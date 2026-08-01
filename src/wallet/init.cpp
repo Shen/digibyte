@@ -20,6 +20,7 @@
 #include <wallet/bdb.h>
 #endif
 #include <wallet/coincontrol.h>
+#include <wallet/context.h>
 #include <wallet/wallet.h>
 #include <walletinitinterface.h>
 
@@ -133,6 +134,7 @@ void WalletInit::Construct(NodeContext& node) const
         return;
     }
     auto wallet_loader = node.init->makeWalletLoader(*node.chain);
+    wallet_loader->context()->paymaster = node.paymaster.get();
     node.wallet_loader = wallet_loader.get();
     node.chain_clients.emplace_back(std::move(wallet_loader));
 }

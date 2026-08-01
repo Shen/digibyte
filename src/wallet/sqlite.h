@@ -29,8 +29,9 @@ public:
     explicit SQLiteCursor() {}
     explicit SQLiteCursor(std::vector<std::byte> start_range, std::vector<std::byte> end_range)
         : m_prefix_range_start(std::move(start_range)),
-        m_prefix_range_end(std::move(end_range))
-    {}
+          m_prefix_range_end(std::move(end_range))
+    {
+    }
     ~SQLiteCursor() override;
 
     Status Next(DataStream& key, DataStream& value) override;
@@ -51,7 +52,7 @@ private:
     void SetupSQLStatements();
     bool ExecStatement(sqlite3_stmt* stmt, Span<const std::byte> blob);
 
-    bool ReadKey(DataStream&& key, DataStream& value) override;
+    DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override;
     bool WriteKey(DataStream&& key, DataStream&& value, bool overwrite = true) override;
     bool EraseKey(DataStream&& key) override;
     bool HasKey(DataStream&& key) override;

@@ -22,6 +22,12 @@ struct bilingual_str;
 namespace wallet {
 void SplitWalletPath(const fs::path& wallet_path, fs::path& env_directory, std::string& database_filename);
 
+enum class DatabaseReadStatus {
+    FOUND,
+    NOT_FOUND,
+    READ_ERROR,
+};
+
 class DatabaseCursor
 {
 public:
@@ -31,8 +37,7 @@ public:
     DatabaseCursor(const DatabaseCursor&) = delete;
     DatabaseCursor& operator=(const DatabaseCursor&) = delete;
 
-    enum class Status
-    {
+    enum class Status {
         FAIL,
         MORE,
         DONE,
@@ -45,7 +50,7 @@ public:
 class DatabaseBatch
 {
 private:
-    virtual bool ReadKey(DataStream&& key, DataStream& value) = 0;
+    virtual DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) = 0;
     virtual bool WriteKey(DataStream&& key, DataStream&& value, bool overwrite = true) = 0;
     virtual bool EraseKey(DataStream&& key) = 0;
     virtual bool HasKey(DataStream&& key) = 0;
@@ -63,17 +68,24 @@ public:
     template <typename K, typename T>
     bool Read(const K& key, T& value)
     {
+        return ReadWithStatus(key, value) == DatabaseReadStatus::FOUND;
+    }
+
+    template <typename K, typename T>
+    DatabaseReadStatus ReadWithStatus(const K& key, T& value)
+    {
         DataStream ssKey{};
         ssKey.reserve(1000);
         ssKey << key;
 
         CDataStream ssValue(SER_DISK, CLIENT_VERSION);
-        if (!ReadKey(std::move(ssKey), ssValue)) return false;
+        const DatabaseReadStatus status = ReadKey(std::move(ssKey), ssValue);
+        if (status != DatabaseReadStatus::FOUND) return status;
         try {
             ssValue >> value;
-            return true;
+            return DatabaseReadStatus::FOUND;
         } catch (const std::exception&) {
-            return false;
+            return DatabaseReadStatus::READ_ERROR;
         }
     }
 
@@ -140,7 +152,7 @@ public:
 
     /** Rewrite the entire database on disk, with the exception of key pszSkip if non-zero
      */
-    virtual bool Rewrite(const char* pszSkip=nullptr) = 0;
+    virtual bool Rewrite(const char* pszSkip = nullptr) = 0;
 
     /** Back up the entire database to a file.
      */

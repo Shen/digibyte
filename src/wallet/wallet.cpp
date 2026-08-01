@@ -35,6 +35,7 @@
 #include <validation.h>
 #include <oracle/node.h>
 #include <outputtype.h>
+#include <paymaster/manager.h>
 #include <policy/feerate.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -72,6 +73,8 @@
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
+#include <wallet/paymasterprovider.h>
+#include <wallet/paymasterstore.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -182,6 +185,8 @@ bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet
 
     interfaces::Chain& chain = wallet->chain();
     std::string name = wallet->GetName();
+
+    if (context.paymaster) context.paymaster->StopProvider(name);
 
     // Unregister with the validation interface which also drops shared pointers.
     wallet->m_chain_notifications_handler.reset();
@@ -1538,6 +1543,19 @@ void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& sta
     // available of the outputs it spends. So force those to be
     // recomputed, also:
     MarkInputsDirty(ptx);
+
+    if (GetDigiDollarTxType(*ptx) == DD_TX_TRANSFER) {
+        const auto it = mapWallet.find(ptx->GetHash());
+        if (it != mapWallet.end()) {
+            std::string paymaster_error;
+            if (!PaymasterStore{*this}.ReconcileFinalTransaction(
+                    *ptx, GetTxDepthInMainChain(it->second),
+                    it->second.InMempool(), GetTime(), paymaster_error)) {
+                WalletLogPrintf("Paymaster session reconciliation failed: %s\n",
+                                paymaster_error);
+            }
+        }
+    }
 }
 
 void CWallet::transactionAddedToMempool(const CTransactionRef& tx) {
@@ -1744,6 +1762,13 @@ void CWallet::updatedBlockTip()
             WalletLogPrintf("DigiDollar: Retried pending position validation after chain tip update - corrected %zu position(s)\n",
                             corrected);
         }
+    }
+
+    std::string paymaster_error;
+    if (!PaymasterStore{*this}.ReconcileFinalSessionsAtTip(
+            GetTime(), paymaster_error)) {
+        WalletLogPrintf(
+            "Paymaster tip reconciliation failed: %s\n", paymaster_error);
     }
 }
 
@@ -2312,6 +2337,27 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
     // even if forcing.
     if (!fBroadcastTransactions) return;
 
+    // Fully signed Paymaster provider commits must pass the dedicated
+    // manifest/final-witness firewall on every retry. Never let the generic
+    // wallet rebroadcaster bypass that validation. A database read failure is
+    // fail-closed for this maintenance pass.
+    std::vector<DigiDollar::Paymaster::ProviderCommitRecord>
+        durable_paymaster_commits;
+    if (!PaymasterStore{*this}.ListProviderCommits(durable_paymaster_commits)) {
+        WalletLogPrintf(
+            "%s: skipping generic rebroadcast because durable Paymaster "
+            "commit state could not be read\n",
+            __func__);
+        return;
+    }
+    std::set<uint256> durable_paymaster_txids;
+    for (const DigiDollar::Paymaster::ProviderCommitRecord& commit :
+         durable_paymaster_commits) {
+        if (!commit.final_txid.IsNull()) {
+            durable_paymaster_txids.insert(commit.final_txid);
+        }
+    }
+
     int submitted_tx_count = 0;
 
     { // cs_wallet scope
@@ -2323,6 +2369,11 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
         for (auto& [txid, wtx] : mapWallet) {
             // Only rebroadcast unconfirmed txs
             if (!wtx.isUnconfirmed()) continue;
+
+            if (durable_paymaster_txids.count(txid) != 0 ||
+                wtx.mapValue.count("paymaster_durable_commit") != 0) {
+                continue;
+            }
 
             // Attempt to rebroadcast all txes more than 5 minutes older than
             // the last block, or all txs if forcing.
@@ -2346,6 +2397,19 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
 void MaybeResendWalletTxs(WalletContext& context)
 {
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+        // Durable provider commits are exact, fully signed transactions. A
+        // transient txindex/mempool condition at wallet load must defer them,
+        // not make recovery depend on startpaymaster or wallet unlock.
+        const DurablePaymasterRecoveryReport paymaster_recovery =
+            RecoverDurablePaymasterCommits(*pwallet, GetTime());
+        if (!paymaster_recovery.errors.empty()) {
+            pwallet->WalletLogPrintf(
+                "Paymaster durable-commit retry: %u candidate(s), %u "
+                "recovered, %u pending\n",
+                static_cast<unsigned int>(paymaster_recovery.candidates),
+                static_cast<unsigned int>(paymaster_recovery.recovered),
+                static_cast<unsigned int>(paymaster_recovery.errors.size()));
+        }
         if (!pwallet->ShouldResend()) continue;
         pwallet->ResubmitWalletTransactions(/*relay=*/true, /*force=*/false);
         pwallet->SetNextResend();
@@ -3681,6 +3745,28 @@ void CWallet::postInitProcess()
     // Update wallet transactions with current mempool transactions.
     WITH_LOCK(cs_wallet, chain().requestMempoolTransactions(*this));
 
+    // Recover durable Paymaster transactions before rebuilding the DigiDollar
+    // UTXO view, so an already-confirmed exact transaction added during
+    // recovery participates in the same startup scan.
+    const DurablePaymasterRecoveryReport paymaster_recovery =
+        RecoverDurablePaymasterCommits(*this, GetTime());
+    if (paymaster_recovery.candidates != 0) {
+        WalletLogPrintf(
+            "Paymaster durable-commit recovery: %u candidate(s), %u recovered, "
+            "%u already confirmed, %u pending\n",
+            static_cast<unsigned int>(paymaster_recovery.candidates),
+            static_cast<unsigned int>(paymaster_recovery.recovered),
+            static_cast<unsigned int>(paymaster_recovery.already_confirmed),
+            static_cast<unsigned int>(paymaster_recovery.errors.size()));
+    }
+    std::string paymaster_reconcile_error;
+    if (!PaymasterStore{*this}.ReconcileFinalSessionsAtTip(
+            GetTime(), paymaster_reconcile_error)) {
+        WalletLogPrintf(
+            "Paymaster startup reconciliation failed: %s\n",
+            paymaster_reconcile_error);
+    }
+
     // Scan for DigiDollar UTXOs
     if (m_dd_wallet) {
         const size_t abandoned_dd_redeems = AbandonStaleDigiDollarRedeems();
@@ -3692,6 +3778,7 @@ void CWallet::postInitProcess()
         size_t dd_utxo_count = m_dd_wallet->ScanForDDUTXOs();
         LogPrintf("Wallet: DigiDollar scan complete - Found %d DD UTXOs\n", dd_utxo_count);
     }
+
 }
 
 bool CWallet::BackupWallet(const std::string& strDest) const
@@ -4871,15 +4958,21 @@ void CWallet::TryAutoStartOracles()
 {
     const std::string wallet_name = GetName().empty() ? "default wallet" : GetName();
 
-    if (HaveChain()) {
-        node::NodeContext* node_ctx = chain().context();
-        if (node_ctx && node_ctx->chainman) {
-            ChainstateManager& chainman = *node_ctx->chainman;
-            const CBlockIndex* tip = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
-            if (!DigiDollar::IsDigiDollarEnabled(tip, chainman)) {
-                LogPrint(BCLog::DIGIDOLLAR, "Oracle: DigiDollar inactive, skipping oracle auto-start for wallet '%s'\n", wallet_name);
-                return;
-            }
+    // Detached wallets are used by offline wallet tools and migration helpers.
+    // They have no node lifecycle to own an OracleNode and must not load wallet
+    // keys into the process-global oracle service.
+    if (!HaveChain()) {
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Detached wallet '%s' has no chain; skipping oracle auto-start\n", wallet_name);
+        return;
+    }
+
+    node::NodeContext* node_ctx = chain().context();
+    if (node_ctx && node_ctx->chainman) {
+        ChainstateManager& chainman = *node_ctx->chainman;
+        const CBlockIndex* tip = WITH_LOCK(cs_main, return chainman.ActiveChain().Tip());
+        if (!DigiDollar::IsDigiDollarEnabled(tip, chainman)) {
+            LogPrint(BCLog::DIGIDOLLAR, "Oracle: DigiDollar inactive, skipping oracle auto-start for wallet '%s'\n", wallet_name);
+            return;
         }
     }
 

@@ -45,7 +45,8 @@ const std::vector<std::string> CONNECTION_TYPE_DOC{
         "inbound (initiated by the peer)",
         "manual (added via addnode RPC or -addnode/-connect configuration options)",
         "addr-fetch (short-lived automatic connection for soliciting addresses)",
-        "feeler (short-lived automatic connection for testing addresses)"
+        "feeler (short-lived automatic connection for testing addresses)",
+        "paymaster (short-lived isolated DigiDollar Paymaster session)"
 };
 
 const std::vector<std::string> TRANSPORT_TYPE_DOC{
@@ -358,7 +359,8 @@ static RPCHelpMan addconnection()
         "\nOpen an outbound connection to a specified node. This RPC is for testing only.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address and port to attempt connecting to."},
-            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\" or \"feeler\")."},
+            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\", \"feeler\" or \"paymaster\")."},
+            {"privacy", RPCArg::Type::STR, RPCArg::Default{"standard"}, "For paymaster connections only: \"standard\" or \"high\"."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -387,14 +389,22 @@ static RPCHelpMan addconnection()
         conn_type = ConnectionType::ADDR_FETCH;
     } else if (conn_type_in == "feeler") {
         conn_type = ConnectionType::FEELER;
+    } else if (conn_type_in == "paymaster") {
+        conn_type = ConnectionType::PAYMASTER;
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, self.ToString());
+    }
+    const std::string privacy{request.params[2].isNull() ? "standard" :
+                             TrimString(request.params[2].get_str())};
+    if ((privacy != "standard" && privacy != "high") ||
+        (conn_type != ConnectionType::PAYMASTER && privacy != "standard")) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "privacy is only supported for paymaster connections");
     }
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     CConnman& connman = EnsureConnman(node);
 
-    const bool success = connman.AddConnection(address, conn_type);
+    const bool success = connman.AddConnection(address, conn_type, privacy == "high");
     if (!success) {
         throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, "Error: Already at capacity for specified connection type.");
     }

@@ -37,6 +37,9 @@ public:
     //! If true, the selection process can add extra unselected inputs from the wallet
     //! while requires all selected inputs be used
     bool m_allow_other_inputs = true;
+    //! Internal-only authorization for provider pool maintenance. Generic RPC
+    //! coin-control parsing never sets this flag.
+    bool m_allow_paymaster_pool_inputs = false;
     //! Includes watch only addresses which are solvable
     bool fAllowWatchOnly = false;
     //! Override automatic min/max checks on fee, m_feerate must be set if true

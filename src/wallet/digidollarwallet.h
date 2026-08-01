@@ -127,15 +127,36 @@ struct DDUtxo {
         : outpoint(out), dd_amount(amt), is_spendable(true) {}
 };
 
+enum class DDTransferPlanError : uint8_t {
+    NONE,
+    INVALID_REQUEST,
+    INSUFFICIENT_DD_INPUTS,
+    INVALID_DD_INPUTS,
+    INSUFFICIENT_DGB_FEE_INPUTS,
+    CAPACITY,
+};
+
+/** A single-lock snapshot of the wallet's DigiDollar balance categories. */
+struct DigiDollarBalanceSummary {
+    CAmount confirmed_total{0};
+    CAmount spendable{0};
+    CAmount paymaster_reserved{0};
+    CAmount pending{0};
+};
+
 struct DDTransferPlan {
     std::vector<std::pair<std::string, CAmount>> recipients;
     std::vector<COutPoint> dd_utxos;
     std::vector<CAmount> dd_amounts;
+    std::vector<COutPoint> fee_utxos;
+    std::vector<CAmount> fee_amounts;
     CAmount total_amount{0};
     CAmount selected_dd_total{0};
+    CAmount selected_fee_total{0};
     CAmount dd_change{0};
     size_t projected_vsize{0};
     CAmount estimated_fee{0};
+    DDTransferPlanError error_code{DDTransferPlanError::NONE};
 };
 
 /**
@@ -370,11 +391,34 @@ public:
     CAmount GetDDBalance(const CDigiDollarAddress& addr = CDigiDollarAddress()) const;
 
     /**
-     * Get total DD balance across all addresses (confirmed only).
-     * Unconfirmed trusted UTXOs are excluded — use GetPendingDDBalance() for those.
-     * @return Confirmed DD balance in cents
+     * Get the wallet's total owned DD balance (confirmed only).
+     *
+     * This includes confirmed DD inputs reserved for an active Paymaster
+     * session or provider pool. Use GetSpendableDDBalance() for affordability
+     * checks and GetPaymasterReservedDDBalance() for the reserved portion.
+     * Unconfirmed trusted UTXOs are excluded — use GetPendingDDBalance() for
+     * those.
+     * @return Confirmed wallet-owned DD balance in cents
      */
     CAmount GetTotalDDBalance() const;
+
+    /** Get all display and affordability balance categories in one snapshot. */
+    DigiDollarBalanceSummary GetDDBalanceSummary() const;
+
+    /**
+     * Get confirmed DD currently selectable by an ordinary wallet spend.
+     * Active Paymaster reservations and provider-pool carriers are excluded.
+     * @return Confirmed spendable DD balance in cents
+     */
+    CAmount GetSpendableDDBalance() const;
+
+    /**
+     * Get confirmed wallet-owned DD protected by Paymaster reservations.
+     * This includes provider-pool carrier outputs and client inputs bound to
+     * an active Paymaster session.
+     * @return Confirmed Paymaster-reserved DD balance in cents
+     */
+    CAmount GetPaymasterReservedDDBalance() const;
 
     /**
      * Get pending DD balance.
@@ -538,7 +582,9 @@ public:
                                 std::string& txid, std::string& error,
                                 CAmount* dd_change_out = nullptr,
                                 const std::vector<COutPoint>* preset_dd_inputs = nullptr,
-                                const std::string& comment = "");
+                                const std::string& comment = "",
+                                bool allow_paymaster_pool_inputs = false,
+                                const DDTransferPlan* exact_plan = nullptr);
 
     bool TransferDigiDollar(const CDigiDollarAddress& to, CAmount amount,
                             std::string& txid, std::string& error,
@@ -808,8 +854,21 @@ public:
 
     // Coin selection and fee calculation helpers (public for testing and integration)
     bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr) const;
-    bool SelectDDCoins(const CAmount& target_amount, const std::vector<COutPoint>& preset_inputs, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr) const;
-    bool PlanDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr) const;
+    bool SelectDDCoins(const CAmount& target_amount, const std::vector<COutPoint>& preset_inputs, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr, bool allow_paymaster_pool_inputs = false) const;
+    /** Snapshot all confirmed ordinary DD inputs and require their sum to
+     * match a previously previewed send-all balance. Active Paymaster
+     * reservations and provider-pool DD are excluded. */
+    bool SelectAllSpendableDDCoins(CAmount expected_total,
+                                   std::vector<COutPoint>& selected_utxos,
+                                   CAmount& selected_total,
+                                   std::vector<CAmount>* amounts,
+                                   std::string& error) const;
+    bool PlanDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr, bool allow_paymaster_pool_inputs = false) const;
+    /** Build and sign a previously validated transfer plan without inserting
+     * it into the wallet or broadcasting it. */
+    bool BuildDigiDollarTransfer(const DDTransferPlan& plan,
+                                 CMutableTransaction& transaction,
+                                 std::string& error);
     bool SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts = nullptr, const std::vector<COutPoint>* exclude_utxos = nullptr) const;
     CAmount CalculateTransactionFee(const CMutableTransaction& tx) const;
 

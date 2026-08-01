@@ -8,8 +8,8 @@
 #include <crypto/common.h>
 #include <logging.h>
 #include <sync.h>
-#include <util/fs_helpers.h>
 #include <util/check.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <wallet/db.h>
@@ -265,10 +265,10 @@ void SQLiteDatabase::Open()
         }
         // Trace SQL statements if tracing is enabled with -debug=walletdb -loglevel=walletdb:trace
         if (LogAcceptCategory(BCLog::WALLETDB, BCLog::Level::Trace)) {
-           ret = sqlite3_trace_v2(m_db, SQLITE_TRACE_STMT, TraceSqlCallback, this);
-           if (ret != SQLITE_OK) {
-               LogPrintf("Failed to enable SQL tracing for %s\n", Filename());
-           }
+            ret = sqlite3_trace_v2(m_db, SQLITE_TRACE_STMT, TraceSqlCallback, this);
+            if (ret != SQLITE_OK) {
+                LogPrintf("Failed to enable SQL tracing for %s\n", Filename());
+            }
         }
     }
 
@@ -424,13 +424,15 @@ void SQLiteBatch::Close()
     }
 }
 
-bool SQLiteBatch::ReadKey(DataStream&& key, DataStream& value)
+DatabaseReadStatus SQLiteBatch::ReadKey(DataStream&& key, DataStream& value)
 {
-    if (!m_database.m_db) return false;
+    if (!m_database.m_db) return DatabaseReadStatus::READ_ERROR;
     assert(m_read_stmt);
 
     // Bind: leftmost parameter in statement is index 1
-    if (!BindBlobToStatement(m_read_stmt, 1, key, "key")) return false;
+    if (!BindBlobToStatement(m_read_stmt, 1, key, "key")) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
     int res = sqlite3_step(m_read_stmt);
     if (res != SQLITE_ROW) {
         if (res != SQLITE_DONE) {
@@ -439,7 +441,7 @@ bool SQLiteBatch::ReadKey(DataStream&& key, DataStream& value)
         }
         sqlite3_clear_bindings(m_read_stmt);
         sqlite3_reset(m_read_stmt);
-        return false;
+        return res == SQLITE_DONE ? DatabaseReadStatus::NOT_FOUND : DatabaseReadStatus::READ_ERROR;
     }
     // Leftmost column in result is index 0
     value.clear();
@@ -447,7 +449,7 @@ bool SQLiteBatch::ReadKey(DataStream&& key, DataStream& value)
 
     sqlite3_clear_bindings(m_read_stmt);
     sqlite3_reset(m_read_stmt);
-    return true;
+    return DatabaseReadStatus::FOUND;
 }
 
 bool SQLiteBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrite)
@@ -592,7 +594,7 @@ std::unique_ptr<DatabaseCursor> SQLiteBatch::GetNewPrefixCursor(Span<const std::
     if (!cursor) return nullptr;
 
     const char* stmt_text = end_range.empty() ? "SELECT key, value FROM main WHERE key >= ?" :
-                            "SELECT key, value FROM main WHERE key >= ? AND key < ?";
+                                                "SELECT key, value FROM main WHERE key >= ? AND key < ?";
     int res = sqlite3_prepare_v2(m_database.m_db, stmt_text, -1, &cursor->m_cursor_stmt, nullptr);
     if (res != SQLITE_OK) {
         throw std::runtime_error(strprintf(

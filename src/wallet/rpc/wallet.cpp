@@ -11,6 +11,7 @@
 #include <wallet/context.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
+#include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
@@ -972,6 +973,37 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"digidollar", &listdigidollarunspent},
         {"digidollar", &listdigidollarutxos},
         {"digidollar", &validateddaddress},
+        {"digidollar", &getdigidollarsendsession},
+        {"digidollar", &getpaymasterreputation},
+        {"digidollar", &clearpaymasterreputation},
+        {"digidollar", &getpaymasteroffers},
+        {"digidollar", &requestpaymasterquote},
+        {"digidollar", &resolvepaymastersession},
+        {"digidollar", &walletprocesspaymasterpsbt},
+        {"digidollar", &submitpaymasterdigidollar},
+        {"digidollar", &createpaymasteridentity},
+        {"digidollar", &createrestrictedpaymasterdescriptor},
+        {"digidollar", &setpaymasterpolicy},
+        {"digidollar", &setpaymastersafetypolicy},
+        {"digidollar", &getpaymastersafetystatus},
+        {"digidollar", &setpaymasterclientsafetypolicy},
+        {"digidollar", &getpaymasterclientsafetystatus},
+        {"digidollar", &setpaymasterenabled},
+        {"digidollar", &setpaymasterruntimesettings},
+        {"digidollar", &preparepaymasterpool},
+        {"digidollar", &rebalancepaymasterpool},
+        {"digidollar", &setpaymasterliquiditypolicy},
+        {"digidollar", &getpaymasterliquiditystatus},
+        {"digidollar", &withdrawpaymastercarrier},
+        {"digidollar", &getpaymasterinfo},
+        {"digidollar", &getpaymasterpoolinfo},
+        {"digidollar", &listpaymasterreservations},
+        {"digidollar", &cancelpaymasterquote},
+        {"digidollar", &processpaymasterrequests},
+        {"digidollar", &processpaymastersubmits},
+        {"digidollar", &processpaymasterresult},
+        {"digidollar", &startpaymaster},
+        {"digidollar", &stoppaymaster},
         {"oracle", &createoraclekey},
         {"oracle", &exportoracleprivkey},
         {"oracle", &importoracleprivkey},

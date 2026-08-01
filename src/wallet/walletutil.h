@@ -75,6 +75,10 @@ enum WalletFlags : uint64_t {
 
     //! Indicates that the wallet needs an external signer
     WALLET_FLAG_EXTERNAL_SIGNER = (1ULL << 35),
+
+    //! A Paymaster authorization may still spend wallet inputs. Older software
+    //! must not open the wallet and ignore its durable reservation records.
+    WALLET_FLAG_PAYMASTER_AUTHORIZATION = (1ULL << 36),
 };
 
 //! Get the path of the wallet directory.

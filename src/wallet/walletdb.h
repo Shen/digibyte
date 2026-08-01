@@ -6,13 +6,20 @@
 #ifndef DIGIBYTE_WALLET_WALLETDB_H
 #define DIGIBYTE_WALLET_WALLETDB_H
 
+#include <key.h>
+#include <paymaster/protocol.h>
+#include <paymaster/provider.h>
+#include <paymaster/recovery.h>
+#include <paymaster/reputation.h>
+#include <paymaster/reservation.h>
+#include <paymaster/sponsorship.h>
 #include <script/sign.h>
 #include <wallet/db.h>
 #include <wallet/walletutil.h>
-#include <key.h>
 
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CScript;
@@ -22,7 +29,7 @@ struct CBlockLocator;
 struct DDTransaction;
 struct WalletCollateralPosition;
 struct WalletDDBalance;
-struct CDigiDollarOutput;
+class CDigiDollarOutput;
 
 namespace wallet {
 class CKeyPool;
@@ -48,8 +55,7 @@ static const bool DEFAULT_FLUSHWALLET = true;
 /** Error statuses for the wallet database.
  * Values are in order of severity. When multiple errors occur, the most severe (highest value) will be returned.
  */
-enum class DBErrors : int
-{
+enum class DBErrors : int {
     LOAD_OK = 0,
     NEED_RESCAN = 1,
     NEED_REWRITE = 2,
@@ -94,17 +100,55 @@ extern const std::string WATCHMETA;
 extern const std::string WATCHS;
 
 // DigiDollar database keys
-extern const std::string DD_POSITION;              // "ddposition" - DDTimeLocks (time-locked DGB backing DigiDollars)
-extern const std::string DD_TRANSACTION;           // "ddtx"       - DD transaction history
-extern const std::string DD_BALANCE;               // "ddbalance"  - DD balance per address
-extern const std::string DD_OUTPUT;                // "ddutxo"     - DD UTXO tracking
-extern const std::string DD_METADATA;              // "ddmeta"     - DD wallet metadata
-extern const std::string DD_ADDRESS_KEY;           // "ddaddrkey"  - DD address keys for received tokens (plaintext)
-extern const std::string DD_OWNER_KEY;             // "ddownerkey" - DD owner keys for minted tokens (plaintext)
-extern const std::string DD_CRYPTED_ADDRESS_KEY;   // "ddcaddrkey" - encrypted DD address keys
-extern const std::string DD_CRYPTED_OWNER_KEY;     // "ddcownerkey" - encrypted DD owner keys
-extern const std::string ORACLE_KEY;               // "oraclekey"  - Oracle private keys by oracle_id
-extern const std::string ORACLE_CRYPTED_KEY;       // "oracleckey" - encrypted Oracle private keys by oracle_id
+extern const std::string DD_POSITION;                    // "ddposition" - DDTimeLocks (time-locked DGB backing DigiDollars)
+extern const std::string DD_TRANSACTION;                 // "ddtx"       - DD transaction history
+extern const std::string DD_BALANCE;                     // "ddbalance"  - DD balance per address
+extern const std::string DD_OUTPUT;                      // "ddutxo"     - DD UTXO tracking
+extern const std::string DD_METADATA;                    // "ddmeta"     - DD wallet metadata
+extern const std::string DD_ADDRESS_KEY;                 // "ddaddrkey"  - DD address keys for received tokens (plaintext)
+extern const std::string DD_OWNER_KEY;                   // "ddownerkey" - DD owner keys for minted tokens (plaintext)
+extern const std::string DD_CRYPTED_ADDRESS_KEY;         // "ddcaddrkey" - encrypted DD address keys
+extern const std::string DD_CRYPTED_OWNER_KEY;           // "ddcownerkey" - encrypted DD owner keys
+extern const std::string ORACLE_KEY;                     // "oraclekey"  - Oracle private keys by oracle_id
+extern const std::string ORACLE_CRYPTED_KEY;             // "oracleckey" - encrypted Oracle private keys by oracle_id
+extern const std::string PAYMASTER_SESSION;              // "pmsession"  - payment sessions by request_id
+extern const std::string PAYMASTER_RECOVERY;             // "pmrecovery" - idempotent self-recovery by request_id
+extern const std::string PAYMASTER_ALT_RECOVERY;         // "pmaltrecovery" - authenticated alternative recovery by recovery_id
+extern const std::string PAYMASTER_ALT_RECOVERY_REQUEST; // "pmaltrecoveryreq" - client request_id to recovery_id
+extern const std::string PAYMASTER_ATTEMPT;              // "pmattempt"  - provider attempts by attempt_id
+extern const std::string PAYMASTER_CAPACITY;             // "pmcapacity" - validated capacity snapshots by snapshot id
+extern const std::string PAYMASTER_CAPACITY_SLOT;        // "pmcapacityslot" - resource commitment to snapshot id
+extern const std::string PAYMASTER_CAPACITY_RESOURCE;    // "pmcapacityresource" - (provider,outpoint) live binding
+extern const std::string PAYMASTER_CAPACITY_RESPONSE;    // "pmcapresponse" - canonical request hash to signed proof
+extern const std::string PAYMASTER_CAPACITY_NONCE;       // "pmcapnonce" - client nonce to canonical request hash
+extern const std::string PAYMASTER_CAPACITY_SESSION;     // "pmcapsession" - provider/request/session key to request hash
+extern const std::string PAYMASTER_CAPACITY_RELEASE;     // "pmcaprelease" - durable expired-reservation release
+extern const std::string PAYMASTER_TEMPLATE;             // "pmtemplate" - template commitment to attempt index
+extern const std::string PAYMASTER_UNSIGNED_TX;          // "pmtxid" - unsigned transaction id to attempt index
+extern const std::string PAYMASTER_SESSION_ID;           // "pmsessionid" - session_id to request_id index
+extern const std::string PAYMASTER_RESERVATION;          // "pmreserve" - input reservations by outpoint
+extern const std::string PAYMASTER_TOMBSTONE;            // "pmtombstone" - permanent request idempotency
+extern const std::string PAYMASTER_PROVIDER_COMMIT;      // "pmcommit" - final provider commit by commit key
+extern const std::string PAYMASTER_USER_AUTH;            // "pmauth" - accepted user authorization by commit key
+extern const std::string PAYMASTER_IDENTITY;             // "pmidentity" - public provider identity metadata
+extern const std::string PAYMASTER_POLICY;               // "pmpolicy" - validated provider policy
+extern const std::string PAYMASTER_SETTINGS;             // "pmsettings" - provider enablement and policy binding
+extern const std::string PAYMASTER_PROVIDER_SAFETY;      // "pmprovidersafety" - local provider loss ceilings
+extern const std::string PAYMASTER_CLIENT_SAFETY;        // "pmclientsafety" - local client fee ceilings
+extern const std::string PAYMASTER_PROVIDER_BUDGET;      // "pmproviderbudget" - provider fee reservations
+extern const std::string PAYMASTER_CLIENT_FEES;          // "pmclientfees" - client service-fee reservations
+extern const std::string PAYMASTER_SPONSOR_AUTH;         // "pmsponsor" - hashed restricted sponsorship authorization
+extern const std::string PAYMASTER_PROVIDER_POOL;        // "pmpool" - validated admission and operational pool entries
+extern const std::string PAYMASTER_LIQUIDITY_POLICY;     // "pmliquidity" - automatic pool targets and fee ceilings
+extern const std::string PAYMASTER_MAINTENANCE_LEDGER;   // "pmmaintenance" - restartable maintenance operations
+extern const std::string PAYMASTER_CARRIER_WITHDRAWAL;   // "pmcarrierwithdraw" - last reviewed carrier withdrawal plan
+extern const std::string PAYMASTER_ANNOUNCE_SEQ;         // "pmannounceseq" - last allocated provider announcement sequence
+extern const std::string PAYMASTER_RESULT;               // "pmresult" - latest signed result by commit key
+extern const std::string PAYMASTER_RELIABILITY;          // "pmreliability" - local provider reliability record
+extern const std::string PAYMASTER_OUTCOME;              // "pmoutcome" - idempotent reliability outcome marker
+extern const std::string PAYMASTER_EQUIVOCATION_PENDING; // "pmequivocationpending" - verified conflict awaiting atomic promotion
+extern const std::string PAYMASTER_EQUIVOCATION;         // "pmequivocation" - signed conflict evidence by evidence id
+extern const std::string PAYMASTER_PROVIDER_BLOCK;       // "pmproviderblock" - permanent local provider deny-list
 
 // Keys in this set pertain only to the legacy wallet (LegacyScriptPubKeyMan) and are removed during migration from legacy to descriptors.
 extern const std::unordered_set<std::string> LEGACY_TYPES;
@@ -116,13 +160,13 @@ class CHDChain
 public:
     uint32_t nExternalChainCounter;
     uint32_t nInternalChainCounter;
-    CKeyID seed_id; //!< seed hash160
+    CKeyID seed_id;                   //!< seed hash160
     int64_t m_next_external_index{0}; // Next index in the keypool to be used. Memory only.
     int64_t m_next_internal_index{0}; // Next index in the keypool to be used. Memory only.
 
-    static const int VERSION_HD_BASE        = 1;
+    static const int VERSION_HD_BASE = 1;
     static const int VERSION_HD_CHAIN_SPLIT = 2;
-    static const int CURRENT_VERSION        = VERSION_HD_CHAIN_SPLIT;
+    static const int CURRENT_VERSION = VERSION_HD_CHAIN_SPLIT;
     int nVersion;
 
     CHDChain() { SetNull(); }
@@ -152,15 +196,15 @@ public:
 class CKeyMetadata
 {
 public:
-    static const int VERSION_BASIC=1;
-    static const int VERSION_WITH_HDDATA=10;
+    static const int VERSION_BASIC = 1;
+    static const int VERSION_WITH_HDDATA = 10;
     static const int VERSION_WITH_KEY_ORIGIN = 12;
-    static const int CURRENT_VERSION=VERSION_WITH_KEY_ORIGIN;
+    static const int CURRENT_VERSION = VERSION_WITH_KEY_ORIGIN;
     int nVersion;
-    int64_t nCreateTime; // 0 means unknown
-    std::string hdKeypath; //optional HD/bip32 keypath. Still used to determine whether a key is a seed. Also kept for backwards compatibility
-    CKeyID hd_seed_id; //id of the HD seed used to derive this key
-    KeyOriginInfo key_origin; // Key origin info with path and fingerprint
+    int64_t nCreateTime;         // 0 means unknown
+    std::string hdKeypath;       // optional HD/bip32 keypath. Still used to determine whether a key is a seed. Also kept for backwards compatibility
+    CKeyID hd_seed_id;           // id of the HD seed used to derive this key
+    KeyOriginInfo key_origin;    // Key origin info with path and fingerprint
     bool has_key_origin = false; //!< Whether the key_origin is useful
 
     CKeyMetadata()
@@ -179,8 +223,7 @@ public:
         if (obj.nVersion >= VERSION_WITH_HDDATA) {
             READWRITE(obj.hdKeypath, obj.hd_seed_id);
         }
-        if (obj.nVersion >= VERSION_WITH_KEY_ORIGIN)
-        {
+        if (obj.nVersion >= VERSION_WITH_KEY_ORIGIN) {
             READWRITE(obj.key_origin);
             READWRITE(obj.has_key_origin);
         }
@@ -234,9 +277,8 @@ private:
     }
 
 public:
-    explicit WalletBatch(WalletDatabase &database, bool _fFlushOnClose = true) :
-        m_batch(database.MakeBatch(_fFlushOnClose)),
-        m_database(database)
+    explicit WalletBatch(WalletDatabase& database, bool _fFlushOnClose = true) : m_batch(database.MakeBatch(_fFlushOnClose)),
+                                                                                 m_database(database)
     {
     }
     WalletBatch(const WalletBatch&) = delete;
@@ -252,14 +294,14 @@ public:
     bool EraseTx(uint256 hash);
 
     bool WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite);
-    bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata &keyMeta);
-    bool WriteCryptedKey(const CPubKey& vchPubKey, const std::vector<unsigned char>& vchCryptedSecret, const CKeyMetadata &keyMeta);
+    bool WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata& keyMeta);
+    bool WriteCryptedKey(const CPubKey& vchPubKey, const std::vector<unsigned char>& vchCryptedSecret, const CKeyMetadata& keyMeta);
     bool WriteMasterKey(unsigned int nID, const CMasterKey& kMasterKey);
 
     bool WriteCScript(const uint160& hash, const CScript& redeemScript);
 
-    bool WriteWatchOnly(const CScript &script, const CKeyMetadata &keymeta);
-    bool EraseWatchOnly(const CScript &script);
+    bool WriteWatchOnly(const CScript& script, const CKeyMetadata& keymeta);
+    bool EraseWatchOnly(const CScript& script);
 
     bool WriteBestBlock(const CBlockLocator& locator);
     bool ReadBestBlock(CBlockLocator& locator);
@@ -323,8 +365,8 @@ public:
                                   const CPubKey& pubkey,
                                   const std::vector<unsigned char>& vchCryptedSecret);
     bool ReadCryptedDDAddressKey(const std::array<unsigned char, 32>& output_key,
-                                  CPubKey& pubkey,
-                                  std::vector<unsigned char>& vchCryptedSecret);
+                                 CPubKey& pubkey,
+                                 std::vector<unsigned char>& vchCryptedSecret);
     bool EraseCryptedDDAddressKey(const std::array<unsigned char, 32>& output_key);
 
     // Encrypted DigiDollar owner key persistence (T4-03a: wallet encryption support)
@@ -332,8 +374,8 @@ public:
                                 const CPubKey& pubkey,
                                 const std::vector<unsigned char>& vchCryptedSecret);
     bool ReadCryptedDDOwnerKey(const uint256& dd_timelock_id,
-                                CPubKey& pubkey,
-                                std::vector<unsigned char>& vchCryptedSecret);
+                               CPubKey& pubkey,
+                               std::vector<unsigned char>& vchCryptedSecret);
     bool EraseCryptedDDOwnerKey(const uint256& dd_timelock_id);
 
     // Oracle key persistence
@@ -349,6 +391,218 @@ public:
                               CPubKey& pubkey,
                               std::vector<unsigned char>& vchCryptedSecret);
     bool EraseCryptedOracleKey(uint32_t oracle_id);
+
+    // DigiDollar Paymaster persistence. These records intentionally contain
+    // identifiers and state only; secret capabilities are never written.
+    bool WritePaymasterSession(const DigiDollar::Paymaster::PaymentSession& session, bool overwrite = true);
+    bool ReadPaymasterSession(const std::string& request_id, DigiDollar::Paymaster::PaymentSession& session);
+    bool ListPaymasterSessions(std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
+    bool ErasePaymasterSession(const std::string& request_id);
+    bool WritePaymasterRecovery(const DigiDollar::Paymaster::SelfRecoveryRecord& recovery, bool overwrite = false);
+    bool ReadPaymasterRecovery(const std::string& request_id, DigiDollar::Paymaster::SelfRecoveryRecord& recovery);
+    bool ErasePaymasterRecovery(const std::string& request_id);
+    bool WritePaymasterAlternativeRecovery(
+        const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery,
+        bool overwrite = true);
+    bool ReadPaymasterAlternativeRecovery(
+        const uint256& recovery_id,
+        DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery);
+    bool ListPaymasterAlternativeRecoveries(
+        std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries);
+    bool ErasePaymasterAlternativeRecovery(const uint256& recovery_id);
+    bool WritePaymasterAlternativeRecoveryRequest(
+        const std::string& request_id, const uint256& recovery_id,
+        bool overwrite = false);
+    bool ReadPaymasterAlternativeRecoveryRequest(
+        const std::string& request_id, uint256& recovery_id);
+    bool ErasePaymasterAlternativeRecoveryRequest(
+        const std::string& request_id);
+    bool WritePaymasterAttempt(const DigiDollar::Paymaster::ProviderAttempt& attempt, bool overwrite = true);
+    bool ReadPaymasterAttempt(const uint256& attempt_id, DigiDollar::Paymaster::ProviderAttempt& attempt);
+    bool ErasePaymasterAttempt(const uint256& attempt_id);
+    bool WritePaymasterCapacitySnapshot(
+        const DigiDollar::Paymaster::ValidatedCapacitySnapshot& snapshot,
+        bool overwrite = false);
+    bool ReadPaymasterCapacitySnapshot(
+        const uint256& snapshot_id,
+        DigiDollar::Paymaster::ValidatedCapacitySnapshot& snapshot);
+    bool ListPaymasterCapacitySnapshots(
+        std::vector<DigiDollar::Paymaster::ValidatedCapacitySnapshot>& snapshots);
+    bool ErasePaymasterCapacitySnapshot(const uint256& snapshot_id);
+    bool WritePaymasterCapacitySlot(const uint256& resource_commitment,
+                                    const uint256& snapshot_id,
+                                    bool overwrite = false);
+    bool ReadPaymasterCapacitySlot(const uint256& resource_commitment,
+                                   uint256& snapshot_id);
+    bool ErasePaymasterCapacitySlot(const uint256& resource_commitment);
+    bool WritePaymasterCapacityResource(
+        const DigiDollar::Paymaster::CapacityResourceBinding& binding,
+        bool overwrite = false);
+    bool ReadPaymasterCapacityResource(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        const COutPoint& outpoint,
+        DigiDollar::Paymaster::CapacityResourceBinding& binding);
+    bool ErasePaymasterCapacityResource(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        const COutPoint& outpoint);
+    bool WritePaymasterCapacityResponse(const uint256& request_hash,
+                                        const std::vector<unsigned char>& response,
+                                        bool overwrite = false);
+    bool ReadPaymasterCapacityResponse(const uint256& request_hash,
+                                       std::vector<unsigned char>& response);
+    bool ListPaymasterCapacityResponses(
+        std::vector<std::pair<uint256, std::vector<unsigned char>>>& responses);
+    bool ErasePaymasterCapacityResponse(const uint256& request_hash);
+    bool WritePaymasterCapacityNonce(const uint256& client_nonce,
+                                     const uint256& request_hash,
+                                     bool overwrite = false);
+    bool ReadPaymasterCapacityNonce(const uint256& client_nonce,
+                                    uint256& request_hash);
+    bool ErasePaymasterCapacityNonce(const uint256& client_nonce);
+    bool WritePaymasterCapacitySession(const uint256& session_key,
+                                       const uint256& request_hash,
+                                       bool overwrite = false);
+    bool ReadPaymasterCapacitySession(const uint256& session_key,
+                                      uint256& request_hash);
+    bool ErasePaymasterCapacitySession(const uint256& session_key);
+    bool WritePaymasterCapacityRelease(
+        const DigiDollar::Paymaster::ProviderCapacityReleaseRecord& release,
+        bool overwrite = false);
+    bool ReadPaymasterCapacityRelease(
+        const uint256& request_hash,
+        DigiDollar::Paymaster::ProviderCapacityReleaseRecord& release);
+    bool HasPaymasterCapacityRelease(const uint256& request_hash);
+    bool ErasePaymasterCapacityRelease(const uint256& request_hash);
+    bool WritePaymasterTemplate(const uint256& template_commitment, const uint256& attempt_id, bool overwrite = false);
+    bool ReadPaymasterTemplate(const uint256& template_commitment, uint256& attempt_id);
+    bool ErasePaymasterTemplate(const uint256& template_commitment);
+    bool WritePaymasterUnsignedTx(const uint256& unsigned_txid, const uint256& attempt_id, bool overwrite = false);
+    bool ReadPaymasterUnsignedTx(const uint256& unsigned_txid, uint256& attempt_id);
+    bool ErasePaymasterUnsignedTx(const uint256& unsigned_txid);
+    bool WritePaymasterSessionId(const uint256& session_id, const std::string& request_id, bool overwrite = true);
+    bool ReadPaymasterSessionId(const uint256& session_id, std::string& request_id);
+    bool ErasePaymasterSessionId(const uint256& session_id);
+    bool WritePaymasterReservation(const DigiDollar::Paymaster::InputReservation& reservation, bool overwrite = true);
+    bool ReadPaymasterReservation(const COutPoint& outpoint, DigiDollar::Paymaster::InputReservation& reservation);
+    bool ErasePaymasterReservation(const COutPoint& outpoint);
+    bool WritePaymasterTombstone(const DigiDollar::Paymaster::IdempotencyTombstone& tombstone, bool overwrite = false);
+    bool ReadPaymasterTombstone(const std::string& request_id, DigiDollar::Paymaster::IdempotencyTombstone& tombstone);
+    bool WritePaymasterProviderCommit(const DigiDollar::Paymaster::ProviderCommitRecord& commit, bool overwrite = false);
+    bool ReadPaymasterProviderCommit(const uint256& commit_key, DigiDollar::Paymaster::ProviderCommitRecord& commit);
+    bool ErasePaymasterProviderCommit(const uint256& commit_key);
+    bool ListPaymasterProviderCommits(
+        std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits);
+    bool WritePaymasterUserAuthorization(const DigiDollar::Paymaster::UserAuthorizationRecord& authorization, bool overwrite = false);
+    bool ReadPaymasterUserAuthorization(const uint256& commit_key, DigiDollar::Paymaster::UserAuthorizationRecord& authorization);
+    bool ErasePaymasterUserAuthorization(const uint256& commit_key);
+    bool WritePaymasterIdentity(const DigiDollar::Paymaster::ProviderIdentityRecord& identity, bool overwrite = false);
+    bool ReadPaymasterIdentity(DigiDollar::Paymaster::ProviderIdentityRecord& identity);
+    bool WritePaymasterPolicy(const DigiDollar::Paymaster::ProviderPolicy& policy, bool overwrite = true);
+    bool ReadPaymasterPolicy(DigiDollar::Paymaster::ProviderPolicy& policy);
+    bool WritePaymasterSettings(const DigiDollar::Paymaster::ProviderSettings& settings, bool overwrite = true);
+    bool ReadPaymasterSettings(DigiDollar::Paymaster::ProviderSettings& settings);
+    bool WritePaymasterProviderSafetyPolicy(
+        const DigiDollar::Paymaster::ProviderSafetyPolicy& policy,
+        bool overwrite = true);
+    bool ReadPaymasterProviderSafetyPolicy(
+        DigiDollar::Paymaster::ProviderSafetyPolicy& policy);
+    bool HasPaymasterProviderSafetyPolicy();
+    bool WritePaymasterClientSafetyPolicy(
+        const DigiDollar::Paymaster::ClientSafetyPolicy& policy,
+        bool overwrite = true);
+    bool ReadPaymasterClientSafetyPolicy(
+        DigiDollar::Paymaster::ClientSafetyPolicy& policy);
+    bool HasPaymasterClientSafetyPolicy();
+    bool WritePaymasterProviderBudgetLedger(
+        const DigiDollar::Paymaster::ProviderBudgetLedger& ledger,
+        bool overwrite = true);
+    bool ReadPaymasterProviderBudgetLedger(
+        DigiDollar::Paymaster::ProviderBudgetLedger& ledger);
+    bool HasPaymasterProviderBudgetLedger();
+    bool WritePaymasterClientFeeLedger(
+        const DigiDollar::Paymaster::ClientFeeLedger& ledger,
+        bool overwrite = true);
+    bool ReadPaymasterClientFeeLedger(
+        DigiDollar::Paymaster::ClientFeeLedger& ledger);
+    bool HasPaymasterClientFeeLedger();
+    bool WritePaymasterSponsorshipAuthorization(
+        const DigiDollar::Paymaster::SponsorshipAuthorizationRecord& authorization,
+        bool overwrite = false);
+    bool ReadPaymasterSponsorshipAuthorization(
+        const uint256& capability_hash,
+        DigiDollar::Paymaster::SponsorshipAuthorizationRecord& authorization);
+    bool WritePaymasterProviderPool(
+        const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
+        bool overwrite = true);
+    bool ReadPaymasterProviderPool(
+        std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
+    bool WritePaymasterLiquidityPolicy(
+        const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
+        bool overwrite = true);
+    bool ReadPaymasterLiquidityPolicy(
+        DigiDollar::Paymaster::ProviderLiquidityPolicy& policy);
+    bool HasPaymasterLiquidityPolicy();
+    bool WritePaymasterMaintenanceLedger(
+        const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger,
+        bool overwrite = true);
+    bool ReadPaymasterMaintenanceLedger(
+        DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
+    bool HasPaymasterMaintenanceLedger();
+    bool WritePaymasterCarrierWithdrawalPlan(
+        const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
+        bool overwrite = true);
+    bool ReadPaymasterCarrierWithdrawalPlan(
+        DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan);
+    bool HasPaymasterCarrierWithdrawalPlan();
+    bool ErasePaymasterCarrierWithdrawalPlan();
+    bool WritePaymasterAnnouncementSequence(uint64_t sequence, bool overwrite = true);
+    bool ReadPaymasterAnnouncementSequence(uint64_t& sequence);
+    bool WritePaymasterResult(const DigiDollar::Paymaster::PaymasterResult& result,
+                              bool overwrite = true);
+    bool ReadPaymasterResult(const uint256& commit_key,
+                             DigiDollar::Paymaster::PaymasterResult& result);
+    bool HasPaymasterResult(const uint256& commit_key);
+    bool ErasePaymasterResult(const uint256& commit_key);
+    bool WritePaymasterReliability(
+        const DigiDollar::Paymaster::PaymasterReliabilityRecord& record,
+        bool overwrite = true);
+    bool ReadPaymasterReliability(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        DigiDollar::Paymaster::PaymasterReliabilityRecord& record);
+    bool ListPaymasterReliability(
+        std::vector<DigiDollar::Paymaster::PaymasterReliabilityRecord>& records);
+    bool ErasePaymasterReliability(const DigiDollar::Paymaster::PaymasterId& provider_id);
+    bool WritePaymasterEquivocationEvidence(
+        const DigiDollar::Paymaster::PaymasterEquivocationEvidence& evidence,
+        bool overwrite = false);
+    DatabaseReadStatus ReadPaymasterEquivocationEvidence(
+        const uint256& evidence_id,
+        DigiDollar::Paymaster::PaymasterEquivocationEvidence& evidence);
+    bool WritePaymasterPendingEquivocation(
+        const DigiDollar::Paymaster::PaymasterEquivocationEvidence& evidence,
+        bool overwrite = false);
+    DatabaseReadStatus ReadPaymasterPendingEquivocation(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        DigiDollar::Paymaster::PaymasterEquivocationEvidence& evidence);
+    DatabaseReadStatus ListPaymasterPendingEquivocations(
+        std::vector<DigiDollar::Paymaster::PaymasterEquivocationEvidence>& evidence);
+    bool ErasePaymasterPendingEquivocation(
+        const DigiDollar::Paymaster::PaymasterId& provider_id);
+    bool WritePaymasterProviderBlock(
+        const DigiDollar::Paymaster::PaymasterProviderBlock& block,
+        bool overwrite = false);
+    DatabaseReadStatus ReadPaymasterProviderBlock(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        DigiDollar::Paymaster::PaymasterProviderBlock& block);
+    bool ListPaymasterProviderBlocks(
+        std::vector<DigiDollar::Paymaster::PaymasterProviderBlock>& blocks);
+    bool WritePaymasterOutcomeMarker(
+        const DigiDollar::Paymaster::PaymasterOutcomeMarker& marker,
+        bool overwrite = false);
+    bool ReadPaymasterOutcomeMarker(
+        const uint256& attempt_id,
+        DigiDollar::Paymaster::PaymasterOutcomeMarker& marker);
+    bool ErasePaymasterOutcomeMarker(const uint256& attempt_id);
 
     bool WriteAddressPreviouslySpent(const CTxDestination& dest, bool previously_spent);
     bool WriteAddressReceiveRequest(const CTxDestination& dest, const std::string& id, const std::string& receive_request);

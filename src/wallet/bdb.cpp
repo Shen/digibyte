@@ -24,8 +24,8 @@
 // here, with the same values as glibc (see stat.h).
 #ifdef WIN32
 #ifndef S_IRUSR
-#define S_IRUSR             0400
-#define S_IWUSR             0200
+#define S_IRUSR 0400
+#define S_IWUSR 0200
 #endif
 #endif
 
@@ -55,7 +55,7 @@ void CheckUniqueFileid(const BerkeleyEnvironment& env, const std::string& filena
     for (const auto& item : env.m_fileids) {
         if (fileid == item.second && &fileid != &item.second) {
             throw std::runtime_error(strprintf("BerkeleyDatabase: Can't open database %s (duplicates fileid %s from %s)", filename,
-                HexStr(item.second.value), item.first));
+                                               HexStr(item.second.value), item.first));
         }
     }
 }
@@ -175,15 +175,15 @@ bool BerkeleyEnvironment::Open(bilingual_str& err)
     dbenv->set_flags(DB_TXN_WRITE_NOSYNC, 1);
     dbenv->log_set_config(DB_LOG_AUTO_REMOVE, 1);
     int ret = dbenv->open(strPath.c_str(),
-                         DB_CREATE |
-                             DB_INIT_LOCK |
-                             DB_INIT_LOG |
-                             DB_INIT_MPOOL |
-                             DB_INIT_TXN |
-                             DB_THREAD |
-                             DB_RECOVER |
-                             nEnvFlags,
-                         S_IRUSR | S_IWUSR);
+                          DB_CREATE |
+                              DB_INIT_LOCK |
+                              DB_INIT_LOG |
+                              DB_INIT_MPOOL |
+                              DB_INIT_TXN |
+                              DB_THREAD |
+                              DB_RECOVER |
+                              nEnvFlags,
+                          S_IRUSR | S_IWUSR);
     if (ret != 0) {
         LogPrintf("BerkeleyEnvironment::Open: Error %d opening database environment: %s\n", ret, DbEnv::strerror(ret));
         int ret2 = dbenv->close(0);
@@ -218,14 +218,14 @@ BerkeleyEnvironment::BerkeleyEnvironment() : m_use_shared_memory(false)
     dbenv->set_flags(DB_AUTO_COMMIT, 1);
     dbenv->log_set_config(DB_LOG_IN_MEMORY, 1);
     int ret = dbenv->open(nullptr,
-                         DB_CREATE |
-                             DB_INIT_LOCK |
-                             DB_INIT_LOG |
-                             DB_INIT_MPOOL |
-                             DB_INIT_TXN |
-                             DB_THREAD |
-                             DB_PRIVATE,
-                         S_IRUSR | S_IWUSR);
+                          DB_CREATE |
+                              DB_INIT_LOCK |
+                              DB_INIT_LOG |
+                              DB_INIT_MPOOL |
+                              DB_INIT_TXN |
+                              DB_THREAD |
+                              DB_PRIVATE,
+                          S_IRUSR | S_IWUSR);
     if (ret > 0) {
         throw std::runtime_error(strprintf("BerkeleyEnvironment::MakeMock: Error %d opening database environment.", ret));
     }
@@ -298,8 +298,7 @@ static Span<const std::byte> SpanFromDbt(const SafeDbt& dbt)
     return {reinterpret_cast<const std::byte*>(dbt.get_data()), dbt.get_size()};
 }
 
-BerkeleyDatabase::BerkeleyDatabase(std::shared_ptr<BerkeleyEnvironment> env, fs::path filename, const DatabaseOptions& options) :
-    WalletDatabase(), env(std::move(env)), m_filename(std::move(filename)), m_max_log_mb(options.max_log_mb)
+BerkeleyDatabase::BerkeleyDatabase(std::shared_ptr<BerkeleyEnvironment> env, fs::path filename, const DatabaseOptions& options) : WalletDatabase(), env(std::move(env)), m_filename(std::move(filename)), m_max_log_mb(options.max_log_mb)
 {
     auto inserted = this->env->m_databases.emplace(m_filename, std::ref(*this));
     assert(inserted.second);
@@ -317,8 +316,7 @@ bool BerkeleyDatabase::Verify(bilingual_str& errorStr)
         return false;
     }
 
-    if (fs::exists(file_path))
-    {
+    if (fs::exists(file_path)) {
         assert(m_refcount == 0);
 
         Db db(env->dbenv.get(), 0);
@@ -389,11 +387,11 @@ void BerkeleyDatabase::Open()
             }
 
             ret = pdb_temp->open(nullptr,                             // Txn pointer
-                            fMockDb ? nullptr : strFile.c_str(),      // Filename
-                            fMockDb ? strFile.c_str() : "main",       // Logical db name
-                            DB_BTREE,                                 // Database type
-                            nFlags,                                   // Flags
-                            0);
+                                 fMockDb ? nullptr : strFile.c_str(), // Filename
+                                 fMockDb ? strFile.c_str() : "main",  // Logical db name
+                                 DB_BTREE,                            // Database type
+                                 nFlags,                              // Flags
+                                 0);
 
             if (ret != 0) {
                 throw std::runtime_error(strprintf("BerkeleyDatabase: Error %d, can't open database %s", ret, strFile));
@@ -405,7 +403,6 @@ void BerkeleyDatabase::Open()
             CheckUniqueFileid(*env, strFile, *pdb_temp, this->env->m_fileids[strFile]);
 
             m_db.reset(pdb_temp.release());
-
         }
     }
 }
@@ -469,7 +466,7 @@ void BerkeleyEnvironment::ReloadDbEnv()
     // Make sure that no Db's are in use
     AssertLockNotHeld(cs_db);
     std::unique_lock<RecursiveMutex> lock(cs_db);
-    m_db_in_use.wait(lock, [this](){
+    m_db_in_use.wait(lock, [this]() {
         for (auto& db : m_databases) {
             if (db.second.get().m_refcount > 0) return false;
         }
@@ -520,7 +517,7 @@ bool BerkeleyDatabase::Rewrite(const char* pszSkip)
                     BerkeleyBatch db(*this, true);
                     std::unique_ptr<Db> pdbCopy = std::make_unique<Db>(env->dbenv.get(), 0);
 
-                    int ret = pdbCopy->open(nullptr,               // Txn pointer
+                    int ret = pdbCopy->open(nullptr,            // Txn pointer
                                             strFileRes.c_str(), // Filename
                                             "main",             // Logical db name
                                             DB_BTREE,           // Database type
@@ -661,12 +658,10 @@ bool BerkeleyDatabase::PeriodicFlush()
 bool BerkeleyDatabase::Backup(const std::string& strDest) const
 {
     const std::string strFile = fs::PathToString(m_filename);
-    while (true)
-    {
+    while (true) {
         {
             LOCK(cs_db);
-            if (m_refcount <= 0)
-            {
+            if (m_refcount <= 0) {
                 // Flush log data to the dat file
                 env->CloseDb(m_filename);
                 env->CheckpointLSN(strFile);
@@ -816,7 +811,7 @@ bool BerkeleyDatabaseSanityCheck()
      */
     if (major != DB_VERSION_MAJOR || minor < DB_VERSION_MINOR) {
         LogPrintf("BerkeleyDB database version conflict: header version is %d.%d, library version is %d.%d\n",
-            DB_VERSION_MAJOR, DB_VERSION_MINOR, major, minor);
+                  DB_VERSION_MAJOR, DB_VERSION_MINOR, major, minor);
         return false;
     }
 
@@ -828,10 +823,10 @@ std::string BerkeleyDatabaseVersion()
     return DbEnv::version(nullptr, nullptr, nullptr);
 }
 
-bool BerkeleyBatch::ReadKey(DataStream&& key, DataStream& value)
+DatabaseReadStatus BerkeleyBatch::ReadKey(DataStream&& key, DataStream& value)
 {
     if (!pdb)
-        return false;
+        return DatabaseReadStatus::READ_ERROR;
 
     SafeDbt datKey(key.data(), key.size());
 
@@ -840,9 +835,9 @@ bool BerkeleyBatch::ReadKey(DataStream&& key, DataStream& value)
     if (ret == 0 && datValue.get_data() != nullptr) {
         value.clear();
         value.write(SpanFromDbt(datValue));
-        return true;
+        return DatabaseReadStatus::FOUND;
     }
-    return false;
+    return ret == DB_NOTFOUND ? DatabaseReadStatus::NOT_FOUND : DatabaseReadStatus::READ_ERROR;
 }
 
 bool BerkeleyBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrite)

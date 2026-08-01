@@ -6,12 +6,16 @@
 
 #include <common/args.h>
 #include <interfaces/chain.h>
+#include <paymaster/manager.h>
 #include <scheduler.h>
 #include <util/check.h>
 #include <util/fs.h>
 #include <util/string.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <wallet/context.h>
+#include <wallet/paymasterstore.h>
+#include <wallet/rpc/paymaster.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -21,6 +25,11 @@
 #include <system_error>
 
 namespace wallet {
+namespace {
+constexpr auto PAYMASTER_MAINTENANCE_INTERVAL{std::chrono::seconds{30}};
+constexpr auto PAYMASTER_PROVIDER_SERVICE_INTERVAL{std::chrono::seconds{1}};
+} // namespace
+
 bool VerifyWallets(WalletContext& context)
 {
     interfaces::Chain& chain = *context.chain;
@@ -39,7 +48,7 @@ bool VerifyWallets(WalletContext& context)
         } else if (!fs::is_directory(canonical_wallet_dir)) {
             chain.initError(strprintf(_("Specified -walletdir \"%s\" is not a directory"), fs::PathToString(wallet_dir)));
             return false;
-        // The canonical path transforms relative paths into absolute ones, so we check the non-canonical version
+            // The canonical path transforms relative paths into absolute ones, so we check the non-canonical version
         } else if (!wallet_dir.is_absolute()) {
             chain.initError(strprintf(_("Specified -walletdir \"%s\" is a relative path"), fs::PathToString(wallet_dir)));
             return false;
@@ -144,13 +153,101 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
 {
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
         pwallet->postInitProcess();
+        // Reconstruct free, wallet-owned successor liquidity before automatic
+        // service starts. This is idempotent and creates no transaction; paid
+        // replenishment remains gated by the persisted maintenance policy.
+        size_t recovered_successors{0};
+        std::string successor_error;
+        if (!PaymasterStore{*pwallet}.ReconcileProviderPoolSuccessors(
+                recovered_successors, successor_error)) {
+            pwallet->WalletLogPrintf(
+                "Paymaster pool-successor startup reconciliation failed: %s\n",
+                successor_error);
+        } else if (recovered_successors != 0) {
+            pwallet->WalletLogPrintf(
+                "Recovered %u historical Paymaster pool successor(s) at wallet startup\n",
+                static_cast<unsigned int>(recovered_successors));
+        }
+        size_t recovered_maintenance{0};
+        std::string maintenance_error;
+        if (!ReconcilePaymasterProviderMaintenance(
+                *pwallet, recovered_maintenance, maintenance_error)) {
+            pwallet->WalletLogPrintf(
+                "Paymaster maintenance startup reconciliation failed: %s\n",
+                maintenance_error);
+        }
     }
 
-    // Schedule periodic wallet flushes and tx rebroadcasts
+    // Schedule periodic wallet flushes, tx rebroadcasts, and Paymaster cleanup.
     if (context.args->GetBoolArg("-flushwallet", DEFAULT_FLUSHWALLET)) {
         scheduler.scheduleEvery([&context] { MaybeCompactWalletDB(context); }, std::chrono::milliseconds{500});
     }
     scheduler.scheduleEvery([&context] { MaybeResendWalletTxs(context); }, 1min);
+    SchedulePeriodicPaymasterMaintenance(context, scheduler);
+    SchedulePaymasterProviderServices(context, scheduler);
+}
+
+void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
+{
+    // Periodic maintenance repairs durable observations only. It never treats
+    // elapsed time as authority to discard a signature, release an ambiguous
+    // reservation, or exceed a provider budget.
+    bool all_equivocation_scans_succeeded{true};
+    for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
+        std::string error;
+        if (!DrainPaymasterEquivocationInbox(context, *wallet, error)) {
+            all_equivocation_scans_succeeded = false;
+            wallet->WalletLogPrintf(
+                "Paymaster equivocation-inbox maintenance failed: %s\n",
+                error);
+            error.clear();
+        }
+        if (!PaymasterStore{*wallet}.ReconcileFinalSessionsAtTip(now, error)) {
+            wallet->WalletLogPrintf("Paymaster periodic maintenance failed: %s\n",
+                                    error);
+        }
+        size_t recovered_maintenance{0};
+        error.clear();
+        if (!ReconcilePaymasterProviderMaintenance(
+                *wallet, recovered_maintenance, error)) {
+            wallet->WalletLogPrintf(
+                "Paymaster liquidity maintenance reconciliation failed: %s\n",
+                error);
+        }
+    }
+    // The manager is shared by all wallets. Expired signed artifacts can be
+    // discarded only after every loaded wallet had an opportunity to persist
+    // evidence; pruning inside the per-wallet loop could lose a conflict that
+    // belongs to a later wallet.
+    if (all_equivocation_scans_succeeded && context.paymaster) {
+        context.paymaster->PruneDirectMessages(now);
+    }
+}
+
+void SchedulePeriodicPaymasterMaintenance(WalletContext& context,
+                                          CScheduler& scheduler)
+{
+    scheduler.scheduleEvery(
+        [&context] { RunPeriodicPaymasterMaintenance(context, GetTime()); },
+        PAYMASTER_MAINTENANCE_INTERVAL);
+}
+
+void RunPaymasterProviderServices(WalletContext& context)
+{
+    // Each wallet owns independent identity, liquidity, and ledgers. Iterating
+    // loaded wallets here must not merge provider state merely because several
+    // wallets share one node-level Paymaster transport manager.
+    for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
+        RunPaymasterProviderServiceCycle(context, *wallet);
+    }
+}
+
+void SchedulePaymasterProviderServices(WalletContext& context,
+                                       CScheduler& scheduler)
+{
+    scheduler.scheduleEvery(
+        [&context] { RunPaymasterProviderServices(context); },
+        PAYMASTER_PROVIDER_SERVICE_INTERVAL);
 }
 
 void FlushWallets(WalletContext& context)

@@ -14,10 +14,10 @@
 
 namespace wallet {
 /* End of headers, beginning of key/value data */
-static const char *HEADER_END = "HEADER=END";
+static const char* HEADER_END = "HEADER=END";
 /* End of key/value data */
-static const char *DATA_END = "DATA=END";
-typedef std::pair<std::vector<unsigned char>, std::vector<unsigned char> > KeyValPair;
+static const char* DATA_END = "DATA=END";
+typedef std::pair<std::vector<unsigned char>, std::vector<unsigned char>> KeyValPair;
 
 class DummyCursor : public DatabaseCursor
 {
@@ -28,8 +28,8 @@ class DummyCursor : public DatabaseCursor
 class DummyBatch : public DatabaseBatch
 {
 private:
-    bool ReadKey(DataStream&& key, DataStream& value) override { return true; }
-    bool WriteKey(DataStream&& key, DataStream&& value, bool overwrite=true) override { return true; }
+    DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override { return DatabaseReadStatus::FOUND; }
+    bool WriteKey(DataStream&& key, DataStream&& value, bool overwrite = true) override { return true; }
     bool EraseKey(DataStream&& key) override { return true; }
     bool HasKey(DataStream&& key) override { return true; }
     bool ErasePrefix(Span<const std::byte> prefix) override { return true; }
@@ -53,7 +53,7 @@ public:
     void Open() override {};
     void AddRef() override {}
     void RemoveRef() override {}
-    bool Rewrite(const char* pszSkip=nullptr) override { return true; }
+    bool Rewrite(const char* pszSkip = nullptr) override { return true; }
     bool Backup(const std::string& strDest) const override { return true; }
     void Close() override {}
     void Flush() override {}
@@ -95,9 +95,8 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
     std::string newFilename = strprintf("%s.%d.bak", filename, now);
 
     int result = env->dbenv->dbrename(nullptr, filename.c_str(), nullptr,
-                                       newFilename.c_str(), DB_AUTO_COMMIT);
-    if (result != 0)
-    {
+                                      newFilename.c_str(), DB_AUTO_COMMIT);
+    if (result != 0) {
         error = strprintf(Untranslated("Failed to rename %s to %s"), filename, newFilename);
         return false;
     }
@@ -157,18 +156,17 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
         fSuccess = (result == 0);
     }
 
-    if (salvagedData.empty())
-    {
+    if (salvagedData.empty()) {
         error = strprintf(Untranslated("Salvage(aggressive) found no records in %s."), newFilename);
         return false;
     }
 
     std::unique_ptr<Db> pdbCopy = std::make_unique<Db>(env->dbenv.get(), 0);
-    int ret = pdbCopy->open(nullptr,               // Txn pointer
-                            filename.c_str(),   // Filename
-                            "main",             // Logical db name
-                            DB_BTREE,           // Database type
-                            DB_CREATE,          // Flags
+    int ret = pdbCopy->open(nullptr,          // Txn pointer
+                            filename.c_str(), // Filename
+                            "main",           // Logical db name
+                            DB_BTREE,         // Database type
+                            DB_CREATE,        // Flags
                             0);
     if (ret > 0) {
         error = strprintf(Untranslated("Cannot create database file %s"), filename);
@@ -178,8 +176,7 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
 
     DbTxn* ptxn = env->TxnBegin(DB_TXN_WRITE_NOSYNC);
     CWallet dummyWallet(nullptr, "", std::make_unique<DummyDatabase>());
-    for (KeyValPair& row : salvagedData)
-    {
+    for (KeyValPair& row : salvagedData) {
         /* Filter for only private key type KV pairs to be added to the salvaged wallet */
         DataStream ssKey{row.first};
         DataStream ssValue(row.second);
@@ -200,8 +197,7 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
             continue;
         }
 
-        if (!fReadOK)
-        {
+        if (!fReadOK) {
             warnings.push_back(strprintf(Untranslated("WARNING: WalletBatch::Recover skipping %s: %s"), strType, strErr));
             continue;
         }

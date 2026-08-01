@@ -27,6 +27,7 @@
 #include <wallet/spend.h>
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
+#include <wallet/paymasterstore.h>
 #include <primitives/transaction.h> // for IsDigiDollarTransaction, GetDigiDollarTxType
 
 #include <cmath>
@@ -263,6 +264,10 @@ util::Result<PreSelectedInputs> FetchSelectedInputs(const CWallet& wallet, const
     const bool can_grind_r = wallet.CanGrindR();
     std::map<COutPoint, CAmount> map_of_bump_fees = wallet.chain().CalculateIndividualBumpFees(coin_control.ListSelected(), coin_selection_params.m_effective_feerate);
     for (const COutPoint& outpoint : coin_control.ListSelected()) {
+        if (IsPaymasterInputReserved(wallet, outpoint) &&
+            !coin_control.m_allow_paymaster_pool_inputs) {
+            return util::Error{_("Pre-selected input is reserved by an active Paymaster session")};
+        }
         if (const DigiDollarWallet* dd_wallet = wallet.GetDDWallet()) {
             if (dd_wallet->IsLockedByDD(outpoint)) {
                 return util::Error{strprintf(_("Pre-selected input %s is locked by DigiDollar; use DigiDollar transfer or redeem RPCs"), outpoint.ToString())};
@@ -346,6 +351,7 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     const bool only_safe = {coinControl ? !coinControl->m_include_unsafe_inputs : true};
     const bool can_grind_r = wallet.CanGrindR();
     std::vector<COutPoint> outpoints;
+    const std::set<COutPoint> paymaster_pool_inputs = GetPaymasterProviderPoolInputs(wallet);
 
     std::set<uint256> trusted_parents;
     for (const auto& entry : wallet.mapWallet)
@@ -417,6 +423,13 @@ CoinsResult AvailableCoins(const CWallet& wallet,
 
             // Skip manually selected coins (the caller can fetch them directly)
             if (coinControl && coinControl->HasSelected() && coinControl->IsSelected(outpoint))
+                continue;
+
+            // Dedicated provider-pool liquidity is never eligible for
+            // automatic wallet funding. The narrow maintenance override is
+            // honored only by FetchSelectedInputs() for inputs explicitly
+            // selected by the internal rebalance path.
+            if (paymaster_pool_inputs.count(outpoint) != 0)
                 continue;
 
             if (wallet.IsLockedCoin(outpoint) && params.skip_locked)

@@ -99,7 +99,7 @@ public:
 
     /** Rewrite the entire database on disk, with the exception of key pszSkip if non-zero
      */
-    bool Rewrite(const char* pszSkip=nullptr) override;
+    bool Rewrite(const char* pszSkip = nullptr) override;
 
     /** Indicate that a new database user has begun using the database. */
     void AddRef() override;
@@ -174,7 +174,7 @@ public:
 class BerkeleyBatch : public DatabaseBatch
 {
 private:
-    bool ReadKey(DataStream&& key, DataStream& value) override;
+    DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override;
     bool WriteKey(DataStream&& key, DataStream&& value, bool overwrite = true) override;
     bool EraseKey(DataStream&& key) override;
     bool HasKey(DataStream&& key) override;
@@ -186,11 +186,11 @@ protected:
     DbTxn* activeTxn{nullptr};
     bool fReadOnly;
     bool fFlushOnClose;
-    BerkeleyEnvironment *env;
+    BerkeleyEnvironment* env;
     BerkeleyDatabase& m_database;
 
 public:
-    explicit BerkeleyBatch(BerkeleyDatabase& database, const bool fReadOnly, bool fFlushOnCloseIn=true);
+    explicit BerkeleyBatch(BerkeleyDatabase& database, const bool fReadOnly, bool fFlushOnCloseIn = true);
     ~BerkeleyBatch() override;
 
     BerkeleyBatch(const BerkeleyBatch&) = delete;

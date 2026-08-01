@@ -17,6 +17,7 @@ namespace interfaces {
 class Chain;
 class Wallet;
 } // namespace interfaces
+namespace DigiDollar::Paymaster { class Manager; }
 
 namespace wallet {
 class CWallet;
@@ -35,6 +36,9 @@ using LoadWalletFn = std::function<void(std::unique_ptr<interfaces::Wallet> wall
 struct WalletContext {
     interfaces::Chain* chain{nullptr};
     ArgsManager* args{nullptr}; // Currently a raw pointer because the memory is not managed by this struct
+    // Non-owning access to node transport queues. Durable Paymaster authority
+    // remains in each wallet database and is accessed through PaymasterStore.
+    DigiDollar::Paymaster::Manager* paymaster{nullptr};
     // It is unsafe to lock this after locking a CWallet::cs_wallet mutex because
     // this could introduce inconsistent lock ordering and cause deadlocks.
     Mutex wallets_mutex;

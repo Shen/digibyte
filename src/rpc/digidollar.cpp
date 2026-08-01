@@ -30,6 +30,8 @@
 #include <kernel/chainparams.h>
 #include <logging.h>
 #include <node/context.h>
+#include <util/int128.h>
+#include <paymaster/manager.h>
 #include <core_io.h>
 #include <util/strencodings.h>
 #include <validation.h>
@@ -40,11 +42,13 @@
 #include <wallet/wallet.h>
 #include <wallet/receive.h>
 #include <wallet/context.h>
+#include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/util.h>
 #include <wallet/spend.h>
 #include <wallet/coincontrol.h>
 #include <wallet/coinselection.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/paymasterstore.h>
 #include <wallet/walletdb.h>
 #include <wallet/scriptpubkeyman.h>
 #include <interfaces/wallet.h>
@@ -1063,12 +1067,12 @@ static RPCHelpMan calculatecollateralrequirement()
             //   = (10000 cents * 100000000 * 150 * 100) / 6310
             //   = 15,000,000,000,000,000 / 6310
             //   = 2,377,179,080,509 sats = ~23,772 DGB
-            // Use __int128 to avoid uint64 overflow for large DD amounts
-            __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                                 static_cast<__int128>(effectiveRatio) * 100;
-            __int128 denominator = static_cast<__int128>(oraclePriceMicroUSD);
-            __int128 result128 = (numerator + denominator - 1) / denominator;
-            if (result128 > static_cast<__int128>(MAX_MONEY)) {
+            // Use util::int128_t to avoid uint64 overflow for large DD amounts
+            util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                                 static_cast<util::int128_t>(effectiveRatio) * 100;
+            util::int128_t denominator = static_cast<util::int128_t>(oraclePriceMicroUSD);
+            util::int128_t result128 = (numerator + denominator - 1) / denominator;
+            if (result128 > static_cast<util::int128_t>(MAX_MONEY)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Required collateral exceeds maximum money supply");
             }
             CAmount requiredDGB = static_cast<CAmount>(result128);
@@ -1747,18 +1751,84 @@ RPCHelpMan senddigidollar()
                             },
                         },
                     },
+                    {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional idempotent fee-funding policy",
+                        {
+                            {"fee_mode", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "dgb, paymaster, or auto (default: auto)"},
+                            {"request_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Required canonical lowercase UUID for paymaster or auto"},
+                            {"maximum_paymaster_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Required hard service-fee cap for paymaster or auto"},
+                            {"maximum_provider_attempts", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Strictly sequential provider-attempt limit (default 3; high privacy requires 1)"},
+                             {"privacy", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "standard (default) or high"},
+                             {"selection", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "lowest_total_cost (default) or privacy_weighted"},
+                             {"provider_identity_key", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Restricted sponsorship provider x-only identity"},
+                             {"restricted_service_descriptor", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Canonical provider-signed restricted descriptor"},
+                             {"sponsorship_capability", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Secret one-payment capability; use authenticated RPC, never shell history"},
+                             {"prepare_only", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Compatibility hint to prepare and return the exact Paymaster authorization; every call without authorization_commitment is prepare-only"},
+                            {"authorization_commitment", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact commitment returned by a prior preparation call; mandatory before any new USER signature"},
+                            {"subtract_paymaster_fee_from_amount", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Treat amount as the exact total DD outflow when a Paymaster is used; the recipient receives amount minus the exact service fee"},
+                            {"send_all_spendable_dd", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Require amount to equal every currently confirmed, ordinary spendable DD input and spend that exact snapshot"},
+                        },
+                    },
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
-                        {RPCResult::Type::STR_HEX, "txid", "Transaction ID"},
+                        {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Transaction ID when known"},
                         {RPCResult::Type::STR, "to_address", "Recipient DigiDollar address"},
                         {RPCResult::Type::NUM, "amount", "Amount sent (in cents)"},
                         {RPCResult::Type::STR, "status", "Transaction status (success/pending/failed)"},
-                        {RPCResult::Type::STR_AMOUNT, "fee_paid", "Transaction fee paid in DGB (optional)"},
-                        {RPCResult::Type::NUM, "inputs_used", "Number of DD inputs consumed (optional)"},
-                        {RPCResult::Type::NUM, "change_amount", "DD change amount in cents if any (optional)"},
-                        {RPCResult::Type::STR, "comment", /*optional=*/true, "Optional wallet comment"}
+                        {RPCResult::Type::STR_AMOUNT, "fee_paid", /*optional=*/true, "Transaction fee paid in DGB"},
+                        {RPCResult::Type::NUM, "inputs_used", /*optional=*/true, "Number of DD inputs consumed"},
+                        {RPCResult::Type::NUM, "change_amount", /*optional=*/true, "DD change amount in cents"},
+                        {RPCResult::Type::STR, "comment", /*optional=*/true, "Optional wallet comment"},
+                        {RPCResult::Type::STR, "request_id", /*optional=*/true, "Canonical Paymaster request UUID"},
+                        {RPCResult::Type::STR_HEX, "session_id", /*optional=*/true, "Persistent Paymaster session"},
+                        {RPCResult::Type::STR_HEX, "canonical_request_hash", /*optional=*/true, "Canonical idempotent request binding"},
+                        {RPCResult::Type::STR, "requested_fee_mode", /*optional=*/true, "Requested fee mode"},
+                        {RPCResult::Type::STR, "fee_mode_used", /*optional=*/true, "Authoritative funding mode"},
+                        {RPCResult::Type::STR, "session_state", /*optional=*/true, "Authoritative Paymaster session state"},
+                        {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Outstanding Paymaster phase"},
+                        {RPCResult::Type::BOOL, "final", /*optional=*/true, "Whether the Paymaster session is terminal"},
+                        {RPCResult::Type::STR, "broadcast_state", /*optional=*/true, "Authoritative broadcast state"},
+                        {RPCResult::Type::STR, "confirmation_state", /*optional=*/true, "Authoritative confirmation state"},
+                        {RPCResult::Type::NUM_TIME, "created_at", /*optional=*/true, "Session creation time"},
+                        {RPCResult::Type::NUM_TIME, "updated_at", /*optional=*/true, "Last durable session update"},
+                        {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known idempotent self-recovery transaction id"},
+                        {RPCResult::Type::ARR, "reserved_user_inputs", /*optional=*/true, "Hard-reserved USER_DD inputs",
+                            {{RPCResult::Type::OBJ, "", /*optional=*/false, "Reserved input",
+                                {
+                                    {RPCResult::Type::STR_HEX, "txid", "Input transaction"},
+                                    {RPCResult::Type::NUM, "vout", "Input output index"},
+                                }}}},
+                        {RPCResult::Type::NUM, "provider_attempts", /*optional=*/true, "Persistent provider attempts"},
+                         {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Selected provider identity"},
+                         {RPCResult::Type::STR_HEX, "offer_id", /*optional=*/true, "Selected public offer"},
+                         {RPCResult::Type::STR_HEX, "policy_hash", /*optional=*/true, "Bound provider policy"},
+                         {RPCResult::Type::STR, "funding_model", /*optional=*/true, "Exact sponsored or user_paid funding model"},
+                         {RPCResult::Type::NUM, "payment_cents", /*optional=*/true, "Recipient amount"},
+                        {RPCResult::Type::NUM, "service_fee_cents", /*optional=*/true, "Exact rounded service fee"},
+                        {RPCResult::Type::NUM, "user_total_cents", /*optional=*/true, "Exact total DD charge"},
+                        {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original requested amount; exact total outflow in subtract mode"},
+                        {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", /*optional=*/true, "Whether the Paymaster fee is deducted from the requested amount"},
+                        {RPCResult::Type::BOOL, "send_all_spendable_dd", /*optional=*/true, "Whether all ordinary spendable DD inputs were bound"},
+                        {RPCResult::Type::NUM_TIME, "expires_at", /*optional=*/true, "Current quote or retry deadline"},
+                        {RPCResult::Type::BOOL, "queued", /*optional=*/true, "Whether a direct message is queued"},
+                        {RPCResult::Type::BOOL, "connection_pending", /*optional=*/true, "Whether a direct connection was requested"},
+                        {RPCResult::Type::BOOL, "capacity_pending", /*optional=*/true, "Whether only the privacy-preserving capacity handshake is pending"},
+                        {RPCResult::Type::STR_HEX, "capacity_snapshot_id", /*optional=*/true, "Fully validated provider capacity snapshot"},
+                        {RPCResult::Type::BOOL, "route_available", /*optional=*/true, "Whether an authenticated provider route is available"},
+                        {RPCResult::Type::STR_HEX, "attempt_id", /*optional=*/true, "Persistent provider attempt"},
+                        {RPCResult::Type::STR, "attempt_state", /*optional=*/true, "Authoritative provider attempt state"},
+                        {RPCResult::Type::STR_HEX, "quote_id", /*optional=*/true, "Signed provider quote"},
+                        {RPCResult::Type::STR_HEX, "unsigned_txid", /*optional=*/true, "Witness-free collaborative transaction id"},
+                         {RPCResult::Type::STR_HEX, "template_commitment", /*optional=*/true, "Exact collaborative template"},
+                         {RPCResult::Type::BOOL, "authorization_required", /*optional=*/true, "Whether this response is awaiting explicit approval of the exact authorization"},
+                         {RPCResult::Type::STR_HEX, "authorization_commitment", /*optional=*/true, "Opaque commitment to the exact validated client authorization manifest"},
+                         {RPCResult::Type::BOOL, "authorization_accepted", /*optional=*/true, "Whether the exact commitment is durably accepted"},
+                         {RPCResult::Type::NUM_TIME, "authorization_accepted_at", /*optional=*/true, "Monotonic durable acceptance time"},
+                         {RPCResult::Type::STR, "psbt", /*optional=*/true, "Collaborative Paymaster PSBT"},
+                        {RPCResult::Type::BOOL, "processed", /*optional=*/true, "Whether a provider result was processed"},
+                        {RPCResult::Type::STR, "result_status", /*optional=*/true, "Signed provider result status"},
+                        {RPCResult::Type::NUM, "result_sequence", /*optional=*/true, "Monotonic provider result sequence"}
                     }
                 },
                 RPCExamples{
@@ -1788,10 +1858,141 @@ RPCHelpMan senddigidollar()
                 }
             }
 
+            bool has_send_options = OptionalParamIsSet(request, 5);
+            DigiDollar::Paymaster::FeeMode fee_mode{DigiDollar::Paymaster::FeeMode::DGB};
+            bool subtract_paymaster_fee_from_amount{false};
+            bool send_all_spendable_dd{false};
+            UniValue send_options{UniValue::VOBJ};
+            if (has_send_options) {
+                send_options = request.params[5].get_obj();
+                const bool fee_cap_supplied = !send_options.find_value("maximum_paymaster_fee_cents").isNull();
+                const bool attempts_supplied = !send_options.find_value("maximum_provider_attempts").isNull();
+                const bool privacy_supplied = !send_options.find_value("privacy").isNull();
+                const bool selection_supplied = !send_options.find_value("selection").isNull();
+                const bool restricted_key_supplied = !send_options.find_value("provider_identity_key").isNull();
+                const bool restricted_descriptor_supplied =
+                    !send_options.find_value("restricted_service_descriptor").isNull();
+                const bool restricted_capability_supplied =
+                    !send_options.find_value("sponsorship_capability").isNull();
+                const bool prepare_only_supplied = !send_options.find_value("prepare_only").isNull();
+                const bool authorization_commitment_supplied =
+                    !send_options.find_value("authorization_commitment").isNull();
+                const bool subtract_fee_supplied =
+                    !send_options.find_value("subtract_paymaster_fee_from_amount").isNull();
+                const bool send_all_supplied =
+                    !send_options.find_value("send_all_spendable_dd").isNull();
+                const bool restricted_context_supplied = restricted_key_supplied ||
+                    restricted_descriptor_supplied || restricted_capability_supplied;
+                RPCTypeCheckObj(send_options,
+                                {{"fee_mode", UniValueType(UniValue::VSTR)},
+                                 {"request_id", UniValueType(UniValue::VSTR)},
+                                 {"maximum_paymaster_fee_cents", UniValueType(UniValue::VNUM)},
+                                 {"maximum_provider_attempts", UniValueType(UniValue::VNUM)},
+                                  {"privacy", UniValueType(UniValue::VSTR)},
+                                  {"selection", UniValueType(UniValue::VSTR)},
+                                  {"provider_identity_key", UniValueType(UniValue::VSTR)},
+                                  {"restricted_service_descriptor", UniValueType(UniValue::VSTR)},
+                                  {"sponsorship_capability", UniValueType(UniValue::VSTR)},
+                                  {"prepare_only", UniValueType(UniValue::VBOOL)},
+                                  {"authorization_commitment", UniValueType(UniValue::VSTR)},
+                                  {"subtract_paymaster_fee_from_amount", UniValueType(UniValue::VBOOL)},
+                                  {"send_all_spendable_dd", UniValueType(UniValue::VBOOL)}},
+                                /*fAllowNull=*/true, /*fStrict=*/true);
+                const std::string mode = send_options.find_value("fee_mode").isNull()
+                    ? "auto" : send_options.find_value("fee_mode").get_str();
+                if (mode == "dgb") fee_mode = DigiDollar::Paymaster::FeeMode::DGB;
+                else if (mode == "paymaster") fee_mode = DigiDollar::Paymaster::FeeMode::PAYMASTER;
+                else if (mode == "auto") fee_mode = DigiDollar::Paymaster::FeeMode::AUTO;
+                else throw JSONRPCError(RPC_INVALID_PARAMETER, "fee_mode must be dgb, paymaster, or auto");
+                if (fee_mode == DigiDollar::Paymaster::FeeMode::DGB &&
+                    (fee_cap_supplied || attempts_supplied || privacy_supplied || selection_supplied ||
+                     restricted_key_supplied || restricted_descriptor_supplied ||
+                     restricted_capability_supplied || prepare_only_supplied ||
+                     authorization_commitment_supplied || subtract_fee_supplied ||
+                     send_all_supplied)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        "fee_mode dgb does not accept Paymaster authorization or selection fields");
+                }
+                if (send_options.find_value("fee_mode").isNull()) send_options.pushKV("fee_mode", mode);
+
+                const std::string privacy = send_options.find_value("privacy").isNull()
+                    ? "standard" : send_options.find_value("privacy").get_str();
+                if (privacy != "standard" && privacy != "high") {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "privacy must be standard or high");
+                }
+                if (send_options.find_value("privacy").isNull()) send_options.pushKV("privacy", privacy);
+                const int maximum_attempts = send_options.find_value("maximum_provider_attempts").isNull()
+                    ? ((privacy == "high" || restricted_context_supplied) ? 1 : 3)
+                    : send_options.find_value("maximum_provider_attempts").getInt<int>();
+                if (maximum_attempts < 1 || maximum_attempts > 16 ||
+                    (privacy == "high" && maximum_attempts != 1)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        "maximum_provider_attempts must be 1..16 and exactly 1 for high privacy");
+                }
+                if (send_options.find_value("maximum_provider_attempts").isNull()) {
+                    send_options.pushKV("maximum_provider_attempts", maximum_attempts);
+                }
+                const std::string selection = send_options.find_value("selection").isNull()
+                    ? "lowest_total_cost" : send_options.find_value("selection").get_str();
+                if (selection != "lowest_total_cost" && selection != "privacy_weighted") {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "selection must be lowest_total_cost or privacy_weighted");
+                }
+                if (send_options.find_value("selection").isNull()) send_options.pushKV("selection", selection);
+                subtract_paymaster_fee_from_amount = subtract_fee_supplied &&
+                    send_options.find_value("subtract_paymaster_fee_from_amount").get_bool();
+                send_all_spendable_dd = send_all_supplied &&
+                    send_options.find_value("send_all_spendable_dd").get_bool();
+                if (send_all_spendable_dd &&
+                    !subtract_paymaster_fee_from_amount) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "send_all_spendable_dd requires subtract_paymaster_fee_from_amount");
+                }
+                if (send_options.find_value("subtract_paymaster_fee_from_amount").isNull()) {
+                    send_options.pushKV("subtract_paymaster_fee_from_amount", false);
+                }
+                if (send_options.find_value("send_all_spendable_dd").isNull()) {
+                    send_options.pushKV("send_all_spendable_dd", false);
+                }
+
+                const bool restricted = restricted_context_supplied;
+                if (restricted && !(restricted_key_supplied && restricted_descriptor_supplied &&
+                                    restricted_capability_supplied)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        "provider_identity_key, restricted_service_descriptor, and sponsorship_capability "
+                        "must be supplied together");
+                }
+                if (prepare_only_supplied && send_options.find_value("prepare_only").get_bool() &&
+                    authorization_commitment_supplied) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "prepare_only and authorization_commitment are mutually exclusive");
+                }
+
+                if (fee_mode != DigiDollar::Paymaster::FeeMode::DGB) {
+                    const UniValue& request_id = send_options.find_value("request_id");
+                    const UniValue& fee_cap = send_options.find_value("maximum_paymaster_fee_cents");
+                    if (request_id.isNull() || fee_cap.isNull()) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                           "request_id and maximum_paymaster_fee_cents are required for paymaster or auto");
+                    }
+                    if (!DigiDollar::Paymaster::IsCanonicalRequestId(request_id.get_str())) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                           "request_id must be a canonical lowercase UUID");
+                    }
+                    const int64_t maximum_fee = fee_cap.getInt<int64_t>();
+                    if (maximum_fee < 0 || maximum_fee > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                           "maximum_paymaster_fee_cents is out of range");
+                    }
+                }
+            }
+
             // DD-FA-FUNC-028 (Wave 18 Agent C): DD-flavored locked-wallet
             // hint, preserving the legacy "walletpassphrase" substring for
             // backward compatibility with digidollar_encrypted_wallet.py.
-            if (pwallet->IsLocked()) {
+            if (fee_mode == DigiDollar::Paymaster::FeeMode::DGB && pwallet->IsLocked()) {
                 throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
                     "DigiDollar send requires the wallet to be unlocked. "
                     "Error: Please enter the wallet passphrase with walletpassphrase first.");
@@ -1824,7 +2025,14 @@ RPCHelpMan senddigidollar()
                 selected_inputs = ParseDigiDollarSelectedInputs(request.params[4]);
                 preset_dd_inputs = &selected_inputs;
             }
-            LogPrintf("DigiDollar RPC: Parsed params - address=%s, amount=%d\n", addressStr, amount);
+            if (send_all_spendable_dd && preset_dd_inputs) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "send_all_spendable_dd cannot be combined with selected_inputs");
+            }
+            // Recipient and amount are payment-profile data. Keep the useful
+            // control-flow marker without copying either value to debug.log.
+            LogPrintf("DigiDollar RPC: Parsed send parameters\n");
 
             // Validate amount
             if (amount <= 0) {
@@ -1839,10 +2047,82 @@ RPCHelpMan senddigidollar()
             CDigiDollarAddress dd_address(addressStr);
             LogPrintf("DigiDollar RPC: DD address validated\n");
 
-            // Check balance
-            LogPrintf("DigiDollar RPC: Calling GetTotalDDBalance()...\n");
-            CAmount balance = dd_wallet->GetTotalDDBalance();
-            LogPrintf("DigiDollar RPC: GetTotalDDBalance() returned %d\n", balance);
+            const auto finalize_paymaster_result =
+                [&](UniValue result) -> UniValue {
+                    result.pushKV("to_address", addressStr);
+                    const UniValue& payment =
+                        result.find_value("payment_cents");
+                    result.pushKV("amount", payment.isNull()
+                                                ? amount
+                                                : payment.getInt<int64_t>());
+                    result.pushKV("requested_amount_cents", amount);
+                    result.pushKV("subtract_paymaster_fee_from_amount",
+                                  subtract_paymaster_fee_from_amount);
+                    result.pushKV("send_all_spendable_dd",
+                                  send_all_spendable_dd);
+                    result.pushKV("status",
+                                  result.find_value("final").isTrue()
+                                      ? "success"
+                                      : "pending");
+                    return result;
+                };
+
+            // Once an AUTO or PAYMASTER request owns a persistent client
+            // session it must resume that exact flow before ordinary balance
+            // checks or a fresh direct-DGB preflight. Its inputs may already
+            // be reserved or spent by the final transaction, so both the
+            // spendable and total DD balances can legitimately be lower than
+            // the original request. RequestAutomaticPaymasterQuote performs
+            // the durable order/input checks and returns the idempotent state.
+            if (fee_mode != DigiDollar::Paymaster::FeeMode::DGB) {
+                const std::string request_id =
+                    send_options.find_value("request_id").get_str();
+                DigiDollar::Paymaster::PaymentSession persisted_session;
+                wallet::PaymasterStore store{*pwallet};
+                if (store.GetSessionByRequestId(request_id,
+                                                persisted_session) &&
+                    !persisted_session.provider_side) {
+                    return finalize_paymaster_result(
+                        wallet::RequestAutomaticPaymasterQuote(
+                            request, addressStr, amount, send_options,
+                            preset_dd_inputs));
+                }
+            }
+
+            // Bind send-all to the exact ordinary spendable set observed by
+            // this call. RequestAutomaticPaymasterQuote verifies the same
+            // balance again immediately before durable reservation.
+            std::vector<CAmount> send_all_amounts;
+            CAmount send_all_total{0};
+            std::string send_all_error;
+            bool send_all_snapshot_available{!send_all_spendable_dd};
+            if (send_all_spendable_dd) {
+                send_all_snapshot_available =
+                    dd_wallet->SelectAllSpendableDDCoins(
+                        amount, selected_inputs, send_all_total,
+                        &send_all_amounts, send_all_error);
+                if (send_all_snapshot_available) {
+                    preset_dd_inputs = &selected_inputs;
+                } else {
+                    // A durable Paymaster session already hides its exact
+                    // inputs from ordinary spendable coin selection. Leave
+                    // the preset empty so RequestAutomaticPaymasterQuote can
+                    // distinguish that safe retry from a genuine pre-reserve
+                    // balance change and reuse only the persisted binding.
+                    selected_inputs.clear();
+                    send_all_amounts.clear();
+                    preset_dd_inputs = nullptr;
+                }
+            }
+
+            // Direct DGB-funded sends may only use ordinary spendable inputs.
+            // Paymaster and AUTO retries deliberately use the total confirmed
+            // balance here because the exact retry may already own a durable
+            // reservation; RequestAutomaticPaymasterQuote validates that
+            // reservation against the persisted session before signing.
+            const CAmount balance = fee_mode == DigiDollar::Paymaster::FeeMode::DGB
+                ? dd_wallet->GetSpendableDDBalance()
+                : dd_wallet->GetTotalDDBalance();
             if (amount > balance) {
                 const CAmount pending_balance = dd_wallet->GetPendingDDBalance();
                 if (amount <= balance + pending_balance) {
@@ -1852,6 +2132,48 @@ RPCHelpMan senddigidollar()
                 throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                     strprintf("Insufficient DD balance (have %d cents, need %d cents)",
                              balance, amount));
+            }
+
+            if (fee_mode == DigiDollar::Paymaster::FeeMode::PAYMASTER) {
+                return finalize_paymaster_result(
+                    wallet::RequestAutomaticPaymasterQuote(
+                        request, addressStr, amount, send_options,
+                        preset_dd_inputs));
+            }
+
+            if (fee_mode == DigiDollar::Paymaster::FeeMode::AUTO) {
+                DDTransferPlan plan;
+                std::string preflight_error;
+                const bool can_fund_direct = send_all_snapshot_available &&
+                    dd_wallet->PlanDigiDollarTransfer(
+                        {{dd_address, amount}}, plan, preflight_error,
+                        preset_dd_inputs);
+                if (!can_fund_direct) {
+                    if (send_all_spendable_dd &&
+                        !send_all_snapshot_available) {
+                        // Either resume the already persisted exact session,
+                        // or fail closed with PAYMASTER_SWEEP_BALANCE_CHANGED
+                        // before a new reservation is created.
+                        return finalize_paymaster_result(
+                            wallet::RequestAutomaticPaymasterQuote(
+                                request, addressStr, amount, send_options,
+                                /*preset_inputs=*/nullptr));
+                    }
+                    if (plan.error_code !=
+                        DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS) {
+                        throw JSONRPCError(RPC_WALLET_ERROR,
+                                           strprintf("Transfer preflight failed: %s", preflight_error));
+                    }
+                    return finalize_paymaster_result(
+                        wallet::RequestAutomaticPaymasterQuote(
+                            request, addressStr, amount, send_options,
+                            preset_dd_inputs));
+                }
+                if (pwallet->IsLocked()) {
+                    throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
+                        "DigiDollar send requires the wallet to be unlocked. "
+                        "Error: Please enter the wallet passphrase with walletpassphrase first.");
+                }
             }
 
             RefreshRegtestMockMuSig2QuoteForMempool(*pwallet);
@@ -2050,7 +2372,7 @@ RPCHelpMan sendmanydigidollar()
                 }
             }
 
-            CAmount balance = dd_wallet->GetTotalDDBalance();
+            const CAmount balance = dd_wallet->GetSpendableDDBalance();
             if (total_amount > balance) {
                 const CAmount pending_balance = dd_wallet->GetPendingDDBalance();
                 if (total_amount <= balance + pending_balance) {
@@ -2709,9 +3031,9 @@ RPCHelpMan listdigidollarpositions()
                         oraclePriceMicroUSD = MockOracleManager::GetInstance().GetCurrentPrice();
                     }
                     if (oraclePriceMicroUSD > 0) {
-                        // Use __int128 to prevent overflow: collateral can be large
-                        __int128 collateralMicroUSD = (static_cast<__int128>(pos.dgb_collateral) * oraclePriceMicroUSD) / COIN;
-                        __int128 ddMicroUSD = static_cast<__int128>(pos.dd_minted) * 10000; // cents to micro-USD
+                        // Use util::int128_t to prevent overflow: collateral can be large
+                        util::int128_t collateralMicroUSD = (static_cast<util::int128_t>(pos.dgb_collateral) * oraclePriceMicroUSD) / COIN;
+                        util::int128_t ddMicroUSD = static_cast<util::int128_t>(pos.dd_minted) * 10000; // cents to micro-USD
                         healthRatio = static_cast<int>((collateralMicroUSD * 100) / ddMicroUSD);
                     }
                 }
@@ -3659,12 +3981,12 @@ static RPCHelpMan estimatecollateral()
             //   = (10000 cents * 100000000 * 150 * 100) / 6310
             //   = 15,000,000,000,000,000 / 6310
             //   = 2,377,179,080,509 sats = ~23,772 DGB
-            // Use __int128 to avoid uint64 overflow for large DD amounts
-            __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                                 static_cast<__int128>(effectiveRatio) * 100;
-            __int128 denominator = static_cast<__int128>(oraclePriceMicroUSD);
-            __int128 result128_est = (numerator + denominator - 1) / denominator;
-            if (result128_est > static_cast<__int128>(MAX_MONEY)) {
+            // Use util::int128_t to avoid uint64 overflow for large DD amounts
+            util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                                 static_cast<util::int128_t>(effectiveRatio) * 100;
+            util::int128_t denominator = static_cast<util::int128_t>(oraclePriceMicroUSD);
+            util::int128_t result128_est = (numerator + denominator - 1) / denominator;
+            if (result128_est > static_cast<util::int128_t>(MAX_MONEY)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Required collateral exceeds maximum money supply");
             }
             CAmount requiredDGB = static_cast<CAmount>(result128_est);
@@ -6248,6 +6570,45 @@ static RPCHelpMan enablemockoracle()
     };
 }
 
+static RPCHelpMan listpaymasters()
+{
+    return RPCHelpMan{"listpaymasters",
+        "\nList locally validated, non-expired DigiDollar Paymaster announcements.\n",
+        {},
+        RPCResult{RPCResult::Type::ARR, "", "Validated Paymasters", {
+            {RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::STR_HEX, "provider_id", "Identity fingerprint"},
+                {RPCResult::Type::STR, "display_name", "Untrusted display label"},
+                {RPCResult::Type::STR, "endpoint", "Authenticated P2P endpoint"},
+                {RPCResult::Type::NUM, "sequence", "Monotonic announcement sequence"},
+                {RPCResult::Type::NUM_TIME, "expires_at", "Announcement expiration"},
+                {RPCResult::Type::NUM, "offers", "Number of public offers"},
+                {RPCResult::Type::NUM, "admission_slots", "Verified admission slot count"},
+            }},
+        }},
+        RPCExamples{HelpExampleCli("listpaymasters", "") + HelpExampleRpc("listpaymasters", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+            if (!node.paymaster || !node.paymaster->Enabled()) {
+                throw JSONRPCError(RPC_MISC_ERROR, "DigiDollar Paymaster support is disabled");
+            }
+
+            UniValue result{UniValue::VARR};
+            for (const auto& announcement : node.paymaster->GetDirectory().List(GetTime())) {
+                UniValue entry{UniValue::VOBJ};
+                entry.pushKV("provider_id", DigiDollar::Paymaster::GetPaymasterId(announcement.identity_key).GetHex());
+                entry.pushKV("display_name", announcement.display_name);
+                entry.pushKV("endpoint", announcement.endpoint.ToStringAddrPort());
+                entry.pushKV("sequence", announcement.sequence);
+                entry.pushKV("expires_at", announcement.expires_at);
+                entry.pushKV("offers", static_cast<uint64_t>(announcement.offers.size()));
+                entry.pushKV("admission_slots", static_cast<uint64_t>(announcement.admission_slots.size()));
+                result.push_back(std::move(entry));
+            }
+            return result;
+        }};
+}
+
 void RegisterDigiDollarRPCCommands(CRPCTable &t)
 {
     static const CRPCCommand commands[] = {
@@ -6256,6 +6617,7 @@ void RegisterDigiDollarRPCCommands(CRPCTable &t)
         {"digidollar", &getdcamultiplier},
         {"digidollar", &calculatecollateralrequirement},
         {"digidollar", &getdigidollardeploymentinfo},
+        {"digidollar", &listpaymasters},
 
         // Core transaction commands (moved to wallet RPC table)
         // {"digidollar", &mintdigidollar},
