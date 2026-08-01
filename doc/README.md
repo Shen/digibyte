@@ -61,6 +61,7 @@ The DigiByte repo's [root README](/README.md) contains relevant information on t
 - [Translation Process](translation_process.md)
 - [Translation Strings Policy](translation_strings_policy.md)
 - [JSON-RPC Interface](JSON-RPC-interface.md)
+- [DigiDollar Paymaster Network](digidollar-paymaster.md)
 - [Unauthenticated REST Interface](REST-interface.md)
 - [Shared Libraries](shared-libraries.md)
 - [BIPS](bips.md)

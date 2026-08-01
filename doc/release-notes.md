@@ -48,6 +48,64 @@ running this version will correctly parse and validate v0x03 bundles once Phase 
 activates, while continuing to accept v0x01 and v0x02 bundles from earlier phases.
 
 
+DigiDollar Paymaster Network V1
+-------------------------------
+
+This release adds an optional, non-consensus Paymaster Network for sending
+DigiDollar when the sending wallet has no spendable DGB for the miner fee. The
+completed payment remains an ordinary `DD_TX_TRANSFER`; no transaction type,
+script rule, chain parameter, or global Paymaster service bit was added.
+
+- Discovery, relay, and client support default to `-paymaster=1` and can be
+  disabled with `-paymaster=0`.
+- Existing `senddigidollar` calls remain on the direct DGB funding path. An
+  optional sixth argument selects `dgb`, `paymaster`, or `auto`, a durable UUID
+  request identifier, a hard service-fee cap, and privacy/selection policy.
+- Provider operation is wallet scoped and explicitly enabled. V1 requires a
+  descriptor wallet with local private keys, a wallet-managed BIP86 identity,
+  a policy, confirmed admission/operational pools, and `startpaymaster`.
+- Automatic providers recycle the exact wallet-owned carrier return and
+  sufficiently large DGB change from a completed payment after confirmation.
+  Wallet-local liquidity targets can replenish only missing slots under
+  separately approved finite maintenance-fee ceilings; stopped/manual
+  providers never create paid maintenance automatically.
+- The preview-first `withdrawpaymastercarrier` RPC can combine wallet-owned
+  carrier fees while retaining 1.00 DD per slot, or release one stopped-provider
+  carrier and reduce its target without a network transaction.
+- Collaborative PSBT validation binds the exact transaction and allows each
+  wallet to sign only its own inputs with `SIGHASH_DEFAULT`.
+- Paymaster protocol V5 requires a provider-identity-signed Capacity proof,
+  including BIP86 control proofs and live-chainstate verification, before the
+  client reveals its payment intent, DD outpoints, or restricted capability.
+  New transfers never silently fall back to an older Paymaster protocol.
+- Independent client and provider authorization manifests are revalidated at
+  every signing, retry, recovery, and broadcast boundary. Final processing
+  additionally verifies the complete witness transaction and scripts against
+  the trusted prevouts and performs a mempool preflight when needed.
+- Wallet-local client fee limits and finite provider per-transaction,
+  reservation, hourly, daily, completion, active-quote, and request budgets are
+  durable and atomically accounted. Public sponsorship therefore stops at the
+  configured loss budget; missing or zero limits never mean unlimited.
+- Persistent sessions, reservations, provider commits, self-recovery records,
+  local reputation, and idempotency tombstones protect retry, restart, reorg,
+  and duplicate-payment handling.
+- Paymaster direct connections require BIP324 v2. High-privacy mode additionally
+  requires onion-only operation and Tor stream isolation. These controls reduce
+  metadata but do not guarantee anonymity.
+- Qt's Send $DD page defaults to direct DGB fee funding, explains automatic
+  fallback and Paymaster costs in plain language, keeps provider controls under
+  an advanced disclosure, and configures wallet-local client fee limits inline.
+  The opt-in provider console remains wallet scoped and provides guided
+  setup/status/pool/recovery controls.
+- `cancel_to_self` can use a distinct Capacity-validated recovery provider so
+  a client without DGB can recover its exact DD inputs to fresh wallet-owned
+  scripts, subject to its local recovery-fee cap.
+
+See [DigiDollar Paymaster Network](digidollar-paymaster.md) for operation and
+[`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](../DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
+for the approved V1 protocol and release criteria.
+
+
 Performance Improvements
 --------------
 

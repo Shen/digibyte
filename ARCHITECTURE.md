@@ -1,7 +1,7 @@
 # DigiByte Blockchain Architecture
-**DigiByte Core v9.26.2 (Based on Bitcoin Core v26.2)**
+**DigiByte Core v9.26.5 (Based on Bitcoin Core v26.2)**
 *Comprehensive Technical Documentation*
-*Last Updated: 2026-05-20*
+*Last Updated: 2026-07-28*
 *Validation Status: Spot-validated against live `feature/digidollar-v1` code surfaces listed in Appendix D*
 
 ---
@@ -165,6 +165,12 @@ digibyte/
 │   │   ├── exchange.cpp     # Exchange API integration
 │   │   ├── node.cpp         # Oracle node operations
 │   │   └── mock_oracle.cpp  # Testing mock oracle
+│   │
+│   ├── paymaster/           # Non-consensus DD fee-funding protocol
+│   │   ├── txbuilder.cpp    # Deterministic collaborative transfer builder
+│   │   ├── protocol.cpp     # Intent, quote, submit, and result validation
+│   │   ├── manager.cpp      # Discovery and direct-message coordination
+│   │   └── provider.cpp     # Provider policy, fees, and pool readiness
 │   │
 │   ├── rpc/                 # RPC commands
 │   │   ├── blockchain.cpp   # Chain queries
@@ -757,6 +763,7 @@ PeerManagerImpl (Message Processing)
 | MANUAL | -addnode connections | 8 |
 | INBOUND | Peer-initiated | Up to 125 total |
 | FEELER | Quality testing | 1 |
+| PAYMASTER | Short-lived isolated Paymaster session | At most 1 in high-privacy mode |
 
 ### 9.3 Dandelion++ Privacy
 
@@ -814,6 +821,10 @@ DANDELION_FLUFF = 10  // 10% immediate fluff probability
 | **ORACLECONSENSUS** / **ORACLEATTESTATION** | MuSig2 oracle consensus/attestation coordination |
 | **ORACLEMUSIGNONCE** / **ORACLEMUSIGCONTEXT** / **ORACLEMUSIGPARTIALSIG** | MuSig2 nonce/context/partial-signature exchange |
 | **ORACLEHEARTBEAT** | Oracle liveness heartbeat |
+| **SENDPMASTERS** / **PMANNOUNCE** / **GETPMASTERS** | Paymaster discovery and bounded announcement exchange |
+| **PMCAPREQ** / **PMCAPRESP** | Selected-provider operational capacity proof |
+| **PMQUOTEREQ** / **PMQUOTERESP** | Bound payment intent and provider quote |
+| **PMSUBMIT** / **PMRESULT** | User-signed PSBT submission and monotonic provider result |
 
 ---
 
@@ -899,6 +910,20 @@ class DigiDollarWallet {
 };
 ```
 
+Paymaster state is wallet scoped. `PaymasterStore` persists sessions, exact
+provider attempts, input reservations, final provider commits, self-recovery
+transactions, local reputation, sponsorship authorizations, and permanent
+idempotency tombstones in the wallet database. The provider store additionally
+persists pool-successor provenance, wallet-local liquidity targets, restartable
+maintenance records, finite maintenance-fee accounting, and the latest reviewed
+carrier-withdrawal plan. Paymaster reservations also use the ordinary wallet
+lock set, so regular DD and DGB coin selection cannot spend active pool or
+reserved inputs. Immediately before a new provider signature, all committed
+template inputs are rechecked against chainstate and mempool. If client
+recovery has already spent a user input, the provider atomically persists a
+signed `REJECTED` result and releases only the still-unused pool entries bound
+to that commit key; no provider signature or final commit is created.
+
 ---
 
 ## 11. RPC Interface
@@ -926,6 +951,7 @@ Authentication Methods:
 | **rawtransaction** | createrawtransaction, signrawtransaction... | rawtransaction.cpp |
 | **wallet** | getnewaddress, sendtoaddress, listunspent... | wallet/rpc/*.cpp |
 | **digidollar** | mintdigidollar, redeemdigidollar, getoracleprice... | digidollar.cpp |
+| **paymaster** | listpaymasters, getpaymasteroffers, session and provider operations... | rpc/digidollar.cpp, wallet/rpc/paymaster.cpp |
 
 ### 11.3 DigiByte-Specific RPC
 
@@ -941,6 +967,14 @@ Authentication Methods:
 | `validateddaddress` (wallet) | `wallet/rpc/wallet.cpp` | Validate DD address |
 | `mintdigidollar` / `senddigidollar` / `redeemdigidollar` (wallet) | `wallet/rpc/wallet.cpp` | DigiDollar mint/transfer/redeem |
 | `setmockoracleprice` / `getmockoracleprice` / `simulatepricevolatility` / `enablemockoracle` | `rpc/digidollar.cpp` | Regtest-only oracle helpers |
+| `listpaymasters` | `rpc/digidollar.cpp` | List locally verified, unexpired announcements |
+| `getpaymasteroffers` / `requestpaymasterquote` | `wallet/rpc/paymaster.cpp` | Select offers and advance a persistent client session |
+| `getdigidollarsendsession` / `resolvepaymastersession` | `wallet/rpc/paymaster.cpp` | Inspect, retry, fall back, or recover a session safely |
+| `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster.cpp` | Configure a wallet-scoped provider and its isolated pools |
+| `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
+| `withdrawpaymastercarrier` | `wallet/rpc/paymaster.cpp` | Preview and execute wallet-owned carrier-excess consolidation or release one stopped-provider carrier slot |
+| `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster.cpp` | Create a non-gossiped provider-signed restricted sponsorship descriptor |
+| `startpaymaster` / `stoppaymaster` / `getpaymasterinfo` | `wallet/rpc/paymaster.cpp` | Operate and inspect an explicitly enabled provider |
 
 Both `sendoracleprice` and `submitoracleprice` are absent from the source tree — `sendoracleprice` was removed as a fake-price-injection vulnerability and `submitoracleprice` never existed. Oracle prices come exclusively from live exchange aggregation. See `REPO_MAP_DIGIDOLLAR.md` for the complete RPC inventory.
 
@@ -1153,6 +1187,100 @@ static void OnRedeemDisconnected(CAmount ddAmount, CAmount dgbCollateral);
 This avoids rescanning the entire UTXO set for every health check. The ERR system uses these live metrics to determine whether emergency redemption is active.
 
 **Result:** All nodes see identical network statistics, updated incrementally per block.
+
+### 12.7 Paymaster Network (non-consensus)
+
+**Specification:** [`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
+**Key files:** `src/paymaster/`, `src/wallet/paymaster*.{cpp,h}`,
+`src/wallet/rpc/paymaster.cpp`
+
+The Paymaster Network lets a wallet with confirmed DD but no spendable DGB
+construct a normal `DD_TX_TRANSFER` with a provider supplying the DGB miner-fee
+inputs. It introduces no transaction type, script rule, service bit, chain
+parameter, or privileged validator role.
+
+```
+bounded announcement gossip
+        ↓
+local admission-proof validation and offer selection
+        ↓
+isolated BIP324-v2 PAYMASTER connection to one selected provider
+        ↓
+authenticated Capacity V5 proof for one exact provider resource set
+        ↓
+payment intent → resource-bound quote → local client manifest/firewall
+        ↓
+provider manifest/budget firewall → role-limited signatures
+        ↓
+full witness/script/mempool validation → atomic exact raw-tx commit
+        ↓
+ordinary DD_TX_TRANSFER broadcast and wallet confirmation/reorg tracking
+        ↓
+wallet-owned carrier/DGB successors → confirmation-gated pool reuse
+        ↓
+finite-budget maintenance only when configured targets remain missing
+```
+
+- `-paymaster=1` enables discovery, relay, and client support. Provider
+  operation additionally requires an eligible descriptor wallet, a persisted
+  BIP86 identity and policy, prepared admission/operational pools, explicit
+  enablement, and `startpaymaster`.
+- `USER_PAID` and public or restricted `SPONSORED` offers use the same
+  transaction protocol. Restricted capabilities are payment-bound and their
+  durable records retain hashes rather than plaintext authorization material.
+- Standard privacy requires v2 transport with no v1 fallback. High privacy is
+  onion-only, uses Tor stream isolation, permits one provider attempt, and has
+  no clearnet fallback. This reduces metadata; it does not provide anonymity.
+- Persistent `request_id` sessions prevent duplicate payment. Once user
+  signatures make a session ambiguous, timeout does not release its inputs;
+  recovery uses exact-provider retry or a same-input `cancel_to_self` spend
+  funded by a distinct Capacity-validated recovery provider when the client
+  has no DGB.
+- Protocol V5 has no automatic legacy fallback: the signed Capacity proof is
+  verified against identity, BIP86 control proofs and live chainstate before
+  the client discloses its intent, DD outpoints, or restricted capability. The
+  quote must consume the exact resource snapshot.
+- Client and provider signatures are gated by immutable wallet-local
+  authorization manifests. Finite provider and client safety policies reserve
+  worst-case fees atomically, persist rolling limits across restart, and make
+  public sponsorship bounded rather than unlimited.
+- Client requests normally treat the RPC amount as the recipient amount. An
+  explicit wallet-local exact-outflow mode instead derives a recipient amount
+  whose value plus the existing rounded service fee equals the requested gross
+  amount. The gross amount, fee treatment, exact recipient/fee split, and input
+  snapshot are persisted and bound by the client authorization manifest. A
+  wallet sweep selects only confirmed ordinary spendable DD and fails closed if
+  that snapshot changes; it does not alter the Paymaster wire protocol.
+- A final result is accepted only after reconstructing the trusted PSBT and
+  verifying the non-witness transaction, txid, wtxid, all witnesses and scripts
+  with the real prevouts, followed by mempool preflight when it is not already
+  known. Final transitions and their economic reservations are monotonic and
+  atomic.
+- Wallet lifecycle maintenance runs the same persistent reconciliation every
+  30 seconds, in addition to startup and chain-tip notifications. Expired
+  unsigned quotes and Capacity reservations are therefore released through the
+  atomic store paths even when no further Paymaster RPC arrives and no block is
+  connected.
+- A successful provider commit registers the exact wallet-owned carrier return
+  and sufficiently large DGB change as provenance-bound pending successors.
+  Confirmation makes them available; reorg or conflict returns them to a safe
+  pending/invalid state. Startup reconciliation can recover still-unspent
+  historical successors without guessing by amount or output position.
+- A wallet-local `ProviderLiquidityPolicy` defines admission/operational DGB and
+  carrier targets plus finite maintenance-fee ceilings per transaction, hour,
+  and day. A started automatic provider reuses free successors first, resumes
+  durable maintenance idempotently, creates only missing slots, and accepts no
+  new work until the target is confirmed. Paid maintenance requires explicit
+  operator approval; zero limits never mean unlimited.
+- Carrier fees can accumulate inside operational carrier outputs. The
+  preview-bound `withdrawpaymastercarrier` RPC can retain exactly 1.00 DD per
+  carrier and combine the excess, or release one carrier locally while reducing
+  the target. Reserved or authorized carriers remain protected.
+- Client/provider readiness requires an unpruned node, a fully synchronized
+  `txindex=1`, complete DD transaction data, and an unlocked wallet for new
+  signatures. Client quote creation fails before intent processing when these
+  archival requirements are unavailable. Ordinary relay and validation do not
+  require client or provider readiness.
 
 ---
 
@@ -1398,11 +1526,12 @@ debug=validation
 
 ### Unit Tests
 - `src/test/` - C++ unit tests (Boost.Test); see `REPO_MAP_DIGIDOLLAR.md` for the granular DigiDollar/Oracle/MuSig2/Red-Hornet test inventory (~150 unit suites at last count).
-- `src/wallet/test/` - DigiDollar wallet suites cover persistence, security, Wave 16/17 spendability, helper asymmetry, and rh59 lock-bypass, plus base wallet tests.
+- `src/test/paymaster_*` - Paymaster builder, protocol, provider, sponsorship, discovery, wire, selection, reputation, and state-machine tests.
+- `src/wallet/test/` - DigiDollar wallet suites plus Paymaster identity, role-limited PSBT, persistence, reservation, recovery, reorg, and idempotency tests.
 - `src/qt/test/` - DigiDollar Qt widget tests (`digidollarwidgettests.cpp`, `digidollarwave19widgettests.cpp`); generated `moc_*.cpp` files are build products.
 
 ### Functional Tests
-- `test/functional/` - Python integration tests; current DD/oracle coverage is registered through `digidollar_*`, `wallet_digidollar_*`, and `feature_oracle_p2p.py` entries in `test_runner.py`.
+- `test/functional/` - Python integration tests; DD/oracle coverage is registered through `digidollar_*`, `wallet_digidollar_*`, and `feature_oracle_p2p.py`; `wallet_paymaster_provider.py` covers the descriptor-provider lifecycle, high-privacy selection rejection, user-paid/public/restricted transfers, and recovery.
 
 ### Running Tests
 ```bash
@@ -1443,6 +1572,7 @@ This architecture document has been spot-validated against the active DigiByte C
 | RPC Interface | Verified | `rpc/server.cpp`, `rpc/digidollar.cpp`, `httprpc.cpp`, `wallet/rpc/wallet.cpp` |
 | DigiDollar Stablecoin | Verified | `digidollar/*`, `consensus/dca.cpp`, `consensus/err.cpp` |
 | Oracle System | Verified | `oracle/*`, `primitives/oracle.h` |
+| Paymaster Network | Implemented; release-gate testing in progress | `paymaster/*`, `wallet/paymaster*`, `wallet/rpc/paymaster.cpp`, Qt DD send/provider surfaces |
 
 ### Key Verified Constants
 
@@ -1505,9 +1635,11 @@ This document is consistent with:
 - **DIGIDOLLAR_ORACLE_ARCHITECTURE.md** - Complete oracle system specification
 - **REPO_MAP.md** - Granular core-DigiByte file index
 - **REPO_MAP_DIGIDOLLAR.md** - Granular DigiDollar/oracle file index
+- **DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md** - Approved Paymaster V1 protocol and acceptance criteria
+- **doc/digidollar-paymaster.md** - Client and provider operation guide
 
 ---
 
-*Document Version: 2.1*
-*Generated from DigiByte Core v9.26.2 codebase analysis (`feature/digidollar-v1`)*
-*Updated: 2026-05-20*
+*Document Version: 2.2*
+*Generated from DigiByte Core v9.26.5 codebase analysis (`feature/digidollar-paymaster-v1`)*
+*Updated: 2026-07-28*

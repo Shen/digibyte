@@ -115,6 +115,16 @@ Index ALL DigiDollar and Oracle source files, wherever they live in the repo.
 | `src/oracle/musig2_aggregator.{cpp,h}`, `musig2_session.{cpp,h}`, `musig2_session_manager.{cpp,h}`, `musig2_orchestrator.{cpp,h}`, `musig2_oracle_participation.{cpp,h}`, `musig2_messages.h`, `musig2_session_mining.h` | MuSig2 v0x03 nonce/partial-sig session lifecycle |
 | `src/primitives/oracle.cpp/h` | Oracle data structures (`COraclePriceMessage`, `COracleBundle`, `OracleNodeInfo`, `SelectOraclesForEpoch`, MuSig2 v0x03 fields) |
 
+**Paymaster source files:**
+
+| Location | Files |
+|----------|-------|
+| `src/paymaster/` | Non-consensus collaborative builder, protocol objects, provider policy/pools, directory, wire validation, manager, sponsorship, reservations, selection, and local reputation |
+| `src/wallet/paymaster*.{cpp,h}` | Wallet identity, role-limited PSBT signing, provider operation, and durable session/reservation/commit/recovery storage |
+| `src/wallet/rpc/paymaster.{cpp,h}` | Wallet-scoped Paymaster client and provider RPCs |
+| `src/rpc/digidollar.cpp` | Node `listpaymasters` and additive `senddigidollar` options integration |
+| `src/qt/digidollarsendwidget.*`, `src/qt/digidollartab.*`, `src/qt/walletmodel.*` | Asynchronous client flow and wallet-scoped provider console |
+
 **Also find scattered references:**
 ```bash
 rg -l "digidollar|DigiDollar" src \
@@ -129,10 +139,10 @@ This catches files like `src/kernel/chainparams.cpp`, `src/primitives/transactio
 
 | Location | Approx. Count | Coverage Areas |
 |----------|--------------|----------------|
-| `src/test/digidollar_*.cpp`, `src/test/oracle_*.cpp`, `src/test/musig2_*.cpp`, `src/test/redteam_*.cpp`, `src/test/rh*.cpp` | ~150 files | activation, address, DCA, ERR, MuSig2 nonce/partial-sig sessions, bundle creation/validation/format/mining, redteam audit (RH series), wallet integration, consensus replay, GUI/widget |
-| `src/wallet/test/digidollar_*.cpp`, `src/wallet/test/rh59_*.cpp` | 6 registered files | persistence, wallet security, Wave 16/17 load-rescan/spendability/helper-asymmetry coverage, lock-bypass |
+| `src/test/digidollar_*.cpp`, `src/test/oracle_*.cpp`, `src/test/musig2_*.cpp`, `src/test/redteam_*.cpp`, `src/test/rh*.cpp`, `src/test/paymaster_*.cpp` | ~160 files | activation, address, DCA, ERR, MuSig2, Paymaster protocol/network/provider/client coverage, and redteam audit |
+| `src/wallet/test/digidollar_*.cpp`, `src/wallet/test/rh59_*.cpp`, `src/wallet/test/paymaster_*.cpp` | Registered wallet suites | persistence, wallet security, DD spendability, Paymaster identity/PSBT/store/recovery, and lock-bypass |
 | `src/qt/test/digidollarwidgettests.cpp`, `src/qt/test/digidollarwave19widgettests.cpp` | 2 files | Qt widget behaviour and Wave 19 address/widget coverage |
-| `test/functional/digidollar_*.py`, `wallet_digidollar_*.py`, `feature_oracle_*.py`, `rpc_getoracles_*.py` | 82 registered entries | activation, mint, transfer, redeem, oracle P2P, wallet restore, MuSig2 integration, mempool ordering |
+| `test/functional/digidollar_*.py`, `wallet_digidollar_*.py`, `feature_oracle_*.py`, `rpc_getoracles_*.py`, `wallet_paymaster_*.py` | Registered functional entries | activation, mint, transfer, redeem, oracle P2P, wallet restore, MuSig2 integration, Paymaster provider/client flow, mempool ordering |
 
 ## REPO_MAP.md Format
 

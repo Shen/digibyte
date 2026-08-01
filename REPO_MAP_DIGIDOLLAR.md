@@ -1,8 +1,8 @@
-# REPO_MAP_DIGIDOLLAR.md — DigiDollar + Oracle Subsystem v9.26.2
+# REPO_MAP_DIGIDOLLAR.md — DigiDollar, Oracle, and Paymaster Subsystems v9.26.5
 
-*Last updated: 2026-05-20 (v9.26.2 / `feature/digidollar-v1`)*
+*Last updated: 2026-07-30 (v9.26.5 / `feature/digidollar-paymaster-v1`)*
 
-This is the granular file index for all DigiDollar and Oracle source code. Read `DIGIDOLLAR_ARCHITECTURE.md` and `DIGIDOLLAR_ORACLE_ARCHITECTURE.md` first for system design context.
+This is the granular file index for DigiDollar, Oracle, and Paymaster source code. Read `DIGIDOLLAR_ARCHITECTURE.md`, `DIGIDOLLAR_ORACLE_ARCHITECTURE.md`, and `DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md` first for system design context. The implementation status of all 28 Paymaster V1 acceptance criteria is tracked in `doc/digidollar-paymaster-release-gate.md`.
 
 ---
 
@@ -12,12 +12,13 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 2. [Consensus Rules (`src/consensus/`)](#consensus-rules)
 3. [Oracle System (`src/oracle/`)](#oracle-system)
 4. [Oracle Primitives (`src/primitives/`)](#oracle-primitives)
-5. [RPC Interface (`src/rpc/`)](#rpc-interface)
-6. [Wallet Integration (`src/wallet/`)](#wallet-integration)
-7. [Index (`src/index/`)](#index)
-8. [Scattered References](#scattered-references)
-9. [Qt GUI](#qt-gui)
-10. [Tests](#tests)
+5. [Paymaster Network (`src/paymaster/`)](#paymaster-network)
+6. [RPC Interface (`src/rpc/`)](#rpc-interface)
+7. [Wallet Integration (`src/wallet/`)](#wallet-integration)
+8. [Index (`src/index/`)](#index)
+9. [Scattered References](#scattered-references)
+10. [Qt GUI](#qt-gui)
+11. [Tests](#tests)
 
 ---
 
@@ -577,6 +578,101 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 
 ---
 
+## Paymaster Network
+
+The Paymaster subsystem is wallet and P2P policy code. Its final transaction is
+an ordinary `DD_TX_TRANSFER`; nothing under `src/paymaster/` defines consensus
+or chain parameters.
+
+### src/paymaster/types.{h,cpp}
+- Strong `DDCents` and `DGBSatoshis` value types, protocol constants, funding,
+  privacy, fee, and selection enums.
+- `ComputePaymasterFee()` performs bounded basis-point calculation rounded up
+  to a whole cent; `IsCanonicalRequestId()` enforces lowercase UUID form.
+
+### src/paymaster/txbuilder.{h,cpp}
+- `CollaborativeTransferParams` describes fully resolved user/provider inputs
+  and explicit recipient, change, carrier, and metadata outputs.
+- `BuildUnsignedCollaborativeTransfer()` deterministically builds and validates
+  the one-recipient collaborative `DD_TX_TRANSFER` without keys or fallback
+  defaults.
+
+### src/paymaster/psbt.{h,cpp}
+- Creates and validates the committed collaborative PSBT template, explicit
+  input roles, allowed fields, signature stage, and `SIGHASH_DEFAULT` policy.
+- `IsInputOwnedBy()` is the common role boundary used by wallet signing.
+- `ClientAuthorizationManifest` and `ProviderAuthorizationManifest` bind each
+  side's complete local authority. The final validator reconstructs the trusted
+  PSBT and verifies txid, wtxid, every witness and every script against the
+  actual prevouts before execution.
+
+### src/paymaster/protocol.{h,cpp}
+- Defines chain-bound `PaymentIntent`, `PaymasterQuote`, verified capacity
+  inputs, and monotonic `PaymasterResult` artifacts.
+- Validates exact request/session/provider/policy/fee/input/output bindings and
+  constructs provider quotes from locally verified parameters.
+
+### src/paymaster/provider.{h,cpp}
+- Defines provider identity/settings/policy records, admission and operational
+  pool entries, successor provenance, and readiness summaries. Pool V2 adds
+  `PENDING_SUCCESSOR`, `RELEASED`, and `INVALIDATED` lifecycle states plus an
+  origin commit/maintenance binding.
+- Provider settings V2 persist the recommended automatic queue-processing mode
+  and optional autostart. V1 records migrate in memory to `automatic` with
+  autostart disabled and are upgraded on the next settings write.
+- Enforces funding-model, fee-rate, amount, TTL, and positive absolute network
+  fee caps; plans 0-cent, carrier, and normal provider-fee outputs.
+- Defines finite `ProviderSafetyPolicy`/budget and `ClientSafetyPolicy`/fee
+  ledgers. Worst-case fees, rolling hour/day totals, active quotes, request
+  rates, and monotonic accounting time are validated independently of remote
+  input.
+- Defines `ProviderLiquidityPolicy`, restartable maintenance records/ledger,
+  and preview-bound carrier-withdrawal plans. Automatic maintenance has explicit
+  DGB/carrier targets and finite per-transaction/hour/day fees; zero never means
+  unlimited paid maintenance.
+
+### src/paymaster/directory.{h,cpp} and validation.{h,cpp}
+- Parses signed short-lived announcements, verifies identity/admission
+  envelopes and chainstate-backed proof transactions, and maintains the bounded
+  local provider directory.
+- Admission and operational liquidity remain separate; only admission proofs
+  enter global gossip.
+
+### src/paymaster/wire.{h,cpp} and manager.{h,cpp}
+- Defines bounded capacity, quote, submit, and result messages for isolated
+  `PAYMASTER` connections and validates cheap size/time/count constraints before
+  signature work.
+- `Manager` owns the node directory plus bounded, replay-protected,
+  peer/session/wallet-scoped direct-message queues and provider runtime state.
+- Its wallet-scoped work guard serializes automatic scheduler work with manual
+  expert RPCs and exposes stopped, unlock/readiness wait, active, manual,
+  drain-only, and error service states without persisting a passphrase.
+- Protocol V5 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure,
+  rejects legacy automatic flows, persists semantic replays independently of
+  peer ID, and binds a later quote to the exact validated resource snapshot.
+
+### src/paymaster/client.{h,cpp} and reputation.{h,cpp}
+- Builds bound client intents, validates quote responses, calculates exact
+  local total cost, and selects deterministically with privacy and local
+  reputation constraints.
+- Reputation is local, day-bucketed, and treats neutral failures separately
+  from provider failures.
+
+### src/paymaster/reservation.{h,cpp}
+- Versioned session, attempt, reservation, authorization, final-commit,
+  self-recovery, and idempotency-tombstone records.
+- Defines legal session/attempt transitions including wallet-unlock waits,
+  ambiguous signed states, mempool-vs-confirmed recovery, and finality.
+- Persists validated Capacity snapshots/resource bindings, authorization
+  manifests, provider budget reservations, client fee reservations, replay
+  evidence, and alternative-provider recovery state.
+
+### src/paymaster/sponsorship.{h,cpp}
+- Validates public/restricted sponsorship descriptors, one-payment capability
+  bindings, zero service fee, and hash-only durable authorization records.
+
+---
+
 ## RPC Interface
 
 ### src/rpc/digidollar.h
@@ -587,7 +683,10 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
   - `getdigidollarstatus()` → stale header declaration only; no implementation or RPC registration exists in the current source tree
 - **Core Transactions:**
   - `mintdigidollar()` → mints DD by locking DGB collateral with specified lock tier
-  - `senddigidollar()` → sends DD to another address (confirmed inputs only, RC32+)
+  - `senddigidollar()` → sends DD to another address (confirmed inputs only,
+    RC32+); its optional Paymaster exact-outflow mode can deduct the rounded
+    service fee from a fixed gross amount and atomically bind all ordinary
+    spendable DD for an explicit wallet sweep
   - `sendmanydigidollar()` → sends DD to multiple recipients in one transaction (RC32+, commit `9143bed9b9`)
   - `redeemdigidollar()` → redeems DD to unlock DGB collateral
   - `listdigidollarpositions()` → lists all collateral positions and minted DD
@@ -614,6 +713,48 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
 ### src/rpc/digidollar.cpp
 - Full implementation of all DD RPC commands
 - Integrates with wallet, oracle, health monitoring systems
+- Adds node `listpaymasters` and the backward-compatible sixth
+  `senddigidollar` options argument (`fee_mode`, canonical `request_id`, hard
+  service-fee cap, privacy profile, selection mode, explicit
+  `subtract_paymaster_fee_from_amount`, and `send_all_spendable_dd`). Direct DGB
+  funding keeps the full recipient amount; exact-gross inversion is used only
+  for an actual Paymaster path.
+
+### src/wallet/rpc/paymaster.{h,cpp}
+- Client RPCs expose offers, persistent session status/resolution, reputation,
+  quote advancement, role-limited PSBT processing, submit, and result handling.
+- Provider RPCs create the BIP86 identity, configure policy/enablement, prepare
+  and rebalance isolated pools, inspect/cancel reservations, process inboxes,
+  create non-gossiped restricted sponsorship descriptors, and explicitly
+  start/stop wallet-scoped operation.
+- `setpaymasterruntimesettings` persists automatic/manual operation and optional
+  autostart. `getpaymasterinfo`/`startpaymaster` expose the effective mode,
+  autostart, service state, privacy-neutral service error, and start-time safety
+  policy. Manual processing RPCs fail while automatic servicing is active.
+- `setpaymasterliquiditypolicy` persists automatic replenishment, exact
+  admission/operational DGB and carrier targets, explicit paid-maintenance
+  approval, and finite fee ceilings. `getpaymasterliquiditystatus` reports
+  ready/pending/missing slots, maintenance state/accounting, carrier principal,
+  and withdrawable carrier excess; `getpaymasterinfo` embeds that summary.
+- Automatic service reconciliation promotes confirmed successors, resumes
+  restartable DGB/carrier maintenance, creates only missing targets, and blocks
+  new requests until confirmed capacity is available while still allowing safe
+  completion of durable submissions.
+- `withdrawpaymastercarrier` binds execution to the unchanged latest preview.
+  `all_excess` retains exactly 1.00 DD in each replacement carrier and combines
+  only wallet-owned excess under the maintenance budget; `release_slot` is a
+  stopped-provider, fee-free local release that reduces the operational target.
+- New client quote creation and automatic `senddigidollar` Paymaster fallback
+  share the provider's `-prune=0`, synchronized `-txindex=1`, node-readiness,
+  activation, BIP324-v2, and mainnet message-capture gates. High privacy also
+  preflights onion-proxy presence, stream isolation, IP logging, and message
+  capture before creating a session or reservation.
+- `getpaymasteroffers` can preview a fixed gross amount. It returns the exact
+  recipient, service-fee, and total values for mathematically exact candidates;
+  cent-rounding gaps fail before input reservation. `requestpaymasterquote`
+  retains its exact-recipient semantics.
+- Shared response formatting exposes authoritative session/pending/finality,
+  fee, provider, quote/policy, broadcast, and confirmation state.
 
 ### src/rpc/digidollar_transactions.{h,cpp} *(legacy / unregistered)*
 - 9-entry command table (`digidollar_transaction_commands` at `src/rpc/digidollar_transactions.cpp:384–395`) defining `getdigidollarinfo`, `getdigidollaraddress`, `getdigidollarbalance`, `mintdigidollar`, `transferdigidollar`, `redeemdigidollar`, `getredemptioninfo`, `listredeemablepositions`, `createrawddtransaction`. (`setmockoracleprice` is NOT in this table — comment at line 393 explicitly delegates to `rpc/digidollar.cpp`.)
@@ -650,7 +791,14 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
     - `UpdatePositionStatus(dd_timelock_id, active)` → updates position active flag in DB
   - **Balance Tracking (Task 5.2):**
     - `GetDDBalance(addr)` → balance for specific address or total
-    - `GetTotalDDBalance()` → confirmed DD balance across all addresses
+    - `GetTotalDDBalance()` → gross confirmed wallet-owned DD, including
+      Paymaster-reserved client inputs and provider carrier outputs
+    - `GetDDBalanceSummary()` → one-lock snapshot of gross confirmed,
+      ordinary spendable, Paymaster-reserved, and pending DD
+    - `GetSpendableDDBalance()` → confirmed DD selectable by ordinary
+      send/redeem flows; excludes every durable Paymaster reservation
+    - `GetPaymasterReservedDDBalance()` → confirmed wallet-owned DD protected
+      for active Paymaster sessions or live provider carrier pools
     - `GetPendingDDBalance()` → unconfirmed but trusted DD balance
     - `ScanForDDUTXOs()` → full UTXO scan at startup (expensive)
     - `ProcessTransactionForDD(tx, txid)` → incremental UTXO update per block
@@ -731,6 +879,58 @@ This is the granular file index for all DigiDollar and Oracle source code. Read 
   - `Select(output)` → locks UTXO for spending
   - `UnSelect(output)` / `UnSelectAll()` → removes selections
   - `ListSelected()` → returns vector of selected outpoints
+
+### src/wallet/paymasterstore.{h,cpp}
+- `PaymasterStore` atomically persists sessions, exact append-only attempts,
+  reservations, authorizations, provider commits/results, self-recovery raw
+  transactions, outcome markers, and permanent idempotency tombstones.
+- Integrates Paymaster and ordinary wallet locks, restores state at startup,
+  reconciles mempool/confirmation/reorg observations, and prunes session detail
+  only after the configured safety depth.
+- Before a new provider signature, the RPC path rechecks every committed
+  template input against chainstate plus mempool. A template already spent by
+  client recovery is atomically marked `REJECTED`, its unused provider pool
+  entries are released, and a signed durable rejection result is retained.
+- Quote, pool and fee-budget reservations are written and transitioned as one
+  database unit. Policy changes remain strict for new authority while an exact
+  already-authorized or committed artifact retains only the historical binding
+  required for safe completion; orphan half-writes fail closed.
+- The exact provider commit atomically registers manifest-bound wallet-owned
+  carrier return and sufficiently large DGB change as `PENDING_SUCCESSOR` pool
+  entries. Confirmation, reorg, conflict, and startup reconstruction use the
+  persisted origin key, so a 1.00 DD carrier can accumulate service fees and be
+  reused without a separate carrier transaction.
+
+### src/wallet/load.{h,cpp}
+- Schedules wallet-wide Paymaster reconciliation every 30 seconds, alongside
+  the existing startup and chain-tip hooks. This drives the store's atomic
+  unsigned-quote and Capacity-reservation expiry even without a subsequent RPC
+  or block notification, while keeping loaded-wallet lifetimes safe through a
+  `GetWallets()` shared-pointer snapshot.
+- Schedules a short bounded provider-service pass for every loaded wallet.
+  Automatic providers perform at most one request step and one submit step per
+  pass; manual providers remain operator-driven, locked wallets pause without
+  consuming work, and opt-in autostart waits for readiness/unlock.
+- Startup and scheduled reconciliation recover historical pool successors and
+  durable maintenance transactions. The automatic pass repairs missing targets
+  before accepting new requests and exposes maintenance approval,
+  replenishment, and confirmation-wait service states.
+
+### src/wallet/paymasteridentity.{h,cpp}
+- Creates and loads the wallet-managed untweaked BIP86/x-only provider identity
+  from an eligible descriptor wallet with local private keys.
+- Rejects legacy, watch-only, and external-signer provider wallets.
+
+### src/wallet/paymasterpsbt.{h,cpp}
+- Signs only the expected user or provider input role using wallet-owned keys,
+  after strict collaborative-template validation.
+- Produces user input-control proofs without exposing private key material.
+
+### src/wallet/paymasterprovider.{h,cpp}
+- Wallet-specific provider proof construction, announcement generation,
+  operational slot reservation, and policy/pool readiness integration.
+- Persists and validates wallet-local liquidity policy and maintenance-ledger
+  state alongside the existing provider settings, safety policy, and pools.
 
 ---
 
@@ -836,6 +1036,18 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - ⚠️ Price/consensus/MuSig2/getoracles/heartbeat handlers all use `IsOracleP2PActive`; `ORACLEHEARTBEAT` is also signed, roster-limited, deduplicated, and rate-limited
 - ⚠️ `GETORACLES` is rate-limited to 10 requests/minute/peer, accepts epochs in `[current_epoch - 24, current_epoch + 1]`, and replies with matching fresh `ORACLEPRICE` messages plus recent `ORACLEHEARTBEAT` messages
 - ⚠️ Oracle message validation, rate limiting, and Misbehaving scoring for invalid MuSig2/heartbeat messages
+- ⚠️ Paymaster discovery messages are handled on ordinary upgraded peers;
+  capacity/quote/submit/result messages are accepted only on isolated
+  `ConnectionType::PAYMASTER` peers with bounded pre-crypto validation.
+
+### src/net.h / src/net.cpp / src/node/connection_types.{h,cpp}
+- ⚠️ Defines the short-lived `PAYMASTER` connection type, v2-only/no-fallback
+  policy, high-privacy onion and Tor-isolation constraints, and connection
+  reporting.
+
+### src/node/context.{h,cpp}
+- ⚠️ Owns the node-level `Paymaster::Manager`; wallet contexts reference it
+  without moving durable wallet state into `NodeContext`.
 
 ### src/node/transaction.cpp
 - ⚠️ DD-aware transaction broadcast handling, oracle data relay
@@ -859,6 +1071,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/wallet/walletdb.h / src/wallet/walletdb.cpp
 - ⚠️ `WalletBatch` DD persistence methods: `WriteDDBalance()`, `WriteDDTimeLock()`, `ReadDDTimeLock()`, `WriteDDTransaction()`, `WriteDDOwnerKey()`, `WriteDDAddressKey()`, `EraseDDTimeLock()` (74 references)
 - ⚠️ `WalletBatch` encrypted DD key methods (T4-03a): `WriteCryptedDDOwnerKey()`, `ReadCryptedDDOwnerKey()`, `EraseCryptedDDOwnerKey()`, `WriteCryptedDDAddressKey()`, `ReadCryptedDDAddressKey()`, `EraseCryptedDDAddressKey()`
+- ⚠️ Paymaster DB methods persist versioned provider pools, liquidity policy,
+  restartable maintenance ledger, and the latest carrier-withdrawal preview so
+  successor/maintenance recovery and exact plan execution survive restart.
 - ⚠️ DB keys: `DD_CRYPTED_ADDRESS_KEY` ("ddcaddrkey"), `DD_CRYPTED_OWNER_KEY` ("ddcownerkey")
 
 ### src/wallet/spend.cpp
@@ -887,10 +1102,68 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ## Qt GUI
 
 ### src/qt/digidollartab.cpp/h
-- `DigiDollarTab` → main DD tab widget containing the activation overlay and 7 tabs: DD Overview, Send DD, Receive DD, Mint DD, Redeem DD, DD Vault, DD Transactions
+- `DigiDollarTab` → main DD tab widget containing the activation overlay and 7
+  client tabs. Its wallet-scoped Paymaster operator console is hidden by default
+  and can be enabled independently in the Qt wallet options.
+- The Paymaster console provides setup, identity/policy/pool controls,
+  start/stop, readiness, reservations, warnings, and recovery actions. Its
+  wallet-scoped first-visit gate offers a recommended guided path or an
+  explicitly acknowledged expert path. Configuration, Safety limits, and
+  Liquidity remain locked until a path completes, while Activity and recovery
+  remains reachable to avoid hiding durable work. Existing Core provider state
+  automatically bypasses the first-visit gate.
+  Its
+  overview explains the provider role, translates readiness codes into guided
+  next steps, and keeps raw backend diagnostics in collapsed technical details.
+  Configuration explains both funding models and their valid simultaneous
+  public use, enforces the sponsored-only restricted combination in the form,
+  reloads the wallet's persisted policy without overwriting unsaved edits,
+  summarizes values in ordinary units, and can restore recommended unsaved
+  policy defaults. Safety limits provide visible setup guidance and
+  per-section safe defaults for provider funding models, quote throttles, and
+  client fee budgets. Scroll pages use the active Qt palette, and operator
+  spin boxes and combo boxes deliberately ignore mouse-wheel value changes so
+  wheel input remains available for page scrolling. Liquidity presents the
+  admission/operational and DGB/carrier split as a guided first-time workflow,
+  restores policy-aware recommended targets without moving funds, formats
+  preview results in ordinary DGB/DD units, and enables execution only for the
+  exact target set most recently previewed. It also explains automatic
+  successor reuse, requests one-time approval for finite paid maintenance,
+  reports pending/confirmed/missing targets and maintenance costs, and exposes
+  separate preview-first actions for carrier excess and full slot release.
+  Activity and recovery shows the
+  automatic service state and queue summary in the recommended mode; explicit
+  one-at-a-time processing controls appear only in manual expert mode. It
+  distinguishes non-spending request handling from potentially spending
+  submitted-payment handling, summarizes durable reservations without leading
+  with identifiers, explains restart recovery, and keeps raw RPC results
+  collapsed by default.
+  The guided setup dialog uses a non-native, theme-controlled classic wizard
+  surface so its page text and controls remain readable under both dark and
+  light Windows themes. It covers prerequisites, identity, service model,
+  offer limits, finite safety profiles, policy-aware liquidity, validation,
+  and a final funding review. Its first page names and pins the current wallet,
+  recommends a dedicated provider wallet, requires explicit confirmation, and
+  directs operators through the normal wallet menu when another wallet should
+  be created or selected. Wallet eligibility is checked again before any
+  mutation. Applying the reviewed plan runs an asynchronous,
+  retryable sequence that reuses or creates the provider identity, persists the
+  operating and provider-safety policies, enables the wallet-local provider
+  configuration, rechecks the live pool, and creates only still-missing pool
+  outputs after a separate funding confirmation. Completed steps remain
+  idempotently resumable after an error. The completion page states that no
+  additional Save actions are required and returns to an automatically
+  refreshed Overview while new liquidity confirms. Starting the provider is
+  always a separate, explicit Overview action and is never performed by the
+  wizard.
 
 ### src/qt/digidollaroverviewwidget.cpp/h
-- `DigiDollarOverviewWidget` → DD balance overview, system health display
+- `DigiDollarOverviewWidget` → DD balance overview and system health display.
+  With no Paymaster-reserved DD it preserves the original compact balance
+  layout. While a client session or live provider carrier pool protects DD, it
+  temporarily splits the display into ordinary available, Paymaster-reserved,
+  and gross wallet total; wallet USD valuation continues to use the gross
+  wallet-owned amount.
 
 ### src/qt/digidollarmintwidget.cpp/h
 - `DigiDollarMintWidget` → mint DD interface with tier selection and collateral calculator
@@ -899,7 +1172,19 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `DigiDollarPositionsWidget` → displays DDTimeLock positions with lock status and health
 
 ### src/qt/digidollarsendwidget.cpp/h
-- `DigiDollarSendWidget` → send DD to address with amount validation
+- `DigiDollarSendWidget` → send DD with amount validation plus asynchronous DGB,
+  Paymaster, or automatic fee funding. The novice surface defaults to direct
+  DGB, explains the cost and exact automatic fallback rule, configures the
+  wallet-local client safety policy, and keeps offer/privacy/provider controls
+  collapsed. It renders persistent unlock, signature, provider, fallback,
+  retry, and same-input recovery states in a separate active-session section.
+  Automatic/Paymaster modes additionally offer an explicit fee-deduction and
+  wallet-empty action, with separate total-outflow, recipient, provider-fee,
+  and remaining-balance summaries; direct DGB retains the original layout.
+
+### src/qt/walletmodel.cpp/h
+- `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
+  operations so wallet unlock contexts are not retained across network waits.
 
 ### src/qt/digidollarreceivewidget.cpp/h
 - `DigiDollarReceiveWidget` → generate/display DD receive addresses
@@ -934,6 +1219,16 @@ present in the tree but not compiled into the current unit-test binary.
 
 | File | Coverage Area |
 |------|--------------|
+| `paymaster_types_tests.cpp` | Strong amount types, fee rounding/bounds, exact gross-to-recipient inversion (including cent-rounding gaps), and canonical request UUIDs |
+| `paymaster_txbuilder_tests.cpp` | Deterministic collaborative transfer construction, prevout resolution, conservation, carrier/change, and fee bounds |
+| `paymaster_psbt_tests.cpp` | Exact PSBT template, input roles, signature stages, gross/recipient/fee authorization binding, unexpected-field rejection, and `SIGHASH_DEFAULT` |
+| `paymaster_protocol_tests.cpp` / `paymaster_wire_tests.cpp` | V5 order/capacity bindings, explicit no-downgrade parsing, semantic replay, and bounded envelopes |
+| `paymaster_provider_tests.cpp` / `paymaster_recovery_tests.cpp` | Finite safety and maintenance budgets, pool-successor provenance/lifecycle, carrier-withdrawal plans, atomic reservation accounting, malicious-counterparty rejection, and distinct-provider recovery |
+| `paymaster_protocol_tests.cpp` | Intent/quote/result binding, monotonic result sequences, exact final artifacts, and optional-field serialization |
+| `paymaster_provider_tests.cpp` / `paymaster_sponsorship_tests.cpp` | Provider policy, BIP86 identity shape, separated pools, fee boundaries, public/restricted sponsorship and durable hash-only authorization |
+| `paymaster_directory_tests.cpp` / `paymaster_wire_tests.cpp` | Signed announcement replacement/expiry, bounded direct messages, owner/session scoping, replay and resource limits |
+| `paymaster_client_tests.cpp` / `paymaster_reputation_tests.cpp` | Exact additive and fixed-gross candidate selection, cost ordering, deterministic ties, privacy tolerance, quote binding, cooldowns, and local neutral/provider outcomes |
+| `paymaster_reservation_tests.cpp` | Session and attempt state transitions, ambiguous reservations, mempool non-finality, and immutable terminal states |
 | `digidollar_activation_tests.cpp` | Buried-height activation gating and deployment status checks (BIP9 state-machine cases removed in the v9.26.5 burial) |
 | `digidollar_activation_wave12_tests.cpp` | Wave 12 activation boundary and deployment predicate regressions |
 | `digidollar_address_tests.cpp` | DD address encoding/decoding, version bytes, network-specific prefixes, validation |
@@ -1082,6 +1377,10 @@ present in the tree but not compiled into the current unit-test binary.
 
 | File | Coverage Area |
 |------|--------------|
+| `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection |
+| `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs and signing only the requested collaborative input role |
+| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, tombstones, self-recovery, restart, mempool, confirmation, reorg, and retention |
+| `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, crash windows, final-witness validation, and malicious client/provider persistence failures |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |
@@ -1092,6 +1391,7 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `digidollarwidgettests.cpp/h` | Qt widget unit tests for DD UI components |
 | `digidollarwave19widgettests.cpp/h` | Wave 19 Qt unit/signal-slot pins for the release-critical DD UX surface (mint tier dropdown, etc.) |
+| Paymaster cases in `digidollarwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, recovery, and asynchronous UI wiring |
 
 ### Python Functional Tests (`test/functional/`)
 
@@ -1103,6 +1403,8 @@ compatibility but is a legacy/superseded scaffold; the live oracle P2P proof is
 
 | File | Coverage Area |
 |------|--------------|
+| `wallet_paymaster_readiness.py` | Pre-session client/provider rejection with disabled Paymaster or inactive DigiDollar, pruning, missing txindex or BIP324, and unsafe high-privacy logging/proxy/capture configuration |
+| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public/restricted sponsorship, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, and production-log redaction of payment artifacts |
 | `digidollar_activation.py` | Basic activation of DD features at the buried height on regtest (BIP9 signaling lifecycle removed in the v9.26.5 burial) |
 | `digidollar_activation_boundary.py` | Activation edge cases: exact height, off-by-one, pre/post activation behavior |
 | `digidollar_activation_multinode.py` | Multi-node activation state and deployment synchronization |
@@ -1209,6 +1511,13 @@ Current DigiDollar-specific fuzz source inventory:
 | `digidollar_txbuilder_validate.cpp` | TxBuilder output validation and reject-path fuzzing |
 | `digidollar_validation_deep.cpp` | Deep mint/transfer/redeem validation fuzzing |
 | `digidollar_wave15_parsers.cpp` | Wave 15 parser hardening for DD metadata and script formats |
+
+Current Paymaster fuzz source inventory:
+
+| File | Coverage Area |
+|------|--------------|
+| `paymaster_wire.cpp` | Announcement and all direct-message deserialization plus bounded envelope-validation paths |
+| `paymaster_stateful.cpp` | Stateful Capacity → Intent → Quote → Submit → Result → Recovery transitions, budgets, replay, and timestamp/amount boundaries |
 
 Current oracle/MuSig2 fuzz source inventory:
 
