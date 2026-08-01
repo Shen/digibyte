@@ -4,19 +4,31 @@
   "dependencies": [
     "berkeleydb",
     "boost-multi-index",
+    "boost-multiprecision",
     "boost-process",
     "boost-signals2",
     "boost-test",
     "boost-thread",
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": ["ssl"]
+    },
     "sqlite3",
     {
       "name": "libevent",
       "features": ["thread"]
     },
+    "libqrencode",
     "zeromq"
   ],
   "builtin-baseline": "f14984af3738e69f197bf0e647a8dca12de92996",
   "overrides": [
+    {
+      "name": "curl",
+      "version": "8.21.0",
+      "port-version": 1
+    },
     {
       "name": "libevent",
       "version": "2.1.12#7"

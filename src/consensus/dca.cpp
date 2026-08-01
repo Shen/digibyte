@@ -7,6 +7,7 @@
 #include <consensus/digidollar.h>
 #include <digidollar/health.h>
 #include <logging.h>
+#include <util/int128.h>
 #include <util/string.h>
 
 #include <algorithm>
@@ -34,14 +35,14 @@ int ResolveCanonicalHealthForDCA(int requestedHealth, bool& staleHealth)
     return requestedHealth;
 }
 
-bool TryMultiplyInt128(__int128 a, __int128 b, __int128& result)
+bool TryMultiplyInt128(util::int128_t a, util::int128_t b, util::int128_t& result)
 {
     if (a < 0 || b < 0) return false;
     if (a == 0 || b == 0) {
         result = 0;
         return true;
     }
-    if (a > std::numeric_limits<__int128>::max() / b) {
+    if (a > std::numeric_limits<util::int128_t>::max() / b) {
         return false;
     }
     result = a * b;
@@ -87,18 +88,18 @@ int DynamicCollateralAdjustment::CalculateSystemHealth(CAmount totalCollateral,
     // totalCollateral is in satoshis, oraclePrice is in milli-cents per DGB
     // (100,000 = $1.00), and totalDD is in cents. Floor the final ratio so
     // health never rounds up across a DCA boundary.
-    __int128 numerator = 0;
-    if (!TryMultiplyInt128(static_cast<__int128>(totalCollateral),
-                           static_cast<__int128>(oraclePrice),
+    util::int128_t numerator = 0;
+    if (!TryMultiplyInt128(static_cast<util::int128_t>(totalCollateral),
+                           static_cast<util::int128_t>(oraclePrice),
                            numerator) ||
         !TryMultiplyInt128(numerator, 100, numerator)) {
         LogPrintf("DCA: Cannot calculate system health - collateral/price multiplication overflow\n");
         return 0;
     }
 
-    __int128 denominator = static_cast<__int128>(COIN) * 1000 *
-                           static_cast<__int128>(totalDD);
-    __int128 healthCalculation = numerator / denominator;
+    util::int128_t denominator = static_cast<util::int128_t>(COIN) * 1000 *
+                                 static_cast<util::int128_t>(totalDD);
+    util::int128_t healthCalculation = numerator / denominator;
 
     if (healthCalculation <= 0) {
         LogPrint(BCLog::DIGIDOLLAR, "DCA: Zero collateral value, system health is 0%%\n");
@@ -159,9 +160,9 @@ int DynamicCollateralAdjustment::ApplyDCA(int baseRatio, int systemHealth)
 
     int multiplierBps = GetDCAMultiplierBps(resolvedHealth);
 
-    __int128 adjustedRatio = static_cast<__int128>(baseRatio) *
-                             static_cast<__int128>(multiplierBps);
-    __int128 finalRatio128 = (adjustedRatio + DCA_BPS_SCALE - 1) / DCA_BPS_SCALE;
+    util::int128_t adjustedRatio = static_cast<util::int128_t>(baseRatio) *
+                                   static_cast<util::int128_t>(multiplierBps);
+    util::int128_t finalRatio128 = (adjustedRatio + DCA_BPS_SCALE - 1) / DCA_BPS_SCALE;
     int finalRatio = finalRatio128 > std::numeric_limits<int>::max()
         ? std::numeric_limits<int>::max()
         : static_cast<int>(finalRatio128);

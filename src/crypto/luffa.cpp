@@ -30,7 +30,9 @@
  * @author   Thomas Pornin <thomas.pornin@cryptolog.com>
  */
 
+#if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wunused-const-variable"
+#endif
 
 #include <stddef.h>
 #include <string.h>

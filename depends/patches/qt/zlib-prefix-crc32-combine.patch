@@ -1,0 +1,24 @@
+Backport the missing Z_PREFIX mappings added upstream after Qt 5.15.10.
+
+Qt builds its bundled zlib with Z_PREFIX so that it can coexist with another
+zlib in the same process. zlib 1.2.12 added three public crc32-combine helper
+symbols, but Qt 5.15.10's bundled zconf.h does not prefix them. This makes a
+static Qt5Core.lib collide with the zlib.lib used by libcurl.
+
+Upstream Qt commit: 54ea62756a
+Qt bug: QTBUG-116236
+
+diff --git a/qtbase/src/3rdparty/zlib/src/zconf.h b/qtbase/src/3rdparty/zlib/src/zconf.h
+--- a/qtbase/src/3rdparty/zlib/src/zconf.h
++++ b/qtbase/src/3rdparty/zlib/src/zconf.h
+@@ -40,7 +40,10 @@
+ #  endif
+ #  define crc32                 z_crc32
+ #  define crc32_combine         z_crc32_combine
+ #  define crc32_combine64       z_crc32_combine64
++#  define crc32_combine_gen     z_crc32_combine_gen
++#  define crc32_combine_gen64   z_crc32_combine_gen64
++#  define crc32_combine_op      z_crc32_combine_op
+ #  define crc32_z               z_crc32_z
+ #  define deflate               z_deflate
+ #  define deflateBound          z_deflateBound

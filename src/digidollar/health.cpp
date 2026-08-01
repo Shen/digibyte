@@ -23,6 +23,7 @@
 #include <node/transaction.h>
 #include <sync.h>
 #include <txmempool.h>
+#include <util/int128.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -811,11 +812,9 @@ int SystemHealthMonitor::CalculateSystemHealth(CAmount ddSupply, CAmount collate
         return 0; // Cannot calculate without valid price
     }
 
-    __int128 numerator = static_cast<__int128>(collateral) *
-                         static_cast<__int128>(price) * 100;
-    __int128 denominator = static_cast<__int128>(COIN) *
-                           static_cast<__int128>(ddSupply);
-    __int128 health = numerator / denominator;
+    const util::int128_t numerator = util::int128_t{collateral} * util::int128_t{price} * 100;
+    const util::int128_t denominator = util::int128_t{COIN} * util::int128_t{ddSupply};
+    const util::int128_t health = numerator / denominator;
 
     if (health < 0) return 0;
     if (health > 300) return 300;
@@ -965,21 +964,21 @@ int CalculateHealthRatio(CAmount ddAmount, CAmount dgbAmount, CAmount dgbPrice)
         return 0; // Cannot calculate without valid price/amount
     }
 
-    // Calculate DGB value in cents using __int128 to prevent overflow.
+    // Calculate DGB value in cents using a fixed 128-bit integer to prevent overflow.
     // dgbPrice is in cents (100 = $1.00 DGB price)
     // dgbAmount is in satoshis
     // Formula: (satoshis * price_cents) / COIN = value_in_cents
     // Then health = (value_in_cents * 100) / ddAmount
     //
-    // Using __int128 is safe here because this is a monitoring/display
+    // Using a fixed 128-bit integer is safe here because this is a monitoring/display
     // function, not consensus-critical code. The consensus equivalent
-    // (CalculateSystemHealth) uses a divide-first pattern, but __int128
+    // (CalculateSystemHealth) uses a divide-first pattern, but 128-bit arithmetic
     // is simpler and handles all edge cases without precision loss.
-    __int128 dgbValue128 = static_cast<__int128>(dgbAmount) * static_cast<__int128>(dgbPrice);
+    util::int128_t dgbValue128 = util::int128_t{dgbAmount} * util::int128_t{dgbPrice};
     dgbValue128 /= COIN;
 
     // Health = (Collateral Value / DD Value) * 100
-    __int128 health128 = (dgbValue128 * 100) / static_cast<__int128>(ddAmount);
+    const util::int128_t health128 = (dgbValue128 * 100) / util::int128_t{ddAmount};
 
     // Clamp to [0, 300]
     if (health128 < 0) return 0;

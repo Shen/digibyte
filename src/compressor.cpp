@@ -180,19 +180,19 @@ bool LegacyCompressAmount(uint64_t n, uint64_t& compressed)
         n /= 10;
         e++;
     }
-    __uint128_t result;
+    const uint64_t max = std::numeric_limits<uint64_t>::max();
     if (e < 9) {
-        int d = (n % 10);
+        const uint64_t d = n % 10;
         assert(d >= 1 && d <= 9);
         n /= 10;
-        result = 1 + ((__uint128_t{n} * 9 + d - 1) * 10) + e;
+        if (n > (max - (d - 1)) / 9) return false;
+        const uint64_t mantissa = n * 9 + d - 1;
+        if (mantissa > (max - 1 - e) / 10) return false;
+        compressed = 1 + mantissa * 10 + e;
     } else {
-        result = 1 + ((__uint128_t{n} - 1) * 10) + 9;
+        if (n > max / 10) return false;
+        compressed = n * 10;
     }
-    if (result > std::numeric_limits<uint64_t>::max()) {
-        return false;
-    }
-    compressed = static_cast<uint64_t>(result);
     return true;
 }
 

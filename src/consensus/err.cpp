@@ -14,6 +14,7 @@
 #include <primitives/oracle.h>
 #include <key.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <util/time.h>
 #include <logging.h>
 
@@ -119,14 +120,14 @@ CAmount EmergencyRedemptionRatio::GetRequiredDDBurn(CAmount originalDDMinted, in
 
     // Consensus-visible burn math: ceil(originalDD * 10000 / ratioBps).
     // Use signed 128-bit arithmetic so large valid CAmount values cannot overflow.
-    const __int128 numerator = static_cast<__int128>(originalDDMinted) * ERR_RATIO_NORMAL_BPS;
-    const __int128 required = (numerator + ratioBps - 1) / ratioBps;
-    const __int128 max_amount = std::numeric_limits<CAmount>::max();
+    const util::int128_t numerator = static_cast<util::int128_t>(originalDDMinted) * ERR_RATIO_NORMAL_BPS;
+    const util::int128_t required = (numerator + ratioBps - 1) / ratioBps;
+    const util::int128_t max_amount = std::numeric_limits<CAmount>::max();
     const CAmount requiredDD = required > max_amount
         ? std::numeric_limits<CAmount>::max()
         : static_cast<CAmount>(required);
 
-    const __int128 increaseBps = (static_cast<__int128>(requiredDD - originalDDMinted) * 10000) / originalDDMinted;
+    const util::int128_t increaseBps = (static_cast<util::int128_t>(requiredDD - originalDDMinted) * 10000) / originalDDMinted;
     LogPrint(BCLog::DIGIDOLLAR, "ERR: GetRequiredDDBurn - original: %lld, health: %d%%, ratio_bps: %d, required: %lld (%lld.%02lld%% increase)\n",
              static_cast<long long>(originalDDMinted), systemHealth, ratioBps,
              static_cast<long long>(requiredDD),
@@ -377,7 +378,7 @@ bool EmergencyRedemptionRatio::ValidateERRRedemption(const CTransaction& tx, CAm
         return false;
     }
 
-    const __int128 inferredInputs = static_cast<__int128>(originalDDMinted) * tx.vin.size();
+    const util::int128_t inferredInputs = static_cast<util::int128_t>(originalDDMinted) * tx.vin.size();
     ddInputs = inferredInputs > std::numeric_limits<CAmount>::max()
         ? std::numeric_limits<CAmount>::max()
         : static_cast<CAmount>(inferredInputs);

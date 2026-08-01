@@ -34,7 +34,22 @@ To build DigiByte Core with the GUI, a static build of Qt is required.
 
 1. Download a single ZIP archive of Qt source code from https://download.qt.io/official_releases/qt/ (e.g., [`qt-everywhere-opensource-src-5.15.10.zip`](https://download.qt.io/official_releases/qt/5.15/5.15.10/single/qt-everywhere-opensource-src-5.15.10.zip)), and expand it into a dedicated folder. The following instructions assume that this folder is `C:\dev\qt-source`.
 
-2. Open "x64 Native Tools Command Prompt for VS 2022", and input the following commands:
+2. Qt 5.15.10's bundled zlib needs the repository's `Z_PREFIX` backport so it
+can be linked together with the zlib used by vcpkg's static libcurl. Apply the
+patch from the root of the extracted Qt source tree (the directory containing
+`qtbase`). Replace `C:\dev\digibyte` with the path to this repository:
+
+```cmd
+cd C:\dev\qt-source
+git apply --check C:\dev\digibyte\depends\patches\qt\zlib-prefix-crc32-combine.patch
+git apply C:\dev\digibyte\depends\patches\qt\zlib-prefix-crc32-combine.patch
+```
+
+The patch gives Qt's three `crc32_combine_*` helpers the same private zlib
+prefix as its other bundled zlib symbols. Do not replace it with
+`/FORCE:MULTIPLE` or by omitting vcpkg's `zlib.lib`.
+
+3. Open "x64 Native Tools Command Prompt for VS 2022", and input the following commands:
 ```cmd
 cd C:\dev\qt-source
 mkdir build
@@ -43,6 +58,10 @@ cd build
 nmake
 nmake install
 ```
+
+For an existing configured Qt 5.15.10 build, apply the patch to its source tree
+and rerun `nmake` followed by `nmake install` in the existing build directory.
+Reconfiguration is not required.
 
 One could speed up building with [`jom`](https://wiki.qt.io/Jom), a replacement for `nmake` which makes use of all CPU cores.
 

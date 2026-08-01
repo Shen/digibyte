@@ -64,6 +64,17 @@
     <ClCompile Include="..\..\src\qt\walletmodeltransaction.cpp" />
     <ClCompile Include="..\..\src\qt\walletview.cpp" />
     <ClCompile Include="..\..\src\qt\winshutdownmonitor.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarcoincontroldialog.cpp" />
+    <ClCompile Include="..\..\src\qt\ddaddressbookpage.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollartab.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarmintwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollaroverviewwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarpositionswidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarreceiverequest.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarreceivewidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarredeemwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollarsendwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\digidollartransactionswidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addressbookpage.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addresstablemodel.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_askpassphrasedialog.cpp" />
@@ -120,6 +131,19 @@
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_walletmodeltransaction.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_walletview.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_winshutdownmonitor.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarcoincontroldialog.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_macdockiconhandler.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_macnotificationhandler.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollartab.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarmintwidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollaroverviewwidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarpositionswidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarreceiverequest.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_ddaddressbookpage.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarreceivewidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarredeemwidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollarsendwidget.cpp" />
+    <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_digidollartransactionswidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\rcc\qrc_digibyte.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\rcc\qrc_digibyte_locale.cpp" />
   </ItemGroup>

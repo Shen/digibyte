@@ -411,6 +411,14 @@ void OracleNode::PriceThreadFunc()
 
 void OracleNode::FetchAndUpdatePrice()
 {
+    // Regtest price data is supplied by MockOracleManager. Keeping the real
+    // OracleNode lifecycle running is useful for start/stop coverage, but an
+    // intentionally skipped public fetch is not an exchange failure.
+    if (Params().GetChainType() == ChainType::REGTEST) {
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Public exchange fetching is disabled on regtest\n");
+        return;
+    }
+
     CAmount median_price = FetchMedianPrice();
 
     if (median_price > 0) {
@@ -444,6 +452,15 @@ void OracleNode::FetchAndUpdatePrice()
 
 CAmount OracleNode::FetchMedianPrice()
 {
+    // Regtest has a dedicated in-process MockOracleManager and must remain
+    // deterministic. Never contact public exchanges merely because a regtest
+    // test starts the oracle lifecycle; the opt-in exchange smoke test covers
+    // the real HTTPS path directly.
+    if (Params().GetChainType() == ChainType::REGTEST) {
+        LogPrint(BCLog::DIGIDOLLAR, "Oracle: Skipping public exchange fetch on regtest\n");
+        return 0;
+    }
+
     // Use the real MultiExchangeAggregator from exchange.cpp
     // This fetches from the active exchange set and returns median with outlier filtering.
     ExchangeAPI::MultiExchangeAggregator aggregator;

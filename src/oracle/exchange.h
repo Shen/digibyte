@@ -239,6 +239,7 @@ private:
 
 public:
     MultiExchangeAggregator();
+    explicit MultiExchangeAggregator(std::vector<std::unique_ptr<BaseExchangeFetcher>> custom_fetchers);
     ~MultiExchangeAggregator();
 
     //! Configuration

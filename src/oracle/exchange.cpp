@@ -10,9 +10,11 @@
 #include <iomanip>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 
 #include <logging.h>
 #include <random.h>
+#include <util/int128.h>
 #include <util/strencodings.h>
 #include <util/system.h>
 #include <util/time.h>
@@ -47,11 +49,11 @@ CAmount ConvertBinancePairPricesToMicroUSD(const std::string& dgb_btc_str, const
     if (dgb_btc_scaled <= 0 || btc_usdt_scaled <= 0) return 0;
     if (dgb_btc_scaled > PRICE_PARSE_SCALE) return 0; // DGB/BTC > 1 is outside sane fallback bounds.
 
-    const __int128 numerator = static_cast<__int128>(dgb_btc_scaled) *
-                               static_cast<__int128>(btc_usdt_scaled) * 1000000;
-    const __int128 denominator = static_cast<__int128>(PRICE_PARSE_SCALE) *
-                                 static_cast<__int128>(PRICE_PARSE_SCALE);
-    const __int128 price_micro_usd = numerator / denominator;
+    const util::int128_t numerator = static_cast<util::int128_t>(dgb_btc_scaled) *
+                               static_cast<util::int128_t>(btc_usdt_scaled) * 1000000;
+    const util::int128_t denominator = static_cast<util::int128_t>(PRICE_PARSE_SCALE) *
+                                 static_cast<util::int128_t>(PRICE_PARSE_SCALE);
+    const util::int128_t price_micro_usd = numerator / denominator;
     if (price_micro_usd <= 0 || price_micro_usd > MAX_REASONABLE_PRICE_MICRO_USD) {
         return 0;
     }
@@ -191,6 +193,7 @@ std::string BaseExchangeFetcher::HttpGet(const std::string& url)
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
 #endif
 
+#ifndef WIN32
     static const char* ca_bundle_paths[] = {
         "/etc/ssl/certs/ca-certificates.crt",     // Debian/Ubuntu
         "/etc/pki/tls/certs/ca-bundle.crt",       // RHEL/CentOS
@@ -208,10 +211,6 @@ std::string BaseExchangeFetcher::HttpGet(const std::string& url)
     };
 
     bool ca_set = false;
-#ifdef WIN32
-    // Windows native cert store handles CA — skip Linux file search
-    ca_set = true;
-#endif
     // Try CA bundle files first
     for (int i = 0; ca_bundle_paths[i] != nullptr; ++i) {
         struct stat st;
@@ -232,6 +231,11 @@ std::string BaseExchangeFetcher::HttpGet(const std::string& url)
             break;
         }
     }
+#else
+    // The Schannel backend uses the native Windows certificate store; the
+    // POSIX CA-file discovery above is neither needed nor available here.
+    const bool ca_set = true;
+#endif
     if (!ca_set) {
         LogPrintf("HttpGet: SECURITY - No CA bundle found, refusing to make unverified request to %s\n", url);
 #ifndef WIN32
@@ -1058,6 +1062,17 @@ CAmount CoinGeckoFetcher::FetchPrice()
 MultiExchangeAggregator::MultiExchangeAggregator()
 {
     InitializeFetchers();
+}
+
+MultiExchangeAggregator::MultiExchangeAggregator(
+    std::vector<std::unique_ptr<BaseExchangeFetcher>> custom_fetchers)
+    : fetchers(std::move(custom_fetchers))
+{
+    for (const auto& fetcher : fetchers) {
+        if (!fetcher) {
+            throw std::invalid_argument("MultiExchangeAggregator requires non-null fetchers");
+        }
+    }
 }
 
 MultiExchangeAggregator::~MultiExchangeAggregator()

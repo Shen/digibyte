@@ -1626,7 +1626,7 @@ PKG_CHECK_MODULES([LIBCURL], [libcurl >= 7.50.0],
    if test "$TARGET_OS" = "darwin"; then
      LIBCURL_LIBS="$LIBCURL_LIBS -framework CoreFoundation -framework SystemConfiguration"
    fi],
-  [AC_MSG_WARN([libcurl not found, oracle will use mock exchange data])])
+  [AC_MSG_WARN([libcurl not found, live oracle exchange fetching will be unavailable])])
 
 AM_CONDITIONAL([HAVE_LIBCURL], [test "$use_libcurl" = "yes"])
 

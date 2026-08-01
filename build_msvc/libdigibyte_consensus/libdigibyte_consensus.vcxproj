@@ -8,19 +8,99 @@
     <ConfigurationType>StaticLibrary</ConfigurationType>
   </PropertyGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\src\arith_uint256.cpp" />
-    <ClCompile Include="..\..\src\consensus\merkle.cpp" />
-    <ClCompile Include="..\..\src\consensus\tx_check.cpp" />
-    <ClCompile Include="..\..\src\hash.cpp" />
-    <ClCompile Include="..\..\src\primitives\block.cpp" />
-    <ClCompile Include="..\..\src\primitives\transaction.cpp" />
-    <ClCompile Include="..\..\src\pubkey.cpp" />
-    <ClCompile Include="..\..\src\script\digibyteconsensus.cpp" />
-    <ClCompile Include="..\..\src\script\interpreter.cpp" />
-    <ClCompile Include="..\..\src\script\script.cpp" />
-    <ClCompile Include="..\..\src\script\script_error.cpp" />
-    <ClCompile Include="..\..\src\uint256.cpp" />
-    <ClCompile Include="..\..\src\util\strencodings.cpp" />
+    <ClCompile Include="..\..\src\arith_uint256.cpp">
+      <ObjectFileName>$(IntDir)arith_uint256.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\consensus\digidollar.cpp">
+      <ObjectFileName>$(IntDir)consensus_digidollar.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\consensus\digidollar_transaction_validation.cpp">
+      <ObjectFileName>$(IntDir)consensus_digidollar_transaction_validation.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\consensus\digidollar_tx.cpp">
+      <ObjectFileName>$(IntDir)consensus_digidollar_tx.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\consensus\merkle.cpp">
+      <ObjectFileName>$(IntDir)consensus_merkle.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\consensus\tx_check.cpp">
+      <ObjectFileName>$(IntDir)consensus_tx_check.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\blake.cpp">
+      <ObjectFileName>$(IntDir)crypto_blake.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\bmw.cpp">
+      <ObjectFileName>$(IntDir)crypto_bmw.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\cubehash.cpp">
+      <ObjectFileName>$(IntDir)crypto_cubehash.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\echo.cpp">
+      <ObjectFileName>$(IntDir)crypto_echo.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\groestl.cpp">
+      <ObjectFileName>$(IntDir)crypto_groestl.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\jh.cpp">
+      <ObjectFileName>$(IntDir)crypto_jh.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\keccak.cpp">
+      <ObjectFileName>$(IntDir)crypto_keccak.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\luffa.cpp">
+      <ObjectFileName>$(IntDir)crypto_luffa.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\shavite.cpp">
+      <ObjectFileName>$(IntDir)crypto_shavite.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\simd.cpp">
+      <ObjectFileName>$(IntDir)crypto_simd.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\skein.cpp">
+      <ObjectFileName>$(IntDir)crypto_skein.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\odocrypt.cpp">
+      <ObjectFileName>$(IntDir)crypto_odocrypt.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\KeccakP-800-reference.cpp">
+      <ObjectFileName>$(IntDir)crypto_KeccakP-800-reference.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\scrypt.cpp">
+      <ObjectFileName>$(IntDir)crypto_scrypt.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\scrypt-sse2.cpp">
+      <ObjectFileName>$(IntDir)crypto_scrypt-sse2.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\hash.cpp">
+      <ObjectFileName>$(IntDir)hash.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\primitives\block.cpp">
+      <ObjectFileName>$(IntDir)primitives_block.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\primitives\transaction.cpp">
+      <ObjectFileName>$(IntDir)primitives_transaction.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\pubkey.cpp">
+      <ObjectFileName>$(IntDir)pubkey.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\script\digibyteconsensus.cpp">
+      <ObjectFileName>$(IntDir)script_digibyteconsensus.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\script\interpreter.cpp">
+      <ObjectFileName>$(IntDir)script_interpreter.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\script\script.cpp">
+      <ObjectFileName>$(IntDir)script_script.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\script\script_error.cpp">
+      <ObjectFileName>$(IntDir)script_script_error.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\uint256.cpp">
+      <ObjectFileName>$(IntDir)uint256.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\strencodings.cpp">
+      <ObjectFileName>$(IntDir)util_strencodings.obj</ObjectFileName>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

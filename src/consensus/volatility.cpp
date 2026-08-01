@@ -6,6 +6,7 @@
 #include <consensus/digidollar.h>
 #include <primitives/oracle.h>
 #include <logging.h>
+#include <util/int128.h>
 #include <util/time.h>
 #include <util/moneystr.h>
 #include <limits>
@@ -25,24 +26,24 @@ namespace Volatility {
 
 namespace {
 
-int64_t SaturatingInt64(__int128 value)
+int64_t SaturatingInt64(util::int128_t value)
 {
-    if (value > static_cast<__int128>(std::numeric_limits<int64_t>::max())) {
+    if (value > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max())) {
         return std::numeric_limits<int64_t>::max();
     }
-    if (value < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+    if (value < static_cast<util::int128_t>(std::numeric_limits<int64_t>::min())) {
         return std::numeric_limits<int64_t>::min();
     }
     return static_cast<int64_t>(value);
 }
 
-uint64_t IntegerSqrtFloor(unsigned __int128 value)
+uint64_t IntegerSqrtFloor(util::uint128_t value)
 {
     uint64_t low = 0;
     uint64_t high = std::numeric_limits<uint64_t>::max();
     while (low < high) {
         const uint64_t mid = low + (high - low) / 2 + 1;
-        const unsigned __int128 square = static_cast<unsigned __int128>(mid) * mid;
+        const util::uint128_t square = static_cast<util::uint128_t>(mid) * mid;
         if (square <= value) {
             low = mid;
         } else {
@@ -638,20 +639,20 @@ int64_t VolatilityMonitor::CalculateStandardDeviationBps(const std::vector<int64
         return 0;
     }
 
-    __int128 sum = 0;
-    __int128 sumSquares = 0;
+    util::int128_t sum = 0;
+    util::int128_t sumSquares = 0;
     for (int64_t value : values) {
         sum += value;
-        sumSquares += static_cast<__int128>(value) * value;
+        sumSquares += static_cast<util::int128_t>(value) * value;
     }
 
-    const __int128 count = values.size();
-    __int128 numerator = count * sumSquares - sum * sum;
+    const util::int128_t count = values.size();
+    util::int128_t numerator = count * sumSquares - sum * sum;
     if (numerator <= 0) {
         return 0;
     }
-    const __int128 denominator = count * (count - 1); // Sample variance
-    const unsigned __int128 variance = static_cast<unsigned __int128>(numerator / denominator);
+    const util::int128_t denominator = count * (count - 1); // Sample variance
+    const util::uint128_t variance = static_cast<util::uint128_t>(numerator / denominator);
     const uint64_t sqrt = IntegerSqrtFloor(variance);
     if (sqrt > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
         return std::numeric_limits<int64_t>::max();
@@ -686,8 +687,8 @@ int64_t CalculatePercentageChangeBps(CAmount oldPrice, CAmount newPrice)
         return 0;
     }
 
-    const __int128 delta = static_cast<__int128>(newPrice) - oldPrice;
-    const __int128 scaled = delta * 10000;
+    const util::int128_t delta = static_cast<util::int128_t>(newPrice) - oldPrice;
+    const util::int128_t scaled = delta * 10000;
     return SaturatingInt64(scaled / oldPrice);
 }
 
