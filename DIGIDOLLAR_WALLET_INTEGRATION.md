@@ -330,8 +330,18 @@ command works with DigiDollar wallets:
 | `digibyted` stop / start | Same as above | `postInitProcess` re-runs `ScanForDDUTXOs()` to validate vault UTXO state against the active chain. |
 | `rescanblockchain` | Idempotent — no double counting | Triggers a post-rescan call to `ScanForDDUTXOs()` -> `ValidatePositionStates()` so any vault that was redeemed off-wallet is correctly marked inactive. |
 | `-reindex=1` | Same as restart | Wallet replays the chain; confirmed mints remain active until a real redeem/transfer spends the collateral on the active chain. |
-| `backupwallet path` / `restorewallet new_name path` | Full DD state including owner keys | Restored wallet is loaded under `new_name`; existing wallet is untouched. |
+| `backupwallet path` / `restorewallet new_name path` | Full DD state including owner keys; for a provider wallet, also the Paymaster identity key, policies, pool/session records, finance ledger and backup metadata | Restored wallet is loaded under `new_name`; existing wallet is untouched. A restored provider wallet asks for a fresh local backup again. |
 | `importdescriptors` into a fresh wallet + `rescanblockchain` | Reconstructs DD positions from on-chain OP_RETURN metadata after proving ownership of the zero-value DD P2TR output | If the imported descriptors can provide the Taproot spending key, the wallet recovers and indexes that key for redemption. |
+
+Paymaster-provider state has stronger recovery requirements than ordinary
+on-chain DD ownership. A seed or descriptor import can recover keys and
+chain-visible outputs, but it does not reconstruct the wallet-local provider
+identity metadata, authorization records, pool lifecycle, safety policies or
+finance history. Use a complete `backupwallet` file (or an equivalent verified
+full-wallet database backup) for an instance-preserving Paymaster recovery.
+Creating a fresh wallet creates a new provider ID and a separate finance
+ledger. The Qt provider wizard and operator pages keep a non-blocking backup
+reminder visible after identity creation and material configuration changes.
 
 ### Operator wallet recovery (descriptor wallet)
 

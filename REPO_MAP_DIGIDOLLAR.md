@@ -630,6 +630,10 @@ or chain parameters.
   and preview-bound carrier-withdrawal plans. Automatic maintenance has explicit
   DGB/carrier targets and finite per-transaction/hour/day fees; zero never means
   unlimited paid maintenance.
+- Defines the genesis/provider-bound `ProviderFinanceEvent`, UTC daily totals,
+  durable finance ledger, and path-free provider backup-reminder metadata.
+  Confirmed income and operating costs are derived idempotently while active
+  pool principal remains separate wallet-owned capital.
 
 ### src/paymaster/directory.{h,cpp} and validation.{h,cpp}
 - Parses signed short-lived announcements, verifies identity/admission
@@ -744,6 +748,11 @@ or chain parameters.
   `all_excess` retains exactly 1.00 DD in each replacement carrier and combines
   only wallet-owned excess under the maintenance budget; `release_slot` is a
   stopped-provider, fee-free local release that reduces the operational target.
+- `getpaymasterfinancestatus` reconciles exact wallet-native provider income,
+  DGB costs, pool capital, UTC period summaries and bounded cursor-paginated
+  events. Current Oracle valuation is optional and never replaces native
+  accounting. `acknowledgepaymasterproviderbackup` records an explicit external
+  full-wallet-backup acknowledgement without storing a path.
 - New client quote creation and automatic `senddigidollar` Paymaster fallback
   share the provider's `-prune=0`, synchronized `-txindex=1`, node-readiness,
   activation, BIP324-v2, and mainnet message-capture gates. High privacy also
@@ -1074,6 +1083,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - ⚠️ Paymaster DB methods persist versioned provider pools, liquidity policy,
   restartable maintenance ledger, and the latest carrier-withdrawal preview so
   successor/maintenance recovery and exact plan execution survive restart.
+- ⚠️ Paymaster DB methods also persist a chain/provider-bound finance ledger,
+  derived UTC daily totals and provider backup-reminder timestamps. The full
+  wallet database is required to preserve this off-chain provider metadata.
 - ⚠️ DB keys: `DD_CRYPTED_ADDRESS_KEY` ("ddcaddrkey"), `DD_CRYPTED_OWNER_KEY` ("ddcownerkey")
 
 ### src/wallet/spend.cpp
@@ -1138,6 +1150,14 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   submitted-payment handling, summarizes durable reservations without leading
   with identifiers, explains restart recovery, and keeps raw RPC results
   collapsed by default.
+  The operator navigation includes a green-theme Finances page with native DD
+  income, DGB operating costs, current-price result estimate, model breakdown,
+  wallet-owned pool capital, bounded event details, privacy-limited CSV export,
+  and links to the existing preview-first liquidity controls. Overview includes
+  a compact finance summary. Backup notices on Overview, Finances and a newly
+  completed identity setup invoke WalletView's existing full-wallet backup
+  dialog or explicitly acknowledge another full-wallet backup flow; no path is
+  persisted and the reminder does not block provider start.
   The guided setup dialog uses a non-native, theme-controlled classic wizard
   surface so its page text and controls remain readable under both dark and
   light Windows themes. It covers prerequisites, identity, service model,
@@ -1223,7 +1243,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_txbuilder_tests.cpp` | Deterministic collaborative transfer construction, prevout resolution, conservation, carrier/change, and fee bounds |
 | `paymaster_psbt_tests.cpp` | Exact PSBT template, input roles, signature stages, gross/recipient/fee authorization binding, unexpected-field rejection, and `SIGHASH_DEFAULT` |
 | `paymaster_protocol_tests.cpp` / `paymaster_wire_tests.cpp` | V5 order/capacity bindings, explicit no-downgrade parsing, semantic replay, and bounded envelopes |
-| `paymaster_provider_tests.cpp` / `paymaster_recovery_tests.cpp` | Finite safety and maintenance budgets, pool-successor provenance/lifecycle, carrier-withdrawal plans, atomic reservation accounting, malicious-counterparty rejection, and distinct-provider recovery |
+| `paymaster_provider_tests.cpp` / `paymaster_recovery_tests.cpp` | Finite safety and maintenance budgets, pool-successor provenance/lifecycle, carrier-withdrawal plans, atomic reservation accounting, provider-finance idempotency/reorg/model totals, malicious-counterparty rejection, and distinct-provider recovery |
 | `paymaster_protocol_tests.cpp` | Intent/quote/result binding, monotonic result sequences, exact final artifacts, and optional-field serialization |
 | `paymaster_provider_tests.cpp` / `paymaster_sponsorship_tests.cpp` | Provider policy, BIP86 identity shape, separated pools, fee boundaries, public/restricted sponsorship and durable hash-only authorization |
 | `paymaster_directory_tests.cpp` / `paymaster_wire_tests.cpp` | Signed announcement replacement/expiry, bounded direct messages, owner/session scoping, replay and resource limits |
@@ -1391,7 +1411,7 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `digidollarwidgettests.cpp/h` | Qt widget unit tests for DD UI components |
 | `digidollarwave19widgettests.cpp/h` | Wave 19 Qt unit/signal-slot pins for the release-critical DD UX surface (mint tier dropdown, etc.) |
-| Paymaster cases in `digidollarwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, recovery, and asynchronous UI wiring |
+| Paymaster cases in `digidollarwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
 
 ### Python Functional Tests (`test/functional/`)
 
@@ -1404,7 +1424,9 @@ compatibility but is a legacy/superseded scaffold; the live oracle P2P proof is
 | File | Coverage Area |
 |------|--------------|
 | `wallet_paymaster_readiness.py` | Pre-session client/provider rejection with disabled Paymaster or inactive DigiDollar, pruning, missing txindex or BIP324, and unsafe high-privacy logging/proxy/capture configuration |
-| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public/restricted sponsorship, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, and production-log redaction of payment artifacts |
+| `wallet_paymaster_lifecycle.py` | Authorized-submit restart recovery plus automatic DGB/carrier replenishment, pending-target accounting, restart idempotency, locked-wallet autostart pause, unlock continuation, confirmation promotion, and absence of duplicate maintenance transactions |
+| `wallet_paymaster_rpc.py` | Direct RPC contracts plus automatic carrier-maintenance gates: deliberate zero target, disabled automation, missing paid-maintenance approval, exactly one pending replacement, restart without duplication, confirmation promotion, and rolling-budget exhaustion without another transaction |
+| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public/restricted sponsorship, provider-finance periods/pagination/native accounting and backup acknowledgement, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, and production-log redaction of payment artifacts |
 | `digidollar_activation.py` | Basic activation of DD features at the buried height on regtest (BIP9 signaling lifecycle removed in the v9.26.5 burial) |
 | `digidollar_activation_boundary.py` | Activation edge cases: exact height, off-by-one, pre/post activation behavior |
 | `digidollar_activation_multinode.py` | Multi-node activation state and deployment synchronization |
@@ -1516,6 +1538,7 @@ Current Paymaster fuzz source inventory:
 
 | File | Coverage Area |
 |------|--------------|
+| `paymaster_pool_lifecycle.cpp` | Stateful provider-pool and maintenance-ledger operation ordering, successor creation/confirmation/reorg/conflict, restart serialization, target accounting, withdrawal binding, and duplicate-operation resistance |
 | `paymaster_wire.cpp` | Announcement and all direct-message deserialization plus bounded envelope-validation paths |
 | `paymaster_stateful.cpp` | Stateful Capacity → Intent → Quote → Submit → Result → Recovery transitions, budgets, replay, and timestamp/amount boundaries |
 

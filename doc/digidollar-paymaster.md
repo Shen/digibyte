@@ -302,6 +302,16 @@ Manual queue processing and provider autostart are advanced operator settings.
 Manual expert setup exposes all detailed controls after an explicit risk
 warning.
 
+When the assistant creates a new provider identity, its completion page shows
+the full provider ID and asks for a new full-wallet backup. The identity private
+key, policies, pool records, durable sessions and provider finance ledger are
+wallet metadata; a seed phrase or descriptor export alone is not a complete
+Paymaster-provider recovery. The reminder is deliberately non-blocking, but it
+remains visible on Overview and Finances until `backupwallet` succeeds or the
+operator explicitly acknowledges an external full-wallet backup procedure.
+Material offer, safety or liquidity-policy changes recommend another backup;
+ordinary payments and finance bookings do not produce repeated reminders.
+
 ### Provider runtime modes
 
 Provider runtime preferences are persisted in the provider wallet:
@@ -331,6 +341,9 @@ The provider lifecycle is deliberately staged:
 1. Create or load an eligible descriptor wallet and unlock it.
 2. Create its wallet-managed BIP86 identity with
    `createpaymasteridentity`.
+   Immediately create a full-wallet backup. Restoring that file preserves the
+   same provider ID and its wallet-local metadata; creating a new wallet starts
+   a new identity and a separate finance history.
 3. Set a policy with `setpaymasterpolicy`. The absolute
    `maximum_network_fee_dgb_satoshis` must be positive.
    A public provider may advertise `user_paid` and `sponsored` at the same
@@ -371,8 +384,9 @@ The provider lifecycle is deliberately staged:
    to autostart. Legacy settings records migrate to `automatic` with autostart
    off.
 9. Inspect `getpaymasterinfo`, `getpaymasterpoolinfo`,
-   `getpaymastersafetystatus`, and `getpaymasterliquiditystatus`, review the
-   effective finite budgets, and explicitly call `startpaymaster`. Its response
+   `getpaymastersafetystatus`, `getpaymasterliquiditystatus`, and
+   `getpaymasterfinancestatus`, review the effective finite budgets, and
+   explicitly call `startpaymaster`. Its response
    echoes the effective safety policy used for that start. A provider whose
    only failed readiness gates are missing pool slots can start in a maintenance
    wait state; it does not advertise or accept new work until the configured
@@ -397,6 +411,8 @@ getpaymastersafetystatus
 setpaymasterliquiditypolicy
 getpaymasterliquiditystatus
 withdrawpaymastercarrier
+getpaymasterfinancestatus
+acknowledgepaymasterproviderbackup
 setpaymasterenabled
 setpaymasterruntimesettings
 preparepaymasterpool
@@ -410,6 +426,63 @@ processpaymastersubmits
 startpaymaster
 stoppaymaster
 ```
+
+### Provider finances and backup
+
+The Qt **Finances** page is an operator dashboard, not a consensus or tax
+accounting authority. Its wallet-local ledger is bound to the active chain's
+genesis hash and exactly one provider ID. Ledgers belonging to different
+provider identities are never merged automatically. It records:
+
+- confirmed user-paid service fees as native DD income;
+- the actual native DGB network fee of user-paid, public-sponsored and
+  restricted-sponsored transfers;
+- actual confirmed DGB fees for pool setup, replenishment, retirement and
+  carrier-excess withdrawal; and
+- pending transactions separately until confirmation.
+
+Prepared pool value remains wallet-owned operating capital, not an expense.
+The dashboard therefore reports available, reserved and pending DGB capacity,
+the 1.00-DD principal of each active carrier, and carrier fee surplus separately
+from income and costs. Replays are idempotent, and confirmation, reorg or
+conflict changes rebuild the UTC daily totals instead of incrementing them a
+second time.
+
+`getpaymasterfinancestatus` accepts `today`, `7d`, `30d` or `all`, and can
+optionally return up to 10,000 event rows with cursor pagination. The detailed
+form also returns the latest 366 materialized UTC-day totals for the selected
+period so operator interfaces do not need to load or expose transaction IDs to
+draw the daily progression. Its selected-period model breakdown separates
+transfer counts, DD income and DGB transfer costs for user-paid, public
+sponsored and restricted sponsored operation. Native DD and DGB values are
+authoritative. When a
+current Oracle price exists, the RPC and Qt may show a current-price USD
+estimate and its valuation time; no historical exchange rate is invented.
+Migration reconstructs exact older events only when durable wallet records
+still prove their amounts. The result explicitly marks earlier history as
+partially reconstructable otherwise.
+
+The Finances page links to the existing preview-first carrier-withdrawal,
+carrier-release, DGB-retirement and liquidity-preparation controls. Preview and
+execution remain distinct and retain the provider-stop, plan-ID, reservation
+and finite-budget checks described below. Its CSV export contains only the
+selected accounting period and native amounts (plus an optional current-price
+valuation); it intentionally excludes keys, recipients, network identity data
+and raw transactions. A CSV file is not a wallet backup.
+
+`backupwallet` is the supported complete provider backup. After the backup file
+has been created, the source wallet records only the completion time, never the
+destination path. Restoring the copied file intentionally presents the reminder
+again so the restored installation can create its own current backup. Operators
+using another full-wallet backup mechanism may call:
+
+```text
+acknowledgepaymasterproviderbackup {"external_backup":true}
+```
+
+That acknowledgement does not create or validate a backup and must never be
+used for seed-only or descriptor-only exports. Existing downgrade protection
+through `WALLET_FLAG_PAYMASTER_AUTHORIZATION` remains unchanged.
 
 `setpaymasterruntimesettings` accepts an object containing
 `operation_mode` (`automatic` or `manual`) and/or `autostart` (boolean).
@@ -517,6 +590,28 @@ Execution requires the unchanged, unexpired `plan_id` from the immediately
 preceding preview. Reserved, unconfirmed, authorized, spent, or invalidated
 carriers cannot be withdrawn. Releasing the last carrier leaves `USER_PAID`
 configured but not ready until liquidity is restored.
+
+A zero operational-carrier target is therefore a valid, intentional stopped
+state, not a repair request. `getpaymasterinfo` reports
+`PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE` and
+`getpaymasterliquiditystatus` reports `waiting_for_target_configuration` until
+the operator explicitly raises and saves the carrier target. Provider start and
+autostart must not claim that automatic maintenance can repair this state:
+maintenance only restores missing outputs *up to the saved targets*.
+
+Automatic-liquidity regression coverage is intentionally split by failure
+surface. Provider unit tests cover target-policy coherence, explicit approval,
+per-transaction and rolling maintenance ceilings, replay conflicts, release,
+and monotonic accounting. Wallet-store tests cover atomic successor writes,
+database failures, restart reconstruction, confirmation, reorg, conflict, and
+idempotency. Functional tests exercise free carrier/DGB recycling and paid DGB
+replacement after real transfers, plus paid carrier replacement with disabled
+automation, missing approval, pending-confirmation restart, duplicate-scheduler
+ticks, confirmation promotion, and exhausted rolling budget. The
+`paymaster_pool_lifecycle` stateful fuzz target permutes pool reservations,
+commits, successors, maintenance records, restarts, reorgs, conflicts, and
+withdrawal plans while continuously checking durable invariants. No single
+happy-path test is treated as proof of the lifecycle.
 
 The provider safety policy has separate classes for `user_paid`,
 `public_sponsored`, and `restricted_sponsored`. Each class limits the network
