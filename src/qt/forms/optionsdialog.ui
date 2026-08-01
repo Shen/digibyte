@@ -262,6 +262,16 @@
             </property>
            </widget>
           </item>
+          <item>
+           <widget class="QCheckBox" name="showPaymasterOperator">
+            <property name="text">
+             <string>Show Paymaster &amp;operator controls</string>
+            </property>
+            <property name="toolTip">
+             <string>Show the Paymaster Network tab used to configure and operate a Paymaster provider. This is not required to pay through a Paymaster.</string>
+            </property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

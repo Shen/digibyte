@@ -67,6 +67,10 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
 
     digiDollarPage = new DigiDollarTab(platformStyle, this);
     digiDollarPage->setWalletModel(walletModel);
+    OptionsModel* options_model = walletModel->getOptionsModel();
+    digiDollarPage->setPaymasterOperatorVisible(options_model->getShowPaymasterOperator());
+    connect(options_model, &OptionsModel::showPaymasterOperatorChanged,
+            digiDollarPage, &DigiDollarTab::setPaymasterOperatorVisible);
 
     usedSendingAddressesPage = new AddressBookPage(platformStyle, AddressBookPage::ForEditing, AddressBookPage::SendingTab, this);
     usedSendingAddressesPage->setModel(walletModel->getAddressTableModel());

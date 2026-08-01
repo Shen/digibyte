@@ -183,6 +183,11 @@ bool OptionsModel::Init(bilingual_str& error)
     }
     m_enable_psbt_controls = settings.value("enable_psbt_controls", false).toBool();
 
+    if (!settings.contains("show_paymaster_operator")) {
+        settings.setValue("show_paymaster_operator", false);
+    }
+    m_show_paymaster_operator = settings.value("show_paymaster_operator", false).toBool();
+
     // These are shared with the core or have a command-line parameter
     // and we want command-line parameters to overwrite the GUI settings.
     for (OptionID option : {DatabaseCache, ThreadsScriptVerif, SpendZeroConfChange, ExternalSignerPath, MapPortUPnP,
@@ -439,6 +444,8 @@ QVariant OptionsModel::getOption(OptionID option, const std::string& suffix) con
         return fCoinControlFeatures;
     case EnablePSBTControls:
         return settings.value("enable_psbt_controls");
+    case ShowPaymasterOperator:
+        return m_show_paymaster_operator;
     case Prune:
         return PruneEnabled(setting());
     case PruneSize:
@@ -607,6 +614,11 @@ bool OptionsModel::setOption(OptionID option, const QVariant& value, const std::
     case EnablePSBTControls:
         m_enable_psbt_controls = value.toBool();
         settings.setValue("enable_psbt_controls", m_enable_psbt_controls);
+        break;
+    case ShowPaymasterOperator:
+        m_show_paymaster_operator = value.toBool();
+        settings.setValue("show_paymaster_operator", m_show_paymaster_operator);
+        Q_EMIT showPaymasterOperatorChanged(m_show_paymaster_operator);
         break;
     case Prune:
         if (changed()) {

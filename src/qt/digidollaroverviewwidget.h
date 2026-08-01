@@ -73,6 +73,8 @@ private Q_SLOTS:
 private:
     void setupUI();
     void setupBalanceSection();
+    /** Keep the legacy balance layout unless a Paymaster reservation exists. */
+    void updateBalanceLayout(bool show_paymaster_breakdown);
     void setupSystemHealthSection();
     void setupRecentTransactionsSection();
     void connectSignals();
@@ -95,10 +97,15 @@ private:
     QGridLayout* m_balanceLayout;
     QLabel* m_ddBalanceLabel;
     QLabel* m_ddBalanceValue;
+    QLabel* m_ddPaymasterReservedLabel;
+    QLabel* m_ddPaymasterReservedValue;
+    QLabel* m_ddWalletTotalLabel;
+    QLabel* m_ddWalletTotalValue;
     QLabel* m_ddPendingLabel;
     QLabel* m_ddPendingValue;
     QLabel* m_dgbCollateralLabel;
     QLabel* m_dgbCollateralValue;
+    QFrame* m_balanceSeparator;
     QLabel* m_usdValueLabel;
     QLabel* m_usdValueValue;
 
@@ -132,6 +139,9 @@ private:
 
     // Data
     double m_ddBalance;
+    double m_ddWalletTotal;
+    double m_ddPaymasterReserved;
+    double m_ddPending;
     double m_dgbCollateral;
     double m_oraclePrice;
     QString m_systemHealthStatus;
@@ -140,6 +150,7 @@ private:
 
     // Privacy
     bool m_privacy{false};
+    bool m_showPaymasterBreakdown{false};
 
     // Throttling - minimum 5 seconds between updates during sync
     qint64 m_lastBalanceUpdateTime{0};

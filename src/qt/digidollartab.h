@@ -5,6 +5,11 @@
 #ifndef DIGIBYTE_QT_DIGIDOLLARTAB_H
 #define DIGIBYTE_QT_DIGIDOLLARTAB_H
 
+#include <univalue.h>
+
+#include <functional>
+#include <string>
+
 #include <QWidget>
 
 class DigiDollarOverviewWidget;
@@ -14,6 +19,7 @@ class DigiDollarMintWidget;
 class DigiDollarRedeemWidget;
 class DigiDollarPositionsWidget;
 class DigiDollarTransactionsWidget;
+class DigiDollarPaymasterWidget;
 class WalletModel;
 class ClientModel;
 class PlatformStyle;
@@ -43,6 +49,24 @@ public:
     void setClientModel(ClientModel* model);
     void updateView();
 
+    /** Test hook for exercising Paymaster liquidity status presentation without RPC I/O. */
+    void setPaymasterLiquidityStatusForTesting(const UniValue& status);
+    /** Test hook for exercising confirmed/pending Paymaster pool presentation without RPC I/O. */
+    void setPaymasterLiquidityPoolForTesting(const UniValue& pool_info);
+    /** Test hook for exercising external Paymaster readiness and Oracle presentation without RPC I/O. */
+    void setPaymasterReadinessStatusForTesting(const UniValue& status);
+    /**
+     * Install a deterministic Paymaster RPC transport for widget tests.
+     *
+     * Production code never calls this hook. Keeping the injected transport at
+     * the Paymaster-widget boundary lets tests exercise button workflows,
+     * status transitions, RPC errors, and retries without a live node or a
+     * worker thread.
+     */
+    using PaymasterRpcExecutorForTesting =
+        std::function<UniValue(const std::string&, const UniValue&)>;
+    void setPaymasterRpcExecutorForTesting(PaymasterRpcExecutorForTesting executor);
+
     /** Show incoming DigiDollar transaction notification */
     void incomingDDTransaction(const QString& date, const QString& amount,
                                const QString& type, const QString& address);
@@ -62,6 +86,8 @@ public Q_SLOTS:
     void updatePositions();
     /** Set privacy mode — relays to all sub-widgets */
     void setPrivacy(bool privacy);
+    /** Show or hide the wallet-scoped Paymaster provider console. */
+    void setPaymasterOperatorVisible(bool visible);
 
 private Q_SLOTS:
     /** Handle tab change to update the active widget */
@@ -97,6 +123,7 @@ private:
     DigiDollarRedeemWidget* m_redeemWidget;
     DigiDollarPositionsWidget* m_positionsWidget;
     DigiDollarTransactionsWidget* m_transactionsWidget;
+    DigiDollarPaymasterWidget* m_paymasterWidget;
 
     // Privacy
     bool m_privacy{false};

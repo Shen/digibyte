@@ -6329,3 +6329,770 @@ DigiDollarOverviewWidget .QFrame#systemHealthFrame .QProgressBar#systemHealthBar
 DigiDollarMintWidget QProgressBar#ratioBar::chunk {
     background-color: #35b86b;
 }
+
+/* Send $DD: clear hierarchy and unmistakable fee-funding selection. */
+DigiDollarSendWidget QLabel#feeFundingHeading {
+    color: #123f2b;
+    font-size: 16pt;
+    font-weight: 700;
+    padding: 0 0 4px 0;
+}
+
+DigiDollarSendWidget QLabel#feeFundingIntroduction {
+    color: #416553;
+    font-size: 10pt;
+    font-weight: normal;
+    padding: 0 0 6px 0;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"] {
+    background-color: #f7fcf9;
+    border: 1px solid #9bcbb0;
+    border-radius: 8px;
+    padding: 2px;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"]:hover {
+    background-color: #edf8f1;
+    border-color: #35a969;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"][feeSelected="true"] {
+    background-color: #dff5e7;
+    border: 2px solid #1f9d57;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"] QRadioButton {
+    color: #123f2b;
+    font-size: 11pt;
+    font-weight: 700;
+    spacing: 10px;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"] QRadioButton::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #6fa889;
+    border-radius: 10px;
+    background-color: #ffffff;
+}
+
+DigiDollarSendWidget QFrame[feeChoice="true"] QRadioButton::indicator:checked {
+    background-color: #ffffff;
+    border: 6px solid #1f9d57;
+}
+
+DigiDollarSendWidget QLabel[feeChoiceDescription="true"] {
+    color: #416553;
+    font-size: 10pt;
+    font-weight: normal;
+    padding-left: 30px;
+}
+
+DigiDollarSendWidget QLabel[feeChoiceBadge="true"] {
+    background-color: #1f9d57;
+    color: #ffffff;
+    border-radius: 9px;
+    font-size: 8pt;
+    font-weight: 700;
+    padding: 3px 9px;
+}
+
+DigiDollarSendWidget QLabel#feeFundingModeExplanation {
+    background-color: #edf8f1;
+    color: #123f2b;
+    border-left: 4px solid #1f9d57;
+    border-radius: 3px;
+    font-size: 10pt;
+    font-weight: 600;
+    padding: 8px 10px;
+}
+
+DigiDollarSendWidget QLabel#feeFundingSummary {
+    background-color: #ffffff;
+    color: #123f2b;
+    border: 1px solid #9bcbb0;
+    border-radius: 6px;
+    font-size: 10pt;
+    font-weight: normal;
+    padding: 10px;
+}
+
+/* Send $DD: focused protected Paymaster session. */
+DigiDollarSendWidget QFrame#paymasterSessionFrame {
+    background-color: #f7fcf9;
+    border: 2px solid #1f9d57;
+    border-radius: 9px;
+    padding: 8px;
+}
+
+DigiDollarSendWidget QLabel#paymasterSessionHeading {
+    color: #123f2b;
+    font-size: 16pt;
+    font-weight: 700;
+}
+
+DigiDollarSendWidget QLabel#paymasterSessionNextStep {
+    background-color: #edf8f1;
+    color: #123f2b;
+    border-left: 4px solid #1f9d57;
+    border-radius: 4px;
+    font-size: 11pt;
+    font-weight: 600;
+    padding: 10px;
+}
+
+DigiDollarSendWidget QPushButton#paymasterSessionPrimaryAction {
+    background-color: #16894d;
+    color: #ffffff;
+    border: 1px solid #147a42;
+    border-radius: 5px;
+    font-size: 11pt;
+    font-weight: 700;
+    padding: 10px 18px;
+}
+
+DigiDollarSendWidget QPushButton#paymasterSessionPrimaryAction:hover {
+    background-color: #1f9d57;
+}
+
+DigiDollarSendWidget QFrame#paymasterSessionSecondaryActions,
+DigiDollarSendWidget QFrame#paymasterSessionTechnicalDetails {
+    background-color: #ffffff;
+    border: 1px solid #9bcbb0;
+    border-radius: 6px;
+    padding: 6px;
+}
+
+DigiDollarSendWidget QLineEdit[paymasterSessionLocked="true"] {
+    background-color: #eef4f0;
+    color: #4b6658;
+    border: 1px solid #9bcbb0;
+}
+
+DigiDollarSendWidget QPushButton#paymasterExplanationButton {
+    background-color: transparent;
+    color: #147a42 !important;
+    border: 1px solid #1f9d57;
+    padding: 4px 10px;
+    font-size: 9pt;
+}
+
+DigiDollarSendWidget QPushButton#paymasterExplanationButton:hover {
+    background-color: #1f9d57;
+    color: #ffffff !important;
+}
+
+/* Explicit Paymaster scroll surfaces avoid platform-palette leaks and keep
+   the operator pages consistent when switching between themes. */
+QWidget#paymasterWidget,
+QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane,
+QWidget#paymasterWidget QScrollArea#paymasterConfigurationPage,
+QWidget#paymasterWidget QScrollArea#paymasterSafetyPolicyPage,
+QWidget#paymasterWidget QScrollArea#paymasterLiquidityPage,
+QWidget#paymasterWidget QScrollArea#paymasterActivityPage,
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents,
+QWidget#paymasterWidget QWidget#paymasterActivityContents {
+    background-color: #eef9f2;
+    color: #123f2b;
+}
+
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QGroupBox,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QGroupBox,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QGroupBox,
+QWidget#paymasterWidget QWidget#paymasterActivityContents QGroupBox {
+    background-color: #f7fcf9;
+    color: #123f2b;
+    border: 1px solid #9bcbb0;
+    border-radius: 6px;
+    margin-top: 10px;
+    padding-top: 8px;
+}
+
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterActivityContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QCheckBox,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QCheckBox,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QCheckBox,
+QWidget#paymasterWidget QWidget#paymasterActivityContents QCheckBox {
+    color: #123f2b;
+}
+
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLineEdit,
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QSpinBox,
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QDoubleSpinBox,
+QWidget#paymasterWidget QWidget#paymasterConfigurationContents QComboBox,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLineEdit,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QSpinBox,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QDoubleSpinBox,
+QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QComboBox,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QLineEdit,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QSpinBox,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QDoubleSpinBox,
+QWidget#paymasterWidget QWidget#paymasterLiquidityContents QComboBox {
+    background-color: #ffffff;
+    color: #123f2b;
+    border: 1px solid #1f9d57;
+    selection-background-color: #1f9d57;
+    selection-color: #ffffff;
+}
+
+QWidget#paymasterWidget QLabel#paymasterEnableStatus {
+    background-color: #e3f5e9;
+    color: #123f2b;
+    border-left: 4px solid #1f9d57;
+    border-radius: 3px;
+    padding: 8px 10px;
+    font-weight: 600;
+}
+
+/* Task-oriented Paymaster operator console. */
+QWidget#paymasterWidget QLabel[paymasterRole="pageHeading"] {
+    color: #123f2b;
+    font-size: 20pt;
+    font-weight: 700;
+    padding-top: 4px;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="pageIntroduction"] {
+    color: #416553;
+    font-size: 11pt;
+    padding-bottom: 4px;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="statusCard"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="card"] {
+    background-color: #ffffff;
+    border: 1px solid #9bcbb0;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="cardHeading"] {
+    color: #123f2b;
+    font-size: 13pt;
+    font-weight: 700;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"] {
+    color: #345b47;
+    font-size: 10pt;
+    min-height: 34px;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="ready"] { color: #08753c; }
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="waiting"] { color: #8a5a00; }
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="action"] { color: #945000; }
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="error"] { color: #b42318; }
+
+QWidget#paymasterWidget QPushButton[paymasterRole="disclosure"],
+QWidget#paymasterWidget QPushButton[paymasterRole="secondaryAction"] {
+    background-color: transparent;
+    color: #147a42;
+    border: 1px solid #9bcbb0;
+    border-radius: 5px;
+    padding: 7px 12px;
+    font-weight: 600;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="primaryAction"] {
+    background-color: #16894d;
+    color: #ffffff;
+    border: 1px solid #147a42;
+    border-radius: 5px;
+    padding: 9px 16px;
+    font-size: 10pt;
+    font-weight: 700;
+}
+
+QWidget#paymasterWidget QCheckBox[paymasterRole="choiceCard"] {
+    background-color: #f7fcf9;
+    border: 1px solid #9bcbb0;
+    border-radius: 6px;
+    padding: 10px;
+    font-weight: 650;
+}
+
+QWidget#paymasterWidget QCheckBox[paymasterRole="choiceCard"]:checked {
+    border: 2px solid #1f9d57;
+    background-color: #e3f5e9;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="notice"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="notice"] {
+    background-color: #edf8f1;
+    border: 1px solid #9bcbb0;
+    border-left: 4px solid #1f9d57;
+    border-radius: 6px;
+    padding: 10px;
+}
+
+QWidget#paymasterWidget QLineEdit,
+QWidget#paymasterWidget QSpinBox,
+QWidget#paymasterWidget QDoubleSpinBox,
+QWidget#paymasterWidget QComboBox {
+    min-height: 30px;
+    border-radius: 4px;
+    padding-left: 8px;
+}
+
+QWidget#paymasterWidget QLineEdit:focus,
+QWidget#paymasterWidget QSpinBox:focus,
+QWidget#paymasterWidget QDoubleSpinBox:focus,
+QWidget#paymasterWidget QComboBox:focus,
+QWidget#paymasterWidget QPushButton:focus {
+    border-color: #8a5a00;
+}
+
+/* Paymaster operator console — DigiDollar visual system v2. */
+QWidget#paymasterWidget {
+    background-color: #f2f8f4;
+    color: #173c2a;
+}
+
+QWidget#paymasterWidget QLabel {
+    color: #173c2a;
+    font-size: 10pt;
+    font-weight: 400;
+}
+
+QWidget#paymasterWidget QFrame#paymasterOperatorHeader {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #e1f4e8, stop:1 #f1faf4);
+    border: 1px solid #8bc9a6;
+    border-radius: 12px;
+}
+
+QWidget#paymasterWidget QLabel#paymasterOperatorHeading {
+    color: #123f2b;
+    font-size: 20pt;
+    font-weight: 700;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="walletHeading"] {
+    color: #25704a;
+    font-size: 10pt;
+    font-weight: 600;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="globalStatus"] {
+    color: #345b47;
+    font-size: 10pt;
+    font-weight: 400;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane {
+    background-color: transparent;
+    border: 0px;
+    border-top: 1px solid #a6cfb7;
+    top: -1px;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab {
+    background-color: #e5f3ea;
+    color: #315f48;
+    border: 1px solid #a6cfb7;
+    border-bottom: 0px;
+    padding: 9px 18px;
+    margin-right: 3px;
+    min-width: 92px;
+    font-size: 10pt;
+    font-weight: 500;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab:selected {
+    background-color: #16894d;
+    color: #ffffff;
+    border-color: #147a42;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab:hover:!selected {
+    background-color: #d3eadc;
+    color: #123f2b;
+}
+
+QWidget#paymasterWidget QWidget#paymasterPageColumn {
+    background-color: transparent;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="pageHeading"] {
+    color: #123f2b;
+    font-size: 19pt;
+    font-weight: 700;
+    padding: 4px 0px 0px 0px;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="pageIntroduction"] {
+    color: #4c705d;
+    font-size: 10pt;
+    font-weight: 400;
+    padding: 0px 0px 8px 0px;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="mutedText"] {
+    color: #557562;
+    font-size: 9pt;
+    font-weight: 400;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="summaryText"] {
+    color: #244d37;
+    background-color: #edf8f1;
+    border-left: 3px solid #1f9d57;
+    border-radius: 4px;
+    padding: 9px 11px;
+    font-weight: 500;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="card"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="technicalCard"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="heroCard"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"] {
+    background-color: #ffffff;
+    color: #173c2a;
+    border: 1px solid #a9cfb9;
+    border-radius: 10px;
+    margin-top: 16px;
+    padding: 17px 16px 14px 16px;
+    font-size: 11pt;
+    font-weight: 650;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="card"]::title,
+QWidget#paymasterWidget QGroupBox[paymasterRole="technicalCard"]::title,
+QWidget#paymasterWidget QGroupBox[paymasterRole="heroCard"]::title,
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"]::title,
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"]::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 14px;
+    padding: 0px 7px;
+    color: #123f2b;
+    background-color: #f2f8f4;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="heroCard"] {
+    background-color: #edf8f1;
+    border-color: #7fbe9a;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"][statusKind="ready"] {
+    background-color: #f4fbf6;
+    border-left: 5px solid #1f9d57;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"][statusKind="waiting"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"][statusKind="action"] {
+    background-color: #fff8e6;
+    border-color: #d6ad43;
+    border-left: 5px solid #c88900;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="nextStepCard"][statusKind="error"] {
+    background-color: #fff0f0;
+    border-color: #d98b8b;
+    border-left: 5px solid #c62828;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"][statusKind="waiting"],
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"][statusKind="action"] {
+    background-color: #fff9e9;
+    border-color: #d5bd70;
+    border-left: 5px solid #c99a20;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"][statusKind="ready"] {
+    background-color: #edf8f1;
+    border-color: #7fbe9a;
+    border-left: 5px solid #1f9d57;
+}
+
+QWidget#paymasterWidget QGroupBox[paymasterRole="maintenanceCard"][statusKind="error"] {
+    background-color: #fff0f0;
+    border-color: #dfa1a1;
+    border-left: 5px solid #c83a3a;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="statusCard"] {
+    background-color: #ffffff;
+    border: 1px solid #a9cfb9;
+    border-radius: 11px;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="statusCard"]:hover {
+    background-color: #f4fbf6;
+    border-color: #4eaa76;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="cardHeading"] {
+    color: #123f2b;
+    font-size: 13pt;
+    font-weight: 650;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"] {
+    color: #345b47;
+    background-color: #f1f8f4;
+    border-radius: 5px;
+    padding: 8px 10px;
+    min-height: 32px;
+    font-size: 9pt;
+    font-weight: 500;
+}
+
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="ready"] {
+    color: #08753c;
+    border-left: 3px solid #1f9d57;
+}
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="waiting"] {
+    color: #77540a;
+    border-left: 3px solid #c99a20;
+}
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="action"] {
+    color: #8a4b0b;
+    border-left: 3px solid #d1842c;
+}
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="error"] {
+    color: #a83232;
+    border-left: 3px solid #d35656;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="choicePanel"] {
+    background-color: #f8fcf9;
+    border: 1px solid #a9cfb9;
+    border-radius: 9px;
+}
+
+QWidget#paymasterWidget QFrame[paymasterRole="choicePanel"][selected="true"] {
+    background-color: #e3f5e9;
+    border: 2px solid #1f9d57;
+}
+
+QWidget#paymasterWidget QCheckBox[paymasterRole="choiceCard"] {
+    background-color: transparent;
+    border: 0px;
+    padding: 2px;
+    color: #123f2b;
+    font-size: 11pt;
+    font-weight: 650;
+}
+
+QWidget#paymasterWidget QCheckBox[paymasterRole="choiceCard"]:checked {
+    background-color: transparent;
+    border: 0px;
+}
+
+QWidget#paymasterWidget QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    background-color: #ffffff;
+    border: 2px solid #1f9d57;
+    border-radius: 3px;
+}
+
+QWidget#paymasterWidget QCheckBox::indicator:checked {
+    background-color: #1f9d57;
+    border: 2px solid #146c3a;
+}
+
+QWidget#paymasterWidget QCheckBox::indicator:unchecked:hover {
+    background-color: #e8f7ed;
+    border-color: #146c3a;
+}
+
+QWidget#paymasterWidget QCheckBox::indicator:disabled {
+    background-color: #dce9e1;
+    border-color: #9bb6a5;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="primaryAction"] {
+    background-color: #16894d;
+    color: #ffffff;
+    border: 1px solid #147a42;
+    border-radius: 6px;
+    padding: 8px 15px;
+    min-height: 18px;
+    font-size: 9pt;
+    font-weight: 650;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="primaryAction"]:hover {
+    background-color: #1da75f;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="secondaryAction"],
+QWidget#paymasterWidget QPushButton[paymasterRole="disclosure"] {
+    background-color: #edf8f1;
+    color: #147a42;
+    border: 1px solid #8bc9a6;
+    border-radius: 6px;
+    padding: 7px 12px;
+    min-height: 17px;
+    font-size: 9pt;
+    font-weight: 550;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="secondaryAction"]:hover,
+QWidget#paymasterWidget QPushButton[paymasterRole="disclosure"]:hover {
+    background-color: #d8efe1;
+    border-color: #1f9d57;
+    color: #0e5f32;
+}
+
+QWidget#paymasterWidget QPushButton[paymasterRole="dangerAction"] {
+    background-color: #fff1f1;
+    color: #a83232;
+    border: 1px solid #dc9999;
+    border-radius: 6px;
+    padding: 8px 15px;
+    font-size: 9pt;
+    font-weight: 600;
+}
+
+QWidget#paymasterWidget QPushButton:disabled {
+    background-color: #e8eeea;
+    color: #85988d;
+    border-color: #c5d1ca;
+}
+
+QWidget#paymasterWidget QLineEdit,
+QWidget#paymasterWidget QSpinBox,
+QWidget#paymasterWidget QDoubleSpinBox,
+QWidget#paymasterWidget QComboBox {
+    background-color: #ffffff;
+    color: #173c2a;
+    border: 1px solid #83b99a;
+    border-radius: 6px;
+    min-height: 30px;
+    padding: 2px 9px;
+    selection-background-color: #16894d;
+}
+
+/* Preserve visible green increment/decrement arrows after styling the native
+   spin boxes. Without explicit subcontrols Windows renders an empty strip. */
+QWidget#paymasterWidget QSpinBox,
+QWidget#paymasterWidget QDoubleSpinBox {
+    padding-right: 32px;
+}
+
+QWidget#paymasterWidget QSpinBox::up-button,
+QWidget#paymasterWidget QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 27px;
+    background-color: #e8f7ed;
+    border-left: 1px solid #1f9d57;
+    border-bottom: 1px solid #9bcbb0;
+    border-top-right-radius: 5px;
+}
+
+QWidget#paymasterWidget QSpinBox::down-button,
+QWidget#paymasterWidget QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 27px;
+    background-color: #e8f7ed;
+    border-left: 1px solid #1f9d57;
+    border-bottom-right-radius: 5px;
+}
+
+QWidget#paymasterWidget QSpinBox::up-button:hover,
+QWidget#paymasterWidget QSpinBox::down-button:hover,
+QWidget#paymasterWidget QDoubleSpinBox::up-button:hover,
+QWidget#paymasterWidget QDoubleSpinBox::down-button:hover {
+    background-color: #c9ecd5;
+}
+
+QWidget#paymasterWidget QSpinBox::up-arrow,
+QWidget#paymasterWidget QDoubleSpinBox::up-arrow {
+    image: url(:/icons/spin_up);
+    width: 9px;
+    height: 6px;
+}
+
+QWidget#paymasterWidget QSpinBox::down-arrow,
+QWidget#paymasterWidget QDoubleSpinBox::down-arrow {
+    image: url(:/icons/spin_down);
+    width: 9px;
+    height: 6px;
+}
+
+QWidget#paymasterWidget QComboBox {
+    padding-right: 32px;
+}
+
+QWidget#paymasterWidget QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 27px;
+    background-color: #e8f7ed;
+    border-left: 1px solid #1f9d57;
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+
+QWidget#paymasterWidget QComboBox::drop-down:hover {
+    background-color: #c9ecd5;
+}
+
+QWidget#paymasterWidget QComboBox::down-arrow {
+    image: url(:/icons/spin_down);
+    width: 9px;
+    height: 6px;
+}
+
+QWidget#paymasterWidget QLineEdit:focus,
+QWidget#paymasterWidget QSpinBox:focus,
+QWidget#paymasterWidget QDoubleSpinBox:focus,
+QWidget#paymasterWidget QComboBox:focus,
+QWidget#paymasterWidget QPushButton:focus {
+    border: 2px solid #a66f00;
+}
+
+QWidget#paymasterWidget QPlainTextEdit {
+    background-color: #f7fbf8;
+    color: #345b47;
+    border: 1px solid #a9cfb9;
+    border-radius: 6px;
+    padding: 8px;
+    font-family: Consolas, monospace;
+    font-size: 9pt;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterFundingSafetyModels::pane {
+    background-color: #f8fcf9;
+    border: 1px solid #a9cfb9;
+    border-radius: 6px;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterFundingSafetyModels QTabBar::tab {
+    background-color: #e5f3ea;
+    color: #315f48;
+    border: 1px solid #a9cfb9;
+    padding: 7px 13px;
+}
+
+QWidget#paymasterWidget QTabWidget#paymasterFundingSafetyModels QTabBar::tab:selected {
+    background-color: #16894d;
+    color: #ffffff;
+}
+
+QWidget#paymasterWidget QScrollBar:vertical {
+    background-color: #f2f8f4;
+    width: 11px;
+    margin: 0px;
+}
+QWidget#paymasterWidget QScrollBar::handle:vertical {
+    background-color: #7fb697;
+    border-radius: 5px;
+    min-height: 32px;
+}
+QWidget#paymasterWidget QScrollBar::add-line:vertical,
+QWidget#paymasterWidget QScrollBar::sub-line:vertical {
+    height: 0px;
+}

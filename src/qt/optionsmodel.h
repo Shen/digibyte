@@ -73,6 +73,7 @@ public:
         Listen,                 // bool
         Server,                 // bool
         EnablePSBTControls,     // bool
+        ShowPaymasterOperator,  // bool
         MaskValues,             // bool
         OptionIDRowCount,
     };
@@ -98,6 +99,7 @@ public:
     bool getCoinControlFeatures() const { return fCoinControlFeatures; }
     bool getSubFeeFromAmount() const { return m_sub_fee_from_amount; }
     bool getEnablePSBTControls() const { return m_enable_psbt_controls; }
+    bool getShowPaymasterOperator() const { return m_show_paymaster_operator; }
     const QString& getOverriddenByCommandLine() { return strOverriddenByCommandLine; }
 
     /** Whether -signer was set or not */
@@ -126,6 +128,7 @@ private:
     bool fCoinControlFeatures;
     bool m_sub_fee_from_amount;
     bool m_enable_psbt_controls;
+    bool m_show_paymaster_operator;
     bool m_mask_values;
 
     /* settings that were overridden by command-line */
@@ -140,6 +143,7 @@ private:
 Q_SIGNALS:
     void displayUnitChanged(DigiByteUnit unit);
     void coinControlFeaturesChanged(bool);
+    void showPaymasterOperatorChanged(bool);
     void showTrayIconChanged(bool);
     void useEmbeddedMonospacedFontChanged(bool);
 };

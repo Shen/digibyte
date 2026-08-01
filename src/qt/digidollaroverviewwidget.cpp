@@ -71,10 +71,15 @@ DigiDollarOverviewWidget::DigiDollarOverviewWidget(QWidget *parent) :
     m_balanceLayout(nullptr),
     m_ddBalanceLabel(nullptr),
     m_ddBalanceValue(nullptr),
+    m_ddPaymasterReservedLabel(nullptr),
+    m_ddPaymasterReservedValue(nullptr),
+    m_ddWalletTotalLabel(nullptr),
+    m_ddWalletTotalValue(nullptr),
     m_ddPendingLabel(nullptr),
     m_ddPendingValue(nullptr),
     m_dgbCollateralLabel(nullptr),
     m_dgbCollateralValue(nullptr),
+    m_balanceSeparator(nullptr),
     m_usdValueLabel(nullptr),
     m_usdValueValue(nullptr),
     m_systemHealthFrame(nullptr),
@@ -100,6 +105,9 @@ DigiDollarOverviewWidget::DigiDollarOverviewWidget(QWidget *parent) :
     m_walletModel(nullptr),
     m_clientModel(nullptr),
     m_ddBalance(0.0),
+    m_ddWalletTotal(0.0),
+    m_ddPaymasterReserved(0.0),
+    m_ddPending(0.0),
     m_dgbCollateral(0.0),
     m_oraclePrice(0.0),
     m_systemHealthStatus("Loading..."),
@@ -197,6 +205,33 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_ddBalanceLabel, 1, 0);
     m_balanceLayout->addWidget(m_ddBalanceValue, 1, 1);
 
+    // These rows are only shown while confirmed DD is protected by a
+    // Paymaster session or provider carrier pool. Wallets not using
+    // Paymaster retain the original compact balance layout unchanged.
+    m_ddPaymasterReservedLabel = new QLabel(tr("Reserved for Paymaster"), this);
+    m_ddPaymasterReservedLabel->setObjectName("ddPaymasterReservedLabel");
+    m_ddPaymasterReservedValue = new QLabel("0.00 $DD", this);
+    m_ddPaymasterReservedValue->setObjectName("ddPaymasterReservedValue");
+    m_ddPaymasterReservedValue->setCursor(QCursor(Qt::IBeamCursor));
+    m_ddPaymasterReservedValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
+    m_ddPaymasterReservedValue->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
+    m_ddPaymasterReservedValue->setToolTip(tr(
+        "Confirmed DigiDollar protected for active Paymaster transfers or provider carrier liquidity. It remains yours but cannot be used by an unrelated send."));
+
+    m_ddWalletTotalLabel = new QLabel(tr("Wallet total"), this);
+    m_ddWalletTotalLabel->setObjectName("ddWalletTotalLabel");
+    m_ddWalletTotalValue = new QLabel("0.00 $DD", this);
+    m_ddWalletTotalValue->setObjectName("ddWalletTotalValue");
+    m_ddWalletTotalValue->setCursor(QCursor(Qt::IBeamCursor));
+    m_ddWalletTotalValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
+    m_ddWalletTotalValue->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
+    m_ddWalletTotalValue->setToolTip(tr(
+        "All confirmed DigiDollar owned by this wallet: available plus Paymaster-reserved."));
+    m_ddPaymasterReservedLabel->hide();
+    m_ddPaymasterReservedValue->hide();
+    m_ddWalletTotalLabel->hide();
+    m_ddWalletTotalValue->hide();
+
     // DD Pending (Unconfirmed)
     m_ddPendingLabel = new QLabel(tr("Pending"), this);
     m_ddPendingLabel->setObjectName("ddPendingLabel");
@@ -222,11 +257,11 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_balanceLayout->addWidget(m_dgbCollateralValue, 3, 1);
 
     // Add separator line
-    QFrame* line = new QFrame(m_balanceFrame);
-    line->setObjectName("line");
-    line->setFrameShape(QFrame::HLine);
-    line->setFrameShadow(QFrame::Sunken);
-    m_balanceLayout->addWidget(line, 4, 0, 1, 2);
+    m_balanceSeparator = new QFrame(m_balanceFrame);
+    m_balanceSeparator->setObjectName("line");
+    m_balanceSeparator->setFrameShape(QFrame::HLine);
+    m_balanceSeparator->setFrameShadow(QFrame::Sunken);
+    m_balanceLayout->addWidget(m_balanceSeparator, 4, 0, 1, 2);
 
     // USD Value (Total — confirmed only)
     m_usdValueLabel = new QLabel(tr("Total $USD:"), this);
@@ -251,6 +286,60 @@ void DigiDollarOverviewWidget::setupBalanceSection()
 
     // REMOVED: m_mainLayout->addWidget(m_balanceFrame);
     // Frame is now added to horizontal layout in setupUI()
+}
+
+void DigiDollarOverviewWidget::updateBalanceLayout(bool show_paymaster_breakdown)
+{
+    if (!m_balanceLayout) return;
+    if (m_showPaymasterBreakdown == show_paymaster_breakdown) return;
+    m_showPaymasterBreakdown = show_paymaster_breakdown;
+
+    m_ddPaymasterReservedLabel->setVisible(show_paymaster_breakdown);
+    m_ddPaymasterReservedValue->setVisible(show_paymaster_breakdown);
+    m_ddWalletTotalLabel->setVisible(show_paymaster_breakdown);
+    m_ddWalletTotalValue->setVisible(show_paymaster_breakdown);
+
+    // This runs only when the presence of a reservation changes. Remove the
+    // existing grid items explicitly before rebuilding so periodic balance
+    // polling never accumulates overlapping layout entries.
+    m_balanceLayout->removeWidget(m_ddBalanceLabel);
+    m_balanceLayout->removeWidget(m_ddBalanceValue);
+    m_balanceLayout->removeWidget(m_ddPaymasterReservedLabel);
+    m_balanceLayout->removeWidget(m_ddPaymasterReservedValue);
+    m_balanceLayout->removeWidget(m_ddWalletTotalLabel);
+    m_balanceLayout->removeWidget(m_ddWalletTotalValue);
+    m_balanceLayout->removeWidget(m_ddPendingLabel);
+    m_balanceLayout->removeWidget(m_ddPendingValue);
+    m_balanceLayout->removeWidget(m_dgbCollateralLabel);
+    m_balanceLayout->removeWidget(m_dgbCollateralValue);
+    m_balanceLayout->removeWidget(m_balanceSeparator);
+    m_balanceLayout->removeWidget(m_usdValueLabel);
+    m_balanceLayout->removeWidget(m_usdValueValue);
+
+    // The false branch exactly restores the original non-Paymaster rows.
+    m_balanceLayout->addWidget(m_ddBalanceLabel, 1, 0);
+    m_balanceLayout->addWidget(m_ddBalanceValue, 1, 1);
+    if (show_paymaster_breakdown) {
+        m_balanceLayout->addWidget(m_ddPaymasterReservedLabel, 2, 0);
+        m_balanceLayout->addWidget(m_ddPaymasterReservedValue, 2, 1);
+        m_balanceLayout->addWidget(m_ddWalletTotalLabel, 3, 0);
+        m_balanceLayout->addWidget(m_ddWalletTotalValue, 3, 1);
+        m_balanceLayout->addWidget(m_ddPendingLabel, 4, 0);
+        m_balanceLayout->addWidget(m_ddPendingValue, 4, 1);
+        m_balanceLayout->addWidget(m_dgbCollateralLabel, 5, 0);
+        m_balanceLayout->addWidget(m_dgbCollateralValue, 5, 1);
+        m_balanceLayout->addWidget(m_balanceSeparator, 6, 0, 1, 2);
+        m_balanceLayout->addWidget(m_usdValueLabel, 7, 0);
+        m_balanceLayout->addWidget(m_usdValueValue, 7, 1);
+    } else {
+        m_balanceLayout->addWidget(m_ddPendingLabel, 2, 0);
+        m_balanceLayout->addWidget(m_ddPendingValue, 2, 1);
+        m_balanceLayout->addWidget(m_dgbCollateralLabel, 3, 0);
+        m_balanceLayout->addWidget(m_dgbCollateralValue, 3, 1);
+        m_balanceLayout->addWidget(m_balanceSeparator, 4, 0, 1, 2);
+        m_balanceLayout->addWidget(m_usdValueLabel, 5, 0);
+        m_balanceLayout->addWidget(m_usdValueValue, 5, 1);
+    }
 }
 
 void DigiDollarOverviewWidget::setupSystemHealthSection()
@@ -618,15 +707,16 @@ void DigiDollarOverviewWidget::updateBalance()
     m_lastBalanceUpdateTime = now;
 
     // Get actual DigiDollar balance from wallet
-    double ddPending = 0.0;
     if (m_walletModel) {
-        // Get DD confirmed balance from wallet (in cents)
-        CAmount balanceCents = m_walletModel->getDigiDollarBalance();
-        m_ddBalance = balanceCents / 100.0; // Convert cents to DD
-
-        // Get DD pending balance from wallet (in cents)
-        CAmount pendingCents = m_walletModel->getPendingDigiDollarBalance();
-        ddPending = pendingCents / 100.0; // Convert cents to DD
+        // "Available" is ordinary spendable DD. The total remains useful for
+        // ownership/accounting but is only exposed as a separate row when a
+        // Paymaster reservation actually exists.
+        const WalletModel::DigiDollarBalanceSummary balances =
+            m_walletModel->getDigiDollarBalanceSummary();
+        m_ddBalance = balances.available / 100.0;
+        m_ddWalletTotal = balances.confirmed_total / 100.0;
+        m_ddPaymasterReserved = balances.paymaster_reserved / 100.0;
+        m_ddPending = balances.pending / 100.0;
 
         // Get locked collateral from wallet positions (in satoshis)
         CAmount collateralSats = m_walletModel->getLockedCollateral();
@@ -634,12 +724,19 @@ void DigiDollarOverviewWidget::updateBalance()
     } else {
         // No wallet connected
         m_ddBalance = 0.0;
+        m_ddWalletTotal = 0.0;
+        m_ddPaymasterReserved = 0.0;
+        m_ddPending = 0.0;
         m_dgbCollateral = 0.0;
     }
+
+    updateBalanceLayout(m_ddPaymasterReserved > 0.0);
 
     // Update display — Available (confirmed only)
     if (m_privacy) {
         m_ddBalanceValue->setText(maskValue(formatDDAmount(0)));
+        m_ddPaymasterReservedValue->setText(maskValue(formatDDAmount(0)));
+        m_ddWalletTotalValue->setText(maskValue(formatDDAmount(0)));
         m_ddPendingValue->setText(maskValue(formatDDAmount(0)));
         m_ddPendingLabel->setVisible(false);
         m_ddPendingValue->setVisible(false);
@@ -647,17 +744,20 @@ void DigiDollarOverviewWidget::updateBalance()
         m_usdValueValue->setText(maskValue(formatUSDAmount(0)));
     } else {
         m_ddBalanceValue->setText(formatDDAmount(m_ddBalance));
+        m_ddPaymasterReservedValue->setText(formatDDAmount(m_ddPaymasterReserved));
+        m_ddWalletTotalValue->setText(formatDDAmount(m_ddWalletTotal));
 
         // Pending (unconfirmed but trusted) — hide row when zero for clean UI
-        m_ddPendingValue->setText(formatDDAmount(ddPending));
-        bool hasPending = (ddPending > 0.0);
+        m_ddPendingValue->setText(formatDDAmount(m_ddPending));
+        const bool hasPending = m_ddPending > 0.0;
         m_ddPendingLabel->setVisible(hasPending);
         m_ddPendingValue->setVisible(hasPending);
 
         m_dgbCollateralValue->setText(formatDGBAmount(m_dgbCollateral));
 
-        // Calculate USD value from CONFIRMED balance only (DD pegged to $1)
-        double usdValue = m_ddBalance * 1.0;
+        // Paymaster-reserved DD remains wallet-owned, so wallet valuation uses
+        // the confirmed total rather than only the immediately spendable part.
+        const double usdValue = m_ddWalletTotal;
         m_usdValueValue->setText(formatUSDAmount(usdValue));
     }
 }
@@ -1049,6 +1149,8 @@ void DigiDollarOverviewWidget::setMonospacedFont(bool use_embedded_font)
 
     // Apply to all value labels
     m_ddBalanceValue->setFont(f);
+    m_ddPaymasterReservedValue->setFont(f);
+    m_ddWalletTotalValue->setFont(f);
     m_ddPendingValue->setFont(f);
     m_dgbCollateralValue->setFont(f);
     m_usdValueValue->setFont(f);
@@ -1085,6 +1187,8 @@ void DigiDollarOverviewWidget::setPrivacy(bool privacy)
     if (m_privacy) {
         // Directly mask all balance labels (bypass updateBalance's IBD/throttle checks)
         m_ddBalanceValue->setText(maskValue(formatDDAmount(0)));
+        m_ddPaymasterReservedValue->setText(maskValue(formatDDAmount(0)));
+        m_ddWalletTotalValue->setText(maskValue(formatDDAmount(0)));
         m_ddPendingValue->setText(maskValue(formatDDAmount(0)));
         m_ddPendingLabel->setVisible(false);
         m_ddPendingValue->setVisible(false);
@@ -1099,8 +1203,14 @@ void DigiDollarOverviewWidget::setPrivacy(bool privacy)
     } else {
         // Directly set real values (bypass updateBalance's IBD/throttle checks)
         m_ddBalanceValue->setText(formatDDAmount(m_ddBalance));
+        m_ddPaymasterReservedValue->setText(formatDDAmount(m_ddPaymasterReserved));
+        m_ddWalletTotalValue->setText(formatDDAmount(m_ddWalletTotal));
+        m_ddPendingValue->setText(formatDDAmount(m_ddPending));
+        const bool has_pending = m_ddPending > 0.0;
+        m_ddPendingLabel->setVisible(has_pending);
+        m_ddPendingValue->setVisible(has_pending);
         m_dgbCollateralValue->setText(formatDGBAmount(m_dgbCollateral));
-        double usdValue = m_ddBalance * 1.0;
+        const double usdValue = m_ddWalletTotal;
         m_usdValueValue->setText(formatUSDAmount(usdValue));
         // Refresh blockchain stats
         updateSystemHealth();

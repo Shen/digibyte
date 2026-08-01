@@ -8,8 +8,10 @@
 #include <QWidget>
 #include <QValidator>
 #include <QMessageBox>
+#include <QHash>
 #include <QTimer>
 
+#include <qt/paymasterconfirmation.h>
 #include <qt/walletmodel.h>
 #include <primitives/transaction.h>
 
@@ -37,6 +39,12 @@ class QToolButton;
 class QScrollArea;
 class QSpacerItem;
 class QAbstractButton;
+class QComboBox;
+class QCheckBox;
+class QRadioButton;
+class QSpinBox;
+class QTableWidget;
+class QResizeEvent;
 QT_END_NAMESPACE
 
 // 3-second confirmation delay constant (matches DGB send behavior)
@@ -45,7 +53,9 @@ QT_END_NAMESPACE
 /**
  * DigiDollar send widget for sending DD to other addresses.
  * This widget provides functionality to send DigiDollar with proper
- * address validation and fee calculation.
+ * address validation and fee calculation. Paymaster sends use a two-stage
+ * workflow: preparation may discover an offer, but only a second prompt for
+ * the exact Core-provided commitment can authorize wallet signing.
  */
 class DigiDollarSendWidget : public QWidget
 {
@@ -61,10 +71,17 @@ public:
 
     /** Test hook for exercising coin-control summary/preflight state without opening the modal dialog. */
     void setSelectedDigiDollarInputsForTesting(const std::vector<COutPoint>& inputs);
+    /** Test hook for exercising the explicit wallet-empty workflow without a live wallet backend. */
+    void setAvailableDigiDollarBalanceForTesting(CAmount balance_cents);
     /** Test hook for verifying the widget forwards selected DD inputs to WalletModel without opening modal UI. */
     WalletModel::DigiDollarSendResult sendDigiDollarForTesting(const QString& address, CAmount amount, const QString& comment = "");
     /** Test hook for verifying success copy without opening a modal dialog. */
     QString successMessageForTesting(const QString& txid, double amount) const;
+    /** Test hook for exercising the non-mutating Paymaster focus-state presentation. */
+    void setPaymasterSessionForTesting(const QString& state, const QString& artifact,
+                                       bool persisted, const QString& address, double amount,
+                                       const QString& attempt_state = QString{},
+                                       const QString& pending_phase = QString{});
 
 Q_SIGNALS:
     /** Fired when a message should be reported to the user */
@@ -77,6 +94,9 @@ public Q_SLOTS:
     void updateOraclePrice();
     /** Set privacy mode — masks balance displays */
     void setPrivacy(bool privacy);
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 
 private Q_SLOTS:
     /** Address field changed */
@@ -92,6 +112,18 @@ private Q_SLOTS:
     void onPasteAddressClicked();
     void onAddressBookClicked();
     void onCoinControlButtonClicked();
+    void onFeeModeChanged();
+    void showPaymasterExplanation();
+    void configureClientSafetyPolicy();
+    void refreshClientSafetyStatus();
+    void refreshPaymasterOffers();
+    void refreshPaymasterSessionState();
+    void pollPaymasterSession();
+    void retryPaymasterSession();
+    void fallbackPaymasterSession();
+    void recoverPaymasterSessionToSelf();
+    void abandonUnsignedPaymasterSession();
+    void cancelPaymasterQuote();
     /** Update coin control labels */
     void updateCoinControlLabels();
 
@@ -111,6 +143,14 @@ private:
     void updateSendButton();
     void updateUSDEquivalent();
     void updateFeeDisplay();
+    void updateClientSafetyDisplay();
+    void updateFeeChoiceLayout();
+    void updatePaymasterFocusMode();
+    QString friendlyPaymasterSessionStatus() const;
+    void onPaymasterPrimaryAction();
+    QString feeMode() const;
+    QString formatCents(qint64 cents) const;
+    QString friendlyFundingModel(const QString& model) const;
     CAmount selectedDigiDollarAmount() const;
 
     bool validateAddress() const;
@@ -129,6 +169,27 @@ private:
     bool showConfirmationDialog(const QString& address, double amount);
     QString buildSuccessMessage(const QString& txid, double amount) const;
     void executeTransfer(const QString& address, double amount);
+    void executePaymasterTransfer(const QString& address, double amount, bool allow_unlock);
+    UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
+    void handlePaymasterResult(const UniValue& result, const QString& error,
+                               const QString& address, double amount);
+    void updatePaymasterSessionView(const UniValue& result);
+    PaymasterConfirmationSelection paymasterConfirmationSelection(
+        const UniValue& result, const QString& address, double amount) const;
+    bool confirmPaymasterSelectionBeforeSigning(
+        const UniValue& result, const QString& address, double amount);
+    void executeAlternativePaymasterRecovery(bool allow_unlock);
+    UniValue buildAlternativePaymasterRecoveryParams() const;
+    void handleAlternativePaymasterRecoveryResult(
+        const UniValue& result, const QString& error);
+    PaymasterRecoveryConfirmationSelection paymasterRecoveryConfirmationSelection(
+        const UniValue& recovery) const;
+    bool confirmPaymasterRecoveryBeforeSigning(
+        const PaymasterRecoveryConfirmationSelection& selection);
+    void blockAlternativePaymasterRecovery(const QString& reason,
+                                           const QString& detail);
+    bool paymasterModeSelected() const;
+    void setPaymasterBusy(bool busy);
     void showSuccess(const QString& txid, double amount);
     void showBackendError(int status, const QString& reasonFailed);
 
@@ -165,10 +226,55 @@ private:
     // Fee section
     QFrame* m_feeFrame;
     QGridLayout* m_feeLayout;
+    QLabel* m_feeHeading;
+    QFrame* m_feeChoicesFrame;
+    QGridLayout* m_feeChoicesLayout;
+    QFrame* m_dgbFeeCard;
+    QFrame* m_autoFeeCard;
+    QFrame* m_paymasterFeeCard;
     QLabel* m_feeLabel;
     QLabel* m_feeValue;
     QLabel* m_totalLabel;
     QLabel* m_totalValue;
+    QLabel* m_feeIntroduction;
+    QRadioButton* m_dgbFeeRadio;
+    QRadioButton* m_autoFeeRadio;
+    QRadioButton* m_paymasterFeeRadio;
+    QLabel* m_feeModeExplanation;
+    QLabel* m_feeSummary;
+    QCheckBox* m_subtractPaymasterFeeCheck;
+    QPushButton* m_paymasterExplanationButton;
+    QPushButton* m_advancedPaymasterButton;
+    QComboBox* m_feeModeCombo;
+    QFrame* m_advancedPaymasterFrame;
+    QComboBox* m_privacyCombo;
+    QComboBox* m_selectionCombo;
+    QSpinBox* m_feeCapSpin;
+    QSpinBox* m_maxAttemptsSpin;
+    QPushButton* m_refreshOffersButton;
+    QLabel* m_offersStatus;
+    QTableWidget* m_offersTable;
+    QFrame* m_clientSafetyFrame;
+    QLabel* m_clientSafetyStatus;
+    QLabel* m_clientSafetyDetails;
+    QPushButton* m_configureClientSafetyButton;
+    QFrame* m_paymasterSessionFrame;
+    QLabel* m_paymasterStateValue;
+    QLabel* m_paymasterTransferValue;
+    QLabel* m_paymasterIdentityValue;
+    QLabel* m_paymasterCostValue;
+    QLabel* m_paymasterExpiryValue;
+    QPushButton* m_retrySessionButton;
+    QPushButton* m_fallbackSessionButton;
+    QPushButton* m_recoverSessionButton;
+    QPushButton* m_abandonSessionButton;
+    QPushButton* m_cancelQuoteButton;
+    QLabel* m_paymasterNextStepValue;
+    QPushButton* m_paymasterPrimaryButton;
+    QPushButton* m_paymasterMoreButton;
+    QPushButton* m_paymasterTechnicalButton;
+    QFrame* m_paymasterSecondaryActions;
+    QFrame* m_paymasterTechnicalDetails;
 
     // Button section
     QFrame* m_buttonFrame;
@@ -194,8 +300,52 @@ private:
 
     // Data
     double m_availableBalance;
+    double m_paymasterInitialAvailableBalance{0.0};
     double m_oraclePrice;
     double m_estimatedFee;
+    QString m_paymasterRequestId;
+    QString m_paymasterSessionId;
+    QString m_paymasterSessionState;
+    QString m_paymasterAttemptState;
+    QString m_paymasterArtifact;
+    QString m_paymasterPendingPhase;
+    QString m_paymasterBroadcastState;
+    QString m_paymasterConfirmationState;
+    QString m_paymasterAddress;
+    QString m_paymasterAuthorizationCommitment;
+    QString m_paymasterSessionPrivacy;
+    QString m_paymasterRecoveryAuthorizationCommitment;
+    double m_paymasterAmount{0.0};
+    qint64 m_paymasterPreviewRecipientCents{-1};
+    qint64 m_paymasterPreviewServiceFeeCents{-1};
+    qint64 m_paymasterPreviewTotalCents{-1};
+    bool m_sendAllSpendableDD{false};
+    bool m_settingSweepAmount{false};
+    qint64 m_paymasterRecoveryMaximumServiceFeeCents{0};
+    bool m_paymasterBusy{false};
+    bool m_paymasterSessionPersisted{false};
+    bool m_paymasterRecoveryActive{false};
+    enum class PaymasterPrimaryAction {
+        REFRESH,
+        REVIEW_OFFER,
+        FALLBACK,
+        RECOVER,
+        NEW_TRANSFER,
+    };
+    PaymasterPrimaryAction m_paymasterPrimaryAction{PaymasterPrimaryAction::REFRESH};
+    bool m_clientSafetyStatusKnown{false};
+    bool m_clientSafetyConfigured{false};
+    qint64 m_clientSafetyMaximumPerTransaction{100};
+    qint64 m_clientSafetyMaximumPerDay{1000};
+    qint64 m_clientSafetyActiveReservations{0};
+    qint64 m_clientSafetyReservedCents{0};
+    qint64 m_clientSafetySpentTodayCents{0};
+    qint64 m_clientSafetyAvailableTodayCents{0};
+    QString m_clientSafetyError;
+    QTimer* m_paymasterPollTimer;
+    QHash<QString, QString> m_offerFundingModels;
+    PaymasterConfirmationGuard m_paymasterConfirmationGuard;
+    PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;
 
     // Privacy
     bool m_privacy{false};
@@ -253,9 +403,11 @@ public:
     DDSendConfirmationDialog(const QString& title, const QString& text,
                              const QString& informative_text = "",
                              int secDelay = DD_SEND_CONFIRM_DELAY,
+                             const QString& confirm_button_text = "",
                              QWidget* parent = nullptr);
 
-    /* Returns QMessageBox::Yes when "Send" is clicked, QMessageBox::Cancel otherwise */
+    /* Returns QMessageBox::Yes when the contextual confirmation action is
+     * clicked, QMessageBox::Cancel otherwise. */
     int exec() override;
 
 private Q_SLOTS:

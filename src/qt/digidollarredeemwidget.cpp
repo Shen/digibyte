@@ -555,7 +555,7 @@ void DigiDollarRedeemWidget::onRedeemClicked()
                          systemHealth, requiredDDBurn);
             }
         }
-    } catch (const UniValue& objError) {
+    } catch (const UniValue&) {
         LogPrintf("DigiDollar Qt: Failed to query system health (RPC error) - assuming normal redemption\n");
         // On error, proceed with normal redemption calculation
     } catch (const std::exception& e) {
@@ -997,7 +997,7 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
                 requiredDDBurn = CalculateRequiredDDBurnDisplayAmount(m_positionDDMinted, systemHealth);
             }
         }
-    } catch (const UniValue& objError) {
+    } catch (const UniValue&) {
         // On error, assume normal redemption and allow validation to proceed
         LogPrintf("DigiDollar Qt: Failed to query system health in validateDDBalance (RPC error)\n");
     } catch (const std::exception& e) {

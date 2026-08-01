@@ -52,6 +52,8 @@
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QSet>
+#include <QPointer>
+#include <QThread>
 #include <QTimer>
 
 using wallet::CCoinControl;
@@ -477,6 +479,14 @@ WalletModel::UnlockContext WalletModel::requestUnlock()
     bool valid = getEncryptionStatus() != Locked;
 
     return UnlockContext(this, valid, was_locked);
+}
+
+std::shared_ptr<WalletModel::UnlockContext> WalletModel::requestUnlockForAsync()
+{
+    const bool was_locked = getEncryptionStatus() == Locked;
+    if (was_locked) Q_EMIT requireUnlock();
+    const bool valid = getEncryptionStatus() != Locked;
+    return std::make_shared<UnlockContext>(this, valid, was_locked);
 }
 
 WalletModel::UnlockContext::UnlockContext(WalletModel *_wallet, bool _valid, bool _relock):
@@ -1277,15 +1287,7 @@ CAmount WalletModel::getDigiDollarBalance() const
             return 0;
         }
 
-        // Get DigiDollar wallet instance from wallet interface
-        DigiDollarWallet* ddWallet = m_wallet->getDigiDollarWallet();
-        if (!ddWallet) {
-            LogPrintf("DigiDollar Qt: DD wallet not available\n");
-            return 0;
-        }
-
-        // Get the total DD balance
-        CAmount balance = ddWallet->GetTotalDDBalance();
+        const CAmount balance = getDigiDollarBalanceSummary().available;
 
         LogPrintf("DigiDollar Qt: getDigiDollarBalance returning %d cents\n", balance);
         return balance;
@@ -1294,6 +1296,36 @@ CAmount WalletModel::getDigiDollarBalance() const
         LogPrintf("DigiDollar Qt: getDigiDollarBalance exception - %s\n", e.what());
         return 0;
     }
+}
+
+CAmount WalletModel::getTotalDigiDollarBalance() const
+{
+    return getDigiDollarBalanceSummary().confirmed_total;
+}
+
+CAmount WalletModel::getPaymasterReservedDigiDollarBalance() const
+{
+    return getDigiDollarBalanceSummary().paymaster_reserved;
+}
+
+WalletModel::DigiDollarBalanceSummary WalletModel::getDigiDollarBalanceSummary() const
+{
+    DigiDollarBalanceSummary result;
+    try {
+        if (m_wallet->privateKeysDisabled()) return result;
+        DigiDollarWallet* dd_wallet = m_wallet->getDigiDollarWallet();
+        if (!dd_wallet) return result;
+
+        const ::DigiDollarBalanceSummary wallet_summary =
+            dd_wallet->GetDDBalanceSummary();
+        result.available = wallet_summary.spendable;
+        result.confirmed_total = wallet_summary.confirmed_total;
+        result.paymaster_reserved = wallet_summary.paymaster_reserved;
+        result.pending = wallet_summary.pending;
+    } catch (const std::exception& e) {
+        LogPrintf("DigiDollar Qt: getDigiDollarBalanceSummary exception - %s\n", e.what());
+    }
+    return result;
 }
 
 CAmount WalletModel::getPendingDigiDollarBalance() const
@@ -1393,6 +1425,43 @@ UniValue WalletModel::executeRpc(const std::string& command, const UniValue& par
     QByteArray encodedName = QUrl::toPercentEncoding(getWalletName());
     std::string uri = "/wallet/" + std::string(encodedName.constData(), encodedName.length());
     return m_node.executeRpc(command, params, uri);
+}
+
+void WalletModel::executeRpcAsync(std::string command, UniValue params, RpcCallback callback)
+{
+    const QByteArray encoded_name = QUrl::toPercentEncoding(getWalletName());
+    const std::string uri = "/wallet/" + std::string(encoded_name.constData(), encoded_name.length());
+    interfaces::Node* const node = &m_node;
+    QPointer<WalletModel> guard{this};
+
+    QThread* thread = QThread::create(
+        [guard, node, command = std::move(command), params = std::move(params),
+         uri, callback = std::move(callback)]() mutable {
+            UniValue result;
+            QString error;
+            try {
+                result = node->executeRpc(command, params, uri);
+            } catch (const UniValue& rpc_error) {
+                const UniValue& message = rpc_error.find_value("message");
+                error = message.isStr() ? QString::fromStdString(message.get_str())
+                                        : QString::fromStdString(rpc_error.write());
+            } catch (const std::exception& exception) {
+                error = QString::fromUtf8(exception.what());
+            } catch (...) {
+                error = QStringLiteral("Unknown RPC error");
+            }
+
+            if (!guard) return;
+            QMetaObject::invokeMethod(
+                guard,
+                [guard, callback = std::move(callback), result = std::move(result),
+                 error = std::move(error)]() mutable {
+                    if (guard && callback) callback(std::move(result), std::move(error));
+                },
+                Qt::QueuedConnection);
+        });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
 }
 
 QString WalletModel::getNewDigiDollarAddress(const QString& label)

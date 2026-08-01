@@ -15,7 +15,10 @@
 
 #include <interfaces/wallet.h>
 #include <support/allocators/secure.h>
+#include <univalue.h>
 
+#include <functional>
+#include <memory>
 #include <vector>
 
 #include <QObject>
@@ -132,6 +135,8 @@ public:
     };
 
     UnlockContext requestUnlock();
+    /** Keep an unlock alive only for one asynchronous signing operation. */
+    std::shared_ptr<UnlockContext> requestUnlockForAsync();
 
     bool bumpFee(uint256 hash, uint256& new_hash);
     bool displayAddress(std::string sAddress) const;
@@ -199,8 +204,25 @@ public:
     // Redeem DigiDollar position
     DigiDollarRedeemResult redeemDigiDollar(const QString& positionId, CAmount amount, const QString& redeemAddress = "");
 
-    // Get DigiDollar balance (confirmed only)
+    struct DigiDollarBalanceSummary
+    {
+        CAmount available{0};
+        CAmount confirmed_total{0};
+        CAmount paymaster_reserved{0};
+        CAmount pending{0};
+    };
+
+    // Get confirmed DigiDollar currently spendable by ordinary wallet actions.
     CAmount getDigiDollarBalance() const;
+
+    // Get all confirmed DigiDollar owned by the wallet, including Paymaster reservations.
+    CAmount getTotalDigiDollarBalance() const;
+
+    // Get confirmed DigiDollar protected by Paymaster sessions or provider pools.
+    CAmount getPaymasterReservedDigiDollarBalance() const;
+
+    // Get a consistent balance breakdown for overview display.
+    DigiDollarBalanceSummary getDigiDollarBalanceSummary() const;
 
     // Get pending (unconfirmed but trusted) DigiDollar balance
     CAmount getPendingDigiDollarBalance() const;
@@ -219,6 +241,14 @@ public:
 
     // Execute RPC command (for DigiDollar widgets)
     UniValue executeRpc(const std::string& command, const UniValue& params) const;
+
+    /**
+     * Execute a wallet-scoped RPC away from the GUI thread and deliver its
+     * result back on this object's thread. Paymaster workflows use this
+     * bridge so network waits and wallet synchronization never block Qt.
+     */
+    using RpcCallback = std::function<void(UniValue result, QString error)>;
+    void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
 
     // Generate new DigiDollar receiving address
     QString getNewDigiDollarAddress(const QString& label = "");
