@@ -470,6 +470,10 @@ BOOST_AUTO_TEST_CASE(liquidity_policy_requires_coherent_targets_and_finite_appro
     policy = LiquidityPolicy();
     BOOST_REQUIRE(ValidateProviderLiquidityPolicy(policy, error));
 
+    const ProviderPolicy user_paid_policy{UserPaidPolicy(0)};
+    BOOST_CHECK(!ProviderLiquidityTargetsSatisfyPolicy(
+        policy, user_paid_policy));
+
     ProviderLiquidityPolicy invalid{policy};
     invalid.maximum_maintenance_fee_per_transaction = {};
     BOOST_CHECK(!ValidateProviderLiquidityPolicy(invalid, error));
@@ -488,8 +492,19 @@ BOOST_AUTO_TEST_CASE(liquidity_policy_requires_coherent_targets_and_finite_appro
     BOOST_CHECK(!ValidateProviderLiquidityPolicy(invalid, error));
 
     policy.target_admission_carriers = 3;
+    BOOST_CHECK(!ProviderLiquidityTargetsSatisfyPolicy(
+        policy, user_paid_policy));
     policy.target_operational_carriers = 1;
     BOOST_REQUIRE(ValidateProviderLiquidityPolicy(policy, error));
+    BOOST_CHECK(ProviderLiquidityTargetsSatisfyPolicy(
+        policy, user_paid_policy));
+
+    ProviderPolicy sponsored_only_policy{user_paid_policy};
+    sponsored_only_policy.funding_models = FUNDING_MODEL_SPONSORED;
+    ProviderLiquidityPolicy sponsored_liquidity{LiquidityPolicy()};
+    BOOST_REQUIRE(ValidateProviderPolicy(sponsored_only_policy, error));
+    BOOST_CHECK(ProviderLiquidityTargetsSatisfyPolicy(
+        sponsored_liquidity, sponsored_only_policy));
 
     invalid = policy;
     invalid.target_admission_carriers = 0;
@@ -588,6 +603,84 @@ BOOST_AUTO_TEST_CASE(provider_maintenance_budget_transitions_are_bounded_and_ide
         restarted, releasable.operation_id, /*now=*/18000, error));
     BOOST_CHECK_EQUAL(SerializedPaymasterHash(restarted),
                       SerializedPaymasterHash(ledger));
+}
+
+BOOST_AUTO_TEST_CASE(provider_maintenance_budget_enforces_every_operator_gate)
+{
+    ProviderLiquidityPolicy policy{LiquidityPolicy()};
+    ProviderMaintenanceLedger ledger;
+    std::string error;
+
+    const ProviderMaintenanceRecord exact_limit{MaintenanceRecord(
+        uint256S("361"), uint256S("a61"), 61,
+        policy.maximum_maintenance_fee_per_transaction.value)};
+
+    // Explicit approval is independent from otherwise finite limits. A
+    // missing approval must leave both the accounting high-water mark and the
+    // durable record set untouched.
+    policy.paid_maintenance_approved = false;
+    const uint256 before_approval_failure{SerializedPaymasterHash(ledger)};
+    BOOST_CHECK(!ReserveProviderMaintenanceBudget(
+        ledger, policy, exact_limit, /*now=*/1000, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED");
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(ledger),
+                      before_approval_failure);
+
+    policy.paid_maintenance_approved = true;
+    BOOST_REQUIRE(ReserveProviderMaintenanceBudget(
+        ledger, policy, exact_limit, /*now=*/1000, error));
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+
+    ProviderMaintenanceRecord above_transaction{MaintenanceRecord(
+        uint256S("362"), uint256S("a62"), 62,
+        policy.maximum_maintenance_fee_per_transaction.value + 1)};
+    const uint256 before_transaction_failure{SerializedPaymasterHash(ledger)};
+    BOOST_CHECK(!ReserveProviderMaintenanceBudget(
+        ledger, policy, above_transaction, /*now=*/1001, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_RESERVATION");
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(ledger),
+                      before_transaction_failure);
+
+    // The first exact reservation consumes part of both rolling ceilings.
+    // Reserving another operation is rejected before any record is appended,
+    // even though that operation would independently satisfy the per-tx cap.
+    ProviderMaintenanceRecord over_hour{MaintenanceRecord(
+        uint256S("363"), uint256S("a63"), 63, /*maximum_fee=*/51)};
+    const uint256 before_hour_failure{SerializedPaymasterHash(ledger)};
+    BOOST_CHECK(!ReserveProviderMaintenanceBudget(
+        ledger, policy, over_hour, /*now=*/1002, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED");
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(ledger), before_hour_failure);
+
+    // Releasing a merely planned operation removes the exposure exactly once
+    // and permits a different operation without resetting historical spend.
+    BOOST_REQUIRE(ReleaseProviderMaintenanceBudget(
+        ledger, exact_limit.operation_id, /*now=*/1003, error));
+    BOOST_CHECK(ReleaseProviderMaintenanceBudget(
+        ledger, exact_limit.operation_id, /*now=*/1004, error));
+    BOOST_REQUIRE(ReserveProviderMaintenanceBudget(
+        ledger, policy, over_hour, /*now=*/1005, error));
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 2U);
+    BOOST_CHECK(ledger.records.front().state ==
+                ProviderMaintenanceState::RELEASED);
+    BOOST_CHECK(ledger.records.back().state ==
+                ProviderMaintenanceState::PLANNED);
+    BOOST_CHECK_EQUAL(ledger.records.back().operation_id,
+                      over_hour.operation_id);
+
+    // A broadcast transaction is charged by its actual fee and remains an
+    // open liability. Neither a backward clock nor expiry of the rolling
+    // window can make the same operation spend a different amount.
+    BOOST_REQUIRE(SpendProviderMaintenanceBudget(
+        ledger, over_hour.operation_id, uint256S("b63"), DGBSatoshis{50},
+        /*now=*/1006, error));
+    BOOST_CHECK(SpendProviderMaintenanceBudget(
+        ledger, over_hour.operation_id, uint256S("b63"), DGBSatoshis{50},
+        /*now=*/900, error));
+    BOOST_CHECK(!SpendProviderMaintenanceBudget(
+        ledger, over_hour.operation_id, uint256S("b63"), DGBSatoshis{49},
+        /*now=*/1007, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_OPERATION_CONFLICT");
 }
 
 BOOST_AUTO_TEST_CASE(old_unconfirmed_maintenance_broadcast_remains_open_budget_exposure)
@@ -1817,6 +1910,185 @@ BOOST_AUTO_TEST_CASE(capacity_admission_prunes_full_stale_ledger_before_limit)
                       CAPACITY_EVENT_LIMIT);
     BOOST_CHECK_EQUAL(live.accounting_time_high_water,
                       original_high_water);
+}
+
+BOOST_AUTO_TEST_CASE(provider_finance_events_are_idempotent_and_reorg_safe)
+{
+    ProviderFinanceLedger ledger;
+    ledger.genesis_hash = uint256S("01");
+    ledger.provider_id = uint256S("02");
+    ledger.history_complete_from = 100;
+    ledger.updated_at = 100;
+
+    ProviderFinanceEvent event;
+    event.event_id = uint256S("03");
+    event.genesis_hash = ledger.genesis_hash;
+    event.provider_id = ledger.provider_id;
+    event.kind = ProviderFinanceEventKind::TRANSFER;
+    event.state = ProviderFinanceEventState::CONFIRMED;
+    event.funding_model = FundingModel::USER_PAID;
+    event.transaction_id = uint256S("04");
+    event.dd_income = DDCents{25};
+    event.dgb_cost = DGBSatoshis{10};
+    event.created_at = 100;
+    event.confirmed_at = 200;
+    event.updated_at = 200;
+
+    std::string error;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, event, error));
+    BOOST_REQUIRE(ValidateProviderFinanceLedger(ledger, error));
+    BOOST_REQUIRE_EQUAL(ledger.events.size(), 1U);
+    BOOST_REQUIRE_EQUAL(ledger.daily_totals.size(), 1U);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().dd_income.value, 25);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().dgb_cost.value, 10);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().successful_transfers, 1U);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().user_paid_transfers, 1U);
+
+    // An exact replay replaces no economic data and cannot double-count it.
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, event, error));
+    BOOST_CHECK_EQUAL(ledger.events.size(), 1U);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().dd_income.value, 25);
+
+    // A delayed pre-confirmation snapshot is an idempotent no-op. It must not
+    // roll a newer confirmed event back to pending or remove its daily total.
+    ProviderFinanceEvent stale{event};
+    stale.state = ProviderFinanceEventState::PENDING;
+    stale.confirmed_at = 0;
+    stale.updated_at = 150;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, stale, error));
+    BOOST_CHECK(ledger.events.front().state ==
+                ProviderFinanceEventState::CONFIRMED);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().dd_income.value, 25);
+
+    ProviderFinanceLedger duplicate{ledger};
+    duplicate.events.push_back(duplicate.events.front());
+    BOOST_CHECK(!ValidateProviderFinanceLedger(duplicate, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DUPLICATE_FINANCE_EVENT");
+
+    ProviderFinanceLedger stale_ledger_time{ledger};
+    stale_ledger_time.updated_at = 199;
+    BOOST_CHECK(!ValidateProviderFinanceLedger(stale_ledger_time, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_FINANCE_LEDGER_TIME");
+
+    // A reorg moves the same event back to pending and removes it from the
+    // confirmed result until it is included again.
+    event.state = ProviderFinanceEventState::PENDING;
+    event.confirmed_at = 0;
+    event.updated_at = 300;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, event, error));
+    BOOST_CHECK(ledger.daily_totals.empty());
+    BOOST_REQUIRE(ValidateProviderFinanceLedger(ledger, error));
+
+    event.state = ProviderFinanceEventState::CONFIRMED;
+    event.confirmed_at = 400;
+    event.updated_at = 400;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, event, error));
+    BOOST_REQUIRE_EQUAL(ledger.daily_totals.size(), 1U);
+    BOOST_CHECK_EQUAL(ledger.daily_totals.front().dd_income.value, 25);
+
+    ProviderFinanceEvent conflict{event};
+    conflict.dd_income = DDCents{26};
+    BOOST_CHECK(!UpsertProviderFinanceEvent(ledger, conflict, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_EVENT_CONFLICT");
+    BOOST_CHECK_EQUAL(ledger.events.front().dd_income.value, 25);
+}
+
+BOOST_AUTO_TEST_CASE(provider_finance_totals_keep_models_and_capital_separate)
+{
+    ProviderFinanceLedger ledger;
+    ledger.genesis_hash = uint256S("11");
+    ledger.provider_id = uint256S("12");
+    ledger.history_complete_from = 100;
+    ledger.updated_at = 100;
+
+    const auto add_event = [&](uint64_t id,
+                               ProviderFinanceEventKind kind,
+                               FundingModel model,
+                               SponsorshipScope scope,
+                               int64_t income,
+                               int64_t cost) {
+        ProviderFinanceEvent event;
+        event.event_id = uint256S(strprintf(
+            "%064llx", static_cast<unsigned long long>(id)));
+        event.genesis_hash = ledger.genesis_hash;
+        event.provider_id = ledger.provider_id;
+        event.kind = kind;
+        event.state = ProviderFinanceEventState::CONFIRMED;
+        event.funding_model = model;
+        event.sponsorship_scope = scope;
+        event.transaction_id = uint256S(strprintf(
+            "%064llx", static_cast<unsigned long long>(id + 100)));
+        event.dd_income = DDCents{income};
+        event.dgb_cost = DGBSatoshis{cost};
+        event.created_at = 100 + id;
+        event.confirmed_at = 200 + id;
+        event.updated_at = 200 + id;
+        std::string error;
+        return UpsertProviderFinanceEvent(ledger, event, error);
+    };
+
+    BOOST_REQUIRE(add_event(1, ProviderFinanceEventKind::TRANSFER,
+                            FundingModel::USER_PAID,
+                            SponsorshipScope::PUBLIC, 30, 5));
+    BOOST_REQUIRE(add_event(2, ProviderFinanceEventKind::TRANSFER,
+                            FundingModel::SPONSORED,
+                            SponsorshipScope::PUBLIC, 0, 7));
+    BOOST_REQUIRE(add_event(3, ProviderFinanceEventKind::TRANSFER,
+                            FundingModel::SPONSORED,
+                            SponsorshipScope::RESTRICTED, 0, 11));
+    BOOST_REQUIRE(add_event(4, ProviderFinanceEventKind::POOL_SETUP,
+                            FundingModel::USER_PAID,
+                            SponsorshipScope::PUBLIC, 0, 13));
+
+    std::string error;
+    BOOST_REQUIRE(ValidateProviderFinanceLedger(ledger, error));
+    BOOST_REQUIRE_EQUAL(ledger.daily_totals.size(), 1U);
+    const ProviderFinanceDailyTotals& totals = ledger.daily_totals.front();
+    BOOST_CHECK_EQUAL(totals.dd_income.value, 30);
+    BOOST_CHECK_EQUAL(totals.dgb_cost.value, 36);
+    BOOST_CHECK_EQUAL(totals.successful_transfers, 3U);
+    BOOST_CHECK_EQUAL(totals.user_paid_transfers, 1U);
+    BOOST_CHECK_EQUAL(totals.public_sponsored_transfers, 1U);
+    BOOST_CHECK_EQUAL(totals.restricted_sponsored_transfers, 1U);
+    BOOST_CHECK_EQUAL(totals.maintenance_transactions, 1U);
+
+    // Pool principal never appears in finance events. Only the actual native
+    // transaction cost above contributes to the provider result.
+    const ProviderPoolEntry capital{
+        PoolEntry(50, PoolPurpose::OPERATIONAL, PoolAsset::DGB, 5000000)};
+    BOOST_CHECK_EQUAL(capital.dgb_value.value, 5000000);
+    BOOST_CHECK_EQUAL(totals.dgb_cost.value, 36);
+}
+
+BOOST_AUTO_TEST_CASE(provider_backup_status_requires_a_fresh_acknowledgement)
+{
+    ProviderBackupStatus status;
+    status.genesis_hash = uint256S("20");
+    status.provider_id = uint256S("21");
+    status.identity_created_at = 100;
+    status.reminder_updated_at = 100;
+
+    std::string error;
+    BOOST_REQUIRE(ValidateProviderBackupStatus(status, error));
+    BOOST_CHECK(ProviderBackupRequired(status));
+
+    status.last_successful_backup_at = 100;
+    BOOST_CHECK(!ProviderBackupRequired(status));
+
+    // A material configuration change advances the reminder and makes an old
+    // backup insufficient without ever retaining its filesystem path.
+    status.reminder_updated_at = 200;
+    BOOST_REQUIRE(ValidateProviderBackupStatus(status, error));
+    BOOST_CHECK(ProviderBackupRequired(status));
+    status.external_backup_acknowledged_at = 200;
+    BOOST_CHECK(!ProviderBackupRequired(status));
+
+    ProviderBackupStatus wrong_identity{status};
+    wrong_identity.provider_id.SetNull();
+    BOOST_CHECK(!ValidateProviderBackupStatus(wrong_identity, error));
+    ProviderBackupStatus wrong_chain{status};
+    wrong_chain.genesis_hash.SetNull();
+    BOOST_CHECK(!ValidateProviderBackupStatus(wrong_chain, error));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

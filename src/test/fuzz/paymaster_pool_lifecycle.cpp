@@ -167,7 +167,7 @@ FUZZ_TARGET(paymaster_pool_lifecycle)
     int64_t now{1000};
 
     while (provider.remaining_bytes() > 0) {
-        const uint8_t command = provider.ConsumeIntegralInRange<uint8_t>(0, 11);
+        const uint8_t command = provider.ConsumeIntegralInRange<uint8_t>(0, 14);
         const size_t index = provider.ConsumeIntegralInRange<size_t>(
             0, pool.size() - 1);
         ProviderPoolEntry& entry = pool[index];
@@ -287,6 +287,52 @@ FUZZ_TARGET(paymaster_pool_lifecycle)
             // releases its target capacity for one bounded replacement.
             entry.state = PoolEntryState::INVALIDATED;
             entry.reservation_id.SetNull();
+        } else if (command == 12 && !ledger.records.empty()) {
+            const size_t record_index =
+                provider.ConsumeIntegralInRange<size_t>(
+                    0, ledger.records.size() - 1);
+            const ProviderMaintenanceRecord before_record{
+                ledger.records[record_index]};
+            const int64_t actual_fee =
+                provider.ConsumeIntegralInRange<int64_t>(
+                    0, before_record.maximum_fee.value + 1);
+            const uint256 transaction_id{uint256S(strprintf(
+                "%x", ++nonce))};
+            std::string error;
+            const uint256 before{ObjectHash(ledger)};
+            const bool spent = SpendProviderMaintenanceBudget(
+                ledger, before_record.operation_id, transaction_id,
+                DGBSatoshis{actual_fee}, now, error);
+            if (!spent) {
+                // Wrong state and over-ceiling actual fees fail atomically.
+                assert(ObjectHash(ledger) == before);
+            } else {
+                const auto& updated = ledger.records[record_index];
+                assert(updated.state == ProviderMaintenanceState::BROADCAST ||
+                       updated.state == ProviderMaintenanceState::CONFIRMED);
+                assert(updated.actual_fee.value <= updated.maximum_fee.value);
+                assert(!updated.transaction_id.IsNull());
+            }
+        } else if (command == 13 && !ledger.records.empty()) {
+            ProviderMaintenanceRecord& record = ledger.records[
+                provider.ConsumeIntegralInRange<size_t>(
+                    0, ledger.records.size() - 1)];
+            if (record.state == ProviderMaintenanceState::BROADCAST) {
+                // Model chain reconciliation after the maintenance
+                // transaction receives its required confirmation.
+                record.state = ProviderMaintenanceState::CONFIRMED;
+                record.updated_at = std::max(record.updated_at, now);
+            }
+        } else if (command == 14 && !ledger.records.empty()) {
+            ProviderMaintenanceRecord& record = ledger.records[
+                provider.ConsumeIntegralInRange<size_t>(
+                    0, ledger.records.size() - 1)];
+            if (record.state == ProviderMaintenanceState::CONFIRMED) {
+                // A reorg restores the unconfirmed liability without
+                // changing its transaction or actual-fee binding.
+                record.state = ProviderMaintenanceState::BROADCAST;
+                record.updated_at = std::max(record.updated_at, now);
+            }
         }
 
         AssertPoolInvariants(pool);

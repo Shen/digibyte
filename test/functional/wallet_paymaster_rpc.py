@@ -10,6 +10,7 @@ idempotency, redacted reservation output, and atomic release semantics.
 """
 
 import base64
+import time
 
 from test_framework.paymaster import (
     PaymasterFunctionalHarness,
@@ -327,7 +328,9 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             self.nodes[0], provider, client, recipient_wallet)
         assert_snapshot_equal(before_preview, after_preview)
 
-        provider.setpaymasterliquiditypolicy(default_liquidity_policy(True))
+        release_policy = default_liquidity_policy(True)
+        release_policy["target_operational_carriers"] = 2
+        provider.setpaymasterliquiditypolicy(release_policy)
         assert_raises_rpc_error(
             -4, "PAYMASTER_CARRIER_WITHDRAWAL_PLAN_CHANGED",
             provider.withdrawpaymastercarrier,
@@ -343,7 +346,247 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             "plan_id": release_preview["plan_id"],
         })
         assert_equal(released["executed"], True)
+        assert_equal(released["operational_carrier_target"], 1)
+
+        # Earlier transaction contract cases may also consume the operational
+        # DGB slot. Restore that independent asset while one valid carrier is
+        # still present, so the automatic scenario below has exactly one
+        # missing carrier and cannot legitimately choose DGB maintenance.
+        restored_dgb = harness.provider_cli.preparepaymasterpool({
+            "admission_dgb_slots": 3,
+            "operational_dgb_slots": 1,
+            "admission_carrier_slots": 3,
+            "operational_carrier_slots": 1,
+            "execute": True,
+        })
+        if restored_dgb["executed"]:
+            self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
+            self.sync_blocks()
+
+        # Empty the operational-carrier target deliberately.  The wallet has
+        # two independently prepared carriers at this point; leaving either
+        # one available would make a later target of one already satisfied and
+        # would exercise DGB replenishment instead of carrier replenishment.
+        remaining_carrier = next(
+            entry for entry in provider.getpaymasterpoolinfo()["pool"]
+            if entry["purpose"] == "operational" and
+            entry["asset"] == "dd_carrier" and
+            entry["state"] == "available")
+        final_release_preview = provider.withdrawpaymastercarrier({
+            "mode": "release_slot", "txid": remaining_carrier["txid"],
+            "vout": remaining_carrier["vout"],
+        })
+        released = provider.withdrawpaymastercarrier({
+            "mode": "release_slot", "execute": True,
+            "plan_id": final_release_preview["plan_id"],
+        })
+        assert_equal(released["executed"], True)
         assert_equal(released["operational_carrier_target"], 0)
+
+        self.log.info(
+            "A released final carrier is a deliberate stopped target, not an automatic repair")
+        provider.setpaymasterruntimesettings({
+            "operation_mode": "automatic",
+            "autostart": False,
+        })
+        released_liquidity = provider.getpaymasterliquiditystatus()
+        assert_equal(
+            released_liquidity["targets_satisfy_provider_policy"], False)
+        assert_equal(
+            released_liquidity["maintenance_state"],
+            "waiting_for_target_configuration")
+        released_info = provider.getpaymasterinfo()
+        assert_equal(released_info["ready"], False)
+        assert (
+            "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" in
+            released_info["readiness_errors"])
+        refused_start = provider.startpaymaster()
+        assert_equal(refused_start["running"], False)
+        assert_equal(refused_start["ready"], False)
+        assert (
+            "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" in
+            refused_start["readiness_errors"])
+
+        def carrier_policy(*, automatic=True, approved=True,
+                           per_transaction=200_000_000,
+                           per_hour=500_000_000,
+                           per_day=1_000_000_000):
+            """Return one explicit operational-carrier recovery policy."""
+            policy = default_liquidity_policy(carriers=True)
+            policy.update({
+                "automatic_replenishment": automatic,
+                "paid_maintenance_approved": approved,
+                "maximum_maintenance_fee_per_transaction_satoshis":
+                    per_transaction,
+                "maximum_maintenance_fee_per_hour_satoshis": per_hour,
+                "maximum_maintenance_fee_per_day_satoshis": per_day,
+            })
+            return policy
+
+        def release_operational_carrier():
+            """Release exactly one confirmed operational carrier and target."""
+            entry = next(
+                candidate
+                for candidate in provider.getpaymasterpoolinfo()["pool"]
+                if candidate["purpose"] == "operational" and
+                candidate["asset"] == "dd_carrier" and
+                candidate["state"] == "available")
+            release = provider.withdrawpaymastercarrier({
+                "mode": "release_slot",
+                "txid": entry["txid"],
+                "vout": entry["vout"],
+            })
+            result = provider.withdrawpaymastercarrier({
+                "mode": "release_slot",
+                "execute": True,
+                "plan_id": release["plan_id"],
+            })
+            assert_equal(result["executed"], True)
+            assert_equal(result["operational_carrier_target"], 0)
+            return entry
+
+        self.log.info(
+            "Automatic carrier maintenance respects disabled and approval gates")
+        mempool_before_maintenance = set(self.nodes[0].getrawmempool())
+        provider.setpaymasterliquiditypolicy(
+            carrier_policy(automatic=False, approved=True))
+        disabled_start = provider.startpaymaster()
+        assert_equal(disabled_start["running"], False)
+        assert_equal(disabled_start["ready"], False)
+        assert (
+            "PAYMASTER_OPERATIONAL_SLOT_MISSING" in
+            disabled_start["readiness_errors"])
+        assert_equal(set(self.nodes[0].getrawmempool()),
+                     mempool_before_maintenance)
+
+        provider.setpaymasterliquiditypolicy(
+            carrier_policy(automatic=True, approved=False))
+        unapproved_start = provider.startpaymaster()
+        assert_equal(unapproved_start["running"], True)
+        assert_equal(unapproved_start["ready"], False)
+        assert_equal(unapproved_start["service_state"],
+                     "waiting_for_maintenance_approval")
+        self.wait_until(
+            lambda: provider.getpaymasterinfo()["service_state"] ==
+            "waiting_for_maintenance_approval")
+        assert_equal(
+            provider.getpaymasterliquiditystatus()["maintenance_state"],
+            "waiting_for_maintenance_approval")
+        assert_equal(set(self.nodes[0].getrawmempool()),
+                     mempool_before_maintenance)
+        assert_equal(provider.stoppaymaster()["running"], False)
+
+        self.log.info(
+            "Automatic carrier maintenance creates one durable replacement")
+        provider.setpaymasterliquiditypolicy(carrier_policy())
+        maintenance_start = provider.startpaymaster()
+        assert_equal(maintenance_start["running"], True)
+        assert_equal(maintenance_start["ready"], False)
+
+        maintenance_txids = set()
+
+        def one_carrier_maintenance_transaction():
+            nonlocal maintenance_txids
+            maintenance_txids = (
+                set(self.nodes[0].getrawmempool()) -
+                mempool_before_maintenance)
+            return len(maintenance_txids) == 1
+
+        self.wait_until(one_carrier_maintenance_transaction)
+        maintenance_txid = next(iter(maintenance_txids))
+        maintenance_entries = [
+            entry for entry in provider.getpaymasterpoolinfo()["pool"]
+            if entry["txid"] == maintenance_txid
+        ]
+        assert_equal(
+            [(entry["purpose"], entry["asset"], entry["state"],
+              entry["dd_cents"]) for entry in maintenance_entries],
+            [("operational", "dd_carrier", "pending_successor", 100)])
+        pending_liquidity = provider.getpaymasterliquiditystatus()
+        assert_equal(pending_liquidity["operational_carriers"]["ready"], 0)
+        assert_equal(pending_liquidity["operational_carriers"]["pending"], 1)
+        assert_equal(pending_liquidity["operational_carriers"]["missing"], 0)
+        assert_equal(pending_liquidity["maintenance_state"],
+                     "waiting_for_liquidity_confirmation")
+
+        # Pending successors count toward the target. Multiple scheduler ticks
+        # must neither spend another ordinary DD input nor reserve another
+        # maintenance budget while the first transaction awaits confirmation.
+        duplicate_check_at = time.monotonic() + 2
+        self.wait_until(lambda: time.monotonic() >= duplicate_check_at)
+        assert_equal(
+            set(self.nodes[0].getrawmempool()) - mempool_before_maintenance,
+            maintenance_txids)
+
+        self.log.info(
+            "Pending carrier maintenance survives restart without duplication")
+        self.restart_node(0, paymaster_node_args(provider_node=0))
+        self.connect_nodes(0, 1)
+        self.sync_blocks()
+        provider = self.nodes[0].get_wallet_rpc("provider")
+        harness.provider_node = self.nodes[0]
+        harness.provider = provider
+        harness.provider_cli = self.nodes[0].cli("-rpcwallet=provider")
+        restarted_start = provider.startpaymaster()
+        assert_equal(restarted_start["running"], True)
+        self.wait_until(
+            lambda: provider.getpaymasterinfo()["service_state"] ==
+            "waiting_for_liquidity_confirmation")
+        assert_equal(
+            set(self.nodes[0].getrawmempool()) - mempool_before_maintenance,
+            maintenance_txids)
+
+        self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
+        self.sync_blocks()
+
+        def carrier_maintenance_confirmed():
+            status = provider.getpaymasterliquiditystatus()
+            return (
+                status["operational_carriers"]["ready"] == 1 and
+                status["operational_carriers"]["pending"] == 0 and
+                status["operational_carriers"]["missing"] == 0 and
+                provider.getpaymasterinfo()["service_state"] == "active")
+
+        self.wait_until(carrier_maintenance_confirmed)
+        confirmed_carriers = [
+            entry for entry in provider.getpaymasterpoolinfo()["pool"]
+            if entry["txid"] in maintenance_txids and
+            entry["purpose"] == "operational" and
+            entry["asset"] == "dd_carrier" and
+            entry["state"] == "available" and
+            entry["dd_cents"] == 100
+        ]
+        assert_equal(len(confirmed_carriers), 1)
+
+        self.log.info(
+            "Rolling maintenance budget blocks a second paid replacement")
+        assert_equal(provider.stoppaymaster()["running"], False)
+        release_operational_carrier()
+        provider.setpaymasterliquiditypolicy(carrier_policy(
+            per_transaction=200_000_000,
+            per_hour=200_000_000,
+            per_day=200_000_000))
+        budget_mempool = set(self.nodes[0].getrawmempool())
+        budget_start = provider.startpaymaster()
+        assert_equal(budget_start["running"], True)
+
+        def maintenance_budget_exhausted():
+            info = provider.getpaymasterinfo()
+            return (
+                info["service_state"] ==
+                "waiting_for_maintenance_approval")
+
+        self.wait_until(maintenance_budget_exhausted)
+        assert_equal(set(self.nodes[0].getrawmempool()), budget_mempool)
+        exhausted_liquidity = provider.getpaymasterliquiditystatus()
+        assert_equal(exhausted_liquidity["operational_carriers"]["ready"], 0)
+        assert_equal(exhausted_liquidity["operational_carriers"]["pending"], 0)
+        assert_equal(exhausted_liquidity["operational_carriers"]["missing"], 1)
+        assert_equal(
+            exhausted_liquidity["maintenance_fee_spent_last_hour_satoshis"] >
+            0,
+            True)
+        assert_equal(provider.stoppaymaster()["running"], False)
 
         self.log.info("Reputation listing and clearing have deterministic contracts")
         records = client.getpaymasterreputation()

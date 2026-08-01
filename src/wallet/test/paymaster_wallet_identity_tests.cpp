@@ -6,6 +6,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chainparams.h>
 #include <hash.h>
 #include <key.h>
 #include <paymaster/directory.h>
@@ -241,6 +242,189 @@ BOOST_AUTO_TEST_CASE(descriptor_wallet_identity_uses_untweaked_bip86_key)
     BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Ignored replacement", 101, replay, error));
     BOOST_CHECK_EQUAL(replay.provider_id, identity.provider_id);
     BOOST_CHECK_EQUAL(replay.display_name, identity.display_name);
+}
+
+BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
+{
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(
+        m_wallet, "Finance Provider", 100, identity, error));
+
+    ProviderFinanceLedger finance;
+    ProviderBackupStatus backup_status;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(finance));
+        BOOST_REQUIRE(batch.ReadPaymasterBackupStatus(backup_status));
+    }
+    BOOST_CHECK_EQUAL(finance.provider_id, identity.provider_id);
+    BOOST_CHECK_EQUAL(finance.genesis_hash, Params().GenesisBlock().GetHash());
+    BOOST_CHECK_EQUAL(finance.history_complete_from, 100);
+    BOOST_CHECK(finance.events.empty());
+    BOOST_CHECK_EQUAL(backup_status.genesis_hash,
+                      Params().GenesisBlock().GetHash());
+    BOOST_CHECK_EQUAL(backup_status.provider_id, identity.provider_id);
+    BOOST_CHECK(ProviderBackupRequired(backup_status));
+
+    ProviderFinanceEvent event;
+    event.event_id = uint256S("31");
+    event.genesis_hash = finance.genesis_hash;
+    event.provider_id = identity.provider_id;
+    event.kind = ProviderFinanceEventKind::TRANSFER;
+    event.state = ProviderFinanceEventState::CONFIRMED;
+    event.funding_model = FundingModel::USER_PAID;
+    event.transaction_id = uint256S("32");
+    event.dd_income = DDCents{3};
+    event.dgb_cost = DGBSatoshis{7};
+    event.created_at = 101;
+    event.confirmed_at = 102;
+    event.updated_at = 102;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(finance, event, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterFinanceLedger(finance));
+
+        // Store representative operator configuration and pool state before
+        // taking the database snapshot. This proves that a full-wallet copy
+        // preserves more than the public provider id and accounting totals.
+        ProviderPolicy policy;
+        policy.funding_models = FUNDING_MODEL_USER_PAID;
+        policy.fee_rate_bps = 40;
+        policy.min_payment = DDCents{100};
+        policy.max_payment = DDCents{100000};
+        policy.maximum_network_fee = DGBSatoshis{1000};
+        BOOST_REQUIRE(batch.WritePaymasterPolicy(policy));
+        ProviderSettings settings;
+        settings.enabled = true;
+        settings.policy_hash = GetProviderPolicyHash(policy);
+        settings.updated_at = 103;
+        BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+        FundingSafetyLimits limits;
+        limits.maximum_network_fee_per_transaction = DGBSatoshis{1000};
+        limits.maximum_reserved_network_fee = DGBSatoshis{2000};
+        limits.maximum_network_fee_per_hour = DGBSatoshis{5000};
+        limits.maximum_network_fee_per_day = DGBSatoshis{10000};
+        limits.maximum_completed_per_hour = 5;
+        limits.maximum_completed_per_day = 25;
+        ProviderSafetyPolicy safety;
+        safety.user_paid = limits;
+        safety.maximum_active_quotes_total = 16;
+        safety.maximum_active_quotes_per_netgroup = 4;
+        safety.maximum_active_quotes_per_recipient = 2;
+        safety.maximum_quote_requests_per_netgroup_per_minute = 10;
+        safety.updated_at = 103;
+        BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(safety));
+        ProviderLiquidityPolicy liquidity;
+        liquidity.target_admission_carriers = 3;
+        liquidity.target_operational_carriers = 1;
+        liquidity.updated_at = 103;
+        BOOST_REQUIRE(batch.WritePaymasterLiquidityPolicy(liquidity));
+        ProviderPoolEntry pool_entry;
+        pool_entry.outpoint = COutPoint{uint256S("33"), 0};
+        pool_entry.purpose = PoolPurpose::ADMISSION;
+        pool_entry.asset = PoolAsset::DGB;
+        pool_entry.script_pub_key = identity.identity_script;
+        pool_entry.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        pool_entry.confirmation_height = 1;
+        pool_entry.updated_at = 103;
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool({pool_entry}));
+    }
+
+    // A full wallet-database copy carries identity and accounting records. It
+    // is taken before the source marks backup completion, so restoring it will
+    // deliberately request a fresh backup on the new system.
+    auto backup_snapshot = DuplicateMockDatabase(m_wallet.GetDatabase());
+    WalletBatch backup_batch{*backup_snapshot};
+    ProviderIdentityRecord restored_identity;
+    ProviderFinanceLedger restored_finance;
+    ProviderBackupStatus restored_backup;
+    ProviderPolicy restored_policy;
+    ProviderSettings restored_settings;
+    ProviderSafetyPolicy restored_safety;
+    ProviderLiquidityPolicy restored_liquidity;
+    std::vector<ProviderPoolEntry> restored_pool;
+    BOOST_REQUIRE(backup_batch.ReadPaymasterIdentity(restored_identity));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterFinanceLedger(restored_finance));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterBackupStatus(restored_backup));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterPolicy(restored_policy));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterSettings(restored_settings));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterProviderSafetyPolicy(
+        restored_safety));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterLiquidityPolicy(
+        restored_liquidity));
+    BOOST_REQUIRE(backup_batch.ReadPaymasterProviderPool(restored_pool));
+    BOOST_CHECK_EQUAL(restored_identity.provider_id, identity.provider_id);
+    BOOST_CHECK_EQUAL(restored_backup.genesis_hash,
+                      Params().GenesisBlock().GetHash());
+    BOOST_REQUIRE_EQUAL(restored_finance.events.size(), 1U);
+    BOOST_CHECK_EQUAL(restored_finance.events.front().dd_income.value, 3);
+    BOOST_CHECK_EQUAL(restored_settings.policy_hash,
+                      GetProviderPolicyHash(restored_policy));
+    BOOST_CHECK(restored_settings.enabled);
+    BOOST_CHECK_EQUAL(
+        restored_safety.user_paid.maximum_network_fee_per_transaction.value,
+        1000);
+    BOOST_CHECK_EQUAL(restored_liquidity.target_operational_carriers, 1);
+    BOOST_REQUIRE_EQUAL(restored_pool.size(), 1U);
+    BOOST_CHECK(restored_pool.front().outpoint == COutPoint(uint256S("33"), 0));
+    BOOST_CHECK(ProviderBackupRequired(restored_backup));
+
+    BOOST_REQUIRE(MarkPaymasterProviderBackupCompleted(m_wallet, 103, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 103, error));
+    BOOST_CHECK(!ProviderBackupRequired(backup_status));
+
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
+    policy.fee_rate_bps = 50;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{100000};
+    policy.maximum_network_fee = DGBSatoshis{1000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(m_wallet, policy, 104, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 104, error));
+    BOOST_CHECK_EQUAL(backup_status.reminder_updated_at, 104);
+    BOOST_CHECK(ProviderBackupRequired(backup_status));
+
+    // Even a material change recorded in the same timestamp second as a
+    // completed backup must request a new backup.
+    BOOST_REQUIRE(MarkPaymasterProviderBackupCompleted(m_wallet, 104, error));
+    policy.fee_rate_bps = 60;
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(m_wallet, policy, 104, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 104, error));
+    BOOST_CHECK_EQUAL(backup_status.reminder_updated_at, 105);
+    BOOST_CHECK(ProviderBackupRequired(backup_status));
+
+    BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(
+        m_wallet, 105, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 105, error));
+    BOOST_CHECK(!ProviderBackupRequired(backup_status));
+    BOOST_CHECK_EQUAL(backup_status.external_backup_acknowledged_at, 105);
+
+    BOOST_REQUIRE(SetPaymasterProviderRuntimeSettings(
+        m_wallet, ProviderOperationMode::MANUAL, true, 106, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 106, error));
+    BOOST_CHECK_EQUAL(backup_status.reminder_updated_at, 106);
+    BOOST_CHECK(ProviderBackupRequired(backup_status));
+
+    BOOST_REQUIRE(MarkPaymasterProviderBackupCompleted(m_wallet, 106, error));
+    BOOST_REQUIRE(SetPaymasterProviderEnabled(m_wallet, false, 107, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(
+        m_wallet, backup_status, 107, error));
+    BOOST_CHECK_EQUAL(backup_status.reminder_updated_at, 107);
+    BOOST_CHECK(ProviderBackupRequired(backup_status));
 }
 
 BOOST_AUTO_TEST_CASE(watch_only_and_external_signer_wallets_are_rejected)

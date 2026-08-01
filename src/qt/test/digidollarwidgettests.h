@@ -49,13 +49,17 @@ private Q_SLOTS:
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();
     void digiDollarAmountLabelsUseCurrencyPrefix();
     void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
+    void paymasterLiquidityPolicySavePersistsVisibleValues();
     void paymasterLiquidityMaintenanceStatesAreReadable();
     void paymasterExternalReadinessIsSeparatedFromConfiguration();
     void paymasterCarrierWithdrawalActionsFailClosed();
+    void paymasterCarrierWithdrawalPreviewsArePlanBound();
     void paymasterSafetyControlsDefaultFailClosed();
     void paymasterSafetyPolicyDisplaysFiniteDisabledSemantics();
     void paymasterInjectedRpcCoversConfigurationWorkflows();
     void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
+    void paymasterManualActivityUsesExpectedRpcAndReadableStates();
+    void paymasterFinancesAndBackupWorkflow();
     void paymasterConfirmationGuardDetectsMaterialChanges();
     void paymasterRecoveryConfirmationGuardDetectsMaterialChanges();
     void overviewPrivacyMaskHidesAmountUnits();

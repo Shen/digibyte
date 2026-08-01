@@ -589,13 +589,23 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 assert_equal(len(unselected_reserved), 0)
 
             authorization = {}
+            approved_exact_authorization = {}
             approval_bypass_checked = False
 
             def authorize_and_submit():
-                nonlocal authorization, approval_bypass_checked
+                nonlocal authorization, approved_exact_authorization
+                nonlocal approval_bypass_checked
                 authorization = resume_client_send()
                 if authorization.get("authorization_required", False):
                     commitment = authorization["authorization_commitment"]
+                    approved_exact_authorization = {
+                        field: authorization[field]
+                        for field in (
+                            "provider_id", "offer_id", "policy_hash",
+                            "funding_model", "payment_cents",
+                            "service_fee_cents", "user_total_cents",
+                            "authorization_commitment")
+                    }
                     assert_equal(authorization["authorization_accepted"], False)
                     if not approval_bypass_checked:
                         # The low-level signer is the final boundary too: a
@@ -706,6 +716,11 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             assert_equal(client_result["result_status"], "broadcast_attempted")
             assert_equal(client_result["session_state"], "MEMPOOL")
             assert_equal(client_result["attempt_state"], "MEMPOOL")
+            # The terminal response must echo the exact manifest approved by
+            # the client. Qt must never have to infer a fee or funding model
+            # from a stale offer preview after the transaction has succeeded.
+            for field, expected in approved_exact_authorization.items():
+                assert_equal(client_result[field], expected)
             assert final_txid in node.getrawmempool()
             return final_txid
 
@@ -873,6 +888,108 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         if first_maintenance_txids:
             assert_equal(first_liquidity[
                 "maintenance_fee_spent_last_day_satoshis"] > 0, True)
+
+        self.log.info("Verify provider finance accounting and backup metadata")
+        finance = wallet.getpaymasterfinancestatus({
+            "period": "all",
+            "include_events": True,
+            "limit": 1,
+        })
+        assert_equal(finance["provider_id"], identity["provider_id"])
+        assert_equal(finance["service_fee_income_cents"], 3)
+        assert_equal(finance["successful_transfers"], 1)
+        assert_equal(finance["user_paid_transfers"], 1)
+        assert_equal(finance["public_sponsored_transfers"], 0)
+        assert_equal(finance["restricted_sponsored_transfers"], 0)
+        assert_equal(finance["model_breakdown"]["user_paid"]
+                     ["successful_transfers"], 1)
+        assert_equal(finance["model_breakdown"]["user_paid"]
+                     ["service_fee_income_cents"], 3)
+        assert_equal(finance["model_breakdown"]["user_paid"]
+                     ["dgb_operating_cost_satoshis"] > 0, True)
+        assert_equal(finance["dgb_operating_cost_satoshis"] >= 10000000,
+                     True)
+        assert_equal(finance["period_summaries"]["all"]
+                     ["service_fee_income_cents"], 3)
+        assert_equal(finance["period_summaries"]["all"]
+                     ["successful_transfers"], 1)
+        assert_equal(finance["pool_capital"]["carrier_base_cents"], 400)
+        assert_equal(finance["pool_capital"]["carrier_earned_cents"], 3)
+        assert_equal(finance["pool_capital"]
+                     ["carrier_withdrawable_cents"], 3)
+        assert_equal(finance["backup_required"], True)
+        assert_equal(len(finance["events"]), 1)
+        assert "next_cursor" in finance
+        assert_equal(len(finance["daily_totals"]) >= 1, True)
+        assert_equal(finance["daily_totals"][0]
+                     ["service_fee_income_cents"] >= 3, True)
+
+        next_finance_page = wallet.getpaymasterfinancestatus({
+            "period": "all",
+            "include_events": True,
+            "limit": 1,
+            "cursor": finance["next_cursor"],
+        })
+        assert_equal(len(next_finance_page["events"]), 1)
+        assert (next_finance_page["events"][0]["event_id"] !=
+                finance["events"][0]["event_id"])
+        assert_raises_rpc_error(
+            -8, "PAYMASTER_INVALID_FINANCE_QUERY",
+            wallet.getpaymasterfinancestatus,
+            {"period": "year", "include_events": False},
+        )
+        assert_raises_rpc_error(
+            -8, "PAYMASTER_INVALID_FINANCE_CURSOR",
+            wallet.getpaymasterfinancestatus,
+            {"period": "all", "include_events": True,
+             "cursor": "00" * 32},
+        )
+        assert_raises_rpc_error(
+            -8, "PAYMASTER_EXTERNAL_BACKUP_NOT_CONFIRMED",
+            wallet.acknowledgepaymasterproviderbackup,
+            {"external_backup": False},
+        )
+
+        self.log.info(
+            "Restore a full provider-wallet backup with identity, pool and finance history")
+        backup_file = node.datadir_path / "paymaster_provider_finance.bak"
+        wallet.backupwallet(backup_file)
+        assert_equal(wallet.getpaymasterinfo()["backup_status"]["required"],
+                     False)
+        restored_wallet_name = "paymaster_finance_restored"
+        node.restorewallet(restored_wallet_name, backup_file)
+        try:
+            restored = node.get_wallet_rpc(restored_wallet_name)
+            restored_info = restored.getpaymasterinfo()
+            restored_finance = restored.getpaymasterfinancestatus({
+                "period": "all",
+                "include_events": True,
+                "limit": 10000,
+            })
+            restored_pool = restored.getpaymasterpoolinfo()["pool"]
+            assert_equal(restored_info["provider_id"],
+                         identity["provider_id"])
+            assert_equal(restored_info["enabled"], True)
+            assert_equal(restored_finance["provider_id"],
+                         identity["provider_id"])
+            assert_equal(restored_finance["service_fee_income_cents"], 3)
+            assert_equal(restored_finance["successful_transfers"], 1)
+            assert_equal(len(restored_pool),
+                         len(wallet.getpaymasterpoolinfo()["pool"]))
+            # The backup image is created before the source wallet records
+            # successful completion. A restored machine therefore receives a
+            # fresh, non-blocking reminder to back up its local provider copy.
+            assert_equal(restored_finance["backup_required"], True)
+        finally:
+            node.unloadwallet(restored_wallet_name)
+
+        acknowledged_backup = wallet.acknowledgepaymasterproviderbackup({
+            "external_backup": True,
+        })
+        assert_equal(acknowledged_backup["acknowledged"], True)
+        assert_equal(acknowledged_backup["backup_required"], False)
+        assert_equal(wallet.getpaymasterinfo()["backup_status"]["required"],
+                     False)
         if self.pre_paymaster_digibyted:
             old_node = self.nodes[2]
             assert final_txid in old_node.getblock(confirmation_block)["tx"]
@@ -1324,6 +1441,22 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         self.sync_blocks()
         assert_equal(client.getbalance(), 0)
         assert_equal(client.getdigidollarbalance()["total"], 0)
+        sponsored_finance = selected_provider.getpaymasterfinancestatus({
+            "period": "all",
+            "include_events": True,
+            "limit": 10000,
+        })
+        sponsored_events = [
+            event for event in sponsored_finance["events"]
+            if event.get("transaction_id") == sponsored_txid
+        ]
+        assert_equal(len(sponsored_events), 1)
+        assert_equal(sponsored_events[0]["kind"], "transfer")
+        assert_equal(sponsored_events[0]["state"], "confirmed")
+        assert_equal(sponsored_events[0]["funding_model"], "sponsored")
+        assert_equal(sponsored_events[0]["sponsorship_scope"], "public")
+        assert_equal(sponsored_events[0]["dd_income_cents"], 0)
+        assert_equal(sponsored_events[0]["dgb_cost_satoshis"], 10000000)
 
         self.log.info(
             "Recover without client DGB through a distinct Capacity-v5 provider")
@@ -1707,6 +1840,22 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(restricted_provider_safety[
             "spent_network_fee_last_day_satoshis"], 10000000)
         assert_equal(restricted_provider_safety["completed_last_day"], 1)
+        restricted_finance = wallet.getpaymasterfinancestatus({
+            "period": "all",
+            "include_events": True,
+            "limit": 10000,
+        })
+        restricted_events = [
+            event for event in restricted_finance["events"]
+            if event.get("transaction_id") == restricted_txid
+        ]
+        assert_equal(len(restricted_events), 1)
+        assert_equal(restricted_events[0]["kind"], "transfer")
+        assert_equal(restricted_events[0]["state"], "confirmed")
+        assert_equal(restricted_events[0]["funding_model"], "sponsored")
+        assert_equal(restricted_events[0]["sponsorship_scope"], "restricted")
+        assert_equal(restricted_events[0]["dd_income_cents"], 0)
+        assert_equal(restricted_events[0]["dgb_cost_satoshis"], 10000000)
 
         self.log.info("Reject reuse of the consumed restricted capability")
         # The recovered 199-cent output cannot fund an exact 100-cent payment:
