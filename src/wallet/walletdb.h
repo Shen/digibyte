@@ -536,6 +536,7 @@ public:
         bool overwrite = true);
     bool ReadPaymasterProviderPool(
         std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
+    bool HasPaymasterProviderPool();
     bool WritePaymasterLiquidityPolicy(
         const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
         bool overwrite = true);
@@ -548,6 +549,18 @@ public:
     bool ReadPaymasterMaintenanceLedger(
         DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
     bool HasPaymasterMaintenanceLedger();
+    bool WritePaymasterFinanceLedger(
+        const DigiDollar::Paymaster::ProviderFinanceLedger& ledger,
+        bool overwrite = true);
+    bool ReadPaymasterFinanceLedger(
+        DigiDollar::Paymaster::ProviderFinanceLedger& ledger);
+    bool HasPaymasterFinanceLedger();
+    bool WritePaymasterBackupStatus(
+        const DigiDollar::Paymaster::ProviderBackupStatus& status,
+        bool overwrite = true);
+    bool ReadPaymasterBackupStatus(
+        DigiDollar::Paymaster::ProviderBackupStatus& status);
+    bool HasPaymasterBackupStatus();
     bool WritePaymasterCarrierWithdrawalPlan(
         const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
         bool overwrite = true);

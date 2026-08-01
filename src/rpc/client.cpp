@@ -330,6 +330,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setpaymastersafetypolicy", 0, "policy" },
     { "setpaymasterclientsafetypolicy", 0, "policy" },
     { "setpaymasterliquiditypolicy", 0, "policy" },
+    { "getpaymasterfinancestatus", 0, "options" },
+    { "acknowledgepaymasterproviderbackup", 0, "options" },
     { "setpaymasterenabled", 0, "enabled" },
     { "setpaymasterruntimesettings", 0, "settings" },
     { "withdrawpaymastercarrier", 0, "options" },

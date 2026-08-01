@@ -329,6 +329,130 @@ struct ProviderIdentityRecord {
     }
 };
 
+/** Economic event recorded by the provider wallet. The ledger deliberately
+ * keeps native DD and DGB amounts separate: pool capital is not income or an
+ * expense, and an optional fiat estimate must always be derived at display
+ * time from the current oracle price. */
+enum class ProviderFinanceEventKind : uint8_t {
+    TRANSFER,
+    POOL_SETUP,
+    LIQUIDITY_REPLENISHMENT,
+    POOL_RETIREMENT,
+    CARRIER_WITHDRAWAL,
+};
+
+enum class ProviderFinanceEventState : uint8_t {
+    PENDING,
+    CONFIRMED,
+    INVALIDATED,
+};
+
+struct ProviderFinanceEvent {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    uint256 event_id;
+    uint256 genesis_hash;
+    PaymasterId provider_id;
+    ProviderFinanceEventKind kind{ProviderFinanceEventKind::TRANSFER};
+    ProviderFinanceEventState state{ProviderFinanceEventState::PENDING};
+    FundingModel funding_model{FundingModel::USER_PAID};
+    SponsorshipScope sponsorship_scope{SponsorshipScope::PUBLIC};
+    uint256 transaction_id;
+    DDCents dd_income;
+    DGBSatoshis dgb_cost;
+    int64_t created_at{0};
+    int64_t confirmed_at{0};
+    int64_t updated_at{0};
+
+    SERIALIZE_METHODS(ProviderFinanceEvent, obj)
+    {
+        READWRITE(
+            obj.version, obj.event_id, obj.genesis_hash, obj.provider_id,
+            Using<EnumByteFormatter<static_cast<uint8_t>(
+                ProviderFinanceEventKind::CARRIER_WITHDRAWAL)>>(obj.kind),
+            Using<EnumByteFormatter<static_cast<uint8_t>(
+                ProviderFinanceEventState::INVALIDATED)>>(obj.state),
+            Using<EnumByteFormatter<static_cast<uint8_t>(
+                FundingModel::SPONSORED)>>(obj.funding_model),
+            Using<EnumByteFormatter<static_cast<uint8_t>(
+                SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),
+            obj.transaction_id, obj.dd_income, obj.dgb_cost,
+            obj.created_at, obj.confirmed_at, obj.updated_at);
+    }
+};
+
+/** UTC-day materialization of confirmed events. These totals are derived
+ * from ProviderFinanceEvent and are rebuilt whenever an event changes, so a
+ * replay or reorg cannot increment an accounting counter twice. */
+struct ProviderFinanceDailyTotals {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    int64_t day_start{0};
+    DDCents dd_income;
+    DGBSatoshis dgb_cost;
+    uint32_t successful_transfers{0};
+    uint32_t user_paid_transfers{0};
+    uint32_t public_sponsored_transfers{0};
+    uint32_t restricted_sponsored_transfers{0};
+    uint32_t maintenance_transactions{0};
+
+    SERIALIZE_METHODS(ProviderFinanceDailyTotals, obj)
+    {
+        READWRITE(obj.version, obj.day_start, obj.dd_income, obj.dgb_cost,
+                  obj.successful_transfers, obj.user_paid_transfers,
+                  obj.public_sponsored_transfers,
+                  obj.restricted_sponsored_transfers,
+                  obj.maintenance_transactions);
+    }
+};
+
+/** Wallet-local accounting authority for exactly one provider identity on
+ * one chain. Ledgers with another identity or genesis are never merged. */
+struct ProviderFinanceLedger {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    uint256 genesis_hash;
+    PaymasterId provider_id;
+    int64_t history_complete_from{0};
+    bool earlier_history_partial{false};
+    int64_t updated_at{0};
+    std::vector<ProviderFinanceEvent> events;
+    std::vector<ProviderFinanceDailyTotals> daily_totals;
+
+    SERIALIZE_METHODS(ProviderFinanceLedger, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id,
+                  obj.history_complete_from, obj.earlier_history_partial,
+                  obj.updated_at, obj.events, obj.daily_totals);
+    }
+};
+
+/** Chain- and provider-bound backup reminder metadata. No path or filename is
+ * retained. A restore from a backup made before last_successful_backup_at
+ * naturally asks for a fresh backup on the restored system. */
+struct ProviderBackupStatus {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    uint256 genesis_hash;
+    PaymasterId provider_id;
+    int64_t identity_created_at{0};
+    int64_t reminder_updated_at{0};
+    int64_t last_successful_backup_at{0};
+    int64_t external_backup_acknowledged_at{0};
+
+    SERIALIZE_METHODS(ProviderBackupStatus, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id,
+                  obj.identity_created_at,
+                  obj.reminder_updated_at, obj.last_successful_backup_at,
+                  obj.external_backup_acknowledged_at);
+    }
+};
+
 /** How a running provider wallet services its bounded direct-message queues.
  * Automatic operation never weakens the provider policy, safety budget, or
  * authorization-manifest checks; it only removes the operator's per-message
@@ -722,6 +846,18 @@ bool ReleaseClientFee(ClientFeeLedger& ledger,
                       int64_t now,
                       std::string& error);
 bool ValidateProviderIdentityRecord(const ProviderIdentityRecord& identity);
+bool ValidateProviderFinanceEvent(const ProviderFinanceEvent& event,
+                                  std::string& error);
+bool ValidateProviderFinanceLedger(const ProviderFinanceLedger& ledger,
+                                   std::string& error);
+bool ValidateProviderBackupStatus(const ProviderBackupStatus& status,
+                                  std::string& error);
+bool RebuildProviderFinanceDailyTotals(ProviderFinanceLedger& ledger,
+                                       std::string& error);
+bool UpsertProviderFinanceEvent(ProviderFinanceLedger& ledger,
+                                const ProviderFinanceEvent& event,
+                                std::string& error);
+bool ProviderBackupRequired(const ProviderBackupStatus& status);
 bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
                                  std::string& error);
 /** States that still dedicate an outpoint to Paymaster operation and must
@@ -729,6 +865,13 @@ bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
 bool IsActiveProviderPoolState(PoolEntryState state);
 bool ValidateProviderLiquidityPolicy(const ProviderLiquidityPolicy& policy,
                                      std::string& error);
+/** Return whether the saved targets can ever satisfy the advertised
+ * provider policy. A USER_PAID offer needs carrier capacity for both
+ * admission proofs and an actual payment; a deliberate zero operational
+ * carrier target therefore keeps that offer configured but not startable. */
+bool ProviderLiquidityTargetsSatisfyPolicy(
+    const ProviderLiquidityPolicy& liquidity_policy,
+    const ProviderPolicy& provider_policy);
 bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                                        std::string& error);
 bool ValidateProviderCarrierWithdrawalPlan(

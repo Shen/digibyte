@@ -10,6 +10,7 @@
 
 #include <wallet/paymasteridentity.h>
 
+#include <chainparams.h>
 #include <key.h>
 #include <paymaster/directory.h>
 #include <script/signingprovider.h>
@@ -18,7 +19,10 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
+#include <algorithm>
+
 namespace wallet {
+using DigiDollar::Paymaster::ProviderBackupStatus;
 using DigiDollar::Paymaster::ProviderIdentityRecord;
 
 bool CheckPaymasterProviderWallet(const CWallet& wallet, std::string& error)
@@ -122,15 +126,120 @@ bool CreatePaymasterIdentity(CWallet& wallet,
         identity.identity_script = script;
         identity.display_name = display_name;
         identity.created_at = now;
-        if (!batch.WritePaymasterIdentity(identity, false)) {
+        ProviderBackupStatus backup_status;
+        backup_status.genesis_hash = Params().GenesisBlock().GetHash();
+        backup_status.provider_id = identity.provider_id;
+        backup_status.identity_created_at = now;
+        backup_status.reminder_updated_at = now;
+        ProviderFinanceLedger finance_ledger;
+        finance_ledger.genesis_hash = Params().GenesisBlock().GetHash();
+        finance_ledger.provider_id = identity.provider_id;
+        finance_ledger.history_complete_from = now;
+        finance_ledger.updated_at = now;
+        std::string ledger_error;
+        if (!RebuildProviderFinanceDailyTotals(finance_ledger, ledger_error)) {
+            identity = {};
+            error = ledger_error;
+            return false;
+        }
+        if (!batch.TxnBegin()) {
+            identity = {};
+            error = "PAYMASTER_IDENTITY_DATABASE_BEGIN";
+            return false;
+        }
+        if (!batch.WritePaymasterIdentity(identity, false) ||
+            !batch.WritePaymasterBackupStatus(backup_status, false) ||
+            !batch.WritePaymasterFinanceLedger(finance_ledger, false)) {
+            batch.TxnAbort();
             identity = {};
             error = "PAYMASTER_IDENTITY_DATABASE_WRITE";
+            return false;
+        }
+        if (!batch.TxnCommit()) {
+            identity = {};
+            error = "PAYMASTER_IDENTITY_DATABASE_COMMIT";
             return false;
         }
         return true;
     }
     error = "PAYMASTER_IDENTITY_KEY_UNAVAILABLE";
     return false;
+}
+
+bool GetPaymasterProviderBackupStatus(const CWallet& wallet,
+                                      ProviderBackupStatus& status,
+                                      int64_t now,
+                                      std::string& error)
+{
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity)) {
+        error = "PAYMASTER_IDENTITY_NOT_FOUND";
+        return false;
+    }
+    if (batch.ReadPaymasterBackupStatus(status)) {
+        if (status.genesis_hash != Params().GenesisBlock().GetHash() ||
+            status.provider_id != identity.provider_id) {
+            error = "PAYMASTER_BACKUP_STATUS_BINDING_MISMATCH";
+            return false;
+        }
+        return true;
+    }
+    if (batch.HasPaymasterBackupStatus()) {
+        error = "PAYMASTER_INVALID_BACKUP_STATUS";
+        return false;
+    }
+    // Wallets created before the reminder feature have no trustworthy proof
+    // of a post-identity backup. Start with a visible, non-blocking reminder.
+    status.genesis_hash = Params().GenesisBlock().GetHash();
+    status.provider_id = identity.provider_id;
+    status.identity_created_at = identity.created_at;
+    status.reminder_updated_at = std::max(identity.created_at, now);
+    if (!batch.WritePaymasterBackupStatus(status, false)) {
+        error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
+        return false;
+    }
+    return true;
+}
+
+bool MarkPaymasterProviderBackupCompleted(const CWallet& wallet,
+                                          int64_t now,
+                                          std::string& error)
+{
+    ProviderBackupStatus status;
+    if (!GetPaymasterProviderBackupStatus(wallet, status, now, error)) {
+        // A wallet without a provider identity has no Paymaster reminder to
+        // update; its ordinary backup remains successful.
+        return error == "PAYMASTER_IDENTITY_NOT_FOUND";
+    }
+    LOCK(wallet.cs_wallet);
+    status.last_successful_backup_at = std::max(
+        status.last_successful_backup_at, now);
+    if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterBackupStatus(status)) {
+        error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool AcknowledgePaymasterProviderExternalBackup(CWallet& wallet,
+                                                int64_t now,
+                                                std::string& error)
+{
+    ProviderBackupStatus status;
+    if (!GetPaymasterProviderBackupStatus(wallet, status, now, error)) return false;
+    LOCK(wallet.cs_wallet);
+    status.external_backup_acknowledged_at = std::max(
+        status.external_backup_acknowledged_at, now);
+    if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterBackupStatus(status)) {
+        error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 } // namespace wallet

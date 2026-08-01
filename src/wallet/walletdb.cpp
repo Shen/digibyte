@@ -108,6 +108,8 @@ const std::string PAYMASTER_PROVIDER_POOL{"pmpool"};
 const std::string PAYMASTER_LIQUIDITY_POLICY{"pmliquidity"};
 const std::string PAYMASTER_MAINTENANCE_LEDGER{"pmmaintenance"};
 const std::string PAYMASTER_CARRIER_WITHDRAWAL{"pmcarrierwithdraw"};
+const std::string PAYMASTER_FINANCE_LEDGER{"pmfinance"};
+const std::string PAYMASTER_BACKUP_STATUS{"pmbackup"};
 const std::string PAYMASTER_ANNOUNCE_SEQ{"pmannounceseq"};
 const std::string PAYMASTER_RESULT{"pmresult"};
 const std::string PAYMASTER_RELIABILITY{"pmreliability"};
@@ -1884,6 +1886,11 @@ bool WalletBatch::ReadPaymasterProviderPool(
     return ValidateProviderPoolEntries(entries, error);
 }
 
+bool WalletBatch::HasPaymasterProviderPool()
+{
+    return m_batch->Exists(DBKeys::PAYMASTER_PROVIDER_POOL);
+}
+
 bool WalletBatch::WritePaymasterLiquidityPolicy(
     const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
     bool overwrite)
@@ -1930,6 +1937,50 @@ bool WalletBatch::ReadPaymasterMaintenanceLedger(
 bool WalletBatch::HasPaymasterMaintenanceLedger()
 {
     return m_batch->Exists(DBKeys::PAYMASTER_MAINTENANCE_LEDGER);
+}
+
+bool WalletBatch::WritePaymasterFinanceLedger(
+    const DigiDollar::Paymaster::ProviderFinanceLedger& ledger,
+    bool overwrite)
+{
+    std::string error;
+    return DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error) &&
+           WriteIC(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger, overwrite);
+}
+
+bool WalletBatch::ReadPaymasterFinanceLedger(
+    DigiDollar::Paymaster::ProviderFinanceLedger& ledger)
+{
+    std::string error;
+    return m_batch->Read(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger) &&
+           DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error);
+}
+
+bool WalletBatch::HasPaymasterFinanceLedger()
+{
+    return m_batch->Exists(DBKeys::PAYMASTER_FINANCE_LEDGER);
+}
+
+bool WalletBatch::WritePaymasterBackupStatus(
+    const DigiDollar::Paymaster::ProviderBackupStatus& status,
+    bool overwrite)
+{
+    std::string error;
+    return DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error) &&
+           WriteIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
+}
+
+bool WalletBatch::ReadPaymasterBackupStatus(
+    DigiDollar::Paymaster::ProviderBackupStatus& status)
+{
+    std::string error;
+    return m_batch->Read(DBKeys::PAYMASTER_BACKUP_STATUS, status) &&
+           DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error);
+}
+
+bool WalletBatch::HasPaymasterBackupStatus()
+{
+    return m_batch->Exists(DBKeys::PAYMASTER_BACKUP_STATUS);
 }
 
 bool WalletBatch::WritePaymasterCarrierWithdrawalPlan(

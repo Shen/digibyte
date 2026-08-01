@@ -33,6 +33,24 @@ bool GetPaymasterIdentityKey(CWallet& wallet,
                              DigiDollar::Paymaster::ProviderIdentityRecord& identity,
                              std::string& error);
 
+/** Return the provider-wallet backup reminder, creating a conservative
+ * reminder for pre-feature identities that do not have metadata yet. */
+bool GetPaymasterProviderBackupStatus(
+    const CWallet& wallet,
+    DigiDollar::Paymaster::ProviderBackupStatus& status,
+    int64_t now,
+    std::string& error);
+
+/** Record a successful full-wallet backup without retaining its path. */
+bool MarkPaymasterProviderBackupCompleted(const CWallet& wallet,
+                                          int64_t now,
+                                          std::string& error);
+
+/** Acknowledge that an operator uses an external full-wallet backup flow. */
+bool AcknowledgePaymasterProviderExternalBackup(CWallet& wallet,
+                                                int64_t now,
+                                                std::string& error);
+
 } // namespace wallet
 
 #endif // DIGIBYTE_WALLET_PAYMASTERIDENTITY_H

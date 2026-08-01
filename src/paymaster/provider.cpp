@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <set>
 
 namespace DigiDollar::Paymaster {
@@ -35,6 +36,7 @@ static constexpr int64_t QUOTE_REQUEST_WINDOW_SECONDS{60};
 static constexpr size_t MAX_BUDGET_LEDGER_ENTRIES{8192};
 static constexpr size_t MAX_QUOTE_REQUEST_EVENTS{8192};
 static constexpr size_t MAX_CAPACITY_ADMISSION_EVENTS{8192};
+static constexpr size_t MAX_PROVIDER_FINANCE_EVENTS{1000000};
 
 bool LimitsDisabled(const FundingSafetyLimits& limits)
 {
@@ -1356,6 +1358,214 @@ bool ValidateProviderIdentityRecord(const ProviderIdentityRecord& identity)
     return identity.identity_script == GetScriptForDestination(builder.GetOutput());
 }
 
+bool ValidateProviderFinanceEvent(const ProviderFinanceEvent& event,
+                                  std::string& error)
+{
+    error.clear();
+    const bool transfer = event.kind == ProviderFinanceEventKind::TRANSFER;
+    if (event.version != ProviderFinanceEvent::CURRENT_VERSION ||
+        event.event_id.IsNull() || event.genesis_hash.IsNull() ||
+        event.provider_id.IsNull() || event.transaction_id.IsNull() ||
+        event.dd_income.value < 0 || event.dgb_cost.value < 0 ||
+        event.dd_income.value > MAX_DD_OUTPUT_CENTS ||
+        !MoneyRange(event.dgb_cost.value) || event.created_at <= 0 ||
+        event.updated_at < event.created_at ||
+        (event.state == ProviderFinanceEventState::CONFIRMED &&
+         (event.confirmed_at < event.created_at ||
+          event.confirmed_at > event.updated_at)) ||
+        (event.state != ProviderFinanceEventState::CONFIRMED &&
+         event.confirmed_at != 0) ||
+        (!transfer && event.dd_income.value != 0) ||
+        (transfer && event.funding_model == FundingModel::SPONSORED &&
+         event.dd_income.value != 0)) {
+        error = "PAYMASTER_INVALID_FINANCE_EVENT";
+        return false;
+    }
+    return true;
+}
+
+bool RebuildProviderFinanceDailyTotals(ProviderFinanceLedger& ledger,
+                                       std::string& error)
+{
+    error.clear();
+    const auto increment = [&](uint32_t& counter) {
+        if (counter == std::numeric_limits<uint32_t>::max()) {
+            error = "PAYMASTER_FINANCE_TOTAL_OVERFLOW";
+            return false;
+        }
+        ++counter;
+        return true;
+    };
+    std::map<int64_t, ProviderFinanceDailyTotals> by_day;
+    std::set<uint256> event_ids;
+    for (const ProviderFinanceEvent& event : ledger.events) {
+        if (!ValidateProviderFinanceEvent(event, error) ||
+            event.genesis_hash != ledger.genesis_hash ||
+            event.provider_id != ledger.provider_id) {
+            if (error.empty()) error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+            return false;
+        }
+        if (!event_ids.insert(event.event_id).second) {
+            error = "PAYMASTER_DUPLICATE_FINANCE_EVENT";
+            return false;
+        }
+        if (event.state != ProviderFinanceEventState::CONFIRMED) continue;
+        const int64_t day_start = (event.confirmed_at / SAFETY_DAY_SECONDS) *
+                                  SAFETY_DAY_SECONDS;
+        ProviderFinanceDailyTotals& total = by_day[day_start];
+        total.day_start = day_start;
+        if (event.dd_income.value >
+                std::numeric_limits<int64_t>::max() - total.dd_income.value ||
+            event.dgb_cost.value >
+                std::numeric_limits<int64_t>::max() - total.dgb_cost.value) {
+            error = "PAYMASTER_FINANCE_TOTAL_OVERFLOW";
+            return false;
+        }
+        total.dd_income.value += event.dd_income.value;
+        total.dgb_cost.value += event.dgb_cost.value;
+        if (event.kind == ProviderFinanceEventKind::TRANSFER) {
+            if (!increment(total.successful_transfers)) return false;
+            if (event.funding_model == FundingModel::USER_PAID) {
+                if (!increment(total.user_paid_transfers)) return false;
+            } else if (event.sponsorship_scope == SponsorshipScope::PUBLIC) {
+                if (!increment(total.public_sponsored_transfers)) return false;
+            } else {
+                if (!increment(total.restricted_sponsored_transfers)) return false;
+            }
+        } else {
+            if (!increment(total.maintenance_transactions)) return false;
+        }
+    }
+    ledger.daily_totals.clear();
+    ledger.daily_totals.reserve(by_day.size());
+    for (auto& [day, totals] : by_day) {
+        (void)day;
+        ledger.daily_totals.push_back(std::move(totals));
+    }
+    return true;
+}
+
+bool ValidateProviderFinanceLedger(const ProviderFinanceLedger& ledger,
+                                   std::string& error)
+{
+    error.clear();
+    if (ledger.version != ProviderFinanceLedger::CURRENT_VERSION ||
+        ledger.genesis_hash.IsNull() || ledger.provider_id.IsNull() ||
+        ledger.history_complete_from <= 0 ||
+        ledger.updated_at < ledger.history_complete_from ||
+        ledger.events.size() > MAX_PROVIDER_FINANCE_EVENTS) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    if (std::any_of(ledger.events.begin(), ledger.events.end(),
+                    [&](const ProviderFinanceEvent& event) {
+                        return event.updated_at > ledger.updated_at;
+                    })) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER_TIME";
+        return false;
+    }
+    ProviderFinanceLedger rebuilt{ledger};
+    if (!RebuildProviderFinanceDailyTotals(rebuilt, error) ||
+        rebuilt.daily_totals.size() != ledger.daily_totals.size()) {
+        if (error.empty()) error = "PAYMASTER_INVALID_FINANCE_TOTALS";
+        return false;
+    }
+    for (size_t index = 0; index < ledger.daily_totals.size(); ++index) {
+        const ProviderFinanceDailyTotals& stored = ledger.daily_totals[index];
+        const ProviderFinanceDailyTotals& expected = rebuilt.daily_totals[index];
+        if (stored.version != ProviderFinanceDailyTotals::CURRENT_VERSION ||
+            stored.day_start != expected.day_start ||
+            stored.dd_income.value != expected.dd_income.value ||
+            stored.dgb_cost.value != expected.dgb_cost.value ||
+            stored.successful_transfers != expected.successful_transfers ||
+            stored.user_paid_transfers != expected.user_paid_transfers ||
+            stored.public_sponsored_transfers != expected.public_sponsored_transfers ||
+            stored.restricted_sponsored_transfers != expected.restricted_sponsored_transfers ||
+            stored.maintenance_transactions != expected.maintenance_transactions) {
+            error = "PAYMASTER_INVALID_FINANCE_TOTALS";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool UpsertProviderFinanceEvent(ProviderFinanceLedger& ledger,
+                                const ProviderFinanceEvent& event,
+                                std::string& error)
+{
+    if (!ValidateProviderFinanceEvent(event, error) ||
+        event.genesis_hash != ledger.genesis_hash ||
+        event.provider_id != ledger.provider_id) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+        return false;
+    }
+    auto existing = std::find_if(
+        ledger.events.begin(), ledger.events.end(),
+        [&](const ProviderFinanceEvent& candidate) {
+            return candidate.event_id == event.event_id;
+        });
+    if (existing == ledger.events.end()) {
+        if (ledger.events.size() >= MAX_PROVIDER_FINANCE_EVENTS) {
+            error = "PAYMASTER_FINANCE_LEDGER_FULL";
+            return false;
+        }
+        ledger.events.push_back(event);
+    } else {
+        const bool same_economic_event =
+            existing->genesis_hash == event.genesis_hash &&
+            existing->provider_id == event.provider_id &&
+            existing->kind == event.kind &&
+            existing->funding_model == event.funding_model &&
+            existing->sponsorship_scope == event.sponsorship_scope &&
+            existing->transaction_id == event.transaction_id &&
+            existing->dd_income == event.dd_income &&
+            existing->dgb_cost == event.dgb_cost &&
+            existing->created_at == event.created_at;
+        if (!same_economic_event) {
+            error = "PAYMASTER_FINANCE_EVENT_CONFLICT";
+            return false;
+        }
+        // A delayed replay can legitimately carry an older pending or
+        // confirmed snapshot. Treat it as an idempotent no-op instead of
+        // letting it roll back the more recent chain-derived state.
+        if (event.updated_at < existing->updated_at) return true;
+        if (event.updated_at == existing->updated_at &&
+            (event.state != existing->state ||
+             event.confirmed_at != existing->confirmed_at)) {
+            error = "PAYMASTER_FINANCE_EVENT_STATE_CONFLICT";
+            return false;
+        }
+        *existing = event;
+    }
+    ledger.updated_at = std::max(ledger.updated_at, event.updated_at);
+    return RebuildProviderFinanceDailyTotals(ledger, error);
+}
+
+bool ValidateProviderBackupStatus(const ProviderBackupStatus& status,
+                                  std::string& error)
+{
+    error.clear();
+    if (status.version != ProviderBackupStatus::CURRENT_VERSION ||
+        status.genesis_hash.IsNull() || status.provider_id.IsNull() ||
+        status.identity_created_at <= 0 ||
+        status.reminder_updated_at < status.identity_created_at ||
+        status.last_successful_backup_at < 0 ||
+        status.external_backup_acknowledged_at < 0) {
+        error = "PAYMASTER_INVALID_BACKUP_STATUS";
+        return false;
+    }
+    return true;
+}
+
+bool ProviderBackupRequired(const ProviderBackupStatus& status)
+{
+    std::string error;
+    if (!ValidateProviderBackupStatus(status, error)) return true;
+    return std::max(status.last_successful_backup_at,
+                    status.external_backup_acknowledged_at) <
+           status.reminder_updated_at;
+}
+
 bool IsActiveProviderPoolState(PoolEntryState state)
 {
     return state == PoolEntryState::AVAILABLE ||
@@ -1394,6 +1604,30 @@ bool ValidateProviderLiquidityPolicy(const ProviderLiquidityPolicy& policy,
         (policy.paid_maintenance_approved && !finite_limits)) {
         error = "PAYMASTER_INVALID_LIQUIDITY_POLICY";
         return false;
+    }
+    return true;
+}
+
+bool ProviderLiquidityTargetsSatisfyPolicy(
+    const ProviderLiquidityPolicy& liquidity_policy,
+    const ProviderPolicy& provider_policy)
+{
+    std::string error;
+    if (!ValidateProviderLiquidityPolicy(liquidity_policy, error) ||
+        !ValidateProviderPolicy(provider_policy, error)) {
+        return false;
+    }
+
+    // The generic liquidity-policy format permits zero carrier targets so an
+    // operator can deliberately release the last carrier while retaining a
+    // USER_PAID offer for later use. That is a valid stored state, but it
+    // cannot restore provider readiness until the operator raises the targets
+    // again. Keep this policy-dependent invariant separate from serialization
+    // validation so sponsored-only providers still require no DD carriers.
+    if (PolicyAllowsFundingModel(provider_policy, FundingModel::USER_PAID)) {
+        return liquidity_policy.target_admission_carriers >=
+                   REQUIRED_ADMISSION_SLOTS &&
+               liquidity_policy.target_operational_carriers >= 1;
     }
     return true;
 }

@@ -29,6 +29,7 @@
 #include <netmessagemaker.h>
 #include <node/context.h>
 #include <node/transaction.h>
+#include <oracle/bundle_manager.h>
 #include <paymaster/client.h>
 #include <paymaster/directory.h>
 #include <paymaster/manager.h>
@@ -608,6 +609,15 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     if (result.have_settings && result.have_policy && result.settings.policy_hash != DigiDollar::Paymaster::GetProviderPolicyHash(result.policy)) {
         result.errors.push_back("PAYMASTER_POLICY_BINDING_MISMATCH");
     }
+    if (result.have_policy && result.have_liquidity_policy &&
+        !DigiDollar::Paymaster::ProviderLiquidityTargetsSatisfyPolicy(
+            result.liquidity_policy, result.policy)) {
+        // A carrier target may intentionally be reduced to zero by
+        // release_slot. Keep that durable configuration valid, but surface a
+        // distinct readiness gate instead of pretending that an automatic
+        // start can restore capacity that the saved target does not request.
+        result.errors.push_back("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE");
+    }
     if (wallet.IsLocked()) result.errors.push_back("PAYMASTER_WALLET_LOCKED");
     if (!result.have_pool) {
         result.errors.push_back("PAYMASTER_POOLS_NOT_PREPARED");
@@ -913,6 +923,9 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
     const ProviderLiquidityPolicy policy = readiness.have_liquidity_policy
         ? readiness.liquidity_policy
         : SuggestedLiquidityPolicy(readiness, now);
+    const bool targets_satisfy_provider_policy =
+        !readiness.have_policy ||
+        ProviderLiquidityTargetsSatisfyPolicy(policy, readiness.policy);
     const auto admission_dgb = CountLiquiditySlots(
         readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB,
         policy.target_admission_dgb);
@@ -935,7 +948,9 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
                            admission_carriers.pending +
                            operational_carriers.pending;
     std::string state{"ready"};
-    if (!readiness.have_liquidity_policy ||
+    if (!targets_satisfy_provider_policy) {
+        state = "waiting_for_target_configuration";
+    } else if (!readiness.have_liquidity_policy ||
         (missing > 0 && !policy.paid_maintenance_approved)) {
         state = "waiting_for_maintenance_approval";
     } else if (pending > 0) {
@@ -996,6 +1011,8 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
 
     UniValue result{UniValue::VOBJ};
     result.pushKV("policy_configured", readiness.have_liquidity_policy);
+    result.pushKV("targets_satisfy_provider_policy",
+                  targets_satisfy_provider_policy);
     result.pushKV("maintenance_state", state);
     result.pushKV("policy", LiquidityPolicyToJSON(policy));
     result.pushKV("admission_dgb", LiquiditySlotCountsToJSON(
@@ -1607,6 +1624,389 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         return false;
     }
     return true;
+}
+
+bool ReconcileProviderFinances(CWallet& wallet,
+                               size_t& changed_events,
+                               std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    changed_events = 0;
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity)) return true;
+
+    const uint256 genesis_hash = Params().GenesisBlock().GetHash();
+    ProviderFinanceLedger finance;
+    bool ledger_changed{false};
+    if (!batch.ReadPaymasterFinanceLedger(finance)) {
+        if (batch.HasPaymasterFinanceLedger()) {
+            error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+            return false;
+        }
+        // Pre-feature wallets may have durable records that no longer carry
+        // enough context for exact reconstruction. Never estimate them.
+        finance.genesis_hash = genesis_hash;
+        finance.provider_id = identity.provider_id;
+        finance.history_complete_from = GetTime();
+        finance.earlier_history_partial = true;
+        finance.updated_at = finance.history_complete_from;
+        if (!RebuildProviderFinanceDailyTotals(finance, error)) return false;
+        ledger_changed = true;
+    }
+    if (finance.genesis_hash != genesis_hash ||
+        finance.provider_id != identity.provider_id) {
+        error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+        return false;
+    }
+
+    const int64_t now = GetTime();
+    const auto transaction_state = [&](const uint256& txid,
+                                       int64_t created_at,
+                                       ProviderFinanceEventState& state,
+                                       int64_t& confirmed_at) {
+        state = ProviderFinanceEventState::PENDING;
+        confirmed_at = 0;
+        const auto transaction = wallet.mapWallet.find(txid);
+        if (transaction == wallet.mapWallet.end()) return;
+        if (transaction->second.isAbandoned() ||
+            transaction->second.isConflicted()) {
+            state = ProviderFinanceEventState::INVALIDATED;
+            return;
+        }
+        if (wallet.GetTxDepthInMainChain(transaction->second) > 0) {
+            state = ProviderFinanceEventState::CONFIRMED;
+            int64_t block_time{0};
+            if (const auto* confirmed =
+                    transaction->second.state<TxStateConfirmed>()) {
+                wallet.chain().findBlock(
+                    confirmed->confirmed_block_hash,
+                    interfaces::FoundBlock().time(block_time));
+            }
+            // UTC totals follow the active-chain confirmation day. The wallet
+            // observation time remains a conservative fallback for old or
+            // temporarily unavailable block metadata.
+            confirmed_at = std::max(
+                created_at, block_time > 0
+                    ? block_time : transaction->second.GetTxTime());
+        }
+    };
+    const auto apply_event = [&](ProviderFinanceEvent event) {
+        auto existing = std::find_if(
+            finance.events.begin(), finance.events.end(),
+            [&](const ProviderFinanceEvent& candidate) {
+                return candidate.event_id == event.event_id;
+            });
+        if (existing != finance.events.end()) {
+            const bool same_economic_event =
+                existing->genesis_hash == event.genesis_hash &&
+                existing->provider_id == event.provider_id &&
+                existing->kind == event.kind &&
+                existing->funding_model == event.funding_model &&
+                existing->sponsorship_scope == event.sponsorship_scope &&
+                existing->transaction_id == event.transaction_id &&
+                existing->dd_income == event.dd_income &&
+                existing->dgb_cost == event.dgb_cost &&
+                existing->created_at == event.created_at;
+            if (!same_economic_event) {
+                error = "PAYMASTER_FINANCE_EVENT_CONFLICT";
+                return false;
+            }
+        }
+        if (existing != finance.events.end() &&
+            existing->state == event.state &&
+            existing->confirmed_at == event.confirmed_at) {
+            event.updated_at = existing->updated_at;
+        } else {
+            // Regtest mock time and imported historical blocks can place the
+            // active-chain confirmation after the current wall-clock value.
+            // Keep the event chronology valid without replacing the actual
+            // block confirmation time with a local observation time.
+            event.updated_at = std::max(
+                {event.created_at, event.confirmed_at, now});
+            ledger_changed = true;
+            ++changed_events;
+        }
+        if (!ValidateProviderFinanceEvent(event, error) ||
+            event.genesis_hash != finance.genesis_hash ||
+            event.provider_id != finance.provider_id) {
+            if (error.empty()) {
+                error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+            }
+            return false;
+        }
+        if (existing == finance.events.end()) {
+            // The shared upsert enforces the durable event bound. Existing
+            // entries are updated directly below so reconciliation can rebuild
+            // daily totals once, rather than once per historical event.
+            return UpsertProviderFinanceEvent(finance, event, error);
+        }
+        *existing = std::move(event);
+        return true;
+    };
+
+    // Events created directly by pool-management RPCs are not represented by
+    // a provider commit or maintenance reservation. Reconcile their chain
+    // state here before adding any newly discoverable records below.
+    for (ProviderFinanceEvent& event : finance.events) {
+        ProviderFinanceEventState state;
+        int64_t confirmed_at;
+        transaction_state(event.transaction_id, event.created_at,
+                          state, confirmed_at);
+        if (event.state == state && event.confirmed_at == confirmed_at) {
+            continue;
+        }
+        event.state = state;
+        event.confirmed_at = confirmed_at;
+        event.updated_at = std::max(
+            {event.created_at, event.confirmed_at, now});
+        finance.updated_at = std::max(
+            finance.updated_at, event.updated_at);
+        ledger_changed = true;
+        ++changed_events;
+    }
+
+    // Initial pool preparation predates maintenance records and therefore has
+    // no separate operation object to replay. The persisted pool still binds
+    // each original slot to its creating transaction. When that transaction
+    // remains in this wallet, its native DGB fee can be reconstructed exactly;
+    // never infer a cost when either the transaction or its wallet debit is
+    // unavailable.
+    std::vector<ProviderPoolEntry> provider_pool;
+    if (batch.ReadPaymasterProviderPool(provider_pool)) {
+        std::set<uint256> setup_transactions;
+        for (const ProviderPoolEntry& entry : provider_pool) {
+            if (entry.origin_commit_key.IsNull() &&
+                !entry.outpoint.hash.IsNull()) {
+                setup_transactions.insert(entry.outpoint.hash);
+            }
+        }
+        for (const uint256& txid : setup_transactions) {
+            HashWriter event_hasher = TaggedHash(
+                "DigiByte Paymaster Finance Event v1");
+            event_hasher << identity.provider_id
+                         << static_cast<uint8_t>(
+                                ProviderFinanceEventKind::POOL_SETUP)
+                         << txid;
+            const uint256 event_id = event_hasher.GetSHA256();
+            if (std::any_of(finance.events.begin(), finance.events.end(),
+                            [&](const ProviderFinanceEvent& event) {
+                                return event.event_id == event_id;
+                            })) {
+                continue;
+            }
+            const auto transaction = wallet.mapWallet.find(txid);
+            if (transaction == wallet.mapWallet.end() ||
+                !transaction->second.tx) {
+                if (!finance.earlier_history_partial) {
+                    finance.earlier_history_partial = true;
+                    ledger_changed = true;
+                }
+                continue;
+            }
+            const CAmount debit = wallet.GetDebit(
+                *transaction->second.tx, ISMINE_ALL);
+            const CAmount value_out = transaction->second.tx->GetValueOut();
+            if (debit < value_out || !MoneyRange(debit - value_out)) {
+                if (!finance.earlier_history_partial) {
+                    finance.earlier_history_partial = true;
+                    ledger_changed = true;
+                }
+                continue;
+            }
+            ProviderFinanceEvent event;
+            event.event_id = event_id;
+            event.genesis_hash = genesis_hash;
+            event.provider_id = identity.provider_id;
+            event.kind = ProviderFinanceEventKind::POOL_SETUP;
+            event.transaction_id = txid;
+            event.dgb_cost = DGBSatoshis{debit - value_out};
+            event.created_at = std::max(
+                identity.created_at, transaction->second.GetTxTime());
+            transaction_state(event.transaction_id, event.created_at,
+                              event.state, event.confirmed_at);
+            if (!apply_event(std::move(event))) return false;
+        }
+    } else if (batch.HasPaymasterProviderPool()) {
+        error = "PAYMASTER_INVALID_PROVIDER_POOL";
+        return false;
+    }
+
+    std::vector<PaymentSession> sessions;
+    std::map<uint256, ProviderAttempt> attempts_by_commit;
+    if (!batch.ListPaymasterSessions(sessions)) {
+        error = "PAYMASTER_FINANCE_SESSION_SCAN_FAILED";
+        return false;
+    }
+    for (const PaymentSession& session : sessions) {
+        for (const uint256& attempt_id : session.attempt_ids) {
+            ProviderAttempt attempt;
+            if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
+                attempt.provider_id != identity.provider_id ||
+                attempt.commit_key.IsNull()) {
+                continue;
+            }
+            attempts_by_commit.emplace(attempt.commit_key, std::move(attempt));
+        }
+    }
+    std::vector<ProviderCommitRecord> commits;
+    if (!batch.ListPaymasterProviderCommits(commits)) {
+        error = "PAYMASTER_FINANCE_COMMIT_SCAN_FAILED";
+        return false;
+    }
+    for (const ProviderCommitRecord& commit : commits) {
+        if (commit.provider_id != identity.provider_id) continue;
+        const auto attempt = attempts_by_commit.find(commit.commit_key);
+        if (attempt == attempts_by_commit.end() ||
+            attempt->second.provider_manifest.manifest_id.IsNull()) {
+            if (!finance.earlier_history_partial) {
+                finance.earlier_history_partial = true;
+                ledger_changed = true;
+            }
+            continue;
+        }
+        const ProviderAuthorizationManifest& manifest =
+            attempt->second.provider_manifest;
+        ProviderFinanceEvent event;
+        event.event_id = commit.commit_key;
+        event.genesis_hash = genesis_hash;
+        event.provider_id = identity.provider_id;
+        event.kind = ProviderFinanceEventKind::TRANSFER;
+        event.funding_model = manifest.funding_model;
+        event.sponsorship_scope = manifest.sponsorship_scope;
+        event.transaction_id = commit.final_txid;
+        event.dd_income = manifest.service_fee;
+        event.dgb_cost = manifest.network_fee;
+        event.created_at = commit.committed_at;
+        transaction_state(event.transaction_id, event.created_at,
+                          event.state, event.confirmed_at);
+        if (!apply_event(std::move(event))) return false;
+    }
+
+    ProviderMaintenanceLedger maintenance;
+    if (batch.ReadPaymasterMaintenanceLedger(maintenance)) {
+        for (const ProviderMaintenanceRecord& record : maintenance.records) {
+            if (record.transaction_id.IsNull()) continue;
+            ProviderFinanceEvent event;
+            event.event_id = record.operation_id;
+            event.genesis_hash = genesis_hash;
+            event.provider_id = identity.provider_id;
+            event.kind = record.kind ==
+                    ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS
+                ? ProviderFinanceEventKind::CARRIER_WITHDRAWAL
+                : ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT;
+            event.transaction_id = record.transaction_id;
+            event.dgb_cost = record.actual_fee;
+            event.created_at = record.created_at;
+            transaction_state(event.transaction_id, event.created_at,
+                              event.state, event.confirmed_at);
+            if (record.state == ProviderMaintenanceState::FAILED ||
+                record.state == ProviderMaintenanceState::RELEASED) {
+                event.state = ProviderFinanceEventState::INVALIDATED;
+                event.confirmed_at = 0;
+            }
+            if (!apply_event(std::move(event))) return false;
+        }
+    } else if (batch.HasPaymasterMaintenanceLedger()) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+        return false;
+    }
+
+    if (!ledger_changed) return true;
+    finance.updated_at = std::max(finance.updated_at, now);
+    for (const ProviderFinanceEvent& event : finance.events) {
+        finance.updated_at = std::max(finance.updated_at, event.updated_at);
+    }
+    if (!RebuildProviderFinanceDailyTotals(finance, error) ||
+        !batch.WritePaymasterFinanceLedger(finance)) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_DATABASE_WRITE";
+        return false;
+    }
+    return true;
+}
+
+/** Persist the exact native DGB cost of a wallet-created provider finance
+ * transaction. The event id is derived from provider, category and txid, so a
+ * retry is idempotent while two categories can never silently share an id. */
+bool RecordProviderFinanceTransaction(
+    CWallet& wallet,
+    DigiDollar::Paymaster::ProviderFinanceEventKind kind,
+    const CTransactionRef& transaction,
+    DigiDollar::Paymaster::DGBSatoshis dgb_cost,
+    int64_t now,
+    std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    error.clear();
+    if (!transaction || dgb_cost.value < 0 || now <= 0) {
+        error = "PAYMASTER_INVALID_FINANCE_TRANSACTION";
+        return false;
+    }
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity)) {
+        error = "PAYMASTER_IDENTITY_NOT_FOUND";
+        return false;
+    }
+    const uint256 genesis_hash = Params().GenesisBlock().GetHash();
+    ProviderFinanceLedger ledger;
+    if (!batch.ReadPaymasterFinanceLedger(ledger)) {
+        if (batch.HasPaymasterFinanceLedger()) {
+            error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+            return false;
+        }
+        ledger.genesis_hash = genesis_hash;
+        ledger.provider_id = identity.provider_id;
+        ledger.history_complete_from = now;
+        ledger.earlier_history_partial = identity.created_at < now;
+        ledger.updated_at = now;
+        if (!RebuildProviderFinanceDailyTotals(ledger, error)) return false;
+    }
+    if (ledger.genesis_hash != genesis_hash ||
+        ledger.provider_id != identity.provider_id) {
+        error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+        return false;
+    }
+    HashWriter event_hasher = TaggedHash(
+        "DigiByte Paymaster Finance Event v1");
+    event_hasher << identity.provider_id << static_cast<uint8_t>(kind)
+                 << transaction->GetHash();
+    ProviderFinanceEvent event;
+    event.event_id = event_hasher.GetSHA256();
+    event.genesis_hash = genesis_hash;
+    event.provider_id = identity.provider_id;
+    event.kind = kind;
+    event.state = ProviderFinanceEventState::PENDING;
+    event.transaction_id = transaction->GetHash();
+    event.dgb_cost = dgb_cost;
+    event.created_at = now;
+    event.updated_at = now;
+    if (!UpsertProviderFinanceEvent(ledger, event, error) ||
+        !batch.WritePaymasterFinanceLedger(ledger)) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_DATABASE_WRITE";
+        return false;
+    }
+    return true;
+}
+
+/** Calculate the actual base-coin fee of a transaction already present in
+ * this wallet. DigiDollar inputs carry zero CTxOut value, so this remains an
+ * exact DGB fee calculation for carrier-management transactions as well. */
+std::optional<DigiDollar::Paymaster::DGBSatoshis>
+GetProviderFinanceTransactionFee(CWallet& wallet,
+                                 const CTransactionRef& transaction)
+{
+    if (!transaction) return std::nullopt;
+    LOCK(wallet.cs_wallet);
+    const CAmount debit = wallet.GetDebit(*transaction, ISMINE_ALL);
+    const CAmount value_out = transaction->GetValueOut();
+    if (debit < value_out || !MoneyRange(debit - value_out)) {
+        return std::nullopt;
+    }
+    return DigiDollar::Paymaster::DGBSatoshis{debit - value_out};
 }
 
 // Paid DGB replenishment reserves its worst-case maintenance fee before wallet
@@ -4559,6 +4959,7 @@ std::vector<RPCResult> ProviderLiquidityStatusResults()
 {
     return {
         {RPCResult::Type::BOOL, "policy_configured", "Whether the operator saved the policy"},
+        {RPCResult::Type::BOOL, "targets_satisfy_provider_policy", "Whether the saved targets can satisfy the active provider offer"},
         {RPCResult::Type::STR, "maintenance_state", "Current automatic liquidity state"},
         {RPCResult::Type::OBJ, "policy", "Saved or suggested liquidity policy",
          ProviderLiquidityPolicyResults()},
@@ -4586,7 +4987,16 @@ bool ReconcilePaymasterProviderMaintenance(CWallet& wallet,
                                            size_t& recovered,
                                            std::string& error)
 {
-    return ReconcileProviderMaintenance(wallet, recovered, error);
+    if (!ReconcileProviderMaintenance(wallet, recovered, error)) return false;
+    size_t finance_changes{0};
+    return ReconcileProviderFinances(wallet, finance_changes, error);
+}
+
+bool ReconcilePaymasterProviderFinances(CWallet& wallet,
+                                        size_t& changed_events,
+                                        std::string& error)
+{
+    return ReconcileProviderFinances(wallet, changed_events, error);
 }
 
 bool EnsureProviderNotEquivocationBlocked(
@@ -8230,6 +8640,7 @@ RPCHelpMan preparepaymasterpool()
             EnsureWalletIsUnlocked(*wallet);
             bool executed{false};
             std::string dd_txid;
+            CTransactionRef dd_tx;
             if (missing_admission_carriers + missing_operational_carriers > 0) {
                 DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
                 if (!dd_wallet) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DD_WALLET_UNAVAILABLE");
@@ -8270,6 +8681,7 @@ RPCHelpMan preparepaymasterpool()
                 if (!carrier_tx) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_TRANSACTION_NOT_IN_WALLET");
                 }
+                dd_tx = carrier_tx;
                 const int64_t now = GetTime();
                 for (const CarrierOutput& output : carrier_outputs) {
                     const auto match = std::find_if(carrier_tx->vout.begin(), carrier_tx->vout.end(),
@@ -8361,6 +8773,30 @@ RPCHelpMan preparepaymasterpool()
                 dgb_tx = created->tx;
                 dgb_fee = created->fee;
                 executed = true;
+            }
+            const int64_t finance_time = GetTime();
+            std::string finance_error;
+            if (dd_tx) {
+                const auto fee = GetProviderFinanceTransactionFee(
+                    *wallet, dd_tx);
+                if (!fee || !RecordProviderFinanceTransaction(
+                                *wallet,
+                                ProviderFinanceEventKind::POOL_SETUP,
+                                dd_tx, *fee, finance_time,
+                                finance_error)) {
+                    throw JSONRPCError(
+                        RPC_WALLET_ERROR,
+                        finance_error.empty()
+                            ? "PAYMASTER_POOL_FINANCE_FEE_UNAVAILABLE"
+                            : finance_error);
+                }
+            }
+            if (dgb_tx && !RecordProviderFinanceTransaction(
+                              *wallet,
+                              ProviderFinanceEventKind::POOL_SETUP,
+                              dgb_tx, DGBSatoshis{dgb_fee}, finance_time,
+                              finance_error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
             }
             UniValue pool{UniValue::VARR};
             for (const auto& entry : existing)
@@ -8544,6 +8980,7 @@ RPCHelpMan rebalancepaymasterpool()
             EnsureWalletIsUnlocked(*wallet);
             bool executed{false};
             std::string dd_txid;
+            CTransactionRef dd_tx;
             if (!retire_dd.empty()) {
                 DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
                 if (!dd_wallet) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DD_WALLET_UNAVAILABLE");
@@ -8562,6 +8999,19 @@ RPCHelpMan rebalancepaymasterpool()
                                                        nullptr, &inputs, "Paymaster carrier retirement",
                                                        /*allow_paymaster_pool_inputs=*/true)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
+                }
+                {
+                    LOCK(wallet->cs_wallet);
+                    const auto transaction = wallet->mapWallet.find(
+                        uint256S(dd_txid));
+                    if (transaction != wallet->mapWallet.end()) {
+                        dd_tx = transaction->second.tx;
+                    }
+                }
+                if (!dd_tx) {
+                    throw JSONRPCError(
+                        RPC_WALLET_ERROR,
+                        "PAYMASTER_CARRIER_RETIREMENT_TRANSACTION_NOT_IN_WALLET");
                 }
                 const int64_t now = GetTime();
                 for (const COutPoint& input : inputs) {
@@ -8622,6 +9072,31 @@ RPCHelpMan rebalancepaymasterpool()
                 executed = true;
             }
 
+            const int64_t finance_time = GetTime();
+            std::string finance_error;
+            if (dd_tx) {
+                const auto fee = GetProviderFinanceTransactionFee(
+                    *wallet, dd_tx);
+                if (!fee || !RecordProviderFinanceTransaction(
+                                *wallet,
+                                ProviderFinanceEventKind::POOL_RETIREMENT,
+                                dd_tx, *fee, finance_time,
+                                finance_error)) {
+                    throw JSONRPCError(
+                        RPC_WALLET_ERROR,
+                        finance_error.empty()
+                            ? "PAYMASTER_RETIREMENT_FINANCE_FEE_UNAVAILABLE"
+                            : finance_error);
+                }
+            }
+            if (dgb_tx && !RecordProviderFinanceTransaction(
+                              *wallet,
+                              ProviderFinanceEventKind::POOL_RETIREMENT,
+                              dgb_tx, DGBSatoshis{dgb_fee}, finance_time,
+                              finance_error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
+            }
+
             UniValue pool{UniValue::VARR};
             for (const auto& entry : entries)
                 pool.push_back(PoolEntryToJSON(entry));
@@ -8632,6 +9107,532 @@ RPCHelpMan rebalancepaymasterpool()
                 result.pushKV("network_fee_satoshis", dgb_fee);
             }
             result.pushKV("pool", std::move(pool));
+            return result;
+        },
+    };
+}
+
+RPCHelpMan getpaymasterfinancestatus()
+{
+    return RPCHelpMan{
+        "getpaymasterfinancestatus",
+        "Return wallet-local provider income, DGB costs, pool capital, and optional accounting events.\n"
+        "Native DD and DGB values are authoritative. Any USD result uses only the current oracle price.\n",
+        {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Finance query", {
+                {"period", RPCArg::Type::STR, RPCArg::Default{"30d"}, "today, 7d, 30d, or all"},
+                {"include_events", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include paginated accounting events"},
+                {"limit", RPCArg::Type::NUM, RPCArg::Default{100}, "Maximum events returned (1-10000)"},
+                {"cursor", RPCArg::Type::STR, RPCArg::Default{""}, "Last event id from the previous page"},
+            }},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Provider finance status", {
+            {RPCResult::Type::STR_HEX, "provider_id", "Provider identity owning this ledger"},
+            {RPCResult::Type::STR, "period", "Selected accounting period"},
+            {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
+            {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
+            {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
+            {RPCResult::Type::NUM, "average_service_fee_cents", "Average DD income per confirmed transfer"},
+            {RPCResult::Type::NUM, "user_paid_transfers", "Confirmed user-paid transfers"},
+            {RPCResult::Type::NUM, "public_sponsored_transfers", "Confirmed public sponsored transfers"},
+            {RPCResult::Type::NUM, "restricted_sponsored_transfers", "Confirmed restricted sponsored transfers"},
+            {RPCResult::Type::OBJ_DYN, "model_breakdown", "Selected-period transfer economics by funding model", {
+                {RPCResult::Type::OBJ, "model", "One funding-model summary", {
+                    {RPCResult::Type::NUM, "successful_transfers", "Confirmed transfers"},
+                    {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
+                    {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB transfer costs"},
+                }},
+            }},
+            {RPCResult::Type::OBJ_DYN, "period_summaries", "Keys are today, 7d, 30d, and all", {
+                {RPCResult::Type::OBJ, "period", "Confirmed totals for one dashboard period", {
+                    {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
+                    {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
+                    {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
+                    {RPCResult::Type::NUM, "average_service_fee_cents", "Average DD income per confirmed transfer"},
+                    {RPCResult::Type::NUM, "user_paid_transfers", "Confirmed user-paid transfers"},
+                    {RPCResult::Type::NUM, "public_sponsored_transfers", "Confirmed public sponsored transfers"},
+                    {RPCResult::Type::NUM, "restricted_sponsored_transfers", "Confirmed restricted sponsored transfers"},
+                }},
+            }},
+            {RPCResult::Type::BOOL, "history_partially_reconstructable", "Whether earlier exact history is unavailable"},
+            {RPCResult::Type::NUM_TIME, "history_complete_from", "Start of guaranteed complete accounting"},
+            {RPCResult::Type::BOOL, "backup_required", "Whether the provider wallet should be backed up"},
+            {RPCResult::Type::NUM_TIME, "last_successful_backup_at", "Last successful backupwallet completion"},
+            {RPCResult::Type::NUM_TIME, "external_backup_acknowledged_at", "Last acknowledged external full-wallet backup"},
+            {RPCResult::Type::NUM, "oracle_price_micro_usd", /*optional=*/true, "Current DGB/USD oracle price"},
+            {RPCResult::Type::NUM_TIME, "valuation_time", /*optional=*/true, "Time of the current-price estimate"},
+            {RPCResult::Type::NUM, "estimated_result_usd", /*optional=*/true, "Current-price estimate, not historical accounting"},
+            {RPCResult::Type::OBJ, "pool_capital", "Current wallet-owned provider capital", {
+                {RPCResult::Type::NUM, "dgb_available_satoshis", "Available DGB pool capital"},
+                {RPCResult::Type::NUM, "dgb_reserved_satoshis", "Reserved or committed DGB pool capital"},
+                {RPCResult::Type::NUM, "dgb_pending_satoshis", "Unconfirmed DGB successor capital"},
+                {RPCResult::Type::NUM, "carrier_base_cents", "Reserved DD carrier base capital"},
+                {RPCResult::Type::NUM, "carrier_earned_cents", "Service fees accumulated above carrier bases"},
+                {RPCResult::Type::NUM, "carrier_withdrawable_cents", "Confirmed available carrier surplus"},
+                {RPCResult::Type::NUM, "pending_maintenance_transactions", "Pending maintenance or withdrawal transactions"},
+            }},
+            {RPCResult::Type::ARR, "daily_totals", /*optional=*/true, "Confirmed UTC-day totals for the selected period, limited to the latest 366 days", {
+                {RPCResult::Type::OBJ, "", "One UTC accounting day", {
+                    {RPCResult::Type::NUM_TIME, "day_start", "UTC start time of this day"},
+                    {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
+                    {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
+                    {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
+                    {RPCResult::Type::NUM, "maintenance_transactions", "Confirmed setup, maintenance, retirement, or withdrawal transactions"},
+                }},
+            }},
+            {RPCResult::Type::ARR, "events", /*optional=*/true, "Accounting events", {
+                {RPCResult::Type::OBJ, "", "Finance event", {
+                    {RPCResult::Type::STR_HEX, "event_id", "Stable idempotency key"},
+                    {RPCResult::Type::STR, "kind", "transfer, setup, replenishment, retirement, or withdrawal"},
+                    {RPCResult::Type::STR, "state", "pending, confirmed, or invalidated"},
+                    {RPCResult::Type::NUM, "dd_income_cents", "Native DD income"},
+                    {RPCResult::Type::NUM, "dgb_cost_satoshis", "Native DGB cost"},
+                    {RPCResult::Type::NUM_TIME, "created_at", "Event creation time"},
+                    {RPCResult::Type::NUM_TIME, "confirmed_at", /*optional=*/true, "Confirmation time"},
+                    {RPCResult::Type::STR, "funding_model", /*optional=*/true, "user_paid or sponsored for transfer events"},
+                    {RPCResult::Type::STR, "sponsorship_scope", /*optional=*/true, "public or restricted for sponsored transfer events"},
+                    {RPCResult::Type::STR_HEX, "transaction_id", "Wallet transaction represented by this event"},
+                }},
+            }},
+            {RPCResult::Type::STR, "next_cursor", /*optional=*/true, "Cursor for the next event page"},
+        }},
+        RPCExamples{HelpExampleCli("getpaymasterfinancestatus", "'{\"period\":\"30d\",\"include_events\":true}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            using namespace DigiDollar::Paymaster;
+            std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            const UniValue options = request.params[0].isNull()
+                ? UniValue{UniValue::VOBJ} : request.params[0];
+            RPCTypeCheckObj(options,
+                            {{"period", UniValueType(UniValue::VSTR)},
+                             {"include_events", UniValueType(UniValue::VBOOL)},
+                             {"limit", UniValueType(UniValue::VNUM)},
+                             {"cursor", UniValueType(UniValue::VSTR)}},
+                            /*fAllowNull=*/true, /*fStrict=*/true);
+            const std::string period = options.find_value("period").isNull()
+                ? "30d" : options.find_value("period").get_str();
+            const bool include_events =
+                !options.find_value("include_events").isNull() &&
+                options.find_value("include_events").get_bool();
+            const int limit = options.find_value("limit").isNull()
+                ? 100 : options.find_value("limit").getInt<int>();
+            const std::string cursor = options.find_value("cursor").isNull()
+                ? std::string{} : options.find_value("cursor").get_str();
+            if ((period != "today" && period != "7d" && period != "30d" &&
+                 period != "all") || limit < 1 || limit > 10000) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_INVALID_FINANCE_QUERY");
+            }
+
+            // Finance reconciliation classifies wallet transactions against
+            // the active chain. Wait for the wallet notification queue first
+            // so a just-confirmed payment cannot be reported as pending while
+            // the rest of this RPC already observes the newer chain tip.
+            wallet->BlockUntilSyncedToCurrentChain();
+            size_t reconciled{0};
+            std::string error;
+            if (!ReconcilePaymasterProviderFinances(*wallet, reconciled, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            ProviderFinanceLedger ledger;
+            ProviderIdentityRecord identity;
+            ProviderBackupStatus backup;
+            std::vector<ProviderPoolEntry> pool;
+            ProviderMaintenanceLedger maintenance;
+            {
+                LOCK(wallet->cs_wallet);
+                WalletBatch batch{wallet->GetDatabase()};
+                if (!batch.ReadPaymasterIdentity(identity) ||
+                    !batch.ReadPaymasterFinanceLedger(ledger)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_FINANCE_LEDGER_NOT_FOUND");
+                }
+                if (!batch.ReadPaymasterProviderPool(pool) &&
+                    batch.HasPaymasterProviderPool()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_INVALID_PROVIDER_POOL");
+                }
+                if (!batch.ReadPaymasterMaintenanceLedger(maintenance) &&
+                    batch.HasPaymasterMaintenanceLedger()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+                }
+            }
+            if (!GetPaymasterProviderBackupStatus(
+                    *wallet, backup, GetTime(), error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+
+            const int64_t now = GetTime();
+            const int64_t utc_day = (now / (24 * 60 * 60)) * (24 * 60 * 60);
+            int64_t cutoff{0};
+            if (period == "today") cutoff = utc_day;
+            if (period == "7d") cutoff = now - 7 * 24 * 60 * 60;
+            if (period == "30d") cutoff = now - 30 * 24 * 60 * 60;
+            int64_t dd_income{0};
+            int64_t dgb_cost{0};
+            uint64_t transfers{0};
+            uint64_t user_paid{0};
+            uint64_t public_sponsored{0};
+            uint64_t restricted_sponsored{0};
+            int64_t user_paid_income{0};
+            int64_t user_paid_cost{0};
+            int64_t public_sponsored_income{0};
+            int64_t public_sponsored_cost{0};
+            int64_t restricted_sponsored_income{0};
+            int64_t restricted_sponsored_cost{0};
+            const auto add_amount = [&](int64_t& total, int64_t amount) {
+                if (amount < 0 || total > std::numeric_limits<int64_t>::max() - amount) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_FINANCE_TOTAL_OVERFLOW");
+                }
+                total += amount;
+            };
+            std::vector<const ProviderFinanceEvent*> matching_events;
+            for (const ProviderFinanceEvent& event : ledger.events) {
+                // A confirmed booking belongs to the UTC period in which it
+                // actually became part of the active chain. Pending and
+                // invalidated records have no confirmation time, so their
+                // creation time remains the only useful ordering key.
+                const int64_t accounting_time =
+                    event.state == ProviderFinanceEventState::CONFIRMED
+                    ? event.confirmed_at
+                    : event.created_at;
+                if (cutoff > 0 && accounting_time < cutoff) continue;
+                matching_events.push_back(&event);
+                if (event.state != ProviderFinanceEventState::CONFIRMED) continue;
+                add_amount(dd_income, event.dd_income.value);
+                add_amount(dgb_cost, event.dgb_cost.value);
+                if (event.kind != ProviderFinanceEventKind::TRANSFER) continue;
+                ++transfers;
+                if (event.funding_model == FundingModel::USER_PAID) {
+                    ++user_paid;
+                    add_amount(user_paid_income, event.dd_income.value);
+                    add_amount(user_paid_cost, event.dgb_cost.value);
+                } else if (event.sponsorship_scope == SponsorshipScope::PUBLIC) {
+                    ++public_sponsored;
+                    add_amount(public_sponsored_income, event.dd_income.value);
+                    add_amount(public_sponsored_cost, event.dgb_cost.value);
+                } else {
+                    ++restricted_sponsored;
+                    add_amount(restricted_sponsored_income,
+                               event.dd_income.value);
+                    add_amount(restricted_sponsored_cost,
+                               event.dgb_cost.value);
+                }
+            }
+
+            int64_t dgb_available{0};
+            int64_t dgb_reserved{0};
+            int64_t dgb_pending{0};
+            int64_t carrier_base{0};
+            int64_t carrier_earned{0};
+            int64_t carrier_withdrawable{0};
+            for (const ProviderPoolEntry& entry : pool) {
+                if (!IsActiveProviderPoolState(entry.state)) continue;
+                if (entry.asset == PoolAsset::DGB) {
+                    if (entry.state == PoolEntryState::AVAILABLE) {
+                        add_amount(dgb_available, entry.dgb_value.value);
+                    } else if (entry.state == PoolEntryState::PENDING_SUCCESSOR) {
+                        add_amount(dgb_pending, entry.dgb_value.value);
+                    } else {
+                        add_amount(dgb_reserved, entry.dgb_value.value);
+                    }
+                    continue;
+                }
+                const int64_t base = std::min<int64_t>(100, entry.carrier_value.value);
+                const int64_t excess = std::max<int64_t>(0, entry.carrier_value.value - base);
+                add_amount(carrier_base, base);
+                add_amount(carrier_earned, excess);
+                if (entry.state == PoolEntryState::AVAILABLE &&
+                    entry.confirmation_height > 0) {
+                    add_amount(carrier_withdrawable, excess);
+                }
+            }
+            const int64_t pending_maintenance = std::count_if(
+                maintenance.records.begin(), maintenance.records.end(),
+                [](const ProviderMaintenanceRecord& record) {
+                    return record.state == ProviderMaintenanceState::PLANNED ||
+                           record.state == ProviderMaintenanceState::BROADCAST;
+                });
+
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("provider_id", identity.provider_id.GetHex());
+            result.pushKV("period", period);
+            result.pushKV("service_fee_income_cents", dd_income);
+            result.pushKV("dgb_operating_cost_satoshis", dgb_cost);
+            result.pushKV("successful_transfers", transfers);
+            result.pushKV("average_service_fee_cents",
+                          transfers == 0 ? 0 : dd_income / static_cast<int64_t>(transfers));
+            result.pushKV("user_paid_transfers", user_paid);
+            result.pushKV("public_sponsored_transfers", public_sponsored);
+            result.pushKV("restricted_sponsored_transfers", restricted_sponsored);
+            const auto make_model_summary = [](uint64_t model_transfers,
+                                               int64_t model_income,
+                                               int64_t model_cost) {
+                UniValue summary{UniValue::VOBJ};
+                summary.pushKV("successful_transfers", model_transfers);
+                summary.pushKV("service_fee_income_cents", model_income);
+                summary.pushKV("dgb_operating_cost_satoshis", model_cost);
+                return summary;
+            };
+            UniValue model_breakdown{UniValue::VOBJ};
+            model_breakdown.pushKV(
+                "user_paid",
+                make_model_summary(user_paid, user_paid_income,
+                                   user_paid_cost));
+            model_breakdown.pushKV(
+                "public_sponsored",
+                make_model_summary(public_sponsored,
+                                   public_sponsored_income,
+                                   public_sponsored_cost));
+            model_breakdown.pushKV(
+                "restricted_sponsored",
+                make_model_summary(restricted_sponsored,
+                                   restricted_sponsored_income,
+                                   restricted_sponsored_cost));
+            result.pushKV("model_breakdown", std::move(model_breakdown));
+
+            // The operator dashboard displays all standard periods together.
+            // Compute them from the authoritative event stream in one wallet
+            // snapshot so the four cards cannot disagree because of separate
+            // RPC calls crossing a new block or day boundary.
+            const auto make_period_summary = [&](int64_t summary_cutoff) {
+                int64_t summary_income{0};
+                int64_t summary_cost{0};
+                uint64_t summary_transfers{0};
+                uint64_t summary_user_paid{0};
+                uint64_t summary_public_sponsored{0};
+                uint64_t summary_restricted_sponsored{0};
+                for (const ProviderFinanceEvent& event : ledger.events) {
+                    if (event.state != ProviderFinanceEventState::CONFIRMED) continue;
+                    if (summary_cutoff > 0 &&
+                        event.confirmed_at < summary_cutoff) continue;
+                    add_amount(summary_income, event.dd_income.value);
+                    add_amount(summary_cost, event.dgb_cost.value);
+                    if (event.kind != ProviderFinanceEventKind::TRANSFER) continue;
+                    ++summary_transfers;
+                    if (event.funding_model == FundingModel::USER_PAID) {
+                        ++summary_user_paid;
+                    } else if (event.sponsorship_scope == SponsorshipScope::PUBLIC) {
+                        ++summary_public_sponsored;
+                    } else {
+                        ++summary_restricted_sponsored;
+                    }
+                }
+                UniValue summary{UniValue::VOBJ};
+                summary.pushKV("service_fee_income_cents", summary_income);
+                summary.pushKV("dgb_operating_cost_satoshis", summary_cost);
+                summary.pushKV("successful_transfers", summary_transfers);
+                summary.pushKV(
+                    "average_service_fee_cents",
+                    summary_transfers == 0
+                        ? 0
+                        : summary_income / static_cast<int64_t>(summary_transfers));
+                summary.pushKV("user_paid_transfers", summary_user_paid);
+                summary.pushKV("public_sponsored_transfers", summary_public_sponsored);
+                summary.pushKV("restricted_sponsored_transfers", summary_restricted_sponsored);
+                return summary;
+            };
+            UniValue period_summaries{UniValue::VOBJ};
+            period_summaries.pushKV("today", make_period_summary(utc_day));
+            period_summaries.pushKV("7d", make_period_summary(now - 7 * 24 * 60 * 60));
+            period_summaries.pushKV("30d", make_period_summary(now - 30 * 24 * 60 * 60));
+            period_summaries.pushKV("all", make_period_summary(0));
+            result.pushKV("period_summaries", std::move(period_summaries));
+            result.pushKV("history_partially_reconstructable",
+                          ledger.earlier_history_partial);
+            result.pushKV("history_complete_from", ledger.history_complete_from);
+            result.pushKV("backup_required", ProviderBackupRequired(backup));
+            result.pushKV("last_successful_backup_at",
+                          backup.last_successful_backup_at);
+            result.pushKV("external_backup_acknowledged_at",
+                          backup.external_backup_acknowledged_at);
+
+            const CAmount oracle_price =
+                OracleIntegration::GetCurrentOraclePriceMicroUSD();
+            if (oracle_price > 0) {
+                const long double income_usd =
+                    static_cast<long double>(dd_income) / 100.0L;
+                const long double cost_usd =
+                    static_cast<long double>(dgb_cost) *
+                    static_cast<long double>(oracle_price) /
+                    static_cast<long double>(COIN) / 1000000.0L;
+                result.pushKV("oracle_price_micro_usd", oracle_price);
+                result.pushKV("valuation_time", now);
+                result.pushKV("estimated_result_usd",
+                              static_cast<double>(income_usd - cost_usd));
+            }
+
+            UniValue pool_capital{UniValue::VOBJ};
+            pool_capital.pushKV("dgb_available_satoshis", dgb_available);
+            pool_capital.pushKV("dgb_reserved_satoshis", dgb_reserved);
+            pool_capital.pushKV("dgb_pending_satoshis", dgb_pending);
+            pool_capital.pushKV("carrier_base_cents", carrier_base);
+            pool_capital.pushKV("carrier_earned_cents", carrier_earned);
+            pool_capital.pushKV("carrier_withdrawable_cents", carrier_withdrawable);
+            pool_capital.pushKV("pending_maintenance_transactions", pending_maintenance);
+            result.pushKV("pool_capital", std::move(pool_capital));
+
+            if (include_events) {
+                // A compact daily progression lets operator UIs graph a year
+                // without exposing transaction identifiers or loading the
+                // complete event ledger. The selected-period filter is still
+                // respected; an all-history request deliberately returns only
+                // the most recent 366 daily materializations.
+                std::vector<const ProviderFinanceDailyTotals*> daily_totals;
+                for (const ProviderFinanceDailyTotals& total :
+                     ledger.daily_totals) {
+                    if (cutoff > 0 && total.day_start < cutoff) continue;
+                    daily_totals.push_back(&total);
+                }
+                std::sort(
+                    daily_totals.begin(), daily_totals.end(),
+                    [](const ProviderFinanceDailyTotals* lhs,
+                       const ProviderFinanceDailyTotals* rhs) {
+                        return lhs->day_start > rhs->day_start;
+                    });
+                if (daily_totals.size() > 366) daily_totals.resize(366);
+                UniValue days{UniValue::VARR};
+                for (const ProviderFinanceDailyTotals* total : daily_totals) {
+                    UniValue day{UniValue::VOBJ};
+                    day.pushKV("day_start", total->day_start);
+                    day.pushKV("service_fee_income_cents",
+                               total->dd_income.value);
+                    day.pushKV("dgb_operating_cost_satoshis",
+                               total->dgb_cost.value);
+                    day.pushKV("successful_transfers",
+                               total->successful_transfers);
+                    day.pushKV("maintenance_transactions",
+                               total->maintenance_transactions);
+                    days.push_back(std::move(day));
+                }
+                result.pushKV("daily_totals", std::move(days));
+
+                std::sort(matching_events.begin(), matching_events.end(),
+                          [](const ProviderFinanceEvent* lhs,
+                             const ProviderFinanceEvent* rhs) {
+                              if (lhs->created_at != rhs->created_at) {
+                                  return lhs->created_at > rhs->created_at;
+                              }
+                              return rhs->event_id < lhs->event_id;
+                          });
+                size_t start{0};
+                if (!cursor.empty()) {
+                    const auto previous = std::find_if(
+                        matching_events.begin(), matching_events.end(),
+                        [&](const ProviderFinanceEvent* event) {
+                            return event->event_id.GetHex() == cursor;
+                        });
+                    if (previous == matching_events.end()) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                           "PAYMASTER_INVALID_FINANCE_CURSOR");
+                    }
+                    start = static_cast<size_t>(
+                        std::distance(matching_events.begin(), previous)) + 1;
+                }
+                UniValue events{UniValue::VARR};
+                const size_t end = std::min(
+                    matching_events.size(), start + static_cast<size_t>(limit));
+                const auto kind_name = [](ProviderFinanceEventKind kind) {
+                    switch (kind) {
+                    case ProviderFinanceEventKind::TRANSFER: return "transfer";
+                    case ProviderFinanceEventKind::POOL_SETUP: return "setup";
+                    case ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT: return "replenishment";
+                    case ProviderFinanceEventKind::POOL_RETIREMENT: return "retirement";
+                    case ProviderFinanceEventKind::CARRIER_WITHDRAWAL: return "withdrawal";
+                    }
+                    return "invalid";
+                };
+                const auto state_name = [](ProviderFinanceEventState state) {
+                    switch (state) {
+                    case ProviderFinanceEventState::PENDING: return "pending";
+                    case ProviderFinanceEventState::CONFIRMED: return "confirmed";
+                    case ProviderFinanceEventState::INVALIDATED: return "invalidated";
+                    }
+                    return "invalid";
+                };
+                for (size_t index = start; index < end; ++index) {
+                    const ProviderFinanceEvent& event = *matching_events[index];
+                    UniValue item{UniValue::VOBJ};
+                    item.pushKV("event_id", event.event_id.GetHex());
+                    item.pushKV("kind", kind_name(event.kind));
+                    item.pushKV("state", state_name(event.state));
+                    item.pushKV("dd_income_cents", event.dd_income.value);
+                    item.pushKV("dgb_cost_satoshis", event.dgb_cost.value);
+                    item.pushKV("created_at", event.created_at);
+                    if (event.confirmed_at > 0) {
+                        item.pushKV("confirmed_at", event.confirmed_at);
+                    }
+                    if (event.kind == ProviderFinanceEventKind::TRANSFER) {
+                        item.pushKV("funding_model",
+                                    event.funding_model == FundingModel::USER_PAID
+                                        ? "user_paid" : "sponsored");
+                        if (event.funding_model == FundingModel::SPONSORED) {
+                            item.pushKV("sponsorship_scope",
+                                        event.sponsorship_scope == SponsorshipScope::PUBLIC
+                                            ? "public" : "restricted");
+                        }
+                    }
+                    item.pushKV("transaction_id", event.transaction_id.GetHex());
+                    events.push_back(std::move(item));
+                }
+                result.pushKV("events", std::move(events));
+                if (end < matching_events.size() && end > start) {
+                    result.pushKV("next_cursor",
+                                  matching_events[end - 1]->event_id.GetHex());
+                }
+            }
+            return result;
+        },
+    };
+}
+
+RPCHelpMan acknowledgepaymasterproviderbackup()
+{
+    return RPCHelpMan{
+        "acknowledgepaymasterproviderbackup",
+        "Acknowledge an external full-wallet backup procedure for this provider wallet.\n"
+        "This does not create a backup and must not be used for seed-only or descriptor-only exports.\n",
+        {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Backup acknowledgement", {
+                {"external_backup", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Must be true after an external full-wallet backup"},
+            }},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Updated backup reminder", {
+            {RPCResult::Type::BOOL, "acknowledged", "Whether the external backup was acknowledged"},
+            {RPCResult::Type::BOOL, "backup_required", "Whether another backup reminder remains"},
+            {RPCResult::Type::NUM_TIME, "acknowledged_at", "Acknowledgement time"},
+        }},
+        RPCExamples{HelpExampleCli("acknowledgepaymasterproviderbackup", "'{\"external_backup\":true}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            const UniValue& options = request.params[0];
+            RPCTypeCheckObj(options,
+                            {{"external_backup", UniValueType(UniValue::VBOOL)}},
+                            /*fAllowNull=*/false, /*fStrict=*/true);
+            if (!options.find_value("external_backup").get_bool()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_EXTERNAL_BACKUP_NOT_CONFIRMED");
+            }
+            const int64_t now = GetTime();
+            std::string error;
+            if (!AcknowledgePaymasterProviderExternalBackup(
+                    *wallet, now, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            DigiDollar::Paymaster::ProviderBackupStatus status;
+            if (!GetPaymasterProviderBackupStatus(
+                    *wallet, status, now, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("acknowledged", true);
+            result.pushKV("backup_required",
+                          DigiDollar::Paymaster::ProviderBackupRequired(status));
+            result.pushKV("acknowledged_at",
+                          status.external_backup_acknowledged_at);
             return result;
         },
     };
@@ -8669,6 +9670,18 @@ RPCHelpMan getpaymasterinfo()
                                                                                                                                  }},
                                                                          {RPCResult::Type::OBJ, "liquidity", "Persisted liquidity targets, confirmed/pending/missing slots, and finite maintenance budget",
                                                                           ProviderLiquidityStatusResults()},
+                                                                        {RPCResult::Type::OBJ, "backup_status", /*optional=*/true, "Provider-wallet backup reminder", {
+                                                                            {RPCResult::Type::BOOL, "required", "Whether a fresh full-wallet backup or external-backup acknowledgement is recommended"},
+                                                                            {RPCResult::Type::NUM_TIME, "reminder_updated_at", "Time of the latest identity or material configuration reminder"},
+                                                                            {RPCResult::Type::NUM_TIME, "last_successful_backup_at", "Last backupwallet completion recorded by this wallet"},
+                                                                            {RPCResult::Type::NUM_TIME, "external_backup_acknowledged_at", "Last acknowledged external full-wallet backup"},
+                                                                        }},
+                                                                        {RPCResult::Type::OBJ, "finance_summary", /*optional=*/true, "Confirmed native all-time provider accounting", {
+                                                                            {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
+                                                                            {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
+                                                                            {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
+                                                                            {RPCResult::Type::BOOL, "history_partially_reconstructable", "Whether older exact history is unavailable"},
+                                                                        }},
                                                                         {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Provider identity"},
                                                                         {RPCResult::Type::STR, "endpoint", /*optional=*/true, "Published provider endpoint"},
                                                                         {RPCResult::Type::NUM, "announcement_sequence", /*optional=*/true, "Published monotonic announcement sequence"},
@@ -8693,6 +9706,15 @@ RPCHelpMan getpaymasterinfo()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             wallet->BlockUntilSyncedToCurrentChain();
+            size_t finance_changes{0};
+            std::string finance_error;
+            if (!ReconcilePaymasterProviderFinances(
+                    *wallet, finance_changes, finance_error)) {
+                LogPrint(BCLog::DIGIDOLLAR,
+                         "Paymaster finance reconciliation skipped in "
+                         "getpaymasterinfo: %s\n",
+                         finance_error);
+            }
             const ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
             const bool running = readiness.have_identity && context.paymaster &&
                                  context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
@@ -8771,6 +9793,58 @@ RPCHelpMan getpaymasterinfo()
                 result.pushKV("provider_id", readiness.identity.provider_id.GetHex());
                 result.pushKV("identity_key", HexStr(readiness.identity.identity_key));
                 result.pushKV("display_name", readiness.identity.display_name);
+
+                ProviderBackupStatus backup;
+                std::string backup_error;
+                if (GetPaymasterProviderBackupStatus(
+                        *wallet, backup, GetTime(), backup_error)) {
+                    UniValue backup_status{UniValue::VOBJ};
+                    backup_status.pushKV(
+                        "required", ProviderBackupRequired(backup));
+                    backup_status.pushKV(
+                        "reminder_updated_at", backup.reminder_updated_at);
+                    backup_status.pushKV(
+                        "last_successful_backup_at",
+                        backup.last_successful_backup_at);
+                    backup_status.pushKV(
+                        "external_backup_acknowledged_at",
+                        backup.external_backup_acknowledged_at);
+                    result.pushKV("backup_status", std::move(backup_status));
+                }
+
+                ProviderFinanceLedger finance;
+                if (WalletBatch{wallet->GetDatabase()}
+                        .ReadPaymasterFinanceLedger(finance)) {
+                    int64_t income{0};
+                    int64_t cost{0};
+                    uint64_t transfers{0};
+                    bool overflow{false};
+                    for (const ProviderFinanceDailyTotals& daily :
+                         finance.daily_totals) {
+                        if (daily.dd_income.value < 0 || daily.dgb_cost.value < 0 ||
+                            income > std::numeric_limits<int64_t>::max() -
+                                         daily.dd_income.value ||
+                            cost > std::numeric_limits<int64_t>::max() -
+                                       daily.dgb_cost.value ||
+                            transfers > std::numeric_limits<uint64_t>::max() -
+                                            daily.successful_transfers) {
+                            overflow = true;
+                            break;
+                        }
+                        income += daily.dd_income.value;
+                        cost += daily.dgb_cost.value;
+                        transfers += daily.successful_transfers;
+                    }
+                    if (!overflow) {
+                        UniValue summary{UniValue::VOBJ};
+                        summary.pushKV("service_fee_income_cents", income);
+                        summary.pushKV("dgb_operating_cost_satoshis", cost);
+                        summary.pushKV("successful_transfers", transfers);
+                        summary.pushKV("history_partially_reconstructable",
+                                       finance.earlier_history_partial);
+                        result.pushKV("finance_summary", std::move(summary));
+                    }
+                }
             }
             if (readiness.endpoint.IsValid()) {
                 result.pushKV("endpoint", readiness.endpoint.ToStringAddrPort());
@@ -10833,6 +11907,14 @@ RPCHelpMan processpaymasterresult()
                                                                                          {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
                                                                                          {RPCResult::Type::STR_HEX, "session_id", "Persistent session"},
                                                                                          {RPCResult::Type::STR_HEX, "provider_id", "Provider identity"},
+                                                                                         {RPCResult::Type::STR_HEX, "offer_id", "Exact authorized offer"},
+                                                                                         {RPCResult::Type::STR_HEX, "policy_hash", "Exact authorized provider policy"},
+                                                                                         {RPCResult::Type::STR, "funding_model", "Exact authorized funding model"},
+                                                                                         {RPCResult::Type::NUM, "payment_cents", "Exact recipient amount"},
+                                                                                         {RPCResult::Type::NUM, "service_fee_cents", "Exact provider service fee"},
+                                                                                         {RPCResult::Type::NUM, "user_total_cents", "Exact maximum wallet outflow"},
+                                                                                         {RPCResult::Type::STR_HEX, "authorization_commitment", "Accepted client authorization manifest"},
+                                                                                         {RPCResult::Type::BOOL, "authorization_accepted", "Whether the exact manifest remains accepted"},
                                                                                          {RPCResult::Type::STR, "session_state", "Authoritative session state"},
                                                                                          {RPCResult::Type::STR, "attempt_state", "Authoritative attempt state"},
                                                                                          {RPCResult::Type::STR, "result_status", /*optional=*/true, "Signed provider status"},
@@ -11072,6 +12154,32 @@ RPCHelpMan processpaymasterresult()
             result.pushKV("request_id", request_id);
             result.pushKV("session_id", session.session_id.GetHex());
             result.pushKV("provider_id", attempt.provider_id.GetHex());
+            // Always echo the exact durable authorization, including on the
+            // final result response. Callers must never reconstruct a funding
+            // model or fee from a stale directory preview, and Qt needs to
+            // distinguish a completed payment from a changed pre-signing
+            // authorization without guessing missing fields.
+            result.pushKV("offer_id", authorized_intent.offer_id.GetHex());
+            result.pushKV("policy_hash", authorized_intent.policy_hash.GetHex());
+            result.pushKV(
+                "funding_model",
+                authorized_intent.funding_model == FundingModel::SPONSORED
+                    ? "sponsored"
+                    : "user_paid");
+            result.pushKV("payment_cents",
+                          authorized_intent.recipient_amount.value);
+            result.pushKV("service_fee_cents",
+                          authorized_quote.service_fee.value);
+            result.pushKV("user_total_cents",
+                          authorized_intent.recipient_amount.value +
+                              authorized_quote.service_fee.value);
+            result.pushKV("authorization_commitment",
+                          attempt.client_manifest.manifest_id.GetHex());
+            result.pushKV(
+                "authorization_accepted",
+                attempt.accepted_client_manifest_id ==
+                        attempt.client_manifest.manifest_id &&
+                    attempt.client_manifest_accepted_at > 0);
             result.pushKV("session_state", std::string{SessionStateName(session.state)});
             result.pushKV("attempt_state", std::string{AttemptStateName(attempt.state)});
             if (accepted_result) {
@@ -12636,6 +13744,10 @@ RPCHelpMan startpaymaster()
             const bool maintenance_start =
                 !readiness.ready && !readiness.errors.empty() &&
                 readiness.settings.operation_mode == ProviderOperationMode::AUTOMATIC &&
+                readiness.have_policy && readiness.have_liquidity_policy &&
+                readiness.liquidity_policy.automatic_replenishment &&
+                ProviderLiquidityTargetsSatisfyPolicy(
+                    readiness.liquidity_policy, readiness.policy) &&
                 std::all_of(readiness.errors.begin(), readiness.errors.end(),
                             is_liquidity_error);
             Announcement announcement;
@@ -12901,6 +14013,10 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
             liquidity.have_liquidity_policy
                 ? liquidity.liquidity_policy
                 : SuggestedLiquidityPolicy(liquidity, GetTime());
+        const bool targets_satisfy_provider_policy =
+            !liquidity.have_policy ||
+            ProviderLiquidityTargetsSatisfyPolicy(
+                liquidity_policy, liquidity.policy);
         const auto admission_dgb = CountLiquiditySlots(
             liquidity.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB,
             liquidity_policy.target_admission_dgb);
@@ -12925,7 +14041,15 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
             operational_dgb.ready >= liquidity_policy.target_operational_dgb &&
             admission_carriers.ready >= liquidity_policy.target_admission_carriers &&
             operational_carriers.ready >= liquidity_policy.target_operational_carriers;
-        if (missing_dgb + missing_carriers > 0) {
+        if (!targets_satisfy_provider_policy) {
+            // A zero operational carrier target can be a deliberate result of
+            // release_slot. It is valid to persist, but automatic maintenance
+            // must not claim success or silently recreate capital the operator
+            // explicitly released. Require an explicit target change first.
+            accept_new_requests = false;
+            state = ProviderServiceState::WAITING_FOR_READINESS;
+            first_error = "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE";
+        } else if (missing_dgb + missing_carriers > 0) {
             accept_new_requests = false;
             if (!liquidity.have_liquidity_policy ||
                 !liquidity_policy.paid_maintenance_approved) {

@@ -53,6 +53,59 @@ bool Abort(WalletBatch& batch, std::string& error)
     return false;
 }
 
+/** Move the non-blocking backup reminder forward in the same database
+ * transaction as a material provider-configuration change. No backup path or
+ * filename is stored, and ordinary runtime/accounting updates do not call this
+ * helper. */
+bool WriteProviderBackupReminder(WalletBatch& batch,
+                                 const ProviderIdentityRecord& identity,
+                                 int64_t now,
+                                 std::string& error)
+{
+    ProviderBackupStatus status;
+    if (!batch.ReadPaymasterBackupStatus(status)) {
+        if (batch.HasPaymasterBackupStatus()) {
+            error = "PAYMASTER_INVALID_BACKUP_STATUS";
+            return false;
+        }
+        status.genesis_hash = Params().GenesisBlock().GetHash();
+        status.provider_id = identity.provider_id;
+        status.identity_created_at = identity.created_at;
+    }
+    if (status.genesis_hash != Params().GenesisBlock().GetHash() ||
+        status.provider_id != identity.provider_id) {
+        error = "PAYMASTER_BACKUP_STATUS_BINDING_MISMATCH";
+        return false;
+    }
+    // Configuration writes and backups can happen within the same timestamp
+    // second. Advance past every completed backup marker so an immediately
+    // following material change cannot accidentally appear protected by the
+    // older backup. Saturation keeps corrupted or extreme timestamps from
+    // wrapping around.
+    status.reminder_updated_at = std::max(
+        {status.reminder_updated_at, now,
+         SaturatingAddSeconds(status.last_successful_backup_at, 1),
+         SaturatingAddSeconds(status.external_backup_acknowledged_at, 1)});
+    if (!ValidateProviderBackupStatus(status, error) ||
+        !batch.WritePaymasterBackupStatus(status)) {
+        if (error.empty()) error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
+        return false;
+    }
+    return true;
+}
+
+/** Hash the complete persisted liquidity policy for change detection. The
+ * timestamp is normalized by the caller, so only operator-visible settings
+ * can trigger a new backup recommendation. */
+uint256 GetProviderLiquidityPolicyStorageHash(
+    const ProviderLiquidityPolicy& policy)
+{
+    HashWriter hasher = TaggedHash(
+        "DigiByte Paymaster Liquidity Policy Storage v1");
+    hasher << policy;
+    return hasher.GetSHA256();
+}
+
 uint256 GetOfferId(const ProviderIdentityRecord& identity,
                    const uint256& policy_hash,
                    FundingModel funding_model)
@@ -1127,13 +1180,20 @@ bool SetPaymasterProviderPolicy(CWallet& wallet,
     }
     ProviderSettings settings;
     batch.ReadPaymasterSettings(settings);
+    ProviderPolicy previous_policy;
+    const bool policy_changed =
+        !batch.ReadPaymasterPolicy(previous_policy) ||
+        GetProviderPolicyHash(previous_policy) != GetProviderPolicyHash(policy);
     settings.policy_hash = GetProviderPolicyHash(policy);
     settings.updated_at = now;
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
     }
-    if (!batch.WritePaymasterPolicy(policy) || !batch.WritePaymasterSettings(settings)) {
+    if (!batch.WritePaymasterPolicy(policy) ||
+        !batch.WritePaymasterSettings(settings) ||
+        (policy_changed &&
+         !WriteProviderBackupReminder(batch, identity, now, error))) {
         return Abort(batch, error);
     }
     if (!batch.TxnCommit()) {
@@ -1150,11 +1210,12 @@ bool SetPaymasterProviderEnabled(CWallet& wallet, bool enabled, int64_t now, std
     WalletBatch batch{wallet.GetDatabase()};
     ProviderSettings settings;
     batch.ReadPaymasterSettings(settings);
+    ProviderIdentityRecord identity;
+    const bool have_identity = batch.ReadPaymasterIdentity(identity);
     if (enabled) {
         if (!CheckPaymasterProviderWallet(wallet, error)) return false;
-        ProviderIdentityRecord identity;
         ProviderPolicy policy;
-        if (!batch.ReadPaymasterIdentity(identity)) {
+        if (!have_identity) {
             error = "PAYMASTER_IDENTITY_NOT_FOUND";
             return false;
         }
@@ -1182,10 +1243,20 @@ bool SetPaymasterProviderEnabled(CWallet& wallet, bool enabled, int64_t now, std
         error = "PAYMASTER_INVALID_TIME";
         return false;
     }
+    const bool settings_changed = settings.enabled != enabled;
     settings.enabled = enabled;
     settings.updated_at = now;
-    if (!batch.WritePaymasterSettings(settings)) {
-        error = "PAYMASTER_DATABASE_WRITE";
+    if (!batch.TxnBegin()) {
+        error = "PAYMASTER_DATABASE_BEGIN";
+        return false;
+    }
+    if (!batch.WritePaymasterSettings(settings) ||
+        (settings_changed && have_identity &&
+         !WriteProviderBackupReminder(batch, identity, now, error))) {
+        return Abort(batch, error);
+    }
+    if (!batch.TxnCommit()) {
+        error = "PAYMASTER_DATABASE_COMMIT";
         return false;
     }
     return true;
@@ -1215,12 +1286,26 @@ bool SetPaymasterProviderRuntimeSettings(CWallet& wallet,
         error = "PAYMASTER_PROVIDER_SETTINGS_NOT_FOUND";
         return false;
     }
+    ProviderIdentityRecord identity;
+    const bool have_identity = batch.ReadPaymasterIdentity(identity);
+    const bool settings_changed =
+        settings.operation_mode != operation_mode ||
+        settings.autostart != autostart;
     settings.version = ProviderSettings::CURRENT_VERSION;
     settings.operation_mode = operation_mode;
     settings.autostart = autostart;
     settings.updated_at = now;
-    if (!batch.WritePaymasterSettings(settings)) {
-        error = "PAYMASTER_DATABASE_WRITE";
+    if (!batch.TxnBegin()) {
+        error = "PAYMASTER_DATABASE_BEGIN";
+        return false;
+    }
+    if (!batch.WritePaymasterSettings(settings) ||
+        (settings_changed && have_identity &&
+         !WriteProviderBackupReminder(batch, identity, now, error))) {
+        return Abort(batch, error);
+    }
+    if (!batch.TxnCommit()) {
+        error = "PAYMASTER_DATABASE_COMMIT";
         return false;
     }
     return true;
@@ -1252,6 +1337,11 @@ bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
     if (!CheckPaymasterProviderWallet(wallet, error)) return false;
 
     WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity)) {
+        error = "PAYMASTER_IDENTITY_NOT_FOUND";
+        return false;
+    }
     ProviderPolicy advertised;
     if (!batch.ReadPaymasterPolicy(advertised)) {
         error = "PAYMASTER_POLICY_NOT_FOUND";
@@ -1271,12 +1361,21 @@ bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
     ProviderSafetyPolicy persisted{policy};
     persisted.updated_at = effective_now;
     if (!ValidateProviderSafetyPolicy(persisted, advertised, error)) return false;
+    ProviderSafetyPolicy previous_policy;
+    const bool had_previous_policy =
+        batch.ReadPaymasterProviderSafetyPolicy(previous_policy);
+    if (had_previous_policy) previous_policy.updated_at = persisted.updated_at;
+    const bool policy_changed = !had_previous_policy ||
+        GetProviderSafetyPolicyHash(previous_policy) !=
+            GetProviderSafetyPolicyHash(persisted);
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
     }
     if (!batch.WritePaymasterProviderSafetyPolicy(persisted) ||
-        !batch.WritePaymasterProviderBudgetLedger(ledger)) {
+        !batch.WritePaymasterProviderBudgetLedger(ledger) ||
+        (policy_changed && !WriteProviderBackupReminder(
+                               batch, identity, effective_now, error))) {
         return Abort(batch, error);
     }
     if (!batch.TxnCommit()) {
@@ -1315,6 +1414,11 @@ bool SetPaymasterProviderLiquidityPolicy(
     LOCK(wallet.cs_wallet);
     if (!CheckPaymasterProviderWallet(wallet, error)) return false;
     WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity)) {
+        error = "PAYMASTER_IDENTITY_NOT_FOUND";
+        return false;
+    }
     ProviderPolicy advertised;
     if (!batch.ReadPaymasterPolicy(advertised)) {
         error = "PAYMASTER_POLICY_NOT_FOUND";
@@ -1343,14 +1447,23 @@ bool SetPaymasterProviderLiquidityPolicy(
     if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
     ledger.accounting_time_high_water = std::max(
         ledger.accounting_time_high_water, now);
+    ProviderLiquidityPolicy previous_policy;
+    const bool had_previous_policy =
+        batch.ReadPaymasterLiquidityPolicy(previous_policy);
+    if (had_previous_policy) previous_policy.updated_at = policy.updated_at;
+    const bool policy_changed = !had_previous_policy ||
+        GetProviderLiquidityPolicyStorageHash(previous_policy) !=
+            GetProviderLiquidityPolicyStorageHash(policy);
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
     }
     if (!batch.WritePaymasterLiquidityPolicy(policy) ||
-        !batch.WritePaymasterMaintenanceLedger(ledger)) {
+        !batch.WritePaymasterMaintenanceLedger(ledger) ||
+        (policy_changed &&
+         !WriteProviderBackupReminder(batch, identity, now, error))) {
         batch.TxnAbort();
-        error = "PAYMASTER_DATABASE_WRITE";
+        if (error.empty()) error = "PAYMASTER_DATABASE_WRITE";
         return false;
     }
     if (!batch.TxnCommit()) {

@@ -266,6 +266,86 @@ bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
     return true;
 }
 
+/** Prepare the accounting side of a provider commit. Modern attempts bind
+ * the exact service fee and network fee in the provider authorization
+ * manifest, so this event can share the same database transaction as the
+ * durable commit. Legacy manifest-less commits are not guessed; their ledger
+ * is marked as only partially reconstructable. */
+bool PrepareProviderTransferFinanceEvent(
+    WalletBatch& batch,
+    const ProviderIdentityRecord& identity,
+    const ProviderAttempt& attempt,
+    const ProviderCommitRecord& commit,
+    const uint256& expected_genesis,
+    ProviderFinanceLedger& ledger,
+    bool& changed,
+    std::string& error)
+{
+    changed = false;
+    const bool have_ledger = batch.ReadPaymasterFinanceLedger(ledger);
+    if (!have_ledger && batch.HasPaymasterFinanceLedger()) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    if (!have_ledger) {
+        ledger.genesis_hash = expected_genesis;
+        ledger.provider_id = identity.provider_id;
+        ledger.history_complete_from = commit.committed_at;
+        ledger.earlier_history_partial =
+            identity.created_at < commit.committed_at;
+        ledger.updated_at = commit.committed_at;
+        if (!RebuildProviderFinanceDailyTotals(ledger, error)) return false;
+        changed = true;
+    }
+    if (ledger.genesis_hash != expected_genesis ||
+        ledger.provider_id != identity.provider_id) {
+        error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+        return false;
+    }
+
+    const ProviderAuthorizationManifest& manifest = attempt.provider_manifest;
+    if (manifest.manifest_id.IsNull()) {
+        if (!ledger.earlier_history_partial) {
+            ledger.earlier_history_partial = true;
+            changed = true;
+        }
+        if (ledger.updated_at < commit.committed_at) {
+            ledger.updated_at = commit.committed_at;
+            changed = true;
+        }
+        return RebuildProviderFinanceDailyTotals(ledger, error);
+    }
+    ProviderFinanceEvent event;
+    event.event_id = commit.commit_key;
+    event.genesis_hash = expected_genesis;
+    event.provider_id = identity.provider_id;
+    event.kind = ProviderFinanceEventKind::TRANSFER;
+    event.state = ProviderFinanceEventState::PENDING;
+    event.funding_model = manifest.funding_model;
+    event.sponsorship_scope = manifest.sponsorship_scope;
+    event.transaction_id = commit.final_txid;
+    event.dd_income = manifest.service_fee;
+    event.dgb_cost = manifest.network_fee;
+    event.created_at = commit.committed_at;
+    event.updated_at = commit.committed_at;
+
+    const auto existing = std::find_if(
+        ledger.events.begin(), ledger.events.end(),
+        [&](const ProviderFinanceEvent& candidate) {
+            return candidate.event_id == event.event_id;
+        });
+    if (existing != ledger.events.end()) {
+        // Exact commit replay must not turn a previously confirmed event back
+        // into pending after a restart or a harmless duplicate result.
+        event.state = existing->state;
+        event.confirmed_at = existing->confirmed_at;
+        event.updated_at = std::max(existing->updated_at, event.updated_at);
+    } else {
+        changed = true;
+    }
+    return UpsertProviderFinanceEvent(ledger, event, error);
+}
+
 // -------------------------------------------------------------------------
 // Durable authorization and budget invariants
 // -------------------------------------------------------------------------
@@ -6984,6 +7064,13 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         batch.ReadPaymasterPolicy(provider_policy)
             ? std::optional<ProviderPolicy>{provider_policy}
             : std::nullopt;
+    ProviderFinanceLedger finance_ledger;
+    bool finance_changed{false};
+    if (!PrepareProviderTransferFinanceEvent(
+            batch, identity, attempt, commit, expected_genesis,
+            finance_ledger, finance_changed, error)) {
+        return false;
+    }
 
     PaymasterResult existing_result;
     const bool have_existing_result =
@@ -7020,7 +7107,8 @@ bool PaymasterStore::CommitProviderFinalTransaction(
                 pool_entries, pool_changed, error)) {
             return false;
         }
-        if (have_existing_result && !budget_changed && !pool_changed) return true;
+        if (have_existing_result && !budget_changed && !pool_changed &&
+            !finance_changed) return true;
 
         // Repair a legacy crash window (commit durable before the initial
         // result) and any legacy budget transition as one database unit.
@@ -7033,7 +7121,9 @@ bool PaymasterStore::CommitProviderFinalTransaction(
             (budget_changed &&
              !batch.WritePaymasterProviderBudgetLedger(budget_ledger)) ||
             (pool_changed &&
-             !batch.WritePaymasterProviderPool(pool_entries))) {
+             !batch.WritePaymasterProviderPool(pool_entries)) ||
+            (finance_changed &&
+             !batch.WritePaymasterFinanceLedger(finance_ledger))) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
         if (!batch.TxnCommit()) {
@@ -7144,6 +7234,10 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         }
     }
     if (budget_changed && !batch.WritePaymasterProviderBudgetLedger(budget_ledger)) {
+        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    }
+    if (finance_changed &&
+        !batch.WritePaymasterFinanceLedger(finance_ledger)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     attempt.state = AttemptState::FINAL_COMMITTED;

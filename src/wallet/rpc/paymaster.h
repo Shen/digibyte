@@ -46,6 +46,13 @@ bool ReconcilePaymasterProviderMaintenance(CWallet& wallet,
                                            size_t& recovered,
                                            std::string& error);
 
+/** Rebuild provider income and cost state from durable commits, maintenance
+ * records, and current wallet transaction state. Safe across replay, reorg,
+ * and restart. */
+bool ReconcilePaymasterProviderFinances(CWallet& wallet,
+                                        size_t& changed_events,
+                                        std::string& error);
+
 /** Run one bounded provider-service cycle. This is the single scheduler entry
  * point for optional autostart plus automatic request/submit processing. */
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);
@@ -74,6 +81,8 @@ RPCHelpMan setpaymasterenabled();
 RPCHelpMan setpaymasterruntimesettings();
 RPCHelpMan setpaymasterliquiditypolicy();
 RPCHelpMan getpaymasterliquiditystatus();
+RPCHelpMan getpaymasterfinancestatus();
+RPCHelpMan acknowledgepaymasterproviderbackup();
 RPCHelpMan withdrawpaymastercarrier();
 RPCHelpMan preparepaymasterpool();
 RPCHelpMan rebalancepaymasterpool();

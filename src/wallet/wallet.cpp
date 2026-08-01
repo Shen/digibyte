@@ -73,6 +73,7 @@
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/scriptpubkeyman.h>
@@ -3783,7 +3784,15 @@ void CWallet::postInitProcess()
 
 bool CWallet::BackupWallet(const std::string& strDest) const
 {
-    return GetDatabase().Backup(strDest);
+    if (!GetDatabase().Backup(strDest)) return false;
+    std::string backup_status_error;
+    if (!MarkPaymasterProviderBackupCompleted(
+            *this, GetTime(), backup_status_error)) {
+        LogPrintf("Wallet: backup created, but Paymaster backup status could not be updated: %s\n",
+                  backup_status_error);
+        return false;
+    }
+    return true;
 }
 
 CKeyPool::CKeyPool()
