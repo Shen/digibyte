@@ -13,6 +13,7 @@ class AddrMan;
 class CChainParams;
 class CTxMemPool;
 class ChainstateManager;
+namespace DigiDollar::Paymaster { class Manager; }
 
 /** Whether transaction reconciliation protocol should be enabled by default. */
 static constexpr bool DEFAULT_TXRECONCILIATION_ENABLE{false};
@@ -63,6 +64,9 @@ public:
         //! Whether or not the internal RNG behaves deterministically (this is
         //! a test-only option).
         bool deterministic_rng{false};
+        // Optional non-owning bridge to bounded Paymaster P2P queues. Message
+        // processing never signs or mutates wallet authorization state.
+        DigiDollar::Paymaster::Manager* paymaster{nullptr};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

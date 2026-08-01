@@ -67,6 +67,7 @@
 #include <script/interpreter.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
+#include <paymaster/manager.h>
 #include <policy/fees_args.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
@@ -683,6 +684,9 @@ void SetupServerArgs(ArgsManager& argsman)
     // DigiDollar startup options
     argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (follows BIP9 activation by default)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymaster", "Enable DigiDollar Paymaster discovery, relay, and client support (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-addpaymaster=<ip>", "Add a DigiDollar Paymaster endpoint for local validation; this bypasses discovery only", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymasterendpoint=<ip:port>", "Public P2P endpoint announced by an explicitly enabled Paymaster provider (loopback is allowed only on regtest)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
 
     // DigiDollar RPC commands (use 'help <command>' in console for details)
     argsman.AddArg("mintdigidollar", "Mint DigiDollars by locking DGB as collateral (RPC/console)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
@@ -1317,6 +1321,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
 
+    assert(!node.paymaster);
+    node.paymaster = std::make_unique<DigiDollar::Paymaster::Manager>(args.GetBoolArg("-paymaster", true));
+
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);
     if (!opt_max_upload) {
         return InitError(strprintf(_("Unable to parse -maxuploadtarget: '%s'"), args.GetArg("-maxuploadtarget", "")));
@@ -1442,6 +1449,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     PeerManager::Options peerman_opts{};
     ApplyArgsManOptions(args, peerman_opts);
+    peerman_opts.paymaster = node.paymaster.get();
 
     {
 

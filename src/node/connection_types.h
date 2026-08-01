@@ -74,6 +74,11 @@ enum class ConnectionType {
      * AddrMan is empty.
      */
     ADDR_FETCH,
+
+    /** Short-lived, application-scoped DigiDollar Paymaster session. These
+     * connections must use BIP324 v2 and are never general relay peers.
+     */
+    PAYMASTER,
 };
 
 /** Convert ConnectionType enum to a string value */

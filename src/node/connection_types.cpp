@@ -19,6 +19,8 @@ std::string ConnectionTypeAsString(ConnectionType conn_type)
         return "block-relay-only";
     case ConnectionType::ADDR_FETCH:
         return "addr-fetch";
+    case ConnectionType::PAYMASTER:
+        return "paymaster";
     } // no default case, so the compiler can warn about missing cases
 
     assert(false);

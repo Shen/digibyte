@@ -22,6 +22,7 @@ using DigiDollar::GetScriptMetadata;
 #include <logging.h>
 #include <util/strencodings.h>
 #include <util/hasher.h>
+#include <util/int128.h>
 #include <sync.h>
 #include <uint256.h>
 
@@ -283,8 +284,10 @@ int FindDDOpReturn(const CTransaction& tx) {
  * Parses the OP_RETURN in the transaction to find DD amounts, then matches
  * the output index to the correct amount. Shared by txindex and block-db lookups.
  */
-static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutPoint& prevout, CAmount& amount) {
+bool ExtractDDAmountFromTransaction(const CTransaction& prev_tx, const COutPoint& prevout, CAmount& amount) {
     amount = 0;
+
+    if (prev_tx.GetHash() != prevout.hash) return false;
 
     // SECURITY [T5-02]: Reject coinbase transactions as DD sources.
     // A malicious miner could craft a coinbase with DD nVersion + zero-value P2TR
@@ -292,7 +295,7 @@ static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutP
     // so the coinbase would skip all DD checks. If we then extract DD amounts from the
     // coinbase here, a later DD TRANSFER would pass conservation — creating DD from nothing.
     // This is defense-in-depth alongside the ConnectBlock coinbase DD marker rejection.
-    if (prev_tx->IsCoinBase()) {
+    if (prev_tx.IsCoinBase()) {
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ExtractDDAmountFromTxRef - REJECTED coinbase tx %s as DD source (attack vector T5-02)\n",
                  prevout.hash.ToString());
         return false;
@@ -303,19 +306,19 @@ static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutP
     // with a DD-formatted OP_RETURN and zero-value P2TR outputs. A subsequent DD transfer
     // spending those outputs would pass conservation checks because ExtractDDAmountFromTxRef
     // would find DD amounts in the non-DD source tx's OP_RETURN — creating DD from nothing.
-    if (!DigiDollar::HasDigiDollarMarker(*prev_tx)) {
+    if (!DigiDollar::HasDigiDollarMarker(prev_tx)) {
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: ExtractDDAmountFromTxRef - source tx %s is not a DD transaction (version=0x%08x)\n",
-                 prevout.hash.ToString(), prev_tx->nVersion);
+                 prevout.hash.ToString(), prev_tx.nVersion);
         return false;
     }
 
     // Parse the OP_RETURN in the previous transaction to get DD amounts.
     // The transaction version is the authoritative DD type. Reject ambiguous
     // or mismatched DD metadata so later spends cannot reinterpret outputs.
-    const DigiDollarTxType versionTxType = DigiDollar::GetDigiDollarTxType(*prev_tx);
+    const DigiDollarTxType versionTxType = DigiDollar::GetDigiDollarTxType(prev_tx);
     std::vector<CAmount> dd_amounts;
     int ddOpReturnCount = 0;
-    for (const auto& vout : prev_tx->vout) {
+    for (const auto& vout : prev_tx.vout) {
         if (vout.scriptPubKey.size() > 0 && vout.scriptPubKey[0] == OP_RETURN) {
             CScript::const_iterator pc = vout.scriptPubKey.begin();
             opcodetype opcode;
@@ -395,8 +398,8 @@ static bool ExtractDDAmountFromTxRef(const CTransactionRef& prev_tx, const COutP
     // Match output index to DD amount
     // Count P2TR (DD) outputs to find the correct amount index
     size_t dd_output_idx = 0;
-    for (uint32_t n = 0; n < prev_tx->vout.size(); ++n) {
-        const CTxOut& txout = prev_tx->vout[n];
+    for (uint32_t n = 0; n < prev_tx.vout.size(); ++n) {
+        const CTxOut& txout = prev_tx.vout[n];
 
         // Skip non-DD outputs (OP_RETURN, non-zero value)
         if (txout.scriptPubKey.size() > 0 && txout.scriptPubKey[0] == OP_RETURN) continue;
@@ -438,7 +441,7 @@ bool ExtractDDAmountFromPrevTx(const COutPoint& prevout, CAmount& amount) {
         return false;
     }
 
-    return ExtractDDAmountFromTxRef(prev_tx, prevout, amount);
+    return ExtractDDAmountFromTransaction(*prev_tx, prevout, amount);
 }
 
 /**
@@ -458,7 +461,7 @@ bool ExtractDDAmountFromBlockDb(const COutPoint& prevout, uint32_t coinHeight,
         return false;
     }
 
-    return ExtractDDAmountFromTxRef(prev_tx, prevout, amount);
+    return ExtractDDAmountFromTransaction(*prev_tx, prevout, amount);
 }
 
 bool ExtractMintAccountingAmounts(const CTransaction& tx,
@@ -874,15 +877,15 @@ CAmount CalculateRequiredCollateral(CAmount ddAmount, int64_t lockTime,
     //   = (10000 * 100000000 * 150 * 100) / 6310
     //   = 15,000,000,000,000,000 / 6310
     //   = 2,377,179,080,509 sats = ~23,772 DGB
-    // Use __int128 to avoid uint64 overflow for large DD amounts (overflows at ~$18K@1000%)
-    __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(effectiveRatio) * 100;
-    __int128 denominator = static_cast<__int128>(ctx.oraclePriceMicroUSD);
-    __int128 result = (numerator + denominator - 1) / denominator;
+    // Use util::int128_t to avoid uint64 overflow for large DD amounts (overflows at ~$18K@1000%)
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(effectiveRatio) * 100;
+    util::int128_t denominator = static_cast<util::int128_t>(ctx.oraclePriceMicroUSD);
+    util::int128_t result = (numerator + denominator - 1) / denominator;
     // Fail closed when the economically required collateral is not
     // representable as a valid DGB amount. Capping at MAX_MONEY would accept
     // a mint with less collateral than the formula requires.
-    if (result > static_cast<__int128>(MAX_MONEY)) {
+    if (result > static_cast<util::int128_t>(MAX_MONEY)) {
         return 0;
     }
     CAmount requiredDGB = static_cast<CAmount>(result);
@@ -941,16 +944,16 @@ bool ValidateCollateralRatio(CAmount dgbLocked, CAmount ddMinted,
     // Oracle price is in micro-USD (1,000,000 = $1.00), DD is in cents
     // Convert: (DGB_sats * oracle_micro_usd / COIN) = micro-USD value
     // Then: micro-USD / 10000 = cents
-    // Use __int128 to prevent overflow when dgbLocked and oraclePrice are both large
-    __int128 dgbValueMicroUSD128 = static_cast<__int128>(dgbLocked) * static_cast<__int128>(ctx.oraclePriceMicroUSD);
+    // Use util::int128_t to prevent overflow when dgbLocked and oraclePrice are both large
+    util::int128_t dgbValueMicroUSD128 = static_cast<util::int128_t>(dgbLocked) * static_cast<util::int128_t>(ctx.oraclePriceMicroUSD);
     dgbValueMicroUSD128 /= COIN;
     CAmount dgbValueMicroUSD = (dgbValueMicroUSD128 > std::numeric_limits<CAmount>::max())
         ? std::numeric_limits<CAmount>::max()
         : static_cast<CAmount>(dgbValueMicroUSD128);
     CAmount dgbValueInCents = dgbValueMicroUSD / 10000;  // Convert micro-USD to cents
     // Clamp before cast to int to avoid overflow with large ratio values
-    __int128 actualRatio128 = ddMinted > 0
-        ? (static_cast<__int128>(dgbValueInCents) * 100) / static_cast<__int128>(ddMinted)
+    util::int128_t actualRatio128 = ddMinted > 0
+        ? (static_cast<util::int128_t>(dgbValueInCents) * 100) / static_cast<util::int128_t>(ddMinted)
         : 0;
     if (actualRatio128 > 100000) {
         actualRatio128 = 100000;
@@ -2610,14 +2613,14 @@ bool ValidateCollateralReleaseAmount(const CTransaction& tx,
 
     // Regular DGB fee inputs are additive funding for fees/change. They must not
     // reduce the amount of locked collateral the redemption is required to return.
-    const __int128 maxAllowedDGBOutputs = static_cast<__int128>(allowedRelease) +
-                                         static_cast<__int128>(totalFeeInputs);
+    const util::int128_t maxAllowedDGBOutputs = static_cast<util::int128_t>(allowedRelease) +
+                                         static_cast<util::int128_t>(totalFeeInputs);
 
     LogPrintf("DigiDollar: Collateral release check - totalOutputs: %lld, feeInputs: %lld, allowedCollateral: %lld\n",
               (long long)totalDGBOutputs, (long long)totalFeeInputs,
               (long long)allowedRelease);
 
-    if (static_cast<__int128>(totalDGBOutputs) > maxAllowedDGBOutputs) {
+    if (static_cast<util::int128_t>(totalDGBOutputs) > maxAllowedDGBOutputs) {
         LogPrintf("DigiDollar: Collateral release too large - outputs: %lld, allowed collateral: %lld, fee inputs: %lld, locked: %lld, ddBurned: %lld, originalDD: %lld\n",
                   (long long)totalDGBOutputs, (long long)allowedRelease,
                   (long long)totalFeeInputs,

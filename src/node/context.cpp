@@ -11,6 +11,7 @@
 #include <net_processing.h>
 #include <netgroup.h>
 #include <node/kernel_notifications.h>
+#include <paymaster/manager.h>
 #include <policy/fees.h>
 #include <scheduler.h>
 #include <txmempool.h>

@@ -181,6 +181,14 @@ int FindDDOpReturn(const CTransaction& tx);
  */
 bool ExtractDDAmountFromPrevTx(const COutPoint& prevout, CAmount& amount);
 
+/** Extract the DD amount for an outpoint from an explicitly supplied creating
+ * transaction. The transaction hash, DD marker, metadata, and output mapping
+ * are verified; no txindex or local metadata registry is consulted.
+ */
+bool ExtractDDAmountFromTransaction(const CTransaction& tx,
+                                    const COutPoint& prevout,
+                                    CAmount& amount);
+
 /**
  * Extract DD amount from the creating transaction fetched via block database
  * lookup callback (used when txindex is unavailable).

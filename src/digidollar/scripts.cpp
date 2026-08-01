@@ -170,7 +170,7 @@ CScript CreateCollateralP2TR(const MintParams& params)
 
         return scriptPubKey;
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         // LogPrintf("DigiDollar: Exception creating P2TR script: %s\n", e.what());
         return CScript();
     }
@@ -209,7 +209,7 @@ CScript CreateDigiDollarP2TR(const XOnlyPubKey& owner, CAmount ddAmount)
 
         return scriptPubKey;
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         // LogPrintf("DigiDollar: Exception creating DD P2TR script: %s\n", e.what());
         return CScript();
     }

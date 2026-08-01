@@ -428,7 +428,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
             // In that case, drop the connection that was just created.
             LOCK(m_nodes_mutex);
             CNode* pnode = FindNode(static_cast<CService>(addrConnect));
-            if (pnode) {
+            if (pnode && conn_type != ConnectionType::PAYMASTER) {
                 LogPrintf("Failed to open new connection, already connected\n");
                 return nullptr;
             }
@@ -1845,9 +1845,12 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     RandAddEvent((uint32_t)id);
 }
 
-bool CConnman::AddConnection(const std::string& address, ConnectionType conn_type)
+bool CConnman::AddConnection(const std::string& address,
+                             ConnectionType conn_type,
+                             bool paymaster_high_privacy)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    if (paymaster_high_privacy && conn_type != ConnectionType::PAYMASTER) return false;
     std::optional<int> max_connections;
     switch (conn_type) {
     case ConnectionType::INBOUND:
@@ -1865,6 +1868,24 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     // no limit for FEELER connections since they're short-lived
     case ConnectionType::FEELER:
         break;
+    case ConnectionType::PAYMASTER:
+        max_connections = 1;
+        // Direct Paymaster sessions never negotiate or retry with plaintext V1.
+        if (!(GetLocalServices() & NODE_P2P_V2)) return false;
+        // Mainnet direct messages can contain capabilities and partially signed
+        // transactions and must never enter the message-capture directory.
+        if (m_params.GetChainType() == ChainType::MAIN &&
+            gArgs.GetBoolArg("-capturemessages", false)) return false;
+        if (paymaster_high_privacy) {
+            if (fLogIPs) return false;
+            const auto endpoints{Lookup(address, GetDefaultPort(address), /*fAllowLookup=*/false, 1)};
+            Proxy onion_proxy;
+            if (endpoints.size() != 1 || !endpoints.front().IsTor() ||
+                !GetProxy(NET_ONION, onion_proxy) || !onion_proxy.randomize_credentials) {
+                return false;
+            }
+        }
+        break;
     } // no default case, so the compiler can warn about missing cases
 
     // Count existing connections
@@ -1878,7 +1899,8 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     CSemaphoreGrant grant(*semOutbound, true);
     if (!grant) return false;
 
-    OpenNetworkConnection(CAddress(), false, std::move(grant), address.c_str(), conn_type, /*use_v2transport=*/false);
+    OpenNetworkConnection(CAddress(), false, std::move(grant), address.c_str(), conn_type,
+                          /*use_v2transport=*/conn_type == ConnectionType::PAYMASTER);
     return true;
 }
 
@@ -1916,7 +1938,7 @@ void CConnman::DisconnectNodes()
                 // Add to reconnection list if appropriate. We don't reconnect right here, because
                 // the creation of a connection is a blocking operation (up to several seconds),
                 // and we don't want to hold up the socket handler thread for that long.
-                if (pnode->m_transport->ShouldReconnectV1()) {
+                if (!pnode->IsPaymasterConn() && pnode->m_transport->ShouldReconnectV1()) {
                     reconnections_to_add.push_back({
                         .addr_connect = pnode->addr,
                         .grant = std::move(pnode->grantOutbound),
@@ -2554,6 +2576,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
                     // peers from addrman.
                     case ConnectionType::ADDR_FETCH:
                     case ConnectionType::FEELER:
+                    case ConnectionType::PAYMASTER:
                         break;
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
@@ -2888,7 +2911,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         if (IsLocal(addrConnect) || banned_or_discouraged || AlreadyConnectedToAddress(addrConnect)) {
             return;
         }
-    } else if (FindNode(std::string(pszDest)))
+    } else if (conn_type != ConnectionType::PAYMASTER && FindNode(std::string(pszDest)))
         return;
 
     CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport);
@@ -3780,18 +3803,24 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
     AssertLockNotHeld(m_total_bytes_sent_mutex);
     size_t nMessageSize = msg.data.size();
     LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n", msg.m_type, nMessageSize, pnode->GetId());
-    if (gArgs.GetBoolArg("-capturemessages", false)) {
+    const bool paymaster_direct = pnode->IsPaymasterConn() &&
+        (msg.m_type == NetMsgType::PMCAPREQ || msg.m_type == NetMsgType::PMCAPRESP ||
+         msg.m_type == NetMsgType::PMQUOTEREQ || msg.m_type == NetMsgType::PMQUOTERESP ||
+         msg.m_type == NetMsgType::PMSUBMIT || msg.m_type == NetMsgType::PMRESULT);
+    if (gArgs.GetBoolArg("-capturemessages", false) && !paymaster_direct) {
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /*is_incoming=*/false);
     }
 
-    TRACE6(net, outbound_message,
-        pnode->GetId(),
-        pnode->m_addr_name.c_str(),
-        pnode->ConnectionTypeAsString().c_str(),
-        msg.m_type.c_str(),
-        msg.data.size(),
-        msg.data.data()
-    );
+    if (!paymaster_direct) {
+        TRACE6(net, outbound_message,
+            pnode->GetId(),
+            pnode->m_addr_name.c_str(),
+            pnode->ConnectionTypeAsString().c_str(),
+            msg.m_type.c_str(),
+            msg.data.size(),
+            msg.data.data()
+        );
+    }
 
     size_t nBytesSent = 0;
     {
@@ -3862,6 +3891,11 @@ uint64_t CConnman::CalculateKeyedNetGroup(const CAddress& address) const
     std::vector<unsigned char> vchNetGroup(m_netgroupman.GetGroup(address));
 
     return GetDeterministicRandomizer(RANDOMIZER_ID_NETGROUP).Write(vchNetGroup).Finalize();
+}
+
+std::vector<unsigned char> CConnman::GetCanonicalNetGroup(const CNetAddr& address) const
+{
+    return m_netgroupman.GetGroup(address);
 }
 
 void CConnman::PerformReconnections()

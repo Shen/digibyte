@@ -16,6 +16,7 @@
 #include <random.h>
 #include <policy/policy.h>
 #include <logging.h>
+#include <util/int128.h>
 
 #include <algorithm>
 #include <cassert>
@@ -42,8 +43,8 @@ CAmount ApplyCollateralSafetyMargin(CAmount requiredCollateral)
         return 0;
     }
 
-    __int128 padded128 = (static_cast<__int128>(requiredCollateral) * 101) / 100;
-    if (padded128 > static_cast<__int128>(MAX_MONEY)) {
+    util::int128_t padded128 = (static_cast<util::int128_t>(requiredCollateral) * 101) / 100;
+    if (padded128 > static_cast<util::int128_t>(MAX_MONEY)) {
         return 0;
     }
     return static_cast<CAmount>(padded128);
@@ -55,8 +56,8 @@ int CalculatePositionCollateralRatio(CAmount dgbLocked, CAmount ddMinted, CAmoun
         return 0;
     }
 
-    const __int128 dgbValueCents = (static_cast<__int128>(dgbLocked) * price) / COIN;
-    const __int128 ratio = (dgbValueCents * 100) / ddMinted;
+    const util::int128_t dgbValueCents = (static_cast<util::int128_t>(dgbLocked) * price) / COIN;
+    const util::int128_t ratio = (dgbValueCents * 100) / ddMinted;
     if (ratio > std::numeric_limits<int>::max()) {
         return std::numeric_limits<int>::max();
     }
@@ -205,17 +206,17 @@ CAmount MintTxBuilder::CalculateRequiredCollateral(CAmount ddAmount, int lockDay
     //   = 15,000,000,000,000,000 / 6310
     //   = 2,377,179,080,509 sats = ~23,772 DGB
     //
-    // NOTE: Using __int128 to avoid uint64 overflow. Without this, minting >$18K DD
+    // NOTE: Using util::int128_t to avoid uint64 overflow. Without this, minting >$18K DD
     // at 1000% ratio (or >$36K at 500%) causes silent overflow, producing a tiny
     // collateral requirement and allowing massively under-collateralized positions.
-    __int128 numerator = static_cast<__int128>(usdValue) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(effectiveRatio) * 100;
-    __int128 denominator = static_cast<__int128>(oraclePrice);
-    __int128 result128 = (numerator + denominator - 1) / denominator;
+    util::int128_t numerator = static_cast<util::int128_t>(usdValue) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(effectiveRatio) * 100;
+    util::int128_t denominator = static_cast<util::int128_t>(oraclePrice);
+    util::int128_t result128 = (numerator + denominator - 1) / denominator;
 
     // Overflow guard: cap at MAX_MONEY before casting to uint64_t.
     // Without this, extreme values could silently truncate to near-zero.
-    if (result128 > static_cast<__int128>(MAX_MONEY)) {
+    if (result128 > static_cast<util::int128_t>(MAX_MONEY)) {
         return 0; // Amount too large
     }
     uint64_t requiredCollateral = static_cast<uint64_t>(result128);
@@ -524,24 +525,24 @@ bool TransferTxBuilder::ValidateTransferParams(const TxBuilderTransferParams& pa
     for (const auto& [address, amount] : params.recipients) {
         // Validate address format
         if (!ValidateDDAddress(address)) {
-            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Invalid address: %s\n", address);
+            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Invalid address\n");
             return false;
         }
 
         // Validate amount ranges
         if (amount <= 0) {
-            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Non-positive amount: %d\n", amount);
+            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Non-positive amount\n");
             return false; // No zero or negative amounts
         }
 
         if (amount < minOutput) {
-            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Below dust threshold: %d < %d\n", amount, minOutput);
+            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Below dust threshold\n");
             return false; // Below dust threshold
         }
 
         // Check maximum single transfer limit ($100,000)
         if (amount > 10000000) { // $100,000.00 in cents
-            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Exceeds max transfer: %d > 10000000\n", amount);
+            LogPrintf("DigiDollar: ValidateTransferParams FAILED - Exceeds max transfer\n");
             return false;
         }
 
@@ -562,7 +563,7 @@ bool TransferTxBuilder::ValidateTransferParams(const TxBuilderTransferParams& pa
 
     // Validate fee rate
     if (!ValidateFeeRate(params.feeRate)) {
-        LogPrintf("DigiDollar: ValidateTransferParams FAILED - Invalid fee rate: %d\n", params.feeRate);
+        LogPrintf("DigiDollar: ValidateTransferParams FAILED - Invalid fee rate\n");
         return false;
     }
 
@@ -687,8 +688,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
 
     // Add DGB fee inputs (after DD inputs)
     // Note: Phase 2.1 already selected these UTXOs, so we just add them directly
-    LogPrintf("DigiDollar: TxBuilder - feeUtxos.size=%d, feeAmounts.size=%d\n",
-              params.feeUtxos.size(), params.feeAmounts.size());
+    LogPrintf("DigiDollar: TxBuilder - adding fee inputs\n");
 
     CAmount totalFeeIn = 0;
     for (size_t i = 0; i < params.feeUtxos.size(); ++i) {
@@ -696,17 +696,12 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         tx.vin.push_back(CTxIn(utxo));
         // Get actual fee UTXO amount from feeAmounts
         CAmount feeAmount = (i < params.feeAmounts.size()) ? params.feeAmounts[i] : GetDGBFromUTXO(utxo);
-        LogPrintf("DigiDollar: Fee input %d - using %s: %d sats\n",
-                  i, (i < params.feeAmounts.size()) ? "feeAmounts[i]" : "GetDGBFromUTXO()", feeAmount);
         totalFeeIn += feeAmount;
-        LogPrintf("DigiDollar: Added fee input %s:%d (%d sats)\n",
-                  utxo.hash.ToString(), utxo.n, feeAmount);
     }
 
     // Add DD outputs for recipients (all with 0 DGB value)
-    LogPrintf("DigiDollar: TxBuilder - recipients.size=%d\n", params.recipients.size());
+    LogPrintf("DigiDollar: TxBuilder - adding recipient outputs\n");
     for (const auto& [address, amount] : params.recipients) {
-        LogPrintf("DigiDollar: Creating DD output - address=%s, amount=%d cents\n", address, amount);
         CTxDestination dest = DecodeDigiDollarAddress(address);
         const auto* taproot = std::get_if<WitnessV1Taproot>(&dest);
         if (!taproot) {
@@ -725,7 +720,6 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         // can extract the DD amount when spending this output
         RegisterScriptMetadata(ddScript, ScriptType::DD_TOKEN_OUTPUT, amount, 0);
 
-        LogPrintf("DigiDollar: Added DD output for %s: %d cents (registered)\n", address, amount);
     }
 
     // Add DD change output if needed — EVERY cent of DD must be accounted for.
@@ -756,7 +750,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         // because ExtractDDAmount can't find the amount.
         RegisterScriptMetadata(changeScript, ScriptType::DD_TOKEN_OUTPUT, ddChange, 0);
 
-        LogPrintf("DigiDollar: Added DD change output: %d cents (tweaked key, registered)\n", ddChange);
+        LogPrintf("DigiDollar: Added DD change output\n");
     } else if (ddChange < 0) {
         // This should never happen - SelectDDCoins should ensure enough DD
         result.error = strprintf("Insufficient DD: need %d cents, have %d cents", totalDDOut, totalDDIn);
@@ -768,8 +762,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     CAmount calculatedFee = CalculateFee(tx, params.feeRate);
     CAmount actualFee = std::max(calculatedFee, MIN_DD_TX_FEE);
 
-    LogPrintf("DigiDollar: Fee calculation - calculated: %d sats, minimum: %d sats, actual: %d sats\n",
-              calculatedFee, MIN_DD_TX_FEE, actualFee);
+    LogPrintf("DigiDollar: Fee calculation completed\n");
 
     if (totalFeeIn <= 0) {
         result.error = "Insufficient DGB fee input: no fee inputs selected";
@@ -800,7 +793,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
                 LogPrintf("DigiDollar: WARNING - Using spenderKey for DGB change (wallet may not recognize!)\n");
             }
             tx.vout.push_back(CTxOut(dgbChange, dgbChangeScript));
-            LogPrintf("DigiDollar: Added DGB change output: %d sats\n", dgbChange);
+            LogPrintf("DigiDollar: Added DGB change output\n");
         }
     }
 
@@ -825,7 +818,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     }
 
     tx.vout.push_back(CTxOut(0, metadataScript));
-    LogPrintf("DigiDollar: Added OP_RETURN with %d DD output amounts\n", ddOutputAmounts.size());
+    LogPrintf("DigiDollar: Added DD transfer metadata\n");
 
     // Final validation - ensure DD conservation
     // DD amounts are now stored in OP_RETURN, so sum up ddOutputAmounts instead
@@ -834,8 +827,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
         finalDDOut += amt;
     }
 
-    LogPrintf("DigiDollar: Conservation check - Input: %d cents, Output: %d cents\n",
-              totalDDIn, finalDDOut);
+    LogPrintf("DigiDollar: Conservation check completed\n");
 
     // DD conservation is absolute — every cent in must equal every cent out.
     // DD change outputs are always created (no dust exception), so strict equality holds.
@@ -906,8 +898,7 @@ TxBuilderResult TransferTxBuilder::BuildTransferTransaction(const TxBuilderTrans
     result.tx = tx;
     result.success = true;
 
-    LogPrintf("DigiDollar: Transaction finalized - %d inputs, %d outputs, version=%d, locktime=%d\n",
-              tx.vin.size(), tx.vout.size(), tx.nVersion, tx.nLockTime);
+    LogPrintf("DigiDollar: Transaction finalized\n");
 
     return result;
 }

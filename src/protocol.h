@@ -303,6 +303,21 @@ extern const char* ORACLEMUSIGNONCE;
 extern const char* ORACLEMUSIGCONTEXT;
 extern const char* ORACLEMUSIGPARTIALSIG;
 extern const char* ORACLEHEARTBEAT;
+/** DigiDollar Paymaster V1 application handshake and directory messages. */
+extern const char* SENDPMASTERS;
+extern const char* PMANNOUNCE;
+extern const char* GETPMASTERS;
+/** DigiDollar Paymaster V1 isolated direct-session messages. */
+extern const char* PMCAPREQ;
+extern const char* PMCAPRESP;
+extern const char* PMQUOTEREQ;
+extern const char* PMQUOTERESP;
+extern const char* PMSUBMIT;
+extern const char* PMRESULT;
+extern const char* PMRECOVERYREQ;
+extern const char* PMRECOVERYRESP;
+extern const char* PMRECOVERYSUBMIT;
+extern const char* PMRECOVERYRESULT;
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */

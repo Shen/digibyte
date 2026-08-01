@@ -60,6 +60,19 @@ const char* ORACLEMUSIGNONCE = "oramusnonce";
 const char* ORACLEMUSIGCONTEXT = "oramusigctx";
 const char* ORACLEMUSIGPARTIALSIG = "oramusigpsig";
 const char* ORACLEHEARTBEAT = "oraclehb";
+const char* SENDPMASTERS = "sendpmasters";
+const char* PMANNOUNCE = "pmannounce";
+const char* GETPMASTERS = "getpmasters";
+const char* PMCAPREQ = "pmcapreq";
+const char* PMCAPRESP = "pmcapresp";
+const char* PMQUOTEREQ = "pmquotereq";
+const char* PMQUOTERESP = "pmquoteresp";
+const char* PMSUBMIT = "pmsubmit";
+const char* PMRESULT = "pmresult";
+const char* PMRECOVERYREQ = "pmrecreq";
+const char* PMRECOVERYRESP = "pmrecresp";
+const char* PMRECOVERYSUBMIT = "pmrecsub";
+const char* PMRECOVERYRESULT = "pmrecresult";
 } // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of
@@ -111,6 +124,19 @@ const static std::vector<std::string> g_all_net_message_types{
     NetMsgType::ORACLEMUSIGCONTEXT,
     NetMsgType::ORACLEMUSIGPARTIALSIG,
     NetMsgType::ORACLEHEARTBEAT,
+    NetMsgType::SENDPMASTERS,
+    NetMsgType::PMANNOUNCE,
+    NetMsgType::GETPMASTERS,
+    NetMsgType::PMCAPREQ,
+    NetMsgType::PMCAPRESP,
+    NetMsgType::PMQUOTEREQ,
+    NetMsgType::PMQUOTERESP,
+    NetMsgType::PMSUBMIT,
+    NetMsgType::PMRESULT,
+    NetMsgType::PMRECOVERYREQ,
+    NetMsgType::PMRECOVERYRESP,
+    NetMsgType::PMRECOVERYSUBMIT,
+    NetMsgType::PMRECOVERYRESULT,
 };
 
 CMessageHeader::CMessageHeader(const MessageStartChars& pchMessageStartIn, const char* pszCommand, unsigned int nMessageSizeIn)

@@ -24,6 +24,7 @@ class CTxMemPool;
 class ChainstateManager;
 class NetGroupManager;
 class PeerManager;
+namespace DigiDollar::Paymaster { class Manager; }
 namespace interfaces {
 class Chain;
 class ChainClient;
@@ -56,6 +57,9 @@ struct NodeContext {
     std::unique_ptr<CTxMemPool> stempool;
     std::unique_ptr<const NetGroupManager> netgroupman;
     std::unique_ptr<CBlockPolicyEstimator> fee_estimator;
+    // Node-scoped transport/directory manager. Wallet-specific identities,
+    // authorizations, budgets, and liquidity never live in this shared object.
+    std::unique_ptr<DigiDollar::Paymaster::Manager> paymaster;
     std::unique_ptr<PeerManager> peerman;
     std::unique_ptr<ChainstateManager> chainman;
     std::unique_ptr<BanMan> banman;

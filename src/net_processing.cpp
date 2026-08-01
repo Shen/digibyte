@@ -36,6 +36,9 @@
 #include <oracle/musig2_messages.h>
 #include <oracle/musig2_session.h>
 #include <oracle/node.h>
+#include <paymaster/manager.h>
+#include <paymaster/validation.h>
+#include <paymaster/wire.h>
 #include <random.h>
 
 #include <secp256k1_musig.h>
@@ -59,6 +62,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <typeinfo>
 
 /** Headers download timeout.
@@ -273,6 +277,13 @@ struct Peer {
 
     /** Whether this peer supports Dandelion++ privacy protocol */
     std::atomic<bool> fSupportsDandelion{false};
+    std::atomic<bool> m_paymaster_negotiated{false};
+    /** The remote peer opened this inbound socket as a dedicated paymaster
+     * connection. Set only by the post-version paymaster handshake extension
+     * sent from a locally ConnectionType::PAYMASTER peer.
+     */
+    std::atomic<bool> m_paymaster_direct_connection{false};
+    int64_t m_last_getpaymasters GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
 
     struct TxRelay {
         mutable RecursiveMutex m_bloom_filter_mutex;
@@ -4058,7 +4069,227 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             pfrom.m_send_dandelion_discovery = true;
             LogPrint(BCLog::DANDELION, "Scheduling Dandelion discovery after VERACK for peer=%d\n", pfrom.GetId());
         }
+
+        // Paymaster negotiation is advertised only after ordinary transport
+        // setup and DigiDollar activation. It announces message support, not a
+        // provider identity or permission to send direct-session payloads.
+        if (m_opts.paymaster && m_opts.paymaster->Enabled()) {
+            const CBlockIndex* tip = WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip());
+            if (DigiDollar::IsDigiDollarEnabled(tip, m_chainman)) {
+                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDPMASTERS,
+                                                           DigiDollar::Paymaster::PROTOCOL_VERSION,
+                                                           pfrom.IsPaymasterConn() ?
+                                                               DigiDollar::Paymaster::CAP_DIRECT_CONNECTION :
+                                                               uint32_t{0}));
+            }
+        }
         
+        return;
+    }
+
+    // Paymaster P2P handling is split into three trust levels: capability
+    // negotiation, relayed signed announcements, and BIP324-only direct
+    // session traffic. Never promote an ordinary outbound relay connection to
+    // a direct channel based solely on peer-supplied capability bits.
+    if (msg_type == NetMsgType::SENDPMASTERS) {
+        uint16_t version{0};
+        uint32_t capabilities{0};
+        vRecv >> version >> capabilities;
+        if (!vRecv.empty() || version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+            !m_opts.paymaster || !m_opts.paymaster->Enabled()) return;
+        if ((capabilities & ~DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) return;
+        if ((capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) {
+            // Only the accepting half can be reclassified. An ordinary
+            // outbound peer cannot turn an existing relay connection into a
+            // direct paymaster channel by advertising this capability.
+            if (!pfrom.IsInboundConn()) return;
+            peer->m_paymaster_direct_connection = true;
+        }
+        peer->m_paymaster_negotiated = true;
+        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPMASTERS, uint16_t{16}));
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETPMASTERS) {
+        uint16_t requested{0};
+        vRecv >> requested;
+        const int64_t now = GetTime();
+        if (!vRecv.empty() || !peer->m_paymaster_negotiated || !m_opts.paymaster ||
+            requested == 0 ||
+            DigiDollar::Paymaster::SaturatingAddSeconds(peer->m_last_getpaymasters, 60) > now) return;
+        peer->m_last_getpaymasters = now;
+        requested = std::min<uint16_t>(requested, 16);
+        const auto announcements = m_opts.paymaster->GetDirectory().List(now);
+        for (size_t i = 0; i < announcements.size() && i < requested; ++i) {
+            m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::PMANNOUNCE, announcements[i]));
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::PMANNOUNCE) {
+        if (!peer->m_paymaster_negotiated || !m_opts.paymaster || vRecv.size() > 64 * 1024) return;
+        const int64_t now = GetTime();
+        if (!m_opts.paymaster->AdmitAnnouncementTransport(
+                pfrom.GetId(), pfrom.nKeyedNetGroup, now)) return;
+        DigiDollar::Paymaster::Announcement announcement;
+        vRecv >> announcement;
+        if (!vRecv.empty()) return;
+        std::string error;
+        if (!DigiDollar::Paymaster::ValidateAnnouncementEnvelope(
+                announcement, m_chainparams.GenesisBlock().GetHash(), now, error,
+                m_chainparams.GetChainType() == ChainType::REGTEST)) {
+            return;
+        }
+        // Do not let an unauthenticated peer consume a named provider's
+        // identity bucket. The peer/netgroup check above protects the single
+        // identity-signature verification; this provider check still precedes
+        // the substantially more expensive chainstate/control-proof work.
+        const DigiDollar::Paymaster::PaymasterId provider_id{
+            DigiDollar::Paymaster::GetPaymasterId(announcement.identity_key)};
+        // A signed announcement can arrive over several relay paths. Reject
+        // stale or exact sequence duplicates before charging the provider
+        // bucket and before the expensive chainstate/control-proof work.
+        if (!m_opts.paymaster->GetDirectory().AcceptsSequence(
+                provider_id, announcement.sequence) ||
+            !m_opts.paymaster->AdmitAnnouncementProvider(provider_id, now) ||
+            !DigiDollar::Paymaster::ValidateAdmissionProofs(announcement, m_chainman, error) ||
+            !m_opts.paymaster->GetDirectory().AddValidated(announcement, now)) {
+            return;
+        }
+
+        m_connman.ForEachNode([this, &pfrom, &announcement](CNode* pnode) {
+            if (pnode->GetId() == pfrom.GetId() || !pnode->fSuccessfullyConnected) return;
+            const PeerRef relay_peer = GetPeerRef(pnode->GetId());
+            if (!relay_peer || !relay_peer->m_paymaster_negotiated) return;
+            const CNetMsgMaker relay_maker{pnode->GetCommonVersion()};
+            m_connman.PushMessage(pnode, relay_maker.Make(NetMsgType::PMANNOUNCE, announcement));
+        });
+        return;
+    }
+
+    const bool direct_paymaster_message =
+        msg_type == NetMsgType::PMCAPREQ || msg_type == NetMsgType::PMCAPRESP ||
+        msg_type == NetMsgType::PMQUOTEREQ || msg_type == NetMsgType::PMQUOTERESP ||
+        msg_type == NetMsgType::PMSUBMIT || msg_type == NetMsgType::PMRESULT ||
+        msg_type == NetMsgType::PMRECOVERYREQ ||
+        msg_type == NetMsgType::PMRECOVERYRESP ||
+        msg_type == NetMsgType::PMRECOVERYSUBMIT ||
+        msg_type == NetMsgType::PMRECOVERYRESULT;
+    if (direct_paymaster_message) {
+        // Direct messages may contain payment metadata and authorization
+        // artifacts, so plaintext V1, capture-enabled mainnet operation, and
+        // over-sized frames fail closed before deserialization.
+        if (!(pfrom.IsPaymasterConn() || peer->m_paymaster_direct_connection) ||
+            pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+            (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
+            !m_opts.paymaster || !m_opts.paymaster->Enabled() || vRecv.empty() ||
+            vRecv.size() > DigiDollar::Paymaster::MAX_DIRECT_MESSAGE_BYTES) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+
+        // This content hash is evidence for the manager's protocol-slot replay
+        // check. Do not reject it in a connection-local raw-message cache:
+        // exact retries must reach semantic idempotency on both the same and a
+        // replacement direct connection.
+        const uint256 message_id{Hash(msg_type, vRecv)};
+
+        const uint256 genesis_hash{m_chainparams.GenesisBlock().GetHash()};
+        const int64_t now{GetTime()};
+        const std::vector<unsigned char> canonical_netgroup =
+            m_connman.GetCanonicalNetGroup(pfrom.addr);
+        if (canonical_netgroup.empty()) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (!m_opts.paymaster->AdmitDirectTransport(
+                pfrom.GetId(), pfrom.nKeyedNetGroup, now)) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        const size_t serialized_size{vRecv.size()};
+        std::string error;
+        bool valid{false};
+        std::optional<DigiDollar::Paymaster::DirectPayload> direct_payload;
+        if (msg_type == NetMsgType::PMCAPREQ) {
+            DigiDollar::Paymaster::PaymasterCapacityRequest request;
+            vRecv >> request;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateCapacityRequestEnvelope(
+                                         request, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(request));
+        } else if (msg_type == NetMsgType::PMCAPRESP) {
+            DigiDollar::Paymaster::PaymasterCapacityProof proof;
+            vRecv >> proof;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateCapacityProofEnvelope(
+                                         proof, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(proof));
+        } else if (msg_type == NetMsgType::PMQUOTEREQ) {
+            DigiDollar::Paymaster::PaymasterQuoteRequest request;
+            vRecv >> request;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateQuoteRequestEnvelope(
+                                         request, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(request));
+        } else if (msg_type == NetMsgType::PMQUOTERESP) {
+            DigiDollar::Paymaster::PaymasterQuoteResponse response;
+            vRecv >> response;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateQuoteResponseEnvelope(
+                                         response, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(response));
+        } else if (msg_type == NetMsgType::PMSUBMIT) {
+            DigiDollar::Paymaster::PaymasterSubmit submit;
+            vRecv >> submit;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateSubmitEnvelope(
+                                         submit, genesis_hash, error);
+            if (valid) direct_payload.emplace(std::move(submit));
+        } else if (msg_type == NetMsgType::PMRESULT) {
+            DigiDollar::Paymaster::PaymasterResultMessage result;
+            vRecv >> result;
+            valid = vRecv.empty() && DigiDollar::Paymaster::ValidateResultMessageEnvelope(
+                                         result, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(result));
+        } else if (msg_type == NetMsgType::PMRECOVERYREQ) {
+            DigiDollar::Paymaster::AlternativeRecoveryRequest recovery;
+            vRecv >> recovery;
+            valid = vRecv.empty() &&
+                    DigiDollar::Paymaster::ValidateAlternativeRecoveryRequestEnvelope(
+                        recovery, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(recovery));
+        } else if (msg_type == NetMsgType::PMRECOVERYRESP) {
+            DigiDollar::Paymaster::AlternativeRecoveryResponse recovery;
+            vRecv >> recovery;
+            valid = vRecv.empty() &&
+                    DigiDollar::Paymaster::ValidateAlternativeRecoveryResponseEnvelope(
+                        recovery, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(recovery));
+        } else if (msg_type == NetMsgType::PMRECOVERYSUBMIT) {
+            DigiDollar::Paymaster::AlternativeRecoverySubmit recovery;
+            vRecv >> recovery;
+            valid = vRecv.empty() &&
+                    DigiDollar::Paymaster::ValidateAlternativeRecoverySubmitEnvelope(
+                        recovery, genesis_hash, error);
+            if (valid) direct_payload.emplace(std::move(recovery));
+        } else {
+            DigiDollar::Paymaster::AlternativeRecoveryResultMessage recovery;
+            vRecv >> recovery;
+            valid = vRecv.empty() &&
+                    DigiDollar::Paymaster::ValidateAlternativeRecoveryResultEnvelope(
+                        recovery, genesis_hash, now, error);
+            if (valid) direct_payload.emplace(std::move(recovery));
+        }
+        if (!valid || !direct_payload) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        const auto enqueue_result = m_opts.paymaster->EnqueueDirectMessageResult(
+            pfrom.GetId(), message_id, serialized_size, std::move(*direct_payload), now,
+            pfrom.nKeyedNetGroup, canonical_netgroup);
+        if (!DigiDollar::Paymaster::IsBenignDirectEnqueueResult(enqueue_result)) {
+            if (enqueue_result == DigiDollar::Paymaster::DirectEnqueueResult::CONFLICT) {
+                Misbehaving(*peer, 100, "conflicting paymaster direct-message replay");
+            }
+            pfrom.fDisconnect = true;
+            return;
+        }
         return;
     }
 
@@ -6437,16 +6668,26 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     CNetMessage& msg{poll_result->first};
     bool fMoreWork = poll_result->second;
 
-    TRACE6(net, inbound_message,
-        pfrom->GetId(),
-        pfrom->m_addr_name.c_str(),
-        pfrom->ConnectionTypeAsString().c_str(),
-        msg.m_type.c_str(),
-        msg.m_recv.size(),
-        msg.m_recv.data()
-    );
-
-    if (m_opts.capture_messages) {
+    const bool paymaster_direct =
+        (pfrom->IsPaymasterConn() || peer->m_paymaster_direct_connection) &&
+        (msg.m_type == NetMsgType::PMCAPREQ || msg.m_type == NetMsgType::PMCAPRESP ||
+         msg.m_type == NetMsgType::PMQUOTEREQ || msg.m_type == NetMsgType::PMQUOTERESP ||
+         msg.m_type == NetMsgType::PMSUBMIT || msg.m_type == NetMsgType::PMRESULT ||
+         msg.m_type == NetMsgType::PMRECOVERYREQ ||
+         msg.m_type == NetMsgType::PMRECOVERYRESP ||
+         msg.m_type == NetMsgType::PMRECOVERYSUBMIT ||
+         msg.m_type == NetMsgType::PMRECOVERYRESULT);
+    if (!paymaster_direct) {
+        TRACE6(net, inbound_message,
+            pfrom->GetId(),
+            pfrom->m_addr_name.c_str(),
+            pfrom->ConnectionTypeAsString().c_str(),
+            msg.m_type.c_str(),
+            msg.m_recv.size(),
+            msg.m_recv.data()
+        );
+    }
+    if (m_opts.capture_messages && !paymaster_direct) {
         CaptureMessage(pfrom->addr, msg.m_type, MakeUCharSpan(msg.m_recv), /*is_incoming=*/true);
     }
 
@@ -6906,6 +7147,43 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     // If we get here, the outgoing message serialization version is set and can't change.
     const CNetMsgMaker msgMaker(pto->GetCommonVersion());
+
+    if (pto->IsPaymasterConn() || peer->m_paymaster_direct_connection) {
+        if (pto->m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+            (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
+            !m_opts.paymaster || !m_opts.paymaster->Enabled()) {
+            pto->fDisconnect = true;
+            return true;
+        }
+        auto outbound = m_opts.paymaster->TakeOutboundDirectMessages(
+            pto->GetId(), /*maximum=*/2, GetTime());
+        for (auto& message : outbound) {
+            std::visit([&](const auto& payload) {
+                using Payload = std::decay_t<decltype(payload)>;
+                if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterCapacityRequest>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMCAPREQ, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterCapacityProof>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMCAPRESP, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterQuoteRequest>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMQUOTEREQ, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterQuoteResponse>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMQUOTERESP, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterSubmit>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMSUBMIT, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::PaymasterResultMessage>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMRESULT, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::AlternativeRecoveryRequest>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMRECOVERYREQ, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::AlternativeRecoveryResponse>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMRECOVERYRESP, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::AlternativeRecoverySubmit>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMRECOVERYSUBMIT, payload));
+                } else if constexpr (std::is_same_v<Payload, DigiDollar::Paymaster::AlternativeRecoveryResultMessage>) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMRECOVERYRESULT, payload));
+                }
+            }, message.payload);
+        }
+    }
 
     // Send Dandelion discovery message if needed
     if (pto->m_send_dandelion_discovery.exchange(false)) {

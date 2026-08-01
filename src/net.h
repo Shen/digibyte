@@ -798,6 +798,7 @@ public:
             case ConnectionType::MANUAL:
             case ConnectionType::ADDR_FETCH:
             case ConnectionType::FEELER:
+            case ConnectionType::PAYMASTER:
                 return false;
         } // no default case, so the compiler can warn about missing cases
 
@@ -819,6 +820,7 @@ public:
         case ConnectionType::FEELER:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
+        case ConnectionType::PAYMASTER:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
         case ConnectionType::MANUAL:
@@ -840,6 +842,10 @@ public:
         return m_conn_type == ConnectionType::ADDR_FETCH;
     }
 
+    bool IsPaymasterConn() const {
+        return m_conn_type == ConnectionType::PAYMASTER;
+    }
+
     bool IsInboundConn() const {
         return m_conn_type == ConnectionType::INBOUND;
     }
@@ -849,6 +855,7 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            case ConnectionType::PAYMASTER:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
@@ -1240,10 +1247,16 @@ public:
      *                          - Max total outbound connection capacity filled
      *                          - Max connection capacity for type is filled
      */
-    bool AddConnection(const std::string& address, ConnectionType conn_type) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    bool AddConnection(const std::string& address,
+                       ConnectionType conn_type,
+                       bool paymaster_high_privacy = false) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
 
     size_t GetNodeCount(ConnectionDirection) const;
     uint32_t GetMappedAS(const CNetAddr& addr) const;
+    /** Return the process-independent network group for an address. The
+     * returned bytes are transient metadata: callers must pseudonymize them
+     * before writing durable state. */
+    std::vector<unsigned char> GetCanonicalNetGroup(const CNetAddr& address) const;
     void GetNodeStats(std::vector<CNodeStats>& vstats) const;
     bool DisconnectNode(const std::string& node);
     bool DisconnectNode(const CSubNet& subnet);

@@ -163,6 +163,20 @@ DIGIBYTE_CORE_H = \
   digidollar/scripts.h \
   digidollar/txbuilder.h \
   digidollar/validation.h \
+  paymaster/txbuilder.h \
+  paymaster/client.h \
+  paymaster/types.h \
+  paymaster/reservation.h \
+  paymaster/directory.h \
+  paymaster/manager.h \
+  paymaster/psbt.h \
+  paymaster/recovery.h \
+  paymaster/provider.h \
+  paymaster/protocol.h \
+  paymaster/reputation.h \
+  paymaster/sponsorship.h \
+  paymaster/wire.h \
+  paymaster/validation.h \
   external_signer.h \
   flatfile.h \
   headerssync.h \
@@ -316,6 +330,7 @@ DIGIBYTE_CORE_H = \
   util/hash_type.h \
   util/hasher.h \
   util/insert.h \
+  util/int128.h \
   util/macros.h \
   util/message.h \
   util/moneystr.h \
@@ -359,6 +374,7 @@ DIGIBYTE_CORE_H = \
   wallet/receive.h \
   wallet/rpc/util.h \
   wallet/rpc/wallet.h \
+  wallet/rpc/paymaster.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
   wallet/spend.h \
@@ -367,6 +383,10 @@ DIGIBYTE_CORE_H = \
   wallet/types.h \
   wallet/wallet.h \
   wallet/walletdb.h \
+  wallet/paymasterpsbt.h \
+  wallet/paymasteridentity.h \
+  wallet/paymasterprovider.h \
+  wallet/paymasterstore.h \
   wallet/wallettool.h \
   wallet/walletutil.h \
   walletinitinterface.h \
@@ -531,11 +551,16 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/rpc/transactions.cpp \
   wallet/rpc/util.cpp \
   wallet/rpc/wallet.cpp \
+  wallet/rpc/paymaster.cpp \
   wallet/scriptpubkeyman.cpp \
   wallet/spend.cpp \
   wallet/transaction.cpp \
   wallet/wallet.cpp \
   wallet/walletdb.cpp \
+  wallet/paymasterpsbt.cpp \
+  wallet/paymasteridentity.cpp \
+  wallet/paymasterprovider.cpp \
+  wallet/paymasterstore.cpp \
   wallet/walletutil.cpp \
   wallet/coinselection.cpp \
   $(DIGIBYTE_CORE_H)
@@ -748,6 +773,20 @@ libdigibyte_common_a_SOURCES = \
   digidollar/scripts.cpp \
   digidollar/txbuilder.cpp \
   digidollar/validation.cpp \
+  paymaster/txbuilder.cpp \
+  paymaster/client.cpp \
+  paymaster/types.cpp \
+  paymaster/reservation.cpp \
+  paymaster/directory.cpp \
+  paymaster/manager.cpp \
+  paymaster/psbt.cpp \
+  paymaster/recovery.cpp \
+  paymaster/provider.cpp \
+  paymaster/protocol.cpp \
+  paymaster/reputation.cpp \
+  paymaster/sponsorship.cpp \
+  paymaster/wire.cpp \
+  paymaster/validation.cpp \
   external_signer.cpp \
   init/common.cpp \
   kernel/chainparams.cpp \
