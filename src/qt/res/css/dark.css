@@ -6225,13 +6225,17 @@ DigiDollarSendWidget QPushButton#paymasterExplanationButton:hover {
    the active DigiDollar dark theme. */
 QWidget#paymasterWidget,
 QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane,
+QWidget#paymasterWidget QScrollArea#paymasterOverviewPage,
 QWidget#paymasterWidget QScrollArea#paymasterConfigurationPage,
 QWidget#paymasterWidget QScrollArea#paymasterSafetyPolicyPage,
 QWidget#paymasterWidget QScrollArea#paymasterLiquidityPage,
+QWidget#paymasterWidget QScrollArea#paymasterFinancesPage,
 QWidget#paymasterWidget QScrollArea#paymasterActivityPage,
+QWidget#paymasterWidget QWidget#paymasterOverviewContents,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents,
+QWidget#paymasterWidget QWidget#paymasterFinancesContents,
 QWidget#paymasterWidget QWidget#paymasterActivityContents {
     background-color: #0b2419;
     color: #ffffff;

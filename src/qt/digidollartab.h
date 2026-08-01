@@ -74,6 +74,8 @@ public:
 Q_SIGNALS:
     /** Fired when a message should be reported to the user */
     void message(const QString &title, const QString &message, unsigned int style);
+    /** Request WalletView's established full-wallet backup dialog. */
+    void providerWalletBackupRequested();
 
 public Q_SLOTS:
     /** Update balance displays across all widgets */

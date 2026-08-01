@@ -1014,7 +1014,6 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         if (m_subtractPaymasterFeeCheck) m_subtractPaymasterFeeCheck->setChecked(false);
         m_paymasterRecoveryMaximumServiceFeeCents = 0;
         m_paymasterRecoveryActive = false;
-        m_offerFundingModels.clear();
         m_paymasterConfirmationGuard.Reset();
         m_paymasterRecoveryConfirmationGuard.Reset();
         m_clientSafetyStatusKnown = false;
@@ -1863,7 +1862,6 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
             if (!guard) return;
             guard->setPaymasterBusy(false);
             guard->m_offersTable->setRowCount(0);
-            guard->m_offerFundingModels.clear();
             guard->m_paymasterPreviewRecipientCents = -1;
             guard->m_paymasterPreviewServiceFeeCents = -1;
             guard->m_paymasterPreviewTotalCents = -1;
@@ -1878,8 +1876,6 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                 guard->m_offersTable->insertRow(row);
                 const QString provider = QString::fromStdString(offer.find_value("display_name").get_str());
                 const QString model = QString::fromStdString(offer.find_value("funding_model").get_str());
-                const QString offer_id = QString::fromStdString(offer.find_value("offer_id").get_str());
-                guard->m_offerFundingModels.insert(offer_id, model);
                 const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
                 const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
                 const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
@@ -2031,6 +2027,37 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
     // updatePaymasterSessionView() may have learned that Core persisted the
     // session. Re-evaluate the recovery controls with that authoritative fact.
     setPaymasterBusy(false);
+    const UniValue& txid = result.find_value("txid");
+    const UniValue& final = result.find_value("final");
+    const UniValue& direct_status = result.find_value("status");
+    const UniValue& result_status = result.find_value("result_status");
+    const QString state = QString::fromStdString(result.find_value("session_state").isStr()
+                                                     ? result.find_value("session_state").get_str()
+                                                     : std::string{});
+    if (IsValidatedPaymasterCompletion(
+            txid.isStr(), state,
+            direct_status.isStr()
+                ? QString::fromStdString(direct_status.get_str())
+                : QString{},
+            result_status.isStr()
+                ? QString::fromStdString(result_status.get_str())
+                : QString{},
+            final.isBool() && final.get_bool())) {
+        // A FINAL_COMMITTED result reaches Qt only after Core has reloaded the
+        // durable client manifest, validated every final input/output and
+        // witness, and accepted or observed the exact transaction. The
+        // response echo is presentation metadata at this point; a missing echo
+        // must not turn a completed payment into a false authorization error.
+        m_paymasterPollTimer->stop();
+        const UniValue& payment = result.find_value("payment_cents");
+        const double recipient_amount = payment.isNum()
+            ? payment.getInt<qint64>() / 100.0
+            : amount;
+        showSuccess(QString::fromStdString(txid.get_str()), recipient_amount);
+        onClearClicked();
+        updateBalance();
+        return;
+    }
     const UniValue& returned_commitment_value = result.find_value("authorization_commitment");
     const QString returned_commitment = returned_commitment_value.isStr()
         ? QString::fromStdString(returned_commitment_value.get_str())
@@ -2050,25 +2077,6 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
                "current provider offer again."));
         return;
     }
-    const UniValue& txid = result.find_value("txid");
-    const UniValue& final = result.find_value("final");
-    const UniValue& direct_status = result.find_value("status");
-    const QString state = QString::fromStdString(result.find_value("session_state").isStr()
-                                                     ? result.find_value("session_state").get_str()
-                                                     : std::string{});
-    const bool direct_success = txid.isStr() && state.isEmpty() && direct_status.isStr() &&
-                                direct_status.get_str() == "success";
-    if ((direct_success || (final.isBool() && final.get_bool())) && txid.isStr()) {
-        m_paymasterPollTimer->stop();
-        const UniValue& payment = result.find_value("payment_cents");
-        const double recipient_amount = payment.isNum()
-            ? payment.getInt<qint64>() / 100.0
-            : amount;
-        showSuccess(QString::fromStdString(txid.get_str()), recipient_amount);
-        onClearClicked();
-        updateBalance();
-        return;
-    }
     const UniValue& authorization_required_value =
         result.find_value("authorization_required");
     const bool authorization_required = authorization_required_value.isBool() &&
@@ -2084,7 +2092,7 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
                    "authorization commitment. No Qt authorization will continue."));
             return;
         }
-        if (!confirmPaymasterSelectionBeforeSigning(result, address, amount)) return;
+        if (!confirmPaymasterSelectionBeforeSigning(result, address)) return;
         m_paymasterAuthorizationCommitment = returned_commitment;
         executePaymasterTransfer(address, amount, /*allow_unlock=*/true);
         return;
@@ -2169,7 +2177,7 @@ void DigiDollarSendWidget::updatePaymasterSessionView(const UniValue& result)
 }
 
 PaymasterConfirmationSelection DigiDollarSendWidget::paymasterConfirmationSelection(
-    const UniValue& result, const QString& address, double amount) const
+    const UniValue& result, const QString& address) const
 {
     const auto string_value = [&result](const char* key) {
         const UniValue& value = result.find_value(key);
@@ -2177,35 +2185,35 @@ PaymasterConfirmationSelection DigiDollarSendWidget::paymasterConfirmationSelect
     };
     PaymasterConfirmationSelection selection;
     selection.provider_id = string_value("provider_id");
+    selection.offer_id = string_value("offer_id");
+    selection.policy_hash = string_value("policy_hash");
     selection.funding_model = string_value("funding_model");
-    if (selection.funding_model.isEmpty()) {
-        selection.funding_model = m_offerFundingModels.value(string_value("offer_id"));
-    }
     selection.recipient = address;
     selection.authorization_commitment = string_value("authorization_commitment");
     const UniValue& payment = result.find_value("payment_cents");
-    selection.payment_cents = payment.isNum()
-        ? payment.getInt<qint64>()
-        : static_cast<qint64>(std::llround(amount * 100));
+    if (payment.isNum()) selection.payment_cents = payment.getInt<qint64>();
     const UniValue& fee = result.find_value("service_fee_cents");
     if (fee.isNum()) selection.service_fee_cents = fee.getInt<qint64>();
+    const UniValue& total = result.find_value("user_total_cents");
+    if (total.isNum()) selection.user_total_cents = total.getInt<qint64>();
     return selection;
 }
 
 bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
-    const UniValue& result, const QString& address, double amount)
+    const UniValue& result, const QString& address)
 {
     // Display values are taken from Core's bound selection, not recomputed from
     // the currently visible widgets. Any provider, model, recipient, amount, or
     // fee change therefore produces a new commitment and another confirmation.
     const PaymasterConfirmationSelection selection =
-        paymasterConfirmationSelection(result, address, amount);
+        paymasterConfirmationSelection(result, address);
     if (!selection.IsComplete()) {
         m_paymasterStateValue->setText(tr("Paymaster authorization blocked: incomplete exact offer details"));
         showWarning(
             tr("Paymaster authorization blocked"),
-            tr("The exact provider, funding model, recipient, amount and service fee "
-               "or the validated authorization commitment was not returned by the wallet. "
+            tr("The exact provider, offer, policy, funding model, recipient, amount, "
+               "service fee, total outflow or validated authorization commitment was "
+               "not returned consistently by the wallet. "
                "No Qt authorization will continue until those details are available."));
         return false;
     }
@@ -2214,10 +2222,13 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
     QStringList changed_fields;
     for (const QString& field : m_paymasterConfirmationGuard.ChangedFields(selection)) {
         if (field == QStringLiteral("provider")) changed_fields.push_back(tr("provider"));
+        else if (field == QStringLiteral("offer")) changed_fields.push_back(tr("offer"));
+        else if (field == QStringLiteral("policy")) changed_fields.push_back(tr("provider policy"));
         else if (field == QStringLiteral("funding_model")) changed_fields.push_back(tr("funding model"));
         else if (field == QStringLiteral("recipient")) changed_fields.push_back(tr("recipient"));
         else if (field == QStringLiteral("amount")) changed_fields.push_back(tr("amount"));
         else if (field == QStringLiteral("service_fee")) changed_fields.push_back(tr("service fee"));
+        else if (field == QStringLiteral("total")) changed_fields.push_back(tr("total wallet outflow"));
         else if (field == QStringLiteral("authorization_commitment")) {
             changed_fields.push_back(tr("transaction or capacity commitment"));
         }
@@ -2232,12 +2243,12 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
         .arg(selection.provider_id, friendlyFundingModel(selection.funding_model), selection.recipient)
         .arg(formatCents(selection.payment_cents))
         .arg(formatCents(selection.service_fee_cents))
-        .arg(formatCents(selection.payment_cents + selection.service_fee_cents))
+        .arg(formatCents(selection.user_total_cents))
         .arg(selection.authorization_commitment)
         .arg(changed_fields.join(tr(", ")))
         .arg(formatDDAmount(std::max(
             0.0, m_paymasterInitialAvailableBalance -
-                     (selection.payment_cents + selection.service_fee_cents) / 100.0)));
+                     selection.user_total_cents / 100.0)));
     if (QMessageBox::question(this, tr("Confirm exact Paymaster authorization"), prompt,
                               QMessageBox::Yes | QMessageBox::Cancel,
                               QMessageBox::Cancel) != QMessageBox::Yes) {

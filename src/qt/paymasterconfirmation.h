@@ -8,34 +8,70 @@
 #include <QString>
 #include <QStringList>
 
+#include <limits>
+
+/** Return true only for a response that identifies an exact transaction and
+ * reports a Core-validated completion state. This check deliberately does not
+ * depend on the response echo of the pre-signing commitment: Core has already
+ * enforced that durable manifest before returning either Paymaster result. */
+inline bool IsValidatedPaymasterCompletion(bool has_txid,
+                                           const QString& session_state,
+                                           const QString& direct_status,
+                                           const QString& result_status,
+                                           bool final)
+{
+    if (!has_txid) return false;
+    const bool direct_success = session_state.isEmpty() &&
+        direct_status == QStringLiteral("success");
+    const bool result_state_is_final =
+        session_state == QStringLiteral("MEMPOOL") ||
+        session_state == QStringLiteral("CONFIRMED");
+    const bool validated_result = result_state_is_final &&
+        (result_status == QStringLiteral("final_committed") ||
+         result_status == QStringLiteral("broadcast_attempted"));
+    return direct_success || validated_result || final;
+}
+
 /** The exact user-visible fields that must be reviewed before a Paymaster
  * authorization. Core remains authoritative and independently validates its
  * persisted authorization manifest; this value only controls the Qt prompt. */
 struct PaymasterConfirmationSelection {
     QString provider_id;
+    QString offer_id;
+    QString policy_hash;
     QString funding_model;
     QString recipient;
     QString authorization_commitment;
     qint64 payment_cents{-1};
     qint64 service_fee_cents{-1};
+    qint64 user_total_cents{-1};
 
     bool IsComplete() const
     {
-        return !provider_id.isEmpty() && !funding_model.isEmpty() &&
-               !recipient.isEmpty() && !authorization_commitment.isEmpty() &&
-               payment_cents >= 0 &&
-               service_fee_cents >= 0;
+        const bool known_model = funding_model == QStringLiteral("user_paid") ||
+                                 funding_model == QStringLiteral("sponsored");
+        const bool addition_is_safe = payment_cents >= 0 && service_fee_cents >= 0 &&
+            payment_cents <= std::numeric_limits<qint64>::max() - service_fee_cents;
+        return !provider_id.isEmpty() && !offer_id.isEmpty() &&
+               !policy_hash.isEmpty() && known_model && !recipient.isEmpty() &&
+               !authorization_commitment.isEmpty() && addition_is_safe &&
+               user_total_cents == payment_cents + service_fee_cents &&
+               (funding_model != QStringLiteral("sponsored") ||
+                service_fee_cents == 0);
     }
 
     friend bool operator==(const PaymasterConfirmationSelection& lhs,
                            const PaymasterConfirmationSelection& rhs)
     {
         return lhs.provider_id == rhs.provider_id &&
+               lhs.offer_id == rhs.offer_id &&
+               lhs.policy_hash == rhs.policy_hash &&
                lhs.funding_model == rhs.funding_model &&
                lhs.recipient == rhs.recipient &&
                lhs.authorization_commitment == rhs.authorization_commitment &&
                lhs.payment_cents == rhs.payment_cents &&
-               lhs.service_fee_cents == rhs.service_fee_cents;
+               lhs.service_fee_cents == rhs.service_fee_cents &&
+               lhs.user_total_cents == rhs.user_total_cents;
     }
 };
 
@@ -71,17 +107,22 @@ public:
     {
         if (!candidate.IsComplete()) return {QStringLiteral("incomplete")};
         if (!m_have_accepted) {
-            return {QStringLiteral("provider"), QStringLiteral("funding_model"),
+            return {QStringLiteral("provider"), QStringLiteral("offer"),
+                    QStringLiteral("policy"), QStringLiteral("funding_model"),
                     QStringLiteral("recipient"), QStringLiteral("amount"),
                     QStringLiteral("service_fee"),
+                    QStringLiteral("total"),
                     QStringLiteral("authorization_commitment")};
         }
         QStringList changed;
         if (candidate.provider_id != m_accepted.provider_id) changed.push_back(QStringLiteral("provider"));
+        if (candidate.offer_id != m_accepted.offer_id) changed.push_back(QStringLiteral("offer"));
+        if (candidate.policy_hash != m_accepted.policy_hash) changed.push_back(QStringLiteral("policy"));
         if (candidate.funding_model != m_accepted.funding_model) changed.push_back(QStringLiteral("funding_model"));
         if (candidate.recipient != m_accepted.recipient) changed.push_back(QStringLiteral("recipient"));
         if (candidate.payment_cents != m_accepted.payment_cents) changed.push_back(QStringLiteral("amount"));
         if (candidate.service_fee_cents != m_accepted.service_fee_cents) changed.push_back(QStringLiteral("service_fee"));
+        if (candidate.user_total_cents != m_accepted.user_total_cents) changed.push_back(QStringLiteral("total"));
         if (candidate.authorization_commitment != m_accepted.authorization_commitment) {
             changed.push_back(QStringLiteral("authorization_commitment"));
         }

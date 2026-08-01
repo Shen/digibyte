@@ -103,6 +103,8 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     connect(transactionView, &TransactionView::message, this, &WalletView::message);
     // Pass through messages from DigiDollar tab
     connect(digiDollarPage, &DigiDollarTab::message, this, &WalletView::message);
+    connect(digiDollarPage, &DigiDollarTab::providerWalletBackupRequested,
+            this, &WalletView::backupWallet);
 
     connect(this, &WalletView::setPrivacy, overviewPage, &OverviewPage::setPrivacy);
     connect(this, &WalletView::setPrivacy, digiDollarPage, &DigiDollarTab::setPrivacy);
@@ -247,6 +249,9 @@ void WalletView::backupWallet()
     else {
         Q_EMIT message(tr("Backup Successful"), tr("The wallet data was successfully saved to %1.").arg(filename),
             CClientUIInterface::MSG_INFORMATION);
+        // A successful full-wallet backup also satisfies the non-blocking
+        // Paymaster provider reminder recorded by the wallet backend.
+        digiDollarPage->updateView();
     }
 }
 

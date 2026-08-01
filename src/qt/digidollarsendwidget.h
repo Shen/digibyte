@@ -8,7 +8,6 @@
 #include <QWidget>
 #include <QValidator>
 #include <QMessageBox>
-#include <QHash>
 #include <QTimer>
 
 #include <qt/paymasterconfirmation.h>
@@ -175,9 +174,9 @@ private:
                                const QString& address, double amount);
     void updatePaymasterSessionView(const UniValue& result);
     PaymasterConfirmationSelection paymasterConfirmationSelection(
-        const UniValue& result, const QString& address, double amount) const;
+        const UniValue& result, const QString& address) const;
     bool confirmPaymasterSelectionBeforeSigning(
-        const UniValue& result, const QString& address, double amount);
+        const UniValue& result, const QString& address);
     void executeAlternativePaymasterRecovery(bool allow_unlock);
     UniValue buildAlternativePaymasterRecoveryParams() const;
     void handleAlternativePaymasterRecoveryResult(
@@ -343,7 +342,6 @@ private:
     qint64 m_clientSafetyAvailableTodayCents{0};
     QString m_clientSafetyError;
     QTimer* m_paymasterPollTimer;
-    QHash<QString, QString> m_offerFundingModels;
     PaymasterConfirmationGuard m_paymasterConfirmationGuard;
     PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;
 
