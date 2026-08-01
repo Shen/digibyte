@@ -31,7 +31,7 @@ std::unique_ptr<CWallet> CreateSyncedWallet(interfaces::Chain& chain, CChain& cc
 
         FlatSigningProvider provider;
         std::string error;
-        std::unique_ptr<Descriptor> desc = Parse("combo(" + EncodeSecret(key) + ")", provider, error, /* require_checksum=*/ false);
+        std::unique_ptr<Descriptor> desc = Parse("combo(" + EncodeSecret(key) + ")", provider, error, /* require_checksum=*/false);
         assert(desc);
         WalletDescriptor w_desc(std::move(desc), 0, 0, 1, 1);
         if (!wallet->AddWalletDescriptor(w_desc, provider, "", false)) assert(false);
@@ -93,7 +93,9 @@ CTxDestination getNewDestination(CWallet& w, OutputType output_type)
 }
 
 // BytePrefix compares equality with other byte spans that begin with the same prefix.
-struct BytePrefix { Span<const std::byte> prefix; };
+struct BytePrefix {
+    Span<const std::byte> prefix;
+};
 bool operator<(BytePrefix a, Span<const std::byte> b) { return a.prefix < b.subspan(0, std::min(a.prefix.size(), b.size())); }
 bool operator<(Span<const std::byte> a, BytePrefix b) { return a.subspan(0, std::min(a.size(), b.prefix.size())) < b.prefix; }
 
@@ -120,19 +122,19 @@ DatabaseCursor::Status MockableCursor::Next(DataStream& key, DataStream& value)
     return Status::MORE;
 }
 
-bool MockableBatch::ReadKey(DataStream&& key, DataStream& value)
+DatabaseReadStatus MockableBatch::ReadKey(DataStream&& key, DataStream& value)
 {
     if (!m_pass) {
-        return false;
+        return DatabaseReadStatus::READ_ERROR;
     }
     SerializeData key_data{key.begin(), key.end()};
     const auto& it = m_records.find(key_data);
     if (it == m_records.end()) {
-        return false;
+        return DatabaseReadStatus::NOT_FOUND;
     }
     value.clear();
     value.write(it->second);
-    return true;
+    return DatabaseReadStatus::FOUND;
 }
 
 bool MockableBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrite)
@@ -140,6 +142,8 @@ bool MockableBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrit
     if (!m_pass) {
         return false;
     }
+    const size_t write_index = m_write_count++;
+    if (m_fail_write_at && write_index == *m_fail_write_at) return false;
     SerializeData key_data{key.begin(), key.end()};
     SerializeData value_data{value.begin(), value.end()};
     auto [it, inserted] = m_records.emplace(key_data, value_data);
@@ -184,6 +188,33 @@ bool MockableBatch::ErasePrefix(Span<const std::byte> prefix)
         }
         it = m_records.erase(it);
     }
+    return true;
+}
+
+bool MockableBatch::TxnBegin()
+{
+    if (!m_pass || m_transaction_snapshot) return false;
+    m_transaction_snapshot = m_records;
+    return true;
+}
+
+bool MockableBatch::TxnCommit()
+{
+    if (!m_pass || !m_transaction_snapshot) return false;
+    if (m_fail_commit) {
+        m_records = std::move(*m_transaction_snapshot);
+        m_transaction_snapshot.reset();
+        return false;
+    }
+    m_transaction_snapshot.reset();
+    return true;
+}
+
+bool MockableBatch::TxnAbort()
+{
+    if (!m_transaction_snapshot) return false;
+    m_records = std::move(*m_transaction_snapshot);
+    m_transaction_snapshot.reset();
     return true;
 }
 

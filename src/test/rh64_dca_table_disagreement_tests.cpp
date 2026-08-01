@@ -16,16 +16,25 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 
 #include <cmath>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 using namespace DigiDollar;
 using namespace DigiDollar::DCA;
@@ -100,9 +109,9 @@ BOOST_AUTO_TEST_CASE(rh64_02_validator_requires_builder_collateral_at_health_105
         base_ratio * ChainparamsMultiplier(system_health, dd_params)));
     BOOST_REQUIRE_EQUAL(expected_ratio, 1000);
 
-    const __int128 expected_num = static_cast<__int128>(dd_amount) *
-                                  static_cast<__int128>(COIN) *
-                                  static_cast<__int128>(expected_ratio) * 100;
+    const util::int128_t expected_num = static_cast<util::int128_t>(dd_amount) *
+                                  static_cast<util::int128_t>(COIN) *
+                                  static_cast<util::int128_t>(expected_ratio) * 100;
     const CAmount expected_required = static_cast<CAmount>(
         (expected_num + oracle_price_micro_usd - 1) / oracle_price_micro_usd);
 

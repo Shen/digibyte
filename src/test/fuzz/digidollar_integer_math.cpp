@@ -12,23 +12,40 @@
 //
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <test/fuzz/FuzzedDataProvider.h>
+#include <util/int128.h>
 #include <test/fuzz/fuzz.h>
+#include <util/int128.h>
 #include <util/chaintype.h>
+#include <util/int128.h>
 
 #include <cassert>
+#include <util/int128.h>
 #include <climits>
+#include <util/int128.h>
 #include <cmath>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 
 // ============================================================================
 // Shared Initialization
@@ -42,11 +59,11 @@ void initialize_dd_integer_math()
 // ============================================================================
 // Target 6: dd_int128_arithmetic
 //
-// Test ALL __int128 arithmetic paths in DD consensus code.
-// Every place __int128 is used can cause a chain split if it overflows
+// Test ALL util::int128_t arithmetic paths in DD consensus code.
+// Every place util::int128_t is used can cause a chain split if it overflows
 // differently under different compilers.
 //
-// Known __int128 usage sites:
+// Known util::int128_t usage sites:
 //   1. validation.cpp:399 — CalculateRequiredCollateral numerator
 //   2. txbuilder.cpp:171 — CalculateRequiredCollateral (txbuilder variant)
 //   3. txbuilder.cpp:184 — 1% safety margin padding
@@ -58,13 +75,13 @@ FUZZ_TARGET(dd_int128_arithmetic, .init = initialize_dd_integer_math)
 {
     FuzzedDataProvider fdp(buffer.data(), buffer.size());
 
-    // -- Path 1: CalculateRequiredCollateral __int128 path --
+    // -- Path 1: CalculateRequiredCollateral util::int128_t path --
     // Formula: numerator = ddAmount * COIN * effectiveRatio * 100
     //          result = numerator / oraclePriceMicroUSD
-    // All three multiplicands can be large. We must verify the __int128
+    // All three multiplicands can be large. We must verify the util::int128_t
     // intermediate never overflows, and the final cast to uint64_t is safe.
     {
-        // Adversarial inputs designed to maximize the __int128 numerator:
+        // Adversarial inputs designed to maximize the util::int128_t numerator:
         // - Max ddAmount: 100,000,000,000 cents ($1 billion DD)
         // - COIN = 100,000,000 (constant)
         // - Max effectiveRatio: could be 2000% (10.0x DCA * 200% base = 2000)
@@ -105,23 +122,23 @@ FUZZ_TARGET(dd_int128_arithmetic, .init = initialize_dd_integer_math)
         }
     }
 
-    // -- Path 2: Reproduce the exact __int128 computation manually --
-    // This tests the raw arithmetic to ensure it never silently overflows __int128
+    // -- Path 2: Reproduce the exact util::int128_t computation manually --
+    // This tests the raw arithmetic to ensure it never silently overflows util::int128_t
     {
         CAmount ddAmount = fdp.ConsumeIntegral<CAmount>();
         int effectiveRatio = fdp.ConsumeIntegralInRange<int>(200, 10000);
         CAmount oraclePrice = fdp.ConsumeIntegralInRange<CAmount>(1, std::numeric_limits<CAmount>::max());
 
         // Mimic: numerator = ddAmount * COIN * effectiveRatio * 100
-        __int128 numerator = static_cast<__int128>(ddAmount) *
-                             static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) *
-                             static_cast<__int128>(100);
-        __int128 result = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) *
+                             static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) *
+                             static_cast<util::int128_t>(100);
+        util::int128_t result = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // Verify MAX_MONEY cap
-        if (result > static_cast<__int128>(MAX_MONEY)) {
-            result = static_cast<__int128>(MAX_MONEY);
+        if (result > static_cast<util::int128_t>(MAX_MONEY)) {
+            result = static_cast<util::int128_t>(MAX_MONEY);
         }
         if (result < 0) {
             result = 0;
@@ -130,15 +147,15 @@ FUZZ_TARGET(dd_int128_arithmetic, .init = initialize_dd_integer_math)
         assert(finalResult <= static_cast<uint64_t>(MAX_MONEY));
 
         // Verify the 1% safety margin path (txbuilder.cpp:184)
-        __int128 padded = (static_cast<__int128>(finalResult) * 101) / 100;
-        if (padded > static_cast<__int128>(MAX_MONEY)) {
-            padded = static_cast<__int128>(MAX_MONEY);
+        util::int128_t padded = (static_cast<util::int128_t>(finalResult) * 101) / 100;
+        if (padded > static_cast<util::int128_t>(MAX_MONEY)) {
+            padded = static_cast<util::int128_t>(MAX_MONEY);
         }
         uint64_t paddedResult = static_cast<uint64_t>(padded);
         assert(paddedResult <= static_cast<uint64_t>(MAX_MONEY));
     }
 
-    // -- Path 3: HealthUtils::CalculateHealthRatio __int128 path --
+    // -- Path 3: HealthUtils::CalculateHealthRatio util::int128_t path --
     // health.cpp uses: dgbValue128 = dgbAmount * dgbPrice / COIN
     //                  health128 = dgbValue128 * 100 / ddAmount
     {
@@ -159,33 +176,33 @@ FUZZ_TARGET(dd_int128_arithmetic, .init = initialize_dd_integer_math)
     // -- Path 4: MAX_MONEY boundary products --
     // If ddAmount = MAX_MONEY and COIN = 100M and ratio = 10000 and 100,
     // the product is MAX_MONEY * 10^8 * 10^4 * 10^2 = ~2.1e31
-    // __int128 max is ~1.7e38, so this should fit. Verify.
+    // util::int128_t max is ~1.7e38, so this should fit. Verify.
     {
-        __int128 maxProduct = static_cast<__int128>(MAX_MONEY) *
-                              static_cast<__int128>(COIN) *
-                              static_cast<__int128>(10000) *
-                              static_cast<__int128>(100);
-        // This should not overflow __int128
+        util::int128_t maxProduct = static_cast<util::int128_t>(MAX_MONEY) *
+                              static_cast<util::int128_t>(COIN) *
+                              static_cast<util::int128_t>(10000) *
+                              static_cast<util::int128_t>(100);
+        // This should not overflow util::int128_t
         assert(maxProduct > 0);
 
         // Divide by minimum oracle price (1)
-        __int128 worstCase = maxProduct / 1;
+        util::int128_t worstCase = maxProduct / 1;
         // Will exceed MAX_MONEY — verify the cap logic works
-        assert(worstCase > static_cast<__int128>(MAX_MONEY));
+        assert(worstCase > static_cast<util::int128_t>(MAX_MONEY));
 
         // After cap:
-        uint64_t capped = (worstCase > static_cast<__int128>(MAX_MONEY)) ? MAX_MONEY : static_cast<uint64_t>(worstCase);
+        uint64_t capped = (worstCase > static_cast<util::int128_t>(MAX_MONEY)) ? MAX_MONEY : static_cast<uint64_t>(worstCase);
         assert(capped == static_cast<uint64_t>(MAX_MONEY));
     }
 
-    // -- Path 5: Negative CAmount values through __int128 --
+    // -- Path 5: Negative CAmount values through util::int128_t --
     // CAmount is int64_t, so negative values are valid.
     // The consensus code should handle these gracefully.
     {
         CAmount negDD = fdp.ConsumeIntegralInRange<CAmount>(std::numeric_limits<CAmount>::min(), -1);
         CAmount posPrice = fdp.ConsumeIntegralInRange<CAmount>(1, 100'000'000LL);
 
-        __int128 product = static_cast<__int128>(negDD) * static_cast<__int128>(posPrice);
+        util::int128_t product = static_cast<util::int128_t>(negDD) * static_cast<util::int128_t>(posPrice);
         // Product should be negative
         assert(product < 0);
 
@@ -196,11 +213,11 @@ FUZZ_TARGET(dd_int128_arithmetic, .init = initialize_dd_integer_math)
 
     // -- Path 6: Two MAX_MONEY values multiplied --
     {
-        __int128 big = static_cast<__int128>(MAX_MONEY) * static_cast<__int128>(MAX_MONEY);
+        util::int128_t big = static_cast<util::int128_t>(MAX_MONEY) * static_cast<util::int128_t>(MAX_MONEY);
         // MAX_MONEY = 21e9 * 1e8 = 2.1e18, so MAX_MONEY^2 ≈ 4.41e36
-        // __int128 max ≈ 1.7e38, so this is safe within __int128
+        // util::int128_t max ≈ 1.7e38, so this is safe within util::int128_t
         assert(big > 0);
-        assert(big < (static_cast<__int128>(1) << 126)); // __int128 can hold up to 2^127-1
+        assert(big < (static_cast<util::int128_t>(1) << 126)); // util::int128_t can hold up to 2^127-1
     }
 }
 
@@ -443,8 +460,8 @@ FUZZ_TARGET(dd_price_conversion, .init = initialize_dd_integer_math)
         // The applied ratio uses consensus integer basis points and rounds up.
         const int multiplier_bps =
             DigiDollar::DCA::DynamicCollateralAdjustment::GetDCAMultiplierBps(systemHealth);
-        const __int128 expected128 =
-            (static_cast<__int128>(baseRatio) * multiplier_bps + 9999) / 10000;
+        const util::int128_t expected128 =
+            (static_cast<util::int128_t>(baseRatio) * multiplier_bps + 9999) / 10000;
         int expected = expected128 > std::numeric_limits<int>::max()
             ? std::numeric_limits<int>::max()
             : static_cast<int>(expected128);

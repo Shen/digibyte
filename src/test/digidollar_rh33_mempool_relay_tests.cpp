@@ -90,8 +90,7 @@ static CMutableTransaction MakeRegularTx(int numInputs = 1, int numOutputs = 1)
 }
 
 /** Create a DD tx that passes IsStandardTx (version mask match) */
-static CMutableTransaction MakeDDStandardTx(int32_t customVersion = 0) __attribute__((unused));
-static CMutableTransaction MakeDDStandardTx(int32_t customVersion)
+[[maybe_unused]] static CMutableTransaction MakeDDStandardTx(int32_t customVersion = 0)
 {
     CMutableTransaction tx;
     tx.nVersion = customVersion ? customVersion : 0x0D1D0770;

@@ -17,25 +17,44 @@
  */
 
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <oracle/musig2_aggregator.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <kernel/chainparams.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <script/script.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_rh21_boundary_tests, BasicTestingSetup)
 
@@ -477,16 +496,16 @@ BOOST_AUTO_TEST_CASE(rh21_collateral_ratio_rejects_beyond_max_tier)
 }
 
 // =============================================================================
-// 8. __int128 overflow guards
+// 8. util::int128_t overflow guards
 // =============================================================================
 
 BOOST_AUTO_TEST_CASE(rh21_int128_collateral_calc_max_values)
 {
-    // Verify __int128 arithmetic doesn't overflow with worst-case inputs
+    // Verify util::int128_t arithmetic doesn't overflow with worst-case inputs
     // numerator = ddAmount * COIN * effectiveRatio * 100
     // Max: 10000000 (max mint) * 100000000 (COIN) * 20000 (max ratio*DCA) * 100
     // = 10^7 * 10^8 * 2*10^4 * 10^2 = 2 * 10^21
-    // __int128 max = 1.7 * 10^38 — safe
+    // util::int128_t max = 1.7 * 10^38 — safe
 
     auto regTestParams = CChainParams::RegTest({});
     // Emergency DCA (2.0x) with highest ratio tier (1000%)

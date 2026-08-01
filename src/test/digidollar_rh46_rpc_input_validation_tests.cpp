@@ -18,34 +18,62 @@
  */
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <digidollar/txbuilder.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <base58.h>
+#include <util/int128.h>
 #include <core_io.h>
+#include <util/int128.h>
 #include <key_io.h>
+#include <util/int128.h>
 #include <node/context.h>
+#include <util/int128.h>
 #include <rpc/client.h>
+#include <util/int128.h>
 #include <rpc/server.h>
+#include <util/int128.h>
 #include <rpc/digidollar.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <univalue.h>
+#include <util/int128.h>
 #include <util/strencodings.h>
+#include <util/int128.h>
 #include <wallet/digidollarwallet.h>
+#include <util/int128.h>
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 #include <cmath>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <thread>
+#include <util/int128.h>
 #include <atomic>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 using namespace DigiDollar;
 using namespace DigiDollar::DCA;
@@ -697,23 +725,23 @@ BOOST_AUTO_TEST_CASE(rh46_redeembuilder_null_outpoint)
 
 BOOST_AUTO_TEST_CASE(rh46_collateral_calc_overflow_128bit)
 {
-    // The RPC uses __int128 for: ddAmount * COIN * ratio * 100 / oraclePriceMicroUSD
-    // Try to overflow even __int128:
-    // __int128 max ~ 1.7e38
-    // INT64_MAX * COIN * 1000 * 100 ~ 9.2e18 * 1e8 * 1e5 = 9.2e31 — fits in __int128
-    // So overflow of __int128 is very unlikely with valid types, but let's verify
+    // The RPC uses util::int128_t for: ddAmount * COIN * ratio * 100 / oraclePriceMicroUSD
+    // Try to overflow even util::int128_t:
+    // util::int128_t max ~ 1.7e38
+    // INT64_MAX * COIN * 1000 * 100 ~ 9.2e18 * 1e8 * 1e5 = 9.2e31 — fits in util::int128_t
+    // So overflow of util::int128_t is very unlikely with valid types, but let's verify
 
     CAmount ddAmount = std::numeric_limits<int64_t>::max();
     CAmount price = 1; // Minimum price to maximize result
     int ratio = 1000; // Max ratio
 
     // Simulate the calculation
-    __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(ratio) * 100;
-    __int128 result = numerator / static_cast<__int128>(price);
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(ratio) * 100;
+    util::int128_t result = numerator / static_cast<util::int128_t>(price);
 
     // Should exceed MAX_MONEY — the RPC correctly checks this
-    BOOST_CHECK(result > static_cast<__int128>(MAX_MONEY));
+    BOOST_CHECK(result > static_cast<util::int128_t>(MAX_MONEY));
 }
 
 BOOST_AUTO_TEST_CASE(rh46_collateral_calc_division_by_zero)
@@ -917,10 +945,10 @@ BOOST_AUTO_TEST_CASE(rh46_position_extreme_values)
     // ddMicroUSD = dd_minted * 10000
     // healthRatio = (collateralMicroUSD * 100) / ddMicroUSD
     //
-    // With __int128, this should NOT overflow even with INT64_MAX values
+    // With util::int128_t, this should NOT overflow even with INT64_MAX values
     CAmount oraclePriceMicroUSD = 6310;
-    __int128 collateralMicroUSD = (static_cast<__int128>(pos.dgb_collateral) * oraclePriceMicroUSD) / COIN;
-    __int128 ddMicroUSD = static_cast<__int128>(pos.dd_minted) * 10000;
+    util::int128_t collateralMicroUSD = (static_cast<util::int128_t>(pos.dgb_collateral) * oraclePriceMicroUSD) / COIN;
+    util::int128_t ddMicroUSD = static_cast<util::int128_t>(pos.dd_minted) * 10000;
 
     // Should not divide by zero or overflow
     BOOST_CHECK(ddMicroUSD > 0);

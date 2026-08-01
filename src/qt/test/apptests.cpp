@@ -174,22 +174,33 @@ void AppTests::guiTests(DigiByteGUI* window)
     overview_action->activate(QAction::Trigger);
     QVERIFY(overview_action->isChecked());
 
-    bool saw_dialog = false;
-    ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/false, /*accept=*/false, saw_dialog);
-    QVERIFY2(saw_dialog, "First DigiDollar tab entry must show the experimental warning dialog");
-    QVERIFY2(overview_action->isChecked(), "Canceling the experimental warning must keep the previous tab selected");
-    QVERIFY(!settings.value(DIGIDOLLAR_WARNING_SETTINGS_KEY, false).toBool());
+#ifdef Q_OS_WIN
+    if (QApplication::platformName() == "minimal") {
+        // Qt's Windows QMessageBox implementation accesses a native system menu
+        // which the headless minimal plugin does not provide.
+        // Skip only the native dialog interaction so the remaining GUI and RPC
+        // console tests still run. Normal Windows runs retain the full dialog test.
+        QWARN("Skipping the DigiDollar warning dialog interaction with Qt's Windows minimal platform plugin");
+    } else
+#endif
+    {
+        bool saw_dialog = false;
+        ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/false, /*accept=*/false, saw_dialog);
+        QVERIFY2(saw_dialog, "First DigiDollar tab entry must show the experimental warning dialog");
+        QVERIFY2(overview_action->isChecked(), "Canceling the experimental warning must keep the previous tab selected");
+        QVERIFY(!settings.value(DIGIDOLLAR_WARNING_SETTINGS_KEY, false).toBool());
 
-    ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/true, /*accept=*/true, saw_dialog);
-    QVERIFY2(saw_dialog, "Accepting DigiDollar for the first time must still show the warning dialog");
-    QVERIFY(digi_dollar_action->isChecked());
-    QVERIFY(settings.value(DIGIDOLLAR_WARNING_SETTINGS_KEY, false).toBool());
+        ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/true, /*accept=*/true, saw_dialog);
+        QVERIFY2(saw_dialog, "Accepting DigiDollar for the first time must still show the warning dialog");
+        QVERIFY(digi_dollar_action->isChecked());
+        QVERIFY(settings.value(DIGIDOLLAR_WARNING_SETTINGS_KEY, false).toBool());
 
-    overview_action->activate(QAction::Trigger);
-    QVERIFY(overview_action->isChecked());
-    ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/false, /*accept=*/true, saw_dialog);
-    QVERIFY2(!saw_dialog, "Remembered DigiDollar warning acceptance must suppress future warning dialogs");
-    QVERIFY(digi_dollar_action->isChecked());
+        overview_action->activate(QAction::Trigger);
+        QVERIFY(overview_action->isChecked());
+        ClickDigiDollarAndHandleWarning(digi_dollar_action, /*remember=*/false, /*accept=*/true, saw_dialog);
+        QVERIFY2(!saw_dialog, "Remembered DigiDollar warning acceptance must suppress future warning dialogs");
+        QVERIFY(digi_dollar_action->isChecked());
+    }
 
     connect(window, &DigiByteGUI::consoleShown, this, &AppTests::consoleTests);
     expectCallback("consoleTests");

@@ -7,31 +7,48 @@
 // Existing suites cover happy paths; this file fills documented gaps:
 //   - Health math edge values across both code paths and confirms each
 //     path's documented return value at the (ddSupply == 0) corner.
-//   - DCA tier off-by-one, ceil-up rounding, and __int128 overflow guards.
+//   - DCA tier off-by-one, ceil-up rounding, and util::int128_t overflow guards.
 //   - WouldCandidateFreezeMinting non-mutation invariants.
 //   - Cooldown boundaries at H, H+cooldown-1, H+cooldown.
 //   - Stale runtime cache rejection in OracleBundleManager::GetLatestPrice.
 //   - ReconstructFromBlockData reorg semantics matching new block data.
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <oracle/bundle_manager.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <util/time.h>
+#include <util/int128.h>
 
 #include <algorithm>
+#include <util/int128.h>
 #include <cmath>
+#include <util/int128.h>
 #include <fstream>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <string>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 using DigiDollar::AlertThresholds;
 using DigiDollar::SystemHealthMonitor;
@@ -172,7 +189,7 @@ BOOST_FIXTURE_TEST_CASE(wave6_dca_health_int128_no_overflow, Wave6Setup)
 
 BOOST_FIXTURE_TEST_CASE(wave6_dca_health_clamp_avoids_int_overflow, Wave6Setup)
 {
-    // RH-fix from src/consensus/dca.cpp:107-110: clamp the __int128 health
+    // RH-fix from src/consensus/dca.cpp:107-110: clamp the util::int128_t health
     // BEFORE casting to int. Hammer the path with combinations that would
     // overflow a naive int truncation.
     constexpr CAmount tinyDD = 1;            // 1 cent of DD
@@ -228,7 +245,7 @@ BOOST_FIXTURE_TEST_CASE(wave6_dca_tier_boundaries_off_by_one, Wave6Setup)
 BOOST_FIXTURE_TEST_CASE(wave6_dca_apply_int128_overflow_caps_int_max, Wave6Setup)
 {
     // ApplyDCA must guard against int truncation by capping at INT_MAX
-    // when the __int128 product would otherwise overflow.
+    // when the util::int128_t product would otherwise overflow.
     int hugeBase = std::numeric_limits<int>::max();
     int multiplied = DynamicCollateralAdjustment::ApplyDCA(hugeBase, 50); // 2.0x emergency
     BOOST_CHECK_EQUAL(multiplied, std::numeric_limits<int>::max());

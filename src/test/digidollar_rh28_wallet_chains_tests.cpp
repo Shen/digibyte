@@ -466,7 +466,7 @@ BOOST_AUTO_TEST_CASE(rh28_06_concurrent_dd_utxo_modification)
                     ddw.GetDDFromUTXO(op);
                 }
             }
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             errors++;
         }
     };

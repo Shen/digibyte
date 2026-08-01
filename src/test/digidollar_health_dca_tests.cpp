@@ -3,29 +3,51 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <consensus/validation.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <digidollar/txbuilder.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <rpc/client.h>
+#include <util/int128.h>
 #include <rpc/server.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <univalue.h>
+#include <util/int128.h>
 #include <util/strencodings.h>
+#include <util/int128.h>
 #include <util/string.h>
+#include <util/int128.h>
 
 #include <utility>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 BOOST_AUTO_TEST_SUITE(digidollar_health_dca_tests)
 
@@ -83,7 +105,7 @@ struct DigiDollarHealthDCASetup : public TestingSetup {
         const int64_t lock_blocks = DigiDollar::LockDaysToBlocks(WAVE1_TEN_YEAR_DAYS);
         const int64_t lock_height = WAVE1_HEIGHT + lock_blocks;
         const int base_ratio = ConsensusRatioForLockDays(WAVE1_TEN_YEAR_DAYS);
-        const __int128 numerator = static_cast<__int128>(WAVE1_DD_AMOUNT) * COIN *
+        const util::int128_t numerator = static_cast<util::int128_t>(WAVE1_DD_AMOUNT) * COIN *
                                    base_ratio * 100;
         const CAmount base_collateral = static_cast<CAmount>(
             (numerator + WAVE1_ORACLE_PRICE_MICRO_USD - 1) / WAVE1_ORACLE_PRICE_MICRO_USD);

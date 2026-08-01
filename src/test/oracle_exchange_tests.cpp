@@ -35,11 +35,59 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <initializer_list>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ExchangeAPI;
+
+namespace {
+
+template <typename Fetcher>
+class StaticHttpFetcher final : public Fetcher
+{
+public:
+    explicit StaticHttpFetcher(std::string response) : m_response(std::move(response)) {}
+
+protected:
+    std::string HttpGet(const std::string&) override { return m_response; }
+
+private:
+    const std::string m_response;
+};
+
+class FixedPriceFetcher final : public BaseExchangeFetcher
+{
+public:
+    FixedPriceFetcher(std::string name, CAmount price)
+        : BaseExchangeFetcher(name, ""), m_price(price)
+    {
+    }
+
+    CAmount FetchPrice() override { return m_price; }
+
+private:
+    const CAmount m_price;
+};
+
+std::vector<std::unique_ptr<BaseExchangeFetcher>> MakeFixedFetchers(
+    std::initializer_list<CAmount> prices)
+{
+    std::vector<std::unique_ptr<BaseExchangeFetcher>> fetchers;
+    size_t index{0};
+    for (const CAmount price : prices) {
+        fetchers.push_back(std::make_unique<FixedPriceFetcher>(
+            "test-exchange-" + std::to_string(index++), price));
+    }
+    return fetchers;
+}
+
+} // namespace
 
 BOOST_FIXTURE_TEST_SUITE(oracle_exchange_tests, BasicTestingSetup)
 
@@ -54,11 +102,13 @@ BOOST_FIXTURE_TEST_SUITE(oracle_exchange_tests, BasicTestingSetup)
  */
 BOOST_AUTO_TEST_CASE(fetch_binance_price_success)
 {
-    BinanceFetcher fetcher;
+    StaticHttpFetcher<BinanceFetcher> fetcher{
+        R"({"symbol":"DGBUSDT","price":"0.01234"})"};
 
     // EXPECTED: FetchPrice() returns CAmount in micro-USD
     // Example: $0.01234 = 12,340 micro-USD
     CAmount price = fetcher.FetchPrice();
+    BOOST_CHECK_EQUAL(price, 12340);
 
     // Price should be positive
     BOOST_CHECK(price > 0);
@@ -155,9 +205,11 @@ BOOST_AUTO_TEST_CASE(fetch_messari_price_success)
  */
 BOOST_AUTO_TEST_CASE(fetch_kucoin_price_success)
 {
-    KuCoinFetcher fetcher;
+    StaticHttpFetcher<KuCoinFetcher> fetcher{
+        R"({"data":{"price":"0.01234"}})"};
     CAmount price = fetcher.FetchPrice();
 
+    BOOST_CHECK_EQUAL(price, 12340);
     BOOST_CHECK(price > 0);
     BOOST_CHECK(price >= 1000);
     BOOST_CHECK(price <= 1000000);
@@ -165,13 +217,15 @@ BOOST_AUTO_TEST_CASE(fetch_kucoin_price_success)
 
 /**
  * Test Crypto.com API returns valid price in micro-USD
- * Expected JSON format: {"result":{"data":{"a":"0.01234"}}}
+ * Expected JSON format: {"result":{"data":[{"a":"0.01234"}]}}
  */
 BOOST_AUTO_TEST_CASE(fetch_cryptocom_price_success)
 {
-    CryptoComFetcher fetcher;
+    StaticHttpFetcher<CryptoComFetcher> fetcher{
+        R"({"result":{"data":[{"i":"DGB_USD","a":"0.01234"}]}})"};
     CAmount price = fetcher.FetchPrice();
 
+    BOOST_CHECK_EQUAL(price, 12340);
     BOOST_CHECK(price > 0);
     BOOST_CHECK(price >= 1000);
     BOOST_CHECK(price <= 1000000);
@@ -187,16 +241,13 @@ BOOST_AUTO_TEST_CASE(fetch_cryptocom_price_success)
  */
 BOOST_AUTO_TEST_CASE(binance_timeout_handling)
 {
-    BinanceFetcher fetcher;
+    StaticHttpFetcher<BinanceFetcher> fetcher{""};
     fetcher.SetTimeout(1); // 1 second timeout (very short)
 
     // Should not throw, should return 0 or handle gracefully
     // EXPECTED: Returns 0 or std::nullopt on timeout
     CAmount price = fetcher.FetchPrice();
-
-    // Mock implementation returns mock data, so this will pass temporarily
-    // Real implementation should handle timeout gracefully
-    BOOST_CHECK(true);
+    BOOST_CHECK_EQUAL(price, 0);
 }
 
 /**
@@ -256,11 +307,11 @@ BOOST_AUTO_TEST_CASE(coingecko_invalid_json_handling)
  */
 BOOST_AUTO_TEST_CASE(coinbase_timeout_handling)
 {
-    CoinbaseFetcher fetcher;
+    StaticHttpFetcher<CoinbaseFetcher> fetcher{""};
     fetcher.SetTimeout(1);
 
     CAmount price = fetcher.FetchPrice();
-    BOOST_CHECK(true); // Mock passes, real implementation will be tested later
+    BOOST_CHECK_EQUAL(price, 0);
 }
 
 /**
@@ -277,11 +328,11 @@ BOOST_AUTO_TEST_CASE(coinbase_invalid_json_handling)
  */
 BOOST_AUTO_TEST_CASE(kraken_timeout_handling)
 {
-    KrakenFetcher fetcher;
+    StaticHttpFetcher<KrakenFetcher> fetcher{""};
     fetcher.SetTimeout(1);
 
     CAmount price = fetcher.FetchPrice();
-    BOOST_CHECK(true);
+    BOOST_CHECK_EQUAL(price, 0);
 }
 
 /**
@@ -316,11 +367,10 @@ BOOST_AUTO_TEST_CASE(messari_invalid_json_handling)
  */
 BOOST_AUTO_TEST_CASE(kucoin_timeout_handling)
 {
-    KuCoinFetcher fetcher;
+    StaticHttpFetcher<KuCoinFetcher> fetcher{""};
     fetcher.SetTimeout(1); // 1 second timeout (very short)
 
-    // Should not throw, should return 0 or handle gracefully
-    BOOST_CHECK(true);
+    BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 0);
 }
 
 /**
@@ -337,11 +387,10 @@ BOOST_AUTO_TEST_CASE(kucoin_invalid_json_handling)
  */
 BOOST_AUTO_TEST_CASE(cryptocom_timeout_handling)
 {
-    CryptoComFetcher fetcher;
+    StaticHttpFetcher<CryptoComFetcher> fetcher{""};
     fetcher.SetTimeout(1); // 1 second timeout (very short)
 
-    // Should not throw, should return 0 or handle gracefully
-    BOOST_CHECK(true);
+    BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 0);
 }
 
 /**
@@ -861,9 +910,16 @@ BOOST_AUTO_TEST_CASE(median_small_values)
 }
 
 // ============================================================================
-// CATEGORY 6: MultiExchangeAggregator Tests (8 tests)
+// CATEGORY 6: MultiExchangeAggregator Tests
 // Tests the complete aggregation system that fetches from all exchanges
 // ============================================================================
+
+BOOST_AUTO_TEST_CASE(aggregator_rejects_null_custom_fetcher)
+{
+    std::vector<std::unique_ptr<BaseExchangeFetcher>> fetchers;
+    fetchers.push_back(nullptr);
+    BOOST_CHECK_THROW(MultiExchangeAggregator{std::move(fetchers)}, std::invalid_argument);
+}
 
 /**
  * Test aggregator fetches from all 8 exchanges
@@ -930,7 +986,7 @@ BOOST_AUTO_TEST_CASE(aggregator_calculates_median)
  */
 BOOST_AUTO_TEST_CASE(aggregator_returns_micro_usd)
 {
-    MultiExchangeAggregator aggregator;
+    MultiExchangeAggregator aggregator{MakeFixedFetchers({12340, 12500, 12700})};
 
     CAmount price = aggregator.FetchAggregatePrice();
 
@@ -941,11 +997,9 @@ BOOST_AUTO_TEST_CASE(aggregator_returns_micro_usd)
     // Reasonable range for DGB: $0.001 to $1.00
     // In micro-USD: 1,000 to 1,000,000
 
-    // Current implementation uses CENTS (100x magnitude error!)
-    // This test will FAIL until implementation is fixed
-
     BOOST_CHECK(price >= 1000);      // >= $0.001
     BOOST_CHECK(price <= 1000000);   // <= $1.00
+    BOOST_CHECK_EQUAL(price, 12500);
 }
 
 /**
@@ -953,16 +1007,17 @@ BOOST_AUTO_TEST_CASE(aggregator_returns_micro_usd)
  */
 BOOST_AUTO_TEST_CASE(aggregator_caches_results)
 {
-    MultiExchangeAggregator aggregator;
+    MultiExchangeAggregator aggregator{MakeFixedFetchers({12340, 12500, 12700})};
 
     // Fetch price twice
     CAmount price1 = aggregator.FetchAggregatePrice();
+    BOOST_CHECK_EQUAL(price1, 12500);
 
     // Get last prices from cache
     std::vector<MultiExchangeAggregator::ExchangePrice> cached = aggregator.GetLastPrices();
 
     // Cached results should exist
-    BOOST_CHECK(cached.size() > 0);
+    BOOST_CHECK_EQUAL(cached.size(), 3);
 
     // TODO: Verify that second call uses cache if within time window
     // This is an optimization, not strictly required for Phase One
@@ -1003,95 +1058,90 @@ BOOST_AUTO_TEST_CASE(aggregator_concurrent_fetching)
 }
 
 // ============================================================================
-// CATEGORY 7: CURL Handle Reuse Tests (Bug Fix #1)
-// Tests that BaseExchangeFetcher reuses a persistent CURL handle instead of
-// creating/destroying one per HTTP request. On Windows, the old pattern
-// exhausted ephemeral ports via TIME_WAIT after 6-24 hours.
+// CATEGORY 7: Fetcher Lifecycle Tests
+// Exercise repeated parsing and independent fetcher lifetimes without relying
+// on external endpoints. Live transport/handle reuse belongs in an opt-in
+// integration test.
 // ============================================================================
 
 /**
- * Test that a fetcher can call FetchPrice() multiple times without crash.
- * Before the fix, each call did curl_easy_init/cleanup. With the fix,
- * a persistent m_curl_handle is reused via curl_easy_reset().
+ * Test that a fetcher can parse repeatedly without state corruption.
  */
-BOOST_AUTO_TEST_CASE(curl_handle_reuse_multiple_fetches)
+BOOST_AUTO_TEST_CASE(fetcher_reuse_multiple_fetches)
 {
-    BinanceFetcher fetcher;
+    StaticHttpFetcher<BinanceFetcher> fetcher{
+        R"({"symbol":"DGBUSDT","price":"0.01234"})"};
     fetcher.SetTimeout(5);
 
     // Call FetchPrice() multiple times — should not crash or leak
     for (int i = 0; i < 5; i++) {
-        CAmount price = fetcher.FetchPrice();
-        // Price may be 0 (network unavailable in test) but must not crash
-        (void)price;
+        BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 12340);
     }
     BOOST_CHECK(true); // If we got here without crash/ASAN error, handle reuse works
 }
 
 /**
- * Test that the persistent handle is properly initialized in the constructor
- * and cleaned up in the destructor. We create and destroy a fetcher in a scope.
+ * Test repeated fetcher construction and destruction.
  */
-BOOST_AUTO_TEST_CASE(curl_handle_lifecycle)
+BOOST_AUTO_TEST_CASE(fetcher_lifecycle)
 {
     {
-        BinanceFetcher fetcher;
-        // Fetcher should have a valid handle after construction
-        // Call FetchPrice to exercise the handle
-        CAmount price = fetcher.FetchPrice();
-        (void)price;
+        StaticHttpFetcher<BinanceFetcher> fetcher{
+            R"({"symbol":"DGBUSDT","price":"0.01234"})"};
+        BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 12340);
     }
-    // Destructor should have called curl_easy_cleanup — no leak
-
     {
-        KrakenFetcher fetcher;
-        CAmount price = fetcher.FetchPrice();
-        (void)price;
+        StaticHttpFetcher<KuCoinFetcher> fetcher{
+            R"({"data":{"price":"0.01250"}})"};
+        BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 12500);
     }
-    // Second fetcher also cleans up correctly
-
-    BOOST_CHECK(true); // No crash, no ASAN leak
+    BOOST_CHECK(true); // No crash or sanitizer finding.
 }
 
 /**
- * Test that multiple different fetcher instances each maintain their own handle
- * and don't interfere with each other.
+ * Test that multiple different fetcher instances do not interfere.
  */
-BOOST_AUTO_TEST_CASE(curl_handle_multiple_fetcher_instances)
+BOOST_AUTO_TEST_CASE(multiple_fetcher_instances)
 {
-    BinanceFetcher binance;
-    KrakenFetcher kraken;
-    CoinbaseFetcher coinbase;
+    StaticHttpFetcher<BinanceFetcher> binance{
+        R"({"symbol":"DGBUSDT","price":"0.01234"})"};
+    StaticHttpFetcher<KuCoinFetcher> kucoin{
+        R"({"data":{"price":"0.01250"}})"};
+    StaticHttpFetcher<CryptoComFetcher> cryptocom{
+        R"({"result":{"data":[{"i":"DGB_USD","a":"0.01270"}]}})"};
 
     binance.SetTimeout(3);
-    kraken.SetTimeout(3);
-    coinbase.SetTimeout(3);
+    kucoin.SetTimeout(3);
+    cryptocom.SetTimeout(3);
 
     // Interleave calls across different fetchers
     CAmount p1 = binance.FetchPrice();
-    CAmount p2 = kraken.FetchPrice();
-    CAmount p3 = coinbase.FetchPrice();
+    CAmount p2 = kucoin.FetchPrice();
+    CAmount p3 = cryptocom.FetchPrice();
     CAmount p4 = binance.FetchPrice();
-    CAmount p5 = kraken.FetchPrice();
+    CAmount p5 = kucoin.FetchPrice();
 
-    (void)p1; (void)p2; (void)p3; (void)p4; (void)p5;
+    BOOST_CHECK_EQUAL(p1, 12340);
+    BOOST_CHECK_EQUAL(p2, 12500);
+    BOOST_CHECK_EQUAL(p3, 12700);
+    BOOST_CHECK_EQUAL(p4, 12340);
+    BOOST_CHECK_EQUAL(p5, 12500);
 
     BOOST_CHECK(true); // No crash, handles are independent
 }
 
 /**
- * Test that CoinGecko fetcher properly reuses its CURL handle
- * across repeated calls without crash or socket exhaustion.
+ * Test repeated CoinGecko response parsing.
  */
-BOOST_AUTO_TEST_CASE(curl_handle_reuse_coingecko)
+BOOST_AUTO_TEST_CASE(fetcher_reuse_coingecko)
 {
-    CoinGeckoFetcher fetcher;
+    StaticHttpFetcher<CoinGeckoFetcher> fetcher{
+        R"({"digibyte":{"usd":0.01234}})"};
     fetcher.SetTimeout(3);
 
     // Repeated calls should reuse handle without crash
     for (int i = 0; i < 3; i++) {
-        CAmount price = fetcher.FetchPrice();
-        (void)price;
+        BOOST_CHECK_EQUAL(fetcher.FetchPrice(), 12340);
     }
     BOOST_CHECK(true); // No crash on repeated calls
 }
@@ -1130,15 +1180,12 @@ BOOST_AUTO_TEST_CASE(aggregator_default_floor_is_two_sources)
 }
 
 /**
- * Pin that bumping the floor above any realistic roster fails the publish
- * path deterministically: every fetcher would have to return success before
- * HasSufficientData reports true. Even when the host running the test has
- * network access and live exchanges respond, six successes cannot satisfy a
- * floor of 99.
+ * Pin that bumping the floor above the injected roster fails the publish path
+ * deterministically.
  */
 BOOST_AUTO_TEST_CASE(aggregator_floor_above_fetcher_count_fails_closed)
 {
-    MultiExchangeAggregator aggregator;
+    MultiExchangeAggregator aggregator{MakeFixedFetchers({12340, 12500, 12700})};
     aggregator.SetMinRequiredSources(99); // far above any realistic roster
 
     CAmount price = aggregator.FetchAggregatePrice();
@@ -1186,6 +1233,32 @@ BOOST_AUTO_TEST_CASE(aggregator_documented_default_floor_invariant)
     // floor value claimed by the docs and exercised by the regtest mock.
     CAmount median = aggregator.CalculateMedianPrice(two_valid);
     BOOST_CHECK(median > 0);
+}
+
+/**
+ * Exercise the production HTTPS path only when explicitly requested. Keeping
+ * this out of the default unit-test path avoids treating exchange availability
+ * as a source-code regression while still providing a release smoke test for
+ * libcurl, TLS verification, response parsing, and source aggregation.
+ */
+BOOST_AUTO_TEST_CASE(live_exchange_smoke_opt_in)
+{
+    const char* const enabled{std::getenv("DIGIBYTE_TEST_LIVE_ORACLE")};
+    if (enabled == nullptr || std::string{enabled} != "1") {
+        BOOST_TEST_MESSAGE("Set DIGIBYTE_TEST_LIVE_ORACLE=1 to run the live oracle smoke test");
+        return;
+    }
+
+#ifdef HAVE_LIBCURL
+    MultiExchangeAggregator aggregator;
+    aggregator.SetMinRequiredSources(3);
+
+    const CAmount price{aggregator.FetchAggregatePrice()};
+    BOOST_REQUIRE_GT(price, 0);
+    BOOST_CHECK_GE(aggregator.GetSuccessfulSourceCount(), 3);
+#else
+    BOOST_FAIL("DIGIBYTE_TEST_LIVE_ORACLE=1 requires a build with libcurl support");
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()

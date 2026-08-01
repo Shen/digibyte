@@ -27,18 +27,29 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 
 #include <cmath>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 
 using namespace DigiDollar;
 using namespace DigiDollar::DCA;
@@ -126,7 +137,7 @@ BOOST_AUTO_TEST_CASE(rh32_applydca_truncation_attack)
 }
 
 // ============================================================================
-// Attack Vector 2: __int128 edge cases in collateral calculation
+// Attack Vector 2: util::int128_t edge cases in collateral calculation
 // ============================================================================
 
 BOOST_AUTO_TEST_CASE(rh32_int128_max_money_collateral)
@@ -138,7 +149,7 @@ BOOST_AUTO_TEST_CASE(rh32_int128_max_money_collateral)
     CAmount smallDD = 100;             // $1.00
     CAmount highPrice = 10000000;      // High bounded price, still safe to multiply
 
-    // Should not crash or return garbage; bounded __int128 math caps health.
+    // Should not crash or return garbage; bounded util::int128_t math caps health.
     int health = DynamicCollateralAdjustment::CalculateSystemHealth(maxCollateral, smallDD, highPrice);
     // With massive collateral and tiny DD, health should be capped at 30000
     BOOST_CHECK_EQUAL(health, 30000);
@@ -259,8 +270,8 @@ BOOST_AUTO_TEST_CASE(rh32_required_collateral_rounds_up)
     ValidationContext ctx(1000, 6310, 150, chainparams);
 
     const int effectiveRatio = GetEffectiveCollateralRatio(1000, 150, chainparams);
-    __int128 numerator = static_cast<__int128>(ddAmount) * COIN * effectiveRatio * 100;
-    __int128 expectedCeil128 = (numerator + ctx.oraclePriceMicroUSD - 1) / ctx.oraclePriceMicroUSD;
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * COIN * effectiveRatio * 100;
+    util::int128_t expectedCeil128 = (numerator + ctx.oraclePriceMicroUSD - 1) / ctx.oraclePriceMicroUSD;
     CAmount expectedCeil = static_cast<CAmount>(expectedCeil128);
 
     CAmount required = CalculateRequiredCollateral(ddAmount, oneHourBlocks, ctx);

@@ -3,36 +3,64 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <crypto/sha256.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <digidollar/txbuilder.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <hash.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <node/miner.h>
+#include <util/int128.h>
 #include <oracle/bundle_manager.h>
+#include <util/int128.h>
 #include <oracle/mock_oracle.h>
+#include <util/int128.h>
 #include <oracle/musig2_aggregator.h>
+#include <util/int128.h>
 #include <policy/feerate.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <random.h>
+#include <util/int128.h>
 #include <script/script.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <test/util/txmempool.h>
+#include <util/int128.h>
 #include <validation.h>
+#include <util/int128.h>
 
 #include <secp256k1.h>
+#include <util/int128.h>
 #include <secp256k1_musig.h>
+#include <util/int128.h>
 #include <secp256k1_schnorrsig.h>
+#include <util/int128.h>
 
 #include <array>
+#include <util/int128.h>
 #include <cstring>
+#include <util/int128.h>
 #include <string>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 using node::BlockAssembler;
 using node::CBlockTemplate;
@@ -437,11 +465,11 @@ BOOST_FIXTURE_TEST_CASE(mint_includes_safety_margin, RegTestingSetup)
     const auto& dd_params = Params().GetDigiDollarParams();
     const int base_ratio = DigiDollar::GetCollateralRatioForLockTime(lock_blocks, dd_params);
 
-    __int128 numerator = static_cast<__int128>(kDDAmount) *
-                         static_cast<__int128>(COIN) *
-                         static_cast<__int128>(base_ratio) * 100;
-    const CAmount base_required = static_cast<CAmount>(numerator / static_cast<__int128>(kOraclePrice));
-    const CAmount expected_with_margin = static_cast<CAmount>((static_cast<__int128>(base_required) * 101) / 100);
+    util::int128_t numerator = static_cast<util::int128_t>(kDDAmount) *
+                         static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(base_ratio) * 100;
+    const CAmount base_required = static_cast<CAmount>(numerator / static_cast<util::int128_t>(kOraclePrice));
+    const CAmount expected_with_margin = static_cast<CAmount>((static_cast<util::int128_t>(base_required) * 101) / 100);
 
     BOOST_CHECK_EQUAL(with_margin, expected_with_margin);
     BOOST_CHECK(with_margin > base_required);

@@ -26,15 +26,24 @@ class FeatureIndexPruneTest(DigiByteTestFramework):
         expected_filter = {
             'basic block filter index': {'synced': True, 'best_block_height': height},
         }
-        self.wait_until(lambda: self.nodes[0].getindexinfo() == expected_filter)
+        self.wait_until(
+            lambda: self.nodes[0].getindexinfo() == expected_filter,
+            timeout=300,
+        )
 
         expected_stats = {
             'coinstatsindex': {'synced': True, 'best_block_height': height}
         }
-        self.wait_until(lambda: self.nodes[1].getindexinfo() == expected_stats)
+        self.wait_until(
+            lambda: self.nodes[1].getindexinfo() == expected_stats,
+            timeout=300,
+        )
 
         expected = {**expected_filter, **expected_stats}
-        self.wait_until(lambda: self.nodes[2].getindexinfo() == expected)
+        self.wait_until(
+            lambda: self.nodes[2].getindexinfo() == expected,
+            timeout=300,
+        )
 
     def reconnect_nodes(self):
         self.connect_nodes(0,1)
@@ -141,7 +150,11 @@ class FeatureIndexPruneTest(DigiByteTestFramework):
             # The nodes need to be reconnected to the non-pruning node upon restart, otherwise they will be stuck
             self.connect_nodes(i, 3)
 
-        self.sync_blocks(timeout=300)
+        # Reindexing the pruned nodes rebuilds the enabled indexes while the
+        # blocks are downloaded again.  On Windows this can take longer than
+        # the ordinary block-sync timeout even though all nodes keep making
+        # progress on the same chain.
+        self.sync_blocks(timeout=600)
         self.sync_index(height=2333)
 
         for node in self.nodes[:2]:

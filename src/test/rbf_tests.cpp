@@ -157,12 +157,16 @@ BOOST_FIXTURE_TEST_CASE(rbf_helper_functions, TestChain100Setup)
     BOOST_CHECK(PaysForRBF(high_fee, high_fee - 1, 1, CFeeRate(0), unused_txid).has_value());
     BOOST_CHECK(PaysForRBF(high_fee + 1, high_fee, 1, CFeeRate(0), unused_txid).has_value());
     // Additional fees must cover the replacement's vsize at incremental relay fee
-    BOOST_CHECK(PaysForRBF(high_fee, high_fee + 1, 2, incremental_relay_feerate, unused_txid).has_value());
-    BOOST_CHECK(PaysForRBF(high_fee, high_fee + 2, 2, incremental_relay_feerate, unused_txid) == std::nullopt);
-    BOOST_CHECK(PaysForRBF(high_fee, high_fee + 2, 2, higher_relay_feerate, unused_txid).has_value());
-    BOOST_CHECK(PaysForRBF(high_fee, high_fee + 4, 2, higher_relay_feerate, unused_txid) == std::nullopt);
-    BOOST_CHECK(PaysForRBF(low_fee, high_fee, 99999999, incremental_relay_feerate, unused_txid).has_value());
-    BOOST_CHECK(PaysForRBF(low_fee, high_fee + 99999999, 99999999, incremental_relay_feerate, unused_txid) == std::nullopt);
+    const CAmount incremental_fee{incremental_relay_feerate.GetFee(2)};
+    BOOST_CHECK(PaysForRBF(high_fee, high_fee + incremental_fee - 1, 2, incremental_relay_feerate, unused_txid).has_value());
+    BOOST_CHECK(PaysForRBF(high_fee, high_fee + incremental_fee, 2, incremental_relay_feerate, unused_txid) == std::nullopt);
+    const CAmount higher_fee{higher_relay_feerate.GetFee(2)};
+    BOOST_CHECK(PaysForRBF(high_fee, high_fee + higher_fee - 1, 2, higher_relay_feerate, unused_txid).has_value());
+    BOOST_CHECK(PaysForRBF(high_fee, high_fee + higher_fee, 2, higher_relay_feerate, unused_txid) == std::nullopt);
+    constexpr size_t large_replacement_vsize{99999999};
+    const CAmount large_relay_fee{incremental_relay_feerate.GetFee(large_replacement_vsize)};
+    BOOST_CHECK(PaysForRBF(low_fee, low_fee + large_relay_fee - 1, large_replacement_vsize, incremental_relay_feerate, unused_txid).has_value());
+    BOOST_CHECK(PaysForRBF(low_fee, low_fee + large_relay_fee, large_replacement_vsize, incremental_relay_feerate, unused_txid) == std::nullopt);
 
     // Tests for GetEntriesForConflicts
     CTxMemPool::setEntries all_parents{entry1, entry3, entry5, entry7, entry8};

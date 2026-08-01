@@ -18,17 +18,27 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <script/script.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <uint256.h>
+#include <util/int128.h>
 
 #include <cstdint>
+#include <util/int128.h>
 #include <string>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_no_partial_redeem_tests, TestingSetup)
 
@@ -215,12 +225,12 @@ BOOST_AUTO_TEST_CASE(collateral_calculation_no_rounding)
 
     // Mint $100.00 (10000 cents) — collateral = 10000 * COIN / 1000000 = 10000 * 100000000 / 1000000
     CAmount dd_100_00 = 10000;
-    // Use __int128 for safe multiplication (same as consensus code)
-    __int128 collateral_100_00 = (static_cast<__int128>(dd_100_00) * 100000000LL) / oraclePrice;
+    // Use util::int128_t for safe multiplication (same as consensus code)
+    util::int128_t collateral_100_00 = (static_cast<util::int128_t>(dd_100_00) * 100000000LL) / oraclePrice;
 
     // Mint $100.50 (10050 cents)
     CAmount dd_100_50 = 10050;
-    __int128 collateral_100_50 = (static_cast<__int128>(dd_100_50) * 100000000LL) / oraclePrice;
+    util::int128_t collateral_100_50 = (static_cast<util::int128_t>(dd_100_50) * 100000000LL) / oraclePrice;
 
     // Verify: collateral scales linearly with DD amount
     // 10050 / 10000 = 1.005, so collateral_100_50 should be 1.005x collateral_100_00

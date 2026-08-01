@@ -22,6 +22,42 @@
 #include <test/util/random.h>
 #include <util/time.h>
 
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+class FixedBundlePriceFetcher final : public ExchangeAPI::BaseExchangeFetcher
+{
+public:
+    FixedBundlePriceFetcher(std::string name, CAmount price)
+        : BaseExchangeFetcher(name, ""), m_price(price)
+    {
+    }
+
+    CAmount FetchPrice() override { return m_price; }
+
+private:
+    const CAmount m_price;
+};
+
+std::vector<std::unique_ptr<ExchangeAPI::BaseExchangeFetcher>> MakeBundlePriceFetchers(
+    std::initializer_list<CAmount> prices)
+{
+    std::vector<std::unique_ptr<ExchangeAPI::BaseExchangeFetcher>> fetchers;
+    size_t index{0};
+    for (const CAmount price : prices) {
+        fetchers.push_back(std::make_unique<FixedBundlePriceFetcher>(
+            "bundle-test-exchange-" + std::to_string(index++), price));
+    }
+    return fetchers;
+}
+
+} // namespace
+
 BOOST_FIXTURE_TEST_SUITE(oracle_bundle_manager_tests, RegTestingSetup)
 
 static CKey GetRegtestBundleOracleKey(uint32_t oracle_id)
@@ -183,15 +219,14 @@ BOOST_AUTO_TEST_CASE(message_validation)
  */
 BOOST_AUTO_TEST_CASE(exchange_aggregator_integration)
 {
-    // Create aggregator
-    ExchangeAPI::MultiExchangeAggregator aggregator;
+    ExchangeAPI::MultiExchangeAggregator aggregator{
+        MakeBundlePriceFetchers({12000, 12300, 12600, 12900})};
     aggregator.SetMinRequiredSources(3);
     aggregator.SetOutlierThreshold(0.10);
 
-    // Fetch prices (will use mock data if libcurl not available)
     CAmount aggregate_price = aggregator.FetchAggregatePrice();
 
-    // Should return a valid price (either real or mock)
+    // Should return the deterministic median of the injected prices.
     BOOST_CHECK(aggregate_price > 0);
 
     // Price should be reasonable (between $0.001 and $10)
@@ -200,7 +235,7 @@ BOOST_AUTO_TEST_CASE(exchange_aggregator_integration)
 
     // Check successful sources
     size_t successful_sources = aggregator.GetSuccessfulSourceCount();
-    BOOST_CHECK(successful_sources >= 3);
+    BOOST_CHECK_EQUAL(successful_sources, 4);
 
     LogPrintf("Test: Exchange aggregator fetched price=%lld micro-USD from %d sources\n",
              aggregate_price, successful_sources);

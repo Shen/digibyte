@@ -55,6 +55,12 @@ class P2PIBDStallingTest(DigiByteTestFramework):
         NUM_BLOCKS = 1025
         NUM_PEERS = 4
         node = self.nodes[0]
+        # Freeze time while loading four 1024-block lookahead windows. With
+        # DigiByte's 15-second target spacing, doing this work against the wall
+        # clock can trigger the ordinary block-download timeout before this
+        # test intentionally advances time to exercise stalling behavior.
+        self.mocktime = int(time.time())
+        node.setmocktime(self.mocktime)
         tip = int(node.getbestblockhash(), 16)
         blocks = []
         height = 1
@@ -86,7 +92,7 @@ class P2PIBDStallingTest(DigiByteTestFramework):
 
         self.all_sync_send_with_ping(peers)
         # If there was a peer marked for stalling, it would get disconnected
-        self.mocktime = int(time.time()) + 3
+        self.mocktime += 3
         node.setmocktime(self.mocktime)
         self.all_sync_send_with_ping(peers)
         assert_equal(node.num_test_p2p_connections(), NUM_PEERS)

@@ -3,33 +3,54 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 // RH-15: Crypto Primitive Edge Cases — Red Team Third Pass
-// Attack vectors: hash domain separation, __int128 edge cases,
+// Attack vectors: hash domain separation, util::int128_t edge cases,
 // version marker ambiguity, MuSig2 nonce/key validation
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <hash.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <oracle/bundle_manager.h>
+#include <util/int128.h>
 #include <oracle/musig2_aggregator.h>
+#include <util/int128.h>
 #include <oracle/signing_orchestrator.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <uint256.h>
+#include <util/int128.h>
 #include <util/strencodings.h>
+#include <util/int128.h>
 
 #include <secp256k1.h>
+#include <util/int128.h>
 #include <secp256k1_extrakeys.h>
+#include <util/int128.h>
 #include <secp256k1_musig.h>
+#include <util/int128.h>
 
 #include <cstring>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 
 BOOST_FIXTURE_TEST_SUITE(rh15_crypto_primitives_tests, BasicTestingSetup)
 
@@ -262,11 +283,11 @@ BOOST_AUTO_TEST_CASE(dd_version_negative_version_number)
 }
 
 // ============================================================================
-// ATTACK VECTOR 8: __int128 Collateral Arithmetic Edge Cases
+// ATTACK VECTOR 8: util::int128_t Collateral Arithmetic Edge Cases
 // ============================================================================
 //
 // FINDING: Both txbuilder.cpp and validation.cpp handle overflow correctly:
-// - Use __int128 for intermediate computation
+// - Use util::int128_t for intermediate computation
 // - Cap at MAX_MONEY before casting to int64/uint64
 // - txbuilder returns 0 on overflow, validation caps at MAX_MONEY
 //
@@ -286,17 +307,17 @@ BOOST_AUTO_TEST_CASE(int128_collateral_overflow_consistency)
     // result = 1e20 / 1 = 1e20 > MAX_MONEY
     // This SHOULD be caught by the overflow guard.
 
-    __int128 ddAmount = 10000000;  // max mint
-    __int128 COIN = 100000000;
-    __int128 ratio = 1000;  // 1000%
-    __int128 price = 1;  // minimum possible price (1 microUSD)
+    util::int128_t ddAmount = 10000000;  // max mint
+    util::int128_t COIN = 100000000;
+    util::int128_t ratio = 1000;  // 1000%
+    util::int128_t price = 1;  // minimum possible price (1 microUSD)
 
-    __int128 numerator = ddAmount * COIN * ratio * 100;
-    __int128 result = numerator / price;
+    util::int128_t numerator = ddAmount * COIN * ratio * 100;
+    util::int128_t result = numerator / price;
 
     // Verify this exceeds MAX_MONEY
     CAmount MAX_MONEY_DGB = 2100000000LL * 100000000LL;
-    BOOST_CHECK(result > static_cast<__int128>(MAX_MONEY_DGB));
+    BOOST_CHECK(result > static_cast<util::int128_t>(MAX_MONEY_DGB));
 
     // FINDING: Both code paths correctly detect this. The inconsistency
     // (return 0 vs cap at MAX_MONEY) isn't exploitable because:
@@ -307,12 +328,12 @@ BOOST_AUTO_TEST_CASE(int128_collateral_overflow_consistency)
 BOOST_AUTO_TEST_CASE(int128_zero_price_division)
 {
     // ATTACK: What if oracle price is 0?
-    // Both codepaths should reject this BEFORE reaching the __int128 division.
+    // Both codepaths should reject this BEFORE reaching the util::int128_t division.
 
     // validation.cpp checks: ctx.oraclePriceMicroUSD <= 0 → return false
     // txbuilder.cpp: let's verify the caller checks this
 
-    // The division by zero is protected by input validation, not by __int128.
+    // The division by zero is protected by input validation, not by util::int128_t.
     // This is correct behavior — document it.
     BOOST_CHECK(true); // Placeholder: actual validation tested elsewhere
 
@@ -378,6 +399,6 @@ BOOST_AUTO_TEST_CASE(nums_point_is_bip341_standard)
 // - MuSig2 key aggregation (libsecp256k1 rejects degenerate keys)
 // - Zero nonce injection (libsecp256k1 parse rejects)
 // - NUMS point (standard BIP-341, no known discrete log)
-// - __int128 overflow (properly guarded with MAX_MONEY cap)
+// - util::int128_t overflow (properly guarded with MAX_MONEY cap)
 
 BOOST_AUTO_TEST_SUITE_END()

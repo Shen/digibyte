@@ -9,6 +9,8 @@ See also rpc_signer.py for tests without wallet context.
 """
 import os
 import platform
+import subprocess
+import sys
 
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
@@ -25,21 +27,21 @@ class WalletSignerTest(DigiByteTestFramework):
     def mock_signer_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'signer.py')
         if platform.system() == "Windows":
-            return "py -3 " + path
+            return subprocess.list2cmdline([sys.executable, path])
         else:
             return path
 
     def mock_invalid_signer_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'invalid_signer.py')
         if platform.system() == "Windows":
-            return "py -3 " + path
+            return subprocess.list2cmdline([sys.executable, path])
         else:
             return path
 
     def mock_multi_signers_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'multi_signers.py')
         if platform.system() == "Windows":
-            return "py -3 " + path
+            return subprocess.list2cmdline([sys.executable, path])
         else:
             return path
 

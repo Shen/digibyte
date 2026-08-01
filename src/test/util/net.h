@@ -105,6 +105,7 @@ constexpr ConnectionType ALL_CONNECTION_TYPES[]{
     ConnectionType::FEELER,
     ConnectionType::BLOCK_RELAY,
     ConnectionType::ADDR_FETCH,
+    ConnectionType::PAYMASTER,
 };
 
 constexpr auto ALL_NETWORKS = std::array{

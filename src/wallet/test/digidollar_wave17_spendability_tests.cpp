@@ -54,6 +54,8 @@
 #include <primitives/transaction.h>
 #include <random.h>
 #include <script/script.h>
+#include <script/descriptor.h>
+#include <script/signingprovider.h>
 #include <script/standard.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
@@ -387,6 +389,28 @@ BOOST_AUTO_TEST_CASE(w17_15_selected_dd_planner_is_non_mutating)
     AddConfirmedWalletTx(*this, m_wallet, tx);
     dd_wallet.AddDDUTXO(selected_input, 50000);
 
+    CKey fee_key;
+    fee_key.MakeNewKey(true);
+    FlatSigningProvider fee_provider;
+    std::string descriptor_error;
+    std::unique_ptr<Descriptor> fee_descriptor = Parse(
+        "tr(" + EncodeSecret(fee_key) + ")", fee_provider, descriptor_error,
+        /*require_checksum=*/false);
+    BOOST_REQUIRE(fee_descriptor);
+    WalletDescriptor wallet_descriptor{std::move(fee_descriptor), 0, 0, 1, 0};
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, fee_provider, "", false));
+    }
+    TaprootBuilder fee_taproot;
+    fee_taproot.Finalize(XOnlyPubKey{fee_key.GetPubKey()});
+    CMutableTransaction fee_transaction;
+    fee_transaction.vin.emplace_back(COutPoint{RandHash(), 0});
+    fee_transaction.vout.emplace_back(
+        COIN, GetScriptForDestination(fee_taproot.GetOutput()));
+    AddConfirmedWalletTx(*this, m_wallet, MakeTransactionRef(std::move(fee_transaction)));
+
     BOOST_REQUIRE(dd_wallet.HasDDUTXO(selected_input));
     BOOST_REQUIRE_EQUAL(dd_wallet.GetTotalDDBalance(), 50000);
 
@@ -402,6 +426,23 @@ BOOST_AUTO_TEST_CASE(w17_15_selected_dd_planner_is_non_mutating)
     auto utxos = dd_wallet.GetDDUTXOs();
     BOOST_REQUIRE_EQUAL(utxos.size(), 1u);
     BOOST_CHECK(utxos[0].outpoint == selected_input);
+}
+
+BOOST_AUTO_TEST_CASE(w17_15b_planner_types_insufficient_dgb_fee_inputs)
+{
+    DigiDollarWallet dd_wallet(&m_wallet);
+    const CTransactionRef tx = MakeMintLikeTx();
+    const COutPoint selected_input{tx->GetHash(), 1};
+    AddConfirmedWalletTx(*this, m_wallet, tx);
+    dd_wallet.AddDDUTXO(selected_input, 50000);
+
+    DDTransferPlan plan;
+    std::string error;
+    const std::vector<COutPoint> preset{selected_input};
+    BOOST_CHECK(!dd_wallet.PlanDigiDollarTransfer(
+        {{MakeValidDDAddress(), 30000}}, plan, error, &preset));
+    BOOST_CHECK(plan.error_code == DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS);
+    BOOST_CHECK(!error.empty());
 }
 
 BOOST_AUTO_TEST_CASE(w17_16_planner_rejects_opreturn_capacity_overflow)

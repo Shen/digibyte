@@ -10,17 +10,27 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 
 #include <limits>
+#include <util/int128.h>
 #include <cmath>
+#include <util/int128.h>
 
 using namespace DigiDollar;
 using namespace DigiDollar::DCA;
@@ -492,7 +502,7 @@ BOOST_AUTO_TEST_CASE(rh13_09_health_calculation_zero_dd_division)
 BOOST_AUTO_TEST_CASE(rh13_09_health_utils_overflow)
 {
     // Test HealthUtils::CalculateHealthRatio with extreme values
-    // Uses __int128, should handle large inputs
+    // Uses util::int128_t, should handle large inputs
 
     int ratio = DigiDollar::HealthUtils::CalculateHealthRatio(
         1, MAX_MONEY, std::numeric_limits<CAmount>::max());

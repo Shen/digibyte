@@ -53,6 +53,7 @@ from test_framework.messages import (
     msg_getcfilters,
     msg_getdata,
     msg_getheaders,
+    msg_getpmasters,
     msg_headers,
     msg_inv,
     msg_mempool,
@@ -60,9 +61,17 @@ from test_framework.messages import (
     msg_notfound,
     msg_ping,
     msg_pong,
+    msg_pmannounce,
+    msg_pmcapreq,
+    msg_pmcapresp,
+    msg_pmquotereq,
+    msg_pmquoteresp,
+    msg_pmsubmit,
+    msg_pmresult,
     msg_sendaddrv2,
     msg_sendcmpct,
     msg_sendheaders,
+    msg_sendpmasters,
     msg_sendtxrcncl,
     msg_tx,
     MSG_TX,
@@ -133,6 +142,7 @@ MESSAGEMAP = {
     b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
     b"getheaders": msg_getheaders,
+    b"getpmasters": msg_getpmasters,
     b"headers": msg_headers,
     b"inv": msg_inv,
     b"mempool": msg_mempool,
@@ -140,9 +150,17 @@ MESSAGEMAP = {
     b"notfound": msg_notfound,
     b"ping": msg_ping,
     b"pong": msg_pong,
+    b"pmannounce": msg_pmannounce,
+    b"pmcapreq": msg_pmcapreq,
+    b"pmcapresp": msg_pmcapresp,
+    b"pmquotereq": msg_pmquotereq,
+    b"pmquoteresp": msg_pmquoteresp,
+    b"pmsubmit": msg_pmsubmit,
+    b"pmresult": msg_pmresult,
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
     b"sendheaders": msg_sendheaders,
+    b"sendpmasters": msg_sendpmasters,
     b"sendtxrcncl": msg_sendtxrcncl,
     b"tx": msg_tx,
     b"verack": msg_verack,
@@ -278,7 +296,7 @@ class P2PConnection(asyncio.Protocol):
                 self._log_message("receive", t)
                 self.on_message(t)
         except Exception as e:
-            logger.exception('Error reading message:', repr(e))
+            logger.exception("Error reading message: %r", e)
             raise
 
     def on_message(self, message):
@@ -439,14 +457,23 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getpmasters(self, message): pass
     def on_headers(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass
     def on_notfound(self, message): pass
     def on_pong(self, message): pass
+    def on_pmannounce(self, message): pass
+    def on_pmcapreq(self, message): pass
+    def on_pmcapresp(self, message): pass
+    def on_pmquotereq(self, message): pass
+    def on_pmquoteresp(self, message): pass
+    def on_pmsubmit(self, message): pass
+    def on_pmresult(self, message): pass
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
     def on_sendheaders(self, message): pass
+    def on_sendpmasters(self, message): pass
     def on_sendtxrcncl(self, message): pass
     def on_tx(self, message): pass
     def on_dandeliontx(self, message): pass

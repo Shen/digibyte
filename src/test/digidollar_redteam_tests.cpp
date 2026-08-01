@@ -13,36 +13,66 @@
  */
 
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/tx_check.h>
+#include <util/int128.h>
 #include <digidollar/txbuilder.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <consensus/dca.h>
+#include <util/int128.h>
 #include <consensus/err.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <consensus/digidollar_transaction_validation.h>
+#include <util/int128.h>
 #include <digidollar/health.h>
+#include <util/int128.h>
 #include <kernel/chainparams.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <script/standard.h>
+#include <util/int128.h>
 #include <script/interpreter.h>
+#include <util/int128.h>
 #include <script/script_error.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <hash.h>
+#include <util/int128.h>
 #include <crypto/sha256.h>
+#include <util/int128.h>
 #include <util/strencodings.h>
+#include <util/int128.h>
 #include <oracle/bundle_manager.h>
+#include <util/int128.h>
 #include <oracle/exchange.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <protocol.h>
+#include <util/int128.h>
 #include <wallet/digidollarwallet.h>
+#include <util/int128.h>
 #include <chain.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 
 BOOST_FIXTURE_TEST_SUITE(digidollar_redteam_tests, BasicTestingSetup)
 
@@ -165,12 +195,12 @@ BOOST_AUTO_TEST_CASE(redteam_negative_dd_amount)
 
 BOOST_AUTO_TEST_CASE(redteam_128bit_overflow_boundary)
 {
-    // ATTACK: Values chosen to overflow even __int128
+    // ATTACK: Values chosen to overflow even util::int128_t
     // numerator = ddAmount * COIN * ratio * 100
-    // max __int128 ≈ 1.7 × 10^38
+    // max util::int128_t ≈ 1.7 × 10^38
     // Try: 10^18 * 10^8 * 10^4 * 10^2 = 10^32 (should be safe)
     
-    // This is the boundary where uint64_t would overflow but __int128 is safe
+    // This is the boundary where uint64_t would overflow but util::int128_t is safe
     const CAmount LARGE_DD = 1000000000000000LL;  // 10^15 cents ($10 trillion)
     const int64_t LOCK_BLOCKS = 30 * DigiDollar::BLOCKS_PER_DAY;
     const CAmount LOW_PRICE = 100;  // $0.0001 per DGB
@@ -182,7 +212,7 @@ BOOST_AUTO_TEST_CASE(redteam_128bit_overflow_boundary)
     
     // Should fail closed, not overflow or cap to a satisfiable amount.
     BOOST_CHECK_MESSAGE(required == 0,
-        "EXPLOIT: __int128 calculation should fail closed, got " + std::to_string(required));
+        "EXPLOIT: util::int128_t calculation should fail closed, got " + std::to_string(required));
 }
 
 BOOST_AUTO_TEST_CASE(redteam_rounding_attack)
@@ -264,10 +294,10 @@ BOOST_AUTO_TEST_CASE(redteam_txbuilder_validation_consistency)
     
     // Manual calculation matching TxBuilder
     // (DD * COIN * ratio * 100) / price
-    __int128 numerator = static_cast<__int128>(DD_AMOUNT) * 
-                         static_cast<__int128>(COIN) * 
-                         static_cast<__int128>(effectiveRatio) * 100;
-    __int128 builderRequired = numerator / static_cast<__int128>(PRICE);
+    util::int128_t numerator = static_cast<util::int128_t>(DD_AMOUNT) *
+                         static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(effectiveRatio) * 100;
+    util::int128_t builderRequired = numerator / static_cast<util::int128_t>(PRICE);
     
     // CRITICAL: Both calculations must produce the SAME result
     BOOST_CHECK_MESSAGE(validationRequired == static_cast<CAmount>(builderRequired),
@@ -301,12 +331,12 @@ BOOST_AUTO_TEST_CASE(redteam_system_health_extremes)
 
 BOOST_AUTO_TEST_CASE(redteam_int128_edge_cases)
 {
-    // ATTACK: Test edge cases specific to __int128 arithmetic
+    // ATTACK: Test edge cases specific to util::int128_t arithmetic
     
     // Case 1: Numerator at max safe value for uint64_t
     // uint64_t max ≈ 1.8 × 10^19
     // If using uint64_t: 10^14 * 10^8 * 10^3 * 10^2 = 10^27 would overflow
-    // With __int128: Should work correctly
+    // With util::int128_t: Should work correctly
     
     const CAmount LARGE_DD = 100000000000000LL;  // 10^14 cents
     const CAmount LOW_PRICE = 1000;  // Very low price
@@ -315,7 +345,7 @@ BOOST_AUTO_TEST_CASE(redteam_int128_edge_cases)
     auto regTestParams = CChainParams::RegTest({});
     DigiDollar::ValidationContext ctx(1000, LOW_PRICE, 50, *regTestParams);  // Emergency (2x multiplier)
     
-    // This would overflow uint64_t but should be safe with __int128
+    // This would overflow uint64_t but should be safe with util::int128_t
     CAmount required = DigiDollar::CalculateRequiredCollateral(LARGE_DD, LOCK_BLOCKS, ctx);
     
     // Should fail closed, not cap to a satisfiable amount or wrap.
@@ -4190,8 +4220,8 @@ BOOST_AUTO_TEST_CASE(redteam_t2_03a_partial_burn_miner_fee_collateral_theft)
     // A miner-attacker recovers ALL collateral while burning only 1% of DD.
     CAmount implicitFee = lockedCollateral - allowedOutput;
     CAmount allowedRelease = static_cast<int64_t>(
-        static_cast<__int128>(ddBurned) * static_cast<__int128>(lockedCollateral) /
-        static_cast<__int128>(originalDD));
+        static_cast<util::int128_t>(ddBurned) * static_cast<util::int128_t>(lockedCollateral) /
+        static_cast<util::int128_t>(originalDD));
 
     BOOST_TEST_MESSAGE("T2-03a: Partial burn 1% DD, output = " << allowedOutput / COIN << " DGB");
     BOOST_TEST_MESSAGE("T2-03a: Collateral input = " << lockedCollateral / COIN << " DGB");
@@ -4464,8 +4494,8 @@ BOOST_AUTO_TEST_CASE(redteam_t2_03e_fee_tolerance_minimum_exploit)
     };
 
     CAmount allowedRelease = static_cast<int64_t>(
-        static_cast<__int128>(ddBurned) * static_cast<__int128>(lockedCollateral) /
-        static_cast<__int128>(originalDD));
+        static_cast<util::int128_t>(ddBurned) * static_cast<util::int128_t>(lockedCollateral) /
+        static_cast<util::int128_t>(originalDD));
     CAmount feeTolerance = std::max((CAmount)1000, allowedRelease / 1000);
 
     BOOST_TEST_MESSAGE("T2-03e: allowedRelease = " << allowedRelease << " sats, feeTolerance = " << feeTolerance << " sats");
@@ -7664,16 +7694,16 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01a_collateral_calc_extreme_oracle_price)
         CAmount oraclePrice = 1;  // 1 micro-USD
         int effectiveRatio = 500; // 500%
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // 10000 * 1e8 * 500 * 100 / 1 = 5e16 sats = 500M DGB
         // This exceeds total DGB supply but NOT MAX_MONEY (2.1e18 sats)
         // The RPC only rejects if > MAX_MONEY, so this passes but represents
         // more DGB than will ever exist — user would fail at coin selection
         BOOST_CHECK(result128 > 0);
-        // Verify the __int128 math is correct and doesn't overflow
+        // Verify the util::int128_t math is correct and doesn't overflow
         uint64_t required = static_cast<uint64_t>(result128);
         BOOST_CHECK_EQUAL(required, 50000000000000000ULL); // 5e16 sats = 500M DGB
     }
@@ -7685,30 +7715,30 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01a_collateral_calc_extreme_oracle_price)
         CAmount oraclePrice = std::numeric_limits<int64_t>::max();
         int effectiveRatio = 500;
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // At astronomical DGB price, collateral should be very small but not negative
         BOOST_CHECK(result128 >= 0);
-        BOOST_CHECK(result128 <= static_cast<__int128>(MAX_MONEY));
+        BOOST_CHECK(result128 <= static_cast<util::int128_t>(MAX_MONEY));
         // Specifically, should be less than 1 DGB (DGB would be worth trillions)
         uint64_t required = static_cast<uint64_t>(result128);
         BOOST_CHECK_LT(required, COIN);
     }
 
-    // Test 3: Large DD amount + small oracle price — __int128 handles it
+    // Test 3: Large DD amount + small oracle price — util::int128_t handles it
     {
         CAmount ddAmount = MAX_MONEY; // Insane DD amount
         CAmount oraclePrice = 100;    // $0.0001/DGB
         int effectiveRatio = 1000;    // 1000%
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // Should be astronomically large — RPC would throw MAX_MONEY error
-        BOOST_CHECK_MESSAGE(result128 > static_cast<__int128>(MAX_MONEY),
+        BOOST_CHECK_MESSAGE(result128 > static_cast<util::int128_t>(MAX_MONEY),
             "Insane DD amount should exceed MAX_MONEY collateral");
     }
 }
@@ -7727,12 +7757,12 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01b_usd_value_display_overflow)
 
         // This multiplication overflows int64_t:
         // 2e18 * 1e6 = 2e24 >> INT64_MAX (9.2e18)
-        __int128 safe_product = static_cast<__int128>(requiredDGB) *
-                                static_cast<__int128>(oraclePrice);
-        __int128 safe_result = safe_product / static_cast<__int128>(COIN);
+        util::int128_t safe_product = static_cast<util::int128_t>(requiredDGB) *
+                                static_cast<util::int128_t>(oraclePrice);
+        util::int128_t safe_result = safe_product / static_cast<util::int128_t>(COIN);
 
         // Verify overflow WOULD occur with int64_t
-        bool would_overflow = (safe_product > static_cast<__int128>(std::numeric_limits<int64_t>::max()));
+        bool would_overflow = (safe_product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max()));
         BOOST_CHECK_MESSAGE(would_overflow,
             "FINDING: estimatecollateral USD value calc can overflow int64_t with large "
             "requiredDGB and user-supplied oracle price. Display-only, not consensus-affecting.");
@@ -7743,11 +7773,11 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01b_usd_value_display_overflow)
         uint64_t requiredDGB = 100000000; // 1 DGB in sats
         CAmount oraclePrice = std::numeric_limits<int64_t>::max(); // User passes INT64_MAX
 
-        __int128 safe_product = static_cast<__int128>(requiredDGB) *
-                                static_cast<__int128>(oraclePrice);
+        util::int128_t safe_product = static_cast<util::int128_t>(requiredDGB) *
+                                static_cast<util::int128_t>(oraclePrice);
 
         // 1e8 * 9.2e18 = 9.2e26 >> INT64_MAX
-        bool would_overflow = (safe_product > static_cast<__int128>(std::numeric_limits<int64_t>::max()));
+        bool would_overflow = (safe_product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max()));
         BOOST_CHECK_MESSAGE(would_overflow,
             "FINDING: Even 1 DGB * INT64_MAX oracle price overflows int64_t in display calc");
     }
@@ -7953,11 +7983,11 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01h_dd_amount_int64_boundaries)
         CAmount oraclePrice = 6310; // $0.00631/DGB
         int effectiveRatio = 500;
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
         BOOST_CHECK(result128 > 0);
-        BOOST_CHECK(result128 < static_cast<__int128>(MAX_MONEY));
+        BOOST_CHECK(result128 < static_cast<util::int128_t>(MAX_MONEY));
     }
 
     // Test 2: DD amount = INT64_MAX — would pass RPC's > 0 check
@@ -7966,13 +7996,13 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01h_dd_amount_int64_boundaries)
         CAmount oraclePrice = 6310;
         int effectiveRatio = 500;
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // Should exceed MAX_MONEY — RPC catches this with the > MAX_MONEY check
-        BOOST_CHECK_MESSAGE(result128 > static_cast<__int128>(MAX_MONEY),
-            "INT64_MAX DD amount correctly caught by MAX_MONEY check in __int128 calc");
+        BOOST_CHECK_MESSAGE(result128 > static_cast<util::int128_t>(MAX_MONEY),
+            "INT64_MAX DD amount correctly caught by MAX_MONEY check in util::int128_t calc");
     }
 
     // Test 3: DD amount = MAX_MONEY — passes > 0, very large but valid CAmount
@@ -7981,9 +8011,9 @@ BOOST_AUTO_TEST_CASE(redteam_T4_01h_dd_amount_int64_boundaries)
         CAmount oraclePrice = 1000000000; // $1000/DGB
         int effectiveRatio = 200; // 200% (10-year tier)
 
-        __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                             static_cast<__int128>(effectiveRatio) * 100;
-        __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+        util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                             static_cast<util::int128_t>(effectiveRatio) * 100;
+        util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
         // Even at very high price, MAX_MONEY DD exceeds MAX_MONEY collateral
         // MAX_MONEY DD = 2.1e18 cents = $21 quadrillion USD worth of DD
@@ -15084,9 +15114,9 @@ BOOST_AUTO_TEST_CASE(redteam_t8_03a_connectblock_dd_validation_uses_nondetermini
     // $100 DD = 10000 cents, 200% ratio
     CAmount ddAmount = 10000;  // $100
     int effectiveRatio = 200;  // 200%
-    __int128 numA = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                    static_cast<__int128>(effectiveRatio) * 100;
-    CAmount requiredA = static_cast<CAmount>(numA / static_cast<__int128>(priceA));
+    util::int128_t numA = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                    static_cast<util::int128_t>(effectiveRatio) * 100;
+    CAmount requiredA = static_cast<CAmount>(numA / static_cast<util::int128_t>(priceA));
 
     // Step 2: Simulate Node B's cached price ($0.006)
     manager.Clear();
@@ -15095,9 +15125,9 @@ BOOST_AUTO_TEST_CASE(redteam_t8_03a_connectblock_dd_validation_uses_nondetermini
     CAmount priceB = manager.GetLatestPrice();
     BOOST_CHECK_EQUAL(priceB, 6000);
 
-    __int128 numB = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                    static_cast<__int128>(effectiveRatio) * 100;
-    CAmount requiredB = static_cast<CAmount>(numB / static_cast<__int128>(priceB));
+    util::int128_t numB = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                    static_cast<util::int128_t>(effectiveRatio) * 100;
+    CAmount requiredB = static_cast<CAmount>(numB / static_cast<util::int128_t>(priceB));
 
     // PROVE: Different prices → different collateral requirements
     BOOST_CHECK(requiredA < requiredB);  // Higher price → less collateral needed
@@ -15265,10 +15295,10 @@ BOOST_AUTO_TEST_CASE(redteam_t8_03d_partition_median_divergence_with_multiple_or
     // $100 DD at 200% ratio
     CAmount ddAmount = 10000;  // $100
     int ratio = 200;  // 200%
-    __int128 num = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                   static_cast<__int128>(ratio) * 100;
-    CAmount reqA = static_cast<CAmount>(num / static_cast<__int128>(medianA));
-    CAmount reqB = static_cast<CAmount>(num / static_cast<__int128>(medianB));
+    util::int128_t num = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                   static_cast<util::int128_t>(ratio) * 100;
+    CAmount reqA = static_cast<CAmount>(num / static_cast<util::int128_t>(medianA));
+    CAmount reqB = static_cast<CAmount>(num / static_cast<util::int128_t>(medianB));
 
     // Higher price = less DGB needed
     // medianA=5200 (lower price) → more DGB needed
@@ -16154,8 +16184,8 @@ BOOST_AUTO_TEST_CASE(redteam_t9_01g_even_count_median_formula_divergence)
     // A minter who cached_price is 5200 (P2P) provides 385,000 DGB collateral.
     // A validating node that uses GetConsensusPrice (5150) would need 388,349.
     // RESULT: Tx accepted by P2P-price node, rejected by bundle-price node.
-    CAmount collateral_p2p = static_cast<CAmount>(((__int128)100 * COIN * 200 * 100) / p2p_price);
-    CAmount collateral_consensus = static_cast<CAmount>(((__int128)100 * COIN * 200 * 100) / consensus_price);
+    CAmount collateral_p2p = static_cast<CAmount>(((util::int128_t)100 * COIN * 200 * 100) / p2p_price);
+    CAmount collateral_consensus = static_cast<CAmount>(((util::int128_t)100 * COIN * 200 * 100) / consensus_price);
     CAmount collateral_gap = collateral_consensus - collateral_p2p;
     BOOST_CHECK(collateral_gap > 0);
 
@@ -16555,8 +16585,8 @@ BOOST_AUTO_TEST_CASE(redteam_t9_02e_stale_messages_skew_consensus_price)
     if (skewed_price != fresh_only_median) {
         int64_t shift = static_cast<int64_t>(skewed_price) - static_cast<int64_t>(fresh_only_median);
         // Calculate collateral impact for $100 DD at 200% ratio
-        CAmount collateral_mixed = static_cast<CAmount>(((__int128)100 * COIN * 200 * 100) / skewed_price);
-        CAmount collateral_fresh = static_cast<CAmount>(((__int128)100 * COIN * 200 * 100) / fresh_only_median);
+        CAmount collateral_mixed = static_cast<CAmount>(((util::int128_t)100 * COIN * 200 * 100) / skewed_price);
+        CAmount collateral_fresh = static_cast<CAmount>(((util::int128_t)100 * COIN * 200 * 100) / fresh_only_median);
         CAmount gap = collateral_fresh - collateral_mixed;
         BOOST_TEST_MESSAGE("  Price shift: " << shift << " µUSD");
         BOOST_TEST_MESSAGE("  Collateral gap: " << gap << " sat per $100 DD");
@@ -18067,8 +18097,8 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03a_max_digidollar_compile_time_safety)
     // MAX_DIGIDOLLAR * COIN should NOT overflow int64_t
     // 2.1T * 10^8 = 2.1 * 10^20 — DOES overflow int64_t!
     // This is relevant if anyone ever tries to multiply DD cents by COIN
-    __int128 product = static_cast<__int128>(MAX_DIGIDOLLAR) * static_cast<__int128>(COIN);
-    BOOST_CHECK(product > static_cast<__int128>(std::numeric_limits<int64_t>::max()));
+    util::int128_t product = static_cast<util::int128_t>(MAX_DIGIDOLLAR) * static_cast<util::int128_t>(COIN);
+    BOOST_CHECK(product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max()));
     BOOST_TEST_MESSAGE("  MAX_DIGIDOLLAR * COIN overflows int64_t: " +
         std::to_string(MAX_DIGIDOLLAR) + " * " + std::to_string(COIN) +
         " > " + std::to_string(std::numeric_limits<int64_t>::max()) + " ⚠️");
@@ -18121,14 +18151,14 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03b_validate_mint_amount_caps_at_max)
 
 BOOST_AUTO_TEST_CASE(redteam_t10_03c_collateral_calc_int128_overflow_protection)
 {
-    // CalculateRequiredCollateral uses __int128 to prevent overflow.
-    // Test extreme values to verify the __int128 path works correctly.
+    // CalculateRequiredCollateral uses util::int128_t to prevent overflow.
+    // Test extreme values to verify the util::int128_t path works correctly.
     //
     // Formula: numerator = ddAmount * COIN * effectiveRatio * 100
     // At maxMintAmount ($100K mainnet):
     //   10,000,000 * 100,000,000 * 2000 * 100 = 2 * 10^20
-    //   This exceeds int64_t max (9.2 * 10^18) — __int128 is essential!
-    BOOST_TEST_MESSAGE("=== T10-03c: CalculateRequiredCollateral __int128 safety ===");
+    //   This exceeds int64_t max (9.2 * 10^18) — util::int128_t is essential!
+    BOOST_TEST_MESSAGE("=== T10-03c: CalculateRequiredCollateral util::int128_t safety ===");
 
     SelectParams(ChainType::REGTEST);
     const CChainParams& params = Params();
@@ -18146,13 +18176,13 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03c_collateral_calc_int128_overflow_protection)
     BOOST_TEST_MESSAGE("  $1000 DD at $0.01 DGB, 1000% ratio: " +
         std::to_string(result) + " sats (" + std::to_string(result / COIN) + " DGB) ✅");
 
-    // Test 2: Verify __int128 intermediate doesn't overflow
+    // Test 2: Verify util::int128_t intermediate doesn't overflow
     // numerator = 100000 * 100000000 * 1000 * 100 = 10^18
-    // This is AT the int64_t boundary — the exact reason __int128 was added
-    __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(1000) * 100;
+    // This is AT the int64_t boundary — the exact reason util::int128_t was added
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(1000) * 100;
     BOOST_CHECK(numerator > 0);
-    BOOST_TEST_MESSAGE("  __int128 numerator: within range ✅");
+    BOOST_TEST_MESSAGE("  util::int128_t numerator: within range ✅");
 
     // Test 3: ddAmount = 0 should return 0 (not crash)
     CAmount zeroResult = DigiDollar::CalculateRequiredCollateral(0, 240, ctx);
@@ -18201,14 +18231,14 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03d_collateral_ratio_logging_overflow)
 
     // safeCollateral * oraclePrice = 92233 * 10^8 * 10^6 = 9.2233 * 10^18
     // This is right at INT64_MAX boundary
-    __int128 product128 = static_cast<__int128>(safeCollateral) * static_cast<__int128>(oraclePrice);
-    bool wouldOverflow = product128 > static_cast<__int128>(std::numeric_limits<int64_t>::max());
+    util::int128_t product128 = static_cast<util::int128_t>(safeCollateral) * static_cast<util::int128_t>(oraclePrice);
+    bool wouldOverflow = product128 > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max());
     BOOST_TEST_MESSAGE("  92,233 DGB * $1.00: overflow=" + std::string(wouldOverflow ? "YES" : "NO"));
 
     // At 100,000 DGB, it definitely overflows
     CAmount largeCollateral = 100000LL * COIN;
-    product128 = static_cast<__int128>(largeCollateral) * static_cast<__int128>(oraclePrice);
-    BOOST_CHECK(product128 > static_cast<__int128>(std::numeric_limits<int64_t>::max()));
+    product128 = static_cast<util::int128_t>(largeCollateral) * static_cast<util::int128_t>(oraclePrice);
+    BOOST_CHECK(product128 > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max()));
     BOOST_TEST_MESSAGE("  100,000 DGB * $1.00: OVERFLOWS int64_t ⚠️");
 
     // The validation decision (dgbLocked >= requiredCollateral) does NOT use
@@ -18216,7 +18246,7 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03d_collateral_ratio_logging_overflow)
     BOOST_TEST_MESSAGE("  DEFENSE: Validation uses dgbLocked >= requiredCollateral (no overflow) ✅");
     BOOST_TEST_MESSAGE("  FINDING: Logging calculation overflows — cosmetic issue only ⚠️");
 
-    // FIX RECOMMENDATION: Use __int128 for dgbValueMicroUSD calculation, or
+    // FIX RECOMMENDATION: Use util::int128_t for dgbValueMicroUSD calculation, or
     // restructure: dgbValueInCents = (dgbLocked / COIN) * (oraclePrice / 10000)
     // This trades precision for overflow safety in logging
 }
@@ -18243,24 +18273,24 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03e_fallback_dd_calc_overflow_and_unit_bug)
     CAmount lowPrice = 5; // $0.000005 per DGB (micro-USD)
 
     // Check: maxCollateral * lowPrice overflows?
-    __int128 product = static_cast<__int128>(maxCollateral) * static_cast<__int128>(lowPrice);
-    bool overflows = product > static_cast<__int128>(std::numeric_limits<int64_t>::max());
+    util::int128_t product = static_cast<util::int128_t>(maxCollateral) * static_cast<util::int128_t>(lowPrice);
+    bool overflows = product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max());
     BOOST_CHECK(overflows);
     BOOST_TEST_MESSAGE("  MAX_MONEY * 5 micro-USD: OVERFLOWS int64_t ⚠️");
 
     // At moderate price ($0.01 = 10000 micro-USD), even small collateral overflows
     CAmount moderateCollateral = 1000000LL * COIN; // 1M DGB
     CAmount moderatePrice = 10000; // $0.01
-    product = static_cast<__int128>(moderateCollateral) * static_cast<__int128>(moderatePrice);
-    overflows = product > static_cast<__int128>(std::numeric_limits<int64_t>::max());
+    product = static_cast<util::int128_t>(moderateCollateral) * static_cast<util::int128_t>(moderatePrice);
+    overflows = product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max());
     // 1M DGB * $0.01 = 10^14 * 10^4 = 10^18 — right at boundary
     BOOST_TEST_MESSAGE("  1M DGB * $0.01: overflow=" + std::string(overflows ? "YES" : "NO"));
 
     // At $1.00 (10^6 micro-USD), 10,000 DGB overflows
     CAmount tenKDGB = 10000LL * COIN; // 10K DGB
     CAmount dollarPrice = 1000000; // $1.00
-    product = static_cast<__int128>(tenKDGB) * static_cast<__int128>(dollarPrice);
-    overflows = product > static_cast<__int128>(std::numeric_limits<int64_t>::max());
+    product = static_cast<util::int128_t>(tenKDGB) * static_cast<util::int128_t>(dollarPrice);
+    overflows = product > static_cast<util::int128_t>(std::numeric_limits<int64_t>::max());
     // 10K DGB = 10^12 sats, * 10^6 = 10^18 — at boundary
     BOOST_TEST_MESSAGE("  10K DGB * $1.00: overflow=" + std::string(overflows ? "YES" : "NO"));
 
@@ -18272,7 +18302,7 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03e_fallback_dd_calc_overflow_and_unit_bug)
     BOOST_TEST_MESSAGE("  FINDING: Fallback formula has unit mismatch (micro-USD vs cents) ⚠️");
     BOOST_TEST_MESSAGE("  IMPACT: Under-counts DD by ~100x — attacker gets LESS DD, not more ✅");
     BOOST_TEST_MESSAGE("  DEFENSE: Path rarely reached (OP_RETURN almost always has DD amount) ✅");
-    BOOST_TEST_MESSAGE("  FIX: Use __int128 and correct unit conversion in fallback path");
+    BOOST_TEST_MESSAGE("  FIX: Use util::int128_t and correct unit conversion in fallback path");
 }
 
 BOOST_AUTO_TEST_CASE(redteam_t10_03f_extract_dd_amount_boundary)
@@ -18369,8 +18399,8 @@ BOOST_AUTO_TEST_CASE(redteam_t10_03h_conservation_sum_overflow_analysis)
     CAmount maxPerOutput = 10000000; // $100K hard cap in transfer validation
     int maxOutputs = 93000; // Extreme theoretical max
 
-    __int128 worstCaseSum = static_cast<__int128>(maxPerOutput) * maxOutputs;
-    bool couldOverflow = worstCaseSum > static_cast<__int128>(std::numeric_limits<CAmount>::max());
+    util::int128_t worstCaseSum = static_cast<util::int128_t>(maxPerOutput) * maxOutputs;
+    bool couldOverflow = worstCaseSum > static_cast<util::int128_t>(std::numeric_limits<CAmount>::max());
     BOOST_CHECK(!couldOverflow);
 
     BOOST_TEST_MESSAGE("  Max per output: " + std::to_string(maxPerOutput) + " cents");

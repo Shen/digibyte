@@ -16,12 +16,18 @@ class BlockstoreReindexTest(DigiByteTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        # Generating enough blocks to cross the fast-prune block-file boundary
+        # can take slightly longer than the default RPC timeout on Windows.
+        self.rpc_timeout = 120
         self.extra_args = [["-fastprune", "-easypow"]]
 
     def reindex_readonly(self):
         self.log.debug("Generate blocks big enough to start second block file")
         # Generate enough blocks to fill the first block file (with fastprune)
-        self.generate(self.nodes[0], 2000)
+        # Use bounded RPC calls so a busy Windows host does not time out while
+        # the node is still successfully generating the complete batch.
+        for _ in range(4):
+            self.generate(self.nodes[0], 500)
         self.stop_node(0)
 
         assert (self.nodes[0].chain_path / "blocks" / "blk00000.dat").exists()

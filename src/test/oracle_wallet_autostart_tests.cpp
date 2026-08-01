@@ -41,10 +41,10 @@ void ResetOracleManager()
     OracleManager::StopOracleService();
 }
 
-class OracleWalletAutoStartSetup : public BasicTestingSetup
+class OracleWalletAutoStartSetup : public TestingSetup
 {
 public:
-    OracleWalletAutoStartSetup() : BasicTestingSetup(ChainType::REGTEST)
+    OracleWalletAutoStartSetup() : TestingSetup(ChainType::REGTEST)
     {
         ResetOracleManager();
     }
@@ -54,11 +54,13 @@ public:
         ResetOracleManager();
     }
 
-    std::shared_ptr<wallet::CWallet> CreateWallet(std::unique_ptr<wallet::WalletDatabase> database, const std::string& name)
+    std::shared_ptr<wallet::CWallet> CreateWallet(std::unique_ptr<wallet::WalletDatabase> database,
+                                                  const std::string& name,
+                                                  bool attach_chain = true)
     {
         wallet::WalletContext context;
         context.args = m_node.args;
-        context.chain = nullptr;
+        context.chain = attach_chain ? m_node.chain.get() : nullptr;
 
         bilingual_str error;
         std::vector<bilingual_str> warnings;
@@ -90,6 +92,7 @@ BOOST_AUTO_TEST_CASE(oracle_autostart_unencrypted_wallet)
     OracleNode* oracle = OracleManager::GetInstance().GetOracleNode(oracle_id);
     BOOST_REQUIRE(oracle != nullptr);
     BOOST_CHECK(oracle->IsEnabled());
+    BOOST_CHECK(oracle->IsRunning());
 }
 
 BOOST_AUTO_TEST_CASE(oracle_no_autostart_locked_wallet)
@@ -132,6 +135,24 @@ BOOST_AUTO_TEST_CASE(oracle_autostart_after_unlock)
     OracleNode* oracle = OracleManager::GetInstance().GetOracleNode(oracle_id);
     BOOST_REQUIRE(oracle != nullptr);
     BOOST_CHECK(oracle->IsEnabled());
+    BOOST_CHECK(oracle->IsRunning());
+}
+
+BOOST_AUTO_TEST_CASE(oracle_no_autostart_for_detached_wallet)
+{
+    static constexpr uint32_t oracle_id{0};
+    const CKey oracle_key = GetDeterministicRegtestOracleKey(oracle_id);
+    BOOST_REQUIRE(oracle_key.IsValid());
+
+    auto database = wallet::CreateMockableWalletDatabase();
+    {
+        wallet::WalletBatch batch(*database);
+        BOOST_REQUIRE(batch.WriteOracleKey(oracle_id, oracle_key));
+    }
+
+    auto wallet = CreateWallet(std::move(database), "oracle-detached-wallet", /*attach_chain=*/false);
+    BOOST_REQUIRE(wallet);
+    BOOST_CHECK(OracleManager::GetInstance().GetOracleNode(oracle_id) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(oracle_no_key_no_start)

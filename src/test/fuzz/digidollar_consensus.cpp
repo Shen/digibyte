@@ -3,24 +3,42 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
+#include <util/int128.h>
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <script/script.h>
+#include <util/int128.h>
 #include <test/fuzz/FuzzedDataProvider.h>
+#include <util/int128.h>
 #include <test/fuzz/fuzz.h>
+#include <util/int128.h>
 #include <test/fuzz/util.h>
+#include <util/int128.h>
 #include <util/chaintype.h>
+#include <util/int128.h>
 
 #include <algorithm>
+#include <util/int128.h>
 #include <cassert>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 // ============================================================================
 // Initialization
@@ -349,18 +367,18 @@ FUZZ_TARGET(dd_amount_validation, .init = initialize_dd_consensus)
         (void)DigiDollar::ValidateConsensusParams(fuzz_params, error);
     }
 
-    // Strategy 6: __int128 arithmetic overflow scenarios
+    // Strategy 6: util::int128_t arithmetic overflow scenarios
     {
         CAmount a = fuzzed_data_provider.ConsumeIntegral<CAmount>();
         CAmount b = fuzzed_data_provider.ConsumeIntegral<CAmount>();
-        // Test that __int128 can safely hold any product of two CAmount values
-        __int128 product = static_cast<__int128>(a) * static_cast<__int128>(b);
+        // Test that util::int128_t can safely hold any product of two CAmount values
+        util::int128_t product = static_cast<util::int128_t>(a) * static_cast<util::int128_t>(b);
         // Verify the product didn't lose information on conversion back
         // (it WILL overflow CAmount for large inputs — that's expected)
         (void)product;
 
         // Test sum
-        __int128 sum = static_cast<__int128>(a) + static_cast<__int128>(b);
+        util::int128_t sum = static_cast<util::int128_t>(a) + static_cast<util::int128_t>(b);
         (void)sum;
     }
 }

@@ -296,28 +296,36 @@ using miniscript::operator"" _mst;
 using Node = miniscript::Node<CPubKey>;
 
 /** Compute all challenges (pubkeys, hashes, timelocks) that occur in a given Miniscript. */
-std::set<Challenge> FindChallenges(const NodeRef& ref) {
+std::set<Challenge> FindChallenges(const NodeRef& ref)
+{
     std::set<Challenge> chal;
-    for (const auto& key : ref->keys) {
-        chal.emplace(ChallengeType::PK, ChallengeNumber(key));
+    std::vector<const Node*> pending{ref.get()};
+
+    while (!pending.empty()) {
+        const Node* node = pending.back();
+        pending.pop_back();
+
+        for (const auto& key : node->keys) {
+            chal.emplace(ChallengeType::PK, ChallengeNumber(key));
+        }
+        if (node->fragment == miniscript::Fragment::OLDER) {
+            chal.emplace(ChallengeType::OLDER, node->k);
+        } else if (node->fragment == miniscript::Fragment::AFTER) {
+            chal.emplace(ChallengeType::AFTER, node->k);
+        } else if (node->fragment == miniscript::Fragment::SHA256) {
+            chal.emplace(ChallengeType::SHA256, ChallengeNumber(node->data));
+        } else if (node->fragment == miniscript::Fragment::RIPEMD160) {
+            chal.emplace(ChallengeType::RIPEMD160, ChallengeNumber(node->data));
+        } else if (node->fragment == miniscript::Fragment::HASH256) {
+            chal.emplace(ChallengeType::HASH256, ChallengeNumber(node->data));
+        } else if (node->fragment == miniscript::Fragment::HASH160) {
+            chal.emplace(ChallengeType::HASH160, ChallengeNumber(node->data));
+        }
+        for (const auto& sub : node->subs) {
+            pending.push_back(sub.get());
+        }
     }
-    if (ref->fragment == miniscript::Fragment::OLDER) {
-        chal.emplace(ChallengeType::OLDER, ref->k);
-    } else if (ref->fragment == miniscript::Fragment::AFTER) {
-        chal.emplace(ChallengeType::AFTER, ref->k);
-    } else if (ref->fragment == miniscript::Fragment::SHA256) {
-        chal.emplace(ChallengeType::SHA256, ChallengeNumber(ref->data));
-    } else if (ref->fragment == miniscript::Fragment::RIPEMD160) {
-        chal.emplace(ChallengeType::RIPEMD160, ChallengeNumber(ref->data));
-    } else if (ref->fragment == miniscript::Fragment::HASH256) {
-        chal.emplace(ChallengeType::HASH256, ChallengeNumber(ref->data));
-    } else if (ref->fragment == miniscript::Fragment::HASH160) {
-        chal.emplace(ChallengeType::HASH160, ChallengeNumber(ref->data));
-    }
-    for (const auto& sub : ref->subs) {
-        auto sub_chal = FindChallenges(sub);
-        chal.insert(sub_chal.begin(), sub_chal.end());
-    }
+
     return chal;
 }
 

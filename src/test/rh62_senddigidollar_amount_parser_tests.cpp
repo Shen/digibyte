@@ -90,7 +90,7 @@
  *       so the attacker still cannot steal. BUT: the same pattern is
  *       used in OTHER RPCs that do not compare amount to balance
  *       (see estimatecollateral paths that feed `amount` into
- *       __int128 math without a balance check). UB in a security-
+ *       util::int128_t math without a balance check). UB in a security-
  *       critical amount parser is a latent risk that must be
  *       eliminated structurally, not patched per-callsite.
  *
@@ -160,16 +160,25 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <consensus/amount.h>
+#include <util/int128.h>
 
 #include <cerrno>
+#include <util/int128.h>
 #include <cmath>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 #include <cstdlib>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <stdexcept>
+#include <util/int128.h>
 #include <string>
+#include <util/int128.h>
 
 namespace {
 

@@ -275,6 +275,21 @@ class PruneTest(DigiByteTestFramework):
             goalbesthash = self.generate(self.nodes[0], blocks_to_mine, sync_fun=self.no_op)[-1]
             goalbestheight = first_reorg_height + 1
 
+            # DigiByte's low-work regtest headers can trip the anti-DoS headers
+            # threshold for this second deep fork as well. Node 1 intentionally
+            # remains on the reorg_test chain, so it cannot relay the restored
+            # main chain to node 2. Submit the required blocks directly to the
+            # pruning node so this test continues to exercise reacquiring
+            # pruned block data and activating the restored chain rather than
+            # the unrelated headers pre-sync policy.
+            self.log.info("Submitting restored main-chain blocks directly to pruning node")
+            for height in range(self.forkheight, goalbestheight + 1):
+                block_hash = self.nodes[0].getblockhash(height)
+                submit_result = self.nodes[2].submitblock(
+                    self.nodes[0].getblock(block_hash, 0),
+                )
+                assert submit_result in (None, "duplicate", "inconclusive"), submit_result
+
         self.log.info("Verify node 2 reorged back to the main chain, some blocks of which it had to redownload")
         # Wait for Node 2 to reorg to proper height
         self.wait_until(lambda: self.nodes[2].getblockcount() >= goalbestheight, timeout=900)

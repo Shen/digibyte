@@ -22,6 +22,7 @@ public:
 
 private Q_SLOTS:
     void overviewWidgetTests();
+    void overviewPaymasterReservationUsesConditionalBalanceBreakdown();
     void watchOnlyDigiDollarBalanceHiddenInWalletModel();
     void privateKeyDisabledWalletCannotGenerateDigiDollarAddress();
     void mintWidgetTests();
@@ -47,6 +48,16 @@ private Q_SLOTS:
     void privacyOverviewMaskTests();
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();
     void digiDollarAmountLabelsUseCurrencyPrefix();
+    void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
+    void paymasterLiquidityMaintenanceStatesAreReadable();
+    void paymasterExternalReadinessIsSeparatedFromConfiguration();
+    void paymasterCarrierWithdrawalActionsFailClosed();
+    void paymasterSafetyControlsDefaultFailClosed();
+    void paymasterSafetyPolicyDisplaysFiniteDisabledSemantics();
+    void paymasterInjectedRpcCoversConfigurationWorkflows();
+    void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
+    void paymasterConfirmationGuardDetectsMaterialChanges();
+    void paymasterRecoveryConfirmationGuardDetectsMaterialChanges();
     void overviewPrivacyMaskHidesAmountUnits();
     void overviewLayoutStretchFavorsBlockchainTotals();
     void overviewBlockchainTotalsFitLaunchScaleValues();

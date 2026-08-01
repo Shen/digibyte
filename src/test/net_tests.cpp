@@ -12,6 +12,7 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
+#include <paymaster/manager.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -35,6 +36,62 @@
 using namespace std::literals;
 
 BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
+
+BOOST_AUTO_TEST_CASE(paymaster_direct_replay_network_policy)
+{
+    using DigiDollar::Paymaster::DirectEnqueueResult;
+    using DigiDollar::Paymaster::IsBenignDirectEnqueueResult;
+
+    BOOST_CHECK(IsBenignDirectEnqueueResult(DirectEnqueueResult::ACCEPTED));
+    BOOST_CHECK(IsBenignDirectEnqueueResult(DirectEnqueueResult::DUPLICATE));
+    BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::CONFLICT));
+    BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::FULL));
+    BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::RATE_LIMITED));
+    BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::INVALID));
+    BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::DISABLED));
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_direct_netgroup_bucket_survives_peer_replacement)
+{
+    using namespace DigiDollar::Paymaster;
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    constexpr uint64_t first_group{101};
+    constexpr uint64_t second_group{202};
+    const PaymasterId provider_id{uint256S("d101")};
+    PaymasterCapacityRequest request;
+    request.funding_model = FundingModel::SPONSORED;
+    request.provider_id = provider_id;
+
+    for (size_t i = 0; i < MAX_DIRECT_TRANSPORT_MESSAGES_PER_NETGROUP; ++i) {
+        uint256 id;
+        id.begin()[0] = static_cast<unsigned char>(i + 1);
+        request.request_id = id.GetHex();
+        request.session_id = id;
+        request.client_nonce = id;
+        // Rotate the live peer when the stricter decoded-payload bucket is
+        // full. The netgroup stays stable, so reconnecting through a
+        // replacement peer must not reset the aggregate allowance under
+        // test.
+        const int64_t peer_id{static_cast<int64_t>(i /
+                                                   MAX_DIRECT_PAYLOAD_MESSAGES_PER_PEER) +
+                              1};
+        BOOST_REQUIRE(manager.EnqueueDirectMessageResult(
+                          peer_id, id, 1, DirectPayload{request}, now,
+                          first_group) == DirectEnqueueResult::ACCEPTED);
+        BOOST_REQUIRE_EQUAL(manager.TakeCapacityRequests(provider_id, 1).size(), 1U);
+    }
+
+    request.request_id = uint256S("d102").GetHex();
+    request.session_id = uint256S("d102");
+    request.client_nonce = uint256S("d102");
+    BOOST_CHECK(manager.EnqueueDirectMessageResult(
+                    99, uint256S("d102"), 1, DirectPayload{request}, now,
+                    first_group) == DirectEnqueueResult::RATE_LIMITED);
+    BOOST_REQUIRE(manager.EnqueueDirectMessageResult(
+                      99, uint256S("d102"), 1, DirectPayload{request}, now,
+                      second_group) == DirectEnqueueResult::ACCEPTED);
+}
 
 BOOST_AUTO_TEST_CASE(cnode_listen_port)
 {

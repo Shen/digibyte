@@ -11,19 +11,31 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <key.h>
+#include <util/int128.h>
 #include <oracle/bundle_manager.h>
+#include <util/int128.h>
 #include <oracle/exchange.h>
+#include <util/int128.h>
 #include <primitives/oracle.h>
+#include <util/int128.h>
 #include <chainparams.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <util/time.h>
+#include <util/int128.h>
 
 #include <climits>
+#include <util/int128.h>
 #include <cstdint>
+#include <util/int128.h>
 #include <limits>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 using namespace ExchangeAPI;
 
@@ -106,7 +118,7 @@ BOOST_AUTO_TEST_CASE(rh09_attack_01_single_source_manipulation)
  * Collateral calculation: $100 DD / $0.000001 * 500% = 500,000,000 DGB
  * Does this overflow or produce incorrect results?
  *
- * DEFENSE: __int128 arithmetic prevents overflow. ORACLE_MIN_PRICE_MICRO_USD=100
+ * DEFENSE: util::int128_t arithmetic prevents overflow. ORACLE_MIN_PRICE_MICRO_USD=100
  * rejects anything below $0.0001. Price of 1 micro-USD is rejected.
  */
 BOOST_AUTO_TEST_CASE(rh09_attack_02_extreme_low_price)
@@ -128,9 +140,9 @@ BOOST_AUTO_TEST_CASE(rh09_attack_02_extreme_low_price)
     CAmount oraclePrice = static_cast<CAmount>(ORACLE_MIN_PRICE_MICRO_USD);  // 100 micro-USD
     int effectiveRatio = 1000;  // 1000%
 
-    __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(effectiveRatio) * 100;
-    __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(effectiveRatio) * 100;
+    util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
     // Should be large but NOT negative (no overflow)
     BOOST_CHECK(result128 > 0);
@@ -176,9 +188,9 @@ BOOST_AUTO_TEST_CASE(rh09_attack_03_extreme_high_price_int64_max)
     CAmount oraclePrice = static_cast<CAmount>(ORACLE_MAX_PRICE_MICRO_USD);  // $100/DGB
     int effectiveRatio = 500;
 
-    __int128 numerator = static_cast<__int128>(ddAmount) * static_cast<__int128>(COIN) *
-                         static_cast<__int128>(effectiveRatio) * 100;
-    __int128 result128 = numerator / static_cast<__int128>(oraclePrice);
+    util::int128_t numerator = static_cast<util::int128_t>(ddAmount) * static_cast<util::int128_t>(COIN) *
+                         static_cast<util::int128_t>(effectiveRatio) * 100;
+    util::int128_t result128 = numerator / static_cast<util::int128_t>(oraclePrice);
 
     // $100 DD at $100/DGB with 500% = 5 DGB = 5e8 sats
     BOOST_CHECK(result128 > 0);

@@ -9,6 +9,8 @@
 #include <interfaces/init.h>
 #include <interfaces/node.h>
 #include <qt/digibyte.h>
+#include <qt/guiconstants.h>
+#include <qt/guiutil.h>
 #include <qt/test/apptests.h>
 #include <qt/test/optiontests.h>
 #include <qt/test/rpcnestedtests.h>
@@ -26,6 +28,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QObject>
+#include <QStringList>
 #include <QTest>
 
 #include <functional>
@@ -88,42 +91,62 @@ int main(int argc, char* argv[])
     // Don't remove this, it's needed to access
     // QApplication:: and QCoreApplication:: in the tests
     DigiByteApplication app;
+    app.setOrganizationName(QAPP_ORG_NAME);
+    app.setOrganizationDomain(QAPP_ORG_DOMAIN);
     app.setApplicationName("DigiByte-Qt-test");
     app.createNode(*init);
 
     int num_test_failures{0};
+    const QStringList requested_suites = GUIUtil::SplitSkipEmptyParts(
+        qEnvironmentVariable("DIGIBYTE_QT_TEST_SUITE"), QLatin1Char(','));
+    QStringList test_arguments{QStringLiteral("test_digibyte-qt")};
+    const QString requested_function = qEnvironmentVariable("DIGIBYTE_QT_TEST_FUNCTION").trimmed();
+    if (!requested_function.isEmpty()) test_arguments.append(requested_function);
+    const QString test_output = qEnvironmentVariable("DIGIBYTE_QT_TEST_OUTPUT").trimmed();
+    if (!test_output.isEmpty()) {
+        test_arguments.append(QStringLiteral("-o"));
+        test_arguments.append(test_output + QStringLiteral(",txt"));
+    }
+    const auto run_test = [&](QObject& test) {
+        const QString suite_name = QString::fromLatin1(test.metaObject()->className());
+        if (!requested_suites.isEmpty() && !requested_suites.contains(suite_name)) {
+            qInfo("Skipping Qt test suite %s (DIGIBYTE_QT_TEST_SUITE filter)", qPrintable(suite_name));
+            return;
+        }
+        num_test_failures += QTest::qExec(&test, test_arguments);
+    };
 
     app.node().context()->args = &gArgs;
     
     AppTests app_tests(app);
-    num_test_failures += QTest::qExec(&app_tests);
+    run_test(app_tests);
 
     app.node().context()->args = &gArgs;
 
     OptionTests options_tests(app.node());
-    num_test_failures += QTest::qExec(&options_tests);
+    run_test(options_tests);
 
     URITests test1;
-    num_test_failures += QTest::qExec(&test1);
+    run_test(test1);
 
     RPCNestedTests test3(app.node());
-    num_test_failures += QTest::qExec(&test3);
+    run_test(test3);
 
 #ifdef ENABLE_WALLET
     WalletTests test5(app.node());
-    num_test_failures += QTest::qExec(&test5);
+    run_test(test5);
 
     AddressBookTests test6(app.node());
-    num_test_failures += QTest::qExec(&test6);
+    run_test(test6);
 
     DigiDollarWidgetTests test7(app.node());
-    num_test_failures += QTest::qExec(&test7);
+    run_test(test7);
 
     // Wave 19 Agent B: separate translation unit for the Wave 19 Qt pins
     // (DD-FA-FUNC-030, DD-FA-TEST-027/028/029) — kept out of
     // digidollarwidgettests.cpp to avoid concurrent edits in the audit.
     DigiDollarWave19WidgetTests test8(app.node());
-    num_test_failures += QTest::qExec(&test8);
+    run_test(test8);
 #endif
 
     if (num_test_failures) {

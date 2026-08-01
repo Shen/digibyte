@@ -1531,6 +1531,96 @@ class msg_sendheaders:
         return "msg_sendheaders()"
 
 
+class msg_sendpmasters:
+    __slots__ = ("capabilities", "version")
+    msgtype = b"sendpmasters"
+
+    def __init__(self, version=0, capabilities=0):
+        self.version = version
+        self.capabilities = capabilities
+
+    def deserialize(self, f):
+        self.version = struct.unpack("<H", f.read(2))[0]
+        self.capabilities = struct.unpack("<I", f.read(4))[0]
+
+    def serialize(self):
+        return struct.pack("<HI", self.version, self.capabilities)
+
+    def __repr__(self):
+        return "msg_sendpmasters(version=%u, capabilities=%u)" % (
+            self.version,
+            self.capabilities,
+        )
+
+
+class msg_getpmasters:
+    __slots__ = ("requested",)
+    msgtype = b"getpmasters"
+
+    def __init__(self, requested=0):
+        self.requested = requested
+
+    def deserialize(self, f):
+        self.requested = struct.unpack("<H", f.read(2))[0]
+
+    def serialize(self):
+        return struct.pack("<H", self.requested)
+
+    def __repr__(self):
+        return "msg_getpmasters(requested=%u)" % self.requested
+
+
+class _msg_paymaster_raw:
+    """Opaque Paymaster payload used only by adversarial functional tests.
+
+    Production peers deserialize these commands into their strongly typed C++
+    envelopes.  Keeping the Python side opaque lets P2P tests send malformed,
+    truncated, and oversized bytes without accidentally normalizing them.
+    """
+    __slots__ = ("payload",)
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def deserialize(self, f):
+        self.payload = f.read()
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "%s(payload_len=%u)" % (
+            self.__class__.__name__, len(self.payload))
+
+
+class msg_pmannounce(_msg_paymaster_raw):
+    msgtype = b"pmannounce"
+
+
+class msg_pmcapreq(_msg_paymaster_raw):
+    msgtype = b"pmcapreq"
+
+
+class msg_pmcapresp(_msg_paymaster_raw):
+    msgtype = b"pmcapresp"
+
+
+class msg_pmquotereq(_msg_paymaster_raw):
+    msgtype = b"pmquotereq"
+
+
+class msg_pmquoteresp(_msg_paymaster_raw):
+    msgtype = b"pmquoteresp"
+
+
+class msg_pmsubmit(_msg_paymaster_raw):
+    msgtype = b"pmsubmit"
+
+
+class msg_pmresult(_msg_paymaster_raw):
+    msgtype = b"pmresult"
+
+
 # getheaders message has
 # number of entries
 # vector of hashes

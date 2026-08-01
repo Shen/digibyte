@@ -4,9 +4,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chainparams.h>
 #include <consensus/amount.h>
 #include <key.h>
-#include <kernel/chainparams.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/musig2_aggregator.h>
 #include <oracle/node.h>
@@ -875,17 +875,18 @@ BOOST_AUTO_TEST_CASE(oracle_block_integration)
     valid_bundle.median_price_micro_usd = 6000;
     valid_bundle.timestamp = GetTime();
 
-    const Consensus::Params& consensus = CChainParams::Main()->GetConsensus();
+    const Consensus::Params& consensus = Params().GetConsensus();
     std::vector<uint8_t> oracle_ids;
     for (uint8_t id = 0; id < consensus.nOracleConsensusRequired; ++id) {
         oracle_ids.push_back(id);
     }
     valid_bundle.participation_bitmap = MuSig2OracleAggregator::EncodeBitmap(
         oracle_ids, static_cast<uint16_t>(consensus.nOracleTotalOracles));
+    BOOST_REQUIRE(!valid_bundle.participation_bitmap.empty());
     valid_bundle.aggregate_sig.assign(64, 0x01);
 
     oracle_script = manager.CreateOracleScript(valid_bundle);
-    BOOST_CHECK(!oracle_script.empty());
+    BOOST_REQUIRE(!oracle_script.empty());
 
     // Should start with OP_RETURN
     BOOST_CHECK_EQUAL(oracle_script[0], OP_RETURN);

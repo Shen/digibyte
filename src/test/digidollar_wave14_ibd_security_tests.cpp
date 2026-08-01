@@ -33,26 +33,45 @@
  */
 
 #include <consensus/amount.h>
+#include <util/int128.h>
 #include <consensus/digidollar.h>
+#include <util/int128.h>
 #include <consensus/volatility.h>
+#include <util/int128.h>
 #include <chainparams.h>
+#include <util/int128.h>
 #include <digidollar/digidollar.h>
+#include <util/int128.h>
 #include <digidollar/scripts.h>
+#include <util/int128.h>
 #include <digidollar/validation.h>
+#include <util/int128.h>
 #include <key.h>
+#include <util/int128.h>
 #include <kernel/chainparams.h>
+#include <util/int128.h>
 #include <primitives/transaction.h>
+#include <util/int128.h>
 #include <pubkey.h>
+#include <util/int128.h>
 #include <script/script.h>
+#include <util/int128.h>
 #include <test/util/setup_common.h>
+#include <util/int128.h>
 #include <uint256.h>
+#include <util/int128.h>
 #include <util/chaintype.h>
+#include <util/int128.h>
 
 #include <boost/test/unit_test.hpp>
+#include <util/int128.h>
 
 #include <cstdint>
+#include <util/int128.h>
 #include <string>
+#include <util/int128.h>
 #include <vector>
+#include <util/int128.h>
 
 namespace {
 
@@ -100,10 +119,10 @@ struct DigiDollarWave14IBDTestSetup : public TestingSetup {
     // collateral check passes for every claimed tier.
     CAmount GenerousCollateral() const
     {
-        const __int128 numerator = static_cast<__int128>(DD_AMOUNT) *
-                                   static_cast<__int128>(COIN) *
+        const util::int128_t numerator = static_cast<util::int128_t>(DD_AMOUNT) *
+                                   static_cast<util::int128_t>(COIN) *
                                    1000 * 100 * 4;
-        const __int128 denominator = ORACLE_PRICE_MICRO_USD;
+        const util::int128_t denominator = ORACLE_PRICE_MICRO_USD;
         return static_cast<CAmount>((numerator + denominator - 1) / denominator);
     }
 

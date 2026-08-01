@@ -199,6 +199,18 @@ DIGIBYTE_TESTS =\
   test/digidollar_transfer_tests.cpp \
   test/digidollar_change_tests.cpp \
   test/digidollar_txbuilder_tests.cpp \
+  test/paymaster_txbuilder_tests.cpp \
+  test/paymaster_client_tests.cpp \
+  test/paymaster_types_tests.cpp \
+  test/paymaster_reservation_tests.cpp \
+  test/paymaster_directory_tests.cpp \
+  test/paymaster_psbt_tests.cpp \
+  test/paymaster_recovery_tests.cpp \
+  test/paymaster_provider_tests.cpp \
+  test/paymaster_protocol_tests.cpp \
+  test/paymaster_reputation_tests.cpp \
+  test/paymaster_sponsorship_tests.cpp \
+  test/paymaster_wire_tests.cpp \
   test/digidollar_validation_tests.cpp \
   test/digidollar_txindex_tests.cpp \
   test/digidollar_volatility_tests.cpp \
@@ -331,6 +343,10 @@ DIGIBYTE_TESTS += \
   wallet/test/group_outputs_tests.cpp \
   wallet/test/digidollar_persistence_wallet_tests.cpp \
   wallet/test/digidollar_wallet_security_tests.cpp \
+  wallet/test/paymaster_wallet_store_tests.cpp \
+  wallet/test/paymaster_wallet_security_tests.cpp \
+  wallet/test/paymaster_wallet_psbt_tests.cpp \
+  wallet/test/paymaster_wallet_identity_tests.cpp \
   wallet/test/rh59_coincontrol_dd_lock_bypass_tests.cpp \
   wallet/test/digidollar_wave16_persistence_tests.cpp \
   wallet/test/digidollar_wave17_spendability_tests.cpp \
@@ -480,6 +496,9 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/parse_numbers.cpp \
  test/fuzz/parse_script.cpp \
  test/fuzz/parse_univalue.cpp \
+ test/fuzz/paymaster_stateful.cpp \
+ test/fuzz/paymaster_pool_lifecycle.cpp \
+ test/fuzz/paymaster_wire.cpp \
  test/fuzz/partially_downloaded_block.cpp \
  test/fuzz/policy_estimator.cpp \
  test/fuzz/policy_estimator_io.cpp \

@@ -9,6 +9,8 @@ See also wallet_signer.py for tests that require wallet context.
 """
 import os
 import platform
+import subprocess
+import sys
 
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
@@ -21,7 +23,7 @@ class RPCSignerTest(DigiByteTestFramework):
     def mock_signer_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'signer.py')
         if platform.system() == "Windows":
-            return "py -3 " + path
+            return subprocess.list2cmdline([sys.executable, path])
         else:
             return path
 
@@ -55,7 +57,9 @@ class RPCSignerTest(DigiByteTestFramework):
         # Handle script missing:
         assert_raises_rpc_error(
             -1,
-            "CreateProcess failed: The system cannot find the file specified."
+            # The text following this stable prefix is produced by Windows
+            # and therefore depends on the operating-system language.
+            "CreateProcess failed:"
             if platform.system() == "Windows"
             else "execve failed: No such file or directory",
             self.nodes[3].enumeratesigners,

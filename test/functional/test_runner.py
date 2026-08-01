@@ -332,6 +332,11 @@ BASE_SCRIPTS = [
     'wallet_digidollar_active_restore_redeem.py',
     'wallet_digidollar_backup.py',
     'wallet_digidollar_descriptors.py --descriptors',
+    'p2p_paymaster.py',
+    'wallet_paymaster_lifecycle.py --descriptors',
+    'wallet_paymaster_readiness.py --descriptors',
+    'wallet_paymaster_rpc.py --descriptors',
+    'wallet_paymaster_provider.py --descriptors',
     'wallet_digidollar_encrypted_received_redeem.py',
     'wallet_digidollar_encryption.py',
     'wallet_digidollar_mint_reorg.py',
@@ -506,6 +511,11 @@ NON_SCRIPTS = [
     "combine_logs.py",
     "create_cache.py",
     "test_runner.py",
+]
+
+DISABLED_SCRIPTS = [
+    # Requires DigiByte-specific MultiAlgo equivalent-work handling.
+    "feature_assumevalid.py",
 ]
 
 def main():
@@ -922,7 +932,8 @@ def check_script_list(*, src_dir, fail_on_warn):
     as a test script or meta script."""
     script_dir = src_dir + '/test/functional/'
     python_files = set([test_file for test_file in os.listdir(script_dir) if test_file.endswith(".py")])
-    missed_tests = list(python_files - set(map(lambda x: x.split()[0], ALL_SCRIPTS + NON_SCRIPTS)))
+    categorized_files = ALL_SCRIPTS + NON_SCRIPTS + DISABLED_SCRIPTS
+    missed_tests = list(python_files - set(map(lambda x: x.split()[0], categorized_files)))
     if len(missed_tests) != 0:
         print("%sWARNING!%s The following scripts are not being run: %s. Check the test lists in test_runner.py." % (BOLD[1], BOLD[0], str(missed_tests)))
         if fail_on_warn:
