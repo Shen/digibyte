@@ -9116,12 +9116,23 @@ bool PaymasterStore::HasProviderDrainWork(
             [&](const ProviderCapacityAdmission& candidate) {
                 return candidate.request_key == admission_key;
             });
-        if (admission == budget_ledger.capacity_admissions.end() ||
-            admission->request_hash != request_hash ||
+        if (admission == budget_ledger.capacity_admissions.end()) {
+            // The response and its indexes are durable replay barriers, but a
+            // capacity proof without its atomic budget admission grants no
+            // continuation authority. This can remain after upgrading a
+            // wallet written at an older crash boundary. Ignore it when
+            // deciding whether the provider has work to drain so that a
+            // stopped automatic provider may still start solely to restore
+            // liquidity. The proof is deliberately not erased here: normal
+            // expiry/compaction retains the replay barrier for its full
+            // retention window.
+            continue;
+        }
+        if (admission->request_hash != request_hash ||
             admission->funding_model != proof.funding_model ||
             admission->requires_carrier != proof.requires_carrier ||
             admission->expires_at != proof.expires_at) {
-            error = "PAYMASTER_CAPACITY_ADMISSION_MISSING";
+            error = "PAYMASTER_CAPACITY_ADMISSION_CONFLICT";
             return false;
         }
 

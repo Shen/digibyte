@@ -796,6 +796,35 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
     BOOST_CHECK_EQUAL(admission_ledger.capacity_admissions.front().netgroup_bucket,
                       GetNetgroupBudgetBucket(admission_ledger,
                                               canonical_netgroup));
+
+    {
+        // A persisted proof is only a replay barrier when the budget admission
+        // from its atomic reservation is absent. It must neither authorize a
+        // quote continuation nor prevent an automatic provider from starting
+        // solely to replenish unrelated missing liquidity.
+        auto orphan_database =
+            DuplicateMockDatabase(m_wallet.GetDatabase());
+        WalletBatch orphan_batch{*orphan_database};
+        ProviderBudgetLedger orphan_ledger;
+        BOOST_REQUIRE(orphan_batch.ReadPaymasterProviderBudgetLedger(
+            orphan_ledger));
+        orphan_ledger.capacity_admissions.clear();
+        BOOST_REQUIRE(orphan_batch.WritePaymasterProviderBudgetLedger(
+            orphan_ledger));
+
+        CWallet orphan_wallet{m_node.chain.get(),
+                              "orphan-capacity-drain-restart",
+                              std::move(orphan_database)};
+        BOOST_REQUIRE(orphan_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        PaymasterStore orphan_store{orphan_wallet};
+        ScopedPaymasterMockTime mock_time{113};
+        bool has_drain_work{true};
+        BOOST_REQUIRE_MESSAGE(orphan_store.HasProviderDrainWork(
+                                  identity.provider_id, has_drain_work, error),
+                              error);
+        BOOST_CHECK(!has_drain_work);
+    }
+
     CDataStream admission_stream{SER_NETWORK, ::PROTOCOL_VERSION};
     admission_stream << admission_ledger;
     const auto admission_bytes = MakeUCharSpan(admission_stream);
