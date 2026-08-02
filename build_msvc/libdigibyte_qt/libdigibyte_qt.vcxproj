@@ -172,6 +172,10 @@
     <QT_MOC Include="..\..\src\qt\rpcconsole.cpp" />
     <MocHeaderFiles Include="..\..\src\qt\*.h" />
     <ResourceTemplates Include="..\..\src\qt\*.qrc" />
+    <!-- A .qrc timestamp does not change when an embedded stylesheet, image, or
+         compiled translation changes. Track the payload as well so incremental
+         MSVC builds never link stale Qt resources. -->
+    <ResourceFiles Include="..\..\src\qt\res\**\*;..\..\src\qt\locale\*.qm" />
     <UiFormFiles Include="..\..\src\qt\forms\*.ui" />
     <TranslationFiles Include="..\..\src\qt\locale\*.ts" />
   </ItemGroup>
@@ -213,7 +217,7 @@
     <Exec Command="$(QtToolsDir)\lrelease.exe &quot;%(TranslationFiles.Identity)&quot; -qm ..\..\src\qt\locale\%(Filename).qm" />
   </Target>
 
-  <Target Name="resource" Inputs="@(ResourceTemplates)" Outputs="@(ResourceTemplates->'$(GeneratedFilesOutDir)\rcc\qrc_%(Filename).cpp')" DependsOnTargets="translation">
+  <Target Name="resource" Inputs="@(ResourceTemplates);@(ResourceFiles)" Outputs="@(ResourceTemplates->'$(GeneratedFilesOutDir)\rcc\qrc_%(Filename).cpp')" DependsOnTargets="translation">
     <PropertyGroup>
       <ErrorText>There was an error executing the libdigibyte_qt resource code generation task.</ErrorText>
     </PropertyGroup>

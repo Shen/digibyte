@@ -72,6 +72,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -769,13 +770,12 @@ void DigiDollarWave19WidgetTests::transactionsWidgetPreservesUserSortAcrossRefre
     DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
     QVERIFY(dd_wallet != nullptr);
 
-    const int64_t now = GetTime();
     auto pushTx = [&](const std::string& txid, CAmount amount, bool incoming,
-                      const std::string& category, int64_t offset) {
+                      const std::string& category, int64_t timestamp) {
         DDTransaction tx;
         tx.txid = txid;
         tx.amount = amount;
-        tx.timestamp = now + offset;
+        tx.timestamp = timestamp;
         tx.confirmations = 1;
         tx.incoming = incoming;
         tx.address = "TDsortaddress";
@@ -785,9 +785,21 @@ void DigiDollarWave19WidgetTests::transactionsWidgetPreservesUserSortAcrossRefre
         tx.abandoned = false;
         dd_wallet->AddMockTransaction(tx);
     };
-    pushTx("e111111111111111111111111111111111111111111111111111111111111111", 300, true, "mint", 1);
-    pushTx("e222222222222222222222222222222222222222222222222222222222222222", 100, false, "send", 2);
-    pushTx("e333333333333333333333333333333333333333333333333333333333333333", 200, true, "receive", 3);
+    // Use dates whose localized display strings have a different lexical and
+    // chronological order. This catches regressions where the Date column
+    // sorts "Aug" before "Jul" instead of comparing Unix timestamps.
+    const int64_t jul_30_2144 =
+        QDateTime::fromString(QStringLiteral("2026-07-30T21:44:00Z"), Qt::ISODate).toSecsSinceEpoch();
+    const int64_t aug_02_0031 =
+        QDateTime::fromString(QStringLiteral("2026-08-02T00:31:00Z"), Qt::ISODate).toSecsSinceEpoch();
+    const int64_t aug_02_0102 =
+        QDateTime::fromString(QStringLiteral("2026-08-02T01:02:00Z"), Qt::ISODate).toSecsSinceEpoch();
+    const int64_t aug_02_2330 =
+        QDateTime::fromString(QStringLiteral("2026-08-02T23:30:00Z"), Qt::ISODate).toSecsSinceEpoch();
+    pushTx("e111111111111111111111111111111111111111111111111111111111111111", 300, true, "mint", jul_30_2144);
+    pushTx("e222222222222222222222222222222222222222222222222222222222222222", 100, false, "send", aug_02_0031);
+    pushTx("e333333333333333333333333333333333333333333333333333333333333333", 200, true, "receive", aug_02_0102);
+    pushTx("e444444444444444444444444444444444444444444444444444444444444444", 400, true, "receive", aug_02_2330);
 
     Wave19MiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
@@ -803,9 +815,24 @@ void DigiDollarWave19WidgetTests::transactionsWidgetPreservesUserSortAcrossRefre
 
     QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 3);
+    QCOMPARE(table->rowCount(), 4);
     QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
     QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::DescendingOrder);
+
+    auto timestampAt = [&](int row) {
+        return table->item(row, 0)->data(Qt::UserRole).toLongLong();
+    };
+    QCOMPARE(timestampAt(0), aug_02_2330);
+    QCOMPARE(timestampAt(1), aug_02_0102);
+    QCOMPARE(timestampAt(2), aug_02_0031);
+    QCOMPARE(timestampAt(3), jul_30_2144);
+
+    table->sortByColumn(0, Qt::AscendingOrder);
+    QCoreApplication::processEvents();
+    QCOMPARE(timestampAt(0), jul_30_2144);
+    QCOMPARE(timestampAt(1), aug_02_0031);
+    QCOMPARE(timestampAt(2), aug_02_0102);
+    QCOMPARE(timestampAt(3), aug_02_2330);
 
     table->sortByColumn(2, Qt::AscendingOrder);
     QCoreApplication::processEvents();
@@ -814,7 +841,7 @@ void DigiDollarWave19WidgetTests::transactionsWidgetPreservesUserSortAcrossRefre
 
     transactionsWidget.updateView();
     QCoreApplication::processEvents();
-    QCOMPARE(table->rowCount(), 3);
+    QCOMPARE(table->rowCount(), 4);
     QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 2);
     QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
 

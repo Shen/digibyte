@@ -19,6 +19,7 @@
 #include <qt/transactiontablemodel.h>
 
 #include <common/args.h> // for GetBoolArg
+#include <core_io.h>
 #include <interfaces/handler.h>
 #include <interfaces/node.h>
 #include <key_io.h>
@@ -47,6 +48,7 @@
 #include <algorithm>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 
 #include <QDebug>
 #include <QMessageBox>
@@ -59,6 +61,50 @@
 using wallet::CCoinControl;
 using wallet::CRecipient;
 using wallet::DEFAULT_DISABLE_WALLET;
+
+namespace {
+
+UniValue SerializeDigiDollarHistory(const std::vector<DDTransaction>& transactions)
+{
+    UniValue result{UniValue::VARR};
+    for (const DDTransaction& tx : transactions) {
+        UniValue tx_info{UniValue::VOBJ};
+        tx_info.pushKV("txid", tx.txid);
+        tx_info.pushKV("category", tx.category);
+        tx_info.pushKV("amount", tx.incoming ? tx.amount : -tx.amount);
+        tx_info.pushKV("address", tx.address);
+        tx_info.pushKV("confirmations", tx.confirmations);
+        tx_info.pushKV("blockheight", tx.blockheight);
+        tx_info.pushKV("blockhash", tx.blockhash);
+        tx_info.pushKV("time", static_cast<int64_t>(tx.timestamp));
+        tx_info.pushKV("fee", ValueFromAmount(tx.fee));
+        tx_info.pushKV("comment", tx.comment);
+        tx_info.pushKV("abandoned", tx.abandoned);
+        tx_info.pushKV("lock_tier", tx.lock_tier);
+        tx_info.pushKV("in_mempool", tx.in_mempool);
+        tx_info.pushKV("wallet_state", tx.is_local ? "local" :
+            (tx.abandoned ? "abandoned" :
+             (tx.confirmations < 0 ? "conflicted" :
+              (tx.confirmations > 0 ? "confirmed" : "pending"))));
+        result.push_back(std::move(tx_info));
+    }
+    return result;
+}
+
+UniValue SliceDigiDollarHistory(const UniValue& history, int count, int skip)
+{
+    UniValue result{UniValue::VARR};
+    if (!history.isArray() || count < 0 || skip < 0) return result;
+
+    const size_t begin = std::min<size_t>(static_cast<size_t>(skip), history.size());
+    const size_t end = std::min(history.size(), begin + static_cast<size_t>(count));
+    for (size_t index = begin; index < end; ++index) {
+        result.push_back(history[index]);
+    }
+    return result;
+}
+
+} // namespace
 
 WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel& client_model, const PlatformStyle *platformStyle, QObject *parent) :
     QObject(parent),
@@ -74,6 +120,14 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
     recentRequestsTableModel = new RecentRequestsTableModel(this);
 
     subscribeToCoreSignals();
+
+    // WalletDB has already populated transaction_history at this point. Seed
+    // the model with only the rows that can be visible immediately, without
+    // performing descriptor ownership recovery on Qt's event thread.
+    if (DigiDollarWallet* const dd_wallet = m_wallet->getDigiDollarWallet()) {
+        m_digi_dollar_history_cache =
+            SerializeDigiDollarHistory(dd_wallet->GetStoredDDTransactionHistory(/*count=*/50));
+    }
 }
 
 WalletModel::~WalletModel()
@@ -1462,6 +1516,93 @@ void WalletModel::executeRpcAsync(std::string command, UniValue params, RpcCallb
         });
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
+}
+
+void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcCallback callback)
+{
+    if (count < 0 || count > 1000 || skip < 0) {
+        QTimer::singleShot(0, this, [callback = std::move(callback)]() mutable {
+            if (callback) callback(UniValue{},
+                                   QStringLiteral("Invalid DigiDollar history range"));
+        });
+        return;
+    }
+
+    m_digi_dollar_history_requests.push_back({count, skip, std::move(callback)});
+    if (m_digi_dollar_history_refresh_in_flight) return;
+    m_digi_dollar_history_refresh_in_flight = true;
+
+    // Capturing the shared interface keeps CWallet and DigiDollarWallet alive
+    // until the worker has finished, even if the user closes or unloads the
+    // wallet while history reconstruction is in progress.
+    const std::shared_ptr<interfaces::Wallet> wallet = m_wallet;
+    QPointer<WalletModel> guard{this};
+
+    QThread* thread = QThread::create(
+        [guard, wallet]() mutable {
+            UniValue result;
+            QString error;
+            try {
+                DigiDollarWallet* const dd_wallet = wallet ? wallet->getDigiDollarWallet() : nullptr;
+                if (!dd_wallet) {
+                    throw std::runtime_error("DigiDollar wallet not initialized");
+                }
+
+                result = SerializeDigiDollarHistory(dd_wallet->GetDDTransactionHistory());
+            } catch (const std::exception& exception) {
+                error = QString::fromUtf8(exception.what());
+            } catch (...) {
+                error = QStringLiteral("Unknown DigiDollar history error");
+            }
+
+            if (!guard) return;
+            QMetaObject::invokeMethod(
+                guard,
+                [guard, result = std::move(result), error = std::move(error)]() mutable {
+                    if (!guard) return;
+
+                    guard->m_digi_dollar_history_refresh_in_flight = false;
+                    if (error.isEmpty() && result.isArray()) {
+                        guard->m_digi_dollar_history_cache = result;
+                    }
+
+                    // Move the batch before invoking callbacks. A callback may
+                    // immediately request another refresh; it must form a new
+                    // batch rather than mutate the range currently delivered.
+                    std::vector<DigiDollarHistoryRequest> requests =
+                        std::move(guard->m_digi_dollar_history_requests);
+                    guard->m_digi_dollar_history_requests.clear();
+                    for (DigiDollarHistoryRequest& request : requests) {
+                        if (!request.callback) continue;
+                        const UniValue response = error.isEmpty()
+                            ? SliceDigiDollarHistory(guard->m_digi_dollar_history_cache,
+                                                     request.count, request.skip)
+                            : UniValue{};
+                        request.callback(response, error);
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+UniValue WalletModel::getCachedDigiDollarTransactionHistory(int count, int skip)
+{
+    if (count < 0 || count > 1000 || skip < 0) return UniValue{UniValue::VARR};
+
+    // Some interfaces can construct WalletModel just before DigiDollarWallet
+    // finishes attaching to CWallet. Retry the cheap persisted seed on first
+    // use so that this narrow initialization race cannot leave a populated
+    // wallet looking empty until the full background scan completes.
+    if (m_digi_dollar_history_cache.empty()) {
+        if (DigiDollarWallet* const dd_wallet = m_wallet->getDigiDollarWallet()) {
+            const UniValue stored = SerializeDigiDollarHistory(
+                dd_wallet->GetStoredDDTransactionHistory(/*count=*/50));
+            if (!stored.empty()) m_digi_dollar_history_cache = stored;
+        }
+    }
+    return SliceDigiDollarHistory(m_digi_dollar_history_cache, count, skip);
 }
 
 QString WalletModel::getNewDigiDollarAddress(const QString& label)

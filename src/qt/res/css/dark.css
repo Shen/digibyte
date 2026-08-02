@@ -4489,7 +4489,6 @@ DigiDollarOverviewWidget .QFrame#systemHealthFrame .QLabel#dcaLevelValue,
 DigiDollarOverviewWidget .QFrame#systemHealthFrame .QLabel#errLevelValue {
     qproperty-alignment: 'AlignVCenter | AlignLeft';
     font-size: 8pt;
-    color: #ffffff;
     margin-left: 4px;
 }
 
@@ -4811,8 +4810,6 @@ DigiDollarSendWidget QLabel#totalValue {
 /* Validation label - lighter text */
 DigiDollarSendWidget QLabel#addressValidationLabel {
     background-color: transparent;
-    color: #666666;
-    font-weight: normal;
     font-size: 10pt;
 }
 
@@ -4973,7 +4970,6 @@ DigiDollarMintWidget QLabel#availableDGBLabel {
 /* Value labels - emphasized bold white */
 DigiDollarMintWidget QLabel#usdValueValue,
 DigiDollarMintWidget QLabel#lockTierInfoValue,
-DigiDollarMintWidget QLabel#oraclePriceValue,
 DigiDollarMintWidget QLabel#collateralValue,
 DigiDollarMintWidget QLabel#ratioValue,
 DigiDollarMintWidget QLabel#availableDGBValue {
@@ -5270,10 +5266,8 @@ DigiDollarRedeemWidget QProgressBar#healthBar {
     min-height: 20px;
 }
 
-/* Validation labels - info styling */
+/* Compact validation hints use the shared semantic status colours below. */
 DigiDollarRedeemWidget QLabel#positionValidationLabel {
-    color: rgba(255, 255, 255, 0.6);
-    font-weight: normal;
     font-size: 10pt;
 }
 
@@ -5373,15 +5367,6 @@ DigiDollarPositionsWidget QPushButton#refreshButton:hover {
 DigiDollarPositionsWidget QPushButton#refreshButton:pressed {
     background-color: #004c99;
     border: 1px solid #004c99;
-}
-
-/* Status Label (Dark Theme) */
-DigiDollarPositionsWidget QLabel#statusLabel {
-    color: #b0b0b0;
-    background-color: #2a2a2a;
-    border: 1px dashed #4a4a4a;
-    border-radius: 8px;
-    padding: 40px 20px;
 }
 
 /* Title Label (Dark Theme) */
@@ -5895,7 +5880,6 @@ DigiDollarOverviewWidget .QFrame#systemHealthFrame .QLabel#dcaLevelValue,
 DigiDollarOverviewWidget .QFrame#systemHealthFrame .QLabel#errLevelValue,
 DigiDollarOverviewWidget .QFrame#transactionsFrame .QLabel {
     background-color: transparent;
-    color: #ffffff !important;
 }
 
 DigiDollarOverviewWidget .QFrame#networkTotalsFrame {
@@ -6841,4 +6825,186 @@ QWidget#paymasterWidget QScrollBar::handle:vertical {
 QWidget#paymasterWidget QScrollBar::add-line:vertical,
 QWidget#paymasterWidget QScrollBar::sub-line:vertical {
     height: 0px;
+}
+/* Shared DigiDollar status language. Persistent messages use the same
+   success/waiting/action/error hierarchy throughout every $DD page. */
+QFrame[digidollarRole="statusBanner"],
+QLabel[digidollarRole="statusBanner"] {
+    background-color: #102f25;
+    color: #dcefe5;
+    border: 1px solid #39745a;
+    border-left: 5px solid #6bbd91;
+    border-radius: 7px;
+    padding: 9px 11px;
+}
+
+QFrame[digidollarRole="statusBanner"][statusKind="ready"],
+QLabel[digidollarRole="statusBanner"][statusKind="ready"] {
+    background-color: #0d3927;
+    color: #dff8e9;
+    border-color: #2b7b54;
+    border-left-color: #42d884;
+}
+
+QFrame[digidollarRole="statusBanner"][statusKind="waiting"],
+QLabel[digidollarRole="statusBanner"][statusKind="waiting"] {
+    background-color: #302a16;
+    color: #fff1ad;
+    border-color: #8b7330;
+    border-left-color: #f0c94b;
+}
+
+QFrame[digidollarRole="statusBanner"][statusKind="action"],
+QLabel[digidollarRole="statusBanner"][statusKind="action"] {
+    background-color: #332f1c;
+    color: #ffe2a3;
+    border-color: #9a722a;
+    border-left-color: #f4ad42;
+}
+
+QFrame[digidollarRole="statusBanner"][statusKind="error"],
+QLabel[digidollarRole="statusBanner"][statusKind="error"] {
+    background-color: #3a1d1d;
+    color: #ffd5d5;
+    border-color: #8f4545;
+    border-left-color: #ff7373;
+}
+
+QFrame[digidollarRole="statusBanner"] QLabel {
+    background-color: transparent;
+    border: 0;
+}
+
+QFrame[digidollarRole="statusBanner"][statusKind="info"] QLabel { color: #dcefe5; }
+QFrame[digidollarRole="statusBanner"][statusKind="waiting"] QLabel { color: #fff1ad; }
+QFrame[digidollarRole="statusBanner"][statusKind="ready"] QLabel { color: #dff8e9; }
+QFrame[digidollarRole="statusBanner"][statusKind="action"] QLabel { color: #ffe2a3; }
+QFrame[digidollarRole="statusBanner"][statusKind="error"] QLabel { color: #ffd5d5; }
+
+QLabel[digidollarRole="statusText"] {
+    font-weight: 600;
+}
+QLabel[digidollarRole="statusText"][statusKind="info"] { color: #a9cdbc; }
+QLabel[digidollarRole="statusText"][statusKind="waiting"] { color: #f4d35e; }
+QLabel[digidollarRole="statusText"][statusKind="ready"] { color: #72e7a9; }
+QLabel[digidollarRole="statusText"][statusKind="action"] { color: #ffd27a; }
+QLabel[digidollarRole="statusText"][statusKind="error"] { color: #ff8b8b; }
+
+/* DigiDollar action controls must never fall back to the application's blue
+   DigiByte palette. This root-scoped rule also covers controls added after the
+   original per-widget list; more specific semantic styles may refine it. */
+QWidget#digiDollarTab QPushButton,
+QDialog#digiDollarClientSafetyDialog QPushButton {
+    background-color: #16804f;
+    color: #ffffff !important;
+    border: 1px solid #42d884;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: 600;
+}
+
+QWidget#digiDollarTab QPushButton:hover,
+QDialog#digiDollarClientSafetyDialog QPushButton:hover {
+    background-color: #21a866;
+    border-color: #72e7a9;
+    color: #ffffff !important;
+}
+
+QWidget#digiDollarTab QPushButton:pressed,
+QDialog#digiDollarClientSafetyDialog QPushButton:pressed {
+    background-color: #0f633c;
+    border-color: #42d884;
+}
+
+QWidget#digiDollarTab QPushButton:disabled,
+QDialog#digiDollarClientSafetyDialog QPushButton:disabled {
+    background-color: #294b3b;
+    color: #789887 !important;
+    border-color: #365d49;
+}
+
+/* The client safety-policy editor is a DigiDollar surface even though it is a
+   top-level modal window. Keep the complete window in the DD green system. */
+QDialog#digiDollarClientSafetyDialog {
+    background-color: #0b2419;
+    color: #ffffff;
+}
+
+QDialog#digiDollarClientSafetyDialog QLabel {
+    background-color: transparent;
+    color: #ffffff;
+}
+
+QDialog#digiDollarClientSafetyDialog QSpinBox,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox {
+    background-color: #113a29;
+    color: #ffffff;
+    border: 1px solid #42d884;
+    border-radius: 4px;
+    padding: 5px 30px 5px 8px;
+    min-height: 24px;
+    selection-background-color: #16804f;
+}
+
+/* Native Windows subcontrols can render as blank button strips when the
+   application palette and a DigiDollar surface differ. Explicit resource
+   arrows keep every numeric DD control visible in both themes. */
+QWidget#digiDollarTab QSpinBox::up-button,
+QWidget#digiDollarTab QSpinBox::down-button,
+QWidget#digiDollarTab QDoubleSpinBox::up-button,
+QWidget#digiDollarTab QDoubleSpinBox::down-button,
+QDialog#digiDollarClientSafetyDialog QSpinBox::up-button,
+QDialog#digiDollarClientSafetyDialog QSpinBox::down-button,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::up-button,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 26px;
+    background-color: #dff5e7;
+    border-left: 1px solid #42d884;
+}
+
+QWidget#digiDollarTab QSpinBox::up-button,
+QWidget#digiDollarTab QDoubleSpinBox::up-button,
+QDialog#digiDollarClientSafetyDialog QSpinBox::up-button,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 4px;
+}
+
+QWidget#digiDollarTab QSpinBox::down-button,
+QWidget#digiDollarTab QDoubleSpinBox::down-button,
+QDialog#digiDollarClientSafetyDialog QSpinBox::down-button,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-top: 1px solid #8bcda6;
+    border-bottom-right-radius: 4px;
+}
+
+QWidget#digiDollarTab QSpinBox::up-button:hover,
+QWidget#digiDollarTab QSpinBox::down-button:hover,
+QWidget#digiDollarTab QDoubleSpinBox::up-button:hover,
+QWidget#digiDollarTab QDoubleSpinBox::down-button:hover,
+QDialog#digiDollarClientSafetyDialog QSpinBox::up-button:hover,
+QDialog#digiDollarClientSafetyDialog QSpinBox::down-button:hover,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::up-button:hover,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::down-button:hover {
+    background-color: #bceccb;
+}
+
+QWidget#digiDollarTab QSpinBox::up-arrow,
+QWidget#digiDollarTab QDoubleSpinBox::up-arrow,
+QDialog#digiDollarClientSafetyDialog QSpinBox::up-arrow,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::up-arrow {
+    image: url(:/icons/spin_up);
+    width: 9px;
+    height: 6px;
+}
+
+QWidget#digiDollarTab QSpinBox::down-arrow,
+QWidget#digiDollarTab QDoubleSpinBox::down-arrow,
+QDialog#digiDollarClientSafetyDialog QSpinBox::down-arrow,
+QDialog#digiDollarClientSafetyDialog QDoubleSpinBox::down-arrow {
+    image: url(:/icons/spin_down);
+    width: 9px;
+    height: 6px;
 }

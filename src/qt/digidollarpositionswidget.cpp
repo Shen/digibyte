@@ -4,6 +4,7 @@
 
 #include <qt/digidollarpositionswidget.h>
 
+#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
@@ -106,6 +107,8 @@ void DigiDollarPositionsWidget::setupUI()
     m_statusLabel = new QLabel(tr("Loading vaults..."), this);
     m_statusLabel->setObjectName("statusLabel");
     m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setWordWrap(true);
+    DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::WAITING);
     // Theme styling will be applied in applyTheme()
     m_mainLayout->addWidget(m_statusLabel);
 
@@ -573,7 +576,8 @@ void DigiDollarPositionsWidget::populatePositionsTable()
     m_positionsTable->setRowCount(0);
 
     if (m_positions.isEmpty()) {
-        m_statusLabel->setText(tr("📋 No DigiDollar vaults found\n\nYou haven't created any DigiDollar vaults yet.\nUse the 'Mint' tab to create your first DigiDollar vault."));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+        m_statusLabel->setText(tr("ℹ No DigiDollar vaults found. Use the Mint $DD tab to create your first vault."));
         m_statusLabel->show();
         return;
     }
@@ -1198,7 +1202,8 @@ void DigiDollarPositionsWidget::setPrivacy(bool privacy)
     m_privacy = privacy;
     m_positionsTable->setVisible(!m_privacy);
     if (m_privacy) {
-        m_statusLabel->setText(tr("Privacy mode activated for the $DD Vault tab. To unmask the values, uncheck Settings->Mask values."));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+        m_statusLabel->setText(tr("ℹ Values are hidden by privacy mode. Disable Settings → Mask values to show them."));
         m_statusLabel->show();
     } else {
         updatePositions();

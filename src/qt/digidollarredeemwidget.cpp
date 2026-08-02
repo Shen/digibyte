@@ -6,6 +6,7 @@
 
 #include <qt/digidollarsendwidget.h> // For AmountValidator
 #include <qt/digidollarcoincontroldialog.h>
+#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
@@ -229,6 +230,7 @@ void DigiDollarRedeemWidget::setupPositionSection()
     // Validation label
     m_positionValidationLabel = new QLabel(this);
     m_positionValidationLabel->setObjectName("positionValidationLabel");
+    DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::INFO);
     // Theme styling will be applied in applyTheme()
     m_positionValidationLabel->setText(tr("Enter a Vault ID to load details"));
     m_positionLayout->addWidget(m_positionValidationLabel, 2, 0, 1, 2);
@@ -758,14 +760,16 @@ void DigiDollarRedeemWidget::updateRedeemButtons()
         m_redeemButton->setText(tr("Redeem && Unlock DGB"));
         const QString readyText = tr("Ready to redeem this DigiDollar vault and release the locked DGB collateral.");
         m_redeemButton->setToolTip(readyText);
-        m_positionValidationLabel->setText(tr("Vault ready to redeem."));
+        m_positionValidationLabel->setText(tr("✓ Ready · this vault can now be redeemed and its DGB collateral unlocked."));
+        DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::SUCCESS);
         m_positionValidationLabel->setToolTip(readyText);
     } else {
         const QString reason = redeemDisabledReason();
         m_redeemButton->setText(tr("Cannot Redeem"));
         m_redeemButton->setToolTip(reason);
         if (m_positionFound || !m_positionIdEdit->text().trimmed().isEmpty()) {
-            m_positionValidationLabel->setText(reason.section('\n', 0, 0));
+            m_positionValidationLabel->setText(tr("! Action required · %1").arg(reason.section('\n', 0, 0)));
+            DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::ACTION);
             m_positionValidationLabel->setToolTip(reason);
         }
     }
@@ -1116,18 +1120,19 @@ void DigiDollarRedeemWidget::updateValidationLabels()
 
     QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
     QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
-    QString infoColor = palette.color(QPalette::Mid).name();
-
     // Update position validation styling
     QString validationText = m_positionValidationLabel->text();
     if (validationText.contains("✓")) {
-        m_positionValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(successColor));
+        DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::SUCCESS);
         m_positionIdEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
     } else if (validationText.contains("✗")) {
-        m_positionValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(errorColor));
+        DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::ERR);
         m_positionIdEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
+    } else if (validationText.startsWith("!")) {
+        DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::ACTION);
+        m_positionIdEdit->setStyleSheet("");
     } else {
-        m_positionValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; }").arg(infoColor));
+        DigiDollarStatus::SetText(m_positionValidationLabel, DigiDollarStatus::Kind::INFO);
         m_positionIdEdit->setStyleSheet("");
     }
 

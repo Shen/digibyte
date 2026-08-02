@@ -4,6 +4,7 @@
 
 #include <qt/digidollaroverviewwidget.h>
 
+#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
@@ -42,6 +43,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QPalette>
+#include <QPointer>
 #include <QLocale>
 #include <QStatusTipEvent>
 #include <QFontMetrics>
@@ -395,6 +397,7 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_oraclePriceLabel->setObjectName("oraclePriceLabel");
     m_oraclePriceValue = new QLabel("Loading...", this);
     m_oraclePriceValue->setObjectName("oraclePriceValue");
+    DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
     m_oraclePriceValue->setCursor(QCursor(Qt::IBeamCursor));
     m_oraclePriceValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
     m_oraclePriceValue->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
@@ -407,6 +410,7 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_systemHealthLabel->setObjectName("systemHealthLabel");
     m_systemHealthValue = new QLabel("Loading...", this);
     m_systemHealthValue->setObjectName("systemHealthValue");
+    DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
     m_systemHealthValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
     m_systemHealthValue->setToolTip(tr("Overall DigiDollar blockchain health status"));
     m_systemHealthLayout->addWidget(m_systemHealthLabel, 1, 0);
@@ -417,6 +421,7 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_dcaLevelLabel->setObjectName("dcaLevelLabel");
     m_dcaLevelValue = new QLabel("0", this);
     m_dcaLevelValue->setObjectName("dcaLevelValue");
+    DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::WAITING);
     m_dcaLevelValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
     m_dcaLevelValue->setToolTip(tr("Current Dynamic Collateral Adjustment intervention level"));
     m_systemHealthLayout->addWidget(m_dcaLevelLabel, 2, 0);
@@ -427,6 +432,7 @@ void DigiDollarOverviewWidget::setupSystemHealthSection()
     m_errLevelLabel->setObjectName("errLevelLabel");
     m_errLevelValue = new QLabel("0", this);
     m_errLevelValue->setObjectName("errLevelValue");
+    DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::WAITING);
     m_errLevelValue->setAlignment(Qt::AlignRight | Qt::AlignTrailing | Qt::AlignVCenter);
     m_errLevelValue->setToolTip(tr("Current Emergency Redemption Ratio level"));
     m_systemHealthLayout->addWidget(m_errLevelLabel, 3, 0);
@@ -578,16 +584,31 @@ void DigiDollarOverviewWidget::connectSignals()
 
 void DigiDollarOverviewWidget::setWalletModel(WalletModel* model)
 {
+    if (m_walletModel == model) {
+        updateRecentTransactions();
+        return;
+    }
+    if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
+
     m_walletModel = model;
+    m_recentSnapshotShown = false;
+    m_recentRefreshInFlight = false;
+    m_recentRefreshPending = false;
+    m_lastRecentTransactionsFingerprint.clear();
+    m_lastTxUpdateTime = 0;
+    if (m_transactionsList) m_transactionsList->clear();
+    if (m_recentTransactionsInfo) m_recentTransactionsInfo->setVisible(true);
 
     if (m_walletModel) {
-        // Connect wallet model signals for automatic updates
-        connect(m_walletModel, &WalletModel::balanceChanged,
-                this, &DigiDollarOverviewWidget::updateBalance);
-
-        // Update transaction history when balance changes (indicates new transaction)
-        connect(m_walletModel, &WalletModel::balanceChanged,
-                this, &DigiDollarOverviewWidget::updateRecentTransactions);
+        // Hidden pages defer wallet reads until selected. In particular, a DD
+        // history RPC may hold cs_wallet in a worker while the GUI receives a
+        // balance signal; a hidden overview must not synchronously wait for it.
+        connect(m_walletModel, &WalletModel::balanceChanged, this, [this] {
+            if (isVisible()) updateBalance();
+        });
+        connect(m_walletModel, &WalletModel::balanceChanged, this, [this] {
+            if (isVisible()) updateRecentTransactions();
+        });
         connect(m_walletModel, &WalletModel::digiDollarChanged,
                 this, &DigiDollarOverviewWidget::refreshDigiDollarState);
 
@@ -766,6 +787,7 @@ void DigiDollarOverviewWidget::refreshDigiDollarState()
 {
     m_lastBalanceUpdateTime = 0;
     m_lastTxUpdateTime = 0;
+    if (!isVisible()) return;
     updateBalance();
     updateRecentTransactions();
 }
@@ -809,9 +831,11 @@ void DigiDollarOverviewWidget::updateOraclePrice()
     }
 
     if (m_oraclePrice > 0) {
+        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::SUCCESS);
         m_oraclePriceValue->setText(QString("%1 $USD").arg(QString::number(m_oraclePrice, 'f', 6)));
     } else {
-        m_oraclePriceValue->setText(tr("Oracle unavailable"));
+        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
+        m_oraclePriceValue->setText(tr("… Oracle unavailable"));
     }
 }
 
@@ -826,7 +850,8 @@ void DigiDollarOverviewWidget::updateSystemHealth()
     // This ensures Bob and Alice both see identical stats across the chain.
 
     if (!m_clientModel) {
-        m_systemHealthValue->setText("No Connection");
+        DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::ERR);
+        m_systemHealthValue->setText(tr("✕ No connection"));
         m_networkTotalDDValue->setText("N/A");
         m_networkTotalCollateralValue->setText("N/A");
         m_dcaLevelValue->setText("N/A");
@@ -875,7 +900,10 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         m_networkTotalCollateralValue->setText(QString("<span style='color: #00FF88; font-weight: bold;'>%1</span><span style='color: white;'> DGB</span>").arg(dgbFormatted));
 
         if (!oracleAvailable) {
-            m_systemHealthValue->setText(tr("Oracle Unavailable"));
+            DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
+            DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::WAITING);
+            DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::WAITING);
+            m_systemHealthValue->setText(tr("… Oracle unavailable"));
             m_dcaLevelValue->setText(tr("Paused"));
             m_errLevelValue->setText(tr("Not Evaluated"));
             m_systemHealthBar->setValue(0);
@@ -887,6 +915,15 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         // RPC returns health_percentage as actual percentage (e.g., 151 = 151%)
         double healthPercent = static_cast<double>(healthPercentage);
 
+        DigiDollarStatus::SetText(
+            m_systemHealthValue,
+            isEmergency ? DigiDollarStatus::Kind::ERR : DigiDollarStatus::Kind::SUCCESS);
+        DigiDollarStatus::SetText(
+            m_dcaLevelValue,
+            isEmergency ? DigiDollarStatus::Kind::ACTION : DigiDollarStatus::Kind::SUCCESS);
+        DigiDollarStatus::SetText(
+            m_errLevelValue,
+            isEmergency ? DigiDollarStatus::Kind::ERR : DigiDollarStatus::Kind::SUCCESS);
         m_systemHealthValue->setText(QString("%1% Collateralized").arg(healthPercentage));
 
         // Update DCA and ERR levels
@@ -910,14 +947,20 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 
     } catch (const UniValue& e) {
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.write());
-        m_systemHealthValue->setText("Loading...");
+        DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
+        DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::WAITING);
+        DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::WAITING);
+        m_systemHealthValue->setText(tr("… Loading…"));
         m_networkTotalDDValue->setText("Loading...");
         m_networkTotalCollateralValue->setText("Loading...");
         m_dcaLevelValue->setText("Loading...");
         m_errLevelValue->setText("Loading...");
         m_systemHealthBar->setValue(0);
     } catch (const std::exception& e) {
-        m_systemHealthValue->setText("Error");
+        DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::ERR);
+        DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::ERR);
+        DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::ERR);
+        m_systemHealthValue->setText(tr("✕ Status unavailable"));
         m_networkTotalDDValue->setText("Error");
         m_networkTotalCollateralValue->setText("Error");
         m_dcaLevelValue->setText("Unknown");
@@ -929,11 +972,25 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 
 void DigiDollarOverviewWidget::updateRecentTransactions()
 {
-    if (!m_walletModel) {
+    if (!isVisible() || !m_walletModel) {
         return;
     }
 
-    // Skip updates during Initial Block Download - DD data only matters when synced
+    // WalletDB history is available before live wallet reconstruction and does
+    // not depend on chain synchronization. Paint it once even during IBD so a
+    // freshly opened wallet never presents an apparently empty account.
+    if (!m_recentSnapshotShown) {
+        const UniValue initial =
+            m_walletModel->getCachedDigiDollarTransactionHistory(20, 0);
+        if (initial.isArray() && !initial.empty()) {
+            m_recentSnapshotShown = true;
+            m_lastRecentTransactionsFingerprint = QString::fromStdString(initial.write());
+            populateRecentTransactions(initial);
+        }
+    }
+
+    // During IBD retain the persisted rows but defer the expensive canonical
+    // reconstruction until chain and wallet confirmation state are meaningful.
     if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
         return;
     }
@@ -945,14 +1002,65 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
     }
     m_lastTxUpdateTime = now;
 
-    // Get recent transactions from DigiDollarWallet
-    DigiDollarWallet* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
-    if (!ddWallet) {
+    if (m_recentRefreshInFlight) {
+        m_recentRefreshPending = true;
         return;
     }
+    m_recentRefreshInFlight = true;
 
-    // Get transaction history (confirmations are calculated on-demand inside this call)
-    std::vector<DDTransaction> transactions = ddWallet->GetDDTransactionHistory();
+    WalletModel* const requested_model = m_walletModel;
+    QPointer<DigiDollarOverviewWidget> guard{this};
+    m_walletModel->getDigiDollarTransactionHistoryAsync(
+        20, 0,
+        [guard, requested_model](UniValue result, QString error) mutable {
+            if (!guard || guard->m_walletModel != requested_model) return;
+            guard->m_recentRefreshInFlight = false;
+
+            if (!error.isEmpty()) {
+                // A failed worker request must not fall back to a blocking
+                // wallet history read on Qt's event thread. Keep the previous
+                // list visible and retry on the next scheduled refresh.
+                LogPrintf("DigiDollar Overview: asynchronous history error - %s\n",
+                          error.toStdString());
+            }
+            if (result.isArray()) {
+                const QString fingerprint = QString::fromStdString(result.write());
+                if (fingerprint != guard->m_lastRecentTransactionsFingerprint) {
+                    guard->m_lastRecentTransactionsFingerprint = fingerprint;
+                    guard->populateRecentTransactions(result);
+                }
+            }
+            if (guard->m_recentRefreshPending) {
+                guard->m_recentRefreshPending = false;
+                guard->m_lastTxUpdateTime = 0;
+                QTimer::singleShot(0, guard, &DigiDollarOverviewWidget::updateRecentTransactions);
+            }
+        });
+}
+
+void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result)
+{
+    std::vector<DDTransaction> transactions;
+    if (!result.isArray()) return;
+    transactions.reserve(result.size());
+    for (size_t index = 0; index < result.size(); ++index) {
+        const UniValue& value = result[index];
+        if (!value.isObject()) continue;
+        DDTransaction tx;
+        tx.txid = value.find_value("txid").get_str();
+        tx.category = value.find_value("category").get_str();
+        const CAmount signed_amount = value.find_value("amount").getInt<int64_t>();
+        tx.amount = signed_amount < 0 ? -signed_amount : signed_amount;
+        tx.incoming = signed_amount >= 0;
+        tx.timestamp = value.find_value("time").getInt<uint64_t>();
+        tx.confirmations = value.find_value("confirmations").getInt<int>();
+        tx.comment = value.find_value("comment").get_str();
+        tx.abandoned = value.find_value("abandoned").get_bool();
+        tx.lock_tier = value.find_value("lock_tier").getInt<int>();
+        const UniValue& wallet_state = value.find_value("wallet_state");
+        tx.is_local = wallet_state.isStr() && wallet_state.get_str() == "local";
+        transactions.push_back(std::move(tx));
+    }
 
     // Sort transactions by timestamp descending (newest first)
     std::sort(transactions.begin(), transactions.end(),

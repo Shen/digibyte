@@ -48,6 +48,7 @@ private Q_SLOTS:
     void privacyOverviewMaskTests();
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();
     void digiDollarAmountLabelsUseCurrencyPrefix();
+    void digiDollarPersistentStatusesUseSharedSemantics();
     void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
     void paymasterLiquidityPolicySavePersistsVisibleValues();
     void paymasterLiquidityMaintenanceStatesAreReadable();
@@ -87,6 +88,9 @@ private Q_SLOTS:
     void privacySignalPropagationTests();
     void mintValidationUpdatesOnBalanceChange();
     void ddTabRefreshesBalancesOnWalletSignal();
+    void ddTabRefreshDoesNotWaitForBusyWallet();
+    void ddTabLoadsSelectedPageOnFirstShow();
+    void transactionsWidgetShowsStoredHistoryWhileWalletBusy();
     void transactionsWidgetRefreshesOnDigiDollarSignal();
     void walletViewRefreshesDigiDollarPageOnOpen();
     void ddReceivePanelFollowsSelectedRow();

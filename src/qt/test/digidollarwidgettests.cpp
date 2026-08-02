@@ -24,6 +24,7 @@
 #include <qt/digidollaroverviewwidget.h>
 #include <qt/digidollarmintwidget.h>
 #include <qt/digidollarsendwidget.h>
+#include <qt/digidollarstatus.h>
 #include <qt/digidollarcoincontroldialog.h>
 #include <qt/digidollarreceivewidget.h>
 #include <qt/digidollarreceiverequest.h>
@@ -47,9 +48,14 @@
 #include <univalue.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 
 #include <QApplication>
 #include <QAbstractButton>
@@ -89,6 +95,7 @@
 #include <QDialogButtonBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -1408,7 +1415,9 @@ void DigiDollarWidgetTests::positionsWidgetHiddenDoesNotPollWallet()
     positionsWidget.show();
     QCoreApplication::processEvents();
     positionsWidget.updateView();
-    QCOMPARE(table->rowCount(), 1);
+    // History reconstruction is intentionally asynchronous so that a busy
+    // wallet can never freeze navigation or painting on Qt's event thread.
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 }
 
 void DigiDollarWidgetTests::positionsWidgetInitialLoadNotThrottled()
@@ -2319,6 +2328,278 @@ void DigiDollarWidgetTests::ddTabRefreshesBalancesOnWalletSignal()
     QCOMPARE(availableDGBValue->text(), expected);
 }
 
+// A DD history request runs outside the GUI thread, but it can legitimately
+// hold cs_wallet while it builds its wallet-owned transaction snapshot. Hidden
+// DigiDollar pages must therefore not perform synchronous wallet reads when a
+// generic refresh or balance signal arrives. Before this regression fix both
+// paths below waited for the lock and froze all navigation after a Paymaster
+// transfer until history processing finished.
+void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarTab tab(mini_gui.platformStyle.get());
+    tab.setWalletModel(mini_gui.walletModel.get());
+    tab.setClientModel(mini_gui.clientModel.get());
+    tab.show();
+
+    QTabWidget* tabs = tab.findChild<QTabWidget*>("digiDollarSubTabs");
+    QVERIFY(tabs != nullptr);
+    tabs->setCurrentIndex(6); // Transactions uses the asynchronous history path.
+    QCoreApplication::processEvents();
+
+    const auto whileWalletBusy = [&](const std::function<void()>& gui_action) {
+        std::promise<void> lock_acquired;
+        std::future<void> ready = lock_acquired.get_future();
+        std::mutex gate_mutex;
+        std::condition_variable gate;
+        bool release_lock{false};
+
+        std::thread lock_holder([&] {
+            LOCK(wallet->cs_wallet);
+            lock_acquired.set_value();
+            std::unique_lock<std::mutex> lock{gate_mutex};
+            gate.wait(lock, [&] { return release_lock; });
+        });
+        ready.wait();
+
+        // The watchdog makes the pre-fix failure finite: a blocking GUI action
+        // is released after 500 ms instead of deadlocking the test process.
+        std::thread watchdog([&] {
+            std::unique_lock<std::mutex> lock{gate_mutex};
+            if (!gate.wait_for(lock, std::chrono::milliseconds{500}, [&] { return release_lock; })) {
+                release_lock = true;
+                lock.unlock();
+                gate.notify_all();
+            }
+        });
+
+        QElapsedTimer elapsed;
+        elapsed.start();
+        gui_action();
+        const qint64 duration_ms = elapsed.elapsed();
+
+        {
+            std::lock_guard<std::mutex> lock{gate_mutex};
+            release_lock = true;
+        }
+        gate.notify_all();
+        lock_holder.join();
+        watchdog.join();
+        return duration_ms;
+    };
+
+    const qint64 view_refresh_ms = whileWalletBusy([&] { tab.updateView(); });
+    QVERIFY2(view_refresh_ms < 200,
+             qPrintable(QStringLiteral("Refreshing the visible DD tab waited %1 ms for cs_wallet")
+                            .arg(view_refresh_ms)));
+
+    // Reproduce the reported interaction rather than only calling the target
+    // widget directly: move away from Transactions, hold cs_wallet as a
+    // just-completed Paymaster operation may do, then click Transactions.
+    tabs->setCurrentIndex(1);
+    QCoreApplication::processEvents();
+    const qint64 transaction_switch_ms = whileWalletBusy([&] {
+        tabs->setCurrentIndex(6);
+    });
+    QVERIFY2(transaction_switch_ms < 200,
+             qPrintable(QStringLiteral("Switching from Send DD to DD Transactions waited %1 ms for cs_wallet")
+                            .arg(transaction_switch_ms)));
+
+    // Top-level wallet navigation may still issue a generic refresh after the
+    // DigiDollar page has been hidden. It must not refresh the last selected
+    // child page or contend with an in-flight wallet operation.
+    tab.hide();
+    QCoreApplication::processEvents();
+    const qint64 hidden_refresh_ms = whileWalletBusy([&] { tab.updateView(); });
+    QVERIFY2(hidden_refresh_ms < 200,
+             qPrintable(QStringLiteral("Refreshing a hidden DD page waited %1 ms for cs_wallet")
+                            .arg(hidden_refresh_ms)));
+    tab.show();
+    QCoreApplication::processEvents();
+
+    // Let the asynchronous transaction refresh triggered above complete before
+    // taking the lock again for the independent wallet-signal path.
+    QTest::qWait(100);
+    const qint64 balance_signal_ms = whileWalletBusy([&] {
+        Q_EMIT mini_gui.walletModel->balanceChanged(interfaces::WalletBalances{});
+    });
+    QVERIFY2(balance_signal_ms < 200,
+             qPrintable(QStringLiteral("A DD balance signal blocked the GUI for %1 ms")
+                            .arg(balance_signal_ms)));
+}
+
+// A tab may receive its wallet and client models while its WalletView page is
+// still hidden. Qt also emits QTabWidget::currentChanged before the selected
+// child necessarily reports isVisible(). The first refresh must survive both
+// lifecycle boundaries instead of relying on the five-second polling timers.
+void DigiDollarWidgetTests::ddTabLoadsSelectedPageOnFirstShow()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarWallet* const dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+
+    DDTransaction transaction;
+    transaction.txid = "d000000000000000000000000000000000000000000000000000000000000004";
+    transaction.amount = 125;
+    transaction.timestamp = GetTime();
+    transaction.confirmations = 1;
+    transaction.incoming = true;
+    transaction.address = "TDfirstshow";
+    transaction.category = "receive";
+    transaction.lock_tier = -1;
+    dd_wallet->AddMockTransaction(transaction);
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarTab tab(mini_gui.platformStyle.get());
+    tab.setWalletModel(mini_gui.walletModel.get());
+    tab.setClientModel(mini_gui.clientModel.get());
+
+    QStackedWidget* stack = tab.findChild<QStackedWidget*>("digiDollarStack");
+    QTabWidget* tabs = tab.findChild<QTabWidget*>("digiDollarSubTabs");
+    DigiDollarTransactionsWidget* transactions =
+        tab.findChild<DigiDollarTransactionsWidget*>("transactionsWidget");
+    QVERIFY(stack != nullptr);
+    QVERIFY(tabs != nullptr);
+    QVERIFY(transactions != nullptr);
+
+    // Select the history page before the parent is shown, as happens when a
+    // wallet restores its last selected subpage during startup.
+    tabs->setCurrentWidget(transactions);
+    tab.show();
+
+    QTRY_COMPARE_WITH_TIMEOUT(stack->currentWidget(), static_cast<QWidget*>(tabs), 1000);
+    QTableWidget* table = transactions->findChild<QTableWidget*>();
+    QVERIFY(table != nullptr);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 3000);
+}
+
+// WalletDB history is already available when WalletModel is constructed. The
+// first visible page must use that bounded snapshot immediately rather than
+// looking empty until descriptor ownership and live confirmations have been
+// reconstructed under cs_wallet on a worker thread.
+void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy()
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        QWARN("Skipping DigiDollarWidgetTests on mac build with 'minimal' platform set due to Qt bugs.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarWallet* const dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+
+    constexpr int STORED_ROWS{75};
+    for (int index = 0; index < STORED_ROWS; ++index) {
+        DDTransaction transaction;
+        transaction.txid = strprintf("%064x", index + 1);
+        transaction.amount = index + 1;
+        transaction.timestamp = GetTime() + index;
+        transaction.confirmations = 1;
+        transaction.incoming = true;
+        transaction.address = "TDstored";
+        transaction.category = "receive";
+        transaction.lock_tier = -1;
+        dd_wallet->AddMockTransaction(transaction);
+    }
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarTransactionsWidget transactions;
+    transactions.setWalletModel(mini_gui.walletModel.get());
+    transactions.setClientModel(mini_gui.clientModel.get());
+
+    QTableWidget* const table = transactions.findChild<QTableWidget*>();
+    QVERIFY(table != nullptr);
+
+    std::promise<void> lock_acquired;
+    std::future<void> ready = lock_acquired.get_future();
+    std::mutex gate_mutex;
+    std::condition_variable gate;
+    bool release_lock{false};
+    std::thread lock_holder([&] {
+        LOCK(wallet->cs_wallet);
+        lock_acquired.set_value();
+        std::unique_lock<std::mutex> lock{gate_mutex};
+        gate.wait(lock, [&] { return release_lock; });
+    });
+    ready.wait();
+
+    // Make the page visible only after cs_wallet is held. Otherwise processing
+    // the show event can legitimately start the canonical background refresh
+    // before this test has established its controlled lock contention.
+    transactions.show();
+    QElapsedTimer elapsed;
+    elapsed.start();
+    transactions.updateView();
+    const qint64 initial_render_ms = elapsed.elapsed();
+    const int initial_row_count = table->rowCount();
+
+    {
+        std::lock_guard<std::mutex> lock{gate_mutex};
+        release_lock = true;
+    }
+    gate.notify_all();
+    lock_holder.join();
+
+    // Release the lock-holding thread before assertions so a failed check
+    // cannot strand a joinable std::thread inside the Qt test process. Do not
+    // pump the complete Qt event queue while cs_wallet is intentionally held:
+    // unrelated WalletModel timers are allowed to inspect the same wallet.
+    QCOMPARE(initial_row_count, 50);
+    QVERIFY2(initial_render_ms < 200,
+             qPrintable(QStringLiteral("Rendering stored DD history waited %1 ms for cs_wallet")
+                            .arg(initial_render_ms)));
+
+    // The canonical worker replaces the bounded startup seed after it can read
+    // live wallet state; the temporary 50-row view is not a permanent limit.
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), STORED_ROWS, 5000);
+}
+
 void DigiDollarWidgetTests::transactionsWidgetRefreshesOnDigiDollarSignal()
 {
 #ifdef Q_OS_MACOS
@@ -2358,12 +2639,15 @@ void DigiDollarWidgetTests::transactionsWidgetRefreshesOnDigiDollarSignal()
     transactionsWidget.setWalletModel(mini_gui.walletModel.get());
     transactionsWidget.setClientModel(mini_gui.clientModel.get());
     transactionsWidget.show();
-    transactionsWidget.updateView();
+    // The widget deliberately suppresses background history work while it is
+    // hidden. Let Qt deliver the show event before requesting the first
+    // asynchronous snapshot, matching the real tab-switch lifecycle.
     QCoreApplication::processEvents();
+    transactionsWidget.updateView();
 
     QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 
     DDTransaction sendTx;
     sendTx.txid = "d000000000000000000000000000000000000000000000000000000000000002";
@@ -2392,9 +2676,7 @@ void DigiDollarWidgetTests::transactionsWidgetRefreshesOnDigiDollarSignal()
 
     const bool invoked = QMetaObject::invokeMethod(mini_gui.walletModel.get(), "digiDollarChanged", Qt::DirectConnection);
     QVERIFY2(invoked, "WalletModel must expose a DigiDollar-specific refresh signal");
-    QCoreApplication::processEvents();
-
-    QCOMPARE(table->rowCount(), 3);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 3, 5000);
     bool foundSend = false;
     bool foundLocal = false;
     for (int row = 0; row < table->rowCount(); ++row) {
@@ -2423,9 +2705,10 @@ void DigiDollarWidgetTests::transactionsWidgetRefreshesOnDigiDollarSignal()
     QVERIFY2(foundLocal, "DD Transactions must show a distinct local/not-relayed bucket");
 }
 
-// Regression test for au_epic's report: reopening the main DigiDollar page
-// after a redeem/unlock must refresh the Mint tab's Available DGB label instead
-// of leaving a stale cached value until full wallet restart.
+// Regression test for au_epic's report: opening the Mint subpage after a
+// redeem/unlock must refresh its Available DGB label instead of leaving a stale
+// cached value until full wallet restart. Hidden pages are intentionally lazy,
+// so the assertion follows the same top-level and subpage navigation as a user.
 void DigiDollarWidgetTests::walletViewRefreshesDigiDollarPageOnOpen()
 {
 #ifdef Q_OS_MACOS
@@ -2460,6 +2743,11 @@ void DigiDollarWidgetTests::walletViewRefreshesDigiDollarPageOnOpen()
 
     availableDGBValue->setText("stale-on-open");
     view.gotoDigiDollarPage();
+    QCoreApplication::processEvents();
+
+    QTabWidget* tabs = view.findChild<QTabWidget*>("digiDollarSubTabs");
+    QVERIFY(tabs != nullptr);
+    tabs->setCurrentIndex(3); // Mint
     QCoreApplication::processEvents();
 
     QCOMPARE(availableDGBValue->text(), expected);
@@ -2567,6 +2855,66 @@ void DigiDollarWidgetTests::overviewUsdValueShowsUsdSuffixWhenPrivacyOff()
     QVERIFY2(usdValueValue->text().endsWith(QStringLiteral(" $USD")),
              qPrintable(QString("Overview USD value must include explicit $USD suffix, got: %1")
                             .arg(usdValueValue->text())));
+}
+
+void DigiDollarWidgetTests::digiDollarPersistentStatusesUseSharedSemantics()
+{
+    // Persistent status messages must expose a semantic state to both themes.
+    // Symbols and readable copy provide a second channel, so meaning never
+    // depends on colour alone.
+    QFrame banner;
+    QLabel bannerText(&banner);
+    DigiDollarStatus::SetBanner(&banner, DigiDollarStatus::Kind::ACTION);
+    QCOMPARE(banner.property("digidollarRole").toString(), QStringLiteral("statusBanner"));
+    QCOMPARE(banner.property("statusKind").toString(), QStringLiteral("action"));
+
+    DigiDollarStatus::SetBanner(&banner, DigiDollarStatus::Kind::ERR);
+    QCOMPARE(banner.property("statusKind").toString(), QStringLiteral("error"));
+
+    DigiDollarStatus::SetText(&bannerText, DigiDollarStatus::Kind::SUCCESS);
+    QCOMPARE(bannerText.property("digidollarRole").toString(), QStringLiteral("statusText"));
+    QCOMPARE(bannerText.property("statusKind").toString(), QStringLiteral("ready"));
+
+    std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget sendWidget(platformStyle.get());
+    QLabel* addressStatus = sendWidget.findChild<QLabel*>("addressValidationLabel");
+    QFrame* clientSafety = sendWidget.findChild<QFrame*>("paymasterClientSafetyFrame");
+    QVERIFY(addressStatus != nullptr);
+    QVERIFY(clientSafety != nullptr);
+    QCOMPARE(addressStatus->property("digidollarRole").toString(), QStringLiteral("statusText"));
+    QCOMPARE(clientSafety->property("digidollarRole").toString(), QStringLiteral("statusBanner"));
+
+    DigiDollarMintWidget mintWidget;
+    QLabel* mintWarning = mintWidget.findChild<QLabel*>("amountWarningLabel");
+    QLabel* mintOracle = mintWidget.findChild<QLabel*>("oraclePriceValue");
+    QVERIFY(mintWarning != nullptr);
+    QVERIFY(mintOracle != nullptr);
+    QCOMPARE(mintWarning->property("digidollarRole").toString(), QStringLiteral("statusBanner"));
+    QCOMPARE(mintOracle->property("digidollarRole").toString(), QStringLiteral("statusText"));
+
+    DigiDollarRedeemWidget redeemWidget;
+    QLabel* redeemStatus = redeemWidget.findChild<QLabel*>("positionValidationLabel");
+    QVERIFY(redeemStatus != nullptr);
+    QCOMPARE(redeemStatus->property("statusKind").toString(), QStringLiteral("info"));
+
+    DigiDollarPositionsWidget positionsWidget;
+    QLabel* positionsStatus = positionsWidget.findChild<QLabel*>("statusLabel");
+    QVERIFY(positionsStatus != nullptr);
+    QCOMPARE(positionsStatus->property("statusKind").toString(), QStringLiteral("waiting"));
+
+    DigiDollarTransactionsWidget transactionsWidget;
+    QLabel* transactionsStatus =
+        transactionsWidget.findChild<QLabel*>("transactionsStatusLabel");
+    QVERIFY(transactionsStatus != nullptr);
+    QCOMPARE(transactionsStatus->property("digidollarRole").toString(), QStringLiteral("statusBanner"));
+
+    DigiDollarOverviewWidget overviewWidget;
+    QLabel* overviewOracle = overviewWidget.findChild<QLabel*>("oraclePriceValue");
+    QLabel* overviewHealth = overviewWidget.findChild<QLabel*>("systemHealthValue");
+    QVERIFY(overviewOracle != nullptr);
+    QVERIFY(overviewHealth != nullptr);
+    QCOMPARE(overviewOracle->property("statusKind").toString(), QStringLiteral("waiting"));
+    QCOMPARE(overviewHealth->property("statusKind").toString(), QStringLiteral("waiting"));
 }
 
 void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
@@ -5436,6 +5784,13 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
             QStringLiteral("DigiDollarRedeemWidget QPushButton#coinControlButton"),
             QStringLiteral("DigiDollarPositionsWidget QTableWidget"),
             QStringLiteral("DigiDollarTransactionsWidget QTableWidget"),
+            QStringLiteral("QWidget#digiDollarTab QPushButton"),
+            QStringLiteral("QWidget#digiDollarTab QSpinBox::up-arrow"),
+            QStringLiteral("QWidget#digiDollarTab QSpinBox::down-arrow"),
+            QStringLiteral("QDialog#digiDollarClientSafetyDialog"),
+            QStringLiteral("QDialog#digiDollarClientSafetyDialog QPushButton"),
+            QStringLiteral("QDialog#digiDollarClientSafetyDialog QSpinBox::up-arrow"),
+            QStringLiteral("QDialog#digiDollarClientSafetyDialog QSpinBox::down-arrow"),
             QStringLiteral("QWidget#paymasterWidget QPushButton[paymasterRole=\"primaryAction\"]"),
             QStringLiteral("QWidget#paymasterWidget QPushButton[paymasterRole=\"secondaryAction\"]"),
             QStringLiteral("QScrollArea#paymasterOverviewPage"),
@@ -5446,6 +5801,12 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
             QStringLiteral("QWidget#paymasterWidget QSpinBox::up-arrow"),
             QStringLiteral("QWidget#paymasterWidget QSpinBox::down-arrow"),
             QStringLiteral("QWidget#paymasterWidget QComboBox::down-arrow"),
+            QStringLiteral("QFrame[digidollarRole=\"statusBanner\"]"),
+            QStringLiteral("QFrame[digidollarRole=\"statusBanner\"][statusKind=\"ready\"]"),
+            QStringLiteral("QFrame[digidollarRole=\"statusBanner\"][statusKind=\"waiting\"]"),
+            QStringLiteral("QFrame[digidollarRole=\"statusBanner\"][statusKind=\"action\"]"),
+            QStringLiteral("QFrame[digidollarRole=\"statusBanner\"][statusKind=\"error\"]"),
+            QStringLiteral("QLabel[digidollarRole=\"statusText\"][statusKind=\"error\"]"),
         };
 
         for (const QString& selector : requiredSelectors) {
@@ -5562,6 +5923,15 @@ void DigiDollarWidgetTests::digiDollarModalDialogsUseGreenThemeRules()
         requireRule(css, theme, QStringLiteral("QDialog#DDAddressBookPage QTableWidget"), panelBg);
         requireRule(css, theme, QStringLiteral("QDialog#DDAddressBookPage QHeaderView::section"), accent);
         requireRule(css, theme, QStringLiteral("QDialog#DDAddressBookPage QPushButton"), accent);
+
+        requireRule(css, theme, QStringLiteral("QDialog#digiDollarClientSafetyDialog {"), dialogBg);
+        requireRule(css, theme, QStringLiteral("QDialog#digiDollarClientSafetyDialog QPushButton"), accent);
+        QVERIFY2(css.contains(QStringLiteral("QDialog#digiDollarClientSafetyDialog QSpinBox::up-arrow")) &&
+                     css.contains(QStringLiteral("QDialog#digiDollarClientSafetyDialog QSpinBox::down-arrow")) &&
+                     css.contains(QStringLiteral("image: url(:/icons/spin_up)")) &&
+                     css.contains(QStringLiteral("image: url(:/icons/spin_down)")),
+                 qPrintable(QStringLiteral("%1 client safety dialog must display both numeric arrows")
+                                 .arg(theme)));
     };
 
     const QString dark = findTheme(QStringLiteral("dark.css"));
@@ -6719,7 +7089,7 @@ void DigiDollarWidgetTests::overviewRecentTransactionsSendShowsNegativeSign()
 
     QListWidget* transactionsList = overviewWidget.findChild<QListWidget*>("transactionsList");
     QVERIFY(transactionsList != nullptr);
-    QVERIFY2(transactionsList->count() >= 4, "expected at least four mock DD transactions in recent list");
+    QTRY_VERIFY_WITH_TIMEOUT(transactionsList->count() >= 4, 5000);
 
     // Walk every row and look at the amount QLabel — index 2 in the row's
     // QHBoxLayout (icon, category, amount, confirmations, date).
@@ -6809,7 +7179,7 @@ void DigiDollarWidgetTests::overviewRecentTransactionAmountIsRightAligned()
 
     QListWidget* transactionsList = overviewWidget.findChild<QListWidget*>("transactionsList");
     QVERIFY(transactionsList != nullptr);
-    QVERIFY(transactionsList->count() >= 2);
+    QTRY_VERIFY_WITH_TIMEOUT(transactionsList->count() >= 2, 5000);
 
     bool foundSmall = false;
     bool foundLarge = false;
@@ -6912,15 +7282,13 @@ void DigiDollarWidgetTests::overviewRecentTransactionDoubleClickOpensTransaction
     tab.updateView();
     QCoreApplication::processEvents();
 
-    RemoveWallet(context, wallet, std::nullopt);
-
     QTabWidget* tabWidget = tab.findChild<QTabWidget*>("digiDollarSubTabs");
     QVERIFY(tabWidget != nullptr);
     QCOMPARE(tabWidget->currentIndex(), 0);
 
     QListWidget* transactionsList = tab.findChild<QListWidget*>("transactionsList");
     QVERIFY(transactionsList != nullptr);
-    QVERIFY(transactionsList->count() >= 1);
+    QTRY_VERIFY_WITH_TIMEOUT(transactionsList->count() >= 1, 5000);
 
     QListWidgetItem* item = transactionsList->item(0);
     QVERIFY(item != nullptr);
@@ -6928,25 +7296,25 @@ void DigiDollarWidgetTests::overviewRecentTransactionDoubleClickOpensTransaction
                                                    Qt::DirectConnection,
                                                    Q_ARG(QListWidgetItem*, item));
     QVERIFY2(invoked, "DD overview recent transaction list must expose the itemDoubleClicked signal");
-    QCoreApplication::processEvents();
-
-    QCOMPARE(tabWidget->currentIndex(), 6);
+    QTRY_COMPARE_WITH_TIMEOUT(tabWidget->currentIndex(), 6, 5000);
 
     DigiDollarTransactionsWidget* transactionsWidget = tab.findChild<DigiDollarTransactionsWidget*>("transactionsWidget");
     QVERIFY(transactionsWidget != nullptr);
     QTableWidget* table = transactionsWidget->findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
 
-    bool foundSelectedTx = false;
-    for (int row = 0; row < table->rowCount(); ++row) {
-        QTableWidgetItem* txidItem = table->item(row, 5);
-        if (!txidItem || txidItem->data(Qt::UserRole).toString() != QString::fromStdString(tx.txid)) {
-            continue;
+    const auto matchingTransactionSelected = [&] {
+        for (int row = 0; row < table->rowCount(); ++row) {
+            QTableWidgetItem* txidItem = table->item(row, 5);
+            if (!txidItem || txidItem->data(Qt::UserRole).toString() != QString::fromStdString(tx.txid)) continue;
+            return table->currentRow() == row &&
+                   table->selectionModel()->isRowSelected(row, QModelIndex());
         }
-        foundSelectedTx = table->currentRow() == row && table->selectionModel()->isRowSelected(row, QModelIndex());
-        break;
-    }
-    QVERIFY2(foundSelectedTx, "DD overview double-click must switch to DD Transactions and focus the matching transaction row");
+        return false;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(matchingTransactionSelected(), 5000);
+
+    RemoveWallet(context, wallet, std::nullopt);
 }
 
 void DigiDollarWidgetTests::transactionsWidgetDoubleClickShowsDetailsDialog()
@@ -6997,11 +7365,9 @@ void DigiDollarWidgetTests::transactionsWidgetDoubleClickShowsDetailsDialog()
     transactionsWidget.updateView();
     QCoreApplication::processEvents();
 
-    RemoveWallet(context, wallet, std::nullopt);
-
     QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 
     QTableWidgetItem* txidItem = table->item(0, 5);
     QVERIFY(txidItem != nullptr);
@@ -7056,6 +7422,8 @@ void DigiDollarWidgetTests::transactionsWidgetDoubleClickShowsDetailsDialog()
     QVERIFY2(plainDetails.contains(QStringLiteral("+43.21 $DD")), "details text must include the signed $DD amount");
     QVERIFY2(plainDetails.contains(QStringLiteral("Status:")), "details text must include the confirmation status");
     QVERIFY2(plainDetails.contains(QStringLiteral("detail dialog note")), "details text must include the local note");
+
+    RemoveWallet(context, wallet, std::nullopt);
 }
 
 void DigiDollarWidgetTests::transactionsWidgetDetailsDialogOverridesDgbBlueDialogFallback()
@@ -7333,8 +7701,8 @@ void DigiDollarWidgetTests::transactionsWidgetDetailsDialogHasDigiDollarThemeRul
                  QStringLiteral("#ffffff"), QStringLiteral("#123f2b"), QStringLiteral("#1f9d57"));
 }
 
-// Regression coverage for the DD Transactions tab's RPC-backed history table:
-// listdigidollartxs returns signed amounts derived from incoming/outgoing wallet
+// Regression coverage for the DD Transactions tab's asynchronous wallet-history
+// table: the wallet snapshot returns signed amounts derived from incoming/outgoing
 // direction, and the Qt table must preserve those signs while showing the right
 // category, lock-period, note, truncated txid, and confirmation text. This is the
 // display path used for sendmanydigidollar history rows, including the aggregate
@@ -7405,11 +7773,9 @@ void DigiDollarWidgetTests::transactionsWidgetShowsRpcHistorySignsAndFields()
     transactionsWidget.updateView();
     QCoreApplication::processEvents();
 
-    RemoveWallet(context, wallet, std::nullopt);
-
     QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 5);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 5, 5000);
 
     auto findRowByTxid = [&](const QString& txid) -> int {
         for (int row = 0; row < table->rowCount(); ++row) {
@@ -7443,6 +7809,8 @@ void DigiDollarWidgetTests::transactionsWidgetShowsRpcHistorySignsAndFields()
     checkRow(redeemTxid, "Redeem 30-day", "-12.50 $DD", "30 days", "redeem note");
     checkRow(mintTxid, "Mint 10-yr", "+7.00 $DD", "10 years", "mint note");
     checkRow(emptyNoteTxid, "Receive", "+3.00 $DD", "-", "", QString("No note"));
+
+    RemoveWallet(context, wallet, std::nullopt);
 }
 
 // Regression test for the DD Vault "Lock Tier" column truncation: with the

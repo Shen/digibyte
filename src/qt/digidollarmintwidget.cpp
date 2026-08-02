@@ -6,6 +6,7 @@
 
 #include <qt/digidollarsendwidget.h> // For AmountValidator
 #include <qt/digidollar_qt_translate.h> // DD-FA-FUNC-032 reject-reason translator
+#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
@@ -208,6 +209,7 @@ void DigiDollarMintWidget::setupMintAmountSection()
     m_amountWarningLabel = new QLabel(this);
     m_amountWarningLabel->setObjectName("amountWarningLabel");
     m_amountWarningLabel->setWordWrap(true);
+    DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::INFO);
     m_amountWarningLabel->setVisible(false); // Hidden by default
     m_amountLayout->addWidget(m_amountWarningLabel, 3, 0, 1, 2);
 
@@ -307,6 +309,7 @@ void DigiDollarMintWidget::setupCollateralSection()
     m_oraclePriceLabel->setToolTip(tr("Current DGB price from oracle feed"));
     m_oraclePriceValue = new QLabel("0.01 $USD/DGB", this);
     m_oraclePriceValue->setObjectName("oraclePriceValue");
+    DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     m_oraclePriceValue->setFont(monospaceFont);
     // Theme styling applied in applyTheme()
@@ -527,9 +530,11 @@ void DigiDollarMintWidget::updateOraclePrice()
     LogPrintf("DigiDollar Mint: Final m_oraclePrice = %f\n", m_oraclePrice);
 
     if (m_oraclePrice > 0) {
+        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::SUCCESS);
         m_oraclePriceValue->setText(formatUSDAmount(m_oraclePrice) + "/DGB");
     } else {
-        m_oraclePriceValue->setText(tr("Oracle unavailable"));
+        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::WAITING);
+        m_oraclePriceValue->setText(tr("… Oracle unavailable"));
     }
     updateCollateralCalculation();
 }
@@ -1093,32 +1098,32 @@ void DigiDollarMintWidget::updateAmountValidation()
         if (!numericAmount || validationState == QValidator::Invalid) {
             // Invalid format - only border color, let system handle background
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("Invalid amount format"));
-            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
+            m_amountWarningLabel->setText(tr("✕ Invalid amount · enter a valid DigiDollar value."));
+            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ERR);
             m_amountWarningLabel->setVisible(true);
         } else if (amount < minAmount) {
             // Below minimum
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("⚠️ Minimum mint amount is $%1").arg(QString::number(minAmount, 'f', 2)));
-            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
+            m_amountWarningLabel->setText(tr("! Amount too small · Minimum mint amount is $%1.").arg(QString::number(minAmount, 'f', 2)));
+            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
             m_amountWarningLabel->setVisible(true);
         } else if (amount > maxAmount) {
             // Above maximum
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
-            m_amountWarningLabel->setText(tr("⚠️ Maximum mint amount is $%1").arg(QString::number(maxAmount, 'f', 0)));
-            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
+            m_amountWarningLabel->setText(tr("! Amount too large · Maximum mint amount is $%1.").arg(QString::number(maxAmount, 'f', 0)));
+            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
             m_amountWarningLabel->setVisible(true);
         } else if (m_oraclePrice <= 0) {
             // Oracle price is unavailable; minting must remain fail-closed.
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
-            m_amountWarningLabel->setText(tr("Oracle price unavailable - minting is paused"));
-            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(warningColor));
+            m_amountWarningLabel->setText(tr("… Minting paused · waiting for an Oracle price."));
+            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::WAITING);
             m_amountWarningLabel->setVisible(true);
         } else if (!hasCollateral) {
             // Valid format but insufficient collateral
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
-            m_amountWarningLabel->setText(tr("⚠️ Insufficient DGB collateral for this amount"));
-            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(warningColor));
+            m_amountWarningLabel->setText(tr("! Action required · insufficient DGB collateral for this amount."));
+            DigiDollarStatus::SetBanner(m_amountWarningLabel, DigiDollarStatus::Kind::ACTION);
             m_amountWarningLabel->setVisible(true);
         } else {
             // Valid and sufficient collateral
@@ -1138,6 +1143,7 @@ void DigiDollarMintWidget::setPrivacy(bool privacy)
     updateCollateralCalculation();
     if (m_privacy) {
         m_usdValueValue->setText(maskValue(formatDigiDollarUSDEquivalent(0)));
+        DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::INFO);
         m_oraclePriceValue->setText(maskValue(formatUSDAmount(0) + "/DGB"));
     } else {
         updateOraclePrice();

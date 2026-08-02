@@ -4,6 +4,7 @@
 
 #include <qt/digidollarsendwidget.h>
 #include <qt/ddaddressbookpage.h>
+#include <qt/digidollarstatus.h>
 
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
@@ -355,6 +356,7 @@ void DigiDollarSendWidget::setupAddressSection()
     m_addressValidationLabel->setObjectName("addressValidationLabel");
     m_addressValidationLabel->setText(tr("Enter a valid DigiDollar address (DD, TD, or RD prefix)"));
     m_addressValidationLabel->setWordWrap(true);
+    DigiDollarStatus::SetText(m_addressValidationLabel, DigiDollarStatus::Kind::INFO);
     m_addressLayout->addWidget(m_addressValidationLabel, 1, 1);
 
     m_mainLayout->addWidget(m_addressFrame);
@@ -623,6 +625,7 @@ void DigiDollarSendWidget::setupFeeSection()
     m_clientSafetyFrame = new QFrame(m_feeFrame);
     m_clientSafetyFrame->setObjectName("paymasterClientSafetyFrame");
     m_clientSafetyFrame->setFrameShape(QFrame::StyledPanel);
+    DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::WAITING);
     auto* safety_layout = new QHBoxLayout(m_clientSafetyFrame);
     m_clientSafetyStatus = new QLabel(
         tr("Checking this wallet's Paymaster service-fee limits…"), m_clientSafetyFrame);
@@ -697,6 +700,7 @@ void DigiDollarSendWidget::setupFeeSection()
         m_advancedPaymasterFrame);
     m_offersStatus->setObjectName("paymasterOffersStatus");
     m_offersStatus->setWordWrap(true);
+    DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::INFO);
     advanced_layout->addWidget(m_offersStatus, 7, 0, 1, 2);
     m_offersTable = new QTableWidget(0, 6, m_advancedPaymasterFrame);
     m_offersTable->setObjectName("paymasterOffers");
@@ -1646,7 +1650,12 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
     }
 
     QDialog dialog(this);
+    // This is a DigiDollar-owned dialog, so give the shared theme a stable
+    // selector instead of inheriting the application's blue default dialog
+    // palette. The selector also scopes visible spin-box arrows to this modal.
+    dialog.setObjectName(QStringLiteral("digiDollarClientSafetyDialog"));
     dialog.setWindowTitle(tr("Set Paymaster service-fee limits"));
+    dialog.setMinimumWidth(520);
     auto* layout = new QVBoxLayout(&dialog);
     auto* explanation = new QLabel(tr(
         "These wallet-local limits protect your $DD. A Paymaster offer can never charge more "
@@ -1676,6 +1685,7 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
     recommendation->setWordWrap(true);
     layout->addWidget(recommendation);
     auto* restore = new QPushButton(tr("Restore recommended limits"), &dialog);
+    restore->setObjectName(QStringLiteral("clientSafetyRestoreDefaultsButton"));
     connect(restore, &QPushButton::clicked, &dialog, [per_transfer, per_day] {
         per_transfer->setValue(100);
         per_day->setValue(1000);
@@ -1683,6 +1693,7 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
     layout->addWidget(restore);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons->setObjectName(QStringLiteral("clientSafetyDialogButtons"));
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
@@ -1779,27 +1790,34 @@ void DigiDollarSendWidget::updateClientSafetyDisplay()
 {
     if (!m_clientSafetyStatus || !m_configureClientSafetyButton) return;
     m_configureClientSafetyButton->setEnabled(m_walletModel && !m_paymasterBusy);
+    m_clientSafetyStatus->setToolTip(QString());
     if (!m_walletModel) {
+        DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::INFO);
         m_clientSafetyStatus->setText(
-            tr("Select a wallet to check its Paymaster service-fee limits."));
+            tr("ℹ Select a wallet to check its Paymaster service-fee limits."));
         if (m_clientSafetyDetails) m_clientSafetyDetails->setText(tr("No wallet selected."));
     } else if (!m_clientSafetyStatusKnown) {
+        DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::WAITING);
         m_clientSafetyStatus->setText(
-            tr("Checking this wallet's Paymaster service-fee limits…"));
+            tr("… Checking this wallet's Paymaster service-fee limits…"));
         if (m_clientSafetyDetails) m_clientSafetyDetails->setText(tr("Loading wallet protection details…"));
     } else if (!m_clientSafetyError.isEmpty()) {
+        DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::ERR);
         m_clientSafetyStatus->setText(tr(
-            "Paymaster use is currently unavailable because the wallet could not read its "
-            "service-fee protection. Technical details: %1").arg(m_clientSafetyError));
+            "✕ Paymaster unavailable · wallet protection could not be read. "
+            "Open Advanced Paymaster settings for technical details."));
+        m_clientSafetyStatus->setToolTip(m_clientSafetyError);
         if (m_clientSafetyDetails) m_clientSafetyDetails->setText(m_clientSafetyError);
     } else if (!m_clientSafetyConfigured) {
+        DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::ACTION);
         m_clientSafetyStatus->setText(tr(
-            "Paymaster use is unavailable until this wallet has positive service-fee limits. "
-            "These limits prevent a provider from charging more $DD than you allowed."));
+            "! Action required · Set wallet-local Paymaster service-fee limits before sending. "
+            "They cap how much $DD a provider may charge."));
         if (m_clientSafetyDetails) m_clientSafetyDetails->setText(tr("No positive wallet-local Paymaster limits are saved."));
     } else {
+        DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::SUCCESS);
         m_clientSafetyStatus->setText(tr(
-            "Protection active · maximum %1 per transfer · %2 per rolling day")
+            "✓ Protection active · maximum %1 per transfer · %2 per rolling day")
             .arg(formatCents(m_clientSafetyMaximumPerTransaction),
                  formatCents(m_clientSafetyMaximumPerDay)));
         m_clientSafetyStatus->setToolTip(tr(
@@ -1819,6 +1837,7 @@ void DigiDollarSendWidget::updateClientSafetyDisplay()
                 .arg(formatCents(m_clientSafetySpentTodayCents)));
         }
     }
+    m_clientSafetyFrame->setAccessibleDescription(m_clientSafetyStatus->text());
 }
 
 void DigiDollarSendWidget::setPaymasterBusy(bool busy)
@@ -1843,11 +1862,13 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
     if (!m_walletModel || m_paymasterBusy) return;
     const CAmount amount_cents = static_cast<CAmount>(std::llround(m_amountEdit->text().toDouble() * 100));
     if (amount_cents <= 0) {
-        m_offersStatus->setText(tr("Enter a valid $DD amount before requesting Paymaster offers."));
+        DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::ACTION);
+        m_offersStatus->setText(tr("! Action required · enter a valid $DD amount before requesting Paymaster offers."));
         showWarning(tr("Paymaster offers"), tr("Enter an amount before refreshing offers."));
         return;
     }
-    m_offersStatus->setText(tr("Looking for eligible Paymaster offers…"));
+    DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::WAITING);
+    m_offersStatus->setText(tr("… Looking for eligible Paymaster offers…"));
     setPaymasterBusy(true);
     UniValue params{UniValue::VARR};
     params.push_back(amount_cents);
@@ -1866,8 +1887,9 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
             guard->m_paymasterPreviewServiceFeeCents = -1;
             guard->m_paymasterPreviewTotalCents = -1;
             if (!error.isEmpty()) {
+                DigiDollarStatus::SetBanner(guard->m_offersStatus, DigiDollarStatus::Kind::ERR);
                 guard->m_offersStatus->setText(guard->tr(
-                    "Offers are currently unavailable. No provider has been selected and no fee was authorized."));
+                    "✕ Offers are currently unavailable. No provider was selected and no fee was authorized."));
                 guard->showWarning(guard->tr("Paymaster offers unavailable"), error);
                 return;
             }
@@ -1901,12 +1923,14 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                 }
                 ++row;
             }
+            DigiDollarStatus::SetBanner(
+                guard->m_offersStatus,
+                row == 0 ? DigiDollarStatus::Kind::WAITING : DigiDollarStatus::Kind::SUCCESS);
             guard->m_offersStatus->setText(row == 0
                 ? (guard->m_subtractPaymasterFeeCheck->isChecked()
-                       ? guard->tr("No offer can split this exact total into a cent-exact recipient amount and rounded service fee. Try a sponsored offer, another provider or a slightly different total.")
-                       : guard->tr("No eligible public offer currently matches this amount and your limits."))
-                : guard->tr("%1 eligible offer(s) shown as a preview. This table does not select an offer; "
-                            "Core will authenticate, bind and re-confirm the exact selection before signing.").arg(row));
+                       ? guard->tr("… No exact offer is available. Try a sponsored offer, another provider or a slightly different total.")
+                       : guard->tr("… No eligible public offer currently matches this amount and your limits."))
+                : guard->tr("✓ %1 eligible offer(s) shown as a preview. Core will authenticate, bind and re-confirm the exact selection before signing.").arg(row));
             guard->updateFeeDisplay();
         });
 }
@@ -3501,7 +3525,6 @@ void DigiDollarSendWidget::updateAddressValidation()
 {
     QString address = m_addressEdit->text();
     QPalette palette = QApplication::palette();
-    QString midColor = palette.color(QPalette::Mid).name();
     int lightness = palette.color(QPalette::WindowText).lightness();
     bool isDarkTheme = lightness > 127;
 
@@ -3510,15 +3533,15 @@ void DigiDollarSendWidget::updateAddressValidation()
 
     if (address.isEmpty()) {
         m_addressValidationLabel->setText(tr("Enter a valid DigiDollar address for this network"));
-        m_addressValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; }").arg(midColor));
+        DigiDollarStatus::SetText(m_addressValidationLabel, DigiDollarStatus::Kind::INFO);
         m_addressEdit->setStyleSheet("");
     } else if (validateAddress()) {
         m_addressValidationLabel->setText(tr("✓ Valid DigiDollar address"));
-        m_addressValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(successColor));
+        DigiDollarStatus::SetText(m_addressValidationLabel, DigiDollarStatus::Kind::SUCCESS);
         m_addressEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
     } else {
         m_addressValidationLabel->setText(tr("✗ Invalid DigiDollar address for this network"));
-        m_addressValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(errorColor));
+        DigiDollarStatus::SetText(m_addressValidationLabel, DigiDollarStatus::Kind::ERR);
         m_addressEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
     }
 }

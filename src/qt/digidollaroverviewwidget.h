@@ -6,6 +6,7 @@
 #define DIGIBYTE_QT_DIGIDOLLAROVERVIEWWIDGET_H
 
 #include <QWidget>
+#include <univalue.h>
 
 class WalletModel;
 class ClientModel;
@@ -80,6 +81,7 @@ private:
     void connectSignals();
     void addDemoTransactions(); // For demo purposes only
     void updateSystemHealthIfDue(bool force);
+    void populateRecentTransactions(const UniValue& result);
 
     QString formatDDAmount(double amount) const;
     QString formatDGBAmount(double amount) const;
@@ -151,6 +153,10 @@ private:
     // Privacy
     bool m_privacy{false};
     bool m_showPaymasterBreakdown{false};
+    bool m_recentSnapshotShown{false};
+    bool m_recentRefreshInFlight{false};
+    bool m_recentRefreshPending{false};
+    QString m_lastRecentTransactionsFingerprint;
 
     // Throttling - minimum 5 seconds between updates during sync
     qint64 m_lastBalanceUpdateTime{0};

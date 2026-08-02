@@ -30,6 +30,7 @@ class QVBoxLayout;
 class QLabel;
 class QTimer;
 class QStackedWidget;
+class QShowEvent;
 QT_END_NAMESPACE
 
 /**
@@ -80,18 +81,22 @@ Q_SIGNALS:
     void providerWalletBackupRequested();
 
 public Q_SLOTS:
-    /** Update balance displays across all widgets */
+    /** Update cached and currently visible balance displays. */
     void updateBalance();
-    /** Update oracle price displays */
+    /** Update the currently visible oracle price display. */
     void updateOraclePrice();
-    /** Update system health status */
+    /** Update system health while the overview is visible. */
     void updateSystemHealth();
-    /** Update positions table */
+    /** Update positions only on the currently visible positions consumer. */
     void updatePositions();
     /** Set privacy mode — relays to all sub-widgets */
     void setPrivacy(bool privacy);
     /** Show or hide the wallet-scoped Paymaster provider console. */
     void setPaymasterOperatorVisible(bool visible);
+
+protected:
+    /** Refresh the selected DD page after Qt has made its child widget visible. */
+    void showEvent(QShowEvent* event) override;
 
 private Q_SLOTS:
     /** Handle tab change to update the active widget */
@@ -106,6 +111,10 @@ private Q_SLOTS:
 private:
     void setupUI();
     void connectSignals();
+    /** Queue one refresh after pending stacked/tab visibility changes settle. */
+    void scheduleCurrentPageRefresh();
+    /** Refresh exactly the currently selected and now-visible DD child page. */
+    void refreshCurrentPage();
     /** Query the current BIP9 deployment status string */
     QString getDeploymentStatus() const;
     /** Check if DigiDollar is active via the node */
@@ -118,6 +127,7 @@ private:
     QLabel* m_activationLabel;
     QTimer* m_activationTimer;
     bool m_activated;
+    bool m_currentPageRefreshScheduled{false};
 
     // Sub-widgets
     DigiDollarOverviewWidget* m_overviewWidget;

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qt/digidollartransactionswidget.h>
+#include <qt/digidollarstatus.h>
 #include <qt/walletmodel.h>
 #include <qt/clientmodel.h>
 #include <qt/optionsmodel.h>
@@ -18,6 +19,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QMessageBox>
+#include <QPointer>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QTextDocument>
@@ -176,6 +178,26 @@ public:
     }
 };
 
+class DigiDollarTimestampTableItem final : public QTableWidgetItem
+{
+public:
+    DigiDollarTimestampTableItem(const QString& display_text, uint64_t timestamp)
+        : QTableWidgetItem(display_text)
+    {
+        setData(Qt::UserRole, QVariant::fromValue(timestamp));
+    }
+
+    bool operator<(const QTableWidgetItem& other) const override
+    {
+        // The visible date is localized for the operator (for example,
+        // "Aug 02, 2026 23:30") and therefore cannot be sorted as text.
+        // Compare the underlying Unix timestamps so both sort directions stay
+        // chronological across hours, days, months, locales, and year changes.
+        return data(Qt::UserRole).toULongLong() <
+               other.data(Qt::UserRole).toULongLong();
+    }
+};
+
 QString DetailRow(const QString& label, const QString& value)
 {
     if (value.isEmpty()) return QString();
@@ -217,7 +239,10 @@ void DigiDollarTransactionsWidget::setupUI()
 
     // Status label
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(QStringLiteral("transactionsStatusLabel"));
     m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setWordWrap(true);
+    DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
     m_mainLayout->addWidget(m_statusLabel);
 
     setLayout(m_mainLayout);
@@ -339,11 +364,29 @@ void DigiDollarTransactionsWidget::connectSignals()
 
 void DigiDollarTransactionsWidget::setWalletModel(WalletModel* model)
 {
+    if (m_walletModel == model) {
+        updateTransactions();
+        return;
+    }
+    if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
+
     m_walletModel = model;
+    m_initialSnapshotShown = false;
+    m_refreshInFlight = false;
+    m_refreshPending = false;
+    m_cachedTransactions = UniValue{UniValue::VARR};
+    m_lastTransactionsFingerprint.clear();
+    m_pendingFocusTxid.clear();
+    m_table->setRowCount(0);
+
     if (m_walletModel) {
         connect(m_walletModel, &WalletModel::digiDollarChanged,
                 this, &DigiDollarTransactionsWidget::updateTransactions);
         updateTransactions();
+    } else {
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+        m_statusLabel->setText(tr("ℹ No wallet is loaded. Select a wallet to view its DigiDollar transactions."));
+        m_statusLabel->setVisible(true);
     }
 }
 
@@ -362,7 +405,8 @@ void DigiDollarTransactionsWidget::setPrivacy(bool privacy)
     m_privacy = privacy;
     m_table->setVisible(!m_privacy);
     if (m_privacy) {
-        m_statusLabel->setText(tr("Privacy mode activated for the $DD Transactions tab. To unmask the values, uncheck Settings->Mask values."));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+        m_statusLabel->setText(tr("ℹ Values are hidden by privacy mode. Disable Settings → Mask values to show them."));
         m_statusLabel->setVisible(true);
     } else {
         updateTransactions();
@@ -375,24 +419,8 @@ void DigiDollarTransactionsWidget::focusTransaction(const QString& txid)
         return;
     }
 
-    updateTransactions();
-
-    if (m_table->selectionModel()) {
-        m_table->selectionModel()->clearSelection();
-    }
-
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        QTableWidgetItem* txidItem = m_table->item(row, Column::TxId);
-        if (!txidItem || txidItem->data(Qt::UserRole).toString() != txid) {
-            continue;
-        }
-
-        m_table->setCurrentCell(row, Column::TxId);
-        m_table->selectRow(row);
-        m_table->scrollToItem(txidItem, QAbstractItemView::PositionAtCenter);
-        m_table->setFocus();
-        return;
-    }
+    m_pendingFocusTxid = txid;
+    if (!selectTransaction(txid)) updateTransactions();
 }
 
 void DigiDollarTransactionsWidget::updateTransactions()
@@ -400,11 +428,97 @@ void DigiDollarTransactionsWidget::updateTransactions()
     if (!isVisible()) return;
     if (m_privacy) return;
     if (!m_walletModel) {
-        m_statusLabel->setText(tr("No wallet loaded"));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+        m_statusLabel->setText(tr("ℹ No wallet is loaded. Select a wallet to view its DigiDollar transactions."));
+        m_statusLabel->setVisible(true);
         return;
     }
 
-    populateTable();
+    // Paint the newest rows from WalletDB before starting the canonical
+    // ownership/confirmation reconstruction. This snapshot never waits for
+    // cs_wallet, so a user who opens the page immediately after startup sees
+    // useful history instead of an empty table for several seconds.
+    if (!m_initialSnapshotShown) {
+        UniValue initial = m_walletModel->getCachedDigiDollarTransactionHistory(50, 0);
+        if (initial.isArray() && !initial.empty()) {
+            m_initialSnapshotShown = true;
+            m_cachedTransactions = std::move(initial);
+            m_lastTransactionsFingerprint =
+                QString::fromStdString(m_cachedTransactions.write());
+            populateTable();
+        }
+    }
+
+    if (m_refreshInFlight) {
+        m_refreshPending = true;
+        return;
+    }
+
+    m_refreshInFlight = true;
+    if (m_cachedTransactions.empty()) {
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::WAITING);
+        m_statusLabel->setText(tr("… Loading DigiDollar transactions…"));
+        m_statusLabel->setVisible(true);
+    }
+
+    WalletModel* const requested_model = m_walletModel;
+    QPointer<DigiDollarTransactionsWidget> guard{this};
+    m_walletModel->getDigiDollarTransactionHistoryAsync(
+        1000, 0,
+        [guard, requested_model](UniValue result, QString error) mutable {
+            if (!guard || guard->m_walletModel != requested_model) return;
+            guard->m_refreshInFlight = false;
+
+            if (!error.isEmpty()) {
+                // Never retry a failed asynchronous history request by reading
+                // the wallet synchronously on Qt's event thread. Preserve the
+                // last good table and let a later refresh retry the snapshot.
+                LogPrintf("DigiDollar Transactions: asynchronous history error - %s\n",
+                          error.toStdString());
+                DigiDollarStatus::SetBanner(
+                    guard->m_statusLabel,
+                    guard->m_table->rowCount() > 0
+                        ? DigiDollarStatus::Kind::WAITING
+                        : DigiDollarStatus::Kind::ERR);
+                guard->m_statusLabel->setText(
+                    guard->m_table->rowCount() > 0
+                        ? tr("… Saved transactions are shown. Checking for updates will retry automatically.")
+                        : tr("✕ Transaction history could not be loaded. It will be retried automatically."));
+                guard->m_statusLabel->setVisible(true);
+            }
+
+            if (result.isArray()) {
+                const QString fingerprint = QString::fromStdString(result.write());
+                const bool changed = fingerprint != guard->m_lastTransactionsFingerprint;
+                guard->m_cachedTransactions = std::move(result);
+                guard->m_lastTransactionsFingerprint = fingerprint;
+                if (changed || guard->m_table->rowCount() == 0) guard->populateTable();
+                if (!guard->m_pendingFocusTxid.isEmpty() &&
+                    guard->selectTransaction(guard->m_pendingFocusTxid)) {
+                    guard->m_pendingFocusTxid.clear();
+                }
+            }
+
+            if (guard->m_refreshPending) {
+                guard->m_refreshPending = false;
+                QTimer::singleShot(0, guard, &DigiDollarTransactionsWidget::updateTransactions);
+            }
+        });
+}
+
+bool DigiDollarTransactionsWidget::selectTransaction(const QString& txid)
+{
+    if (m_table->selectionModel()) m_table->selectionModel()->clearSelection();
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        QTableWidgetItem* item = m_table->item(row, Column::TxId);
+        if (!item || item->data(Qt::UserRole).toString() != txid) continue;
+        m_table->setCurrentCell(row, Column::TxId);
+        m_table->selectRow(row);
+        m_table->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+        m_table->setFocus();
+        return true;
+    }
+    return false;
 }
 
 void DigiDollarTransactionsWidget::populateTable()
@@ -426,48 +540,11 @@ void DigiDollarTransactionsWidget::populateTable()
     m_table->setSortingEnabled(false);
 
     try {
-        // Request up to 1000 transactions (max allowed by RPC) to show full history
-        UniValue params(UniValue::VARR);
-        params.push_back(1000);  // count - get up to 1000 transactions
-        params.push_back(0);     // skip - start from the beginning
-        UniValue result(UniValue::VARR);
-        try {
-            result = m_walletModel->executeRpc("listdigidollartxs", params);
-        } catch (const UniValue& e) {
-            // Qt unit tests and early GUI startup paths may not have the wallet
-            // RPC table registered yet, or the RPC layer may still be in warmup.
-            // Fall back to the same wallet history data that listdigidollartxs
-            // exposes so the display path stays available.
-            const int code = e.find_value("code").isNum() ? e.find_value("code").getInt<int>() : 0;
-            if (code != -32601 && code != -28) throw;
-
-            DigiDollarWallet* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
-            if (!ddWallet) throw;
-            for (const auto& histTx : ddWallet->GetDDTransactionHistory()) {
-                UniValue txInfo(UniValue::VOBJ);
-                txInfo.pushKV("txid", histTx.txid);
-                txInfo.pushKV("category", histTx.category);
-                txInfo.pushKV("amount", histTx.incoming ? histTx.amount : -histTx.amount);
-                txInfo.pushKV("address", histTx.address);
-                txInfo.pushKV("confirmations", histTx.confirmations);
-                txInfo.pushKV("blockheight", histTx.blockheight);
-                txInfo.pushKV("blockhash", histTx.blockhash);
-                txInfo.pushKV("time", static_cast<int64_t>(histTx.timestamp));
-                txInfo.pushKV("fee", histTx.fee);
-                txInfo.pushKV("comment", histTx.comment);
-                txInfo.pushKV("abandoned", histTx.abandoned);
-                txInfo.pushKV("lock_tier", histTx.lock_tier);
-                txInfo.pushKV("in_mempool", histTx.in_mempool);
-                txInfo.pushKV("wallet_state", histTx.is_local ? "local" :
-                    (histTx.abandoned ? "abandoned" :
-                     (histTx.confirmations < 0 ? "conflicted" :
-                      (histTx.confirmations > 0 ? "confirmed" : "pending"))));
-                result.push_back(txInfo);
-            }
-        }
+        const UniValue& result = m_cachedTransactions;
 
         if (!result.isArray()) {
-            m_statusLabel->setText(tr("No DigiDollar transactions found"));
+            DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+            m_statusLabel->setText(tr("ℹ No DigiDollar transactions were found in this wallet."));
             m_statusLabel->setVisible(true);
             applySort();
             return;
@@ -495,8 +572,8 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Date
             uint64_t timestamp = tx.find_value("time").getInt<uint64_t>();
-            QTableWidgetItem* dateItem = new QTableWidgetItem(formatTimestamp(timestamp));
-            dateItem->setData(Qt::UserRole, QVariant::fromValue(timestamp));
+            QTableWidgetItem* dateItem =
+                new DigiDollarTimestampTableItem(formatTimestamp(timestamp), timestamp);
             m_table->setItem(row, Column::Date, dateItem);
 
             // Get lock tier early so we can use it for Type column
@@ -575,16 +652,19 @@ void DigiDollarTransactionsWidget::populateTable()
 
         m_statusLabel->setVisible(row == 0);
         if (row == 0) {
-            m_statusLabel->setText(tr("No transactions match the current filters"));
+            DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
+            m_statusLabel->setText(tr("ℹ No transactions match the current filters."));
         }
 
     } catch (const UniValue& e) {
         LogPrintf("DigiDollar Transactions: RPC error - %s\n", e.write());
-        m_statusLabel->setText(tr("Loading transactions..."));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::WAITING);
+        m_statusLabel->setText(tr("… Transaction history is temporarily unavailable; retrying automatically."));
         m_statusLabel->setVisible(true);
     } catch (const std::exception& e) {
         LogPrintf("DigiDollar Transactions: Error loading transactions - %s\n", e.what());
-        m_statusLabel->setText(tr("Error loading transactions"));
+        DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::ERR);
+        m_statusLabel->setText(tr("✕ Transaction history could not be loaded."));
         m_statusLabel->setVisible(true);
     }
 

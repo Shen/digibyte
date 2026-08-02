@@ -8,6 +8,7 @@
 #include <QWidget>
 #include <QList>
 #include <consensus/amount.h>
+#include <univalue.h>
 
 class WalletModel;
 class ClientModel;
@@ -67,6 +68,7 @@ private:
     void setupTable();
     void connectSignals();
     void populateTable();
+    bool selectTransaction(const QString& txid);
     bool isDarkTheme() const;
     QColor getAmountColor(bool isPositive) const;
     QString formatDDAmount(CAmount amount) const;
@@ -89,6 +91,12 @@ private:
     // Privacy
     bool m_privacy{false};
     bool m_hasAppliedDefaultSort{false};
+    bool m_initialSnapshotShown{false};
+    bool m_refreshInFlight{false};
+    bool m_refreshPending{false};
+    UniValue m_cachedTransactions{UniValue::VARR};
+    QString m_lastTransactionsFingerprint;
+    QString m_pendingFocusTxid;
 
     // Models
     WalletModel* m_walletModel;

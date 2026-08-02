@@ -250,6 +250,22 @@ public:
     using RpcCallback = std::function<void(UniValue result, QString error)>;
     void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
 
+    /**
+     * Build the DigiDollar transaction-history view away from Qt's event
+     * thread. Unlike executeRpcAsync(), this local wallet query does not
+     * depend on the RPC server being started. Requests from multiple DD views
+     * are coalesced into one wallet scan so tab changes do not multiply the
+     * expensive ownership and confirmation reconstruction.
+     */
+    void getDigiDollarTransactionHistoryAsync(int count, int skip, RpcCallback callback);
+
+    /**
+     * Return the latest model-owned history snapshot without waiting for
+     * cs_wallet. At startup this contains up to 50 persisted rows; a completed
+     * asynchronous refresh replaces it with the authoritative history.
+     */
+    UniValue getCachedDigiDollarTransactionHistory(int count, int skip);
+
     // Generate new DigiDollar receiving address
     QString getNewDigiDollarAddress(const QString& label = "");
 
@@ -257,7 +273,10 @@ public:
     DigiDollarWallet* getDigiDollarWallet() const;
 
 private:
-    std::unique_ptr<interfaces::Wallet> m_wallet;
+    // Background Qt jobs keep a shared interface reference while reading a
+    // wallet snapshot. The public constructor still accepts unique ownership;
+    // no wallet is shared outside WalletModel and its bounded worker jobs.
+    std::shared_ptr<interfaces::Wallet> m_wallet;
     std::unique_ptr<interfaces::Handler> m_handler_unload;
     std::unique_ptr<interfaces::Handler> m_handler_status_changed;
     std::unique_ptr<interfaces::Handler> m_handler_address_book_changed;
@@ -283,6 +302,19 @@ private:
     interfaces::WalletBalances m_cached_balances;
     EncryptionStatus cachedEncryptionStatus{Unencrypted};
     QTimer* timer;
+
+    struct DigiDollarHistoryRequest {
+        int count{0};
+        int skip{0};
+        RpcCallback callback;
+    };
+
+    // A WalletModel belongs to exactly one wallet, making it the natural
+    // boundary for both the immediate persisted seed and the single-flight
+    // canonical refresh. Widgets never share history across wallet models.
+    UniValue m_digi_dollar_history_cache{UniValue::VARR};
+    std::vector<DigiDollarHistoryRequest> m_digi_dollar_history_requests;
+    bool m_digi_dollar_history_refresh_in_flight{false};
 
     // Block hash denoting when the last balance update was done.
     uint256 m_cached_last_update_tip{};

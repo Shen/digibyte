@@ -184,6 +184,7 @@ DIGIBYTE_QT_H = \
   qt/digidollartab.h \
   qt/paymasterconfirmation.h \
   qt/digidollar_qt_translate.h \
+  qt/digidollarstatus.h \
   qt/digidollarmintwidget.h \
   qt/ddaddressbookpage.h \
   qt/digidollaroverviewwidget.h \

@@ -8196,27 +8196,76 @@ void DigiDollarTab::setClientModel(ClientModel* model)
         m_positionsWidget->setClientModel(model);
     if (m_transactionsWidget)
         m_transactionsWidget->setClientModel(model);
+
+    // The constructor cannot determine activation before ClientModel exists.
+    // Waiting for the five-second activation timer left a newly opened wallet
+    // showing placeholder or empty DD pages even when activation was already
+    // complete. Evaluate it immediately once the node interface is available.
+    checkActivationStatus();
 }
 
 void DigiDollarTab::updateView()
 {
-    // Update all sub-widgets
-    if (m_overviewWidget)
-        m_overviewWidget->updateView();
-    if (m_receiveWidget)
-        m_receiveWidget->updateView();
-    if (m_sendWidget)
-        m_sendWidget->updateView();
-    if (m_mintWidget)
-        m_mintWidget->updateView();
-    if (m_redeemWidget)
-        m_redeemWidget->updateView();
-    if (m_positionsWidget)
-        m_positionsWidget->updateView();
-    if (m_transactionsWidget)
-        m_transactionsWidget->updateView();
-    if (m_paymasterWidget)
-        m_paymasterWidget->refreshStatus();
+    // Some child refreshes need wallet or RPC locks. Refreshing every hidden
+    // page made navigation wait behind unrelated history work. Queue the
+    // selected page instead: this also guarantees that its own isVisible()
+    // guard observes the final QStackedWidget/QTabWidget state.
+    scheduleCurrentPageRefresh();
+}
+
+void DigiDollarTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    scheduleCurrentPageRefresh();
+}
+
+void DigiDollarTab::scheduleCurrentPageRefresh()
+{
+    if (m_currentPageRefreshScheduled || !isVisible()) return;
+
+    m_currentPageRefreshScheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        m_currentPageRefreshScheduled = false;
+        if (!isVisible() || !m_stackedWidget ||
+            m_stackedWidget->currentWidget() != m_tabWidget) {
+            return;
+        }
+        refreshCurrentPage();
+    });
+}
+
+void DigiDollarTab::refreshCurrentPage()
+{
+    if (!m_tabWidget) return;
+
+    switch (m_tabWidget->currentIndex()) {
+    case 0: // Overview
+        if (m_overviewWidget) m_overviewWidget->updateView();
+        break;
+    case 1: // Send
+        if (m_sendWidget) m_sendWidget->updateView();
+        break;
+    case 2: // Receive
+        if (m_receiveWidget) m_receiveWidget->updateView();
+        break;
+    case 3: // Mint
+        if (m_mintWidget) m_mintWidget->updateView();
+        break;
+    case 4: // Redeem
+        if (m_redeemWidget) m_redeemWidget->updateView();
+        break;
+    case 5: // Vault
+        if (m_positionsWidget) m_positionsWidget->updateView();
+        break;
+    case 6: // Transactions
+        if (m_transactionsWidget) m_transactionsWidget->updateView();
+        break;
+    case 7: // Paymaster Network
+        if (m_paymasterWidget) m_paymasterWidget->refreshStatus();
+        break;
+    default:
+        break;
+    }
 }
 
 void DigiDollarTab::setPaymasterLiquidityStatusForTesting(
@@ -8273,79 +8322,70 @@ void DigiDollarTab::incomingDDTransaction(const QString& date, const QString& am
 
 void DigiDollarTab::updateBalance()
 {
-    if (m_overviewWidget)
-        m_overviewWidget->updateBalance();
-    if (m_sendWidget)
-        m_sendWidget->updateBalance();
-    if (m_mintWidget)
-        m_mintWidget->updateBalance();
-    if (m_redeemWidget)
-        m_redeemWidget->updateBalance();
-}
+    if (!isVisible() || !m_tabWidget) return;
 
-void DigiDollarTab::updateOraclePrice()
-{
-    if (m_overviewWidget)
-        m_overviewWidget->updateOraclePrice();
-    if (m_sendWidget)
-        m_sendWidget->updateOraclePrice();
-    if (m_mintWidget)
-        m_mintWidget->updateOraclePrice();
-}
-
-void DigiDollarTab::updateSystemHealth()
-{
-    if (m_overviewWidget)
-        m_overviewWidget->updateSystemHealth();
-}
-
-void DigiDollarTab::updatePositions()
-{
-    if (m_positionsWidget)
-        m_positionsWidget->updatePositions();
-    if (m_redeemWidget)
-        m_redeemWidget->updatePositions();
-}
-
-void DigiDollarTab::onTabChanged(int index)
-{
-    // Update the active tab when switching
-    switch (index) {
-    case 0: // Overview
-        if (m_overviewWidget)
-            m_overviewWidget->updateView();
+    // The Mint balance comes from WalletModel's already cached DGB balance and
+    // is safe to keep current while hidden. DD balance queries may acquire
+    // cs_wallet, so perform those only for the page the user can see.
+    if (m_mintWidget) m_mintWidget->updateBalance();
+    switch (m_tabWidget->currentIndex()) {
+    case 0:
+        if (m_overviewWidget) m_overviewWidget->updateBalance();
         break;
-    case 1: // Send
-        if (m_sendWidget)
-            m_sendWidget->updateView();
+    case 1:
+        if (m_sendWidget) m_sendWidget->updateBalance();
         break;
-    case 2: // Receive
-        if (m_receiveWidget)
-            m_receiveWidget->updateView();
-        break;
-    case 3: // Mint
-        if (m_mintWidget)
-            m_mintWidget->updateView();
-        break;
-    case 4: // Redeem
-        if (m_redeemWidget)
-            m_redeemWidget->updateView();
-        break;
-    case 5: // Vault
-        if (m_positionsWidget)
-            m_positionsWidget->updateView();
-        break;
-    case 6: // Transactions
-        if (m_transactionsWidget)
-            m_transactionsWidget->updateView();
-        break;
-    case 7: // Paymaster Network
-        if (m_paymasterWidget)
-            m_paymasterWidget->refreshStatus();
+    case 4:
+        if (m_redeemWidget) m_redeemWidget->updateBalance();
         break;
     default:
         break;
     }
+}
+
+void DigiDollarTab::updateOraclePrice()
+{
+    if (!isVisible() || !m_tabWidget) return;
+    switch (m_tabWidget->currentIndex()) {
+    case 0:
+        if (m_overviewWidget) m_overviewWidget->updateOraclePrice();
+        break;
+    case 1:
+        if (m_sendWidget) m_sendWidget->updateOraclePrice();
+        break;
+    case 3:
+        if (m_mintWidget) m_mintWidget->updateOraclePrice();
+        break;
+    default:
+        break;
+    }
+}
+
+void DigiDollarTab::updateSystemHealth()
+{
+    if (isVisible() && m_tabWidget && m_tabWidget->currentIndex() == 0 && m_overviewWidget) {
+        m_overviewWidget->updateSystemHealth();
+    }
+}
+
+void DigiDollarTab::updatePositions()
+{
+    if (!isVisible() || !m_tabWidget) return;
+    if (m_tabWidget->currentIndex() == 5 && m_positionsWidget) {
+        m_positionsWidget->updatePositions();
+    } else if (m_tabWidget->currentIndex() == 4 && m_redeemWidget) {
+        m_redeemWidget->updatePositions();
+    }
+}
+
+void DigiDollarTab::onTabChanged(int index)
+{
+    Q_UNUSED(index);
+    // currentChanged is emitted before the newly selected child necessarily
+    // reports isVisible(). A queued refresh avoids losing the request and
+    // prevents the five-second child timers from becoming the accidental
+    // first-load mechanism.
+    scheduleCurrentPageRefresh();
 }
 
 void DigiDollarTab::setPrivacy(bool privacy)
@@ -8415,10 +8455,9 @@ void DigiDollarTab::checkActivationStatus()
         m_activated = true;
         m_stackedWidget->setCurrentIndex(1); // Show DD tabs
         if (m_activationTimer) m_activationTimer->stop();
-        // Trigger initial data load
-        updateBalance();
-        updateOraclePrice();
-        updatePositions();
+        // The tab page becomes visible only after the stack transition. Queue
+        // its complete initial load instead of issuing child updates too early.
+        scheduleCurrentPageRefresh();
         return;
     }
 
