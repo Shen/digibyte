@@ -153,6 +153,17 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
 {
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
         pwallet->postInitProcess();
+        // Older Paymaster clients could persist only the wallet-owned DD
+        // change row because collaborative sends bypassed the ordinary direct
+        // send history path. Rebuild those display rows from successful,
+        // durable sessions without changing transaction authority or funds.
+        std::string client_history_error;
+        if (!ReconcilePaymasterClientHistory(*pwallet,
+                                             client_history_error)) {
+            pwallet->WalletLogPrintf(
+                "Paymaster client-history startup reconciliation failed: %s\n",
+                client_history_error);
+        }
         // Reconstruct free, wallet-owned successor liquidity before automatic
         // service starts. This is idempotent and creates no transaction; paid
         // replenishment remains gated by the persisted maintenance policy.

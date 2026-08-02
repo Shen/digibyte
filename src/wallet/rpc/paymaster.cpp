@@ -5019,6 +5019,77 @@ bool ReconcilePaymasterProviderFinances(CWallet& wallet,
     return ReconcileProviderFinances(wallet, changed_events, error);
 }
 
+bool ReconcilePaymasterClientHistory(CWallet& wallet, std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    error.clear();
+    DigiDollarWallet* const dd_wallet = wallet.GetDDWallet();
+    if (!dd_wallet) return true;
+
+    PaymasterStore store{wallet};
+    std::vector<PaymentSession> sessions;
+    if (!store.ListClientSessions(sessions, error)) return false;
+
+    for (const PaymentSession& session : sessions) {
+        // Only a transaction already accepted by the wallet/node is a
+        // completed send. Signed, ambiguous, failed, or safely canceled
+        // sessions must not acquire an outgoing history row merely because
+        // they contain durable final bytes.
+        if (session.state != SessionState::STEMPOOL &&
+            session.state != SessionState::MEMPOOL &&
+            session.state != SessionState::CONFIRMED) {
+            continue;
+        }
+        if (session.final_txid.IsNull()) continue;
+
+        bool found_final_attempt{false};
+        for (auto it = session.attempt_ids.rbegin();
+             it != session.attempt_ids.rend(); ++it) {
+            ProviderAttempt attempt;
+            if (!store.GetAttempt(*it, attempt) ||
+                attempt.final_txid != session.final_txid) {
+                continue;
+            }
+
+            PaymentIntent intent;
+            PaymasterQuote quote;
+            CollaborativePSBTTemplate trusted_template;
+            std::string artifact_error;
+            if (!LoadAttemptAuthorizationArtifacts(
+                    attempt, intent, quote, trusted_template,
+                    artifact_error)) {
+                error = artifact_error.empty()
+                    ? "PAYMASTER_CLIENT_HISTORY_ARTIFACTS_INVALID"
+                    : artifact_error;
+                return false;
+            }
+            if (intent.recipient_amount.value <= 0 ||
+                quote.service_fee.value < 0 ||
+                intent.recipient_amount.value >
+                    std::numeric_limits<CAmount>::max() -
+                        quote.service_fee.value) {
+                error = "PAYMASTER_CLIENT_HISTORY_AMOUNT_INVALID";
+                return false;
+            }
+
+            if (!dd_wallet->RecordPaymasterSendHistory(
+                    session.final_txid, intent.recipient_script,
+                    intent.recipient_amount.value + quote.service_fee.value,
+                    error)) {
+                return false;
+            }
+            found_final_attempt = true;
+            break;
+        }
+
+        if (!found_final_attempt) {
+            error = "PAYMASTER_CLIENT_HISTORY_ATTEMPT_NOT_FOUND";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool EnsureProviderNotEquivocationBlocked(
     PaymasterStore& store,
     const DigiDollar::Paymaster::PaymasterId& provider_id,
@@ -12169,6 +12240,30 @@ RPCHelpMan processpaymasterresult()
             }
             store.GetSessionByRequestId(request_id, session);
             store.GetAttempt(session.attempt_ids.back(), attempt);
+
+            // Collaborative Paymaster transactions bypass the ordinary
+            // TransferDigiDollarMany() path that records an outgoing DD row.
+            // Once exact final bytes are durable, repair that display-only
+            // history idempotently. A history-write failure must never turn a
+            // valid, possibly already broadcast payment into an RPC failure;
+            // every later result poll will retry the same deterministic row.
+            if (!attempt.final_txid.IsNull()) {
+                if (DigiDollarWallet* dd_wallet = wallet->GetDDWallet()) {
+                    std::string history_error;
+                    const CAmount user_total =
+                        authorized_intent.recipient_amount.value +
+                        authorized_quote.service_fee.value;
+                    if (!dd_wallet->RecordPaymasterSendHistory(
+                            attempt.final_txid,
+                            authorized_intent.recipient_script,
+                            user_total,
+                            history_error)) {
+                        LogPrintf(
+                            "Paymaster: unable to record client DD history for %s: %s\n",
+                            attempt.final_txid.GetHex(), history_error);
+                    }
+                }
+            }
             UniValue result{UniValue::VOBJ};
             result.pushKV("processed", accepted_result.has_value());
             result.pushKV("request_id", request_id);

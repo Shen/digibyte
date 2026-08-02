@@ -53,6 +53,11 @@ bool ReconcilePaymasterProviderFinances(CWallet& wallet,
                                         size_t& changed_events,
                                         std::string& error);
 
+/** Restore client-facing DD send rows for successful Paymaster sessions made
+ * by older wallet versions. This changes display history only; authoritative
+ * session, transaction, reservation, and accounting records are untouched. */
+bool ReconcilePaymasterClientHistory(CWallet& wallet, std::string& error);
+
 /** Run one bounded provider-service cycle. This is the single scheduler entry
  * point for optional autostart plus automatic request/submit processing. */
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);

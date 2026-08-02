@@ -605,6 +605,31 @@ public:
     std::vector<DDTransaction> GetDDTransactionHistory() const;
 
     /**
+     * Return a bounded view of the already loaded DD history.
+     *
+     * This deliberately does not inspect CWallet transactions, recover
+     * descriptor ownership, or recalculate confirmations. Qt uses it only as
+     * an immediate startup seed while GetDDTransactionHistory() builds the
+     * authoritative view on a worker thread.
+     */
+    std::vector<DDTransaction> GetStoredDDTransactionHistory(size_t count,
+                                                              size_t skip = 0) const;
+
+    /**
+     * Persist the client-side history row for a finalized Paymaster transfer.
+     *
+     * Paymaster transactions are assembled collaboratively and therefore do
+     * not pass through TransferDigiDollarMany(), which normally records the
+     * outgoing DD row. This method replaces any provisional receive row for
+     * wallet-owned change with one idempotent outgoing row for the complete
+     * DD wallet outflow (recipient amount plus Paymaster service fee).
+     */
+    bool RecordPaymasterSendHistory(const uint256& txid,
+                                    const CScript& recipient_script,
+                                    CAmount total_outflow,
+                                    std::string& error);
+
+    /**
      * Validate DD address format
      * @param address DD address string to validate
      * @return true if valid, false otherwise

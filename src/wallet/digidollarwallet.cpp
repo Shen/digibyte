@@ -729,24 +729,9 @@ size_t DigiDollarWallet::LoadDDAddressKeys()
 
 bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) const
 {
-    auto locks = LockDDWallet();
     // First check if this is a DD output (P2TR with value=0)
     if (txout.nValue != 0 || txout.scriptPubKey.size() != 34 || txout.scriptPubKey[0] != OP_1) {
         return false;
-    }
-
-    // Try standard wallet IsMine first — require SPENDABLE to exclude watch-only
-    // SECURITY [T4-04]: Using ISMINE_SPENDABLE prevents watch-only DD balance contamination
-    if (m_wallet && (m_wallet->IsMine(txout) & wallet::ISMINE_SPENDABLE)) {
-        return true;
-    }
-
-    // Check if this is a MINT output that we've already identified as ours
-    // This handles the case where dd_owner_keys is empty (e.g., after wallet restore)
-    // but we've already processed the MINT tx and added it to collateral_positions
-    if (collateral_positions.count(txid) > 0) {
-        // This txid is a MINT we own, so its canonical DD token output is ours.
-        return true;
     }
 
     // Extract the P2TR output key from the scriptPubKey
@@ -754,64 +739,85 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
     std::vector<unsigned char> output_key_bytes(txout.scriptPubKey.begin() + 2, txout.scriptPubKey.end());
     std::array<unsigned char, 32> output_key_array;
     std::copy(output_key_bytes.begin(), output_key_bytes.end(), output_key_array.begin());
-
-    // Check dd_owner_keys - first try the specific txid, then check ALL owner keys
-    // This is needed because TRANSFER change outputs use the owner key from the original
-    // MINT (stored under MINT txid), not the TRANSFER txid.
-    CKey owner_key;
-    if (GetOwnerKey(txid, owner_key)) {
-        // Compute what the tweaked key should be from this owner_key
-        XOnlyPubKey owner_xonly(owner_key.GetPubKey());
-        auto tweaked = owner_xonly.CreateTapTweak(nullptr);
-        if (tweaked) {
-            // Check if tweaked key matches output key
-            if (std::equal(output_key_bytes.begin(), output_key_bytes.end(),
-                          tweaked->first.begin())) {
-                return true;
-            }
-        }
-    }
-
-    // Check ALL owner keys - necessary for TRANSFER change outputs where the key
-    // is from the original MINT but we're checking with the TRANSFER's txid
-    for (const auto& [key_txid, key] : dd_owner_keys) {
-        if (key_txid == txid) continue;  // Already checked above
-        XOnlyPubKey owner_xonly(key.GetPubKey());
-        auto tweaked = owner_xonly.CreateTapTweak(nullptr);
-        if (tweaked) {
-            if (std::equal(output_key_bytes.begin(), output_key_bytes.end(),
-                          tweaked->first.begin())) {
-                return true;
-            }
-        }
-    }
-
-    // T4-03a: Also check encrypted owner keys. We can check pubkey-derived
-    // tweaked keys without decrypting the secret, which lets locked encrypted
-    // wallets recognize their own DD outputs during rescan without exposing keys.
-    for (const auto& [key_txid, crypted_pair] : dd_crypted_owner_keys) {
-        const CPubKey& pubkey = crypted_pair.first;
-        XOnlyPubKey owner_xonly(pubkey);
-        auto tweaked = owner_xonly.CreateTapTweak(nullptr);
-        if (tweaked) {
-            if (std::equal(output_key_bytes.begin(), output_key_bytes.end(),
-                          tweaked->first.begin())) {
-                return true;
-            }
-        }
-    }
-
-    // Check dd_address_keys (for DD addresses generated via getdigidollaraddress)
     XOnlyPubKey output_key(output_key_bytes);
-    CKey address_key;
-    if (GetAddressKey(output_key, address_key)) {
-        return true;
-    }
+    std::vector<wallet::DescriptorScriptPubKeyMan*> descriptor_managers;
 
-    if (dd_foreign_output_keys.count(output_key_array) > 0) {
-        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - cached foreign output_key=%s\n",
-                 HexStr(output_key_bytes));
-        return false;
+    // Keep the common ownership checks short. In particular, do not retain
+    // cs_wallet while scanning every descriptor script below: history refreshes
+    // run in the background, and monopolizing cs_wallet here would make Qt
+    // balance reads and tab changes wait for the complete descriptor scan.
+    {
+        auto locks = LockDDWallet();
+
+        // Try standard wallet IsMine first — require SPENDABLE to exclude watch-only.
+        // SECURITY [T4-04]: Using ISMINE_SPENDABLE prevents watch-only DD balance contamination.
+        if (m_wallet && (m_wallet->IsMine(txout) & wallet::ISMINE_SPENDABLE)) {
+            return true;
+        }
+
+        // Check if this is a MINT output that we've already identified as ours.
+        // This handles the case where dd_owner_keys is empty (e.g., after wallet restore)
+        // but we've already processed the MINT tx and added it to collateral_positions.
+        if (collateral_positions.count(txid) > 0) {
+            return true;
+        }
+
+        // Check dd_owner_keys - first try the specific txid, then check ALL owner keys.
+        // TRANSFER change outputs use the owner key from the original MINT, not the
+        // TRANSFER txid.
+        CKey owner_key;
+        if (GetOwnerKey(txid, owner_key)) {
+            XOnlyPubKey owner_xonly(owner_key.GetPubKey());
+            auto tweaked = owner_xonly.CreateTapTweak(nullptr);
+            if (tweaked && std::equal(output_key_bytes.begin(), output_key_bytes.end(),
+                                      tweaked->first.begin())) {
+                return true;
+            }
+        }
+
+        for (const auto& [key_txid, key] : dd_owner_keys) {
+            if (key_txid == txid) continue;
+            XOnlyPubKey owner_xonly(key.GetPubKey());
+            auto tweaked = owner_xonly.CreateTapTweak(nullptr);
+            if (tweaked && std::equal(output_key_bytes.begin(), output_key_bytes.end(),
+                                      tweaked->first.begin())) {
+                return true;
+            }
+        }
+
+        // Encrypted owner/address maps are sufficient for recognition while the
+        // wallet is locked; no private-key decryption is needed here.
+        for (const auto& [key_txid, crypted_pair] : dd_crypted_owner_keys) {
+            XOnlyPubKey owner_xonly(crypted_pair.first);
+            auto tweaked = owner_xonly.CreateTapTweak(nullptr);
+            if (tweaked && std::equal(output_key_bytes.begin(), output_key_bytes.end(),
+                                      tweaked->first.begin())) {
+                return true;
+            }
+        }
+
+        if (dd_address_keys.count(output_key_array) > 0 ||
+            dd_crypted_address_keys.count(output_key_array) > 0) {
+            return true;
+        }
+
+        if (dd_foreign_output_keys.count(output_key_array) > 0) {
+            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - cached foreign output_key=%s\n",
+                     HexStr(output_key_bytes));
+            return false;
+        }
+
+        // ScriptPubKeyMan objects live for the lifetime of their wallet. Copy
+        // only their stable pointers while cs_wallet protects the manager map;
+        // each descriptor manager protects its own script/key cache during the
+        // potentially expensive scan below.
+        if (m_wallet) {
+            for (wallet::ScriptPubKeyMan* spk_man : m_wallet->GetAllScriptPubKeyMans()) {
+                if (auto* desc_spk = dynamic_cast<wallet::DescriptorScriptPubKeyMan*>(spk_man)) {
+                    descriptor_managers.push_back(desc_spk);
+                }
+            }
+        }
     }
 
     // WALLET RESTORE FIX: After descriptor import, dd_address_keys may be
@@ -819,11 +825,9 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
     // and applying TapTweak(nullptr). The wallet has the base keys from
     // descriptors, but not necessarily every DD-tweaked output cached yet.
     // Try to find a wallet key that, when DD-tweaked, matches this output key.
-    if (m_wallet) {
+    if (!descriptor_managers.empty()) {
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine: trying descriptor key derivation for output_key=%s\n",
                  HexStr(output_key_bytes));
-
-        LOCK(m_wallet->cs_wallet);
 
         int spk_man_count = 0;
         int p2tr_script_count = 0;
@@ -834,9 +838,14 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
 
         // Enumerate ALL P2TR scripts from all descriptor managers
         // This includes keys that were reserved via GetNewDestination but not used in transactions
-        for (auto* spk_man : m_wallet->GetAllScriptPubKeyMans()) {
-            auto* desc_spk = dynamic_cast<wallet::DescriptorScriptPubKeyMan*>(spk_man);
-            if (!desc_spk) continue;
+        auto cache_address_key = [this, &output_key](const CKey& key) {
+            // StoreAddressKey reads wallet encryption state. Reacquire locks in
+            // the canonical wallet-before-DD order after the descriptor scan.
+            auto locks = LockDDWallet();
+            const_cast<DigiDollarWallet*>(this)->StoreAddressKey(output_key, key);
+        };
+
+        for (wallet::DescriptorScriptPubKeyMan* desc_spk : descriptor_managers) {
             spk_man_count++;
 
             // Get all scripts this descriptor knows about
@@ -869,7 +878,7 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                                     if (provider->GetKeyByXOnly(spenddata.internal_key, internal_key)) {
                                         // Store the internal key for this DD output
                                         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - direct descriptor match, storing internal key\n");
-                                        const_cast<DigiDollarWallet*>(this)->StoreAddressKey(output_key, internal_key);
+                                        cache_address_key(internal_key);
                                         return true;
                                     }
                                 }
@@ -928,7 +937,7 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                                          tweaked->first.begin())) {
                     // Found a match! Cache it in dd_address_keys for future lookups
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - found key via descriptor scan, caching DD address key\n");
-                    const_cast<DigiDollarWallet*>(this)->StoreAddressKey(output_key, test_key);
+                    cache_address_key(test_key);
                     return true;
                 }
             }
@@ -936,7 +945,10 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
 
         LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - no match found. Stats: spk_mans=%d, p2tr_scripts=%d, providers=%d, spenddata=%d, keys=%d, target_in_scripts=%d\n",
                  spk_man_count, p2tr_script_count, provider_count, spenddata_count, key_count, found_target_in_scripts);
-        dd_foreign_output_keys.insert(output_key_array);
+        {
+            LOCK(cs_dd_wallet);
+            dd_foreign_output_keys.insert(output_key_array);
+        }
     }
 
     return false;
@@ -1902,35 +1914,123 @@ CAmount DigiDollarWallet::GetDDBalanceLegacy() const {
     return GetDDBalance(CDigiDollarAddress());
 }
 
-std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
-    auto locks = LockDDWallet();
-    // Return actual transaction history (with mock fallback for testing)
-    std::vector<DDTransaction> history = transaction_history;
+std::vector<DDTransaction> DigiDollarWallet::GetStoredDDTransactionHistory(size_t count,
+                                                                           size_t skip) const
+{
+    // transaction_history is populated from WalletDB before the Qt wallet
+    // model is created. Copying this small value-only snapshot is therefore a
+    // safe way to paint useful rows immediately; unlike the canonical history
+    // builder below it never waits for cs_wallet or scans descriptors.
+    std::vector<DDTransaction> history;
+    {
+        LOCK(cs_dd_wallet);
+        history.reserve(transaction_history.size() + mockHistory.size());
+        history.insert(history.end(), transaction_history.begin(), transaction_history.end());
+        history.insert(history.end(), mockHistory.begin(), mockHistory.end());
+    }
+
+    std::stable_sort(history.begin(), history.end(),
+                     [](const DDTransaction& a, const DDTransaction& b) {
+                         return a.timestamp > b.timestamp;
+                     });
+
+    const size_t begin = std::min(skip, history.size());
+    const size_t end = std::min(history.size(), begin + std::min(count, history.size() - begin));
+    return {history.begin() + begin, history.begin() + end};
+}
+
+std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const
+{
+    // Copy the DD-owned state first, then release cs_dd_wallet. History
+    // rendering, metadata parsing, descriptor recovery and sorting can all be
+    // expensive and must not prevent the node from processing new DD state.
+    std::vector<DDTransaction> stored_history;
+    std::vector<DDTransaction> mock_history;
+    {
+        LOCK(cs_dd_wallet);
+        stored_history = transaction_history;
+        mock_history = mockHistory;
+    }
+    std::vector<DDTransaction> history = stored_history;
+
+    struct WalletHistorySnapshot {
+        CTransactionRef tx;
+        bool found{false};
+        bool in_mempool{false};
+        bool is_local{false};
+        bool abandoned{false};
+        int confirmations{0};
+        int blockheight{-1};
+        std::string blockhash;
+        CAmount fee{0};
+    };
+    std::map<std::string, WalletHistorySnapshot> wallet_snapshots;
+
+    // Take a compact, immutable view of one wallet transaction at a time. A
+    // history worker therefore releases cs_wallet between records instead of
+    // monopolizing it for the entire table rebuild.
+    auto get_wallet_snapshot = [this, &wallet_snapshots](const std::string& txid_hex) -> const WalletHistorySnapshot& {
+        auto [it, inserted] = wallet_snapshots.try_emplace(txid_hex);
+        if (!inserted || !m_wallet) return it->second;
+
+        uint256 txid;
+        txid.SetHex(txid_hex);
+        LOCK(m_wallet->cs_wallet);
+        const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(txid);
+        if (!wtx || !wtx->tx) return it->second;
+
+        WalletHistorySnapshot& snapshot = it->second;
+        snapshot.found = true;
+        snapshot.tx = wtx->tx;
+        snapshot.confirmations = m_wallet->GetTxDepthInMainChain(*wtx);
+        snapshot.in_mempool = wtx->InMempool();
+        snapshot.is_local = snapshot.confirmations == 0 && wtx->isUnconfirmed() && !snapshot.in_mempool;
+        if (const auto* conf = wtx->state<wallet::TxStateConfirmed>()) {
+            snapshot.blockheight = conf->confirmed_block_height;
+            snapshot.blockhash = conf->confirmed_block_hash.GetHex();
+        }
+
+        const CAmount debit = wallet::CachedTxGetDebit(*m_wallet, *wtx, wallet::ISMINE_ALL);
+        const CAmount credit = wallet::CachedTxGetCredit(*m_wallet, *wtx, wallet::ISMINE_ALL);
+        if (debit > credit) snapshot.fee = debit - credit;
+
+        snapshot.abandoned = wtx->isAbandoned();
+        if (snapshot.abandoned) {
+            snapshot.confirmations = -1;
+            snapshot.is_local = false;
+        } else if (snapshot.confirmations < 0) {
+            snapshot.is_local = false;
+            const std::set<uint256> conflicts = m_wallet->GetTxConflicts(*wtx);
+            bool all_conflicts_abandoned = !conflicts.empty();
+            for (const uint256& conflict_txid : conflicts) {
+                const wallet::CWalletTx* conflict_wtx = m_wallet->GetWalletTx(conflict_txid);
+                if (conflict_wtx && !conflict_wtx->isAbandoned()) {
+                    all_conflicts_abandoned = false;
+                    break;
+                }
+            }
+            if (all_conflicts_abandoned) {
+                snapshot.abandoned = true;
+                snapshot.confirmations = -1;
+                LogPrintf("DigiDollar: Transaction %s marked abandoned (all %zu conflicts are abandoned)\n",
+                          txid_hex, conflicts.size());
+            }
+        }
+        return snapshot;
+    };
 
     // Synthesize per-output wallet history rows from wallet transactions. The
     // database stores one DDTransaction per txid, so multi-recipient receives
     // and redemption DD change need display rows built on demand.
     if (m_wallet) {
-        LOCK(m_wallet->cs_wallet);
         std::set<std::string> txids_with_synthesized_rows;
         std::vector<DDTransaction> synthesized_rows;
         std::set<std::string> local_send_txids;
-        for (const auto& hist_tx : transaction_history) {
+        for (const auto& hist_tx : stored_history) {
             if (!hist_tx.incoming && hist_tx.category == "send") {
                 local_send_txids.insert(hist_tx.txid);
             }
         }
-
-        auto is_local_dd_output = [this](const CTxOut& txout, const uint256& txid) {
-            if (!IsStandardDDTokenOutput(txout)) return false;
-
-            std::array<unsigned char, 32> output_key;
-            std::copy(txout.scriptPubKey.begin() + 2, txout.scriptPubKey.begin() + 34, output_key.begin());
-            const bool is_mine = m_wallet->IsMine(txout.scriptPubKey);
-            const bool has_plain_key = dd_address_keys.find(output_key) != dd_address_keys.end();
-            const bool has_crypted_key = dd_crypted_address_keys.find(output_key) != dd_crypted_address_keys.end();
-            return is_mine || has_plain_key || has_crypted_key || IsDDOutputMine(txout, txid);
-        };
 
         auto append_local_output_rows = [&](const DDTransaction& base_tx,
                                             const CTransaction& tx,
@@ -1947,9 +2047,8 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
                 if (!IsStandardDDTokenOutput(txout)) continue;
 
                 const size_t amount_index = dd_output_index++;
-                if (amount_index >= dd_amounts.size()) continue;
-                if (amount_index >= max_dd_outputs) continue;
-                if (!is_local_dd_output(txout, base_txid)) continue;
+                if (amount_index >= dd_amounts.size() || amount_index >= max_dd_outputs) continue;
+                if (!IsDDOutputMine(txout, base_txid)) continue;
 
                 CTxDestination dest;
                 std::string dd_address;
@@ -1957,14 +2056,12 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
                     dd_address = DigiDollar::EncodeDigiDollarAddress(dest, Params());
                 }
 
-                bool duplicate = false;
-                for (const auto& existing : synthesized_rows) {
-                    if (existing.txid == base_tx.txid && existing.category == category &&
-                        existing.address == dd_address && existing.amount == dd_amounts[amount_index]) {
-                        duplicate = true;
-                        break;
-                    }
-                }
+                const bool duplicate = std::any_of(
+                    synthesized_rows.begin(), synthesized_rows.end(),
+                    [&](const DDTransaction& existing) {
+                        return existing.txid == base_tx.txid && existing.category == category &&
+                               existing.address == dd_address && existing.amount == dd_amounts[amount_index];
+                    });
                 if (duplicate) continue;
 
                 DDTransaction row = base_tx;
@@ -1974,20 +2071,18 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
                 row.category = category;
                 row.fee = 0;
                 row.lock_tier = -1;
-                synthesized_rows.push_back(row);
+                synthesized_rows.push_back(std::move(row));
                 txids_with_synthesized_rows.insert(base_tx.txid);
             }
         };
 
-        for (const auto& hist_tx : transaction_history) {
-            uint256 txid;
-            txid.SetHex(hist_tx.txid);
-            const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(txid);
-            if (!wtx || !wtx->tx) continue;
+        for (const auto& hist_tx : stored_history) {
+            const WalletHistorySnapshot& snapshot = get_wallet_snapshot(hist_tx.txid);
+            if (!snapshot.tx) continue;
 
             if (!hist_tx.incoming && hist_tx.category == "send" && hist_tx.amount != 0) {
                 const CAmount send_amount = hist_tx.amount < 0 ? -hist_tx.amount : hist_tx.amount;
-                const std::vector<CAmount> dd_amounts = ExtractDDMetadataAmounts(*wtx->tx, DD_TX_TRANSFER);
+                const std::vector<CAmount> dd_amounts = ExtractDDMetadataAmounts(*snapshot.tx, DD_TX_TRANSFER);
                 CAmount recipient_sum = 0;
                 size_t recipient_count = 0;
                 for (CAmount amount : dd_amounts) {
@@ -1996,12 +2091,12 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
                     if (recipient_sum >= send_amount) break;
                 }
                 if (recipient_sum == send_amount && recipient_count > 0) {
-                    append_local_output_rows(hist_tx, *wtx->tx, DD_TX_TRANSFER, recipient_count, "receive");
+                    append_local_output_rows(hist_tx, *snapshot.tx, DD_TX_TRANSFER, recipient_count, "receive");
                 }
             } else if (hist_tx.incoming && hist_tx.category == "receive" && !local_send_txids.count(hist_tx.txid)) {
-                append_local_output_rows(hist_tx, *wtx->tx, DD_TX_TRANSFER, std::numeric_limits<size_t>::max(), "receive");
+                append_local_output_rows(hist_tx, *snapshot.tx, DD_TX_TRANSFER, std::numeric_limits<size_t>::max(), "receive");
             } else if (!hist_tx.incoming && hist_tx.category == "redeem") {
-                append_local_output_rows(hist_tx, *wtx->tx, DD_TX_REDEEM, std::numeric_limits<size_t>::max(), "redeem_change");
+                append_local_output_rows(hist_tx, *snapshot.tx, DD_TX_REDEEM, std::numeric_limits<size_t>::max(), "redeem_change");
             }
         }
 
@@ -2020,77 +2115,28 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
         }
     }
 
-    // Add mock history for testing if present
-    history.insert(history.end(), mockHistory.begin(), mockHistory.end());
+    history.insert(history.end(), mock_history.begin(), mock_history.end());
 
-    // Calculate confirmations and abandoned status on-demand
-    // This is the same pattern Bitcoin Core uses - confirmations computed dynamically
-    for (auto& ddtx : history) {
-        uint256 txid;
-        txid.SetHex(ddtx.txid);
+    // Apply the immutable wallet snapshots after all DD-only synthesis. No
+    // CWalletTx pointer escapes cs_wallet, and the remaining sort is lock-free.
+    for (DDTransaction& ddtx : history) {
         const bool preset_in_mempool = ddtx.in_mempool;
         const bool preset_is_local = ddtx.is_local;
-        ddtx.confirmations = GetDDTransactionConfirmations(txid);
+        const WalletHistorySnapshot& snapshot = get_wallet_snapshot(ddtx.txid);
+        ddtx.confirmations = 0;
         ddtx.in_mempool = preset_in_mempool;
         ddtx.is_local = preset_is_local;
-
-        // Check if transaction is abandoned or effectively abandoned
         ddtx.abandoned = false;
-        if (m_wallet) {
-            LOCK(m_wallet->cs_wallet);
-            const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(txid);
-            if (wtx) {
-                ddtx.in_mempool = wtx->InMempool();
-                ddtx.is_local = ddtx.confirmations == 0 && wtx->isUnconfirmed() && !ddtx.in_mempool;
 
-                // Set block height from the transaction state
-                if (auto* conf = wtx->state<wallet::TxStateConfirmed>()) {
-                    ddtx.blockheight = conf->confirmed_block_height;
-                    ddtx.blockhash = conf->confirmed_block_hash.GetHex();
-                } else {
-                    // Transaction is not confirmed, keep default -1
-                    ddtx.blockheight = -1;
-                    ddtx.blockhash = "";
-                }
-
-                // Calculate actual fee for send/mint/redeem transactions
-                if (!ddtx.incoming && ddtx.fee == 0 && m_wallet) {
-                    CAmount debit = wallet::CachedTxGetDebit(*m_wallet, *wtx, wallet::ISMINE_ALL);
-                    CAmount credit = wallet::CachedTxGetCredit(*m_wallet, *wtx, wallet::ISMINE_ALL);
-                    if (debit > credit) {
-                        ddtx.fee = debit - credit;
-                    }
-                }
-
-                if (wtx->isAbandoned()) {
-                    // Directly abandoned
-                    ddtx.abandoned = true;
-                    ddtx.is_local = false;
-                    ddtx.confirmations = -1;
-                } else if (ddtx.confirmations < 0) {
-                    ddtx.is_local = false;
-                    // Transaction is conflicted (negative confirmations)
-                    // Check if ALL conflicting transactions are abandoned
-                    // If so, this transaction should also be considered abandoned
-                    std::set<uint256> conflicts = m_wallet->GetTxConflicts(*wtx);
-                    bool all_conflicts_abandoned = !conflicts.empty();
-                    for (const uint256& conflict_txid : conflicts) {
-                        const wallet::CWalletTx* conflict_wtx = m_wallet->GetWalletTx(conflict_txid);
-                        if (conflict_wtx && !conflict_wtx->isAbandoned()) {
-                            // Found a conflict that is NOT abandoned (it got confirmed or is pending)
-                            all_conflicts_abandoned = false;
-                            break;
-                        }
-                    }
-                    if (all_conflicts_abandoned) {
-                        // All conflicts are abandoned, so treat this as abandoned too
-                        ddtx.abandoned = true;
-                        ddtx.confirmations = -1;
-                        LogPrintf("DigiDollar: Transaction %s marked abandoned (all %zu conflicts are abandoned)\n",
-                                  ddtx.txid, conflicts.size());
-                    }
-                }
-            }
+        if (!snapshot.found) continue;
+        ddtx.confirmations = snapshot.confirmations;
+        ddtx.in_mempool = snapshot.in_mempool;
+        ddtx.is_local = snapshot.is_local;
+        ddtx.abandoned = snapshot.abandoned;
+        ddtx.blockheight = snapshot.blockheight;
+        ddtx.blockhash = snapshot.blockhash;
+        if (!ddtx.incoming && ddtx.fee == 0 && snapshot.fee > 0) {
+            ddtx.fee = snapshot.fee;
         }
     }
 
@@ -2102,6 +2148,76 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
 
     LogPrintf("DigiDollar: GetDDTransactionHistory returning %zu transactions\n", history.size());
     return history;
+}
+
+bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
+                                                   const CScript& recipient_script,
+                                                   CAmount total_outflow,
+                                                   std::string& error)
+{
+    auto locks = LockDDWallet();
+    error.clear();
+    if (!m_wallet) {
+        error = "DigiDollar wallet is not initialized";
+        return false;
+    }
+    if (txid.IsNull() || total_outflow <= 0) {
+        error = "Invalid finalized Paymaster history record";
+        return false;
+    }
+
+    DDTransaction outgoing;
+    outgoing.txid = txid.GetHex();
+    outgoing.amount = total_outflow;
+    outgoing.timestamp = GetTime();
+    outgoing.confirmations = 0;
+    outgoing.incoming = false;
+    outgoing.category = "send";
+
+    CTxDestination destination;
+    if (ExtractDestination(recipient_script, destination)) {
+        outgoing.address = DigiDollar::EncodeDigiDollarAddress(destination, Params());
+    }
+
+    // ProcessIncomingTransaction may have observed wallet-owned DD change
+    // before the Paymaster result reached the client. Preserve its timestamp,
+    // then replace every in-memory view of this txid. WalletDB intentionally
+    // stores one DDTransaction per txid, so the same write also repairs the
+    // durable row after a restart or an idempotent result replay.
+    for (const DDTransaction& existing : transaction_history) {
+        if (existing.txid == outgoing.txid) {
+            outgoing.timestamp = existing.timestamp;
+            if (!existing.comment.empty()) outgoing.comment = existing.comment;
+            break;
+        }
+    }
+
+    const auto exact_send = std::find_if(
+        transaction_history.begin(), transaction_history.end(),
+        [&](const DDTransaction& existing) {
+            return existing.txid == outgoing.txid &&
+                   existing.category == "send" &&
+                   !existing.incoming &&
+                   existing.amount == outgoing.amount &&
+                   existing.address == outgoing.address;
+        });
+    if (exact_send != transaction_history.end()) return true;
+
+    wallet::WalletBatch batch(m_wallet->GetDatabase());
+    if (!batch.WriteDDTransaction(outgoing)) {
+        error = "Failed to persist finalized Paymaster transaction history";
+        return false;
+    }
+
+    transaction_history.erase(
+        std::remove_if(
+            transaction_history.begin(), transaction_history.end(),
+            [&](const DDTransaction& existing) {
+                return existing.txid == outgoing.txid;
+            }),
+        transaction_history.end());
+    transaction_history.push_back(std::move(outgoing));
+    return true;
 }
 
 bool DigiDollarWallet::ValidateDDAddress(const std::string& address) const {

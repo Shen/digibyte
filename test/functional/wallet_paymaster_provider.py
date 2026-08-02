@@ -1180,6 +1180,19 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(sweep_client.getbalance(), 0)
         assert_equal(sweep_recipient.getbalance(), 0)
 
+        # A collaborative Paymaster transaction is not created by the normal
+        # direct-send wallet path. The final result must nevertheless replace
+        # any provisional wallet-owned change row with one durable outgoing
+        # history row for the client's exact gross DD outflow.
+        sweep_history = [
+            entry for entry in sweep_client.listdigidollartxs(1000, 0)
+            if entry["txid"] == sweep_txid
+        ]
+        assert_equal(len(sweep_history), 1)
+        assert_equal(sweep_history[0]["category"], "send")
+        assert_equal(sweep_history[0]["amount"], -5000)
+        assert_equal(sweep_history[0]["address"], sweep_recipient_address)
+
         self.wait_until(
             lambda: sweep_client.getdigidollarsendsession({
                 "request_id": sweep_request_id,
