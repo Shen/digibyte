@@ -4172,6 +4172,38 @@ void DigiDollarWidgetTests::paymasterExternalReadinessIsSeparatedFromConfigurati
     QVERIFY(other_requirement->text().startsWith(QStringLiteral("!")));
 }
 
+void DigiDollarWidgetTests::paymasterPendingStartUsesLiveStatusInsteadOfStaleModal()
+{
+    std::unique_ptr<const PlatformStyle> platform_style(
+        PlatformStyle::instantiate("other"));
+    DigiDollarTab tab(platform_style.get());
+    QLabel* provider_status = tab.findChild<QLabel*>(
+        QStringLiteral("paymasterProviderStatus"));
+    QVERIFY(provider_status != nullptr);
+
+    UniValue pending{UniValue::VOBJ};
+    pending.pushKV("running", true);
+    pending.pushKV("ready", false);
+    pending.pushKV("operation_mode", "automatic");
+    pending.pushKV("service_state", "replenishing_liquidity");
+
+    const auto message_box_count = [] {
+        const QWidgetList widgets = QApplication::topLevelWidgets();
+        return std::count_if(
+            widgets.cbegin(), widgets.cend(),
+            [](QWidget* widget) { return qobject_cast<QMessageBox*>(widget); });
+    };
+    const int message_boxes_before = message_box_count();
+    tab.setPaymasterStartResultForTesting(pending);
+    const int message_boxes_after = message_box_count();
+
+    QCOMPARE(message_boxes_after, message_boxes_before);
+    QVERIFY(provider_status->text().contains(
+        QStringLiteral("Provider start accepted")));
+    QVERIFY(provider_status->text().contains(
+        QStringLiteral("restoring the saved liquidity targets")));
+}
+
 void DigiDollarWidgetTests::paymasterCarrierWithdrawalActionsFailClosed()
 {
     std::unique_ptr<const PlatformStyle> platform_style(

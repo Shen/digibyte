@@ -55,6 +55,8 @@ public:
     void setPaymasterLiquidityPoolForTesting(const UniValue& pool_info);
     /** Test hook for exercising external Paymaster readiness and Oracle presentation without RPC I/O. */
     void setPaymasterReadinessStatusForTesting(const UniValue& status);
+    /** Test hook for exercising the provider-start result presentation without opening the start confirmation. */
+    void setPaymasterStartResultForTesting(const UniValue& result);
     /**
      * Install a deterministic Paymaster RPC transport for widget tests.
      *

@@ -52,6 +52,7 @@ private Q_SLOTS:
     void paymasterLiquidityPolicySavePersistsVisibleValues();
     void paymasterLiquidityMaintenanceStatesAreReadable();
     void paymasterExternalReadinessIsSeparatedFromConfiguration();
+    void paymasterPendingStartUsesLiveStatusInsteadOfStaleModal();
     void paymasterCarrierWithdrawalActionsFailClosed();
     void paymasterCarrierWithdrawalPreviewsArePlanBound();
     void paymasterSafetyControlsDefaultFailClosed();

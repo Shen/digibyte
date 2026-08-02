@@ -2326,56 +2326,7 @@ public:
             }
             call("startpaymaster", {}, false, nullptr,
                  [this](const UniValue& result) {
-                     const QString mode = result.find_value("operation_mode").isStr()
-                         ? QString::fromStdString(result.find_value("operation_mode").get_str())
-                         : m_operation_mode;
-                     const bool running =
-                         result.find_value("running").isBool() &&
-                         result.find_value("running").get_bool();
-                     const bool ready =
-                         result.find_value("ready").isBool() &&
-                         result.find_value("ready").get_bool();
-                     const QString service_state =
-                         result.find_value("service_state").isStr()
-                             ? QString::fromStdString(
-                                   result.find_value("service_state").get_str())
-                             : QStringLiteral("stopped");
-
-                     if (!running) {
-                         QMessageBox::warning(
-                             this, tr("Paymaster provider not started"),
-                             !m_liquidity_targets_satisfy_provider_policy
-                                 ? tr("The saved liquidity targets cannot satisfy the active offer. A user-paid provider needs at least three admission DigiDollar carriers and one operational DigiDollar carrier. Review and save the liquidity targets before starting the provider.")
-                                 : tr("The provider is not running because one or more readiness requirements are still unmet. Refresh the Overview for the next safe action."));
-                     } else if (ready &&
-                                (service_state == QLatin1String("active") ||
-                                 service_state == QLatin1String("manual"))) {
-                         QMessageBox::information(
-                             this, tr("Paymaster provider started"),
-                             mode == QLatin1String("manual")
-                                 ? tr("The provider is now online in manual expert mode. Queue items must be processed from Operations.")
-                                 : tr("Automatic provider operation is active. Core now processes eligible requests and validated submissions within the saved safety budgets. No provider-side confirmation is required for each transfer."));
-                     } else {
-                         QString pending;
-                         if (service_state ==
-                             QLatin1String("waiting_for_maintenance_approval")) {
-                             pending = tr("The runtime is waiting for explicit approval of finite paid-maintenance limits.");
-                         } else if (service_state ==
-                                    QLatin1String("waiting_for_liquidity_confirmation")) {
-                             pending = tr("Replacement liquidity has been prepared and must confirm before the provider can accept new requests.");
-                         } else if (service_state ==
-                                    QLatin1String("replenishing_liquidity")) {
-                             pending = tr("Core is restoring the saved liquidity targets. The provider will accept requests only after the required outputs are confirmed.");
-                         } else if (service_state ==
-                                    QLatin1String("drain_only")) {
-                             pending = tr("The provider started in recovery-only mode so previously authorized work can finish safely. It will not accept new requests until all readiness requirements are satisfied.");
-                         } else {
-                             pending = tr("The provider runtime is registered but is not yet accepting new requests. Refresh the Overview for the remaining requirement.");
-                         }
-                         QMessageBox::information(
-                             this, tr("Paymaster provider startup pending"),
-                             pending);
-                     }
+                     presentProviderStartResult(result);
                      refreshStatus();
                   });
         });
@@ -3062,6 +3013,11 @@ public:
         updateProviderButtons();
     }
 
+    void setStartResultForTesting(const UniValue& result)
+    {
+        presentProviderStartResult(result);
+    }
+
     void setLiquidityStatusForTesting(const UniValue& status)
     {
         applyLiquidityStatus(status);
@@ -3085,6 +3041,67 @@ private:
         AVAILABLE,
         UNAVAILABLE,
     };
+
+    void presentProviderStartResult(const UniValue& result)
+    {
+        const UniValue& result_mode = result.find_value("operation_mode");
+        const QString mode = result_mode.isStr()
+            ? QString::fromStdString(result_mode.get_str())
+            : m_operation_mode;
+        const bool running = result.find_value("running").isBool() &&
+                             result.find_value("running").get_bool();
+        const bool ready = result.find_value("ready").isBool() &&
+                           result.find_value("ready").get_bool();
+        const UniValue& result_service_state =
+            result.find_value("service_state");
+        const QString service_state = result_service_state.isStr()
+            ? QString::fromStdString(result_service_state.get_str())
+            : QStringLiteral("stopped");
+
+        if (!running) {
+            QMessageBox::warning(
+                this, tr("Paymaster provider not started"),
+                !m_liquidity_targets_satisfy_provider_policy
+                    ? tr("The saved liquidity targets cannot satisfy the active offer. A user-paid provider needs at least three admission DigiDollar carriers and one operational DigiDollar carrier. Review and save the liquidity targets before starting the provider.")
+                    : tr("The provider is not running because one or more readiness requirements are still unmet. Refresh the Overview for the next safe action."));
+            return;
+        }
+
+        if (ready && (service_state == QLatin1String("active") ||
+                      service_state == QLatin1String("manual"))) {
+            QMessageBox::information(
+                this, tr("Paymaster provider started"),
+                mode == QLatin1String("manual")
+                    ? tr("The provider is now online in manual expert mode. Queue items must be processed from Operations.")
+                    : tr("Automatic provider operation is active. Core now processes eligible requests and validated submissions within the saved safety budgets. No provider-side confirmation is required for each transfer."));
+            return;
+        }
+
+        QString pending;
+        if (service_state ==
+            QLatin1String("waiting_for_maintenance_approval")) {
+            pending = tr("waiting for approval of the finite refill limits");
+        } else if (service_state ==
+                   QLatin1String("waiting_for_liquidity_confirmation")) {
+            pending = tr("replacement liquidity is waiting for confirmation");
+        } else if (service_state ==
+                   QLatin1String("replenishing_liquidity")) {
+            pending = tr("restoring the saved liquidity targets");
+        } else if (service_state == QLatin1String("drain_only")) {
+            pending = tr("finishing previously authorized work in recovery-only mode");
+        } else {
+            pending = tr("checking the remaining readiness requirement");
+        }
+
+        // A pending start is normal background progress, not a result the
+        // operator must acknowledge. A modal message box runs a nested event
+        // loop, so the periodic refresh can make the Overview ready while the
+        // old "startup pending" text remains in front of it. Keep progress in
+        // the live status area instead; the caller immediately refreshes the
+        // authoritative Core state after this short transitional message.
+        m_status->setText(
+            tr("Provider start accepted — %1.").arg(pending));
+    }
 
     bool hasRpcTransport() const
     {
@@ -8223,6 +8240,14 @@ void DigiDollarTab::setPaymasterReadinessStatusForTesting(
 {
     if (m_paymasterWidget) {
         m_paymasterWidget->setReadinessStatusForTesting(status);
+    }
+}
+
+void DigiDollarTab::setPaymasterStartResultForTesting(
+    const UniValue& result)
+{
+    if (m_paymasterWidget) {
+        m_paymasterWidget->setStartResultForTesting(result);
     }
 }
 
