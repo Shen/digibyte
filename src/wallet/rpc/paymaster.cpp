@@ -2872,6 +2872,26 @@ bool AcknowledgeRejectedDirectMessage(
     return true;
 }
 
+/** Return whether an immutable quote continuation can never become valid on a
+ * later scheduler pass. Capacity is durably reserved before its proof is sent,
+ * so a quote that cannot reload that exact reservation is not a transient
+ * liquidity or synchronization failure. Keeping such a message leased would
+ * let one stale or malicious peer repeatedly fault an otherwise healthy
+ * automatic provider service.
+ */
+bool IsPermanentCapacityContinuationError(const std::string& error)
+{
+    return error == "PAYMASTER_CAPACITY_CONTINUATION_MISMATCH" ||
+           error == "PAYMASTER_CAPACITY_RESERVATION_MISSING" ||
+           error == "PAYMASTER_CAPACITY_ADMISSION_MISSING" ||
+           error == "PAYMASTER_CAPACITY_ADMISSION_EXPIRED" ||
+           error == "PAYMASTER_CAPACITY_ADMISSION_CONFLICT" ||
+           error == "PAYMASTER_CAPACITY_RESPONSE_BINDING_MISMATCH" ||
+           error == "PAYMASTER_CAPACITY_RESPONSE_ENCODING" ||
+           error == "PAYMASTER_CAPACITY_RESPONSE_INDEX_MISMATCH" ||
+           error == "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
+}
+
 /** Keep one provider-addressed inbound message leased until the durable
  * handler finishes. A normal return acknowledges the message; unwinding from
  * a local failure releases only the lease so the scheduler can retry it. The
@@ -12770,6 +12790,8 @@ RPCHelpMan processpaymasterrequests()
         RPCResult{RPCResult::Type::OBJ, "", "Provider quote processing result", {
                                                                                     {RPCResult::Type::BOOL, "processed", "Whether a request was available"},
                                                                                     {RPCResult::Type::BOOL, "queued", "Whether the signed response was queued"},
+                                                                                    {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether a permanently invalid inbound continuation was discarded"},
+                                                                                    {RPCResult::Type::STR, "rejection_reason", /*optional=*/true, "Stable reason for discarding a permanently invalid continuation"},
                                                                                     {RPCResult::Type::STR, "message_type", /*optional=*/true, "capacity, recovery_request, or quote"},
                                                                                     {RPCResult::Type::STR_HEX, "client_nonce", /*optional=*/true, "Capacity-bound client nonce"},
                                                                                     {RPCResult::Type::STR_HEX, "capacity_snapshot_id", /*optional=*/true, "Signed capacity snapshot"},
@@ -13529,6 +13551,22 @@ RPCHelpMan processpaymasterrequests()
                     messages.front().canonical_netgroup, needs_carrier,
                     DGBSatoshis{network_fee}, now,
                     provider_netgroup_bucket, error)) {
+                if (IsPermanentCapacityContinuationError(error)) {
+                    // The exact quote can no longer be authorized because its
+                    // preceding Capacity reservation is absent, expired, or
+                    // conflicts with the persisted proof. Consume only this
+                    // invalid inbox entry and leave the provider's maintenance
+                    // state intact; a remote peer must not be able to turn a
+                    // safely rejected continuation into a provider fault.
+                    const std::string rejection_reason{error};
+                    if (!AcknowledgeRejectedDirectMessage(
+                            *context.paymaster, direct, error)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, error);
+                    }
+                    result.pushKV("rejected", true);
+                    result.pushKV("rejection_reason", rejection_reason);
+                    return result;
+                }
                 throw JSONRPCError(
                     RPC_WALLET_ERROR,
                     error.empty() ? "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" : error);
