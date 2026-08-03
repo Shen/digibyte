@@ -69,12 +69,14 @@ struct DDCents {
     int64_t value{0};
     SERIALIZE_METHODS(DDCents, obj) { READWRITE(obj.value); }
     friend bool operator==(const DDCents& a, const DDCents& b) { return a.value == b.value; }
+    friend bool operator!=(const DDCents& a, const DDCents& b) { return !(a == b); }
 };
 
 struct DGBSatoshis {
     int64_t value{0};
     SERIALIZE_METHODS(DGBSatoshis, obj) { READWRITE(obj.value); }
     friend bool operator==(const DGBSatoshis& a, const DGBSatoshis& b) { return a.value == b.value; }
+    friend bool operator!=(const DGBSatoshis& a, const DGBSatoshis& b) { return !(a == b); }
 };
 
 using PaymasterId = uint256;
