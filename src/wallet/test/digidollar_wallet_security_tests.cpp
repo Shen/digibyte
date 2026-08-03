@@ -281,18 +281,49 @@ BOOST_AUTO_TEST_CASE(rh08_03_watch_only_output_excluded_from_dd_ownership)
 
     CTxOut dd_output(0, p2tr_script);
 
-    // This output is NOT in our wallet at all — IsDDOutputMine should return false
+    // Import the exact P2TR script as watch-only so this test distinguishes
+    // ISMINE_WATCH_ONLY from an unrelated ISMINE_NO output.
+    LegacyScriptPubKeyMan* spk_man = m_wallet.GetOrCreateLegacyScriptPubKeyMan();
+    {
+        LOCK(spk_man->cs_KeyStore);
+        BOOST_REQUIRE(spk_man->LoadWatchOnly(p2tr_script));
+    }
+    BOOST_REQUIRE(m_wallet.IsMine(dd_output) & ISMINE_WATCH_ONLY);
+
+    // Watch-only ownership must not make a DD output spendable.
     uint256 fake_txid;
     GetRandBytes(fake_txid);
-    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 0u);
     BOOST_CHECK(!dd_wallet.IsDDOutputMine(dd_output, fake_txid));
-    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
-    BOOST_CHECK(!dd_wallet.IsDDOutputMine(dd_output, fake_txid));
-    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
 
-    // Verify the function checks ISMINE_SPENDABLE (code inspection confirms this,
-    // but this test ensures the behavior holds)
     BOOST_TEST_MESSAGE("RH-08-03: Watch-only contamination properly blocked via ISMINE_SPENDABLE checks.");
+}
+
+BOOST_AUTO_TEST_CASE(rh08_03a_foreign_descriptor_output_miss_is_cached)
+{
+    // The negative ownership cache exists specifically to avoid repeating the
+    // wallet-wide fallback scan for foreign outputs in descriptor wallets.
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    DigiDollarWallet dd_wallet(&m_wallet);
+
+    CKey foreign_key;
+    foreign_key.MakeNewKey(true);
+    XOnlyPubKey foreign_xonly(foreign_key.GetPubKey());
+    CScript foreign_script;
+    foreign_script << OP_1 << std::vector<unsigned char>(foreign_xonly.begin(), foreign_xonly.end());
+    CTxOut foreign_output(0, foreign_script);
+
+    uint256 foreign_txid;
+    GetRandBytes(foreign_txid);
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 0u);
+    BOOST_CHECK(!dd_wallet.IsDDOutputMine(foreign_output, foreign_txid));
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
+    BOOST_CHECK(!dd_wallet.IsDDOutputMine(foreign_output, foreign_txid));
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
 }
 
 BOOST_AUTO_TEST_CASE(rh08_03b_foreign_mint_with_wallet_dgb_output_not_claimed)
