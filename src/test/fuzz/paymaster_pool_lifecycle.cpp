@@ -32,6 +32,11 @@ using namespace DigiDollar::Paymaster;
 
 namespace {
 
+void initialize_paymaster_pool_lifecycle()
+{
+    ECC_Start();
+}
+
 CScript TestScript(uint8_t discriminator)
 {
     std::array<unsigned char, 32> secret{};
@@ -148,7 +153,7 @@ size_t ActiveCount(const std::vector<ProviderPoolEntry>& pool,
 
 } // namespace
 
-FUZZ_TARGET(paymaster_pool_lifecycle)
+FUZZ_TARGET(paymaster_pool_lifecycle, .init = initialize_paymaster_pool_lifecycle)
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     std::vector<ProviderPoolEntry> pool{
