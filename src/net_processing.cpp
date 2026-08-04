@@ -278,11 +278,6 @@ struct Peer {
     /** Whether this peer supports Dandelion++ privacy protocol */
     std::atomic<bool> fSupportsDandelion{false};
     std::atomic<bool> m_paymaster_negotiated{false};
-    /** The remote peer opened this inbound socket as a dedicated paymaster
-     * connection. Set only by the post-version paymaster handshake extension
-     * sent from a locally ConnectionType::PAYMASTER peer.
-     */
-    std::atomic<bool> m_paymaster_direct_connection{false};
     int64_t m_last_getpaymasters GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
 
     struct TxRelay {
@@ -3843,12 +3838,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         const CNetMsgMaker msg_maker(greatest_common_version);
 
-        if (greatest_common_version >= WTXID_RELAY_VERSION) {
+        // Identify an outbound dedicated socket before VERACK so the accepting
+        // peer can mark its half as isolated before normal post-handshake relay
+        // setup would run.
+        if (pfrom.IsPaymasterConn()) {
+            const CBlockIndex* tip = WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip());
+            if (!m_opts.paymaster || !m_opts.paymaster->Enabled() ||
+                !DigiDollar::IsDigiDollarEnabled(tip, m_chainman)) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            m_connman.PushMessage(&pfrom, msg_maker.Make(
+                NetMsgType::SENDPMASTERS,
+                DigiDollar::Paymaster::PROTOCOL_VERSION,
+                DigiDollar::Paymaster::CAP_DIRECT_CONNECTION));
+        }
+
+        if (!pfrom.IsPaymasterDirectConn() && greatest_common_version >= WTXID_RELAY_VERSION) {
             m_connman.PushMessage(&pfrom, msg_maker.Make(NetMsgType::WTXIDRELAY));
         }
 
         // Signal ADDRv2 support (BIP155).
-        if (greatest_common_version >= 70018) {
+        if (!pfrom.IsPaymasterDirectConn() && greatest_common_version >= 70018) {
             // BIP155 defines addrv2 and sendaddrv2 for all protocol versions, but some
             // implementations reject messages they don't know. As a courtesy, don't send
             // it to nodes with a version before 70018, as no software is known to support
@@ -3871,7 +3882,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // - fRelay=true (the peer wishes to receive transaction announcements)
         //   or we're offering NODE_BLOOM to this peer. NODE_BLOOM means that
         //   the peer may turn on transaction relay later.
-        if (!pfrom.IsBlockOnlyConn() &&
+        if (!pfrom.IsPaymasterDirectConn() &&
+            !pfrom.IsBlockOnlyConn() &&
             !pfrom.IsFeelerConn() &&
             (fRelay || (peer->m_our_services & NODE_BLOOM))) {
             auto* const tx_relay = peer->SetTxRelay();
@@ -3911,7 +3923,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         {
             LOCK(cs_main);
             CNodeState* state = State(pfrom.GetId());
-            state->fPreferredDownload = (!pfrom.IsInboundConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)) && !pfrom.IsAddrFetchConn() && CanServeBlocks(*peer);
+            state->fPreferredDownload = !pfrom.IsPaymasterDirectConn() &&
+                                        (!pfrom.IsInboundConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)) &&
+                                        !pfrom.IsAddrFetchConn() && CanServeBlocks(*peer);
             m_num_preferred_download_peers += state->fPreferredDownload;
         }
 
@@ -3919,7 +3933,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // to decide whether to send GETADDR, so that we don't send it to
         // inbound or outbound block-relay-only peers.
         bool send_getaddr{false};
-        if (!pfrom.IsInboundConn()) {
+        if (!pfrom.IsInboundConn() && !pfrom.IsPaymasterDirectConn()) {
             send_getaddr = SetupAddressRelay(pfrom, *peer);
         }
         if (send_getaddr) {
@@ -3936,7 +3950,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             peer->m_addr_token_bucket += MAX_ADDR_TO_SEND;
         }
 
-        if (!pfrom.IsInboundConn()) {
+        if (!pfrom.IsInboundConn() && !pfrom.IsPaymasterDirectConn()) {
             // For non-inbound connections, we update the addrman to record
             // connection success so that addrman will have an up-to-date
             // notion of which peers are online and available.
@@ -3966,7 +3980,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         int64_t nTimeOffset = nTime - GetTime();
         pfrom.nTimeOffset = nTimeOffset;
-        if (!pfrom.IsInboundConn()) {
+        if (!pfrom.IsInboundConn() && !pfrom.IsPaymasterDirectConn()) {
             // Don't use timedata samples from inbound peers to make it
             // harder for others to tamper with our adjusted time.
             AddTimeData(pfrom.addr, nTimeOffset);
@@ -3995,6 +4009,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     // At this point, the outgoing message serialization version can't change.
     const CNetMsgMaker msgMaker(pfrom.GetCommonVersion());
 
+    // The accepting peer can send these ordinary feature-negotiation messages
+    // before it learns that our outbound socket is Paymaster-only. They carry
+    // no application data and need no response on the isolated connection.
+    if (pfrom.IsPaymasterDirectConn() && !pfrom.fSuccessfullyConnected &&
+        (msg_type == NetMsgType::WTXIDRELAY || msg_type == NetMsgType::SENDADDRV2 ||
+         msg_type == NetMsgType::SENDTXRCNCL)) {
+        return;
+    }
+
     if (msg_type == NetMsgType::VERACK) {
         if (pfrom.fSuccessfullyConnected) {
             LogPrint(BCLog::NET, "ignoring redundant verack message from peer=%d\n", pfrom.GetId());
@@ -4014,7 +4037,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogPrintf("DEBUG: VERACK processing started for peer=%d\n", pfrom.GetId());
         }
 
-        if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
+        const bool paymaster_direct{pfrom.IsPaymasterDirectConn()};
+        if (!paymaster_direct && pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
             // Tell our peer we are willing to provide version 2 cmpctblocks.
             // However, we do not request new block announcements using
             // cmpctblock messages.
@@ -4051,7 +4075,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         // Request oracle data from new peer for discovery
         // This enables newly connected/restarted nodes to catch up on oracle prices
-        {
+        if (!paymaster_direct) {
             int chain_height = m_chainman.ActiveChain().Height();
             if (IsOracleP2PActive(m_chainman)) {
                 int32_t current_epoch = GetCurrentEpoch(chain_height);
@@ -4065,25 +4089,32 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         // Schedule Dandelion discovery message if Dandelion is enabled and peer can relay transactions
-        if (gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION) && pfrom.m_relays_txs) {
+        if (!paymaster_direct && gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION) && pfrom.m_relays_txs) {
             pfrom.m_send_dandelion_discovery = true;
             LogPrint(BCLog::DANDELION, "Scheduling Dandelion discovery after VERACK for peer=%d\n", pfrom.GetId());
         }
 
-        // Paymaster negotiation is advertised only after ordinary transport
-        // setup and DigiDollar activation. It announces message support, not a
-        // provider identity or permission to send direct-session payloads.
-        if (m_opts.paymaster && m_opts.paymaster->Enabled()) {
+        // The outbound Paymaster half advertised before VERACK. Send the
+        // ordinary capability advertisement, or acknowledge an inbound direct
+        // marker, only once here.
+        if (!pfrom.IsPaymasterConn() && m_opts.paymaster && m_opts.paymaster->Enabled()) {
             const CBlockIndex* tip = WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip());
             if (DigiDollar::IsDigiDollarEnabled(tip, m_chainman)) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDPMASTERS,
                                                            DigiDollar::Paymaster::PROTOCOL_VERSION,
-                                                           pfrom.IsPaymasterConn() ?
-                                                               DigiDollar::Paymaster::CAP_DIRECT_CONNECTION :
-                                                               uint32_t{0}));
+                                                           uint32_t{0}));
             }
         }
         
+        return;
+    }
+
+    if (pfrom.IsPaymasterDirectConn() &&
+        !NetMsgType::IsPaymasterConnectionMessage(msg_type)) {
+        LogPrint(BCLog::NET,
+                 "disconnecting isolated Paymaster peer=%d for message %s\n",
+                 pfrom.GetId(), SanitizeString(msg_type));
+        pfrom.fDisconnect = true;
         return;
     }
 
@@ -4103,10 +4134,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // outbound peer cannot turn an existing relay connection into a
             // direct paymaster channel by advertising this capability.
             if (!pfrom.IsInboundConn()) return;
-            peer->m_paymaster_direct_connection = true;
+            if (pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+                (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages)) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            pfrom.MarkAsPaymasterDirect();
         }
         peer->m_paymaster_negotiated = true;
-        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPMASTERS, uint16_t{16}));
+        if (!pfrom.IsPaymasterDirectConn()) {
+            m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPMASTERS, uint16_t{16}));
+        }
         return;
     }
 
@@ -4151,6 +4189,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // bucket and before the expensive chainstate/control-proof work.
         if (!m_opts.paymaster->GetDirectory().AcceptsSequence(
                 provider_id, announcement.sequence) ||
+            !m_opts.paymaster->GetDirectory().AcceptsAdmissionOutpoints(announcement, now) ||
             !m_opts.paymaster->AdmitAnnouncementProvider(provider_id, now) ||
             !DigiDollar::Paymaster::ValidateAdmissionProofs(announcement, m_chainman, error) ||
             !m_opts.paymaster->GetDirectory().AddValidated(announcement, now)) {
@@ -4167,19 +4206,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
-    const bool direct_paymaster_message =
-        msg_type == NetMsgType::PMCAPREQ || msg_type == NetMsgType::PMCAPRESP ||
-        msg_type == NetMsgType::PMQUOTEREQ || msg_type == NetMsgType::PMQUOTERESP ||
-        msg_type == NetMsgType::PMSUBMIT || msg_type == NetMsgType::PMRESULT ||
-        msg_type == NetMsgType::PMRECOVERYREQ ||
-        msg_type == NetMsgType::PMRECOVERYRESP ||
-        msg_type == NetMsgType::PMRECOVERYSUBMIT ||
-        msg_type == NetMsgType::PMRECOVERYRESULT;
+    const bool direct_paymaster_message{NetMsgType::IsPaymasterDirectMessage(msg_type)};
     if (direct_paymaster_message) {
         // Direct messages may contain payment metadata and authorization
         // artifacts, so plaintext V1, capture-enabled mainnet operation, and
         // over-sized frames fail closed before deserialization.
-        if (!(pfrom.IsPaymasterConn() || peer->m_paymaster_direct_connection) ||
+        if (!pfrom.IsPaymasterDirectConn() || !pfrom.fSuccessfullyConnected ||
+            !peer->m_paymaster_negotiated ||
             pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
             (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled() || vRecv.empty() ||
@@ -6668,15 +6701,9 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     CNetMessage& msg{poll_result->first};
     bool fMoreWork = poll_result->second;
 
-    const bool paymaster_direct =
-        (pfrom->IsPaymasterConn() || peer->m_paymaster_direct_connection) &&
-        (msg.m_type == NetMsgType::PMCAPREQ || msg.m_type == NetMsgType::PMCAPRESP ||
-         msg.m_type == NetMsgType::PMQUOTEREQ || msg.m_type == NetMsgType::PMQUOTERESP ||
-         msg.m_type == NetMsgType::PMSUBMIT || msg.m_type == NetMsgType::PMRESULT ||
-         msg.m_type == NetMsgType::PMRECOVERYREQ ||
-         msg.m_type == NetMsgType::PMRECOVERYRESP ||
-         msg.m_type == NetMsgType::PMRECOVERYSUBMIT ||
-         msg.m_type == NetMsgType::PMRECOVERYRESULT);
+    // Never expose private direct-session payloads through raw capture or
+    // tracing, even if a future routing bug delivers one on a wrong socket.
+    const bool paymaster_direct{NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
     if (!paymaster_direct) {
         TRACE6(net, inbound_message,
             pfrom->GetId(),
@@ -7104,6 +7131,7 @@ public:
 
 bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const
 {
+    if (peer.IsPaymasterDirectConn()) return true;
     // block-relay-only peers may never send txs to us
     if (peer.IsBlockOnlyConn()) return true;
     if (peer.IsFeelerConn()) return true;
@@ -7117,7 +7145,7 @@ bool PeerManagerImpl::SetupAddressRelay(const CNode& node, Peer& peer)
     // We don't participate in addr relay with outbound block-relay-only
     // connections to prevent providing adversaries with the additional
     // information of addr traffic to infer the link.
-    if (node.IsBlockOnlyConn()) return false;
+    if (node.IsBlockOnlyConn() || node.IsPaymasterDirectConn()) return false;
 
     if (!peer.m_addr_relay_enabled.exchange(true)) {
         // During version message processing (non-block-relay-only outbound peers)
@@ -7148,11 +7176,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     // If we get here, the outgoing message serialization version is set and can't change.
     const CNetMsgMaker msgMaker(pto->GetCommonVersion());
 
-    if (pto->IsPaymasterConn() || peer->m_paymaster_direct_connection) {
+    if (pto->IsPaymasterDirectConn()) {
         if (pto->m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
             (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled()) {
             pto->fDisconnect = true;
+            return true;
+        }
+        if (!peer->m_paymaster_negotiated) {
+            MaybeSendPing(*pto, *peer, GetTime<std::chrono::microseconds>());
             return true;
         }
         auto outbound = m_opts.paymaster->TakeOutboundDirectMessages(
@@ -7183,6 +7215,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }, message.payload);
         }
+        MaybeSendPing(*pto, *peer, GetTime<std::chrono::microseconds>());
+        return true;
     }
 
     // Send Dandelion discovery message if needed

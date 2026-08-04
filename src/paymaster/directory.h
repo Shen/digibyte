@@ -99,7 +99,8 @@ bool ValidateAnnouncementEnvelope(const Announcement& announcement,
                                   bool allow_local_endpoint = false);
 
 /** Bounded cache for announcements whose envelope and UTXO proofs have already
- * been validated by the caller. Sequence replacement is monotonic.
+ * been validated by the caller. Sequence replacement is monotonic, and active
+ * provider identities cannot claim the same admission outpoint.
  */
 class Directory {
 public:
@@ -108,6 +109,9 @@ public:
      * capacity or trigger chainstate proof validation. AddValidated remains
      * authoritative and repeats this check under the same lock. */
     bool AcceptsSequence(const PaymasterId& provider_id, uint64_t sequence) const;
+    /** Cheap admission-outpoint conflict precheck before chainstate proof
+     * validation. AddValidated repeats it atomically with insertion. */
+    bool AcceptsAdmissionOutpoints(const Announcement& announcement, int64_t now) const;
     bool AddValidated(Announcement announcement, int64_t now);
     std::vector<Announcement> List(int64_t now) const;
     void RemoveExpired(int64_t now);
@@ -115,6 +119,10 @@ public:
     size_t Size() const;
 
 private:
+    bool HasAdmissionOutpointConflict(const Announcement& announcement,
+                                      const PaymasterId& provider_id,
+                                      int64_t now) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+
     mutable Mutex m_mutex;
     std::map<PaymasterId, Announcement> m_announcements GUARDED_BY(m_mutex);
 };

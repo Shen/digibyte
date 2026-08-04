@@ -73,6 +73,22 @@ const char* PMRECOVERYREQ = "pmrecreq";
 const char* PMRECOVERYRESP = "pmrecresp";
 const char* PMRECOVERYSUBMIT = "pmrecsub";
 const char* PMRECOVERYRESULT = "pmrecresult";
+
+bool IsPaymasterDirectMessage(const std::string& message_type)
+{
+    return message_type == PMCAPREQ || message_type == PMCAPRESP ||
+           message_type == PMQUOTEREQ || message_type == PMQUOTERESP ||
+           message_type == PMSUBMIT || message_type == PMRESULT ||
+           message_type == PMRECOVERYREQ || message_type == PMRECOVERYRESP ||
+           message_type == PMRECOVERYSUBMIT || message_type == PMRECOVERYRESULT;
+}
+
+bool IsPaymasterConnectionMessage(const std::string& message_type)
+{
+    return message_type == VERSION || message_type == VERACK ||
+           message_type == SENDPMASTERS || message_type == PING ||
+           message_type == PONG || IsPaymasterDirectMessage(message_type);
+}
 } // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of

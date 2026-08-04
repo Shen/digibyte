@@ -768,6 +768,9 @@ public:
     /** Whether this peer needs to be sent a Dandelion discovery message */
     std::atomic_bool m_send_dandelion_discovery{false};
 
+    /** The accepting half was authenticated as an isolated Paymaster socket. */
+    std::atomic_bool m_paymaster_direct{false};
+
     const ConnectionType m_conn_type;
 
     /** Move all messages from the received queue to the processing queue. */
@@ -844,6 +847,15 @@ public:
 
     bool IsPaymasterConn() const {
         return m_conn_type == ConnectionType::PAYMASTER;
+    }
+
+    bool IsPaymasterDirectConn() const {
+        return IsPaymasterConn() || m_paymaster_direct;
+    }
+
+    void MarkAsPaymasterDirect() {
+        assert(IsInboundConn());
+        m_paymaster_direct = true;
     }
 
     bool IsInboundConn() const {

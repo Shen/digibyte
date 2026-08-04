@@ -32,10 +32,126 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace std::literals;
 
 BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
+
+BOOST_AUTO_TEST_CASE(paymaster_direct_messages_are_sensitive)
+{
+    const std::vector<std::string> direct_messages{
+        NetMsgType::PMCAPREQ,
+        NetMsgType::PMCAPRESP,
+        NetMsgType::PMQUOTEREQ,
+        NetMsgType::PMQUOTERESP,
+        NetMsgType::PMSUBMIT,
+        NetMsgType::PMRESULT,
+        NetMsgType::PMRECOVERYREQ,
+        NetMsgType::PMRECOVERYRESP,
+        NetMsgType::PMRECOVERYSUBMIT,
+        NetMsgType::PMRECOVERYRESULT,
+    };
+    for (const auto& message_type : direct_messages) {
+        BOOST_CHECK(NetMsgType::IsPaymasterDirectMessage(message_type));
+        BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(message_type));
+    }
+
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::SENDPMASTERS));
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::PMANNOUNCE));
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::GETPMASTERS));
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::TX));
+
+    BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::VERSION));
+    BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::VERACK));
+    BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::SENDPMASTERS));
+    BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::PING));
+    BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::PONG));
+    BOOST_CHECK(!NetMsgType::IsPaymasterConnectionMessage(NetMsgType::GETPMASTERS));
+    BOOST_CHECK(!NetMsgType::IsPaymasterConnectionMessage(NetMsgType::PMANNOUNCE));
+    BOOST_CHECK(!NetMsgType::IsPaymasterConnectionMessage(NetMsgType::TX));
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_connection_suppresses_ordinary_outbound_messages)
+{
+    in_addr peer_addr;
+    peer_addr.s_addr = htonl(0x01020304);
+    const CAddress address{CService{peer_addr, 12024}, NODE_NETWORK};
+    CNode outbound{/*id=*/1,
+                   /*sock=*/nullptr,
+                   address,
+                   /*nKeyedNetGroupIn=*/0,
+                   /*nLocalHostNonceIn=*/0,
+                   CAddress{},
+                   /*addrNameIn=*/std::string{},
+                   ConnectionType::PAYMASTER,
+                   /*inbound_onion=*/false};
+    CNode inbound{/*id=*/2,
+                  /*sock=*/nullptr,
+                  address,
+                  /*nKeyedNetGroupIn=*/0,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/std::string{},
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false};
+    inbound.MarkAsPaymasterDirect();
+    BOOST_CHECK(outbound.IsPaymasterDirectConn());
+    BOOST_CHECK(inbound.IsPaymasterDirectConn());
+
+    unsigned int captured_tx{0};
+    unsigned int captured_ping{0};
+    unsigned int captured_direct{0};
+    const auto capture_message_orig{CaptureMessage};
+    CaptureMessage = [&](const CAddress&, const std::string& message_type,
+                         Span<const unsigned char>, bool is_incoming) {
+        if (is_incoming) return;
+        if (message_type == NetMsgType::TX) ++captured_tx;
+        if (message_type == NetMsgType::PING) ++captured_ping;
+        if (NetMsgType::IsPaymasterDirectMessage(message_type)) ++captured_direct;
+    };
+    m_node.args->ForceSetArg("-capturemessages", "1");
+    const CNetMsgMaker msg_maker{PROTOCOL_VERSION};
+    m_node.connman->PushMessage(&outbound, msg_maker.Make(NetMsgType::TX));
+    m_node.connman->PushMessage(&outbound, msg_maker.Make(NetMsgType::PING));
+    m_node.connman->PushMessage(&outbound, msg_maker.Make(NetMsgType::PMRECOVERYRESULT));
+    m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::TX));
+    m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::PING));
+    m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::PMRECOVERYRESULT));
+    m_node.args->ForceSetArg("-capturemessages", "0");
+    CaptureMessage = capture_message_orig;
+
+    BOOST_CHECK_EQUAL(captured_tx, 0U);
+    BOOST_CHECK_EQUAL(captured_ping, 2U);
+    BOOST_CHECK_EQUAL(captured_direct, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_connection_rejects_ordinary_inbound_messages)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    in_addr peer_addr;
+    peer_addr.s_addr = htonl(0x01020304);
+    CNode peer{/*id=*/3,
+               /*sock=*/nullptr,
+               CAddress{CService{peer_addr, 12024}, NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/std::string{},
+               ConnectionType::INBOUND,
+               /*inbound_onion=*/false};
+    m_node.peerman->InitializeNode(peer, NODE_NETWORK);
+    peer.SetCommonVersion(PROTOCOL_VERSION);
+    peer.nVersion = PROTOCOL_VERSION;
+    peer.fSuccessfullyConnected = true;
+    peer.MarkAsPaymasterDirect();
+
+    CDataStream message{SER_NETWORK, PROTOCOL_VERSION};
+    const std::atomic<bool> interrupt{false};
+    m_node.peerman->ProcessMessage(peer, NetMsgType::GETADDR, message,
+                                   std::chrono::microseconds{0}, interrupt);
+    BOOST_CHECK(peer.fDisconnect);
+}
 
 BOOST_AUTO_TEST_CASE(paymaster_direct_replay_network_policy)
 {

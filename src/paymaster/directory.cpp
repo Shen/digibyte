@@ -17,6 +17,23 @@
 
 namespace DigiDollar::Paymaster {
 
+namespace {
+
+std::set<COutPoint> GetAdmissionOutpoints(const Announcement& announcement)
+{
+    const bool needs_carriers{std::any_of(
+        announcement.offers.begin(), announcement.offers.end(),
+        [](const OfferTerms& offer) { return offer.funding_model == FundingModel::USER_PAID; })};
+    std::set<COutPoint> outpoints;
+    for (const AdmissionSlotProof& slot : announcement.admission_slots) {
+        outpoints.insert(slot.dgb_outpoint);
+        if (needs_carriers) outpoints.insert(slot.carrier_outpoint);
+    }
+    return outpoints;
+}
+
+} // namespace
+
 PaymasterId GetPaymasterId(const XOnlyPubKey& identity_key)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Id v1");
@@ -140,6 +157,33 @@ bool Directory::AcceptsSequence(const PaymasterId& provider_id,
            existing->second.sequence < sequence;
 }
 
+bool Directory::HasAdmissionOutpointConflict(const Announcement& announcement,
+                                             const PaymasterId& provider_id,
+                                             int64_t now) const
+{
+    const std::set<COutPoint> claimed_outpoints{GetAdmissionOutpoints(announcement)};
+    for (const auto& [other_id, other] : m_announcements) {
+        if (other_id == provider_id || other.expires_at <= now) continue;
+        const std::set<COutPoint> other_outpoints{GetAdmissionOutpoints(other)};
+        if (std::any_of(claimed_outpoints.begin(), claimed_outpoints.end(),
+                        [&](const COutPoint& outpoint) {
+                            return other_outpoints.count(outpoint) != 0;
+                        })) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Directory::AcceptsAdmissionOutpoints(const Announcement& announcement,
+                                          int64_t now) const
+{
+    if (announcement.expires_at <= now) return false;
+    const PaymasterId provider_id{GetPaymasterId(announcement.identity_key)};
+    LOCK(m_mutex);
+    return !HasAdmissionOutpointConflict(announcement, provider_id, now);
+}
+
 bool Directory::AddValidated(Announcement announcement, int64_t now)
 {
     if (announcement.expires_at <= now) return false;
@@ -147,6 +191,13 @@ bool Directory::AddValidated(Announcement announcement, int64_t now)
     LOCK(m_mutex);
     const auto existing = m_announcements.find(id);
     if (existing != m_announcements.end() && existing->second.sequence >= announcement.sequence) return false;
+
+    // A UTXO controller can sign admission proofs for multiple identity keys.
+    // Count each active reserve only once so one pool cannot manufacture many
+    // apparent providers or fill the bounded directory. Ignore this provider's
+    // prior announcement so a monotonic replacement can retain its own slots.
+    if (HasAdmissionOutpointConflict(announcement, id, now)) return false;
+
     m_announcements[id] = std::move(announcement);
     if (m_announcements.size() > MAX_DIRECTORY_ENTRIES) {
         const auto oldest = std::min_element(m_announcements.begin(), m_announcements.end(),

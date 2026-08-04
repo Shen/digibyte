@@ -11,7 +11,9 @@
 #include <paymaster/directory.h>
 #include <test/util/setup_common.h>
 
+#include <atomic>
 #include <limits>
+#include <thread>
 
 using namespace DigiDollar::Paymaster;
 
@@ -51,6 +53,20 @@ Announcement SignedAnnouncement(const CKey& key, const uint256& genesis, uint64_
     BOOST_REQUIRE(key.SignSchnorr(GetAnnouncementSignatureHash(announcement),
                                   announcement.identity_signature, nullptr, uint256{}));
     return announcement;
+}
+
+void SetAdmissionOutpoints(Announcement& announcement,
+                           const CKey& key,
+                           const uint256& dgb_txid,
+                           const uint256& carrier_txid)
+{
+    for (uint32_t i = 0; i < announcement.admission_slots.size(); ++i) {
+        announcement.admission_slots[i].dgb_outpoint = COutPoint{dgb_txid, i};
+        announcement.admission_slots[i].carrier_outpoint = COutPoint{carrier_txid, i};
+    }
+    announcement.identity_signature.assign(64, 0);
+    BOOST_REQUIRE(key.SignSchnorr(GetAnnouncementSignatureHash(announcement),
+                                  announcement.identity_signature, nullptr, uint256{}));
 }
 
 } // namespace
@@ -121,6 +137,96 @@ BOOST_AUTO_TEST_CASE(expired_entries_are_not_listed)
     BOOST_CHECK(directory.List(100000 + ANNOUNCEMENT_TTL_SECONDS).empty());
     directory.RemoveExpired(100000 + ANNOUNCEMENT_TTL_SECONDS);
     BOOST_CHECK_EQUAL(directory.Size(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(rejects_cross_provider_admission_outpoint_reuse)
+{
+    CKey first_key;
+    CKey second_key;
+    first_key.MakeNewKey(true);
+    second_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    Directory directory;
+
+    BOOST_REQUIRE(directory.AddValidated(
+        SignedAnnouncement(first_key, uint256::ONE, 1, now), now));
+    const auto duplicate{SignedAnnouncement(second_key, uint256::ONE, 1, now)};
+    BOOST_CHECK(!directory.AcceptsAdmissionOutpoints(duplicate, now));
+    BOOST_CHECK(!directory.AddValidated(duplicate, now));
+    BOOST_CHECK_EQUAL(directory.Size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(rejects_partial_cross_provider_admission_overlap)
+{
+    CKey first_key;
+    CKey second_key;
+    first_key.MakeNewKey(true);
+    second_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    const auto first{SignedAnnouncement(first_key, uint256::ONE, 1, now)};
+
+    auto dgb_overlap{SignedAnnouncement(second_key, uint256::ONE, 1, now)};
+    SetAdmissionOutpoints(dgb_overlap, second_key, uint256S("03"), uint256S("04"));
+    dgb_overlap.admission_slots[1].dgb_outpoint = first.admission_slots[0].dgb_outpoint;
+    dgb_overlap.identity_signature.assign(64, 0);
+    BOOST_REQUIRE(second_key.SignSchnorr(GetAnnouncementSignatureHash(dgb_overlap),
+                                         dgb_overlap.identity_signature, nullptr, uint256{}));
+    Directory dgb_directory;
+    BOOST_REQUIRE(dgb_directory.AddValidated(first, now));
+    BOOST_CHECK(!dgb_directory.AddValidated(dgb_overlap, now));
+
+    auto carrier_overlap{SignedAnnouncement(second_key, uint256::ONE, 1, now)};
+    SetAdmissionOutpoints(carrier_overlap, second_key, uint256S("05"), uint256S("06"));
+    carrier_overlap.admission_slots[1].carrier_outpoint = first.admission_slots[0].carrier_outpoint;
+    carrier_overlap.identity_signature.assign(64, 0);
+    BOOST_REQUIRE(second_key.SignSchnorr(GetAnnouncementSignatureHash(carrier_overlap),
+                                         carrier_overlap.identity_signature, nullptr, uint256{}));
+    Directory carrier_directory;
+    BOOST_REQUIRE(carrier_directory.AddValidated(first, now));
+    BOOST_CHECK(!carrier_directory.AddValidated(carrier_overlap, now));
+}
+
+BOOST_AUTO_TEST_CASE(expired_provider_releases_admission_outpoints)
+{
+    CKey first_key;
+    CKey second_key;
+    first_key.MakeNewKey(true);
+    second_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    const auto first{SignedAnnouncement(first_key, uint256::ONE, 1, now)};
+    Directory directory;
+    BOOST_REQUIRE(directory.AddValidated(first, now));
+
+    const int64_t after_expiry{first.expires_at};
+    const auto replacement{SignedAnnouncement(second_key, uint256::ONE, 1, after_expiry)};
+    BOOST_CHECK(directory.AcceptsAdmissionOutpoints(replacement, after_expiry));
+    BOOST_CHECK(directory.AddValidated(replacement, after_expiry));
+    BOOST_CHECK_EQUAL(directory.List(after_expiry).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(concurrent_cross_provider_claim_accepts_only_one_identity)
+{
+    CKey first_key;
+    CKey second_key;
+    first_key.MakeNewKey(true);
+    second_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    auto first{SignedAnnouncement(first_key, uint256::ONE, 1, now)};
+    auto second{SignedAnnouncement(second_key, uint256::ONE, 1, now)};
+    Directory directory;
+    std::atomic<unsigned int> accepted{0};
+
+    std::thread first_thread{[&] {
+        if (directory.AddValidated(std::move(first), now)) accepted.fetch_add(1);
+    }};
+    std::thread second_thread{[&] {
+        if (directory.AddValidated(std::move(second), now)) accepted.fetch_add(1);
+    }};
+    first_thread.join();
+    second_thread.join();
+
+    BOOST_CHECK_EQUAL(accepted.load(), 1U);
+    BOOST_CHECK_EQUAL(directory.Size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(rejects_extreme_timestamps_without_overflow)

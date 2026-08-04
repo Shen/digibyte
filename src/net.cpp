@@ -3803,10 +3803,17 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
     AssertLockNotHeld(m_total_bytes_sent_mutex);
     size_t nMessageSize = msg.data.size();
     LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n", msg.m_type, nMessageSize, pnode->GetId());
-    const bool paymaster_direct = pnode->IsPaymasterConn() &&
-        (msg.m_type == NetMsgType::PMCAPREQ || msg.m_type == NetMsgType::PMCAPRESP ||
-         msg.m_type == NetMsgType::PMQUOTEREQ || msg.m_type == NetMsgType::PMQUOTERESP ||
-         msg.m_type == NetMsgType::PMSUBMIT || msg.m_type == NetMsgType::PMRESULT);
+    if (pnode->IsPaymasterDirectConn() &&
+        !NetMsgType::IsPaymasterConnectionMessage(msg.m_type)) {
+        LogPrint(BCLog::NET, "suppressing non-Paymaster message %s on isolated peer=%d\n",
+                 msg.m_type, pnode->GetId());
+        return;
+    }
+    // Classify by message type rather than connection type. Provider replies
+    // travel over the inbound half of a direct connection, and a sensitive
+    // payload sent over the wrong connection must still never be persisted or
+    // exposed through a raw tracepoint.
+    const bool paymaster_direct{NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
     if (gArgs.GetBoolArg("-capturemessages", false) && !paymaster_direct) {
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /*is_incoming=*/false);
     }
