@@ -103,6 +103,74 @@ test/get_previous_releases.py -b
 
 to download the necessary previous release binaries.
 
+The Paymaster wallet-file compatibility test also needs an official DigiByte
+Core v9.26.5 daemon. That release is not in the binary checksum table above,
+so build it from its tag (including the reproducible dependencies) with:
+
+```
+test/get_previous_releases.py -d v9.26.5
+```
+
+This places the daemon at `releases/v9.26.5/bin/digibyted`. A binary built
+elsewhere can instead be selected with `V9_26_5_DIGIBYTED=/path/to/digibyted`;
+`PRE_PAYMASTER_DIGIBYTED` is accepted as a compatibility fallback. The
+registered legacy and descriptor variants of
+`wallet_v9_26_5_compatibility.py` both require this daemon. They cover raw
+wallet-file migration plus bidirectional v9.26.5/current DGB transfers; the
+descriptor variant also covers bidirectional DD transfers. Each transfer is
+validated against the receiving version's address codec, relayed to both
+mempools, and confirmed by the receiving version.
+
+Two additional registered descriptor scenarios use the same historical
+daemon. `wallet_v9_26_5_inplace_upgrade.py` replaces the daemon on one unchanged
+datadir and verifies blocks, Chainstate, txindex, `mempool.dat`, encrypted
+wallets, pending DGB/DD history, active positions, post-upgrade confirmation,
+and redemption. `p2p_paymaster_v9_26_5_bridge.py` places v9.26.5 between a
+current provider and client: ordinary DGB/DD relay must continue, Paymaster
+gossip and selection must fail closed across the old bridge, and a direct
+current-current link must restore discovery.
+
+Run the complete historical compatibility group with:
+
+```
+V9_26_5_DIGIBYTED=/path/to/v9.26.5/bin/digibyted \
+    test/functional/test_runner.py --jobs=1 \
+    wallet_v9_26_5_compatibility.py \
+    wallet_v9_26_5_inplace_upgrade.py \
+    p2p_paymaster_v9_26_5_bridge.py
+```
+
+The same daemon can be selected with `PRE_PAYMASTER_DIGIBYTED` for the
+three-node provider compatibility scenario:
+
+```
+PRE_PAYMASTER_DIGIBYTED=/path/to/v9.26.5/bin/digibyted \
+    test/functional/test_runner.py --jobs=1 wallet_paymaster_provider.py
+```
+
+That mode requires the ordinary Paymaster result transaction to reach the old
+node's mempool and confirmed tip while message capture proves that the old node
+does not send or receive Paymaster announcements.
+
+The registered `wallet_paymaster_offer_selection.py --descriptors` scenario
+uses three current-version daemons: two independent USER_PAID providers
+advertise different fees and a DGB-less client must display both offers in
+exact-total-cost order, automatically use only the cheapest provider, and
+leave the unselected provider's pool, safety budget, and finance ledger
+unchanged. It also replaces a provider's announcement with higher and restored
+prices, verifies monotonic sequence handling, expires both stale announcements,
+and accepts only a freshly announced replacement.
+
+`wallet_paymaster_failover.py --descriptors` uses four current daemons and two
+client wallets to contend for one cheap operational slot. The second client
+must retain the exact same reserved DD inputs while falling back to a standby
+provider; fallback must be rejected after the user PSBT exists, exactly one
+payment may be committed, and canceling the unsigned contender must restore
+its balance without provider finance effects. `wallet_paymaster_reorg.py
+--descriptors` confirms a real Paymaster transfer, reorganizes it onto an
+isolated longer branch, checks client/finance/pool rollback, and reconfirms the
+same txid without duplicate accounting.
+
 By default, up to 4 tests will be run in parallel by test_runner. To specify
 how many jobs to run, append `--jobs=n`
 

@@ -1655,6 +1655,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         # boundary is covered by the wallet security regression tests.
         self.restart_node(1)
         self.connect_nodes(0, 1)
+        if self.pre_paymaster_digibyted:
+            self.connect_nodes(1, 2, peer_advertises_v2=True)
         client_node = self.nodes[1]
         client = client_node.get_wallet_rpc("client")
         restarted_prepared = client.resolvepaymastersession(
