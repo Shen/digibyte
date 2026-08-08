@@ -22,8 +22,12 @@ struct bilingual_str;
 namespace wallet {
 void SplitWalletPath(const fs::path& wallet_path, fs::path& env_directory, std::string& database_filename);
 
+/** Preserve the difference between absence and corruption for records whose
+ * presence may carry durable signing or spending authority. */
 enum class DatabaseReadStatus {
+    /** The key exists and its value decoded successfully. */
     FOUND,
+    /** The key does not exist; callers may consider an explicit fallback. */
     NOT_FOUND,
     /** The record decoded far enough to identify a non-current format. */
     UNSUPPORTED_VERSION,

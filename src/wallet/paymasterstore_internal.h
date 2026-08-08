@@ -24,6 +24,8 @@ using namespace DigiDollar::Paymaster;
 inline constexpr size_t MAX_RECOVERY_ENDPOINT_BYTES{512};
 inline constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
 
+/** Translate typed wallet-database failures into stable Paymaster errors
+ * without collapsing a present-but-unreadable authority record into absence. */
 std::string PersistedVersionError(std::string_view record_type,
                                   uint16_t found,
                                   uint16_t expected,
@@ -66,6 +68,9 @@ bool PrepareProviderTransferFinanceEvent(WalletBatch& batch,
 bool HasAuthorizationRisk(SessionState state);
 bool AttemptHasReached(AttemptState state, AttemptState threshold);
 bool HasTimelyDurableProviderSignature(const ProviderAttempt& attempt);
+
+// Provider budget and commit authorization firewalls shared by normal and
+// alternative-recovery finalization paths.
 bool ValidateProviderBudgetState(const ProviderAttempt& attempt,
                                  const ProviderSafetyPolicy& policy,
                                  const ProviderBudgetLedger& ledger,
@@ -81,6 +86,8 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
     std::string& error);
 bool SameCommit(const ProviderCommitRecord& lhs, const ProviderCommitRecord& rhs);
 
+/** Serialize an authority object exactly as it is hashed, signed, compared,
+ * or retained as equivocation evidence. */
 template <typename T>
 std::vector<unsigned char> CanonicalBytes(const T& value)
 {
@@ -106,6 +113,8 @@ bool ValidateProviderAlternativeRecoveryCommitBinding(
     std::vector<COutPoint>& provider_inputs,
     std::string& error);
 
+// Exact final artifacts deliberately bind serialized bytes, txid, and wtxid;
+// matching only one identifier is insufficient for restart authorization.
 struct ExactFinalArtifact {
     std::vector<unsigned char> bytes;
     CMutableTransaction transaction;
@@ -142,6 +151,9 @@ bool BindExactObservation(const CTransaction& transaction,
                           bool in_mempool,
                           ExactFinalObservation& observation,
                           std::string& error);
+
+// Capacity proof validation and equivocation evidence. Functions ending in
+// Locked participate in a caller-owned wallet database transaction.
 bool SameCapacitySnapshot(const ValidatedCapacitySnapshot& lhs,
                           const ValidatedCapacitySnapshot& rhs);
 bool StagePendingEquivocationLocked(WalletBatch& batch,
@@ -267,6 +279,9 @@ bool RecordQuoteEquivocationLocked(
     const std::vector<unsigned char>& conflicting_signed_quote,
     int64_t now,
     std::string& error);
+
+// Result progression and reconstruction of the immutable authorization
+// artifacts used at signing, finalization, and rebroadcast boundaries.
 bool IsFinalResultStatus(PaymasterResultStatus status);
 bool IsNegativeTerminalResultStatus(PaymasterResultStatus status);
 std::vector<unsigned char> SerializeResultTransaction(

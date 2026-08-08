@@ -396,6 +396,12 @@ public:
     // contain transaction metadata and signed artifacts. They do not receive
     // Paymaster-specific field encryption; secret sponsorship capabilities are
     // redacted before persistence and only their binding hashes are written.
+    // Read*WithStatus methods preserve absence, unsupported-version, and
+    // corruption as distinct outcomes. Security-sensitive callers must use
+    // them whenever treating an absent record differently from a broken one.
+    // The bool Read* wrappers are intended only where every non-FOUND outcome
+    // has the same fail-closed meaning; Has* checks key presence without
+    // asserting that the stored value is valid.
     bool WritePaymasterSession(const DigiDollar::Paymaster::PaymentSession& session, bool overwrite = true);
     DatabaseReadStatus ReadPaymasterSessionWithStatus(
         const std::string& request_id,

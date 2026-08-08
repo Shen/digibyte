@@ -152,6 +152,8 @@ struct ProviderCommitRecoveryResult {
     std::string error;
 };
 
+// Provider lifecycle and readiness helpers. These functions reconcile durable
+// wallet state before exposing an operator action or public announcement.
 std::string ProviderPoolReadError(
     const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
 bool ReadOptionalProviderPool(
@@ -201,6 +203,9 @@ bool PublishCurrentProviderAnnouncement(
     int64_t now,
     DigiDollar::Paymaster::Announcement* published,
     std::string& error);
+
+// Liquidity planning and accounting. Maintenance builders must operate on a
+// reconciled pool and persist restartable plans before broadcasting.
 LiquiditySlotCounts CountLiquiditySlots(
     const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
     DigiDollar::Paymaster::PoolPurpose purpose,
@@ -249,6 +254,9 @@ bool RunAutomaticCarrierReplenishment(
     size_t missing_admission,
     size_t missing_operational,
     std::string& error);
+
+// RPC presentation and canonical wire encodings. Redacted serializers are the
+// only variants suitable for durable client-side diagnostic state.
 UniValue ReliabilityToJSON(
     const DigiDollar::Paymaster::PaymasterReliabilityRecord& record,
     int64_t now);
@@ -308,6 +316,9 @@ bool AcknowledgeRejectedDirectMessage(
     DigiDollar::Paymaster::Manager& manager,
     const DigiDollar::Paymaster::DirectMessage& message,
     std::string& error);
+
+// Drain conflicting signed messages into durable evidence before acknowledging
+// their inbox leases, so a crash cannot erase an observed equivocation.
 bool IsPermanentCapacityContinuationError(const std::string& error);
 bool PersistPendingCapacityEquivocationPair(
     PaymasterStore& store,
@@ -356,6 +367,8 @@ bool DrainPendingAlternativeRecoveryCapacityEquivocations(
     const std::vector<unsigned char>& first_capacity_proof,
     std::string& error);
 
+// Alternative-recovery messages are persisted and retried byte-for-byte;
+// decoding therefore rejects both trailing bytes and non-canonical encodings.
 template <typename T>
 std::vector<unsigned char> SerializeRecoveryMessage(const T& message)
 {
@@ -421,6 +434,10 @@ bool QueuePersistedPaymasterSubmit(
     int64_t now,
     PaymasterSubmitQueueState& state,
     std::string& error);
+
+// Durable authorization reconstruction and the final pre-broadcast firewall.
+// These helpers must reload persisted artifacts instead of trusting earlier
+// RPC-local objects across a database commit or wallet-signing boundary.
 std::vector<unsigned char> SerializePaymentIntent(
     const DigiDollar::Paymaster::PaymentIntent& intent);
 bool LoadTrustedTemplate(
@@ -503,6 +520,9 @@ ProviderCommitRecoveryResult RecoverProviderCommit(
     PaymasterStore& store,
     const DigiDollar::Paymaster::ProviderCommitRecord& commit,
     int64_t now);
+
+// Policy conversion is kept at the RPC boundary; PaymasterStore consumes only
+// validated typed policies and never UniValue supplied by a peer or caller.
 UniValue ProviderPolicyToJSON(
     const DigiDollar::Paymaster::ProviderPolicy& policy);
 DigiDollar::Paymaster::ProviderPolicy ParseProviderPolicy(
