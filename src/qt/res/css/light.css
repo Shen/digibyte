@@ -6402,6 +6402,37 @@ DigiDollarSendWidget QLabel#feeFundingSummary {
     padding: 10px;
 }
 
+/* Keep the Paymaster offer preview inside the DigiDollar palette instead of
+   inheriting the global blue DGB table styling. */
+DigiDollarSendWidget QTableWidget#paymasterOffers {
+    background-color: #ffffff;
+    alternate-background-color: #e6f7ec;
+    color: #123f2b;
+    gridline-color: #c8ead6;
+    border: 1px solid #1f9d57;
+}
+
+DigiDollarSendWidget QTableWidget#paymasterOffers::item {
+    background-color: #ffffff;
+    color: #123f2b;
+    padding: 6px;
+}
+
+DigiDollarSendWidget QTableWidget#paymasterOffers::item:alternate {
+    background-color: #e6f7ec;
+}
+
+DigiDollarSendWidget QTableWidget#paymasterOffers QHeaderView::section,
+DigiDollarSendWidget QTableWidget#paymasterOffers QTableCornerButton::section {
+    background-color: #1f9d57;
+    color: #ffffff;
+    border: none;
+    border-right: 1px solid #c8ead6;
+    border-bottom: 1px solid #c8ead6;
+    padding: 7px;
+    font-weight: 700;
+}
+
 /* Send $DD: focused protected Paymaster session. */
 DigiDollarSendWidget QFrame#paymasterSessionFrame {
     background-color: #f7fcf9;

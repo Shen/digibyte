@@ -5779,6 +5779,11 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
             QStringLiteral("DigiDollarReceiveWidget QPushButton#editRequestButton"),
             QStringLiteral("DigiDollarSendWidget QFrame#addressFrame"),
             QStringLiteral("DigiDollarSendWidget QPushButton#coinControlButton"),
+            // Qt styles the viewport, headers, and corner button independently;
+            // require all three overrides to prevent the global DGB blue from leaking through.
+            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers"),
+            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers QHeaderView::section"),
+            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers QTableCornerButton::section"),
             QStringLiteral("DigiDollarMintWidget QFrame#amountFrame"),
             QStringLiteral("DigiDollarRedeemWidget QFrame#positionFrame"),
             QStringLiteral("DigiDollarRedeemWidget QPushButton#coinControlButton"),
