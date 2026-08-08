@@ -207,12 +207,24 @@ bool Directory::AddValidated(Announcement announcement, int64_t now)
     return true;
 }
 
-std::vector<Announcement> Directory::List(int64_t now) const
+std::vector<Announcement> Directory::List(int64_t now,
+                                          size_t maximum,
+                                          uint64_t rotation) const
 {
     LOCK(m_mutex);
     std::vector<Announcement> result;
+    if (maximum == 0) return result;
+    std::vector<const Announcement*> active;
+    active.reserve(m_announcements.size());
     for (const auto& [id, announcement] : m_announcements) {
-        if (announcement.expires_at > now) result.push_back(announcement);
+        if (announcement.expires_at > now) active.push_back(&announcement);
+    }
+    if (active.empty()) return result;
+    const size_t count{std::min(maximum, active.size())};
+    const size_t first{static_cast<size_t>(rotation % active.size())};
+    result.reserve(count);
+    for (size_t offset = 0; offset < count; ++offset) {
+        result.push_back(*active[(first + offset) % active.size()]);
     }
     return result;
 }

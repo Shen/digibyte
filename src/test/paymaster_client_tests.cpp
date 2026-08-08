@@ -7,6 +7,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <key.h>
+#include <netbase.h>
 #include <paymaster/client.h>
 #include <paymaster/provider.h>
 #include <script/standard.h>
@@ -38,6 +39,42 @@ CScript TaprootScript(const CKey& key)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_client_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(privacy_profile_routes_fail_closed)
+{
+    const CService clearnet{LookupNumeric("8.8.8.8", 12024)};
+    CNetAddr onion_address;
+    BOOST_REQUIRE(onion_address.SetSpecial(
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"));
+    const CService onion{onion_address, 12024};
+    const CService invalid;
+    const CService local{LookupNumeric("127.0.0.1", 12024)};
+    const CService private_network{LookupNumeric("192.168.1.1", 12024)};
+
+    BOOST_CHECK(IsEndpointAllowedForPrivacyProfile(
+        clearnet, PrivacyProfile::STANDARD));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        clearnet, PrivacyProfile::HIGH));
+    BOOST_CHECK(IsEndpointAllowedForPrivacyProfile(
+        onion, PrivacyProfile::STANDARD));
+    BOOST_CHECK(IsEndpointAllowedForPrivacyProfile(
+        onion, PrivacyProfile::HIGH));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        invalid, PrivacyProfile::STANDARD));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        invalid, PrivacyProfile::HIGH));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        clearnet, static_cast<PrivacyProfile>(255)));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        local, PrivacyProfile::STANDARD));
+    BOOST_CHECK(IsEndpointAllowedForPrivacyProfile(
+        local, PrivacyProfile::STANDARD, /*allow_local_endpoint=*/true));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        local, PrivacyProfile::HIGH, /*allow_local_endpoint=*/true));
+    BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
+        private_network, PrivacyProfile::STANDARD,
+        /*allow_local_endpoint=*/true));
+}
 
 BOOST_AUTO_TEST_CASE(offers_are_sorted_by_exact_rounded_total_cost)
 {

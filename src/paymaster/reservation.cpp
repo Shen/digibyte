@@ -11,6 +11,51 @@
 #include <paymaster/reservation.h>
 
 namespace DigiDollar::Paymaster {
+namespace {
+
+bool IsKnownState(SessionState state)
+{
+    switch (state) {
+    case SessionState::CREATED:
+    case SessionState::INPUTS_RESERVED:
+    case SessionState::AWAITING_WALLET_UNLOCK:
+    case SessionState::AWAITING_USER_SIGNATURE:
+    case SessionState::AUTHORIZED:
+    case SessionState::DGB_COMMITTING:
+    case SessionState::STEMPOOL:
+    case SessionState::MEMPOOL:
+    case SessionState::CONFIRMED:
+    case SessionState::PENDING_PROVIDER:
+    case SessionState::FAILED:
+    case SessionState::CANCELED_SAFE:
+    case SessionState::CONFLICTED:
+        return true;
+    }
+    return false;
+}
+
+bool IsKnownState(AttemptState state)
+{
+    switch (state) {
+    case AttemptState::CANDIDATE:
+    case AttemptState::QUOTED:
+    case AttemptState::USER_SIGNED:
+    case AttemptState::USER_PSBT_ACCEPTED:
+    case AttemptState::PROVIDER_SIGNED:
+    case AttemptState::FINAL_COMMITTED:
+    case AttemptState::BROADCAST:
+    case AttemptState::STEMPOOL:
+    case AttemptState::MEMPOOL:
+    case AttemptState::REJECTED:
+    case AttemptState::QUOTE_EXPIRED:
+    case AttemptState::AMBIGUOUS:
+    case AttemptState::CONFLICTED:
+        return true;
+    }
+    return false;
+}
+
+} // namespace
 
 bool IsTerminal(SessionState state)
 {
@@ -20,6 +65,7 @@ bool IsTerminal(SessionState state)
 
 bool CanTransition(SessionState from, SessionState to)
 {
+    if (!IsKnownState(from) || !IsKnownState(to)) return false;
     if (from == to) return true; // idempotent replay
     if (IsTerminal(from)) return false;
     if (to == SessionState::CONFLICTED) return true;
@@ -60,6 +106,7 @@ bool CanTransition(SessionState from, SessionState to)
 
 bool CanTransition(AttemptState from, AttemptState to)
 {
+    if (!IsKnownState(from) || !IsKnownState(to)) return false;
     if (from == to) return true;
     if (to == AttemptState::CONFLICTED) return true;
     if (from == AttemptState::REJECTED || from == AttemptState::QUOTE_EXPIRED ||

@@ -36,6 +36,17 @@ void SaturatingAdd(uint32_t& value, uint32_t add)
                 ? std::numeric_limits<uint32_t>::max() : value + add;
 }
 
+int64_t UpdateLatencyEwma(int64_t current, int64_t sample)
+{
+    if (current == 0) return sample;
+    // Equivalent to (3 * current + sample) / 4 for non-negative
+    // measurements, without overflowing when either persisted value is near
+    // INT64_MAX. Preserve the original floor rounding exactly.
+    if (sample >= current) return current + (sample - current) / 4;
+    const int64_t difference{current - sample};
+    return current - difference / 4 - (difference % 4 != 0 ? 1 : 0);
+}
+
 PaymasterReliabilityBucket& BucketForDay(PaymasterReliabilityRecord& record, int32_t utc_day)
 {
     for (auto& bucket : record.daily_buckets) {
@@ -126,9 +137,8 @@ bool ApplyReliabilityOutcome(PaymasterReliabilityRecord& record,
         SaturatingAdd(bucket.successful_latency_sum_ms, static_cast<uint64_t>(successful_latency_ms));
         record.consecutive_provider_failures = 0;
         record.cooldown_until = 0;
-        record.latency_ewma_ms = record.latency_ewma_ms == 0
-                                     ? successful_latency_ms
-                                     : (record.latency_ewma_ms * 3 + successful_latency_ms) / 4;
+        record.latency_ewma_ms = UpdateLatencyEwma(
+            record.latency_ewma_ms, successful_latency_ms);
         break;
     case ReliabilityOutcome::PROVIDER_FAILURE: {
         SaturatingIncrement(bucket.provider_failures);

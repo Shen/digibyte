@@ -74,13 +74,24 @@ const char* PMRECOVERYRESP = "pmrecresp";
 const char* PMRECOVERYSUBMIT = "pmrecsub";
 const char* PMRECOVERYRESULT = "pmrecresult";
 
+bool IsPaymasterDirectRequest(const std::string& message_type)
+{
+    return message_type == PMCAPREQ || message_type == PMQUOTEREQ ||
+           message_type == PMSUBMIT || message_type == PMRECOVERYREQ ||
+           message_type == PMRECOVERYSUBMIT;
+}
+
+bool IsPaymasterDirectResponse(const std::string& message_type)
+{
+    return message_type == PMCAPRESP || message_type == PMQUOTERESP ||
+           message_type == PMRESULT || message_type == PMRECOVERYRESP ||
+           message_type == PMRECOVERYRESULT;
+}
+
 bool IsPaymasterDirectMessage(const std::string& message_type)
 {
-    return message_type == PMCAPREQ || message_type == PMCAPRESP ||
-           message_type == PMQUOTEREQ || message_type == PMQUOTERESP ||
-           message_type == PMSUBMIT || message_type == PMRESULT ||
-           message_type == PMRECOVERYREQ || message_type == PMRECOVERYRESP ||
-           message_type == PMRECOVERYSUBMIT || message_type == PMRECOVERYRESULT;
+    return IsPaymasterDirectRequest(message_type) ||
+           IsPaymasterDirectResponse(message_type);
 }
 
 bool IsPaymasterConnectionMessage(const std::string& message_type)

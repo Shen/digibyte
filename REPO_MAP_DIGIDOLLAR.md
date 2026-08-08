@@ -618,8 +618,8 @@ or chain parameters.
   `PENDING_SUCCESSOR`, `RELEASED`, and `INVALIDATED` lifecycle states plus an
   origin commit/maintenance binding.
 - Provider settings V2 persist the recommended automatic queue-processing mode
-  and optional autostart. V1 records migrate in memory to `automatic` with
-  autostart disabled and are upgraded on the next settings write.
+  and optional autostart. Settings are accepted only at V2; V1 records fail
+  closed and are neither migrated nor overwritten by a settings update.
 - Enforces funding-model, fee-rate, amount, TTL, and positive absolute network
   fee caps; plans 0-cent, carrier, and normal provider-fee outputs.
 - Defines finite `ProviderSafetyPolicy`/budget and `ClientSafetyPolicy`/fee
@@ -639,6 +639,9 @@ or chain parameters.
 - Parses signed short-lived announcements, verifies identity/admission
   envelopes and chainstate-backed proof transactions, and maintains the bounded
   local provider directory.
+- Admission validation rejects both spent chainstate entries and current
+  mempool conflicts. Bounded directory reads rotate over active entries while
+  copying only the requested full announcements.
 - Admission and operational liquidity remain separate; only admission proofs
   enter global gossip.
 
@@ -652,8 +655,10 @@ or chain parameters.
   expert RPCs and exposes stopped, unlock/readiness wait, active, manual,
   drain-only, and error service states without persisting a passphrase.
 - Protocol V5 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure,
-  rejects legacy automatic flows, persists semantic replays independently of
-  peer ID, and binds a later quote to the exact validated resource snapshot.
+  rejects every older Paymaster wire format, persists semantic replays
+  independently of peer ID, and binds a later quote to the exact validated
+  resource snapshot. Paymaster persistence is also current-only: old records
+  fail closed without migration, deletion, or implicit replacement.
 
 ### src/paymaster/client.{h,cpp} and reputation.{h,cpp}
 - Builds bound client intents, validates quote responses, calculates exact
@@ -665,6 +670,8 @@ or chain parameters.
 ### src/paymaster/reservation.{h,cpp}
 - Versioned session, attempt, reservation, authorization, final-commit,
   self-recovery, and idempotency-tombstone records.
+- Every record is accepted only at its exact `CURRENT_VERSION`; version fields
+  remain for future format development, not for range-based compatibility.
 - Defines legal session/attempt transitions including wallet-unlock waits,
   ambiguous signed states, mempool-vs-confirmed recovery, and finality.
 - Persists validated Capacity snapshots/resource bindings, authorization
@@ -1047,7 +1054,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - ⚠️ Oracle message validation, rate limiting, and Misbehaving scoring for invalid MuSig2/heartbeat messages
 - ⚠️ Paymaster discovery messages are handled on ordinary upgraded peers;
   capacity/quote/submit/result messages are accepted only on isolated
-  `ConnectionType::PAYMASTER` peers with bounded pre-crypto validation.
+  `ConnectionType::PAYMASTER` peers with bounded pre-crypto validation. Every
+  Paymaster handler shares the DigiDollar activation gate, and direct request
+  versus response direction is enforced before deserialization and queueing.
 
 ### src/net.h / src/net.cpp / src/node/connection_types.{h,cpp}
 - ⚠️ Defines the short-lived `PAYMASTER` connection type, v2-only/no-fallback
@@ -1246,7 +1255,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_provider_tests.cpp` / `paymaster_recovery_tests.cpp` | Finite safety and maintenance budgets, pool-successor provenance/lifecycle, carrier-withdrawal plans, atomic reservation accounting, provider-finance idempotency/reorg/model totals, malicious-counterparty rejection, and distinct-provider recovery |
 | `paymaster_protocol_tests.cpp` | Intent/quote/result binding, monotonic result sequences, exact final artifacts, and optional-field serialization |
 | `paymaster_provider_tests.cpp` / `paymaster_sponsorship_tests.cpp` | Provider policy, BIP86 identity shape, separated pools, fee boundaries, public/restricted sponsorship and durable hash-only authorization |
-| `paymaster_directory_tests.cpp` / `paymaster_wire_tests.cpp` | Signed announcement replacement/expiry, bounded direct messages, owner/session scoping, replay and resource limits |
+| `paymaster_directory_tests.cpp` / `paymaster_wire_tests.cpp` | Signed announcement replacement/expiry, bounded rotating directory reads, admission mempool conflicts, bounded direct messages, owner/session scoping, replay and resource limits |
 | `paymaster_client_tests.cpp` / `paymaster_reputation_tests.cpp` | Exact additive and fixed-gross candidate selection, cost ordering, deterministic ties, privacy tolerance, quote binding, cooldowns, and local neutral/provider outcomes |
 | `paymaster_reservation_tests.cpp` | Session and attempt state transitions, ambiguous reservations, mempool non-finality, and immutable terminal states |
 | `digidollar_activation_tests.cpp` | Buried-height activation gating and deployment status checks (BIP9 state-machine cases removed in the v9.26.5 burial) |
@@ -1397,9 +1406,9 @@ present in the tree but not compiled into the current unit-test binary.
 
 | File | Coverage Area |
 |------|--------------|
-| `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection |
+| `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records |
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs and signing only the requested collaborative input role |
-| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, tombstones, self-recovery, restart, mempool, confirmation, reorg, and retention |
+| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, crash windows, final-witness validation, and malicious client/provider persistence failures |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries |
@@ -1541,6 +1550,15 @@ Current Paymaster fuzz source inventory:
 | `paymaster_pool_lifecycle.cpp` | Stateful provider-pool and maintenance-ledger operation ordering, successor creation/confirmation/reorg/conflict, restart serialization, target accounting, withdrawal binding, and duplicate-operation resistance |
 | `paymaster_wire.cpp` | Announcement and all direct-message deserialization plus bounded envelope-validation paths |
 | `paymaster_stateful.cpp` | Stateful Capacity → Intent → Quote → Submit → Result → Recovery transitions, budgets, replay, and timestamp/amount boundaries |
+
+### Paymaster Assurance Workflows (`.github/workflows/`)
+
+| File | Coverage Area |
+|------|--------------|
+| `codeql.yml` | Wallet-enabled C++ CodeQL build of `test_digibyte`, including Paymaster wallet, persistence, provider, and RPC translation units |
+| `paymaster-security.yml` | Pull-request/weekly ASan+UBSan run of the 16 Paymaster unit suites and scheduled/manual campaigns for the three Paymaster fuzz targets |
+| `dependency-review.yml` | Pull-request dependency-diff review with high-severity failure threshold |
+| `sbom.yml` | Release/manual export of the repository dependency graph as SPDX JSON |
 
 Current oracle/MuSig2 fuzz source inventory:
 

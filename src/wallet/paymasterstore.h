@@ -30,21 +30,21 @@ class CWallet;
  */
 bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint);
 
-/** Snapshot every live provider-pool input for one coin-selection pass. */
-std::set<COutPoint> GetPaymasterProviderPoolInputs(const CWallet& wallet);
+/** Snapshot every live provider-pool input for one coin-selection pass. A
+ * non-success status must make the caller fail closed instead of treating an
+ * unreadable safety record as an empty pool. */
+DatabaseReadStatus GetPaymasterProviderPoolInputs(
+    const CWallet& wallet, std::set<COutPoint>& inputs);
 
 /** Bind one provider-side alternative-recovery record to exactly one local
  * budget reservation. Current-policy mode is the first USER_SIGNED firewall;
- * historical mode is reserved for exact durable retries after that boundary.
- * Legacy V2 records can be admitted only when USER_SIGNED or final authority
- * was already persisted. */
+ * historical mode is reserved for exact durable retries after that boundary. */
 bool ValidateProviderAlternativeRecoveryBudgetAuthorization(
     const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery,
     const DigiDollar::Paymaster::ProviderSafetyPolicy* policy,
     const DigiDollar::Paymaster::ProviderBudgetLedger& ledger,
     DigiDollar::Paymaster::BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_authorized_recovery,
     std::string& error);
 
 enum class CreatePaymasterSessionResult {
@@ -284,7 +284,6 @@ public:
         const DigiDollar::Paymaster::ProviderAttempt& attempt,
         DigiDollar::Paymaster::BudgetReservationState expected_state,
         bool allow_historical_policy,
-        bool allow_legacy_durable_commit,
         std::string& error) const;
 
     /** Last read-only database firewall before creating a normal provider
@@ -622,11 +621,8 @@ public:
      * PSBT, capacity/control proofs, all final witnesses, and current
      * chainstate. exact_final_already_known may be true only after an exact
      * txid/wtxid/byte match in the active chain or a local transaction pool.
-     * Legacy V1/V2 or exactly manifest-less records are accepted only when an
-     * already durable, provider-signed result and the attempt/session final
-     * artifacts match byte-for-byte; that recovery path creates no new
-     * authority or state. A separate mempool preflight remains mandatory
-     * immediately before insertion/broadcast. */
+     * A separate mempool preflight remains mandatory immediately before
+     * insertion or broadcast. */
     bool ValidateClientDurableFinalForBroadcast(
         const CTransaction& transaction,
         int64_t now,

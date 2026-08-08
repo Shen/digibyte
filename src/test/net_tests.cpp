@@ -16,6 +16,7 @@
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
+#include <test/util/net.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
@@ -40,20 +41,30 @@ BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
 
 BOOST_AUTO_TEST_CASE(paymaster_direct_messages_are_sensitive)
 {
-    const std::vector<std::string> direct_messages{
+    const std::vector<std::string> request_messages{
         NetMsgType::PMCAPREQ,
-        NetMsgType::PMCAPRESP,
         NetMsgType::PMQUOTEREQ,
-        NetMsgType::PMQUOTERESP,
         NetMsgType::PMSUBMIT,
-        NetMsgType::PMRESULT,
         NetMsgType::PMRECOVERYREQ,
-        NetMsgType::PMRECOVERYRESP,
         NetMsgType::PMRECOVERYSUBMIT,
+    };
+    const std::vector<std::string> response_messages{
+        NetMsgType::PMCAPRESP,
+        NetMsgType::PMQUOTERESP,
+        NetMsgType::PMRESULT,
+        NetMsgType::PMRECOVERYRESP,
         NetMsgType::PMRECOVERYRESULT,
     };
-    for (const auto& message_type : direct_messages) {
+    for (const auto& message_type : request_messages) {
         BOOST_CHECK(NetMsgType::IsPaymasterDirectMessage(message_type));
+        BOOST_CHECK(NetMsgType::IsPaymasterDirectRequest(message_type));
+        BOOST_CHECK(!NetMsgType::IsPaymasterDirectResponse(message_type));
+        BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(message_type));
+    }
+    for (const auto& message_type : response_messages) {
+        BOOST_CHECK(NetMsgType::IsPaymasterDirectMessage(message_type));
+        BOOST_CHECK(!NetMsgType::IsPaymasterDirectRequest(message_type));
+        BOOST_CHECK(NetMsgType::IsPaymasterDirectResponse(message_type));
         BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(message_type));
     }
 
@@ -61,6 +72,8 @@ BOOST_AUTO_TEST_CASE(paymaster_direct_messages_are_sensitive)
     BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::PMANNOUNCE));
     BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::GETPMASTERS));
     BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(NetMsgType::TX));
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectRequest(NetMsgType::SENDPMASTERS));
+    BOOST_CHECK(!NetMsgType::IsPaymasterDirectResponse(NetMsgType::SENDPMASTERS));
 
     BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::VERSION));
     BOOST_CHECK(NetMsgType::IsPaymasterConnectionMessage(NetMsgType::VERACK));
@@ -95,6 +108,15 @@ BOOST_AUTO_TEST_CASE(paymaster_connection_suppresses_ordinary_outbound_messages)
                   /*addrNameIn=*/std::string{},
                   ConnectionType::INBOUND,
                   /*inbound_onion=*/false};
+    CNode ordinary{/*id=*/3,
+                   /*sock=*/nullptr,
+                   address,
+                   /*nKeyedNetGroupIn=*/0,
+                   /*nLocalHostNonceIn=*/0,
+                   CAddress{},
+                   /*addrNameIn=*/std::string{},
+                   ConnectionType::OUTBOUND_FULL_RELAY,
+                   /*inbound_onion=*/false};
     inbound.MarkAsPaymasterDirect();
     BOOST_CHECK(outbound.IsPaymasterDirectConn());
     BOOST_CHECK(inbound.IsPaymasterDirectConn());
@@ -118,12 +140,89 @@ BOOST_AUTO_TEST_CASE(paymaster_connection_suppresses_ordinary_outbound_messages)
     m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::TX));
     m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::PING));
     m_node.connman->PushMessage(&inbound, msg_maker.Make(NetMsgType::PMRECOVERYRESULT));
+    m_node.connman->PushMessage(&ordinary, msg_maker.Make(NetMsgType::PMCAPREQ));
     m_node.args->ForceSetArg("-capturemessages", "0");
     CaptureMessage = capture_message_orig;
 
     BOOST_CHECK_EQUAL(captured_tx, 0U);
-    BOOST_CHECK_EQUAL(captured_ping, 2U);
+    BOOST_CHECK_EQUAL(captured_ping, 0U);
     BOOST_CHECK_EQUAL(captured_direct, 0U);
+
+    {
+        LOCK(outbound.cs_vSend);
+        const auto& [bytes, more, message_type] =
+            outbound.m_transport->GetBytesToSend(/*have_next_message=*/false);
+        BOOST_CHECK(!bytes.empty());
+        BOOST_CHECK_EQUAL(message_type, NetMsgType::PING);
+        BOOST_CHECK(!more);
+        BOOST_CHECK(outbound.vSendMsg.empty());
+    }
+    {
+        LOCK(inbound.cs_vSend);
+        const auto& [bytes, more, message_type] =
+            inbound.m_transport->GetBytesToSend(/*have_next_message=*/true);
+        BOOST_CHECK(!bytes.empty());
+        BOOST_CHECK_EQUAL(message_type, NetMsgType::PING);
+        BOOST_CHECK(more);
+        BOOST_REQUIRE_EQUAL(inbound.vSendMsg.size(), 1U);
+        BOOST_CHECK_EQUAL(inbound.vSendMsg.front().m_type,
+                          NetMsgType::PMRECOVERYRESULT);
+    }
+    {
+        LOCK(ordinary.cs_vSend);
+        const auto& [bytes, more, message_type] =
+            ordinary.m_transport->GetBytesToSend(/*have_next_message=*/false);
+        BOOST_CHECK(bytes.empty());
+        BOOST_CHECK(!more);
+        BOOST_CHECK(message_type.empty());
+        BOOST_CHECK(ordinary.vSendMsg.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_connections_are_excluded_from_dandelion_routes)
+{
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    const bool dandelion_was_enabled{
+        m_node.args->GetBoolArg("-dandelion", DEFAULT_DANDELION)};
+    m_node.args->ForceSetArg("-dandelion", "1");
+
+    in_addr peer_addr;
+    peer_addr.s_addr = htonl(0x01020304);
+    const CAddress address{CService{peer_addr, 12024}, NODE_NETWORK};
+    CNode outbound{/*id=*/1,
+                   /*sock=*/nullptr,
+                   address,
+                   /*nKeyedNetGroupIn=*/0,
+                   /*nLocalHostNonceIn=*/0,
+                   CAddress{},
+                   /*addrNameIn=*/std::string{},
+                   ConnectionType::PAYMASTER,
+                   /*inbound_onion=*/false};
+    CNode inbound{/*id=*/2,
+                  /*sock=*/nullptr,
+                  address,
+                  /*nKeyedNetGroupIn=*/0,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/std::string{},
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false};
+
+    connman.AddDandelionDestination(&outbound);
+    BOOST_CHECK(connman.getAllDandelionDestinations().empty());
+
+    connman.AddDandelionInboundTest(&inbound);
+    connman.AddDandelionDestination(&inbound);
+    BOOST_CHECK(connman.isDandelionInbound(&inbound));
+    BOOST_CHECK_EQUAL(connman.getAllDandelionDestinations().size(), 1U);
+
+    inbound.MarkAsPaymasterDirect();
+    connman.RemoveDandelionPeer(&inbound);
+    BOOST_CHECK(!connman.isDandelionInbound(&inbound));
+    BOOST_CHECK(connman.getAllDandelionDestinations().empty());
+    BOOST_CHECK(connman.getDandelionDestination(&inbound) == nullptr);
+
+    m_node.args->ForceSetArg("-dandelion", dandelion_was_enabled ? "1" : "0");
 }
 
 BOOST_AUTO_TEST_CASE(paymaster_connection_rejects_ordinary_inbound_messages)

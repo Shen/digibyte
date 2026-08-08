@@ -78,6 +78,18 @@ script rule, chain parameter, or global Paymaster service bit was added.
   including BIP86 control proofs and live-chainstate verification, before the
   client reveals its payment intent, DD outpoints, or restricted capability.
   New transfers never silently fall back to an older Paymaster protocol.
+- Paymaster wire, manifest, recovery, and wallet-database formats are
+  current-only. Older development records are not migrated or erased; the
+  affected Paymaster operation reports an unsupported-version error while the
+  rest of the wallet remains available.
+- Paymaster database readers distinguish missing, unsupported-version, and
+  unreadable records. Recovery, fee/finance reconciliation, pool maintenance,
+  and final-session pruning stop before mutation when a referenced record
+  cannot be validated; pruning preloads all children before writing a
+  tombstone. Unreadable reservation or provider-pool safety records are not
+  interpreted as unlocked inputs by automatic wallet coin selection.
+  Provider maintenance, quote expiry, commit recovery, and local reliability
+  updates likewise stop without overwriting an unreadable referenced record.
 - Independent client and provider authorization manifests are revalidated at
   every signing, retry, recovery, and broadcast boundary. Final processing
   additionally verifies the complete witness transaction and scripts against
@@ -91,7 +103,17 @@ script rule, chain parameter, or global Paymaster service bit was added.
   and duplicate-payment handling.
 - Paymaster direct connections require BIP324 v2. High-privacy mode additionally
   requires onion-only operation and Tor stream isolation. These controls reduce
-  metadata but do not guarantee anonymity.
+  metadata but do not guarantee anonymity. SOCKS stream-isolation credentials
+  are never logged, and private Paymaster proxy logs redact the target host and
+  port on both success and failure paths.
+- Newly created Paymaster BIP340 identity and control signatures use auxiliary
+  randomness. Exact retries remain byte-identical because signed Capacity,
+  quote, result, and recovery artifacts are stored before they are queued or
+  broadcast.
+- Paymaster P2P handling is disabled before DigiDollar activation, enforces the
+  request/response direction of isolated connections, excludes admission
+  reserves already used in the mempool, and returns bounded rotating directory
+  subsets without copying every cached announcement.
 - Qt's Send $DD page defaults to direct DGB fee funding, explains automatic
   fallback and Paymaster costs in plain language, keeps provider controls under
   an advanced disclosure, and configures wallet-local client fee limits inline.

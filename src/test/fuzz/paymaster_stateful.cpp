@@ -2205,8 +2205,7 @@ public:
             bound_manifest, bound_attempt,
             provider_ledger.reservations.front(), safety,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_durable_commit=*/false, error));
+            /*allow_historical_policy=*/false, error));
 
         ProviderAuthorizationManifest invalid_manifest{bound_manifest};
         ProviderAttempt invalid_attempt{bound_attempt};
@@ -2244,8 +2243,7 @@ public:
         assert(!ValidateProviderBudgetReservationBinding(
             invalid_manifest, invalid_attempt, invalid_reservation, safety,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_durable_commit=*/false, error));
+            /*allow_historical_policy=*/false, error));
 
         ProviderBudgetReservation spent_reservation{
             provider_ledger.reservations.front()};
@@ -2253,13 +2251,11 @@ public:
         assert(ValidateProviderBudgetReservationBinding(
             bound_manifest, bound_attempt, spent_reservation, safety,
             BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_durable_commit=*/false, error));
+            /*allow_historical_policy=*/false, error));
         assert(!ValidateProviderBudgetReservationBinding(
             bound_manifest, bound_attempt, spent_reservation, safety,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_durable_commit=*/false, error));
+            /*allow_historical_policy=*/false, error));
 
         const uint256 provider_before{CanonicalHash(provider_ledger)};
         bool provider_result{false};

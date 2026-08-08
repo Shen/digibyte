@@ -36,6 +36,7 @@ bool CConnman::setLocalDandelionDestination()
 
 CNode* CConnman::getDandelionDestination(CNode* pfrom)
 {
+    if (pfrom && pfrom->IsPaymasterDirectConn()) return nullptr;
     LOCK(m_nodes_mutex);
     for (auto const& e : mDandelionRoutes) {
         if (pfrom == e.first) {
@@ -418,6 +419,7 @@ std::vector<CNode*> CConnman::getAllDandelionDestinations() const
 
 void CConnman::AddDandelionDestination(CNode* pnode)
 {
+    if (!pnode || pnode->IsPaymasterDirectConn()) return;
     // Only process if Dandelion is enabled
     if (!gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION)) {
         LogPrint(BCLog::DANDELION, "AddDandelionDestination: Dandelion disabled, not adding peer %d\n", pnode->GetId());
@@ -467,6 +469,13 @@ void CConnman::AddDandelionDestination(CNode* pnode)
         LogPrint(BCLog::DANDELION, "AddDandelionDestination: Max destinations reached (%d), not adding peer %d\n", 
                  DANDELION_MAX_DESTINATIONS, pnode->GetId());
     }
+}
+
+void CConnman::RemoveDandelionPeer(CNode* pnode)
+{
+    if (!pnode) return;
+    LOCK(m_nodes_mutex);
+    CloseDandelionConnections(pnode);
 }
 
 void CConnman::ThreadDandelionShuffle()

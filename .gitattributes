@@ -1,1 +1,4 @@
 src/clientversion.cpp export-subst
+
+# Keep executable build helpers usable after a Windows checkout or WSL copy.
+*.sh text eol=lf

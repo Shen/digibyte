@@ -65,6 +65,12 @@ struct ProxyCredentials
     std::string password;
 };
 
+/** Controls whether proxy diagnostics may identify the remote destination. */
+enum class ProxyLogPolicy {
+    NORMAL,
+    REDACT_DESTINATION,
+};
+
 /**
  * List of reachable networks. Everything is reachable by default.
  */
@@ -274,9 +280,12 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
  *
  * @returns Whether or not the operation succeeded.
  */
-bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port, const Sock& sock, int nTimeout, bool& outProxyConnectionFailed);
+bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
+                         const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
+                         ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL);
 
-void InterruptSocks5(bool interrupt);
+/** Set the SOCKS receive interrupt flag and return its previous value. */
+bool InterruptSocks5(bool interrupt);
 
 /**
  * Connect to a specified destination service through an already connected
@@ -296,7 +305,8 @@ void InterruptSocks5(bool interrupt);
  * @see <a href="https://www.ietf.org/rfc/rfc1928.txt">RFC1928: SOCKS Protocol
  *      Version 5</a>
  */
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& socket);
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
+            const Sock& socket, ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL);
 
 /**
  * Determine if a port is "bad" from the perspective of attempting to connect

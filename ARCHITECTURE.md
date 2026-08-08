@@ -826,6 +826,12 @@ DANDELION_FLUFF = 10  // 10% immediate fluff probability
 | **PMQUOTEREQ** / **PMQUOTERESP** | Bound payment intent and provider quote |
 | **PMSUBMIT** / **PMRESULT** | User-signed PSBT submission and monotonic provider result |
 
+All Paymaster message handling is gated by DigiDollar activation. On an
+isolated connection, `PMCAPREQ`, `PMQUOTEREQ`, `PMSUBMIT`, `PMRECOVERYREQ`,
+and `PMRECOVERYSUBMIT` flow client-to-provider; their response counterparts
+flow provider-to-client. `GETPMASTERS` returns at most 16 entries from a
+rotating bounded directory view.
+
 ---
 
 ## 10. Wallet System
@@ -1236,10 +1242,15 @@ finite-budget maintenance only when configured targets remain missing
   recovery uses exact-provider retry or a same-input `cancel_to_self` spend
   funded by a distinct Capacity-validated recovery provider when the client
   has no DGB.
-- Protocol V5 has no automatic legacy fallback: the signed Capacity proof is
-  verified against identity, BIP86 control proofs and live chainstate before
-  the client discloses its intent, DD outpoints, or restricted capability. The
-  quote must consume the exact resource snapshot.
+- Paymaster is current-only: wire requests and responses must use protocol V5,
+  and every intent, quote, manifest, recovery object, session, attempt, safety
+  ledger, pool entry, and maintenance record must use its exact current
+  persisted version. There is no automatic migration or executable legacy
+  fallback. An unsupported Paymaster record stops only the affected Paymaster
+  operation and is never erased or rewritten implicitly.
+- The signed Capacity proof is verified against identity, BIP86 control proofs
+  and live chainstate before the client discloses its intent, DD outpoints, or
+  restricted capability. The quote must consume the exact resource snapshot.
 - Client and provider signatures are gated by immutable wallet-local
   authorization manifests. Finite provider and client safety policies reserve
   worst-case fees atomically, persist rolling limits across restart, and make

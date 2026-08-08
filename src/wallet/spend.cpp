@@ -351,7 +351,16 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     const bool only_safe = {coinControl ? !coinControl->m_include_unsafe_inputs : true};
     const bool can_grind_r = wallet.CanGrindR();
     std::vector<COutPoint> outpoints;
-    const std::set<COutPoint> paymaster_pool_inputs = GetPaymasterProviderPoolInputs(wallet);
+    std::set<COutPoint> paymaster_pool_inputs;
+    const DatabaseReadStatus paymaster_pool_status{
+        GetPaymasterProviderPoolInputs(wallet, paymaster_pool_inputs)};
+    if (paymaster_pool_status != DatabaseReadStatus::FOUND &&
+        paymaster_pool_status != DatabaseReadStatus::NOT_FOUND) {
+        // An unreadable safety record cannot safely be interpreted as an empty
+        // pool. Return no automatically selectable coins; explicit recovery of
+        // the Paymaster data remains an operator action.
+        return result;
+    }
 
     std::set<uint256> trusted_parents;
     for (const auto& entry : wallet.mapWallet)

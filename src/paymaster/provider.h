@@ -121,7 +121,6 @@ struct ProviderSafetyPolicy {
 /** Persistent reservation of the provider's worst-case DGB miner fee. */
 struct ProviderBudgetReservation {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     uint256 commit_key;
@@ -139,9 +138,7 @@ struct ProviderBudgetReservation {
         READWRITE(obj.version, obj.commit_key,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),
-                  obj.network_fee, obj.recipient_bucket);
-        if (obj.version >= 2) READWRITE(obj.netgroup_bucket);
-        READWRITE(
+                  obj.network_fee, obj.recipient_bucket, obj.netgroup_bucket,
             Using<EnumByteFormatter<static_cast<uint8_t>(BudgetReservationState::RELEASED)>>(obj.state),
             obj.reserved_at, obj.updated_at);
     }
@@ -153,7 +150,6 @@ struct ProviderBudgetReservation {
  * consume a second token while changed contents fail closed. */
 struct ProviderQuoteRequestEvent {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     /** Stable protocol slot (provider, request and session), independent of
@@ -168,9 +164,8 @@ struct ProviderQuoteRequestEvent {
 
     SERIALIZE_METHODS(ProviderQuoteRequestEvent, obj)
     {
-        READWRITE(obj.version, obj.request_key);
-        if (obj.version >= 2) READWRITE(obj.request_hash);
-        READWRITE(obj.netgroup_bucket, obj.admitted_at);
+        READWRITE(obj.version, obj.request_key, obj.request_hash,
+                  obj.netgroup_bucket, obj.admitted_at);
     }
 };
 
@@ -211,9 +206,6 @@ struct ProviderCapacityAdmission {
 
 struct ProviderBudgetLedger {
     static constexpr uint16_t CURRENT_VERSION{4};
-    static constexpr uint16_t NETGROUP_RESERVATION_VERSION{3};
-    static constexpr uint16_t QUOTE_REQUEST_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     uint256 recipient_bucket_secret;
@@ -225,9 +217,8 @@ struct ProviderBudgetLedger {
     SERIALIZE_METHODS(ProviderBudgetLedger, obj)
     {
         READWRITE(obj.version, obj.recipient_bucket_secret,
-                  obj.accounting_time_high_water, obj.reservations);
-        if (obj.version >= 2) READWRITE(obj.quote_requests);
-        if (obj.version >= 4) READWRITE(obj.capacity_admissions);
+                  obj.accounting_time_high_water, obj.reservations,
+                  obj.quote_requests, obj.capacity_admissions);
     }
 };
 
@@ -474,13 +465,10 @@ struct ProviderSettings {
 
     SERIALIZE_METHODS(ProviderSettings, obj)
     {
-        READWRITE(obj.version, obj.enabled, obj.policy_hash, obj.updated_at);
-        if (obj.version >= 2) {
-            READWRITE(
-                Using<EnumByteFormatter<static_cast<uint8_t>(
-                    ProviderOperationMode::MANUAL)>>(obj.operation_mode),
-                obj.autostart);
-        }
+        READWRITE(obj.version, obj.enabled, obj.policy_hash, obj.updated_at,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(
+                      ProviderOperationMode::MANUAL)>>(obj.operation_mode),
+                  obj.autostart);
     }
 };
 
@@ -560,8 +548,6 @@ struct ProviderMaintenanceOutput {
  * committed. Persisting the exact output scripts makes a broadcast recoverable
  * even if shutdown occurs before its txid is attached to this record. */
 struct ProviderMaintenanceRecord {
-    static constexpr uint16_t LEGACY_VERSION{1};
-    static constexpr uint16_t SOURCE_INPUTS_VERSION{2};
     static constexpr uint16_t CURRENT_VERSION{3};
 
     uint16_t version{CURRENT_VERSION};
@@ -590,15 +576,11 @@ struct ProviderMaintenanceRecord {
         READWRITE(obj.version, obj.operation_id, obj.plan_id,
             Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS)>>(obj.kind),
             Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceState::FAILED)>>(obj.state),
-            obj.outputs);
-        if (obj.version >= SOURCE_INPUTS_VERSION) READWRITE(obj.source_inputs);
-        if (obj.version >= 3) {
-            READWRITE(obj.withdrawal_excess_script_pub_key,
-                      obj.withdrawal_excess_amount);
-        }
-        READWRITE(
-            obj.transaction_id, obj.maximum_fee,
-            obj.actual_fee, obj.created_at, obj.updated_at);
+            obj.outputs, obj.source_inputs,
+            obj.withdrawal_excess_script_pub_key,
+            obj.withdrawal_excess_amount, obj.transaction_id,
+            obj.maximum_fee, obj.actual_fee, obj.created_at,
+            obj.updated_at);
     }
 };
 
@@ -657,7 +639,6 @@ struct ProviderCarrierWithdrawalPlan {
 
 struct ProviderPoolEntry {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     COutPoint outpoint;
@@ -684,9 +665,8 @@ struct ProviderPoolEntry {
                   Using<EnumByteFormatter<static_cast<uint8_t>(PoolAsset::DD_CARRIER)>>(obj.asset),
                   Using<EnumByteFormatter<static_cast<uint8_t>(PoolEntryState::INVALIDATED)>>(obj.state),
                   obj.script_pub_key, obj.dgb_value, obj.carrier_value,
-                  obj.confirmation_height, obj.reservation_id);
-        if (obj.version >= 2) READWRITE(obj.origin_commit_key);
-        READWRITE(obj.updated_at);
+                  obj.confirmation_height, obj.reservation_id,
+                  obj.origin_commit_key, obj.updated_at);
     }
 };
 
@@ -793,10 +773,9 @@ bool ReleaseProviderBudget(ProviderBudgetLedger& ledger,
                            int64_t now,
                            std::string& error);
 /** Require one persistent provider-budget row to be the exact reservation
- * authorized by the immutable provider manifest and current local policy.
- * A historical policy hash or legacy V1 manifest is accepted only while
- * completing/recovering an already durable exact provider signature; neither
- * can authorize a new signature. */
+ * authorized by the immutable provider manifest. A historical policy hash is
+ * accepted only while completing or recovering an already durable exact
+ * provider signature; it cannot authorize a new signature. */
 bool ValidateProviderBudgetReservationBinding(
     const ProviderAuthorizationManifest& manifest,
     const ProviderAttempt& attempt,
@@ -804,7 +783,6 @@ bool ValidateProviderBudgetReservationBinding(
     const ProviderSafetyPolicy& policy,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_durable_commit,
     std::string& error);
 ProviderSafetyStatus EvaluateProviderSafetyStatus(const ProviderBudgetLedger& ledger,
                                                   const ProviderSafetyPolicy& policy,

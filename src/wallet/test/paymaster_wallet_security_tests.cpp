@@ -30,6 +30,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <initializer_list>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -56,14 +58,12 @@ uint256 SecurityTestId(const uint256& seed, uint16_t domain)
 
 uint256 SecurityCapacitySnapshotId(const PaymasterCapacityProof& proof)
 {
-    HashWriter hasher = TaggedHash(
-        proof.version >= 4 ? "DigiByte Paymaster Capacity Snapshot v2" : "DigiByte Paymaster Capacity Snapshot v1");
+    HashWriter hasher =
+        TaggedHash("DigiByte Paymaster Capacity Snapshot v2");
     hasher << proof.version << proof.genesis_hash << proof.provider_id
-           << proof.request_id << proof.session_id << proof.client_nonce;
-    if (proof.version >= 4) {
-        hasher << static_cast<uint8_t>(proof.funding_model)
-               << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
-    }
+           << proof.request_id << proof.session_id << proof.client_nonce
+           << static_cast<uint8_t>(proof.funding_model)
+           << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
     hasher << proof.created_at << proof.expires_at
            << static_cast<uint64_t>(proof.liquidity_slots.size());
     for (const PaymasterLiquiditySlot& slot : proof.liquidity_slots) {
@@ -864,6 +864,35 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     PaymasterStore store{m_wallet};
     auto& database = GetMockableDatabase(m_wallet);
     const MockableData before_quote = database.m_records;
+    const auto reject_noncanonical_without_write =
+        [&](ProviderAttempt candidate,
+            std::initializer_list<std::string_view> expected_errors) {
+            BOOST_CHECK(!store.CommitProviderQuote(
+                std::move(candidate), fixture.request.intent.genesis_hash,
+                now, error));
+            BOOST_CHECK(std::find(expected_errors.begin(), expected_errors.end(),
+                                  error) != expected_errors.end());
+            BOOST_CHECK(database.m_records == before_quote);
+        };
+    ProviderAttempt trailing_request{fixture.attempt};
+    trailing_request.quote_request.push_back(0);
+    reject_noncanonical_without_write(
+        std::move(trailing_request), {"PAYMASTER_PROVIDER_QUOTE_ENCODING"});
+    ProviderAttempt trailing_response{fixture.attempt};
+    trailing_response.signed_quote.push_back(0);
+    reject_noncanonical_without_write(
+        std::move(trailing_response), {"PAYMASTER_PROVIDER_QUOTE_ENCODING"});
+    ProviderAttempt trailing_transaction{fixture.attempt};
+    trailing_transaction.unsigned_transaction.push_back(0);
+    reject_noncanonical_without_write(
+        std::move(trailing_transaction),
+        {"PAYMASTER_TEMPLATE_TRANSACTION_ENCODING"});
+    ProviderAttempt trailing_psbt{fixture.attempt};
+    trailing_psbt.unsigned_psbt.push_back(0);
+    reject_noncanonical_without_write(
+        std::move(trailing_psbt),
+        {"PAYMASTER_TEMPLATE_PSBT_ENCODING",
+         "PAYMASTER_TEMPLATE_PSBT_NONCANONICAL"});
     for (size_t failing_write = 0; failing_write < 7; ++failing_write) {
         database.FailWriteAt(failing_write);
         BOOST_CHECK(!store.CommitProviderQuote(
@@ -913,8 +942,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
                 fixture.response.quote.network_fee);
     BOOST_REQUIRE_MESSAGE(store.ValidateProviderBudgetAuthorization(
                               attempt, BudgetReservationState::RESERVED,
-                              /*allow_historical_policy=*/false,
-                              /*allow_legacy_durable_commit=*/false, error),
+                              /*allow_historical_policy=*/false, error),
                           error);
 
     ProviderAuthorizationManifest changed_budget_manifest{
@@ -927,8 +955,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_CHECK(!ValidateProviderBudgetReservationBinding(
         changed_budget_manifest, changed_budget_attempt, *reservation,
         environment.safety, BudgetReservationState::RESERVED,
-        /*allow_historical_policy=*/false,
-        /*allow_legacy_durable_commit=*/false, error));
+        /*allow_historical_policy=*/false, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH");
 
     ProviderBudgetReservation changed_reservation{*reservation};
@@ -936,8 +963,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_CHECK(!ValidateProviderBudgetReservationBinding(
         attempt.provider_manifest, attempt, changed_reservation,
         environment.safety, BudgetReservationState::RESERVED,
-        /*allow_historical_policy=*/false,
-        /*allow_legacy_durable_commit=*/false, error));
+        /*allow_historical_policy=*/false, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH");
     const ProviderCapacityAdmission* admission =
         FindCapacityAdmission(ledger, fixture.attempt.commit_key);
@@ -1682,8 +1708,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(
         ValidateProviderAlternativeRecoveryBudgetAuthorization(
             recovery, &safety, ledger, BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_authorized_recovery=*/false, error),
+            /*allow_historical_policy=*/false, error),
         error);
 
     ProviderSafetyPolicy changed_safety{safety};
@@ -1692,8 +1717,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!ValidateProviderAlternativeRecoveryBudgetAuthorization(
         recovery, &changed_safety, ledger,
         BudgetReservationState::RESERVED,
-        /*allow_historical_policy=*/false,
-        /*allow_legacy_authorized_recovery=*/false, error));
+        /*allow_historical_policy=*/false, error));
     BOOST_CHECK_EQUAL(error,
                       "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH");
 
@@ -1704,8 +1728,7 @@ BOOST_AUTO_TEST_CASE(
         ValidateProviderAlternativeRecoveryBudgetAuthorization(
             recovery, /*policy=*/nullptr, ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/false, error),
+            /*allow_historical_policy=*/true, error),
         error);
     BOOST_REQUIRE_MESSAGE(SpendProviderBudget(
                               ledger,
@@ -1717,82 +1740,31 @@ BOOST_AUTO_TEST_CASE(
         ValidateProviderAlternativeRecoveryBudgetAuthorization(
             recovery, /*policy=*/nullptr, ledger,
             BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/false, error),
+            /*allow_historical_policy=*/true, error),
         error);
 
-    // V2 had no serialized provider-policy binding. It can never cross the
-    // first authorization boundary, but already USER_SIGNED work remains
-    // drainable against the exact persistent reservation.
-    AlternativeRecoveryRecord legacy{recovery};
-    legacy.version = AlternativeRecoveryRecord::LEGACY_VERSION;
-    legacy.provider_safety_policy_hash.SetNull();
-    legacy.provider_budget_reservation_id.SetNull();
-    legacy.provider_netgroup_bucket.SetNull();
-    legacy.provider_maximum_network_fee = DGBSatoshis{};
-    legacy.phase = AlternativeRecoveryPhase::RESPONSE_VALIDATED;
+    AlternativeRecoveryRecord outdated{recovery};
+    --outdated.version;
     BOOST_CHECK(!ValidateProviderAlternativeRecoveryBudgetAuthorization(
-        legacy, /*policy=*/nullptr, ledger, BudgetReservationState::SPENT,
-        /*allow_historical_policy=*/true,
-        /*allow_legacy_authorized_recovery=*/true, error));
+        outdated, /*policy=*/nullptr, ledger,
+        BudgetReservationState::SPENT,
+        /*allow_historical_policy=*/true, error));
     BOOST_CHECK_EQUAL(
-        error, "PAYMASTER_PROVIDER_RECOVERY_BUDGET_LEGACY_NOT_EXECUTABLE");
-    legacy.phase = AlternativeRecoveryPhase::USER_SIGNED;
-    BOOST_REQUIRE_MESSAGE(
-        ValidateProviderAlternativeRecoveryBudgetAuthorization(
-            legacy, /*policy=*/nullptr, ledger,
-            BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/true, error),
-        error);
-    BOOST_CHECK(!ValidateProviderAlternativeRecoveryBudgetAuthorization(
-        legacy, &safety, ledger, BudgetReservationState::SPENT,
-        /*allow_historical_policy=*/false,
-        /*allow_legacy_authorized_recovery=*/true, error));
-    BOOST_CHECK_EQUAL(
-        error, "PAYMASTER_PROVIDER_RECOVERY_BUDGET_LEGACY_NOT_EXECUTABLE");
-    BOOST_CHECK(!ValidateProviderAlternativeRecoveryBudgetAuthorization(
-        legacy, /*policy=*/nullptr, ledger, BudgetReservationState::SPENT,
-        /*allow_historical_policy=*/true,
-        /*allow_legacy_authorized_recovery=*/false, error));
-    BOOST_CHECK_EQUAL(
-        error, "PAYMASTER_PROVIDER_RECOVERY_BUDGET_LEGACY_NOT_EXECUTABLE");
+        error, "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH");
 
-    // The migration reader consumes the byte-identical V2 layout and leaves
-    // the new local-only fields empty; they were never part of that schema.
-    AlternativeRecoveryRecord legacy_serialized{legacy};
-    legacy_serialized.provider_safety_policy_hash =
-        recovery.provider_safety_policy_hash;
-    legacy_serialized.provider_budget_reservation_id =
-        recovery.provider_budget_reservation_id;
-    legacy_serialized.provider_netgroup_bucket =
-        recovery.provider_netgroup_bucket;
-    legacy_serialized.provider_maximum_network_fee =
-        recovery.provider_maximum_network_fee;
-    CDataStream legacy_stream{SER_NETWORK, ::PROTOCOL_VERSION};
-    legacy_stream << legacy_serialized;
-    AlternativeRecoveryRecord decoded_legacy;
-    legacy_stream >> decoded_legacy;
-    BOOST_CHECK(legacy_stream.empty());
-    BOOST_CHECK(AlternativeRecoveryRecord::IsSupportedVersion(
-        decoded_legacy.version));
-    BOOST_CHECK_EQUAL(decoded_legacy.version,
-                      AlternativeRecoveryRecord::LEGACY_VERSION);
-    BOOST_CHECK(decoded_legacy.provider_safety_policy_hash.IsNull());
-    BOOST_CHECK(decoded_legacy.provider_budget_reservation_id.IsNull());
-    BOOST_CHECK(decoded_legacy.provider_netgroup_bucket.IsNull());
-    BOOST_CHECK_EQUAL(decoded_legacy.provider_maximum_network_fee.value, 0);
-
-    AlternativeRecoveryRecord version3_serialized{recovery};
-    version3_serialized.version = 3;
-    version3_serialized.capacity_proof_claim_candidate = {1, 2, 3};
-    CDataStream version3_stream{SER_NETWORK, ::PROTOCOL_VERSION};
-    version3_stream << version3_serialized;
-    AlternativeRecoveryRecord decoded_version3;
-    version3_stream >> decoded_version3;
-    BOOST_CHECK(version3_stream.empty());
-    BOOST_CHECK_EQUAL(decoded_version3.version, 3U);
-    BOOST_CHECK(decoded_version3.capacity_proof_claim_candidate.empty());
+    CDataStream outdated_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    outdated_stream << outdated;
+    AlternativeRecoveryRecord decoded_outdated;
+    outdated_stream >> decoded_outdated;
+    BOOST_CHECK(outdated_stream.empty());
+    BOOST_CHECK_EQUAL(decoded_outdated.version,
+                      AlternativeRecoveryRecord::CURRENT_VERSION - 1);
+    BOOST_CHECK(decoded_outdated.provider_safety_policy_hash ==
+                recovery.provider_safety_policy_hash);
+    BOOST_CHECK(!ValidateProviderAlternativeRecoveryBudgetAuthorization(
+        decoded_outdated, /*policy=*/nullptr, ledger,
+        BudgetReservationState::SPENT,
+        /*allow_historical_policy=*/true, error));
 
     AlternativeRecoveryRecord current_serialized{recovery};
     current_serialized.version = AlternativeRecoveryRecord::CURRENT_VERSION;
@@ -1992,7 +1964,7 @@ BOOST_AUTO_TEST_CASE(concurrent_provider_quotes_cannot_bind_one_pool_slot_twice)
         loser_session));
 }
 
-BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_ownership)
+BOOST_AUTO_TEST_CASE(outdated_client_finals_are_not_recoverable)
 {
     constexpr int64_t now{2800};
     constexpr CAmount network_fee{100000};
@@ -2048,30 +2020,39 @@ BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_owner
     {
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
+        UserAuthorizationRecord authorization;
+        authorization.commit_key = fixture.attempt.commit_key;
+        authorization.attempt_id = fixture.attempt.attempt_id;
+        authorization.canonical_psbt_hash =
+            Hash(fixture.attempt.user_signed_psbt);
+        authorization.accepted_at =
+            fixture.attempt.client_manifest_accepted_at;
+        authorization.retry_until = fixture.attempt.retry_until;
         BOOST_REQUIRE(batch.WritePaymasterAttempt(fixture.attempt));
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
         BOOST_REQUIRE(batch.WritePaymasterResult(result, false));
+        BOOST_REQUIRE(batch.WritePaymasterUserAuthorization(authorization));
     }
 
     const CTransaction final{final_transaction};
-    const auto validate_legacy_variant =
+    const auto validate_outdated_variant =
         [&](const std::string& wallet_name, auto&& mutate,
             std::string& variant_error) {
             auto database = DuplicateMockDatabase(m_wallet.GetDatabase());
-            wallet::CWallet legacy_wallet{
+            wallet::CWallet outdated_wallet{
                 m_node.chain.get(), wallet_name, std::move(database)};
-            BOOST_REQUIRE(legacy_wallet.LoadWallet() == DBErrors::LOAD_OK);
+            BOOST_REQUIRE(outdated_wallet.LoadWallet() == DBErrors::LOAD_OK);
             {
-                LOCK(legacy_wallet.cs_wallet);
-                WalletBatch batch{legacy_wallet.GetDatabase()};
+                LOCK(outdated_wallet.cs_wallet);
+                WalletBatch batch{outdated_wallet.GetDatabase()};
                 ProviderAttempt persisted;
                 BOOST_REQUIRE(batch.ReadPaymasterAttempt(
                     fixture.attempt.attempt_id, persisted));
                 mutate(persisted, batch);
                 BOOST_REQUIRE(batch.WritePaymasterAttempt(persisted));
             }
-            PaymasterStore legacy_store{legacy_wallet};
-            return legacy_store.ValidateClientDurableFinalForBroadcast(
+            PaymasterStore outdated_store{outdated_wallet};
+            return outdated_store.ValidateClientDurableFinalForBroadcast(
                 final, now + 2,
                 /*exact_final_already_known=*/false, variant_error);
         };
@@ -2080,41 +2061,39 @@ BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_owner
         persisted.client_manifest.version = 2;
         persisted.client_manifest.manifest_id =
             GetClientAuthorizationManifestId(persisted.client_manifest);
-        persisted.accepted_client_manifest_id.SetNull();
-        persisted.client_manifest_accepted_at = 0;
+        persisted.accepted_client_manifest_id =
+            persisted.client_manifest.manifest_id;
     };
-    BOOST_REQUIRE_MESSAGE(validate_legacy_variant(
-                              "legacy-client-v2", make_v2, error),
-                          error);
-    BOOST_REQUIRE_MESSAGE(validate_legacy_variant(
-                              "legacy-client-v1",
-                              [](ProviderAttempt& persisted, WalletBatch&) {
-                                  persisted.client_manifest.version = 1;
-                                  persisted.client_manifest.manifest_id =
-                                      GetClientAuthorizationManifestId(
-                                          persisted.client_manifest);
-                                  persisted.capacity_snapshot.version =
-                                      ValidatedCapacitySnapshot::
-                                          LEGACY_VERSION;
-                                  persisted.accepted_client_manifest_id
-                                      .SetNull();
-                                  persisted.client_manifest_accepted_at = 0;
-                              },
-                              error),
-                          error);
-    BOOST_REQUIRE_MESSAGE(validate_legacy_variant(
-                              "legacy-client-manifestless",
-                              [](ProviderAttempt& persisted, WalletBatch&) {
-                                  persisted.client_manifest = {};
-                                  persisted.accepted_client_manifest_id
-                                      .SetNull();
-                                  persisted.client_manifest_accepted_at = 0;
-                              },
-                              error),
-                          error);
+    BOOST_CHECK(!validate_outdated_variant(
+        "outdated-client-v2", make_v2, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTH_MANIFEST_INVALID");
+    BOOST_CHECK(!validate_outdated_variant(
+        "outdated-client-v1",
+        [](ProviderAttempt& persisted, WalletBatch&) {
+            persisted.client_manifest.version = 1;
+            persisted.client_manifest.manifest_id =
+                GetClientAuthorizationManifestId(
+                    persisted.client_manifest);
+            persisted.capacity_snapshot.version =
+                ValidatedCapacitySnapshot::CURRENT_VERSION - 1;
+            persisted.accepted_client_manifest_id =
+                persisted.client_manifest.manifest_id;
+        },
+        error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTH_MANIFEST_INVALID");
+    BOOST_CHECK(!validate_outdated_variant(
+        "outdated-client-manifestless",
+        [](ProviderAttempt& persisted, WalletBatch&) {
+            persisted.client_manifest = {};
+            persisted.accepted_client_manifest_id
+                .SetNull();
+            persisted.client_manifest_accepted_at = 0;
+        },
+        error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED");
 
-    BOOST_CHECK(!validate_legacy_variant(
-        "legacy-client-missing-result",
+    BOOST_CHECK(!validate_outdated_variant(
+        "outdated-client-missing-result",
         [&](ProviderAttempt& persisted, WalletBatch& batch) {
             make_v2(persisted, batch);
             BOOST_REQUIRE(batch.ErasePaymasterResult(
@@ -2123,8 +2102,8 @@ BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_owner
         error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_RESULT_MISSING");
 
-    BOOST_CHECK(!validate_legacy_variant(
-        "legacy-client-mismatched-result",
+    BOOST_CHECK(!validate_outdated_variant(
+        "outdated-client-mismatched-result",
         [&](ProviderAttempt& persisted, WalletBatch& batch) {
             make_v2(persisted, batch);
             PaymasterResult mismatched{result};
@@ -2148,13 +2127,8 @@ BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_owner
                       "PAYMASTER_FINAL_RESULT_BINDING_MISMATCH");
 
     ProviderAttempt foreign_attempt{fixture.attempt};
-    foreign_attempt.client_manifest.version = 2;
-    foreign_attempt.client_manifest.manifest_id =
-        GetClientAuthorizationManifestId(foreign_attempt.client_manifest);
-    foreign_attempt.accepted_client_manifest_id.SetNull();
-    foreign_attempt.client_manifest_accepted_at = 0;
     wallet::CWallet foreign_wallet{
-        m_node.chain.get(), "legacy-client-foreign-wallet",
+        m_node.chain.get(), "current-client-foreign-wallet",
         CreateMockableWalletDatabase()};
     {
         LOCK(foreign_wallet.cs_wallet);
@@ -2162,6 +2136,15 @@ BOOST_AUTO_TEST_CASE(durable_legacy_client_finals_require_exact_result_and_owner
         BOOST_REQUIRE(batch.WritePaymasterAttempt(foreign_attempt));
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
         BOOST_REQUIRE(batch.WritePaymasterResult(result, false));
+        UserAuthorizationRecord authorization;
+        authorization.commit_key = foreign_attempt.commit_key;
+        authorization.attempt_id = foreign_attempt.attempt_id;
+        authorization.canonical_psbt_hash =
+            Hash(foreign_attempt.user_signed_psbt);
+        authorization.accepted_at =
+            foreign_attempt.client_manifest_accepted_at;
+        authorization.retry_until = foreign_attempt.retry_until;
+        BOOST_REQUIRE(batch.WritePaymasterUserAuthorization(authorization));
     }
     PaymasterStore foreign_store{foreign_wallet};
     BOOST_CHECK(!foreign_store.ValidateClientDurableFinalForBroadcast(
@@ -2328,22 +2311,22 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     BOOST_CHECK_EQUAL(error,
                       "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_STATE");
 
-    // V13 serialized neither the provider-signing time nor the private result
-    // envelope. Reading such a record may migrate its schema version, but it
-    // must not synthesize either field or acquire fresh commit authority.
-    ProviderAttempt legacy_v13{provider_signed};
-    legacy_v13.version = 13;
-    CDataStream legacy_stream{SER_NETWORK, ::PROTOCOL_VERSION};
-    legacy_stream << legacy_v13;
-    ProviderAttempt migrated_v13;
-    legacy_stream >> migrated_v13;
-    migrated_v13.version = ProviderAttempt::CURRENT_VERSION;
-    BOOST_CHECK_EQUAL(migrated_v13.provider_signed_at, 0);
-    BOOST_CHECK(migrated_v13.provider_signed_result.empty());
+    ProviderAttempt outdated_attempt{provider_signed};
+    --outdated_attempt.version;
+    CDataStream outdated_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    outdated_stream << outdated_attempt;
+    ProviderAttempt decoded_outdated;
+    outdated_stream >> decoded_outdated;
+    BOOST_CHECK(outdated_stream.empty());
+    BOOST_CHECK_EQUAL(decoded_outdated.version,
+                      ProviderAttempt::CURRENT_VERSION - 1);
+    BOOST_CHECK_EQUAL(decoded_outdated.provider_signed_at,
+                      provider_signed.provider_signed_at);
+    BOOST_CHECK(decoded_outdated.provider_signed_result ==
+                provider_signed.provider_signed_result);
     BOOST_CHECK(!ValidateProviderCommitForExecution(
-        migrated_v13, commit, commit.committed_at, rejected_final, error));
-    BOOST_CHECK_EQUAL(error,
-                      "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID");
+        decoded_outdated, commit, commit.committed_at, rejected_final, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION");
 
     bool has_work{false};
     BOOST_REQUIRE(store.HasProviderDrainWork(
@@ -2352,6 +2335,34 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
 
     auto& database = GetMockableDatabase(m_wallet);
     const MockableData before_commit = database.m_records;
+
+    auto unreadable_pool_database =
+        DuplicateMockDatabase(m_wallet.GetDatabase());
+    wallet::CWallet unreadable_pool_wallet{
+        m_node.chain.get(), "unreadable-provider-pool",
+        std::move(unreadable_pool_database)};
+    BOOST_REQUIRE(unreadable_pool_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    ProviderPoolEntry outdated_pool_entry{fixture.pool_entry};
+    --outdated_pool_entry.version;
+    {
+        auto raw_batch = unreadable_pool_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw_batch->Write(
+            DBKeys::PAYMASTER_PROVIDER_POOL,
+            std::vector<ProviderPoolEntry>{outdated_pool_entry}));
+    }
+    auto& unreadable_pool_mock =
+        GetMockableDatabase(unreadable_pool_wallet);
+    const MockableData before_unreadable_pool =
+        unreadable_pool_mock.m_records;
+    PaymasterStore unreadable_pool_store{unreadable_pool_wallet};
+    BOOST_CHECK(!unreadable_pool_store.CommitProviderFinalTransaction(
+        request_id, provider_signed.attempt_id, commit, result,
+        result.genesis_hash, error));
+    BOOST_CHECK_EQUAL(
+        error,
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=ProviderPoolEntry found=1 expected=2");
+    BOOST_CHECK(unreadable_pool_mock.m_records == before_unreadable_pool);
+
     for (size_t failing_write = 0; failing_write < 6; ++failing_write) {
         database.FailWriteAt(failing_write);
         BOOST_CHECK(!store.CommitProviderFinalTransaction(
@@ -2536,14 +2547,12 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     }
     BOOST_CHECK(!restarted_store.ValidateProviderBudgetAuthorization(
         restarted_attempt, BudgetReservationState::SPENT,
-        /*allow_historical_policy=*/false,
-        /*allow_legacy_durable_commit=*/false, error));
+        /*allow_historical_policy=*/false, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH");
     BOOST_REQUIRE_MESSAGE(
         restarted_store.ValidateProviderBudgetAuthorization(
             restarted_attempt, BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/false, error),
+            /*allow_historical_policy=*/true, error),
         error);
     auto& restarted_mock = GetMockableDatabase(restarted_wallet);
     const MockableData restarted_before_retry = restarted_mock.m_records;

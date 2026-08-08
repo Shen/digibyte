@@ -7,6 +7,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <coins.h>
+#include <consensus/digidollar.h>
 #include <hash.h>
 #include <key.h>
 #include <paymaster/directory.h>
@@ -622,6 +623,134 @@ BOOST_AUTO_TEST_CASE(capacity_full_validation_requires_successful_chainstate_cal
     BOOST_CHECK(!ValidateCapacityProof(proof, request, genesis, identity_public_key,
                                        chainstate, now, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_CHAINSTATE_VALIDATOR_MISSING");
+}
+
+BOOST_FIXTURE_TEST_CASE(admission_validation_rejects_mempool_conflicts,
+                        TestChain100Setup)
+{
+    CKey identity_key;
+    identity_key.MakeNewKey(true);
+    Announcement announcement;
+    announcement.identity_key = XOnlyPubKey{identity_key.GetPubKey()};
+    announcement.sequence = 1;
+    announcement.min_confirmations = 1;
+    announcement.offers.push_back(
+        {uint256S("51"), uint256S("52"), FundingModel::USER_PAID,
+         SponsorshipScope::PUBLIC, 50, DDCents{100}, DDCents{1000000}});
+
+    uint256 reference_block;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(m_node.chainman);
+        BOOST_REQUIRE(m_node.chainman->ActiveChain().Tip());
+        reference_block =
+            m_node.chainman->ActiveChain().Tip()->GetBlockHash();
+    }
+
+    std::vector<CKey> dgb_keys(REQUIRED_ADMISSION_SLOTS);
+    std::vector<CKey> carrier_keys(REQUIRED_ADMISSION_SLOTS);
+    for (size_t index = 0; index < REQUIRED_ADMISSION_SLOTS; ++index) {
+        dgb_keys[index].MakeNewKey(true);
+        carrier_keys[index].MakeNewKey(true);
+
+        CMutableTransaction dgb_tx;
+        dgb_tx.vin.emplace_back(COutPoint{uint256::ONE,
+                                          static_cast<uint32_t>(100 + index)});
+        dgb_tx.vout.emplace_back(
+            MIN_ADMISSION_DGB_SATOSHIS,
+            GetScriptForDestination(
+                WitnessV1Taproot{BIP86OutputKey(dgb_keys[index])}));
+
+        CMutableTransaction carrier_tx;
+        carrier_tx.SetDigiDollarType(::DD_TX_TRANSFER);
+        carrier_tx.vin.emplace_back(COutPoint{
+            uint256::ONE, static_cast<uint32_t>(200 + index)});
+        carrier_tx.vout.emplace_back(
+            0, GetScriptForDestination(
+                   WitnessV1Taproot{BIP86OutputKey(carrier_keys[index])}));
+        carrier_tx.vout.emplace_back(
+            0, CScript{} << OP_RETURN
+                         << std::vector<unsigned char>{'D', 'D'}
+                         << CScriptNum(DD_TX_TRANSFER) << CScriptNum(100));
+
+        AdmissionSlotProof slot;
+        slot.dgb_creating_tx = dgb_tx;
+        slot.dgb_outpoint = COutPoint{CTransaction{dgb_tx}.GetHash(), 0};
+        slot.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        slot.carrier_creating_tx = carrier_tx;
+        slot.carrier_outpoint =
+            COutPoint{CTransaction{carrier_tx}.GetHash(), 0};
+        slot.carrier_value = DDCents{100};
+        slot.reference_block = reference_block;
+        slot.expires_at = 100600;
+        SignBIP86ControlProof(
+            dgb_keys[index],
+            GetAdmissionControlHash(
+                GetPaymasterId(announcement.identity_key),
+                announcement.sequence, reference_block, slot.dgb_outpoint,
+                slot.expires_at, /*carrier=*/false),
+            slot.dgb_control_signature);
+        SignBIP86ControlProof(
+            carrier_keys[index],
+            GetAdmissionControlHash(
+                GetPaymasterId(announcement.identity_key),
+                announcement.sequence, reference_block,
+                slot.carrier_outpoint, slot.expires_at, /*carrier=*/true),
+            slot.carrier_control_signature);
+
+        {
+            LOCK(cs_main);
+            auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();
+            coins.AddCoin(slot.dgb_outpoint,
+                          Coin{dgb_tx.vout.at(0), /*nHeightIn=*/100,
+                               /*fCoinBaseIn=*/false},
+                          /*possible_overwrite=*/false);
+            coins.AddCoin(slot.carrier_outpoint,
+                          Coin{carrier_tx.vout.at(0), /*nHeightIn=*/100,
+                               /*fCoinBaseIn=*/false},
+                          /*possible_overwrite=*/false);
+        }
+        announcement.admission_slots.push_back(std::move(slot));
+    }
+
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(
+        ValidateAdmissionProofs(announcement, *m_node.chainman, error), error);
+
+    const auto add_conflict = [&](const COutPoint& outpoint) {
+        CMutableTransaction spending_tx;
+        spending_tx.vin.emplace_back(outpoint);
+        spending_tx.vout.emplace_back(1, CScript{} << OP_TRUE);
+        const CTransactionRef spending_ref{
+            MakeTransactionRef(std::move(spending_tx))};
+        {
+            LOCK2(cs_main, m_node.mempool->cs);
+            TestMemPoolEntryHelper entry;
+            m_node.mempool->addUnchecked(entry.Fee(1).FromTx(spending_ref));
+        }
+        return spending_ref;
+    };
+    const auto remove_conflict = [&](const CTransactionRef& transaction) {
+        WITH_LOCK(m_node.mempool->cs,
+                  m_node.mempool->removeRecursive(
+                      *transaction, MemPoolRemovalReason::CONFLICT));
+    };
+
+    const CTransactionRef dgb_conflict{
+        add_conflict(announcement.admission_slots.front().dgb_outpoint)};
+    BOOST_CHECK(!ValidateAdmissionProofs(
+        announcement, *m_node.chainman, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_DGB_ADMISSION_PROOF");
+    remove_conflict(dgb_conflict);
+
+    BOOST_REQUIRE_MESSAGE(
+        ValidateAdmissionProofs(announcement, *m_node.chainman, error), error);
+    const CTransactionRef carrier_conflict{
+        add_conflict(announcement.admission_slots.front().carrier_outpoint)};
+    BOOST_CHECK(!ValidateAdmissionProofs(
+        announcement, *m_node.chainman, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_CARRIER_ADMISSION_PROOF");
+    remove_conflict(carrier_conflict);
 }
 
 BOOST_FIXTURE_TEST_CASE(

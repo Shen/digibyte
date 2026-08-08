@@ -54,6 +54,13 @@ struct PaymentIntentParameters {
     uint256 sponsorship_authorization_hash;
 };
 
+/** Return whether an endpoint is usable for the selected privacy profile.
+ * Unknown profiles and invalid endpoints fail closed. */
+bool IsEndpointAllowedForPrivacyProfile(
+    const CService& endpoint,
+    PrivacyProfile privacy_profile,
+    bool allow_local_endpoint = false);
+
 std::optional<PaymentIntent> BuildUnsignedPaymentIntent(
     const OfferCandidate& offer,
     const PaymentIntentParameters& parameters,

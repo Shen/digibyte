@@ -200,7 +200,6 @@ bool DecodeProviderAuthorizationArtifacts(
     PaymentIntent& intent,
     PaymasterQuote& quote,
     CollaborativePSBTTemplate& trusted,
-    bool allow_legacy_protocol,
     std::string& error)
 {
     PaymasterQuoteRequest request;
@@ -252,21 +251,9 @@ bool DecodeProviderAuthorizationArtifacts(
     intent = std::move(request.intent);
     quote = std::move(response.quote);
     const uint256 intent_hash{GetPaymentIntentHash(intent)};
-    // Versions 1-4 are accepted only by the exact durable-commit recovery
-    // caller. New provider signatures and all client finalization stay pinned
-    // to the current protocol with no downgrade path.
-    const bool supported_protocol{
-        request.version == response.version &&
-        (request.version == DigiDollar::Paymaster::PROTOCOL_VERSION ||
-         (allow_legacy_protocol &&
-          request.version >= 1 &&
-          request.version < DigiDollar::Paymaster::PROTOCOL_VERSION))};
-    const bool supported_intent{
-        intent.version == PaymentIntent::CURRENT_VERSION ||
-        (allow_legacy_protocol &&
-         intent.version == PaymentIntent::LEGACY_VERSION)};
-    if (!supported_protocol ||
-        !supported_intent ||
+    if (request.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+        response.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+        intent.version != PaymentIntent::CURRENT_VERSION ||
         quote.version != PaymasterQuote::CURRENT_VERSION ||
         response.request_id != intent.request_id ||
         response.session_id != intent.session_id ||
@@ -320,55 +307,14 @@ bool ValidateProviderManifestForExecution(
     const PaymentIntent& intent,
     const PaymasterQuote& quote,
     const CollaborativePSBTTemplate& trusted,
-    bool allow_legacy_commit,
     std::string& error)
 {
-    if (!attempt.provider_manifest.manifest_id.IsNull()) {
-        if (allow_legacy_commit &&
-            attempt.provider_manifest.version ==
-                ProviderAuthorizationManifest::LEGACY_VERSION) {
-            // V1 did not bind its wallet-local budget record. It can never
-            // authorize a new signature, but an already durable exact commit
-            // remains recoverable after first verifying the original V1
-            // manifest id and then projecting the missing fields from the
-            // immutable quote/commit artifacts.
-            if (attempt.provider_manifest.manifest_id !=
-                GetProviderAuthorizationManifestId(
-                    attempt.provider_manifest)) {
-                error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID";
-                return false;
-            }
-            ProviderAuthorizationManifest upgraded{
-                attempt.provider_manifest};
-            upgraded.version =
-                ProviderAuthorizationManifest::CURRENT_VERSION;
-            upgraded.budget_reservation_id = attempt.commit_key;
-            upgraded.maximum_network_fee = quote.network_fee;
-            upgraded.manifest_id =
-                GetProviderAuthorizationManifestId(upgraded);
-            return ValidateProviderAuthorizationManifest(
-                upgraded, intent, quote, trusted, error);
-        }
-        return ValidateProviderAuthorizationManifest(
-            attempt.provider_manifest, intent, quote, trusted, error);
-    }
-    if (!allow_legacy_commit) {
+    if (attempt.provider_manifest.manifest_id.IsNull()) {
         error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
         return false;
     }
-
-    // V9/V10 records are upgraded in memory by WalletBatch and therefore no
-    // longer expose their original version. They remain recoverable only as
-    // an already durable, byte-exact commit. Reconstructing and validating an
-    // ephemeral manifest gives that migration path the same structural spend
-    // firewall without permitting a new signature.
-    HashWriter marker_hasher = TaggedHash("DigiByte Paymaster Legacy Recovery Authority v1");
-    marker_hasher << attempt.attempt_id << attempt.commit_key;
-    const uint256 safety_marker{marker_hasher.GetSHA256()};
-    ProviderAuthorizationManifest legacy_manifest;
-    return !attempt.attempt_id.IsNull() && !attempt.commit_key.IsNull() &&
-           BuildProviderAuthorizationManifest(
-               intent, quote, trusted, safety_marker, legacy_manifest, error);
+    return ValidateProviderAuthorizationManifest(
+        attempt.provider_manifest, intent, quote, trusted, error);
 }
 
 } // namespace
@@ -429,6 +375,10 @@ bool ValidateQuoteAgainstCapacitySnapshot(
     const ValidatedCapacitySnapshot& capacity,
     std::string& error)
 {
+    if (capacity.version != ValidatedCapacitySnapshot::CURRENT_VERSION) {
+        error = "PAYMASTER_CAPACITY_SNAPSHOT_VERSION";
+        return false;
+    }
     PaymasterCapacityProof proof;
     try {
         CDataStream stream{capacity.capacity_proof, SER_NETWORK,
@@ -439,7 +389,8 @@ bool ValidateQuoteAgainstCapacitySnapshot(
         error = "PAYMASTER_CAPACITY_SNAPSHOT_ENCODING";
         return false;
     }
-    if (SerializeExact(proof) != capacity.capacity_proof ||
+    if (proof.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+        SerializeExact(proof) != capacity.capacity_proof ||
         proof.snapshot_id != capacity.snapshot_id ||
         proof.provider_id != capacity.provider_id ||
         proof.client_nonce != capacity.client_nonce ||
@@ -567,33 +518,31 @@ bool ValidateClientAuthorizationManifest(
     const CollaborativePSBTTemplate& trusted_template,
     std::string& error)
 {
-    if (!IsSupportedClientAuthorizationManifestVersion(manifest.version) ||
+    if (manifest.version != ClientAuthorizationManifest::CURRENT_VERSION ||
         manifest.manifest_id.IsNull() ||
         manifest.manifest_id != GetClientAuthorizationManifestId(manifest)) {
         error = "PAYMASTER_CLIENT_AUTH_MANIFEST_INVALID";
         return false;
     }
-    if (manifest.version >= 4) {
-        if (manifest.requested_amount.value <= 0 ||
-            manifest.requested_amount.value > MAX_DD_OUTPUT_CENTS ||
-            (manifest.send_all_spendable_dd &&
-             !manifest.subtract_paymaster_fee_from_amount)) {
-            error = "PAYMASTER_CLIENT_AUTH_AMOUNT_INVALID";
+    if (manifest.requested_amount.value <= 0 ||
+        manifest.requested_amount.value > MAX_DD_OUTPUT_CENTS ||
+        (manifest.send_all_spendable_dd &&
+         !manifest.subtract_paymaster_fee_from_amount)) {
+        error = "PAYMASTER_CLIENT_AUTH_AMOUNT_INVALID";
+        return false;
+    }
+    if (manifest.subtract_paymaster_fee_from_amount) {
+        if (manifest.recipient_amount.value >
+                std::numeric_limits<int64_t>::max() -
+                    manifest.service_fee.value ||
+            manifest.recipient_amount.value + manifest.service_fee.value !=
+                manifest.requested_amount.value) {
+            error = "PAYMASTER_CLIENT_AUTH_GROSS_AMOUNT_MISMATCH";
             return false;
         }
-        if (manifest.subtract_paymaster_fee_from_amount) {
-            if (manifest.recipient_amount.value >
-                    std::numeric_limits<int64_t>::max() -
-                        manifest.service_fee.value ||
-                manifest.recipient_amount.value + manifest.service_fee.value !=
-                    manifest.requested_amount.value) {
-                error = "PAYMASTER_CLIENT_AUTH_GROSS_AMOUNT_MISMATCH";
-                return false;
-            }
-        } else if (manifest.recipient_amount != manifest.requested_amount) {
-            error = "PAYMASTER_CLIENT_AUTH_RECIPIENT_AMOUNT_MISMATCH";
-            return false;
-        }
+    } else if (manifest.recipient_amount != manifest.requested_amount) {
+        error = "PAYMASTER_CLIENT_AUTH_RECIPIENT_AMOUNT_MISMATCH";
+        return false;
     }
     const int64_t expected_expiry = quote.retry_until;
     if (manifest.request_id != intent.request_id ||
@@ -739,6 +688,10 @@ bool ValidateProviderAuthorizationForExecution(
 {
     error.clear();
     trusted_template = {};
+    if (attempt.version != ProviderAttempt::CURRENT_VERSION) {
+        error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
+        return false;
+    }
     if (now <= 0 || attempt.created_at <= 0 || now < attempt.created_at ||
         attempt.quote_expires_at <= 0 ||
         attempt.retry_until < attempt.quote_expires_at ||
@@ -753,11 +706,9 @@ bool ValidateProviderAuthorizationForExecution(
     PaymentIntent intent;
     PaymasterQuote quote;
     if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted_template,
-            /*allow_legacy_protocol=*/false, error) ||
+            attempt, intent, quote, trusted_template, error) ||
         !ValidateProviderManifestForExecution(
-            attempt, intent, quote, trusted_template,
-            /*allow_legacy_commit=*/false, error)) {
+            attempt, intent, quote, trusted_template, error)) {
         return false;
     }
     return true;
@@ -772,6 +723,10 @@ bool ValidateProviderCommitForExecution(
 {
     error.clear();
     final_transaction = CMutableTransaction{};
+    if (attempt.version != ProviderAttempt::CURRENT_VERSION) {
+        error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
+        return false;
+    }
     const bool exact_persisted_provider_signature =
         attempt.state == AttemptState::PROVIDER_SIGNED &&
         !attempt.final_txid.IsNull() &&
@@ -809,11 +764,9 @@ bool ValidateProviderCommitForExecution(
     PaymasterQuote quote;
     CollaborativePSBTTemplate trusted;
     if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted,
-            /*allow_legacy_protocol=*/true, error) ||
+            attempt, intent, quote, trusted, error) ||
         !ValidateProviderManifestForExecution(
-            attempt, intent, quote, trusted,
-            /*allow_legacy_commit=*/true, error)) {
+            attempt, intent, quote, trusted, error)) {
         return false;
     }
     if (attempt.commit_key != commit.commit_key ||
@@ -904,8 +857,7 @@ bool ValidateClientFinalForExecution(
     PaymasterQuote quote;
     CollaborativePSBTTemplate trusted;
     if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted,
-            /*allow_legacy_protocol=*/false, error) ||
+            attempt, intent, quote, trusted, error) ||
         !ValidateClientAuthorizationManifest(
             attempt.client_manifest, intent, quote,
             attempt.capacity_snapshot, trusted, error)) {

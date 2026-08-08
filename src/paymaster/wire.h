@@ -81,13 +81,9 @@ struct PaymasterCapacityRequest {
     SERIALIZE_METHODS(PaymasterCapacityRequest, obj)
     {
         READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
-                  obj.session_id, obj.client_nonce);
-        if (obj.version >= 4) {
-            READWRITE(
-                Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
-                obj.requires_carrier);
-        }
-        READWRITE(obj.requested_slots,
+                  obj.session_id, obj.client_nonce,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
+                  obj.requires_carrier, obj.requested_slots,
                   obj.created_at, obj.expires_at);
     }
 };
@@ -110,13 +106,9 @@ struct PaymasterCapacityProof {
     SERIALIZE_METHODS(PaymasterCapacityProof, obj)
     {
         READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
-                  obj.session_id, obj.client_nonce);
-        if (obj.version >= 4) {
-            READWRITE(
-                Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
-                obj.requires_carrier);
-        }
-        READWRITE(obj.snapshot_id,
+                  obj.session_id, obj.client_nonce,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
+                  obj.requires_carrier, obj.snapshot_id,
                   obj.created_at, obj.expires_at, obj.liquidity_slots,
                   obj.identity_signature);
     }

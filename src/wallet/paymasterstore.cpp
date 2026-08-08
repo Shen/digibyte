@@ -24,6 +24,7 @@
 #include <paymaster/wire.h>
 #include <random.h>
 #include <streams.h>
+#include <tinyformat.h>
 #include <util/time.h>
 #include <version.h>
 #include <wallet/paymasterpsbt.h>
@@ -36,6 +37,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace wallet {
@@ -50,9 +52,15 @@ bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint)
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
     InputReservation reservation;
-    if (batch.ReadPaymasterReservation(outpoint, reservation)) return true;
+    const DatabaseReadStatus reservation_status{
+        batch.ReadPaymasterReservationWithStatus(outpoint, reservation)};
+    if (reservation_status == DatabaseReadStatus::FOUND) return true;
+    if (reservation_status != DatabaseReadStatus::NOT_FOUND) return true;
     std::vector<ProviderPoolEntry> pool;
-    if (!batch.ReadPaymasterProviderPool(pool)) return false;
+    const DatabaseReadStatus pool_status{
+        batch.ReadPaymasterProviderPoolWithStatus(pool)};
+    if (pool_status == DatabaseReadStatus::NOT_FOUND) return false;
+    if (pool_status != DatabaseReadStatus::FOUND) return true;
     const auto entry = std::find_if(pool.begin(), pool.end(), [&](const ProviderPoolEntry& candidate) {
         return candidate.outpoint == outpoint;
     });
@@ -62,22 +70,70 @@ bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint)
     return entry != pool.end() && IsActiveProviderPoolState(entry->state);
 }
 
-std::set<COutPoint> GetPaymasterProviderPoolInputs(const CWallet& wallet)
+DatabaseReadStatus GetPaymasterProviderPoolInputs(
+    const CWallet& wallet, std::set<COutPoint>& inputs)
 {
     LOCK(wallet.cs_wallet);
+    inputs.clear();
     std::vector<ProviderPoolEntry> pool;
-    if (!WalletBatch{wallet.GetDatabase()}.ReadPaymasterProviderPool(pool)) return {};
-    std::set<COutPoint> result;
+    const DatabaseReadStatus status{
+        WalletBatch{wallet.GetDatabase()}.ReadPaymasterProviderPoolWithStatus(
+            pool)};
+    if (status != DatabaseReadStatus::FOUND) return status;
     for (const ProviderPoolEntry& entry : pool) {
-        if (IsActiveProviderPoolState(entry.state)) result.insert(entry.outpoint);
+        if (IsActiveProviderPoolState(entry.state)) inputs.insert(entry.outpoint);
     }
-    return result;
+    return DatabaseReadStatus::FOUND;
 }
 
 namespace {
 
 constexpr size_t MAX_RECOVERY_ENDPOINT_BYTES{512};
 constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
+
+std::string PersistedVersionError(std::string_view record_type,
+                                  uint16_t found,
+                                  uint16_t expected,
+                                  std::string_view invalid_error)
+{
+    if (found == expected) return std::string{invalid_error};
+    return strprintf(
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=%s found=%u expected=%u",
+        std::string{record_type}, found, expected);
+}
+
+template <typename T>
+std::string PersistedReadError(DatabaseReadStatus status,
+                               std::string_view record_type,
+                               const T& record,
+                               std::string_view missing_error,
+                               std::string_view invalid_error)
+{
+    if (status == DatabaseReadStatus::NOT_FOUND) {
+        return std::string{missing_error};
+    }
+    if (status == DatabaseReadStatus::UNSUPPORTED_VERSION) {
+        return PersistedVersionError(record_type, record.version,
+                                     T::CURRENT_VERSION, invalid_error);
+    }
+    return std::string{invalid_error};
+}
+
+std::string ProviderPoolReadError(
+    const std::vector<ProviderPoolEntry>& entries)
+{
+    const auto outdated = std::find_if(
+        entries.begin(), entries.end(), [](const ProviderPoolEntry& entry) {
+            return entry.version != ProviderPoolEntry::CURRENT_VERSION;
+        });
+    if (outdated != entries.end()) {
+        return PersistedVersionError(
+            "ProviderPoolEntry", outdated->version,
+            ProviderPoolEntry::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PROVIDER_POOL");
+    }
+    return "PAYMASTER_INVALID_PROVIDER_POOL";
+}
 
 // -------------------------------------------------------------------------
 // Provider-pool successor reconstruction
@@ -266,11 +322,9 @@ bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
     return true;
 }
 
-/** Prepare the accounting side of a provider commit. Modern attempts bind
- * the exact service fee and network fee in the provider authorization
- * manifest, so this event can share the same database transaction as the
- * durable commit. Legacy manifest-less commits are not guessed; their ledger
- * is marked as only partially reconstructable. */
+/** Prepare the accounting side of a provider commit. The exact service fee
+ * and network fee are bound in the provider authorization manifest, so this
+ * event can share the same database transaction as the durable commit. */
 bool PrepareProviderTransferFinanceEvent(
     WalletBatch& batch,
     const ProviderIdentityRecord& identity,
@@ -305,15 +359,8 @@ bool PrepareProviderTransferFinanceEvent(
 
     const ProviderAuthorizationManifest& manifest = attempt.provider_manifest;
     if (manifest.manifest_id.IsNull()) {
-        if (!ledger.earlier_history_partial) {
-            ledger.earlier_history_partial = true;
-            changed = true;
-        }
-        if (ledger.updated_at < commit.committed_at) {
-            ledger.updated_at = commit.committed_at;
-            changed = true;
-        }
-        return RebuildProviderFinanceDailyTotals(ledger, error);
+        error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
+        return false;
     }
     ProviderFinanceEvent event;
     event.event_id = commit.commit_key;
@@ -366,24 +413,6 @@ bool AttemptHasReached(AttemptState state, AttemptState threshold)
     return state >= threshold && state <= AttemptState::MEMPOOL;
 }
 
-bool ProviderBudgetReservationRequired(const ProviderAttempt& attempt)
-{
-    // Every quote created by the mandatory safety-policy flow binds the
-    // policy hash in its provider authorization manifest. A null hash is an
-    // explicit legacy marker; wall-clock ordering is not safe for migration
-    // decisions because the local clock may move backwards across restarts.
-    return !attempt.provider_manifest.safety_policy_hash.IsNull();
-}
-
-bool IsLegacyBudgetlessProviderAttempt(const ProviderAttempt& attempt)
-{
-    if (attempt.provider_manifest.manifest_id.IsNull()) return true;
-    return attempt.provider_manifest.version ==
-               ProviderAuthorizationManifest::LEGACY_VERSION &&
-           attempt.provider_manifest.manifest_id ==
-               GetProviderAuthorizationManifestId(attempt.provider_manifest);
-}
-
 bool HasTimelyDurableProviderSignature(const ProviderAttempt& attempt)
 {
     return attempt.state == AttemptState::PROVIDER_SIGNED &&
@@ -395,31 +424,12 @@ bool HasTimelyDurableProviderSignature(const ProviderAttempt& attempt)
            !attempt.provider_signed_result.empty();
 }
 
-bool HasExactDurableProviderCommit(WalletBatch& batch,
-                                   const ProviderAttempt& attempt)
-{
-    ProviderCommitRecord commit;
-    return batch.ReadPaymasterProviderCommit(attempt.commit_key, commit) &&
-           commit.version == ProviderCommitRecord::CURRENT_VERSION &&
-           commit.commit_key == attempt.commit_key &&
-           commit.provider_id == attempt.provider_id &&
-           commit.quote_id == attempt.quote_id &&
-           commit.template_commitment == attempt.template_commitment &&
-           commit.final_txid == attempt.unsigned_txid &&
-           commit.final_txid == attempt.final_txid &&
-           commit.raw_transaction_hash == Hash(commit.final_transaction) &&
-           commit.final_transaction == attempt.final_transaction &&
-           !commit.provider_inputs.empty() && commit.committed_at > 0 &&
-           commit.retry_until == attempt.retry_until;
-}
-
 bool ValidateProviderBudgetState(
     const ProviderAttempt& attempt,
     const ProviderSafetyPolicy& policy,
     const ProviderBudgetLedger& ledger,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_durable_commit,
     std::string& error)
 {
     if (!ValidateProviderBudgetLedger(ledger, error)) return false;
@@ -441,7 +451,7 @@ bool ValidateProviderBudgetState(
     }
     return ValidateProviderBudgetReservationBinding(
         attempt.provider_manifest, attempt, *first, policy, expected_state,
-        allow_historical_policy, allow_legacy_durable_commit, error);
+        allow_historical_policy, error);
 }
 
 bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
@@ -450,13 +460,12 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
     const ProviderBudgetLedger& ledger,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_authorized_recovery,
     std::string& error)
 {
     error.clear();
     if (!recovery.provider_side ||
         recovery.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
-        !AlternativeRecoveryRecord::IsSupportedVersion(recovery.version) ||
+        recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         !ValidateProviderBudgetLedger(ledger, error)) {
         if (error.empty()) {
             error = "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH";
@@ -464,26 +473,17 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
         return false;
     }
 
-    const bool legacy =
-        recovery.version == AlternativeRecoveryRecord::LEGACY_VERSION;
-    if (legacy &&
-        (!allow_historical_policy || !allow_legacy_authorized_recovery ||
-         recovery.phase < AlternativeRecoveryPhase::USER_SIGNED)) {
-        error = "PAYMASTER_PROVIDER_RECOVERY_BUDGET_LEGACY_NOT_EXECUTABLE";
-        return false;
-    }
-    if (!legacy &&
-        (recovery.provider_safety_policy_hash.IsNull() ||
-         recovery.provider_budget_reservation_id !=
-             recovery.recovery_response.recovery_commit_key ||
-         recovery.provider_netgroup_bucket.IsNull() ||
-         recovery.provider_maximum_network_fee.value <= 0 ||
-         !(recovery.provider_maximum_network_fee ==
-           recovery.recovery_response.manifest.network_fee) ||
-         (!allow_historical_policy &&
-          (!policy ||
-           recovery.provider_safety_policy_hash !=
-               GetProviderSafetyPolicyHash(*policy))))) {
+    if (recovery.provider_safety_policy_hash.IsNull() ||
+        recovery.provider_budget_reservation_id !=
+            recovery.recovery_response.recovery_commit_key ||
+        recovery.provider_netgroup_bucket.IsNull() ||
+        recovery.provider_maximum_network_fee.value <= 0 ||
+        !(recovery.provider_maximum_network_fee ==
+          recovery.recovery_response.manifest.network_fee) ||
+        (!allow_historical_policy &&
+         (!policy ||
+          recovery.provider_safety_policy_hash !=
+              GetProviderSafetyPolicyHash(*policy)))) {
         error = "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH";
         return false;
     }
@@ -526,8 +526,7 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
           recovery.recovery_response.manifest.network_fee) ||
         first->recipient_bucket != recipient_bucket ||
         first->recipient_bucket.IsNull() || first->netgroup_bucket.IsNull() ||
-        (!legacy &&
-         first->netgroup_bucket != recovery.provider_netgroup_bucket) ||
+        first->netgroup_bucket != recovery.provider_netgroup_bucket ||
         first->state != expected_state) {
         error = "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH";
         return false;
@@ -674,7 +673,7 @@ bool ValidateAlternativeRecoveryRecordShape(
     const AlternativeRecoveryRecord& recovery,
     std::string& error)
 {
-    if (!AlternativeRecoveryRecord::IsSupportedVersion(recovery.version) ||
+    if (recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         !IsCanonicalRequestId(recovery.request_id) || recovery.session_id.IsNull() ||
         recovery.recovery_id.IsNull() || recovery.original_provider_id.IsNull() ||
         recovery.recovery_provider_id.IsNull() || recovery.offer_id.IsNull() ||
@@ -797,15 +796,8 @@ bool ValidateAlternativeRecoveryRecordShape(
         !recovery.provider_budget_reservation_id.IsNull() ||
         !recovery.provider_netgroup_bucket.IsNull() ||
         recovery.provider_maximum_network_fee.value != 0;
-    if (recovery.version == AlternativeRecoveryRecord::LEGACY_VERSION) {
-        // These fields are not serialized by v2. Reject in-memory aliases that
-        // would otherwise compare equal after canonical serialization.
-        if (has_provider_budget_binding) {
-            error = "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH";
-            return false;
-        }
-    } else if (recovery.provider_side &&
-               recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+    if (recovery.provider_side &&
+        recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
         const AlternativeRecoveryManifest& manifest =
             recovery.recovery_response.manifest;
         if (recovery.provider_safety_policy_hash.IsNull() ||
@@ -1003,8 +995,16 @@ bool LoadPaymentFinalArtifact(WalletBatch& batch,
 
     for (const uint256& attempt_id : session.attempt_ids) {
         ProviderAttempt candidate;
-        if (!batch.ReadPaymasterAttempt(attempt_id, candidate) ||
-            candidate.final_txid != session.final_txid) {
+        const DatabaseReadStatus attempt_status =
+            batch.ReadPaymasterAttemptWithStatus(attempt_id, candidate);
+        if (attempt_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                attempt_status, "ProviderAttempt", candidate,
+                "PAYMASTER_FINAL_ATTEMPT_MISSING",
+                "PAYMASTER_INVALID_PERSISTED_ATTEMPT");
+            return false;
+        }
+        if (candidate.final_txid != session.final_txid) {
             continue;
         }
         ExactFinalArtifact candidate_artifact;
@@ -1043,8 +1043,16 @@ bool LoadRecoveryFinalArtifact(WalletBatch& batch,
     if (session.recovery_txid.IsNull()) return true;
 
     SelfRecoveryRecord recovery;
-    if (!batch.ReadPaymasterRecovery(session.request_id, recovery) ||
-        recovery.session_id != session.session_id ||
+    const DatabaseReadStatus recovery_status =
+        batch.ReadPaymasterRecoveryWithStatus(session.request_id, recovery);
+    if (recovery_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            recovery_status, "SelfRecoveryRecord", recovery,
+            "PAYMASTER_RECOVERY_FINAL_MISSING",
+            "PAYMASTER_INVALID_PERSISTED_RECOVERY");
+        return false;
+    }
+    if (recovery.session_id != session.session_id ||
         recovery.recovery_txid != session.recovery_txid ||
         recovery.raw_transaction_hash != Hash(recovery.final_transaction) ||
         !DecodeExactFinalArtifact(recovery.final_transaction,
@@ -1054,12 +1062,22 @@ bool LoadRecoveryFinalArtifact(WalletBatch& batch,
     }
 
     uint256 alternative_id;
-    if (batch.ReadPaymasterAlternativeRecoveryRequest(session.request_id,
-                                                      alternative_id)) {
+    const DatabaseReadStatus alternative_request_status =
+        batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(
+            session.request_id, alternative_id);
+    if (alternative_request_status == DatabaseReadStatus::FOUND) {
         AlternativeRecoveryRecord alternative;
-        if (!batch.ReadPaymasterAlternativeRecovery(alternative_id,
-                                                    alternative) ||
-            alternative.provider_side ||
+        const DatabaseReadStatus alternative_status =
+            batch.ReadPaymasterAlternativeRecoveryWithStatus(alternative_id,
+                                                             alternative);
+        if (alternative_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                alternative_status, "AlternativeRecoveryRecord", alternative,
+                "PAYMASTER_ALTERNATIVE_RECOVERY_FINAL_MISSING",
+                "PAYMASTER_INVALID_PERSISTED_ALTERNATIVE_RECOVERY");
+            return false;
+        }
+        if (alternative.provider_side ||
             alternative.session_id != session.session_id ||
             alternative.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
             alternative.final_transaction != artifact.bytes ||
@@ -1067,6 +1085,9 @@ bool LoadRecoveryFinalArtifact(WalletBatch& batch,
             error = "PAYMASTER_ALTERNATIVE_RECOVERY_FINAL_MISMATCH";
             return false;
         }
+    } else if (alternative_request_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_ALTERNATIVE_RECOVERY_INDEX_DATABASE_READ";
+        return false;
     }
     error.clear();
     return true;
@@ -2480,12 +2501,11 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorization(
     const ProviderBudgetLedger& ledger,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_authorized_recovery,
     std::string& error)
 {
     return ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
         recovery, policy, ledger, expected_state, allow_historical_policy,
-        allow_legacy_authorized_recovery, error);
+        error);
 }
 
 CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
@@ -2512,6 +2532,13 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
         }
         return CreatePaymasterSessionResult::JOINED;
     }
+    if (batch.HasPaymasterSession(request_id)) {
+        error = PersistedVersionError(
+            "PaymentSession", session.version,
+            PaymentSession::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PERSISTED_SESSION");
+        return CreatePaymasterSessionResult::DATABASE_ERROR;
+    }
 
     IdempotencyTombstone tombstone;
     if (batch.ReadPaymasterTombstone(request_id, tombstone)) {
@@ -2535,6 +2562,13 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
             session.final_txid = tombstone.final_txid;
         }
         return CreatePaymasterSessionResult::FINAL_TOMBSTONE;
+    }
+    if (batch.HasPaymasterTombstone(request_id)) {
+        error = PersistedVersionError(
+            "IdempotencyTombstone", tombstone.version,
+            IdempotencyTombstone::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PERSISTED_TOMBSTONE");
+        return CreatePaymasterSessionResult::DATABASE_ERROR;
     }
 
     session = {};
@@ -2582,7 +2616,16 @@ bool PaymasterStore::BindClientPaymentOrder(
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     PaymentSession session;
-    if (!batch.ReadPaymasterSession(request_id, session) || session.provider_side) {
+    if (!batch.ReadPaymasterSession(request_id, session)) {
+        error = batch.HasPaymasterSession(request_id)
+                    ? PersistedVersionError(
+                          "PaymentSession", session.version,
+                          PaymentSession::CURRENT_VERSION,
+                          "PAYMASTER_INVALID_PERSISTED_SESSION")
+                    : "PAYMASTER_SESSION_NOT_FOUND";
+        return false;
+    }
+    if (session.provider_side) {
         error = "PAYMASTER_SESSION_NOT_FOUND";
         return false;
     }
@@ -2597,11 +2640,9 @@ bool PaymasterStore::BindClientPaymentOrder(
         }
         return true;
     }
-    // A migrated additive session can be bound from its already persisted
-    // intent. New subtract/sweep semantics are never grafted onto an old
-    // active attempt whose original local order cannot prove those flags.
-    if (!session.attempt_ids.empty() &&
-        (subtract_paymaster_fee_from_amount || send_all_spendable_dd)) {
+    // Current sessions bind the local payment order before any attempt is
+    // created. Never reconstruct missing authority after an attempt exists.
+    if (!session.attempt_ids.empty()) {
         error = "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT";
         return false;
     }
@@ -2621,9 +2662,15 @@ bool PaymasterStore::GetSessionByRequestId(const std::string& request_id, Paymen
 {
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    if (batch.ReadPaymasterSession(request_id, session)) return true;
+    const DatabaseReadStatus session_status =
+        batch.ReadPaymasterSessionWithStatus(request_id, session);
+    if (session_status == DatabaseReadStatus::FOUND) return true;
+    if (session_status != DatabaseReadStatus::NOT_FOUND) return false;
     IdempotencyTombstone tombstone;
-    if (!batch.ReadPaymasterTombstone(request_id, tombstone)) return false;
+    if (batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone) !=
+        DatabaseReadStatus::FOUND) {
+        return false;
+    }
     session = {};
     session.request_id = tombstone.request_id;
     session.session_id = tombstone.session_id;
@@ -2648,10 +2695,24 @@ bool PaymasterStore::GetSessionBySessionId(const uint256& session_id, PaymentSes
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::string request_id;
-    if (!batch.ReadPaymasterSessionId(session_id, request_id)) return false;
-    if (batch.ReadPaymasterSession(request_id, session)) return session.session_id == session_id;
+    if (batch.ReadPaymasterSessionIdWithStatus(session_id, request_id) !=
+        DatabaseReadStatus::FOUND) {
+        return false;
+    }
+    const DatabaseReadStatus session_status =
+        batch.ReadPaymasterSessionWithStatus(request_id, session);
+    if (session_status == DatabaseReadStatus::FOUND) {
+        return session.session_id == session_id;
+    }
+    // A present-but-unreadable live session must never be reinterpreted as its
+    // tombstone. Only a genuinely absent live record permits the fallback.
+    if (session_status != DatabaseReadStatus::NOT_FOUND) return false;
     IdempotencyTombstone tombstone;
-    if (!batch.ReadPaymasterTombstone(request_id, tombstone) || tombstone.session_id != session_id) return false;
+    if (batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone) !=
+            DatabaseReadStatus::FOUND ||
+        tombstone.session_id != session_id) {
+        return false;
+    }
     session = {};
     session.request_id = tombstone.request_id;
     session.session_id = tombstone.session_id;
@@ -3428,8 +3489,16 @@ bool PaymasterStore::RecordPendingCapacityEquivocation(
     std::string request_id;
     PaymentSession session;
     const ValidatedCapacitySnapshot empty_snapshot;
-    if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
-        attempt.attempt_id != attempt_id ||
+    if (!batch.ReadPaymasterAttempt(attempt_id, attempt)) {
+        error = batch.HasPaymasterAttempt(attempt_id)
+                    ? PersistedVersionError(
+                          "ProviderAttempt", attempt.version,
+                          ProviderAttempt::CURRENT_VERSION,
+                          "PAYMASTER_INVALID_PERSISTED_ATTEMPT")
+                    : "PAYMASTER_ATTEMPT_NOT_FOUND";
+        return false;
+    }
+    if (attempt.attempt_id != attempt_id ||
         !batch.ReadPaymasterSessionId(attempt.session_id, request_id) ||
         !batch.ReadPaymasterSession(request_id, session) ||
         session.provider_side || session.request_id != request_id ||
@@ -3479,8 +3548,16 @@ bool PaymasterStore::StageCapacityProofClaimCandidate(
     PaymentSession session;
     std::string request_id;
     const ValidatedCapacitySnapshot empty_snapshot;
-    if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
-        attempt.attempt_id != attempt_id ||
+    if (!batch.ReadPaymasterAttempt(attempt_id, attempt)) {
+        error = batch.HasPaymasterAttempt(attempt_id)
+                    ? PersistedVersionError(
+                          "ProviderAttempt", attempt.version,
+                          ProviderAttempt::CURRENT_VERSION,
+                          "PAYMASTER_INVALID_PERSISTED_ATTEMPT")
+                    : "PAYMASTER_ATTEMPT_NOT_FOUND";
+        return false;
+    }
+    if (attempt.attempt_id != attempt_id ||
         !batch.ReadPaymasterSessionId(attempt.session_id, request_id) ||
         !batch.ReadPaymasterSession(request_id, session) ||
         session.provider_side || attempt.session_id != session.session_id ||
@@ -4489,6 +4566,13 @@ bool PaymasterStore::CommitProviderQuote(
     ProviderAttempt existing;
     const bool have_existing =
         batch.ReadPaymasterAttempt(attempt.attempt_id, existing);
+    if (!have_existing && batch.HasPaymasterAttempt(attempt.attempt_id)) {
+        error = PersistedVersionError(
+            "ProviderAttempt", existing.version,
+            ProviderAttempt::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PERSISTED_ATTEMPT");
+        return false;
+    }
     if (have_existing &&
         CanonicalBytes(existing) != CanonicalBytes(attempt)) {
         error = "PAYMASTER_ATTEMPT_ID_CONFLICT";
@@ -4556,8 +4640,7 @@ bool PaymasterStore::CommitProviderQuote(
         if (!ValidateProviderBudgetState(
                 existing, safety_policy, budget_ledger,
                 BudgetReservationState::RESERVED,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_durable_commit=*/false, error)) {
+                /*allow_historical_policy=*/true, error)) {
             return false;
         }
         const std::vector<unsigned char> budget_before =
@@ -4576,8 +4659,7 @@ bool PaymasterStore::CommitProviderQuote(
             !ValidateProviderBudgetState(
                 existing, safety_policy, budget_ledger,
                 BudgetReservationState::RESERVED,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_durable_commit=*/false, error)) {
+                /*allow_historical_policy=*/true, error)) {
             return false;
         }
         if (budget_before != CanonicalBytes(budget_ledger)) {
@@ -4592,7 +4674,16 @@ bool PaymasterStore::CommitProviderQuote(
         error = "PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT";
         return false;
     }
-    if (!batch.ReadPaymasterSettings(settings) || !settings.enabled ||
+    if (!batch.ReadPaymasterSettings(settings)) {
+        error = batch.HasPaymasterSettings()
+                    ? PersistedVersionError(
+                          "ProviderSettings", settings.version,
+                          ProviderSettings::CURRENT_VERSION,
+                          "PAYMASTER_INVALID_PROVIDER_SETTINGS")
+                    : "PAYMASTER_PROVIDER_NOT_READY";
+        return false;
+    }
+    if (!settings.enabled ||
         settings.policy_hash != GetProviderPolicyHash(policy) ||
         !ValidatePaymasterQuote(response.quote, request.intent, policy,
                                 identity.identity_key,
@@ -4622,8 +4713,7 @@ bool PaymasterStore::CommitProviderQuote(
         !ValidateProviderBudgetState(
             attempt, safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_durable_commit=*/false, error)) {
+            /*allow_historical_policy=*/false, error)) {
         return false;
     }
 
@@ -4668,9 +4758,23 @@ bool PaymasterStore::CommitProviderQuote(
                     "PAYMASTER_REQUEST_ID_CONFLICT";
         return false;
     }
+    if (batch.HasPaymasterSession(request.intent.request_id)) {
+        error = PersistedVersionError(
+            "PaymentSession", session.version,
+            PaymentSession::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PERSISTED_SESSION");
+        return false;
+    }
     IdempotencyTombstone tombstone;
     if (batch.ReadPaymasterTombstone(request.intent.request_id, tombstone)) {
         error = "PAYMASTER_REQUEST_ID_CONFLICT";
+        return false;
+    }
+    if (batch.HasPaymasterTombstone(request.intent.request_id)) {
+        error = PersistedVersionError(
+            "IdempotencyTombstone", tombstone.version,
+            IdempotencyTombstone::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PERSISTED_TOMBSTONE");
         return false;
     }
     std::string indexed_request;
@@ -5014,11 +5118,7 @@ bool PaymasterStore::UpdateAttempt(const std::string& request_id, const Provider
             }
         } else if (provider_authority_known &&
                    (update.provider_signed_at == 0 ||
-                    update.provider_signed_result.empty()) &&
-                   !HasExactDurableProviderCommit(batch, current)) {
-            // V13 attempts without the signed envelope gain no new authority.
-            // Only their already exact, durable ProviderCommit remains
-            // recoverable through the legacy path.
+                    update.provider_signed_result.empty())) {
             error = "PAYMASTER_PROVIDER_SIGNED_RESULT_MISSING";
             return false;
         } else if (provider_authority_known &&
@@ -5367,7 +5467,6 @@ bool PaymasterStore::ValidateProviderBudgetAuthorization(
     const ProviderAttempt& attempt,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_durable_commit,
     std::string& error) const
 {
     error.clear();
@@ -5399,14 +5498,6 @@ bool PaymasterStore::ValidateProviderBudgetAuthorization(
         return false;
     }
     if (!have_policy || !have_ledger) {
-        if (allow_legacy_durable_commit &&
-            expected_state == BudgetReservationState::SPENT &&
-            IsLegacyBudgetlessProviderAttempt(persisted) &&
-            HasExactDurableProviderCommit(batch, persisted) &&
-            !batch.HasPaymasterProviderSafetyPolicy() &&
-            !batch.HasPaymasterProviderBudgetLedger()) {
-            return true;
-        }
         error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
         return false;
     }
@@ -5414,24 +5505,9 @@ bool PaymasterStore::ValidateProviderBudgetAuthorization(
         return false;
     }
     if (!ValidateProviderBudgetLedger(ledger, error)) return false;
-    const bool reservation_missing = std::none_of(
-        ledger.reservations.begin(), ledger.reservations.end(),
-        [&](const ProviderBudgetReservation& reservation) {
-            return reservation.commit_key == persisted.commit_key;
-        });
-    if (allow_legacy_durable_commit &&
-        expected_state == BudgetReservationState::SPENT &&
-        reservation_missing && IsLegacyBudgetlessProviderAttempt(persisted) &&
-        HasExactDurableProviderCommit(batch, persisted)) {
-        // Safety policy and ledger may be installed after an old exact commit
-        // was already durable. Such a commit predates budget rows and cannot
-        // be charged retroactively, but it remains recoverable. Current
-        // manifests never receive this exception.
-        return true;
-    }
     return ValidateProviderBudgetState(
         persisted, policy, ledger, expected_state,
-        allow_historical_policy, allow_legacy_durable_commit, error);
+        allow_historical_policy, error);
 }
 
 bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
@@ -5491,8 +5567,7 @@ bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
         !ValidateProviderBudgetState(
             persisted, safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/false, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
 
@@ -5621,7 +5696,7 @@ bool PaymasterStore::CancelProviderQuote(const uint256& attempt_id,
                 return false;
             }
             budget_changed = previous_state != BudgetReservationState::RELEASED;
-        } else if (ProviderBudgetReservationRequired(attempt)) {
+        } else {
             error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
             return false;
         }
@@ -5648,7 +5723,14 @@ bool PaymasterStore::CancelProviderQuote(const uint256& attempt_id,
     }
 
     std::vector<ProviderPoolEntry> pool;
-    const bool have_pool = batch.ReadPaymasterProviderPool(pool);
+    const DatabaseReadStatus pool_status{
+        batch.ReadPaymasterProviderPoolWithStatus(pool)};
+    if (pool_status != DatabaseReadStatus::FOUND &&
+        pool_status != DatabaseReadStatus::NOT_FOUND) {
+        error = ProviderPoolReadError(pool);
+        return false;
+    }
+    const bool have_pool{pool_status == DatabaseReadStatus::FOUND};
     bool pool_changed{false};
     size_t released_entries{0};
     if (!attempt.commit_key.IsNull() && have_pool) {
@@ -5899,10 +5981,40 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
             UserAuthorizationRecord authorization;
             ProviderCommitRecord commit;
             PaymasterResult result;
-            if (batch.ReadPaymasterUserAuthorization(attempt.commit_key, authorization) ||
-                batch.ReadPaymasterProviderCommit(attempt.commit_key, commit) ||
-                batch.ReadPaymasterResult(attempt.commit_key, result)) {
+            const DatabaseReadStatus authorization_status{
+                batch.ReadPaymasterUserAuthorizationWithStatus(
+                    attempt.commit_key, authorization)};
+            if (authorization_status == DatabaseReadStatus::FOUND) {
                 continue;
+            }
+            if (authorization_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    authorization_status, "UserAuthorizationRecord",
+                    authorization, "PAYMASTER_USER_AUTHORIZATION_MISSING",
+                    "PAYMASTER_INVALID_USER_AUTHORIZATION");
+                return false;
+            }
+            const DatabaseReadStatus commit_status{
+                batch.ReadPaymasterProviderCommitWithStatus(
+                    attempt.commit_key, commit)};
+            if (commit_status == DatabaseReadStatus::FOUND) continue;
+            if (commit_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    commit_status, "ProviderCommitRecord", commit,
+                    "PAYMASTER_PROVIDER_COMMIT_MISSING",
+                    "PAYMASTER_INVALID_PROVIDER_COMMIT");
+                return false;
+            }
+            const DatabaseReadStatus result_status{
+                batch.ReadPaymasterResultWithStatus(attempt.commit_key,
+                                                    result)};
+            if (result_status == DatabaseReadStatus::FOUND) continue;
+            if (result_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    result_status, "PaymasterResult", result,
+                    "PAYMASTER_RESULT_MISSING",
+                    "PAYMASTER_INVALID_PERSISTED_RESULT");
+                return false;
             }
 
             std::vector<ProviderPoolEntry> pool;
@@ -5935,10 +6047,8 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
                         return entry.commit_key == attempt.commit_key;
                     });
                 if (reservation == budget_ledger.reservations.end()) {
-                    if (ProviderBudgetReservationRequired(attempt)) {
-                        error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
-                        return false;
-                    }
+                    error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
+                    return false;
                 } else if (reservation->state == BudgetReservationState::SPENT) {
                     // A spent reservation is evidence of a provider commit,
                     // even if another record was lost during local recovery.
@@ -6095,9 +6205,8 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         }
         const bool replay_retention_elapsed = TimeDeltaExceeds(
             now, proof.expires_at, CAPACITY_REPLAY_RETENTION_SECONDS);
-        const uint256 admission_key = proof.version >= 4 ? GetProviderRequestSlotKey(proof.provider_id, proof.request_id,
-                                                                                     proof.session_id) :
-                                                           uint256{};
+        const uint256 admission_key = GetProviderRequestSlotKey(
+            proof.provider_id, proof.request_id, proof.session_id);
         const auto find_admission = [&](ProviderBudgetLedger& ledger) {
             return std::find_if(
                 ledger.capacity_admissions.begin(),
@@ -6117,33 +6226,31 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
                 error = "PAYMASTER_CAPACITY_RELEASE_POOL_CONFLICT";
                 return false;
             }
-            if (proof.version >= 4) {
-                if (!have_budget_ledger) {
-                    error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
-                    return false;
-                }
-                const auto admission = find_admission(budget_ledger);
-                if (admission != budget_ledger.capacity_admissions.end() &&
-                    (admission->request_hash != request_hash ||
-                     admission->state != CapacityAdmissionState::RELEASED)) {
-                    error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
-                    return false;
-                }
-                if (admission == budget_ledger.capacity_admissions.end() &&
-                    !replay_retention_elapsed) {
-                    error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
-                    return false;
-                }
+            if (!have_budget_ledger) {
+                error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
+                return false;
+            }
+            const auto admission = find_admission(budget_ledger);
+            if (admission != budget_ledger.capacity_admissions.end() &&
+                (admission->request_hash != request_hash ||
+                 admission->state != CapacityAdmissionState::RELEASED)) {
+                error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
+                return false;
+            }
+            if (admission == budget_ledger.capacity_admissions.end() &&
+                !replay_retention_elapsed) {
+                error = "PAYMASTER_CAPACITY_RELEASE_BUDGET_CONFLICT";
+                return false;
             }
             if (replay_retention_elapsed) {
                 ProviderBudgetLedger compacted_ledger{budget_ledger};
                 bool compact_budget{false};
-                if (proof.version >= 4) {
-                    const auto admission = find_admission(compacted_ledger);
-                    if (admission != compacted_ledger.capacity_admissions.end()) {
-                        compacted_ledger.capacity_admissions.erase(admission);
-                        compact_budget = true;
-                    }
+                const auto compacted_admission = find_admission(compacted_ledger);
+                if (compacted_admission !=
+                    compacted_ledger.capacity_admissions.end()) {
+                    compacted_ledger.capacity_admissions.erase(
+                        compacted_admission);
+                    compact_budget = true;
                 }
                 if (!batch.TxnBegin()) {
                     return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
@@ -6174,22 +6281,19 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
             }
             ProviderBudgetLedger compacted_ledger{budget_ledger};
             bool compact_budget{false};
-            if (proof.version >= 4) {
-                if (!have_budget_ledger) {
+            if (!have_budget_ledger) {
+                error = "PAYMASTER_CAPACITY_PROMOTION_CONFLICT";
+                return false;
+            }
+            const auto admission = find_admission(compacted_ledger);
+            if (admission != compacted_ledger.capacity_admissions.end()) {
+                if (admission->request_hash != request_hash ||
+                    admission->state != CapacityAdmissionState::PROMOTED) {
                     error = "PAYMASTER_CAPACITY_PROMOTION_CONFLICT";
                     return false;
                 }
-                const auto admission = find_admission(compacted_ledger);
-                if (admission != compacted_ledger.capacity_admissions.end()) {
-                    if (admission->request_hash != request_hash ||
-                        admission->state !=
-                            CapacityAdmissionState::PROMOTED) {
-                        error = "PAYMASTER_CAPACITY_PROMOTION_CONFLICT";
-                        return false;
-                    }
-                    compacted_ledger.capacity_admissions.erase(admission);
-                    compact_budget = true;
-                }
+                compacted_ledger.capacity_admissions.erase(admission);
+                compact_budget = true;
             }
             if (!batch.TxnBegin()) {
                 return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
@@ -6276,26 +6380,23 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         release.client_nonce = proof.client_nonce;
         release.released_at = now;
 
-        if (proof.version >= 4) {
-            if (!have_budget_ledger ||
-                !ReleaseProviderCapacityAdmission(
-                    budget_ledger,
-                    GetProviderRequestSlotKey(proof.provider_id,
-                                              proof.request_id,
-                                              proof.session_id),
-                    request_hash, now, error)) {
-                if (error.empty()) {
-                    error = "PAYMASTER_CAPACITY_ADMISSION_MISSING";
-                }
-                return false;
+        if (!have_budget_ledger ||
+            !ReleaseProviderCapacityAdmission(
+                budget_ledger,
+                GetProviderRequestSlotKey(proof.provider_id,
+                                          proof.request_id,
+                                          proof.session_id),
+                request_hash, now, error)) {
+            if (error.empty()) {
+                error = "PAYMASTER_CAPACITY_ADMISSION_MISSING";
             }
+            return false;
         }
 
         if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
         if (!batch.WritePaymasterProviderPool(updated_pool) ||
             !batch.WritePaymasterCapacityRelease(release, false) ||
-            (proof.version >= 4 &&
-             !batch.WritePaymasterProviderBudgetLedger(budget_ledger))) {
+            !batch.WritePaymasterProviderBudgetLedger(budget_ledger)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
         if (!batch.TxnCommit()) {
@@ -6723,7 +6824,7 @@ bool PaymasterStore::RejectUnavailableProviderSubmit(
                 return false;
             }
             budget_changed = previous_state != BudgetReservationState::RELEASED;
-        } else if (ProviderBudgetReservationRequired(attempt)) {
+        } else {
             error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
             return false;
         }
@@ -6828,8 +6929,7 @@ bool PaymasterStore::AcceptUserAuthorization(
         !ValidateProviderBudgetState(
             attempt, safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/false, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
 
@@ -6955,15 +7055,8 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         return false;
     }
     bool budget_changed{false};
-    const auto spend_budget = [&](int64_t committed_at,
-                                  bool allow_legacy_durable_commit) {
+    const auto spend_budget = [&](int64_t committed_at) {
         if (!have_safety_policy || !have_budget_ledger) {
-            if (allow_legacy_durable_commit &&
-                !attempt.final_txid.IsNull() &&
-                !attempt.final_transaction.empty() &&
-                IsLegacyBudgetlessProviderAttempt(attempt)) {
-                return true;
-            }
             error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
             return false;
         }
@@ -6973,8 +7066,6 @@ bool PaymasterStore::CommitProviderFinalTransaction(
                 return entry.commit_key == attempt.commit_key;
             });
         if (reservation == budget_ledger.reservations.end()) {
-            if (allow_legacy_durable_commit &&
-                IsLegacyBudgetlessProviderAttempt(attempt)) return true;
             error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
             return false;
         }
@@ -6982,8 +7073,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
              reservation->state != BudgetReservationState::SPENT) ||
             !ValidateProviderBudgetState(
                 attempt, safety_policy, budget_ledger, reservation->state,
-                /*allow_historical_policy=*/true,
-                allow_legacy_durable_commit, error)) {
+                /*allow_historical_policy=*/true, error)) {
             if (error.empty()) {
                 error = "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH";
             }
@@ -7009,16 +7099,12 @@ bool PaymasterStore::CommitProviderFinalTransaction(
     const bool exact_signed_envelope =
         have_signed_envelope &&
         CanonicalBytes(result) == attempt.provider_signed_result;
-    const bool legacy_durable_result =
-        have_existing_commit && attempt.provider_signed_at == 0 &&
-        attempt.provider_signed_result.empty() &&
-        result.updated_at == existing.committed_at;
     if (!ValidatePaymasterResult(result, expected_genesis, commit.provider_id,
                                  commit.commit_key, identity.identity_key,
                                  1, error) ||
         result.result_sequence != 1 ||
         result.status != PaymasterResultStatus::FINAL_COMMITTED ||
-        (!exact_signed_envelope && !legacy_durable_result) || !result.txid ||
+        !exact_signed_envelope || !result.txid ||
         *result.txid != commit.final_txid || !result.raw_transaction_hash ||
         *result.raw_transaction_hash != commit.raw_transaction_hash ||
         !result.final_transaction ||
@@ -7029,14 +7115,10 @@ bool PaymasterStore::CommitProviderFinalTransaction(
     }
     // The first atomic commit is a financial authorization boundary: prove
     // every provider input and return script is still wallet-owned before the
-    // budget is spent and the final transaction becomes durable. An exact
-    // manifest-less legacy commit may be replayed, but can never enter here as
-    // a newly authorized signature.
-    if ((!have_existing_commit &&
-         attempt.provider_manifest.manifest_id.IsNull()) ||
-        (!attempt.provider_manifest.manifest_id.IsNull() &&
-         !ValidateProviderAuthorizationOwnership(
-             m_wallet, attempt.provider_manifest, error))) {
+    // budget is spent and the final transaction becomes durable.
+    if (attempt.provider_manifest.manifest_id.IsNull() ||
+        !ValidateProviderAuthorizationOwnership(
+            m_wallet, attempt.provider_manifest, error)) {
         if (error.empty()) {
             error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
         }
@@ -7058,7 +7140,14 @@ bool PaymasterStore::CommitProviderFinalTransaction(
     const CTransaction transaction{mutable_transaction};
 
     std::vector<ProviderPoolEntry> pool_entries;
-    const bool have_provider_pool = batch.ReadPaymasterProviderPool(pool_entries);
+    const DatabaseReadStatus pool_status{
+        batch.ReadPaymasterProviderPoolWithStatus(pool_entries)};
+    if (pool_status != DatabaseReadStatus::FOUND) {
+        error = pool_status == DatabaseReadStatus::NOT_FOUND
+                    ? "PAYMASTER_PROVIDER_POOL_COMMIT_MISMATCH"
+                    : ProviderPoolReadError(pool_entries);
+        return false;
+    }
     ProviderPolicy provider_policy;
     const std::optional<ProviderPolicy> successor_policy =
         batch.ReadPaymasterPolicy(provider_policy)
@@ -7099,10 +7188,9 @@ bool PaymasterStore::CommitProviderFinalTransaction(
                 return false;
             }
         }
-        if (!spend_budget(existing.committed_at,
-                          /*allow_legacy_durable_commit=*/true)) return false;
+        if (!spend_budget(existing.committed_at)) return false;
         bool pool_changed{false};
-        if (have_provider_pool && !RegisterProviderPoolSuccessors(
+        if (!RegisterProviderPoolSuccessors(
                 attempt, existing, transaction, successor_policy,
                 pool_entries, pool_changed, error)) {
             return false;
@@ -7110,8 +7198,8 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         if (have_existing_result && !budget_changed && !pool_changed &&
             !finance_changed) return true;
 
-        // Repair a legacy crash window (commit durable before the initial
-        // result) and any legacy budget transition as one database unit.
+        // Repair a crash window where the commit became durable before the
+        // initial result, budget, pool, or finance update completed.
         if (!batch.TxnBegin()) {
             error = "PAYMASTER_DATABASE_BEGIN";
             return false;
@@ -7180,7 +7268,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         return false;
     }
 
-    if (have_provider_pool) {
+    {
         std::set<COutPoint> committed_inputs(commit.provider_inputs.begin(), commit.provider_inputs.end());
         size_t bound_entries{0};
         for (const ProviderPoolEntry& entry : pool_entries) {
@@ -7198,11 +7286,10 @@ bool PaymasterStore::CommitProviderFinalTransaction(
             return false;
         }
     }
-    if (!spend_budget(commit.committed_at,
-                      /*allow_legacy_durable_commit=*/false)) return false;
+    if (!spend_budget(commit.committed_at)) return false;
 
     bool pool_changed{false};
-    if (have_provider_pool && !RegisterProviderPoolSuccessors(
+    if (!RegisterProviderPoolSuccessors(
             attempt, commit, transaction, successor_policy,
             pool_entries, pool_changed, error)) {
         return false;
@@ -7220,7 +7307,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
-    if (have_provider_pool) {
+    {
         for (ProviderPoolEntry& entry : pool_entries) {
             if (entry.reservation_id == commit.commit_key) {
                 if (entry.origin_commit_key == commit.commit_key) continue;
@@ -7278,7 +7365,13 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<ProviderPoolEntry> pool_entries;
-    if (!batch.ReadPaymasterProviderPool(pool_entries)) return true;
+    const DatabaseReadStatus pool_status =
+        batch.ReadPaymasterProviderPoolWithStatus(pool_entries);
+    if (pool_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (pool_status != DatabaseReadStatus::FOUND) {
+        error = ProviderPoolReadError(pool_entries);
+        return false;
+    }
 
     std::vector<ProviderCommitRecord> commits;
     std::vector<PaymentSession> sessions;
@@ -7288,8 +7381,17 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
         return false;
     }
     ProviderPolicy provider_policy;
+    const DatabaseReadStatus policy_status =
+        batch.ReadPaymasterPolicyWithStatus(provider_policy);
+    if (policy_status != DatabaseReadStatus::FOUND &&
+        policy_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            policy_status, "ProviderPolicy", provider_policy,
+            "PAYMASTER_POLICY_NOT_FOUND", "PAYMASTER_INVALID_PROVIDER_POLICY");
+        return false;
+    }
     const std::optional<ProviderPolicy> successor_policy =
-        batch.ReadPaymasterPolicy(provider_policy)
+        policy_status == DatabaseReadStatus::FOUND
             ? std::optional<ProviderPolicy>{provider_policy}
             : std::nullopt;
 
@@ -7297,8 +7399,16 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
     for (const PaymentSession& session : sessions) {
         for (const uint256& attempt_id : session.attempt_ids) {
             ProviderAttempt attempt;
-            if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
-                attempt.commit_key.IsNull() ||
+            const DatabaseReadStatus attempt_status =
+                batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt);
+            if (attempt_status != DatabaseReadStatus::FOUND) {
+                error = PersistedReadError(
+                    attempt_status, "ProviderAttempt", attempt,
+                    "PAYMASTER_POOL_RECONCILIATION_ATTEMPT_MISSING",
+                    "PAYMASTER_POOL_RECONCILIATION_ATTEMPT_READ_FAILED");
+                return false;
+            }
+            if (attempt.commit_key.IsNull() ||
                 attempt.provider_manifest.manifest_id.IsNull() ||
                 attempt.provider_manifest.manifest_id !=
                     GetProviderAuthorizationManifestId(attempt.provider_manifest)) {
@@ -7399,9 +7509,13 @@ bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
             }
             if (attempt.state != AttemptState::PROVIDER_SIGNED) continue;
             ProviderCommitRecord commit;
-            if (!batch.ReadPaymasterProviderCommit(
-                    attempt.commit_key, commit)) {
+            const DatabaseReadStatus commit_status{
+                batch.ReadPaymasterProviderCommitWithStatus(
+                    attempt.commit_key, commit)};
+            if (commit_status == DatabaseReadStatus::NOT_FOUND) {
                 attempts.push_back(std::move(attempt));
+            } else if (commit_status != DatabaseReadStatus::FOUND) {
+                return false;
             }
         }
     }
@@ -7500,8 +7614,8 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
         AttemptHasReached(attempt.state, AttemptState::USER_SIGNED) ||
         attempt.state == AttemptState::AMBIGUOUS;
     const bool has_current_accepted_client_manifest =
-        IsSupportedClientAuthorizationManifestVersion(
-            attempt.client_manifest.version) &&
+        attempt.client_manifest.version ==
+            ClientAuthorizationManifest::CURRENT_VERSION &&
         !attempt.client_manifest.manifest_id.IsNull() &&
         attempt.accepted_client_manifest_id ==
             attempt.client_manifest.manifest_id &&
@@ -7564,35 +7678,10 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
     }
     const bool exact_replay = have_existing && SameResult(result, existing);
     if (final_result) {
-        // A result received now is new remote input, even when it describes
-        // the same unsigned txid as an old attempt. Only an explicitly
-        // accepted current manifest may authorize state progression or create
-        // client-side authorization evidence. Already durable legacy finals
-        // are handled by the separate exact-artifact recovery path.
+        // A result received now is remote input. Only an explicitly accepted
+        // current manifest may authorize state progression or create
+        // client-side authorization evidence.
         if (!has_current_accepted_client_manifest) {
-            const bool exact_durable_legacy_binding =
-                exact_replay && result.txid && result.raw_transaction_hash &&
-                result.final_transaction &&
-                session.final_txid == *result.txid &&
-                attempt.final_txid == *result.txid &&
-                attempt.final_transaction == final_transaction;
-            if (exact_durable_legacy_binding) {
-                CMutableTransaction recovered_final;
-                if (!ValidatePersistedLegacyClientFinalForRecovery(
-                        m_wallet, attempt, existing, expected_genesis,
-                        recovered_final, error)) {
-                    return false;
-                }
-                if (CTransaction{recovered_final} !=
-                    CTransaction{*result.final_transaction}) {
-                    error = "PAYMASTER_LEGACY_CLIENT_FINAL_RESULT_MISMATCH";
-                    return false;
-                }
-                // Recovery of an exact durable legacy result is deliberately
-                // read-only. In particular it must not manufacture a current
-                // manifest acceptance or UserAuthorizationRecord.
-                return true;
-            }
             error = "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED";
             return false;
         }
@@ -8697,8 +8786,7 @@ bool PaymasterStore::UpdateAlternativeRecovery(
             !ValidateProviderAlternativeRecoveryBudgetAuthorization(
                 current, &safety_policy, budget_ledger,
                 BudgetReservationState::RESERVED,
-                /*allow_historical_policy=*/false,
-                /*allow_legacy_authorized_recovery=*/false, error)) {
+                /*allow_historical_policy=*/false, error)) {
             if (error.empty()) {
                 error =
                     "PAYMASTER_PROVIDER_RECOVERY_BUDGET_BINDING_MISMATCH";
@@ -9067,9 +9155,13 @@ bool PaymasterStore::HasProviderDrainWork(
             error = "PAYMASTER_CAPACITY_RESPONSE_ENCODING";
             return false;
         }
-        // Legacy proofs have no persistent ProviderCapacityAdmission and
-        // therefore cannot grant new post-restart continuation authority.
-        if (proof.version < 4) continue;
+        if (proof.version != DigiDollar::Paymaster::PROTOCOL_VERSION) {
+            error = PersistedVersionError(
+                "PaymasterCapacityProof", proof.version,
+                DigiDollar::Paymaster::PROTOCOL_VERSION,
+                "PAYMASTER_INVALID_PERSISTED_CAPACITY_PROOF");
+            return false;
+        }
 
         PaymasterCapacityRequest request;
         request.version = proof.version;
@@ -9490,8 +9582,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
         if (!ValidateProviderAlternativeRecoveryBudgetAuthorization(
                 recovery, &safety_policy, budget_ledger,
                 BudgetReservationState::RESERVED,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_authorized_recovery=*/false, error)) {
+                /*allow_historical_policy=*/true, error)) {
             return false;
         }
         const std::vector<unsigned char> budget_before =
@@ -9519,8 +9610,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
             !ValidateProviderAlternativeRecoveryBudgetAuthorization(
                 recovery, &safety_policy, budget_ledger,
                 BudgetReservationState::RESERVED,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_authorized_recovery=*/false, error)) {
+                /*allow_historical_policy=*/true, error)) {
             return false;
         }
         if (budget_before != CanonicalBytes(budget_ledger)) {
@@ -9570,8 +9660,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
         !ValidateProviderAlternativeRecoveryBudgetAuthorization(
             recovery, &safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/false,
-            /*allow_legacy_authorized_recovery=*/false, error)) {
+            /*allow_historical_policy=*/false, error)) {
         if (error.empty()) error = "PAYMASTER_SAFETY_LIMIT_EXHAUSTED";
         return false;
     }
@@ -9652,8 +9741,7 @@ bool PaymasterStore::ValidateProviderAlternativeRecoveryPreSignatureAuthorizatio
         !ValidateProviderAlternativeRecoveryBudgetAuthorization(
             persisted, &safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/false, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
 
@@ -9749,8 +9837,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
             ValidateProviderAlternativeRecoveryBudgetAuthorization(
                 current, /*policy=*/nullptr, budget_ledger,
                 BudgetReservationState::SPENT,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_authorized_recovery=*/true, error)) {
+                /*allow_historical_policy=*/true, error)) {
             return true;
         }
         if (!error.empty()) return false;
@@ -9767,13 +9854,12 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
     }
     // USER_SIGNED is the durable provider-authorization boundary. Finalizing
     // may therefore use the exact historical reservation after a later policy
-    // change, but the reservation must still be present and RESERVED. V2 is
-    // accepted here only because it was already durably authorized.
+    // change, but the current-format reservation must still be present and
+    // RESERVED.
     if (!ValidateProviderAlternativeRecoveryBudgetAuthorization(
             current, /*policy=*/nullptr, budget_ledger,
             BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/true, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
 
@@ -9799,8 +9885,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
     if (!ValidateProviderAlternativeRecoveryBudgetAuthorization(
             recovery, /*policy=*/nullptr, budget_ledger,
             BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_authorized_recovery=*/true, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
 
@@ -10034,8 +10119,12 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     ProviderAttempt attempt;
-    if (!batch.ReadPaymasterAttempt(attempt_id, attempt)) {
-        error = "PAYMASTER_ATTEMPT_NOT_FOUND";
+    const DatabaseReadStatus attempt_status{
+        batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt)};
+    if (attempt_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            attempt_status, "ProviderAttempt", attempt,
+            "PAYMASTER_ATTEMPT_NOT_FOUND", "PAYMASTER_INVALID_ATTEMPT");
         return false;
     }
     const bool compatible = [&] {
@@ -10057,14 +10146,30 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
         return false;
     }
     PaymasterOutcomeMarker existing;
-    if (batch.ReadPaymasterOutcomeMarker(attempt_id, existing)) {
+    const DatabaseReadStatus outcome_status{
+        batch.ReadPaymasterOutcomeMarkerWithStatus(attempt_id, existing)};
+    if (outcome_status == DatabaseReadStatus::FOUND) {
         if (existing.provider_id == attempt.provider_id && existing.outcome == outcome) return true;
         error = "PAYMASTER_OUTCOME_ALREADY_RECORDED";
         return false;
     }
+    if (outcome_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            outcome_status, "PaymasterOutcomeMarker", existing,
+            "PAYMASTER_OUTCOME_NOT_FOUND", "PAYMASTER_INVALID_OUTCOME_MARKER");
+        return false;
+    }
     PaymasterReliabilityRecord record;
-    if (!batch.ReadPaymasterReliability(attempt.provider_id, record)) {
+    const DatabaseReadStatus reliability_status{
+        batch.ReadPaymasterReliabilityWithStatus(attempt.provider_id, record)};
+    if (reliability_status == DatabaseReadStatus::NOT_FOUND) {
         record.provider_id = attempt.provider_id;
+    } else if (reliability_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            reliability_status, "PaymasterReliabilityRecord", record,
+            "PAYMASTER_RELIABILITY_NOT_FOUND",
+            "PAYMASTER_INVALID_RELIABILITY_RECORD");
+        return false;
     }
     if (!ApplyReliabilityOutcome(record, outcome, observed_at, successful_latency_ms, error)) return false;
     const PaymasterOutcomeMarker marker{
@@ -10085,7 +10190,13 @@ bool PaymasterStore::GetProviderReliability(const PaymasterId& provider_id,
 {
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    const bool have_record = batch.ReadPaymasterReliability(provider_id, record);
+    const DatabaseReadStatus record_status{
+        batch.ReadPaymasterReliabilityWithStatus(provider_id, record)};
+    if (record_status != DatabaseReadStatus::FOUND &&
+        record_status != DatabaseReadStatus::NOT_FOUND) {
+        return false;
+    }
+    const bool have_record{record_status == DatabaseReadStatus::FOUND};
     PaymasterProviderBlock block;
     const DatabaseReadStatus block_status =
         batch.ReadPaymasterProviderBlock(provider_id, block);
@@ -10147,7 +10258,16 @@ bool PaymasterStore::ClearProviderReliability(const PaymasterId& provider_id,
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     PaymasterReliabilityRecord existing;
-    if (!batch.ReadPaymasterReliability(provider_id, existing)) return true;
+    const DatabaseReadStatus status{
+        batch.ReadPaymasterReliabilityWithStatus(provider_id, existing)};
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            status, "PaymasterReliabilityRecord", existing,
+            "PAYMASTER_RELIABILITY_NOT_FOUND",
+            "PAYMASTER_INVALID_RELIABILITY_RECORD");
+        return false;
+    }
     if (!batch.ErasePaymasterReliability(provider_id)) {
         error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -10346,10 +10466,6 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
                     error = "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED";
                     return false;
                 }
-                const bool legacy_manifest =
-                    observed_attempt->client_manifest.manifest_id.IsNull() ||
-                    observed_attempt->client_manifest.version == 1 ||
-                    observed_attempt->client_manifest.version == 2;
                 PaymasterResult persisted_result;
                 if (!batch.ReadPaymasterResult(
                         observed_attempt->commit_key,
@@ -10361,15 +10477,13 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
                     return false;
                 }
                 persisted_payment_result = std::move(persisted_result);
-                if (!legacy_manifest) {
-                    UserAuthorizationRecord authorization;
-                    if (!batch.ReadPaymasterUserAuthorization(
-                            observed_attempt->commit_key, authorization)) {
-                        error = "PAYMASTER_USER_AUTHORIZATION_MISSING";
-                        return false;
-                    }
-                    user_authorization = std::move(authorization);
+                UserAuthorizationRecord authorization;
+                if (!batch.ReadPaymasterUserAuthorization(
+                        observed_attempt->commit_key, authorization)) {
+                    error = "PAYMASTER_USER_AUTHORIZATION_MISSING";
+                    return false;
                 }
+                user_authorization = std::move(authorization);
                 payment_attempt = std::move(*observed_attempt);
                 continue;
             }
@@ -10381,8 +10495,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
                 !batch.ReadPaymasterAlternativeRecovery(alternative_id,
                                                         recovery) ||
                 recovery.provider_side ||
-                !AlternativeRecoveryRecord::IsSupportedVersion(
-                    recovery.version) ||
+                recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
                 recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
                 recovery.request_id != session.request_id ||
                 recovery.session_id != session.session_id ||
@@ -10431,72 +10544,6 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
                 error = "PAYMASTER_FINAL_RESULT_BINDING_MISMATCH";
             }
             return false;
-        }
-        const bool legacy_manifest =
-            payment_attempt->client_manifest.manifest_id.IsNull() ||
-            payment_attempt->client_manifest.version == 1 ||
-            payment_attempt->client_manifest.version == 2;
-        if (legacy_manifest) {
-            CMutableTransaction validated_final;
-            if (!ValidatePersistedLegacyClientFinalForRecovery(
-                    m_wallet, *payment_attempt,
-                    persisted_result,
-                    Params().GenesisBlock().GetHash(), validated_final,
-                    error) ||
-                CTransaction{validated_final} != transaction) {
-                if (error.empty()) {
-                    error =
-                        "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_MISMATCH";
-                }
-                return false;
-            }
-            PaymasterCapacityRequest capacity_request;
-            PaymasterCapacityProof capacity_proof;
-            try {
-                SpanReader request_stream{
-                    ::PROTOCOL_VERSION,
-                    payment_attempt->capacity_request};
-                request_stream >> capacity_request;
-                SpanReader proof_stream{
-                    ::PROTOCOL_VERSION,
-                    payment_attempt->capacity_snapshot.capacity_proof};
-                proof_stream >> capacity_proof;
-                if (!request_stream.empty() || !proof_stream.empty()) {
-                    throw std::ios_base::failure(
-                        "trailing legacy capacity authority data");
-                }
-            } catch (const std::ios_base::failure&) {
-                error = "PAYMASTER_CAPACITY_SNAPSHOT_ENCODING";
-                return false;
-            }
-            if (CanonicalBytes(capacity_request) !=
-                    payment_attempt->capacity_request ||
-                CanonicalBytes(capacity_proof) !=
-                    payment_attempt->capacity_snapshot.capacity_proof ||
-                Hash(payment_attempt->capacity_request) !=
-                    payment_attempt->capacity_snapshot.request_hash) {
-                error = "PAYMASTER_CAPACITY_SNAPSHOT_BINDING_MISMATCH";
-                return false;
-            }
-            const int64_t authorization_time =
-                payment_attempt->capacity_snapshot.validated_at;
-            const AuthorizedCapacityResourceMode resource_mode{
-                exact_final_already_known ? AuthorizedCapacityResourceMode::
-                                                EXACT_FINAL_ALREADY_KNOWN :
-                                            AuthorizedCapacityResourceMode::REQUIRE_UNSPENT};
-            if (!ValidateAuthorizedCapacityRetryAgainstChainstate(
-                    capacity_proof, capacity_request,
-                    payment_attempt->provider_identity_key,
-                    *node->chainman, authorization_time,
-                    std::max(now, authorization_time), resource_mode,
-                    error,
-                    exact_final_already_known ? &transaction : nullptr)) {
-                return false;
-            }
-            // The normal mempool/chain preflight performed by the caller is
-            // still required. This narrow branch only recovers authority
-            // already made durable by the historical exact final result.
-            return true;
         }
         if (!user_authorization) {
             error = "PAYMASTER_USER_AUTHORIZATION_MISSING";
@@ -10779,13 +10826,16 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
             bool client_fee_changed{false};
             if (state == SessionState::CANCELED_SAFE && final_depth > 0 &&
                 !session.provider_side) {
-                const bool have_client_ledger =
-                    batch.ReadPaymasterClientFeeLedger(client_fee_ledger);
-                if (!have_client_ledger &&
-                    batch.HasPaymasterClientFeeLedger()) {
+                const DatabaseReadStatus client_ledger_status =
+                    batch.ReadPaymasterClientFeeLedgerWithStatus(
+                        client_fee_ledger);
+                if (client_ledger_status != DatabaseReadStatus::FOUND &&
+                    client_ledger_status != DatabaseReadStatus::NOT_FOUND) {
                     error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
                     return false;
                 }
+                const bool have_client_ledger{
+                    client_ledger_status == DatabaseReadStatus::FOUND};
                 if (have_client_ledger) {
                     // Confirmation of the cancel-to-self transaction proves
                     // that no original provider attempt can consume these DD
@@ -10794,9 +10844,18 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                     // untouched.
                     for (const uint256& attempt_id : session.attempt_ids) {
                         ProviderAttempt original_attempt;
-                        if (!batch.ReadPaymasterAttempt(attempt_id,
-                                                        original_attempt) ||
-                            original_attempt.commit_key.IsNull()) {
+                        const DatabaseReadStatus attempt_status =
+                            batch.ReadPaymasterAttemptWithStatus(
+                                attempt_id, original_attempt);
+                        if (attempt_status != DatabaseReadStatus::FOUND) {
+                            error = PersistedReadError(
+                                attempt_status, "ProviderAttempt",
+                                original_attempt,
+                                "PAYMASTER_CLIENT_FEE_ATTEMPT_MISSING",
+                                "PAYMASTER_CLIENT_FEE_ATTEMPT_READ_FAILED");
+                            return false;
+                        }
+                        if (original_attempt.commit_key.IsNull()) {
                             continue;
                         }
                         const auto reservation = std::find_if(
@@ -10946,14 +11005,249 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     PaymentSession session;
-    if (!batch.ReadPaymasterSession(request_id, session)) {
-        error = "PAYMASTER_SESSION_NOT_FOUND";
+    const DatabaseReadStatus session_status =
+        batch.ReadPaymasterSessionWithStatus(request_id, session);
+    if (session_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            session_status, "PaymentSession", session,
+            "PAYMASTER_SESSION_NOT_FOUND",
+            "PAYMASTER_INVALID_PERSISTED_SESSION");
         return false;
     }
     if (!IsTerminal(session.state)) {
         error = "PAYMASTER_SESSION_NOT_FINAL";
         return false;
     }
+
+    // Pruning is destructive. Resolve and validate every referenced record
+    // before opening the transaction so no unreadable child can be skipped and
+    // orphaned by an otherwise successful tombstone write.
+    std::string indexed_request_id;
+    if (batch.ReadPaymasterSessionIdWithStatus(
+            session.session_id, indexed_request_id) !=
+            DatabaseReadStatus::FOUND ||
+        indexed_request_id != request_id) {
+        error = "PAYMASTER_SESSION_INDEX_CONFLICT";
+        return false;
+    }
+
+    IdempotencyTombstone existing_tombstone;
+    const DatabaseReadStatus tombstone_status =
+        batch.ReadPaymasterTombstoneWithStatus(request_id,
+                                               existing_tombstone);
+    if (tombstone_status == DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_TOMBSTONE_CONFLICT";
+        return false;
+    }
+    if (tombstone_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            tombstone_status, "IdempotencyTombstone", existing_tombstone,
+            "PAYMASTER_TOMBSTONE_NOT_FOUND",
+            "PAYMASTER_INVALID_PERSISTED_TOMBSTONE");
+        return false;
+    }
+
+    std::set<COutPoint> reservations_to_erase;
+    if (!session.provider_side) {
+        for (const COutPoint& outpoint : session.user_inputs) {
+            InputReservation reservation;
+            const DatabaseReadStatus reservation_status =
+                batch.ReadPaymasterReservationWithStatus(outpoint,
+                                                         reservation);
+            if (reservation_status == DatabaseReadStatus::NOT_FOUND) {
+                // Failed unsigned sessions may have released their locks in
+                // an earlier atomic transition.
+                continue;
+            }
+            if (reservation_status != DatabaseReadStatus::FOUND) {
+                error = PersistedReadError(
+                    reservation_status, "InputReservation", reservation,
+                    "PAYMASTER_RESERVATION_NOT_FOUND",
+                    "PAYMASTER_INVALID_PERSISTED_RESERVATION");
+                return false;
+            }
+            if (reservation.request_id != request_id ||
+                reservation.session_id != session.session_id) {
+                error = "PAYMASTER_RESERVATION_SESSION_CONFLICT";
+                return false;
+            }
+            reservations_to_erase.insert(outpoint);
+        }
+    }
+
+    struct PrunableAttempt {
+        ProviderAttempt attempt;
+        bool has_commit{false};
+        bool has_authorization{false};
+        bool has_result{false};
+        bool has_outcome{false};
+    };
+    std::vector<PrunableAttempt> attempts;
+    attempts.reserve(session.attempt_ids.size());
+    std::set<uint256> unique_attempt_ids;
+    for (const uint256& attempt_id : session.attempt_ids) {
+        if (!unique_attempt_ids.insert(attempt_id).second) {
+            error = "PAYMASTER_PRUNE_ATTEMPT_ID_CONFLICT";
+            return false;
+        }
+        PrunableAttempt records;
+        const DatabaseReadStatus attempt_status =
+            batch.ReadPaymasterAttemptWithStatus(attempt_id, records.attempt);
+        if (attempt_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                attempt_status, "ProviderAttempt", records.attempt,
+                "PAYMASTER_PRUNE_ATTEMPT_MISSING",
+                "PAYMASTER_PRUNE_ATTEMPT_READ_FAILED");
+            return false;
+        }
+        if (records.attempt.session_id != session.session_id) {
+            error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+            return false;
+        }
+
+        if (!records.attempt.template_commitment.IsNull()) {
+            uint256 indexed_attempt;
+            if (batch.ReadPaymasterTemplateWithStatus(
+                    records.attempt.template_commitment, indexed_attempt) !=
+                    DatabaseReadStatus::FOUND ||
+                indexed_attempt != attempt_id) {
+                error = "PAYMASTER_TEMPLATE_INDEX_CONFLICT";
+                return false;
+            }
+        }
+        if (!records.attempt.unsigned_txid.IsNull()) {
+            uint256 indexed_attempt;
+            if (batch.ReadPaymasterUnsignedTxWithStatus(
+                    records.attempt.unsigned_txid, indexed_attempt) !=
+                    DatabaseReadStatus::FOUND ||
+                indexed_attempt != attempt_id) {
+                error = "PAYMASTER_UNSIGNED_TX_INDEX_CONFLICT";
+                return false;
+            }
+        }
+
+        if (!records.attempt.commit_key.IsNull()) {
+            ProviderCommitRecord commit;
+            const DatabaseReadStatus commit_status =
+                batch.ReadPaymasterProviderCommitWithStatus(
+                    records.attempt.commit_key, commit);
+            if (commit_status == DatabaseReadStatus::FOUND) {
+                if (commit.provider_id != records.attempt.provider_id ||
+                    commit.template_commitment !=
+                        records.attempt.template_commitment) {
+                    error = "PAYMASTER_PROVIDER_COMMIT_ATTEMPT_CONFLICT";
+                    return false;
+                }
+                records.has_commit = true;
+            } else if (commit_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    commit_status, "ProviderCommitRecord", commit,
+                    "PAYMASTER_PROVIDER_COMMIT_NOT_FOUND",
+                    "PAYMASTER_INVALID_PERSISTED_PROVIDER_COMMIT");
+                return false;
+            }
+
+            UserAuthorizationRecord authorization;
+            const DatabaseReadStatus authorization_status =
+                batch.ReadPaymasterUserAuthorizationWithStatus(
+                    records.attempt.commit_key, authorization);
+            if (authorization_status == DatabaseReadStatus::FOUND) {
+                if (authorization.attempt_id != attempt_id) {
+                    error = "PAYMASTER_USER_AUTHORIZATION_CONFLICT";
+                    return false;
+                }
+                records.has_authorization = true;
+            } else if (authorization_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    authorization_status, "UserAuthorizationRecord",
+                    authorization, "PAYMASTER_USER_AUTHORIZATION_MISSING",
+                    "PAYMASTER_INVALID_PERSISTED_USER_AUTHORIZATION");
+                return false;
+            }
+
+            PaymasterResult result;
+            const DatabaseReadStatus result_status =
+                batch.ReadPaymasterResultWithStatus(
+                    records.attempt.commit_key, result);
+            if (result_status == DatabaseReadStatus::FOUND) {
+                records.has_result = true;
+            } else if (result_status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    result_status, "PaymasterResult", result,
+                    "PAYMASTER_RESULT_NOT_FOUND",
+                    "PAYMASTER_PERSISTED_RESULT_CORRUPT");
+                return false;
+            }
+        }
+
+        PaymasterOutcomeMarker outcome;
+        const DatabaseReadStatus outcome_status =
+            batch.ReadPaymasterOutcomeMarkerWithStatus(attempt_id, outcome);
+        if (outcome_status == DatabaseReadStatus::FOUND) {
+            records.has_outcome = true;
+        } else if (outcome_status != DatabaseReadStatus::NOT_FOUND) {
+            error = PersistedReadError(
+                outcome_status, "PaymasterOutcomeMarker", outcome,
+                "PAYMASTER_OUTCOME_NOT_FOUND",
+                "PAYMASTER_INVALID_PERSISTED_OUTCOME");
+            return false;
+        }
+        attempts.push_back(std::move(records));
+    }
+
+    std::optional<SelfRecoveryRecord> recovery;
+    SelfRecoveryRecord loaded_recovery;
+    const DatabaseReadStatus recovery_status =
+        batch.ReadPaymasterRecoveryWithStatus(request_id, loaded_recovery);
+    if (recovery_status == DatabaseReadStatus::FOUND) {
+        if (loaded_recovery.session_id != session.session_id) {
+            error = "PAYMASTER_RECOVERY_SESSION_CONFLICT";
+            return false;
+        }
+        recovery = std::move(loaded_recovery);
+    } else if (recovery_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            recovery_status, "SelfRecoveryRecord", loaded_recovery,
+            "PAYMASTER_RECOVERY_NOT_FOUND",
+            "PAYMASTER_INVALID_PERSISTED_RECOVERY");
+        return false;
+    }
+
+    std::optional<AlternativeRecoveryRecord> alternative_recovery;
+    uint256 alternative_recovery_id;
+    const DatabaseReadStatus alternative_request_status =
+        batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(
+            request_id, alternative_recovery_id);
+    if (alternative_request_status == DatabaseReadStatus::FOUND) {
+        AlternativeRecoveryRecord alternative;
+        const DatabaseReadStatus alternative_status =
+            batch.ReadPaymasterAlternativeRecoveryWithStatus(
+                alternative_recovery_id, alternative);
+        if (alternative_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                alternative_status, "AlternativeRecoveryRecord", alternative,
+                "PAYMASTER_ALTERNATIVE_RECOVERY_NOT_FOUND",
+                "PAYMASTER_INVALID_PERSISTED_ALTERNATIVE_RECOVERY");
+            return false;
+        }
+        if (alternative.provider_side ||
+            alternative.request_id != request_id ||
+            alternative.session_id != session.session_id ||
+            (session.state == SessionState::CANCELED_SAFE &&
+             (alternative.phase !=
+                  AlternativeRecoveryPhase::FINAL_COMMITTED ||
+              !recovery ||
+              alternative.final_transaction !=
+                  recovery->final_transaction))) {
+            error = "PAYMASTER_ALTERNATIVE_RECOVERY_PRUNE_CONFLICT";
+            return false;
+        }
+        alternative_recovery = std::move(alternative);
+    } else if (alternative_request_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_ALTERNATIVE_RECOVERY_INDEX_DATABASE_READ";
+        return false;
+    }
+
     const uint256 tombstone_txid = session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid;
     IdempotencyTombstone tombstone{IdempotencyTombstone::CURRENT_VERSION, request_id, session.session_id,
                                    session.canonical_request_hash, session.fee_mode_requested,
@@ -10965,14 +11259,15 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
     if (!batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     if (!session.provider_side) {
         for (const auto& outpoint : session.user_inputs) {
-            if (!batch.ErasePaymasterReservation(outpoint) || !batch.EraseLockedUTXO(outpoint)) {
+            if ((reservations_to_erase.count(outpoint) != 0 &&
+                 !batch.ErasePaymasterReservation(outpoint)) ||
+                !batch.EraseLockedUTXO(outpoint)) {
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             }
         }
     }
-    for (const uint256& attempt_id : session.attempt_ids) {
-        ProviderAttempt attempt;
-        if (!batch.ReadPaymasterAttempt(attempt_id, attempt)) continue;
+    for (const PrunableAttempt& records : attempts) {
+        const ProviderAttempt& attempt = records.attempt;
         if (!attempt.template_commitment.IsNull() &&
             !batch.ErasePaymasterTemplate(attempt.template_commitment)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
@@ -10982,52 +11277,32 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
         if (!attempt.commit_key.IsNull()) {
-            ProviderCommitRecord commit;
-            if (batch.ReadPaymasterProviderCommit(attempt.commit_key, commit) &&
+            if (records.has_commit &&
                 !batch.ErasePaymasterProviderCommit(attempt.commit_key)) {
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             }
-            UserAuthorizationRecord authorization;
-            if (batch.ReadPaymasterUserAuthorization(attempt.commit_key, authorization) &&
+            if (records.has_authorization &&
                 !batch.ErasePaymasterUserAuthorization(attempt.commit_key)) {
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             }
-            PaymasterResult result;
-            if (batch.ReadPaymasterResult(attempt.commit_key, result) &&
+            if (records.has_result &&
                 !batch.ErasePaymasterResult(attempt.commit_key)) {
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             }
         }
-        PaymasterOutcomeMarker outcome;
-        if (batch.ReadPaymasterOutcomeMarker(attempt_id, outcome) &&
-            !batch.ErasePaymasterOutcomeMarker(attempt_id)) {
+        if (records.has_outcome &&
+            !batch.ErasePaymasterOutcomeMarker(attempt.attempt_id)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
-        if (!batch.ErasePaymasterAttempt(attempt_id)) {
+        if (!batch.ErasePaymasterAttempt(attempt.attempt_id)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
-    SelfRecoveryRecord recovery;
-    if (batch.ReadPaymasterRecovery(request_id, recovery) &&
+    if (recovery &&
         !batch.ErasePaymasterRecovery(request_id)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
-    uint256 alternative_recovery_id;
-    if (batch.ReadPaymasterAlternativeRecoveryRequest(
-            request_id, alternative_recovery_id)) {
-        AlternativeRecoveryRecord alternative;
-        if (!batch.ReadPaymasterAlternativeRecovery(
-                alternative_recovery_id, alternative) ||
-            alternative.provider_side ||
-            alternative.request_id != request_id ||
-            alternative.session_id != session.session_id ||
-            (session.state == SessionState::CANCELED_SAFE &&
-             (alternative.phase !=
-                  AlternativeRecoveryPhase::FINAL_COMMITTED ||
-              alternative.final_transaction != recovery.final_transaction))) {
-            return Abort(batch, error,
-                         "PAYMASTER_ALTERNATIVE_RECOVERY_PRUNE_CONFLICT");
-        }
+    if (alternative_recovery) {
         if (!batch.ErasePaymasterAlternativeRecovery(
                 alternative_recovery_id) ||
             !batch.ErasePaymasterAlternativeRecoveryRequest(request_id)) {

@@ -61,215 +61,6 @@ bool ToInputRole(DigiDollar::Paymaster::ReservationRole role,
     return false;
 }
 
-bool DecodeLegacyClientRecoveryArtifacts(
-    const DigiDollar::Paymaster::ProviderAttempt& attempt,
-    DigiDollar::Paymaster::PaymasterQuoteRequest& request,
-    DigiDollar::Paymaster::PaymasterQuoteResponse& response,
-    DigiDollar::Paymaster::CollaborativePSBTTemplate& trusted,
-    std::string& error)
-{
-    using namespace DigiDollar::Paymaster;
-    try {
-        CDataStream request_stream{attempt.quote_request, SER_NETWORK,
-                                   ::PROTOCOL_VERSION};
-        CDataStream response_stream{attempt.signed_quote, SER_NETWORK,
-                                    ::PROTOCOL_VERSION};
-        request_stream >> request;
-        response_stream >> response;
-        if (!request_stream.empty() || !response_stream.empty()) {
-            throw std::ios_base::failure(
-                "trailing legacy client authorization data");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_ARTIFACT_ENCODING";
-        return false;
-    }
-
-    PartiallySignedTransaction psbt;
-    std::string decode_error;
-    if (!DecodeRawPSBT(psbt, MakeByteSpan(attempt.unsigned_psbt),
-                       decode_error)) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_ARTIFACT_ENCODING";
-        return false;
-    }
-    if (SerializeExact(request) != attempt.quote_request ||
-        SerializeExact(response) != attempt.signed_quote ||
-        SerializeExact(psbt) != attempt.unsigned_psbt) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_ARTIFACT_NONCANONICAL";
-        return false;
-    }
-    if (request.version != response.version || request.version < 1 ||
-        request.version > DigiDollar::Paymaster::PROTOCOL_VERSION) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_PROTOCOL";
-        return false;
-    }
-
-    trusted = {};
-    trusted.psbt = std::move(psbt);
-    trusted.input_roles.reserve(attempt.input_roles.size());
-    for (const ReservationRole role : attempt.input_roles) {
-        InputRole input_role;
-        if (!ToInputRole(role, input_role)) {
-            error = "PAYMASTER_PROVIDER_AUTHORIZATION_INPUT_ROLE";
-            return false;
-        }
-        trusted.input_roles.push_back(input_role);
-    }
-    return true;
-}
-
-bool NormalizeLegacyCapacitySnapshot(
-    const DigiDollar::Paymaster::ProviderAttempt& attempt,
-    const DigiDollar::Paymaster::PaymasterQuoteRequest& quote_request,
-    const uint256& expected_genesis,
-    DigiDollar::Paymaster::ValidatedCapacitySnapshot& normalized,
-    std::string& error)
-{
-    using namespace DigiDollar::Paymaster;
-    normalized = attempt.capacity_snapshot;
-    if (normalized.version != ValidatedCapacitySnapshot::CURRENT_VERSION &&
-        normalized.version != ValidatedCapacitySnapshot::LEGACY_VERSION) {
-        error = "PAYMASTER_LEGACY_CAPACITY_SNAPSHOT_INVALID";
-        return false;
-    }
-
-    PaymasterCapacityRequest request;
-    PaymasterCapacityProof proof;
-    try {
-        CDataStream request_stream{attempt.capacity_request, SER_NETWORK,
-                                   ::PROTOCOL_VERSION};
-        CDataStream proof_stream{normalized.capacity_proof, SER_NETWORK,
-                                 ::PROTOCOL_VERSION};
-        request_stream >> request;
-        proof_stream >> proof;
-        if (!request_stream.empty() || !proof_stream.empty()) {
-            throw std::ios_base::failure("trailing legacy capacity data");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_LEGACY_CAPACITY_SNAPSHOT_INVALID";
-        return false;
-    }
-    if (SerializeExact(request) != attempt.capacity_request ||
-        SerializeExact(proof) != normalized.capacity_proof ||
-        request.version != proof.version || request.version < 4 ||
-        request.version > DigiDollar::Paymaster::PROTOCOL_VERSION ||
-        request.genesis_hash != expected_genesis ||
-        proof.genesis_hash != expected_genesis ||
-        request.provider_id != attempt.provider_id ||
-        proof.provider_id != attempt.provider_id ||
-        request.request_id != quote_request.intent.request_id ||
-        proof.request_id != request.request_id ||
-        request.session_id != attempt.session_id ||
-        proof.session_id != request.session_id ||
-        request.client_nonce != attempt.client_nonce ||
-        proof.client_nonce != request.client_nonce ||
-        request.funding_model != quote_request.intent.funding_model ||
-        proof.funding_model != request.funding_model ||
-        proof.requires_carrier != request.requires_carrier ||
-        proof.snapshot_id != normalized.snapshot_id ||
-        proof.liquidity_slots.size() != 1 ||
-        request.requested_slots !=
-            static_cast<uint16_t>(proof.liquidity_slots.size()) ||
-        proof.created_at < request.created_at ||
-        proof.expires_at > request.expires_at ||
-        normalized.snapshot_id.IsNull() ||
-        normalized.resource_commitment.IsNull() ||
-        normalized.session_id != attempt.session_id ||
-        normalized.attempt_id != attempt.attempt_id ||
-        normalized.provider_id != attempt.provider_id ||
-        normalized.client_nonce != attempt.client_nonce ||
-        normalized.request_hash != Hash(attempt.capacity_request) ||
-        normalized.resource_commitment !=
-            GetCapacityResourceCommitment(proof) ||
-        normalized.created_at != proof.created_at ||
-        normalized.expires_at != proof.expires_at ||
-        normalized.validated_at <= 0 ||
-        normalized.validated_at < normalized.created_at ||
-        normalized.validated_at >= normalized.expires_at ||
-        !attempt.provider_identity_key.IsFullyValid() ||
-        GetPaymasterId(attempt.provider_identity_key) != proof.provider_id ||
-        proof.identity_signature.size() != 64 ||
-        !attempt.provider_identity_key.VerifySchnorr(
-            GetCapacityProofSignatureHash(proof),
-            proof.identity_signature)) {
-        error = "PAYMASTER_LEGACY_CAPACITY_SNAPSHOT_INVALID";
-        return false;
-    }
-
-    if (normalized.version == ValidatedCapacitySnapshot::LEGACY_VERSION) {
-        normalized.version = ValidatedCapacitySnapshot::CURRENT_VERSION;
-        normalized.funding_model = proof.funding_model;
-        normalized.requires_carrier = proof.requires_carrier;
-    }
-    if (normalized.funding_model != proof.funding_model ||
-        normalized.requires_carrier != proof.requires_carrier) {
-        error = "PAYMASTER_LEGACY_CAPACITY_SNAPSHOT_INVALID";
-        return false;
-    }
-    return true;
-}
-
-bool BuildEphemeralLegacyClientManifest(
-    const DigiDollar::Paymaster::ProviderAttempt& attempt,
-    const DigiDollar::Paymaster::PaymentIntent& intent,
-    const DigiDollar::Paymaster::PaymasterQuote& quote,
-    const DigiDollar::Paymaster::ValidatedCapacitySnapshot& capacity,
-    const DigiDollar::Paymaster::CollaborativePSBTTemplate& trusted,
-    DigiDollar::Paymaster::ClientAuthorizationManifest& manifest,
-    std::string& error)
-{
-    using namespace DigiDollar::Paymaster;
-    const ClientAuthorizationManifest& persisted = attempt.client_manifest;
-    if (persisted.manifest_id.IsNull()) {
-        if (SerializeExact(persisted) !=
-                SerializeExact(ClientAuthorizationManifest{}) ||
-            !attempt.accepted_client_manifest_id.IsNull() ||
-            attempt.client_manifest_accepted_at != 0) {
-            error = "PAYMASTER_LEGACY_CLIENT_MANIFEST_INVALID";
-            return false;
-        }
-        return BuildClientAuthorizationManifest(
-            intent, quote, capacity, trusted, quote.service_fee, manifest,
-            error);
-    }
-
-    if ((persisted.version != 1 && persisted.version != 2) ||
-        persisted.manifest_id !=
-            GetClientAuthorizationManifestId(persisted)) {
-        error = "PAYMASTER_LEGACY_CLIENT_MANIFEST_INVALID";
-        return false;
-    }
-    const bool has_acceptance =
-        !attempt.accepted_client_manifest_id.IsNull() ||
-        attempt.client_manifest_accepted_at != 0;
-    if (has_acceptance &&
-        (attempt.accepted_client_manifest_id != persisted.manifest_id ||
-         attempt.client_manifest_accepted_at <= 0 ||
-         attempt.client_manifest_accepted_at < attempt.created_at ||
-         attempt.client_manifest_accepted_at > attempt.updated_at)) {
-        error = "PAYMASTER_LEGACY_CLIENT_MANIFEST_INVALID";
-        return false;
-    }
-
-    manifest = persisted;
-    if (manifest.version == 1) {
-        manifest.capacity_client_nonce = capacity.client_nonce;
-        manifest.capacity_request_hash = capacity.request_hash;
-        manifest.capacity_proof_hash = Hash(capacity.capacity_proof);
-    }
-    manifest.canonical_request_hash = intent.canonical_request_hash;
-    manifest.requested_fee_mode = intent.requested_fee_mode;
-    manifest.privacy_profile = intent.privacy_profile;
-    manifest.selection_mode = intent.selection_mode;
-    manifest.requested_amount = intent.recipient_amount;
-    manifest.subtract_paymaster_fee_from_amount = false;
-    manifest.send_all_spendable_dd = false;
-    manifest.version = ClientAuthorizationManifest::CURRENT_VERSION;
-    manifest.manifest_id = GetClientAuthorizationManifestId(manifest);
-    return ValidateClientAuthorizationManifest(
-        manifest, intent, quote, capacity, trusted, error);
-}
-
 void CopySignatures(const PSBTInput& source, PSBTInput& destination)
 {
     destination.partial_sigs = source.partial_sigs;
@@ -431,8 +222,8 @@ bool ValidateClientAuthorizationOwnership(
     std::string& error)
 {
     error.clear();
-    if (!DigiDollar::Paymaster::IsSupportedClientAuthorizationManifestVersion(
-            manifest.version) ||
+    if (manifest.version !=
+            DigiDollar::Paymaster::ClientAuthorizationManifest::CURRENT_VERSION ||
         manifest.manifest_id.IsNull() ||
         manifest.manifest_id !=
             DigiDollar::Paymaster::GetClientAuthorizationManifestId(manifest) ||
@@ -458,134 +249,6 @@ bool ValidateClientAuthorizationOwnership(
     return true;
 }
 
-bool ValidatePersistedLegacyClientFinalForRecovery(
-    CWallet& wallet,
-    const DigiDollar::Paymaster::ProviderAttempt& attempt,
-    const DigiDollar::Paymaster::PaymasterResult& persisted_result,
-    const uint256& expected_genesis,
-    CMutableTransaction& final_transaction,
-    std::string& error)
-{
-    using namespace DigiDollar::Paymaster;
-    error.clear();
-    final_transaction = CMutableTransaction{};
-    const bool durable_final_state =
-        attempt.state == AttemptState::PROVIDER_SIGNED ||
-        attempt.state == AttemptState::FINAL_COMMITTED ||
-        attempt.state == AttemptState::BROADCAST ||
-        attempt.state == AttemptState::STEMPOOL ||
-        attempt.state == AttemptState::MEMPOOL;
-    const bool legacy_manifest =
-        attempt.client_manifest.manifest_id.IsNull() ||
-        attempt.client_manifest.version == 1 ||
-        attempt.client_manifest.version == 2;
-    if (!durable_final_state || !legacy_manifest ||
-        expected_genesis.IsNull() || attempt.attempt_id.IsNull() ||
-        attempt.session_id.IsNull() || attempt.provider_id.IsNull() ||
-        attempt.commit_key.IsNull() || attempt.unsigned_txid.IsNull() ||
-        attempt.final_txid.IsNull() ||
-        attempt.final_txid != attempt.unsigned_txid ||
-        attempt.final_transaction.empty() ||
-        attempt.user_signed_psbt.empty() || attempt.created_at <= 0 ||
-        attempt.updated_at < attempt.created_at) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_RECOVERY_REQUIRED";
-        return false;
-    }
-    if (!ValidatePaymasterResult(
-            persisted_result, expected_genesis, attempt.provider_id,
-            attempt.commit_key, attempt.provider_identity_key, 1, error)) {
-        return false;
-    }
-    if ((persisted_result.status !=
-             PaymasterResultStatus::FINAL_COMMITTED &&
-         persisted_result.status !=
-             PaymasterResultStatus::BROADCAST_ATTEMPTED) ||
-        !persisted_result.txid || !persisted_result.raw_transaction_hash ||
-        !persisted_result.final_transaction ||
-        *persisted_result.txid != attempt.final_txid ||
-        SerializeExact(*persisted_result.final_transaction) !=
-            attempt.final_transaction) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_RESULT_MISMATCH";
-        return false;
-    }
-
-    PaymasterQuoteRequest request;
-    PaymasterQuoteResponse response;
-    CollaborativePSBTTemplate trusted;
-    if (!DecodeLegacyClientRecoveryArtifacts(
-            attempt, request, response, trusted, error)) {
-        return false;
-    }
-
-    ValidatedCapacitySnapshot capacity;
-    if (!NormalizeLegacyCapacitySnapshot(
-            attempt, request, expected_genesis, capacity, error)) {
-        return false;
-    }
-    ClientAuthorizationManifest manifest;
-    if (!BuildEphemeralLegacyClientManifest(
-            attempt, request.intent, response.quote, capacity, trusted,
-            manifest, error)) {
-        return false;
-    }
-
-    // Project only the historical wrapper and manifest schema fields in a
-    // local copy. The strict current validator below still authenticates the
-    // quote, PSBT, transaction, roles, SIGHASH modes, and every witness.
-    request.version = DigiDollar::Paymaster::PROTOCOL_VERSION;
-    response.version = DigiDollar::Paymaster::PROTOCOL_VERSION;
-    ProviderAttempt projected{attempt};
-    projected.version = ProviderAttempt::CURRENT_VERSION;
-    projected.quote_request = SerializeExact(request);
-    projected.signed_quote = SerializeExact(response);
-    projected.capacity_snapshot = std::move(capacity);
-    projected.client_manifest = std::move(manifest);
-    projected.accepted_client_manifest_id =
-        projected.client_manifest.manifest_id;
-    projected.client_manifest_accepted_at = attempt.created_at;
-
-    CMutableTransaction validated;
-    if (!ValidateClientFinalForExecution(
-            projected, *persisted_result.raw_transaction_hash, validated,
-            error) ||
-        !ValidateClientAuthorizationOwnership(
-            wallet, projected.client_manifest, error)) {
-        final_transaction = CMutableTransaction{};
-        return false;
-    }
-    if (CTransaction{validated}.GetHash() != *persisted_result.txid ||
-        CTransaction{validated}.GetWitnessHash() !=
-            *persisted_result.raw_transaction_hash) {
-        error = "PAYMASTER_LEGACY_CLIENT_FINAL_RESULT_MISMATCH";
-        return false;
-    }
-    final_transaction = std::move(validated);
-    return true;
-}
-
-bool ValidateClientChangeScriptOwnership(
-    CWallet& wallet,
-    const DigiDollar::Paymaster::ClientAuthorizationManifest& manifest,
-    std::string& error)
-{
-    error.clear();
-    if (!DigiDollar::Paymaster::IsSupportedClientAuthorizationManifestVersion(
-            manifest.version) ||
-        manifest.manifest_id.IsNull() ||
-        manifest.manifest_id !=
-            DigiDollar::Paymaster::GetClientAuthorizationManifestId(manifest)) {
-        error = "PAYMASTER_CLIENT_AUTH_MANIFEST_INVALID";
-        return false;
-    }
-    if (manifest.user_dd_change_script.empty()) return true;
-    LOCK(wallet.cs_wallet);
-    if (!(wallet.IsMine(manifest.user_dd_change_script) & ISMINE_SPENDABLE)) {
-        error = "PAYMASTER_CLIENT_CHANGE_NOT_WALLET_OWNED";
-        return false;
-    }
-    return true;
-}
-
 bool ValidateProviderAuthorizationOwnership(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderAuthorizationManifest& manifest,
@@ -593,8 +256,7 @@ bool ValidateProviderAuthorizationOwnership(
 {
     using namespace DigiDollar::Paymaster;
     error.clear();
-    if ((manifest.version != ProviderAuthorizationManifest::CURRENT_VERSION &&
-         manifest.version != ProviderAuthorizationManifest::LEGACY_VERSION) ||
+    if (manifest.version != ProviderAuthorizationManifest::CURRENT_VERSION ||
         manifest.manifest_id.IsNull() ||
         manifest.manifest_id !=
             GetProviderAuthorizationManifestId(manifest) ||
@@ -872,7 +534,7 @@ bool BuildAlternativeRecoveryParametersFromRecord(
 {
     using namespace DigiDollar::Paymaster;
     parameters = {};
-    if (!AlternativeRecoveryRecord::IsSupportedVersion(recovery.version) ||
+    if (recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         recovery.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
         recovery.recovery_response.manifest.recovery_provider_dd_scripts.size() > 1 ||
         recovery.recovery_response.manifest.recovery_provider_dgb_change_scripts.size() > 1) {

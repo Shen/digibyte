@@ -6,15 +6,18 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <netgroup.h>
+#include <logging.h>
 #include <protocol.h>
 #include <serialize.h>
 #include <streams.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 #include <version.h>
 
 #include <string>
+#include <utility>
 
 #include <boost/test/unit_test.hpp>
 
@@ -22,9 +25,117 @@ using namespace std::literals;
 
 BOOST_FIXTURE_TEST_SUITE(netbase_tests, BasicTestingSetup)
 
+namespace {
+
+class Socks5InterruptGuard
+{
+public:
+    explicit Socks5InterruptGuard(bool interrupt)
+        : m_previous{InterruptSocks5(interrupt)}
+    {
+    }
+    ~Socks5InterruptGuard() { InterruptSocks5(m_previous); }
+
+private:
+    const bool m_previous;
+};
+
+std::string Socks5Response(bool authenticate, uint8_t reply = 0x00)
+{
+    std::string response;
+    response.push_back('\x05');
+    response.push_back(authenticate ? '\x02' : '\x00');
+    if (authenticate) {
+        response.push_back('\x01');
+        response.push_back('\x00');
+    }
+    response.push_back('\x05');
+    response.push_back(static_cast<char>(reply));
+    response.push_back('\x00');
+    response.push_back('\x01');
+    if (reply == 0x00) {
+        response.append(4, '\0');
+        response.append(2, '\0');
+    }
+    return response;
+}
+
+std::pair<bool, std::string> RunSocks5AndCaptureLog(
+    const std::string& response, const std::string& destination, uint16_t port,
+    const ProxyCredentials* credentials, ProxyLogPolicy log_policy)
+{
+    Socks5InterruptGuard interrupt_guard{/*interrupt=*/false};
+    const bool net_was_enabled{LogInstance().WillLogCategory(BCLog::NET)};
+    const bool proxy_was_enabled{LogInstance().WillLogCategory(BCLog::PROXY)};
+    LogInstance().EnableCategory(BCLog::NET);
+    LogInstance().EnableCategory(BCLog::PROXY);
+
+    std::string log;
+    auto callback = LogInstance().PushBackCallback(
+        [&log](const std::string& line) { log += line; });
+    StaticContentsSock sock{response};
+    const bool success{Socks5(destination, port, credentials, sock, log_policy)};
+    LogInstance().DeleteCallback(callback);
+
+    if (!net_was_enabled) LogInstance().DisableCategory(BCLog::NET);
+    if (!proxy_was_enabled) LogInstance().DisableCategory(BCLog::PROXY);
+    return {success, std::move(log)};
+}
+
+} // namespace
+
 static CNetAddr ResolveIP(const std::string& ip)
 {
     return LookupHost(ip, false).value_or(CNetAddr{});
+}
+
+BOOST_AUTO_TEST_CASE(socks5_private_logging_redacts_destination_and_credentials)
+{
+    // CConnman::Interrupt() can legitimately leave this process-global flag
+    // set between test fixtures. Prove the helper is order-independent and
+    // restore the pre-test state when this case ends.
+    Socks5InterruptGuard interrupted_before_test{/*interrupt=*/true};
+    const std::string destination{"paymaster-private-test.onion"};
+    const uint16_t port{41234};
+    const ProxyCredentials credentials{"isolation-user-secret", "isolation-password-secret"};
+
+    const auto [private_success, private_log] = RunSocks5AndCaptureLog(
+        Socks5Response(/*authenticate=*/true), destination, port, &credentials,
+        ProxyLogPolicy::REDACT_DESTINATION);
+    BOOST_CHECK(private_success);
+    BOOST_CHECK(private_log.find("private destination") != std::string::npos);
+    BOOST_CHECK(private_log.find(destination) == std::string::npos);
+    BOOST_CHECK(private_log.find(std::to_string(port)) == std::string::npos);
+    BOOST_CHECK(private_log.find(credentials.username) == std::string::npos);
+    BOOST_CHECK(private_log.find(credentials.password) == std::string::npos);
+
+    const auto [private_failure, private_failure_log] = RunSocks5AndCaptureLog(
+        Socks5Response(/*authenticate=*/true, /*reply=*/0x05), destination, port,
+        &credentials, ProxyLogPolicy::REDACT_DESTINATION);
+    BOOST_CHECK(!private_failure);
+    BOOST_CHECK(private_failure_log.find("private destination failed") != std::string::npos);
+    BOOST_CHECK(private_failure_log.find(destination) == std::string::npos);
+    BOOST_CHECK(private_failure_log.find(std::to_string(port)) == std::string::npos);
+    BOOST_CHECK(private_failure_log.find(credentials.username) == std::string::npos);
+    BOOST_CHECK(private_failure_log.find(credentials.password) == std::string::npos);
+
+    const auto [private_timeout, private_timeout_log] = RunSocks5AndCaptureLog(
+        /*response=*/{}, destination, port, &credentials,
+        ProxyLogPolicy::REDACT_DESTINATION);
+    BOOST_CHECK(!private_timeout);
+    BOOST_CHECK(private_timeout_log.find("private destination failed") != std::string::npos);
+    BOOST_CHECK(private_timeout_log.find(destination) == std::string::npos);
+    BOOST_CHECK(private_timeout_log.find(std::to_string(port)) == std::string::npos);
+    BOOST_CHECK(private_timeout_log.find(credentials.username) == std::string::npos);
+    BOOST_CHECK(private_timeout_log.find(credentials.password) == std::string::npos);
+
+    const auto [normal_success, normal_log] = RunSocks5AndCaptureLog(
+        Socks5Response(/*authenticate=*/true), destination, port, &credentials,
+        ProxyLogPolicy::NORMAL);
+    BOOST_CHECK(normal_success);
+    BOOST_CHECK(normal_log.find(destination) != std::string::npos);
+    BOOST_CHECK(normal_log.find(credentials.username) == std::string::npos);
+    BOOST_CHECK(normal_log.find(credentials.password) == std::string::npos);
 }
 
 static CSubNet ResolveSubNet(const std::string& subnet)

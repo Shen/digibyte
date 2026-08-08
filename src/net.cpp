@@ -389,7 +389,9 @@ static CAddress GetBindAddress(const Sock& sock)
     return addr_bind;
 }
 
-CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport)
+CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCountFailure,
+                             ConnectionType conn_type, bool use_v2transport,
+                             ProxyLogPolicy proxy_log_policy)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -407,10 +409,15 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
         }
     }
 
-    LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "trying %s connection %s lastseen=%.1fhrs\n",
-        use_v2transport ? "v2" : "v1",
-        pszDest ? pszDest : addrConnect.ToStringAddrPort(),
-        Ticks<HoursDouble>(pszDest ? 0h : Now<NodeSeconds>() - addrConnect.nTime));
+    // A dedicated Paymaster connection is correlated with one wallet
+    // operation. Do not persist its provider endpoint or precise attempt time
+    // in the ordinary network debug log.
+    if (conn_type != ConnectionType::PAYMASTER) {
+        LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "trying %s connection %s lastseen=%.1fhrs\n",
+            use_v2transport ? "v2" : "v1",
+            pszDest ? pszDest : addrConnect.ToStringAddrPort(),
+            Ticks<HoursDouble>(pszDest ? 0h : Now<NodeSeconds>() - addrConnect.nTime));
+    }
 
     // Resolve
     const uint16_t default_port{pszDest != nullptr ? GetDefaultPort(pszDest) :
@@ -421,7 +428,11 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
             const CService& rnd{resolved[GetRand(resolved.size())]};
             addrConnect = CAddress{MaybeFlipIPv6toCJDNS(rnd), NODE_NONE};
             if (!addrConnect.IsValid()) {
-                LogPrint(BCLog::NET, "Resolver returned invalid address %s for %s\n", addrConnect.ToStringAddrPort(), pszDest);
+                if (conn_type == ConnectionType::PAYMASTER) {
+                    LogPrint(BCLog::NET, "Paymaster endpoint resolution returned an invalid address\n");
+                } else {
+                    LogPrint(BCLog::NET, "Resolver returned invalid address %s for %s\n", addrConnect.ToStringAddrPort(), pszDest);
+                }
                 return nullptr;
             }
             // It is possible that we already have a connection to the IP/port pszDest resolved to.
@@ -482,7 +493,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
                 return nullptr;
             }
             connected = ConnectThroughProxy(proxy, addrConnect.ToStringAddr(), addrConnect.GetPort(),
-                                            *sock, nConnectTimeout, proxyConnectionFailed);
+                                            *sock, nConnectTimeout, proxyConnectionFailed,
+                                            proxy_log_policy);
         } else {
             // no proxy needed (none set for target network)
             sock = CreateSock(addrConnect);
@@ -507,7 +519,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
         SplitHostPort(std::string(pszDest), port, host);
         bool proxyConnectionFailed;
         connected = ConnectThroughProxy(proxy, host, port, *sock, nConnectTimeout,
-                                        proxyConnectionFailed);
+                                        proxyConnectionFailed, proxy_log_policy);
     }
     if (!connected) {
         return nullptr;
@@ -1900,7 +1912,9 @@ bool CConnman::AddConnection(const std::string& address,
     if (!grant) return false;
 
     OpenNetworkConnection(CAddress(), false, std::move(grant), address.c_str(), conn_type,
-                          /*use_v2transport=*/conn_type == ConnectionType::PAYMASTER);
+                          /*use_v2transport=*/conn_type == ConnectionType::PAYMASTER,
+                          paymaster_high_privacy ? ProxyLogPolicy::REDACT_DESTINATION
+                                                 : ProxyLogPolicy::NORMAL);
     return true;
 }
 
@@ -2365,7 +2379,9 @@ void CConnman::ProcessAddrFetch()
     CAddress addr;
     CSemaphoreGrant grant(*semOutbound, /*fTry=*/true);
     if (grant) {
-        OpenNetworkConnection(addr, false, std::move(grant), strDest.c_str(), ConnectionType::ADDR_FETCH, /*use_v2transport=*/false);
+        OpenNetworkConnection(addr, false, std::move(grant), strDest.c_str(),
+                              ConnectionType::ADDR_FETCH, /*use_v2transport=*/false,
+                              ProxyLogPolicy::NORMAL);
     }
 }
 
@@ -2468,7 +2484,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             for (const std::string& strAddr : connect)
             {
                 CAddress addr(CService(), NODE_NONE);
-                OpenNetworkConnection(addr, false, {}, strAddr.c_str(), ConnectionType::MANUAL, /*use_v2transport=*/false);
+                OpenNetworkConnection(addr, false, {}, strAddr.c_str(), ConnectionType::MANUAL,
+                                      /*use_v2transport=*/false, ProxyLogPolicy::NORMAL);
                 for (int i = 0; i < 10 && i < nLoop; i++)
                 {
                     if (!interruptNet.sleep_for(std::chrono::milliseconds(500)))
@@ -2788,7 +2805,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect)
             const bool count_failures{((int)outbound_ipv46_peer_netgroups.size() + outbound_privacy_network_peers) >= std::min(nMaxConnections - 1, 2)};
             // Use BIP324 transport when both us and them have NODE_V2_P2P set.
             const bool use_v2transport(addrConnect.nServices & GetLocalServices() & NODE_P2P_V2);
-            OpenNetworkConnection(addrConnect, count_failures, std::move(grant), /*strDest=*/nullptr, conn_type, use_v2transport);
+            OpenNetworkConnection(addrConnect, count_failures, std::move(grant),
+                                  /*strDest=*/nullptr, conn_type, use_v2transport,
+                                  ProxyLogPolicy::NORMAL);
         }
     }
 }
@@ -2878,7 +2897,9 @@ void CConnman::ThreadOpenAddedConnections()
                 }
                 tried = true;
                 CAddress addr(CService(), NODE_NONE);
-                OpenNetworkConnection(addr, false, std::move(grant), info.m_params.m_added_node.c_str(), ConnectionType::MANUAL, info.m_params.m_use_v2transport);
+                OpenNetworkConnection(addr, false, std::move(grant),
+                                      info.m_params.m_added_node.c_str(), ConnectionType::MANUAL,
+                                      info.m_params.m_use_v2transport, ProxyLogPolicy::NORMAL);
                 if (!interruptNet.sleep_for(std::chrono::milliseconds(500))) return;
                 grant = CSemaphoreGrant(*semAddnode, /*fTry=*/true);
             }
@@ -2892,7 +2913,10 @@ void CConnman::ThreadOpenAddedConnections()
 }
 
 // if successful, this moves the passed grant to the constructed node
-void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport)
+void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure,
+                                     CSemaphoreGrant&& grant_outbound, const char* pszDest,
+                                     ConnectionType conn_type, bool use_v2transport,
+                                     ProxyLogPolicy proxy_log_policy)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -2914,7 +2938,8 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     } else if (conn_type != ConnectionType::PAYMASTER && FindNode(std::string(pszDest)))
         return;
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type,
+                              use_v2transport, proxy_log_policy);
 
     if (!pnode)
         return;
@@ -2926,8 +2951,12 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
         
-        // Dandelion: new outbound connection
-        if (gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION)) {
+        // An isolated Paymaster socket must never become an ordinary
+        // transaction route. PushMessage also enforces this boundary, but
+        // keeping it out of Dandelion avoids failed selections and metadata
+        // correlation in the first place.
+        if (!pnode->IsPaymasterDirectConn() &&
+            gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION)) {
             vDandelionOutbound.push_back(pnode);
             LogPrint(BCLog::DANDELION, "Added outbound Dandelion connection: peer=%d\n", pnode->GetId());
             
@@ -3755,10 +3784,14 @@ CNode::CNode(NodeId idIn,
         mapRecvBytesPerMsgType[msg] = 0;
     mapRecvBytesPerMsgType[NET_MESSAGE_TYPE_OTHER] = 0;
 
-    if (fLogIPs) {
-        LogPrint(BCLog::NET, "Added connection to %s peer=%d\n", m_addr_name, id);
-    } else {
-        LogPrint(BCLog::NET, "Added connection peer=%d\n", id);
+    // A dedicated Paymaster connection links a wallet operation to a
+    // provider. Do not create a normal lifecycle log correlation point for it.
+    if (!IsPaymasterDirectConn()) {
+        if (fLogIPs) {
+            LogPrint(BCLog::NET, "Added connection to %s peer=%d\n", m_addr_name, id);
+        } else {
+            LogPrint(BCLog::NET, "Added connection peer=%d\n", id);
+        }
     }
 }
 
@@ -3801,24 +3834,51 @@ bool CConnman::NodeFullyConnected(const CNode* pnode)
 void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 {
     AssertLockNotHeld(m_total_bytes_sent_mutex);
-    size_t nMessageSize = msg.data.size();
-    LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n", msg.m_type, nMessageSize, pnode->GetId());
+    const bool paymaster_direct_message{
+        NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
+    const bool paymaster_private_transport{
+        pnode->IsPaymasterDirectConn() || paymaster_direct_message};
+    if (!paymaster_private_transport) {
+        LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n",
+                 msg.m_type, msg.data.size(), pnode->GetId());
+    }
+    // Never let a private application payload escape through an ordinary
+    // relay connection, even if a future internal caller selects one.
+    if (paymaster_direct_message && !pnode->IsPaymasterDirectConn()) {
+        LogPrint(BCLog::NET,
+                 "suppressing Paymaster direct message on ordinary connection\n");
+        return;
+    }
     if (pnode->IsPaymasterDirectConn() &&
         !NetMsgType::IsPaymasterConnectionMessage(msg.m_type)) {
-        LogPrint(BCLog::NET, "suppressing non-Paymaster message %s on isolated peer=%d\n",
-                 msg.m_type, pnode->GetId());
+        LogPrint(BCLog::NET,
+                 "suppressing disallowed message on isolated Paymaster connection\n");
         return;
+    }
+    if (pnode->IsPaymasterDirectConn() && paymaster_direct_message) {
+        // The client owns the outbound half and sends requests. The provider
+        // owns the accepted inbound half and sends responses. Suppress a local
+        // caller that tries to put a private message on the opposite half.
+        const bool expected_direction{
+            pnode->IsInboundConn()
+                ? NetMsgType::IsPaymasterDirectResponse(msg.m_type)
+                : NetMsgType::IsPaymasterDirectRequest(msg.m_type)};
+        if (!expected_direction) {
+            LogPrint(BCLog::NET,
+                     "suppressing wrong-direction Paymaster message\n");
+            return;
+        }
     }
     // Classify by message type rather than connection type. Provider replies
     // travel over the inbound half of a direct connection, and a sensitive
     // payload sent over the wrong connection must still never be persisted or
     // exposed through a raw tracepoint.
-    const bool paymaster_direct{NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
-    if (gArgs.GetBoolArg("-capturemessages", false) && !paymaster_direct) {
+    if (gArgs.GetBoolArg("-capturemessages", false) &&
+        !paymaster_private_transport) {
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /*is_incoming=*/false);
     }
 
-    if (!paymaster_direct) {
+    if (!paymaster_private_transport) {
         TRACE6(net, outbound_message,
             pnode->GetId(),
             pnode->m_addr_name.c_str(),
@@ -3928,7 +3988,8 @@ void CConnman::PerformReconnections()
                               std::move(item.grant),
                               item.destination.empty() ? nullptr : item.destination.c_str(),
                               item.conn_type,
-                              item.use_v2transport);
+                              item.use_v2transport,
+                              ProxyLogPolicy::NORMAL);
     }
 }
 

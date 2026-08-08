@@ -1179,7 +1179,10 @@ public:
     bool GetNetworkActive() const { return fNetworkActive; };
     bool GetUseAddrmanOutgoing() const { return m_use_addrman_outgoing; };
     void SetNetworkActive(bool active);
-    void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char* strDest, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure,
+                               CSemaphoreGrant&& grant_outbound, const char* strDest,
+                               ConnectionType conn_type, bool use_v2transport,
+                               ProxyLogPolicy proxy_log_policy) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
 
     // alias for thread safety annotations only, not defined
@@ -1404,7 +1407,9 @@ private:
     bool AlreadyConnectedToAddress(const CAddress& addr);
 
     bool AttemptToEvictConnection();
-    CNode* ConnectNode(CAddress addrConnect, const char *pszDest, bool fCountFailure, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    CNode* ConnectNode(CAddress addrConnect, const char* pszDest, bool fCountFailure,
+                       ConnectionType conn_type, bool use_v2transport,
+                       ProxyLogPolicy proxy_log_policy) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, const CNetAddr &addr) const;
 
     void DeleteNode(CNode* pnode);
@@ -1706,6 +1711,9 @@ public:
     CNode* getDandelionDestination(CNode* pfrom);
     CNode* getLocalDandelionDestination() const;
     void AddDandelionDestination(CNode* pnode);
+    /** Remove a reclassified isolated connection from all ordinary
+     * transaction-routing state. */
+    void RemoveDandelionPeer(CNode* pnode);
     std::vector<CNode*> getAllDandelionDestinations() const;
 
 private:

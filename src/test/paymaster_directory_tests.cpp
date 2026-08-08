@@ -11,6 +11,7 @@
 #include <paymaster/directory.h>
 #include <test/util/setup_common.h>
 
+#include <array>
 #include <atomic>
 #include <limits>
 #include <thread>
@@ -202,6 +203,52 @@ BOOST_AUTO_TEST_CASE(expired_provider_releases_admission_outpoints)
     BOOST_CHECK(directory.AcceptsAdmissionOutpoints(replacement, after_expiry));
     BOOST_CHECK(directory.AddValidated(replacement, after_expiry));
     BOOST_CHECK_EQUAL(directory.List(after_expiry).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(list_is_bounded_and_rotates_active_entries)
+{
+    constexpr int64_t now{100000};
+    CKey first_key;
+    CKey second_key;
+    CKey third_key;
+    CKey fourth_key;
+    first_key.MakeNewKey(true);
+    second_key.MakeNewKey(true);
+    third_key.MakeNewKey(true);
+    fourth_key.MakeNewKey(true);
+    std::array<std::pair<CKey*, std::pair<uint256, uint256>>, 4> fixtures{{
+        {&first_key, {uint256S("11"), uint256S("12")}},
+        {&second_key, {uint256S("21"), uint256S("22")}},
+        {&third_key, {uint256S("31"), uint256S("32")}},
+        {&fourth_key, {uint256S("41"), uint256S("42")}},
+    }};
+
+    Directory directory;
+    for (auto& [key, outpoints] : fixtures) {
+        auto announcement{SignedAnnouncement(*key, uint256::ONE, 1, now)};
+        SetAdmissionOutpoints(
+            announcement, *key, outpoints.first, outpoints.second);
+        BOOST_REQUIRE(directory.AddValidated(std::move(announcement), now));
+    }
+
+    const auto all{directory.List(now)};
+    BOOST_REQUIRE_EQUAL(all.size(), fixtures.size());
+    const auto first_two{directory.List(now, 2, 0)};
+    BOOST_REQUIRE_EQUAL(first_two.size(), 2U);
+    BOOST_CHECK(GetPaymasterId(first_two[0].identity_key) ==
+                GetPaymasterId(all[0].identity_key));
+    BOOST_CHECK(GetPaymasterId(first_two[1].identity_key) ==
+                GetPaymasterId(all[1].identity_key));
+
+    const auto wrapped{directory.List(now, 3, all.size() - 1)};
+    BOOST_REQUIRE_EQUAL(wrapped.size(), 3U);
+    BOOST_CHECK(GetPaymasterId(wrapped[0].identity_key) ==
+                GetPaymasterId(all[3].identity_key));
+    BOOST_CHECK(GetPaymasterId(wrapped[1].identity_key) ==
+                GetPaymasterId(all[0].identity_key));
+    BOOST_CHECK(GetPaymasterId(wrapped[2].identity_key) ==
+                GetPaymasterId(all[1].identity_key));
+    BOOST_CHECK(directory.List(now, 0).empty());
 }
 
 BOOST_AUTO_TEST_CASE(concurrent_cross_provider_claim_accepts_only_one_identity)

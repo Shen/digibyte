@@ -59,32 +59,30 @@ bool ValidCarrier(const VerifiedDDCarrier& carrier)
 
 uint256 GetPaymentIntentCoreHash(const PaymentIntent& intent)
 {
-    HashWriter hasher = TaggedHash(intent.version >= 2 ? "DigiByte Paymaster Payment Intent Core v2" : "DigiByte Paymaster Payment Intent Core v1");
+    HashWriter hasher = TaggedHash("DigiByte Paymaster Payment Intent Core v2");
     hasher << intent.version << intent.genesis_hash << intent.provider_id << intent.request_id
            << intent.session_id << intent.client_nonce << intent.user_dd_inputs
            << intent.recipient_script << intent.recipient_amount << intent.user_dd_change_script
            << intent.offer_id << static_cast<uint8_t>(intent.funding_model)
            << static_cast<uint8_t>(intent.sponsorship_scope)
-           << intent.policy_hash << intent.sponsorship_authorization_hash << intent.expires_at;
-    if (intent.version >= 2) {
-        hasher << intent.canonical_request_hash
-               << static_cast<uint8_t>(intent.requested_fee_mode)
-               << static_cast<uint8_t>(intent.privacy_profile)
-               << static_cast<uint8_t>(intent.selection_mode);
-    }
+           << intent.policy_hash << intent.sponsorship_authorization_hash
+           << intent.expires_at << intent.canonical_request_hash
+           << static_cast<uint8_t>(intent.requested_fee_mode)
+           << static_cast<uint8_t>(intent.privacy_profile)
+           << static_cast<uint8_t>(intent.selection_mode);
     return hasher.GetSHA256();
 }
 
 uint256 GetPaymentIntentHash(const PaymentIntent& intent)
 {
-    HashWriter hasher = TaggedHash(intent.version >= 2 ? "DigiByte Paymaster Payment Intent v2" : "DigiByte Paymaster Payment Intent v1");
+    HashWriter hasher = TaggedHash("DigiByte Paymaster Payment Intent v2");
     hasher << GetPaymentIntentCoreHash(intent) << intent.user_input_proofs;
     return hasher.GetSHA256();
 }
 
 uint256 GetUserInputControlHash(const PaymentIntent& intent, const COutPoint& outpoint)
 {
-    HashWriter hasher = TaggedHash(intent.version >= 2 ? "DigiByte Paymaster User Input v2" : "DigiByte Paymaster User Input v1");
+    HashWriter hasher = TaggedHash("DigiByte Paymaster User Input v2");
     hasher << intent.genesis_hash << intent.provider_id << intent.client_nonce
            << GetPaymentIntentCoreHash(intent) << outpoint << intent.expires_at;
     return hasher.GetSHA256();

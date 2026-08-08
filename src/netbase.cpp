@@ -333,10 +333,16 @@ static std::string Socks5ErrorString(uint8_t err)
     }
 }
 
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock)
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
+            const Sock& sock, ProxyLogPolicy log_policy)
 {
     IntrRecvError recvr;
-    LogPrint(BCLog::NET, "SOCKS5 connecting %s\n", strDest);
+    const bool redact_destination{log_policy == ProxyLogPolicy::REDACT_DESTINATION};
+    if (redact_destination) {
+        LogPrint(BCLog::NET, "SOCKS5 connecting to private destination\n");
+    } else {
+        LogPrint(BCLog::NET, "SOCKS5 connecting %s\n", strDest);
+    }
     if (strDest.size() > 255) {
         return error("Hostname too long");
     }
@@ -357,7 +363,11 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     }
     uint8_t pchRet1[2];
     if (InterruptibleRecv(pchRet1, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
-        LogPrintf("Socks5() connect to %s:%d failed: InterruptibleRecv() timeout or other failure\n", strDest, port);
+        if (redact_destination) {
+            LogPrintf("Socks5() connection to private destination failed: proxy response timeout or other failure\n");
+        } else {
+            LogPrintf("Socks5() connect to %s:%d failed: InterruptibleRecv() timeout or other failure\n", strDest, port);
+        }
         return false;
     }
     if (pchRet1[0] != SOCKSVersion::SOCKS5) {
@@ -377,7 +387,9 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
         if (ret != (ssize_t)vAuth.size()) {
             return error("Error sending authentication to proxy");
         }
-        LogPrint(BCLog::PROXY, "SOCKS5 sending proxy authentication %s:%s\n", auth->username, auth->password);
+        // Proxy credentials may be operator secrets or per-connection Tor
+        // stream-isolation tokens. Their values must never enter debug.log.
+        LogPrint(BCLog::PROXY, "SOCKS5 sending proxy authentication\n");
         uint8_t pchRetA[2];
         if (InterruptibleRecv(pchRetA, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
             return error("Error reading proxy authentication response");
@@ -419,7 +431,13 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     }
     if (pchRet2[1] != SOCKS5Reply::SUCCEEDED) {
         // Failures to connect to a peer that are not proxy errors
-        LogPrintf("Socks5() connect to %s:%d failed: %s\n", strDest, port, Socks5ErrorString(pchRet2[1]));
+        if (redact_destination) {
+            LogPrintf("Socks5() connection to private destination failed: %s\n",
+                      Socks5ErrorString(pchRet2[1]));
+        } else {
+            LogPrintf("Socks5() connect to %s:%d failed: %s\n", strDest, port,
+                      Socks5ErrorString(pchRet2[1]));
+        }
         return false;
     }
     if (pchRet2[2] != 0x00) { // Reserved field must be 0
@@ -448,7 +466,11 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     if (InterruptibleRecv(pchRet3, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
         return error("Error reading from proxy");
     }
-    LogPrint(BCLog::NET, "SOCKS5 connected %s\n", strDest);
+    if (redact_destination) {
+        LogPrint(BCLog::NET, "SOCKS5 connected to private destination\n");
+    } else {
+        LogPrint(BCLog::NET, "SOCKS5 connected %s\n", strDest);
+    }
     return true;
 }
 
@@ -624,7 +646,9 @@ bool IsProxy(const CNetAddr &addr) {
     return false;
 }
 
-bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port, const Sock& sock, int nTimeout, bool& outProxyConnectionFailed)
+bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
+                         const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
+                         ProxyLogPolicy log_policy)
 {
     // first connect to proxy server
     if (!ConnectSocketDirectly(proxy.proxy, sock, nTimeout, true)) {
@@ -636,11 +660,11 @@ bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_
         ProxyCredentials random_auth;
         static std::atomic_int counter(0);
         random_auth.username = random_auth.password = strprintf("%i", counter++);
-        if (!Socks5(strDest, port, &random_auth, sock)) {
+        if (!Socks5(strDest, port, &random_auth, sock, log_policy)) {
             return false;
         }
     } else {
-        if (!Socks5(strDest, port, nullptr, sock)) {
+        if (!Socks5(strDest, port, nullptr, sock, log_policy)) {
             return false;
         }
     }
@@ -683,9 +707,9 @@ bool LookupSubNet(const std::string& subnet_str, CSubNet& subnet_out)
     return false;
 }
 
-void InterruptSocks5(bool interrupt)
+bool InterruptSocks5(bool interrupt)
 {
-    interruptSocks5Recv = interrupt;
+    return interruptSocks5Recv.exchange(interrupt);
 }
 
 bool IsBadPort(uint16_t port)

@@ -1178,6 +1178,14 @@ static bool IsOracleP2PActive(const ChainstateManager& chainman)
            DigiDollar::IsDigiDollarEnabled(tip, chainman);
 }
 
+/** Paymaster transport is available only after the shared DigiDollar gate. */
+static bool IsPaymasterP2PActive(const ChainstateManager& chainman)
+{
+    const CBlockIndex* tip =
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+    return DigiDollar::IsDigiDollarEnabled(tip, chainman);
+}
+
 /** Whether this peer can serve us blocks. */
 static bool CanServeBlocks(const Peer& peer)
 {
@@ -1557,6 +1565,9 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
             my_services, CNetAddr::V1(CService{}), // Together the pre-version-31402 serialization of CAddress "addrMe" (without nTime)
             nonce, strSubVersion, nNodeStartingHeight, tx_relay));
 
+    if (pnode.IsPaymasterDirectConn()) {
+        return;
+    }
     if (fLogIPs) {
         LogPrint(BCLog::NET, "send version message: version %d, blocks=%d, them=%s, txrelay=%d, peer=%d\n", PROTOCOL_VERSION, nNodeStartingHeight, addr_you.ToStringAddrPort(), tx_relay, nodeid);
     } else {
@@ -3750,7 +3761,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 {
     AssertLockHeld(g_msgproc_mutex);
 
-    LogPrint(BCLog::NET, "received: %s (%u bytes) peer=%d\n", SanitizeString(msg_type), vRecv.size(), pfrom.GetId());
+    const bool paymaster_private_transport{
+        pfrom.IsPaymasterDirectConn() ||
+        NetMsgType::IsPaymasterDirectMessage(msg_type)};
+    if (!paymaster_private_transport) {
+        LogPrint(BCLog::NET, "received: %s (%u bytes) peer=%d\n",
+                 SanitizeString(msg_type), vRecv.size(), pfrom.GetId());
+    }
 
     PeerRef peer = GetPeerRef(pfrom.GetId());
     if (peer == nullptr) return;
@@ -3842,9 +3859,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // peer can mark its half as isolated before normal post-handshake relay
         // setup would run.
         if (pfrom.IsPaymasterConn()) {
-            const CBlockIndex* tip = WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip());
             if (!m_opts.paymaster || !m_opts.paymaster->Enabled() ||
-                !DigiDollar::IsDigiDollarEnabled(tip, m_chainman)) {
+                !IsPaymasterP2PActive(m_chainman)) {
                 pfrom.fDisconnect = true;
                 return;
             }
@@ -3973,10 +3989,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             remoteAddr = ", peeraddr=" + pfrom.addr.ToStringAddrPort();
 
         const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
-        LogPrint(BCLog::NET, "receive version message: %s: version %d, blocks=%d, us=%s, txrelay=%d, peer=%d%s%s\n",
-                  cleanSubVer, pfrom.nVersion,
-                  peer->m_starting_height, addrMe.ToStringAddrPort(), fRelay, pfrom.GetId(),
-                  remoteAddr, (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
+        if (!pfrom.IsPaymasterDirectConn()) {
+            LogPrint(BCLog::NET, "receive version message: %s: version %d, blocks=%d, us=%s, txrelay=%d, peer=%d%s%s\n",
+                      cleanSubVer, pfrom.nVersion,
+                      peer->m_starting_height, addrMe.ToStringAddrPort(), fRelay, pfrom.GetId(),
+                      remoteAddr, (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
+        }
 
         int64_t nTimeOffset = nTime - GetTime();
         pfrom.nTimeOffset = nTimeOffset;
@@ -4020,13 +4038,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::VERACK) {
         if (pfrom.fSuccessfullyConnected) {
-            LogPrint(BCLog::NET, "ignoring redundant verack message from peer=%d\n", pfrom.GetId());
+            if (!paymaster_private_transport) {
+                LogPrint(BCLog::NET, "ignoring redundant verack message from peer=%d\n", pfrom.GetId());
+            }
             return;
         }
 
+        const bool paymaster_direct{pfrom.IsPaymasterDirectConn()};
         // Log succesful connections unconditionally for outbound, but not for inbound as those
         // can be triggered by an attacker at high rate.
-        if (!pfrom.IsInboundConn() || LogAcceptCategory(BCLog::NET, BCLog::Level::Debug)) {
+        if (!paymaster_direct &&
+            (!pfrom.IsInboundConn() || LogAcceptCategory(BCLog::NET, BCLog::Level::Debug))) {
             const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
             LogPrintf("New %s %s peer connected: version: %d, blocks=%d, peer=%d%s%s\n",
                       pfrom.ConnectionTypeAsString(),
@@ -4037,7 +4059,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogPrintf("DEBUG: VERACK processing started for peer=%d\n", pfrom.GetId());
         }
 
-        const bool paymaster_direct{pfrom.IsPaymasterDirectConn()};
         if (!paymaster_direct && pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
             // Tell our peer we are willing to provide version 2 cmpctblocks.
             // However, we do not request new block announcements using
@@ -4071,7 +4092,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         pfrom.fSuccessfullyConnected = true;
-        LogPrintf("DEBUG: VERACK processing completed successfully for peer=%d\n", pfrom.GetId());
+        if (!paymaster_direct) {
+            LogPrintf("DEBUG: VERACK processing completed successfully for peer=%d\n", pfrom.GetId());
+        }
 
         // Request oracle data from new peer for discovery
         // This enables newly connected/restarted nodes to catch up on oracle prices
@@ -4098,8 +4121,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // ordinary capability advertisement, or acknowledge an inbound direct
         // marker, only once here.
         if (!pfrom.IsPaymasterConn() && m_opts.paymaster && m_opts.paymaster->Enabled()) {
-            const CBlockIndex* tip = WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip());
-            if (DigiDollar::IsDigiDollarEnabled(tip, m_chainman)) {
+            if (IsPaymasterP2PActive(m_chainman)) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDPMASTERS,
                                                            DigiDollar::Paymaster::PROTOCOL_VERSION,
                                                            uint32_t{0}));
@@ -4112,8 +4134,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (pfrom.IsPaymasterDirectConn() &&
         !NetMsgType::IsPaymasterConnectionMessage(msg_type)) {
         LogPrint(BCLog::NET,
-                 "disconnecting isolated Paymaster peer=%d for message %s\n",
-                 pfrom.GetId(), SanitizeString(msg_type));
+                 "disconnecting isolated Paymaster connection for a disallowed message\n");
         pfrom.fDisconnect = true;
         return;
     }
@@ -4127,7 +4148,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         uint32_t capabilities{0};
         vRecv >> version >> capabilities;
         if (!vRecv.empty() || version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
-            !m_opts.paymaster || !m_opts.paymaster->Enabled()) return;
+            !m_opts.paymaster || !m_opts.paymaster->Enabled() ||
+            !IsPaymasterP2PActive(m_chainman)) return;
         if ((capabilities & ~DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) return;
         if ((capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) {
             // Only the accepting half can be reclassified. An ordinary
@@ -4140,6 +4162,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 return;
             }
             pfrom.MarkAsPaymasterDirect();
+            // The socket entered as an ordinary inbound peer before its
+            // authenticated transport role was known. Remove any Dandelion
+            // bookkeeping created during accept so it cannot participate in
+            // transaction routing after reclassification.
+            m_connman.RemoveDandelionPeer(&pfrom);
         }
         peer->m_paymaster_negotiated = true;
         if (!pfrom.IsPaymasterDirectConn()) {
@@ -4153,19 +4180,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         vRecv >> requested;
         const int64_t now = GetTime();
         if (!vRecv.empty() || !peer->m_paymaster_negotiated || !m_opts.paymaster ||
+            !IsPaymasterP2PActive(m_chainman) ||
             requested == 0 ||
             DigiDollar::Paymaster::SaturatingAddSeconds(peer->m_last_getpaymasters, 60) > now) return;
         peer->m_last_getpaymasters = now;
         requested = std::min<uint16_t>(requested, 16);
-        const auto announcements = m_opts.paymaster->GetDirectory().List(now);
-        for (size_t i = 0; i < announcements.size() && i < requested; ++i) {
-            m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::PMANNOUNCE, announcements[i]));
+        const uint64_t rotation{
+            pfrom.nKeyedNetGroup + static_cast<uint64_t>(now / 60)};
+        const auto announcements = m_opts.paymaster->GetDirectory().List(
+            now, requested, rotation);
+        for (const auto& announcement : announcements) {
+            m_connman.PushMessage(
+                &pfrom, msgMaker.Make(NetMsgType::PMANNOUNCE, announcement));
         }
         return;
     }
 
     if (msg_type == NetMsgType::PMANNOUNCE) {
-        if (!peer->m_paymaster_negotiated || !m_opts.paymaster || vRecv.size() > 64 * 1024) return;
+        if (!peer->m_paymaster_negotiated || !m_opts.paymaster ||
+            !IsPaymasterP2PActive(m_chainman) ||
+            vRecv.size() > 64 * 1024) return;
         const int64_t now = GetTime();
         if (!m_opts.paymaster->AdmitAnnouncementTransport(
                 pfrom.GetId(), pfrom.nKeyedNetGroup, now)) return;
@@ -4208,14 +4242,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     const bool direct_paymaster_message{NetMsgType::IsPaymasterDirectMessage(msg_type)};
     if (direct_paymaster_message) {
+        // The client always opens the dedicated connection. Its outbound half
+        // receives provider responses; the provider's inbound half receives
+        // client requests. Reject the opposite direction before deserialization
+        // or shared-inbox admission so it cannot consume protocol capacity.
+        const bool expected_direction{
+            pfrom.IsInboundConn()
+                ? NetMsgType::IsPaymasterDirectRequest(msg_type)
+                : NetMsgType::IsPaymasterDirectResponse(msg_type)};
         // Direct messages may contain payment metadata and authorization
         // artifacts, so plaintext V1, capture-enabled mainnet operation, and
         // over-sized frames fail closed before deserialization.
         if (!pfrom.IsPaymasterDirectConn() || !pfrom.fSuccessfullyConnected ||
+            !expected_direction ||
             !peer->m_paymaster_negotiated ||
             pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
             (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled() || vRecv.empty() ||
+            !IsPaymasterP2PActive(m_chainman) ||
             vRecv.size() > DigiDollar::Paymaster::MAX_DIRECT_MESSAGE_BYTES) {
             pfrom.fDisconnect = true;
             return;
@@ -5552,7 +5596,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             sProblem = "Short payload";
         }
 
-        if (!(sProblem.empty())) {
+        if (!(sProblem.empty()) && !pfrom.IsPaymasterDirectConn()) {
             LogPrint(BCLog::NET, "pong peer=%d: %s, %x expected, %x received, %u bytes\n",
                 pfrom.GetId(),
                 sProblem,
@@ -6703,8 +6747,10 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
 
     // Never expose private direct-session payloads through raw capture or
     // tracing, even if a future routing bug delivers one on a wrong socket.
-    const bool paymaster_direct{NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
-    if (!paymaster_direct) {
+    const bool paymaster_private_transport{
+        pfrom->IsPaymasterDirectConn() ||
+        NetMsgType::IsPaymasterDirectMessage(msg.m_type)};
+    if (!paymaster_private_transport) {
         TRACE6(net, inbound_message,
             pfrom->GetId(),
             pfrom->m_addr_name.c_str(),
@@ -6714,7 +6760,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
             msg.m_recv.data()
         );
     }
-    if (m_opts.capture_messages && !paymaster_direct) {
+    if (m_opts.capture_messages && !paymaster_private_transport) {
         CaptureMessage(pfrom->addr, msg.m_type, MakeUCharSpan(msg.m_recv), /*is_incoming=*/true);
     }
 
@@ -6734,9 +6780,19 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         //  unnecessary 100ms delay)
         if (m_orphanage.HaveTxToReconsider(peer->m_id)) fMoreWork = true;
     } catch (const std::exception& e) {
-        LogPrint(BCLog::NET, "%s(%s, %u bytes): Exception '%s' (%s) caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size, e.what(), typeid(e).name());
+        if (paymaster_private_transport) {
+            LogPrint(BCLog::NET,
+                     "Exception while processing isolated Paymaster traffic\n");
+        } else {
+            LogPrint(BCLog::NET, "%s(%s, %u bytes): Exception '%s' (%s) caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size, e.what(), typeid(e).name());
+        }
     } catch (...) {
-        LogPrint(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
+        if (paymaster_private_transport) {
+            LogPrint(BCLog::NET,
+                     "Unknown exception while processing isolated Paymaster traffic\n");
+        } else {
+            LogPrint(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
+        }
     }
 
     return fMoreWork;

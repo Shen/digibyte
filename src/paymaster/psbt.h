@@ -173,8 +173,7 @@ bool ValidateProviderCommitForExecution(
     std::string& error);
 
 /** Reconstruct the exact client authorization and final transaction from one
- * durable attempt. Unlike provider recovery, legacy attempts are never
- * accepted here: startup/retry broadcast requires the current client manifest,
+ * durable attempt. Startup/retry broadcast requires the current client manifest,
  * its explicit local acceptance, and the exact persisted user-signed PSBT.
  * Quote expiry cannot revoke an already complete signature, so no wall-clock
  * parameter is needed. The caller must still revalidate the capacity proof

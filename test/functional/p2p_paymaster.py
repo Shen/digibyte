@@ -24,12 +24,13 @@ PAYMASTER_PROTOCOL_VERSION = 5
 
 class PaymasterP2PTest(DigiByteTestFramework):
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.setup_clean_chain = True
         self.extra_args = [
             paymaster_node_args(),
             ["-dandelion=0", "-digidollar=1", "-paymaster=0",
              "-prune=0", "-txindex=1", "-v2transport=1"],
+            paymaster_node_args() + ["-digidollaractivationheight=100"],
         ]
 
     def run_test(self):
@@ -46,6 +47,14 @@ class PaymasterP2PTest(DigiByteTestFramework):
         incompatible = self.nodes[1].add_p2p_connection(P2PInterface())
         incompatible.sync_with_ping()
         assert_equal(incompatible.message_count["sendpmasters"], 0)
+
+        self.log.info("Negotiation remains inactive before DigiDollar activation")
+        inactive = self.nodes[2].add_p2p_connection(P2PInterface())
+        inactive.sync_with_ping()
+        assert_equal(inactive.message_count["sendpmasters"], 0)
+        inactive.send_and_ping(msg_sendpmasters(
+            version=PAYMASTER_PROTOCOL_VERSION, capabilities=0))
+        assert_equal(inactive.message_count["getpmasters"], 0)
 
         self.log.info("Invalid negotiation versions and capabilities fail closed")
         wrong_version = node.add_p2p_connection(P2PInterface())

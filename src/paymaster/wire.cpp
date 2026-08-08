@@ -101,12 +101,10 @@ uint256 GetCapacityControlHash(const PaymasterCapacityProof& proof,
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity Control v1");
     hasher << proof.genesis_hash << proof.provider_id << proof.request_id
-           << proof.session_id << proof.client_nonce << proof.snapshot_id;
-    if (proof.version >= 4) {
-        hasher << static_cast<uint8_t>(proof.funding_model)
-               << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
-    }
-    hasher << outpoint << expires_at;
+           << proof.session_id << proof.client_nonce << proof.snapshot_id
+           << static_cast<uint8_t>(proof.funding_model)
+           << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U)
+           << outpoint << expires_at;
     return hasher.GetSHA256();
 }
 
@@ -114,12 +112,10 @@ uint256 GetCapacityProofSignatureHash(const PaymasterCapacityProof& proof)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity v1");
     hasher << proof.version << proof.genesis_hash << proof.provider_id
-           << proof.request_id << proof.session_id << proof.client_nonce;
-    if (proof.version >= 4) {
-        hasher << static_cast<uint8_t>(proof.funding_model)
-               << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
-    }
-    hasher << proof.snapshot_id << proof.created_at << proof.expires_at
+           << proof.request_id << proof.session_id << proof.client_nonce
+           << static_cast<uint8_t>(proof.funding_model)
+           << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U)
+           << proof.snapshot_id << proof.created_at << proof.expires_at
            << static_cast<uint64_t>(proof.liquidity_slots.size());
     for (const PaymasterLiquiditySlot& slot : proof.liquidity_slots) {
         hasher << static_cast<uint8_t>(slot.carrier.has_value() ? 1U : 0U);
@@ -144,12 +140,10 @@ uint256 GetCapacityProofSignatureHash(const PaymasterCapacityProof& proof)
 uint256 GetCapacityResourceCommitment(const PaymasterCapacityProof& proof)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity Resources v1");
-    hasher << proof.genesis_hash << proof.provider_id;
-    if (proof.version >= 4) {
-        hasher << static_cast<uint8_t>(proof.funding_model)
-               << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
-    }
-    hasher << static_cast<uint64_t>(proof.liquidity_slots.size());
+    hasher << proof.genesis_hash << proof.provider_id
+           << static_cast<uint8_t>(proof.funding_model)
+           << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U)
+           << static_cast<uint64_t>(proof.liquidity_slots.size());
     for (const PaymasterLiquiditySlot& slot : proof.liquidity_slots) {
         hasher << static_cast<uint8_t>(slot.carrier.has_value() ? 1U : 0U);
         if (slot.carrier) {

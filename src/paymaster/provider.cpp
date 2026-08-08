@@ -58,6 +58,10 @@ bool ValidateFundingSafetyLimits(const FundingSafetyLimits& limits,
         return !required;
     }
     if (limits.maximum_network_fee_per_transaction.value <= 0 ||
+        !MoneyRange(limits.maximum_network_fee_per_transaction.value) ||
+        !MoneyRange(limits.maximum_reserved_network_fee.value) ||
+        !MoneyRange(limits.maximum_network_fee_per_hour.value) ||
+        !MoneyRange(limits.maximum_network_fee_per_day.value) ||
         limits.maximum_network_fee_per_transaction.value > advertised_maximum.value ||
         limits.maximum_reserved_network_fee.value <
             limits.maximum_network_fee_per_transaction.value ||
@@ -229,7 +233,8 @@ bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
         error = "PAYMASTER_INVALID_QUOTE_TTL";
         return false;
     }
-    if (policy.maximum_network_fee.value <= 0) {
+    if (policy.maximum_network_fee.value <= 0 ||
+        !MoneyRange(policy.maximum_network_fee.value)) {
         error = "PAYMASTER_INVALID_NETWORK_FEE_CAP";
         return false;
     }
@@ -282,28 +287,20 @@ bool ValidateClientSafetyPolicy(const ClientSafetyPolicy& policy, std::string& e
 bool ValidateProviderBudgetLedger(const ProviderBudgetLedger& ledger, std::string& error)
 {
     error.clear();
-    if ((ledger.version != ProviderBudgetLedger::LEGACY_VERSION &&
-         ledger.version != ProviderBudgetLedger::QUOTE_REQUEST_VERSION &&
-         ledger.version != ProviderBudgetLedger::NETGROUP_RESERVATION_VERSION &&
-         ledger.version != ProviderBudgetLedger::CURRENT_VERSION) ||
+    if (ledger.version != ProviderBudgetLedger::CURRENT_VERSION ||
         ledger.recipient_bucket_secret.IsNull() || ledger.accounting_time_high_water <= 0 ||
         ledger.reservations.size() > MAX_BUDGET_LEDGER_ENTRIES ||
         ledger.quote_requests.size() > MAX_QUOTE_REQUEST_EVENTS ||
-        ledger.capacity_admissions.size() > MAX_CAPACITY_ADMISSION_EVENTS ||
-        (ledger.version == ProviderBudgetLedger::LEGACY_VERSION &&
-         !ledger.quote_requests.empty()) ||
-        (ledger.version < ProviderBudgetLedger::CURRENT_VERSION &&
-         !ledger.capacity_admissions.empty())) {
+        ledger.capacity_admissions.size() > MAX_CAPACITY_ADMISSION_EVENTS) {
         error = "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER";
         return false;
     }
     std::set<uint256> commit_keys;
     for (const ProviderBudgetReservation& reservation : ledger.reservations) {
-        if ((reservation.version != ProviderBudgetReservation::LEGACY_VERSION &&
-             reservation.version != ProviderBudgetReservation::CURRENT_VERSION) ||
+        if (reservation.version != ProviderBudgetReservation::CURRENT_VERSION ||
             reservation.commit_key.IsNull() || !commit_keys.insert(reservation.commit_key).second ||
             reservation.network_fee.value <= 0 || reservation.recipient_bucket.IsNull() ||
-            (reservation.version >= 2 && reservation.netgroup_bucket.IsNull()) ||
+            reservation.netgroup_bucket.IsNull() ||
             reservation.reserved_at <= 0 || reservation.updated_at < reservation.reserved_at ||
             reservation.updated_at > ledger.accounting_time_high_water ||
             (reservation.state != BudgetReservationState::RESERVED &&
@@ -321,15 +318,9 @@ bool ValidateProviderBudgetLedger(const ProviderBudgetLedger& ledger, std::strin
     }
     std::set<uint256> request_keys;
     for (const ProviderQuoteRequestEvent& event : ledger.quote_requests) {
-        if ((event.version != ProviderQuoteRequestEvent::LEGACY_VERSION &&
-             event.version != ProviderQuoteRequestEvent::CURRENT_VERSION) ||
-            event.request_key.IsNull() || event.netgroup_bucket.IsNull() ||
-            (event.version == ProviderQuoteRequestEvent::LEGACY_VERSION &&
-             !event.request_hash.IsNull()) ||
-            (event.version == ProviderQuoteRequestEvent::CURRENT_VERSION &&
-             event.request_hash.IsNull()) ||
-            (ledger.version == ProviderBudgetLedger::QUOTE_REQUEST_VERSION &&
-             event.version != ProviderQuoteRequestEvent::LEGACY_VERSION) ||
+        if (event.version != ProviderQuoteRequestEvent::CURRENT_VERSION ||
+            event.request_key.IsNull() || event.request_hash.IsNull() ||
+            event.netgroup_bucket.IsNull() ||
             !request_keys.insert(event.request_key).second || event.admitted_at <= 0 ||
             event.admitted_at > ledger.accounting_time_high_water) {
             error = "PAYMASTER_INVALID_PROVIDER_QUOTE_REQUEST_EVENT";
@@ -743,13 +734,10 @@ bool RecordProviderQuoteRequest(ProviderBudgetLedger& ledger,
     }
     for (const ProviderQuoteRequestEvent& event : ledger.quote_requests) {
         if (event.request_key != request_key) continue;
-        const bool exact_current =
+        const bool exact =
             event.version == ProviderQuoteRequestEvent::CURRENT_VERSION &&
             event.request_hash == request_hash;
-        const bool exact_legacy =
-            event.version == ProviderQuoteRequestEvent::LEGACY_VERSION &&
-            event.request_key == request_hash;
-        if ((exact_current || exact_legacy) &&
+        if (exact &&
             event.netgroup_bucket == netgroup_bucket) {
             return true;
         }
@@ -1163,25 +1151,12 @@ bool ValidateProviderBudgetReservationBinding(
     const ProviderSafetyPolicy& policy,
     BudgetReservationState expected_state,
     bool allow_historical_policy,
-    bool allow_legacy_durable_commit,
     std::string& error)
 {
     error.clear();
-    const bool legacy_manifest =
-        manifest.version == ProviderAuthorizationManifest::LEGACY_VERSION;
-    if (legacy_manifest) {
-        if (!allow_legacy_durable_commit || manifest.manifest_id.IsNull() ||
-            manifest.manifest_id !=
-                GetProviderAuthorizationManifestId(manifest) ||
-            attempt.final_txid.IsNull() || attempt.final_transaction.empty()) {
-            error = "PAYMASTER_PROVIDER_BUDGET_LEGACY_NOT_EXECUTABLE";
-            return false;
-        }
-    } else if (manifest.version !=
-                   ProviderAuthorizationManifest::CURRENT_VERSION ||
-               manifest.manifest_id.IsNull() ||
-               manifest.manifest_id !=
-                   GetProviderAuthorizationManifestId(manifest)) {
+    if (manifest.version != ProviderAuthorizationManifest::CURRENT_VERSION ||
+        manifest.manifest_id.IsNull() ||
+        manifest.manifest_id != GetProviderAuthorizationManifestId(manifest)) {
         error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID";
         return false;
     }
@@ -1204,14 +1179,13 @@ bool ValidateProviderBudgetReservationBinding(
         return false;
     }
 
-    if (!legacy_manifest &&
-        (reservation.version != ProviderBudgetReservation::CURRENT_VERSION ||
-         manifest.budget_reservation_id != expected_commit_key ||
-         !(manifest.maximum_network_fee == reservation.network_fee) ||
-         !(manifest.maximum_network_fee == manifest.network_fee) ||
-         manifest.maximum_network_fee.value <= 0 ||
-         reservation.netgroup_bucket.IsNull() ||
-         reservation.netgroup_bucket != attempt.provider_netgroup_bucket)) {
+    if (reservation.version != ProviderBudgetReservation::CURRENT_VERSION ||
+        manifest.budget_reservation_id != expected_commit_key ||
+        !(manifest.maximum_network_fee == reservation.network_fee) ||
+        !(manifest.maximum_network_fee == manifest.network_fee) ||
+        manifest.maximum_network_fee.value <= 0 ||
+        reservation.netgroup_bucket.IsNull() ||
+        reservation.netgroup_bucket != attempt.provider_netgroup_bucket) {
         error = "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH";
         return false;
     }
@@ -1728,12 +1702,7 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
             record.state == ProviderMaintenanceState::FAILED;
         const bool current_record =
             record.version == ProviderMaintenanceRecord::CURRENT_VERSION;
-        const bool source_inputs_record =
-            record.version ==
-                ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION;
-        const bool legacy_record =
-            record.version == ProviderMaintenanceRecord::LEGACY_VERSION;
-        if ((!current_record && !source_inputs_record && !legacy_record) ||
+        if (!current_record ||
             !valid_kind || !valid_state ||
             record.operation_id.IsNull() || record.plan_id.IsNull() ||
             !operation_ids.insert(record.operation_id).second ||
@@ -1762,8 +1731,7 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                         }) ||
             (record.kind ==
                      ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS
-                 ? (current_record || source_inputs_record) &&
-                       record.source_inputs.empty()
+                 ? record.source_inputs.empty()
                  : !record.source_inputs.empty())) {
             error = "PAYMASTER_INVALID_MAINTENANCE_SOURCE_INPUTS";
             return false;
@@ -2001,8 +1969,7 @@ bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
     for (const ProviderPoolEntry& entry : entries) {
         int witness_version{-1};
         std::vector<unsigned char> witness_program;
-        if ((entry.version != ProviderPoolEntry::LEGACY_VERSION &&
-             entry.version != ProviderPoolEntry::CURRENT_VERSION) ||
+        if (entry.version != ProviderPoolEntry::CURRENT_VERSION ||
             (entry.purpose != PoolPurpose::ADMISSION && entry.purpose != PoolPurpose::OPERATIONAL) ||
             (entry.asset != PoolAsset::DGB && entry.asset != PoolAsset::DD_CARRIER) ||
             (entry.state != PoolEntryState::AVAILABLE && entry.state != PoolEntryState::RESERVED &&
@@ -2024,13 +1991,11 @@ bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
             error = "PAYMASTER_INVALID_POOL_RESERVATION";
             return false;
         }
-        if (entry.version >= 2) {
-            const bool successor_state = entry.state == PoolEntryState::PENDING_SUCCESSOR;
-            if ((successor_state && entry.origin_commit_key.IsNull()) ||
-                (successor_state && entry.reservation_id != entry.origin_commit_key)) {
-                error = "PAYMASTER_INVALID_POOL_PROVENANCE";
-                return false;
-            }
+        const bool successor_state = entry.state == PoolEntryState::PENDING_SUCCESSOR;
+        if ((successor_state && entry.origin_commit_key.IsNull()) ||
+            (successor_state && entry.reservation_id != entry.origin_commit_key)) {
+            error = "PAYMASTER_INVALID_POOL_PROVENANCE";
+            return false;
         }
         if (entry.asset == PoolAsset::DGB) {
             if (!MoneyRange(entry.dgb_value.value) ||

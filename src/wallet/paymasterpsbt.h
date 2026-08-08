@@ -49,40 +49,11 @@ bool ValidateClientAuthorizationOwnership(
     const DigiDollar::Paymaster::ClientAuthorizationManifest& manifest,
     std::string& error);
 
-/** Validate an already durable legacy client final without creating new
- * authority. The caller must supply the exact PaymasterResult loaded from the
- * wallet database; live result ingestion, signing, submit retry, and first
- * persistence must continue to use the current manifest path. Only a V1/V2
- * client manifest (or the exact empty pre-manifest value) is projected into an
- * ephemeral current manifest. The projection is never persisted and the
- * normal current-manifest acceptance boundary is not weakened.
- *
- * The signed result, attempt artifacts, user-signed PSBT, final transaction,
- * all witnesses/scripts, and wallet ownership are revalidated before the
- * returned transaction may be considered for recovery broadcast. The caller
- * must still bind the attempt/result to its durable session, revalidate any
- * required chainstate conditions, and perform the usual mempool preflight. */
-bool ValidatePersistedLegacyClientFinalForRecovery(
-    CWallet& wallet,
-    const DigiDollar::Paymaster::ProviderAttempt& attempt,
-    const DigiDollar::Paymaster::PaymasterResult& persisted_result,
-    const uint256& expected_genesis,
-    CMutableTransaction& final_transaction,
-    std::string& error);
-
-/** Backward-compatible narrow wrapper used by older focused tests. New
- * authorization boundaries must call ValidateClientAuthorizationOwnership. */
-bool ValidateClientChangeScriptOwnership(
-    CWallet& wallet,
-    const DigiDollar::Paymaster::ClientAuthorizationManifest& manifest,
-    std::string& error);
-
 /** Fail closed unless every provider pool input and every provider fee,
- * carrier-return, and DGB-change script in the exact current or V1 legacy
- * manifest are currently spendable by this wallet. Manifest-less legacy
- * commits are handled only by their narrow, already-durable recovery path.
- * This is the wallet-local half of the provider spend firewall and is
- * independent from the pure transaction validator. */
+ * carrier-return, and DGB-change script in the exact current manifest are
+ * currently spendable by this wallet. This is the wallet-local half of the
+ * provider spend firewall and is independent from the pure transaction
+ * validator. */
 bool ValidateProviderAuthorizationOwnership(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderAuthorizationManifest& manifest,

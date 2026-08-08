@@ -25,6 +25,9 @@ void SplitWalletPath(const fs::path& wallet_path, fs::path& env_directory, std::
 enum class DatabaseReadStatus {
     FOUND,
     NOT_FOUND,
+    /** The record decoded far enough to identify a non-current format. */
+    UNSUPPORTED_VERSION,
+    /** Storage, deserialization, or record-shape validation failed. */
     READ_ERROR,
 };
 

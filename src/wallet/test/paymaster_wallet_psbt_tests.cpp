@@ -258,8 +258,6 @@ BOOST_AUTO_TEST_CASE(client_change_ownership_is_rechecked_immediately_before_sig
     manifest.manifest_id = GetClientAuthorizationManifestId(manifest);
     BOOST_CHECK(ValidateClientAuthorizationOwnership(
         m_wallet, manifest, error));
-    BOOST_CHECK(ValidateClientChangeScriptOwnership(
-        m_wallet, manifest, error));
 
     ClientAuthorizationManifest foreign_input{manifest};
     foreign_input.user_dd_inputs = {COutPoint{uint256S("902"), 0}};
@@ -281,14 +279,9 @@ BOOST_AUTO_TEST_CASE(client_change_ownership_is_rechecked_immediately_before_sig
         m_wallet, manifest, error));
     BOOST_CHECK_EQUAL(
         error, "PAYMASTER_CLIENT_CHANGE_NOT_WALLET_OWNED");
-    BOOST_CHECK(!ValidateClientChangeScriptOwnership(
-        m_wallet, manifest, error));
-    BOOST_CHECK_EQUAL(
-        error, "PAYMASTER_CLIENT_CHANGE_NOT_WALLET_OWNED");
-
     manifest.user_dd_change_script.clear();
     manifest.manifest_id = GetClientAuthorizationManifestId(manifest);
-    BOOST_CHECK(ValidateClientChangeScriptOwnership(
+    BOOST_CHECK(ValidateClientAuthorizationOwnership(
         m_wallet, manifest, error));
 }
 
@@ -547,17 +540,14 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
                               m_wallet, attempt.provider_manifest, error),
                           error);
 
-    ProviderAuthorizationManifest legacy_provider_manifest{
+    ProviderAuthorizationManifest outdated_provider_manifest{
         attempt.provider_manifest};
-    legacy_provider_manifest.version =
-        ProviderAuthorizationManifest::LEGACY_VERSION;
-    legacy_provider_manifest.budget_reservation_id.SetNull();
-    legacy_provider_manifest.maximum_network_fee = {};
-    legacy_provider_manifest.manifest_id =
-        GetProviderAuthorizationManifestId(legacy_provider_manifest);
-    BOOST_REQUIRE_MESSAGE(ValidateProviderAuthorizationOwnership(
-                              m_wallet, legacy_provider_manifest, error),
-                          error);
+    --outdated_provider_manifest.version;
+    outdated_provider_manifest.manifest_id =
+        GetProviderAuthorizationManifestId(outdated_provider_manifest);
+    BOOST_CHECK(!ValidateProviderAuthorizationOwnership(
+        m_wallet, outdated_provider_manifest, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID");
 
     ProviderAuthorizationManifest foreign_provider_input{
         attempt.provider_manifest};
@@ -674,6 +664,36 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
     BOOST_CHECK(CTransaction{validated_final}.GetWitnessHash() ==
                 final.GetWitnessHash());
 
+    ProviderAttempt trailing_request{attempt};
+    trailing_request.quote_request.push_back(0);
+    BOOST_CHECK(!ValidateProviderCommitForExecution(
+        trailing_request, commit, now + 3, validated_final, error));
+    BOOST_CHECK_EQUAL(
+        error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_ENCODING");
+
+    ProviderAttempt trailing_response{attempt};
+    trailing_response.signed_quote.push_back(0);
+    BOOST_CHECK(!ValidateProviderCommitForExecution(
+        trailing_response, commit, now + 3, validated_final, error));
+    BOOST_CHECK_EQUAL(
+        error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_ENCODING");
+
+    ProviderAttempt trailing_transaction{attempt};
+    trailing_transaction.unsigned_transaction.push_back(0);
+    BOOST_CHECK(!ValidateProviderCommitForExecution(
+        trailing_transaction, commit, now + 3, validated_final, error));
+    BOOST_CHECK_EQUAL(
+        error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_ENCODING");
+
+    ProviderAttempt trailing_psbt{attempt};
+    trailing_psbt.unsigned_psbt.push_back(0);
+    BOOST_CHECK(!ValidateProviderCommitForExecution(
+        trailing_psbt, commit, now + 3, validated_final, error));
+    BOOST_CHECK(error ==
+                    "PAYMASTER_PROVIDER_AUTHORIZATION_TEMPLATE_ENCODING" ||
+                error ==
+                    "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_NONCANONICAL");
+
     CMutableTransaction client_validated_final;
     BOOST_REQUIRE_MESSAGE(ValidateClientFinalForExecution(
                               attempt, final.GetWitnessHash(),
@@ -681,94 +701,24 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
                           error);
     BOOST_CHECK(CTransaction{client_validated_final} == final);
 
-    PaymasterResult persisted_client_result;
-    persisted_client_result.genesis_hash = intent.genesis_hash;
-    persisted_client_result.provider_id = attempt.provider_id;
-    persisted_client_result.commit_key = attempt.commit_key;
-    persisted_client_result.result_sequence = 1;
-    persisted_client_result.status =
-        PaymasterResultStatus::FINAL_COMMITTED;
-    persisted_client_result.txid = final.GetHash();
-    persisted_client_result.raw_transaction_hash = final.GetWitnessHash();
-    persisted_client_result.final_transaction = final_transaction;
-    persisted_client_result.updated_at = now;
-    persisted_client_result.identity_signature.resize(64);
-    BOOST_REQUIRE(key.SignSchnorr(
-        GetPaymasterResultSignatureHash(persisted_client_result),
-        persisted_client_result.identity_signature, nullptr, uint256{}));
-
-    CMutableTransaction legacy_validated_final;
-    ProviderAttempt legacy_v2_final{attempt};
-    legacy_v2_final.client_manifest.version = 2;
-    legacy_v2_final.client_manifest.manifest_id =
+    ProviderAttempt outdated_client_manifest{attempt};
+    --outdated_client_manifest.client_manifest.version;
+    outdated_client_manifest.client_manifest.manifest_id =
         GetClientAuthorizationManifestId(
-            legacy_v2_final.client_manifest);
-    legacy_v2_final.accepted_client_manifest_id.SetNull();
-    legacy_v2_final.client_manifest_accepted_at = 0;
-    BOOST_REQUIRE_MESSAGE(
-        ValidatePersistedLegacyClientFinalForRecovery(
-            m_wallet, legacy_v2_final, persisted_client_result,
-            intent.genesis_hash, legacy_validated_final, error),
-        error);
-    BOOST_CHECK(CTransaction{legacy_validated_final} == final);
-    BOOST_CHECK_EQUAL(legacy_v2_final.client_manifest.version, 2);
+            outdated_client_manifest.client_manifest);
+    outdated_client_manifest.accepted_client_manifest_id =
+        outdated_client_manifest.client_manifest.manifest_id;
+    BOOST_CHECK(!ValidateClientFinalForExecution(
+        outdated_client_manifest, final.GetWitnessHash(),
+        client_validated_final, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTH_MANIFEST_INVALID");
 
-    ProviderAttempt legacy_v1_final{legacy_v2_final};
-    legacy_v1_final.client_manifest.version = 1;
-    legacy_v1_final.client_manifest.manifest_id =
-        GetClientAuthorizationManifestId(
-            legacy_v1_final.client_manifest);
-    legacy_v1_final.capacity_snapshot.version =
-        ValidatedCapacitySnapshot::LEGACY_VERSION;
-    BOOST_REQUIRE_MESSAGE(
-        ValidatePersistedLegacyClientFinalForRecovery(
-            m_wallet, legacy_v1_final, persisted_client_result,
-            intent.genesis_hash, legacy_validated_final, error),
-        error);
-    BOOST_CHECK(CTransaction{legacy_validated_final} == final);
-
-    ProviderAttempt manifestless_legacy_final{attempt};
-    manifestless_legacy_final.client_manifest = {};
-    manifestless_legacy_final.accepted_client_manifest_id.SetNull();
-    manifestless_legacy_final.client_manifest_accepted_at = 0;
-    BOOST_REQUIRE_MESSAGE(
-        ValidatePersistedLegacyClientFinalForRecovery(
-            m_wallet, manifestless_legacy_final,
-            persisted_client_result, intent.genesis_hash,
-            legacy_validated_final, error),
-        error);
-    BOOST_CHECK(CTransaction{legacy_validated_final} == final);
-
-    BOOST_CHECK(!ValidatePersistedLegacyClientFinalForRecovery(
-        m_wallet, attempt, persisted_client_result, intent.genesis_hash,
-        legacy_validated_final, error));
-    BOOST_CHECK_EQUAL(
-        error, "PAYMASTER_LEGACY_CLIENT_FINAL_RECOVERY_REQUIRED");
-
-    ProviderAttempt invalid_legacy_witness{legacy_v2_final};
-    PaymasterResult invalid_legacy_result{persisted_client_result};
-    CMutableTransaction invalid_legacy_transaction{final_transaction};
-    BOOST_REQUIRE(!invalid_legacy_transaction.vin.front()
-                       .scriptWitness.stack.empty());
-    BOOST_REQUIRE(!invalid_legacy_transaction.vin.front()
-                       .scriptWitness.stack.front()
-                       .empty());
-    invalid_legacy_transaction.vin.front()
-        .scriptWitness.stack.front()
-        .front() ^= 1;
-    invalid_legacy_witness.final_transaction =
-        SerializePaymasterTestArtifact(invalid_legacy_transaction);
-    invalid_legacy_result.final_transaction = invalid_legacy_transaction;
-    invalid_legacy_result.raw_transaction_hash =
-        CTransaction{invalid_legacy_transaction}.GetWitnessHash();
-    invalid_legacy_result.identity_signature.assign(64, 0);
-    BOOST_REQUIRE(key.SignSchnorr(
-        GetPaymasterResultSignatureHash(invalid_legacy_result),
-        invalid_legacy_result.identity_signature, nullptr, uint256{}));
-    BOOST_CHECK(!ValidatePersistedLegacyClientFinalForRecovery(
-        m_wallet, invalid_legacy_witness, invalid_legacy_result,
-        intent.genesis_hash, legacy_validated_final, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGNATURE_INVALID");
+    ProviderAttempt outdated_capacity_snapshot{attempt};
+    --outdated_capacity_snapshot.capacity_snapshot.version;
+    BOOST_CHECK(!ValidateClientFinalForExecution(
+        outdated_capacity_snapshot, final.GetWitnessHash(),
+        client_validated_final, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_SNAPSHOT_VERSION");
 
     ProviderAttempt missing_client_acceptance{attempt};
     missing_client_acceptance.accepted_client_manifest_id.SetNull();
@@ -868,9 +818,8 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
     BOOST_CHECK(CTransaction{validated_final}.GetWitnessHash() ==
                 final.GetWitnessHash());
 
-    // Protocols 1-4 were all historical deployed formats. They remain
-    // executable only when the fully signed transaction and commit are already
-    // exact and durable; none may authorize a new provider signature.
+    // Protocols 1-4 cannot authorize either a new signature or execution of a
+    // previously persisted commit.
     for (uint16_t protocol_version{1};
          protocol_version < DigiDollar::Paymaster::PROTOCOL_VERSION;
          ++protocol_version) {
@@ -891,11 +840,10 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
         BOOST_CHECK_EQUAL(
             error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
 
-        BOOST_CHECK_MESSAGE(ValidateProviderCommitForExecution(
-                                legacy_attempt, commit, now + 3,
-                                validated_final, error),
-                            "legacy protocol " << protocol_version << ": "
-                                               << error);
+        BOOST_CHECK(!ValidateProviderCommitForExecution(
+            legacy_attempt, commit, now + 3, validated_final, error));
+        BOOST_CHECK_EQUAL(
+            error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
     }
 
     for (const uint16_t unsupported_protocol :

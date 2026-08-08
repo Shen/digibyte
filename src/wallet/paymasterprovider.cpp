@@ -40,11 +40,39 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 namespace {
+
+std::string PersistedVersionError(std::string_view record_type,
+                                  uint16_t found,
+                                  uint16_t expected,
+                                  std::string_view invalid_error)
+{
+    if (found == expected) return std::string{invalid_error};
+    return strprintf(
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=%s found=%u expected=%u",
+        std::string{record_type}, found, expected);
+}
+
+std::string ProviderPoolReadError(
+    const std::vector<ProviderPoolEntry>& entries)
+{
+    const auto outdated = std::find_if(
+        entries.begin(), entries.end(), [](const ProviderPoolEntry& entry) {
+            return entry.version != ProviderPoolEntry::CURRENT_VERSION;
+        });
+    if (outdated != entries.end()) {
+        return PersistedVersionError(
+            "ProviderPoolEntry", outdated->version,
+            ProviderPoolEntry::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PROVIDER_POOL");
+    }
+    return "PAYMASTER_INVALID_PROVIDER_POOL";
+}
 
 bool Abort(WalletBatch& batch, std::string& error)
 {
@@ -118,8 +146,7 @@ uint256 GetOfferId(const ProviderIdentityRecord& identity,
 bool SignBip86ControlHash(CWallet& wallet,
                           const CScript& script,
                           const uint256& hash,
-                          std::vector<unsigned char>& signature,
-                          bool deterministic = false)
+                          std::vector<unsigned char>& signature)
 {
     CTxDestination destination;
     if (!ExtractDestination(script, destination)) return false;
@@ -141,24 +168,20 @@ bool SignBip86ControlHash(CWallet& wallet,
         if (!tweaked || tweaked->first != output_key) continue;
         signature.resize(64);
         const uint256 empty_merkle_root;
-        const uint256 auxiliary_randomness{deterministic ? uint256{} : GetRandHash()};
         return internal_key.SignSchnorr(hash, signature, &empty_merkle_root,
-                                        auxiliary_randomness);
+                                        GetRandHash());
     }
     return false;
 }
 
 uint256 GetCapacitySnapshotId(const PaymasterCapacityProof& proof)
 {
-    HashWriter hasher = TaggedHash(
-        proof.version >= 4 ? "DigiByte Paymaster Capacity Snapshot v2" : "DigiByte Paymaster Capacity Snapshot v1");
+    HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity Snapshot v2");
     hasher << proof.version << proof.genesis_hash << proof.provider_id
-           << proof.request_id << proof.session_id << proof.client_nonce;
-    if (proof.version >= 4) {
-        hasher << static_cast<uint8_t>(proof.funding_model)
-               << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U);
-    }
-    hasher << proof.created_at << proof.expires_at
+           << proof.request_id << proof.session_id << proof.client_nonce
+           << static_cast<uint8_t>(proof.funding_model)
+           << static_cast<uint8_t>(proof.requires_carrier ? 1U : 0U)
+           << proof.created_at << proof.expires_at
            << static_cast<uint64_t>(proof.liquidity_slots.size());
     for (const PaymasterLiquiditySlot& slot : proof.liquidity_slots) {
         hasher << static_cast<uint8_t>(slot.carrier.has_value() ? 1U : 0U);
@@ -791,8 +814,7 @@ static bool PromoteProviderSignedAttempt(
             attempt, candidate, candidate.committed_at, validated, error) ||
         !store.ValidateProviderBudgetAuthorization(
             attempt, BudgetReservationState::RESERVED,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/false, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
     if (attempt.provider_manifest.manifest_id.IsNull() ||
@@ -859,17 +881,15 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
         }
         if (!store.ValidateProviderBudgetAuthorization(
                 attempt, BudgetReservationState::SPENT,
-                /*allow_historical_policy=*/true,
-                /*allow_legacy_durable_commit=*/true, result.error)) {
+                /*allow_historical_policy=*/true, result.error)) {
             return result;
         }
-        // Current and V1 manifests retain enough wallet-local ownership
-        // authority to re-run the spend firewall on every restart broadcast.
-        // Only an exact manifest-less legacy commit, which can no longer create
-        // a signature, uses the narrow durable-recovery exception.
-        if (!attempt.provider_manifest.manifest_id.IsNull() &&
+        if (attempt.provider_manifest.manifest_id.IsNull() ||
             !ValidateProviderAuthorizationOwnership(
                 wallet, attempt.provider_manifest, result.error)) {
+            if (result.error.empty()) {
+                result.error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
+            }
             return result;
         }
     } else {
@@ -1179,7 +1199,14 @@ bool SetPaymasterProviderPolicy(CWallet& wallet,
         }
     }
     ProviderSettings settings;
-    batch.ReadPaymasterSettings(settings);
+    if (!batch.ReadPaymasterSettings(settings) &&
+        batch.HasPaymasterSettings()) {
+        error = PersistedVersionError(
+            "ProviderSettings", settings.version,
+            ProviderSettings::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PROVIDER_SETTINGS");
+        return false;
+    }
     ProviderPolicy previous_policy;
     const bool policy_changed =
         !batch.ReadPaymasterPolicy(previous_policy) ||
@@ -1209,7 +1236,14 @@ bool SetPaymasterProviderEnabled(CWallet& wallet, bool enabled, int64_t now, std
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
     ProviderSettings settings;
-    batch.ReadPaymasterSettings(settings);
+    if (!batch.ReadPaymasterSettings(settings) &&
+        batch.HasPaymasterSettings()) {
+        error = PersistedVersionError(
+            "ProviderSettings", settings.version,
+            ProviderSettings::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PROVIDER_SETTINGS");
+        return false;
+    }
     ProviderIdentityRecord identity;
     const bool have_identity = batch.ReadPaymasterIdentity(identity);
     if (enabled) {
@@ -1283,7 +1317,12 @@ bool SetPaymasterProviderRuntimeSettings(CWallet& wallet,
     WalletBatch batch{wallet.GetDatabase()};
     ProviderSettings settings;
     if (!batch.ReadPaymasterSettings(settings)) {
-        error = "PAYMASTER_PROVIDER_SETTINGS_NOT_FOUND";
+        error = batch.HasPaymasterSettings()
+                    ? PersistedVersionError(
+                          "ProviderSettings", settings.version,
+                          ProviderSettings::CURRENT_VERSION,
+                          "PAYMASTER_INVALID_PROVIDER_SETTINGS")
+                    : "PAYMASTER_PROVIDER_SETTINGS_NOT_FOUND";
         return false;
     }
     ProviderIdentityRecord identity;
@@ -1560,7 +1599,12 @@ bool SetPaymasterProviderPoolEntries(CWallet& wallet,
     }
     if (!ValidateProviderPoolEntries(entries, error)) return false;
     std::vector<ProviderPoolEntry> existing;
-    if (batch.ReadPaymasterProviderPool(existing)) {
+    const bool have_existing = batch.ReadPaymasterProviderPool(existing);
+    if (!have_existing && batch.HasPaymasterProviderPool()) {
+        error = ProviderPoolReadError(existing);
+        return false;
+    }
+    if (have_existing) {
         std::map<COutPoint, const ProviderPoolEntry*> replacements;
         for (const ProviderPoolEntry& entry : entries)
             replacements.emplace(entry.outpoint, &entry);
@@ -1822,7 +1866,7 @@ bool BuildPaymasterCapacityProof(CWallet& wallet,
                     wallet, dgb_entries[index]->script_pub_key,
                     GetCapacityControlHash(proof, input.input.outpoint,
                                            input.control_proof.expires_at),
-                    input.control_proof.signature, /*deterministic=*/true)) {
+                    input.control_proof.signature)) {
                 error = "PAYMASTER_CAPACITY_DGB_SIGNING_FAILED";
                 return false;
             }
@@ -1833,7 +1877,7 @@ bool BuildPaymasterCapacityProof(CWallet& wallet,
                     wallet, carrier_entry->script_pub_key,
                     GetCapacityControlHash(proof, carrier.carrier.outpoint,
                                            carrier.control_proof.expires_at),
-                    carrier.control_proof.signature, /*deterministic=*/true)) {
+                    carrier.control_proof.signature)) {
                 error = "PAYMASTER_CAPACITY_CARRIER_SIGNING_FAILED";
                 return false;
             }
@@ -1842,7 +1886,8 @@ bool BuildPaymasterCapacityProof(CWallet& wallet,
 
     proof.identity_signature.resize(64);
     if (!identity_key.SignSchnorr(GetCapacityProofSignatureHash(proof),
-                                  proof.identity_signature, nullptr, uint256{})) {
+                                  proof.identity_signature, nullptr,
+                                  GetRandHash())) {
         error = "PAYMASTER_CAPACITY_IDENTITY_SIGNING_FAILED";
         return false;
     }

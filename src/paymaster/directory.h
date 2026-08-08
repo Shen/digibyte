@@ -113,7 +113,12 @@ public:
      * validation. AddValidated repeats it atomically with insertion. */
     bool AcceptsAdmissionOutpoints(const Announcement& announcement, int64_t now) const;
     bool AddValidated(Announcement announcement, int64_t now);
-    std::vector<Announcement> List(int64_t now) const;
+    /** Return at most maximum active announcements, rotating the first entry
+     * without copying the remainder of the bounded directory. */
+    std::vector<Announcement> List(
+        int64_t now,
+        size_t maximum = MAX_DIRECTORY_ENTRIES,
+        uint64_t rotation = 0) const;
     void RemoveExpired(int64_t now);
     void Clear();
     size_t Size() const;

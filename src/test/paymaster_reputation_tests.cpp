@@ -8,6 +8,8 @@
 
 #include <paymaster/reputation.h>
 
+#include <limits>
+
 using namespace DigiDollar::Paymaster;
 
 BOOST_AUTO_TEST_SUITE(paymaster_reputation_tests)
@@ -63,6 +65,26 @@ BOOST_AUTO_TEST_CASE(only_the_latest_thirty_utc_days_are_summarized)
     const ReliabilitySummary summary = SummarizeReliability(record, 31LL * 86400);
     BOOST_CHECK_EQUAL(summary.successful_attempts, 30U);
     BOOST_CHECK(summary.sufficient_data);
+}
+
+BOOST_AUTO_TEST_CASE(latency_ewma_does_not_overflow)
+{
+    PaymasterReliabilityRecord record;
+    record.provider_id = uint256::ONE;
+    std::string error;
+    const int64_t maximum = std::numeric_limits<int64_t>::max();
+
+    BOOST_REQUIRE(ApplyReliabilityOutcome(
+        record, ReliabilityOutcome::SUCCESS, 1000, maximum, error));
+    BOOST_CHECK_EQUAL(record.latency_ewma_ms, maximum);
+    BOOST_REQUIRE(ApplyReliabilityOutcome(
+        record, ReliabilityOutcome::SUCCESS, 1001, maximum, error));
+    BOOST_CHECK_EQUAL(record.latency_ewma_ms, maximum);
+
+    BOOST_REQUIRE(ApplyReliabilityOutcome(
+        record, ReliabilityOutcome::SUCCESS, 1002, 0, error));
+    BOOST_CHECK_EQUAL(
+        record.latency_ewma_ms, maximum - maximum / 4 - 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

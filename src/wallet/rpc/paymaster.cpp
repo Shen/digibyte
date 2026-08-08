@@ -53,6 +53,7 @@
 #include <wallet/spend.h>
 
 #include <univalue.h>
+#include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
@@ -64,6 +65,7 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <string_view>
 
 namespace wallet {
 namespace {
@@ -74,6 +76,67 @@ constexpr const char* INTERNAL_PAYMASTER_AUTOSTART_METHOD{
     "__paymaster_automatic_start"};
 constexpr const char* INTERNAL_PAYMASTER_MAINTENANCE_METHOD{
     "__paymaster_automatic_maintenance"};
+
+std::string PersistedVersionError(std::string_view record_type,
+                                  uint16_t found,
+                                  uint16_t expected,
+                                  std::string_view invalid_error)
+{
+    if (found == expected) return std::string{invalid_error};
+    return strprintf(
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=%s found=%u expected=%u",
+        std::string{record_type}, found, expected);
+}
+
+template <typename T>
+std::string PersistedReadError(DatabaseReadStatus status,
+                               std::string_view record_type,
+                               const T& record,
+                               std::string_view missing_error,
+                               std::string_view invalid_error)
+{
+    if (status == DatabaseReadStatus::NOT_FOUND) {
+        return std::string{missing_error};
+    }
+    if (status == DatabaseReadStatus::UNSUPPORTED_VERSION) {
+        return PersistedVersionError(record_type, record.version,
+                                     T::CURRENT_VERSION, invalid_error);
+    }
+    return std::string{invalid_error};
+}
+
+std::string ProviderPoolReadError(
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries)
+{
+    using DigiDollar::Paymaster::ProviderPoolEntry;
+    const auto outdated = std::find_if(
+        entries.begin(), entries.end(), [](const ProviderPoolEntry& entry) {
+            return entry.version != ProviderPoolEntry::CURRENT_VERSION;
+        });
+    if (outdated != entries.end()) {
+        return PersistedVersionError(
+            "ProviderPoolEntry", outdated->version,
+            ProviderPoolEntry::CURRENT_VERSION,
+            "PAYMASTER_INVALID_PROVIDER_POOL");
+    }
+    return "PAYMASTER_INVALID_PROVIDER_POOL";
+}
+
+bool ReadOptionalProviderPool(
+    WalletBatch& batch,
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
+    std::string& error)
+{
+    const DatabaseReadStatus status{
+        batch.ReadPaymasterProviderPoolWithStatus(entries)};
+    if (status == DatabaseReadStatus::FOUND) return true;
+    if (status == DatabaseReadStatus::NOT_FOUND) {
+        entries.clear();
+        return true;
+    }
+    error = ProviderPoolReadError(entries);
+    return false;
+}
 
 // -------------------------------------------------------------------------
 // Automatic provider runtime and readiness
@@ -807,7 +870,7 @@ LiquiditySlotCounts CountLiquiditySlots(
             !counts_toward_target) continue;
         // An operational DGB slot that cannot cover the provider's current
         // advertised fee ceiling is not usable capacity. Do not let such a
-        // legacy or undersized output suppress automatic replenishment.
+        // stale or undersized output suppress automatic replenishment.
         if (asset == PoolAsset::DGB &&
             entry.dgb_value.value < minimum_dgb_value) {
             continue;
@@ -1159,17 +1222,25 @@ bool SaveCarrierWithdrawalPreview(
     WalletBatch batch{wallet.GetDatabase()};
     ProviderMaintenanceLedger ledger;
     std::vector<ProviderPoolEntry> pool;
-    const bool have_ledger = batch.ReadPaymasterMaintenanceLedger(ledger);
-    if (!have_ledger && batch.HasPaymasterMaintenanceLedger()) {
-        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+    const DatabaseReadStatus ledger_status{
+        batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+    if (ledger_status != DatabaseReadStatus::FOUND &&
+        ledger_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            ledger_status, "ProviderMaintenanceLedger", ledger,
+            "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+            "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
         return false;
     }
-    if (!batch.ReadPaymasterProviderPool(pool)) pool.clear();
+    const bool have_ledger{ledger_status == DatabaseReadStatus::FOUND};
+    if (!ReadOptionalProviderPool(batch, pool, error)) return false;
 
     bool ledger_changed{false};
     bool pool_changed{false};
     ProviderCarrierWithdrawalPlan previous;
-    if (batch.ReadPaymasterCarrierWithdrawalPlan(previous) &&
+    const DatabaseReadStatus previous_status{
+        batch.ReadPaymasterCarrierWithdrawalPlanWithStatus(previous)};
+    if (previous_status == DatabaseReadStatus::FOUND &&
         previous.operation_id != plan.operation_id && have_ledger) {
         const auto record = std::find_if(
             ledger.records.begin(), ledger.records.end(),
@@ -1193,9 +1264,12 @@ bool SaveCarrierWithdrawalPreview(
                 }
             }
         }
-    } else if (batch.HasPaymasterCarrierWithdrawalPlan() &&
-               !batch.ReadPaymasterCarrierWithdrawalPlan(previous)) {
-        error = "PAYMASTER_INVALID_CARRIER_WITHDRAWAL_PLAN";
+    } else if (previous_status != DatabaseReadStatus::FOUND &&
+               previous_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            previous_status, "ProviderCarrierWithdrawalPlan", previous,
+            "PAYMASTER_CARRIER_WITHDRAWAL_PLAN_NOT_FOUND",
+            "PAYMASTER_INVALID_CARRIER_WITHDRAWAL_PLAN");
         return false;
     }
 
@@ -1227,62 +1301,40 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
     ProviderMaintenanceLedger ledger;
-    if (!batch.ReadPaymasterMaintenanceLedger(ledger)) {
-        if (batch.HasPaymasterMaintenanceLedger()) {
-            error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
-            return false;
-        }
-        return true;
+    const DatabaseReadStatus ledger_status{
+        batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+    if (ledger_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (ledger_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            ledger_status, "ProviderMaintenanceLedger", ledger,
+            "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+            "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+        return false;
     }
     std::vector<ProviderPoolEntry> pool;
-    if (!batch.ReadPaymasterProviderPool(pool)) pool.clear();
+    if (!ReadOptionalProviderPool(batch, pool, error)) return false;
     bool ledger_changed{false};
     bool pool_changed{false};
     const int64_t now = GetTime();
     ProviderCarrierWithdrawalPlan withdrawal_plan;
-    const bool have_withdrawal_plan =
-        batch.ReadPaymasterCarrierWithdrawalPlan(withdrawal_plan);
-    if (!have_withdrawal_plan &&
-        batch.HasPaymasterCarrierWithdrawalPlan()) {
-        error = "PAYMASTER_INVALID_CARRIER_WITHDRAWAL_PLAN";
+    const DatabaseReadStatus withdrawal_status{
+        batch.ReadPaymasterCarrierWithdrawalPlanWithStatus(withdrawal_plan)};
+    if (withdrawal_status != DatabaseReadStatus::FOUND &&
+        withdrawal_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            withdrawal_status, "ProviderCarrierWithdrawalPlan",
+            withdrawal_plan,
+            "PAYMASTER_CARRIER_WITHDRAWAL_PLAN_NOT_FOUND",
+            "PAYMASTER_INVALID_CARRIER_WITHDRAWAL_PLAN");
         return false;
     }
+    const bool have_withdrawal_plan{
+        withdrawal_status == DatabaseReadStatus::FOUND};
     for (ProviderMaintenanceRecord& record : ledger.records) {
         if (record.state != ProviderMaintenanceState::PLANNED &&
             record.state != ProviderMaintenanceState::BROADCAST &&
             record.state != ProviderMaintenanceState::CONFIRMED) {
             continue;
-        }
-        if ((record.version == ProviderMaintenanceRecord::LEGACY_VERSION ||
-             record.version ==
-                 ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION) &&
-            record.kind ==
-                ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS &&
-            have_withdrawal_plan &&
-            withdrawal_plan.operation_id == record.operation_id) {
-            std::string plan_error;
-            if (!ValidateProviderCarrierWithdrawalPlan(
-                    withdrawal_plan, plan_error) ||
-                withdrawal_plan.mode != CarrierWithdrawalMode::ALL_EXCESS ||
-                withdrawal_plan.plan_id != record.plan_id ||
-                withdrawal_plan.replacement_carriers != record.outputs ||
-                (record.version >=
-                     ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION &&
-                 withdrawal_plan.source_carriers != record.source_inputs)) {
-                error = "PAYMASTER_MAINTENANCE_WITHDRAWAL_PLAN_CONFLICT";
-                return false;
-            }
-            // Upgrade only while the still-bound preview can supply every
-            // field introduced after the stored record version. V1/V2 records
-            // without that preview remain valid legacy records rather than
-            // being mislabeled as an exactly bound V3 template.
-            record.source_inputs = withdrawal_plan.source_carriers;
-            record.withdrawal_excess_script_pub_key =
-                withdrawal_plan.excess_script_pub_key;
-            record.withdrawal_excess_amount = withdrawal_plan.excess_amount;
-            record.version = ProviderMaintenanceRecord::CURRENT_VERSION;
-            record.updated_at = std::max(record.updated_at, now);
-            ledger_changed = true;
         }
         const auto matches = [&](const CWalletTx& wallet_tx) {
             if (!wallet_tx.tx) return false;
@@ -1298,8 +1350,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             for (const ProviderMaintenanceOutput& output : record.outputs) {
                 if (!FindMaintenanceOutputIndex(*wallet_tx.tx, output)) return false;
             }
-            if (record.version == ProviderMaintenanceRecord::CURRENT_VERSION &&
-                record.kind ==
+            if (record.kind ==
                     ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS &&
                 !FindExactDigiDollarOutputIndex(
                     *wallet_tx.tx,
@@ -1316,13 +1367,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                 error = "PAYMASTER_MAINTENANCE_TRANSACTION_CONFLICT";
                 return false;
             }
-        } else if (record.kind !=
-                       ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ||
-                   record.version ==
-                       ProviderMaintenanceRecord::CURRENT_VERSION) {
-            // A pre-V3 withdrawal does not bind the non-pool excess output.
-            // Without an already persisted txid, scanning by only its sources
-            // and replacement carriers would accept an incomplete template.
+        } else {
             transaction = std::find_if(wallet.mapWallet.begin(), wallet.mapWallet.end(),
                                        [&](const auto& item) {
                                            return matches(item.second);
@@ -1349,10 +1394,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                             record.source_inputs.begin(),
                             record.source_inputs.end(), entry.outpoint) !=
                             record.source_inputs.end();
-                        const bool legacy_bound =
-                            record.source_inputs.empty() &&
-                            entry.reservation_id == record.operation_id;
-                        if (explicitly_bound || legacy_bound) {
+                        if (explicitly_bound) {
                             sources.push_back(&entry);
                         }
                     }
@@ -1369,8 +1411,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                                             PoolEntryState::COMMITTED) &&
                                        !wallet.IsSpent(source->outpoint);
                             }) &&
-                        (record.source_inputs.empty() ||
-                         sources.size() == record.source_inputs.size());
+                        sources.size() == record.source_inputs.size();
                     if (can_release) {
                         if (!ReleaseProviderMaintenanceBudget(
                                 ledger, record.operation_id, now, error)) {
@@ -1389,30 +1430,6 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             continue;
         }
         const uint256 txid = transaction->first;
-        if (record.version == ProviderMaintenanceRecord::LEGACY_VERSION &&
-            record.kind ==
-                ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS &&
-            record.source_inputs.empty()) {
-            for (const CTxIn& input : transaction->second.tx->vin) {
-                const auto source = std::find_if(
-                    pool.begin(), pool.end(),
-                    [&](const ProviderPoolEntry& entry) {
-                        return entry.outpoint == input.prevout &&
-                               entry.reservation_id == record.operation_id &&
-                               (entry.state == PoolEntryState::RESERVED ||
-                                entry.state == PoolEntryState::COMMITTED);
-                    });
-                if (source != pool.end()) {
-                    record.source_inputs.push_back(input.prevout);
-                }
-            }
-            if (!record.source_inputs.empty()) {
-                record.version =
-                    ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION;
-                record.updated_at = std::max(record.updated_at, now);
-                ledger_changed = true;
-            }
-        }
         if (record.transaction_id.IsNull()) {
             record.transaction_id = txid;
             // Conservatively charge the entire reservation after recovering a
@@ -1636,14 +1653,27 @@ bool ReconcileProviderFinances(CWallet& wallet,
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
     ProviderIdentityRecord identity;
-    if (!batch.ReadPaymasterIdentity(identity)) return true;
+    const DatabaseReadStatus identity_status =
+        batch.ReadPaymasterIdentityWithStatus(identity);
+    if (identity_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (identity_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(
+            identity_status, "ProviderIdentityRecord", identity,
+            "PAYMASTER_IDENTITY_NOT_FOUND", "PAYMASTER_INVALID_IDENTITY");
+        return false;
+    }
 
     const uint256 genesis_hash = Params().GenesisBlock().GetHash();
     ProviderFinanceLedger finance;
     bool ledger_changed{false};
-    if (!batch.ReadPaymasterFinanceLedger(finance)) {
-        if (batch.HasPaymasterFinanceLedger()) {
-            error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+    const DatabaseReadStatus finance_status =
+        batch.ReadPaymasterFinanceLedgerWithStatus(finance);
+    if (finance_status != DatabaseReadStatus::FOUND) {
+        if (finance_status != DatabaseReadStatus::NOT_FOUND) {
+            error = PersistedReadError(
+                finance_status, "ProviderFinanceLedger", finance,
+                "PAYMASTER_FINANCE_LEDGER_NOT_FOUND",
+                "PAYMASTER_INVALID_FINANCE_LEDGER");
             return false;
         }
         // Pre-feature wallets may have durable records that no longer carry
@@ -1775,7 +1805,9 @@ bool ReconcileProviderFinances(CWallet& wallet,
     // never infer a cost when either the transaction or its wallet debit is
     // unavailable.
     std::vector<ProviderPoolEntry> provider_pool;
-    if (batch.ReadPaymasterProviderPool(provider_pool)) {
+    const DatabaseReadStatus provider_pool_status =
+        batch.ReadPaymasterProviderPoolWithStatus(provider_pool);
+    if (provider_pool_status == DatabaseReadStatus::FOUND) {
         std::set<uint256> setup_transactions;
         for (const ProviderPoolEntry& entry : provider_pool) {
             if (entry.origin_commit_key.IsNull() &&
@@ -1829,8 +1861,8 @@ bool ReconcileProviderFinances(CWallet& wallet,
                               event.state, event.confirmed_at);
             if (!apply_event(std::move(event))) return false;
         }
-    } else if (batch.HasPaymasterProviderPool()) {
-        error = "PAYMASTER_INVALID_PROVIDER_POOL";
+    } else if (provider_pool_status != DatabaseReadStatus::NOT_FOUND) {
+        error = ProviderPoolReadError(provider_pool);
         return false;
     }
 
@@ -1843,8 +1875,16 @@ bool ReconcileProviderFinances(CWallet& wallet,
     for (const PaymentSession& session : sessions) {
         for (const uint256& attempt_id : session.attempt_ids) {
             ProviderAttempt attempt;
-            if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
-                attempt.provider_id != identity.provider_id ||
+            const DatabaseReadStatus attempt_status =
+                batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt);
+            if (attempt_status != DatabaseReadStatus::FOUND) {
+                error = PersistedReadError(
+                    attempt_status, "ProviderAttempt", attempt,
+                    "PAYMASTER_FINANCE_ATTEMPT_MISSING",
+                    "PAYMASTER_FINANCE_ATTEMPT_READ_FAILED");
+                return false;
+            }
+            if (attempt.provider_id != identity.provider_id ||
                 attempt.commit_key.IsNull()) {
                 continue;
             }
@@ -1886,7 +1926,9 @@ bool ReconcileProviderFinances(CWallet& wallet,
     }
 
     ProviderMaintenanceLedger maintenance;
-    if (batch.ReadPaymasterMaintenanceLedger(maintenance)) {
+    const DatabaseReadStatus maintenance_status =
+        batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
+    if (maintenance_status == DatabaseReadStatus::FOUND) {
         for (const ProviderMaintenanceRecord& record : maintenance.records) {
             if (record.transaction_id.IsNull()) continue;
             ProviderFinanceEvent event;
@@ -1909,8 +1951,11 @@ bool ReconcileProviderFinances(CWallet& wallet,
             }
             if (!apply_event(std::move(event))) return false;
         }
-    } else if (batch.HasPaymasterMaintenanceLedger()) {
-        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+    } else if (maintenance_status != DatabaseReadStatus::NOT_FOUND) {
+        error = PersistedReadError(
+            maintenance_status, "ProviderMaintenanceLedger", maintenance,
+            "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+            "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
         return false;
     }
 
@@ -2033,17 +2078,26 @@ bool RunAutomaticDGBReplenishment(
     }
 
     ProviderMaintenanceLedger ledger;
+    std::vector<ProviderPoolEntry> pool;
     std::optional<ProviderMaintenanceRecord> operation;
     {
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
-        if (!batch.ReadPaymasterMaintenanceLedger(ledger)) {
-            if (batch.HasPaymasterMaintenanceLedger()) {
-                error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
-                return false;
-            }
+        const DatabaseReadStatus ledger_status{
+            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+        if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
             ledger.accounting_time_high_water = GetTime();
+        } else if (ledger_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                ledger_status, "ProviderMaintenanceLedger", ledger,
+                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            return false;
         }
+        // Validate the pool before reserving budget, creating destinations, or
+        // constructing a transaction. Re-read it after commit to cover a
+        // concurrent change without ever overwriting an unreadable record.
+        if (!ReadOptionalProviderPool(batch, pool, error)) return false;
         const auto planned = std::find_if(
             ledger.records.begin(), ledger.records.end(),
             [](const ProviderMaintenanceRecord& record) {
@@ -2173,18 +2227,27 @@ bool RunAutomaticDGBReplenishment(
         return false;
     }
 
-    std::vector<ProviderPoolEntry> pool;
     {
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
-        if (!batch.ReadPaymasterMaintenanceLedger(ledger) ||
+        const DatabaseReadStatus ledger_status{
+            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+        if (ledger_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                ledger_status, "ProviderMaintenanceLedger", ledger,
+                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            return false;
+        }
+        if (!ReadOptionalProviderPool(batch, pool, error) ||
             !SpendProviderMaintenanceBudget(
                 ledger, operation->operation_id, created->tx->GetHash(),
                 DGBSatoshis{created->fee}, GetTime(), error)) {
-            if (error.empty()) error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
+            if (error.empty()) {
+                error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
+            }
             return false;
         }
-        if (!batch.ReadPaymasterProviderPool(pool)) pool.clear();
         const size_t missing_pool_entries = std::count_if(
             operation->outputs.begin(), operation->outputs.end(),
             [&](const ProviderMaintenanceOutput& output) {
@@ -2265,17 +2328,23 @@ bool RunAutomaticCarrierReplenishment(
     }
 
     ProviderMaintenanceLedger ledger;
+    std::vector<ProviderPoolEntry> pool;
     std::optional<ProviderMaintenanceRecord> operation;
     {
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
-        if (!batch.ReadPaymasterMaintenanceLedger(ledger)) {
-            if (batch.HasPaymasterMaintenanceLedger()) {
-                error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
-                return false;
-            }
+        const DatabaseReadStatus ledger_status{
+            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+        if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
             ledger.accounting_time_high_water = GetTime();
+        } else if (ledger_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                ledger_status, "ProviderMaintenanceLedger", ledger,
+                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            return false;
         }
+        if (!ReadOptionalProviderPool(batch, pool, error)) return false;
         const auto planned = std::find_if(
             ledger.records.begin(), ledger.records.end(),
             [](const ProviderMaintenanceRecord& record) {
@@ -2451,18 +2520,27 @@ bool RunAutomaticCarrierReplenishment(
         return false;
     }
 
-    std::vector<ProviderPoolEntry> pool;
     {
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
-        if (!batch.ReadPaymasterMaintenanceLedger(ledger) ||
+        const DatabaseReadStatus ledger_status{
+            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+        if (ledger_status != DatabaseReadStatus::FOUND) {
+            error = PersistedReadError(
+                ledger_status, "ProviderMaintenanceLedger", ledger,
+                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
+                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            return false;
+        }
+        if (!ReadOptionalProviderPool(batch, pool, error) ||
             !SpendProviderMaintenanceBudget(
                 ledger, operation->operation_id, txid,
                 DGBSatoshis{actual_fee}, GetTime(), error)) {
-            if (error.empty()) error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
+            if (error.empty()) {
+                error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
+            }
             return false;
         }
-        if (!batch.ReadPaymasterProviderPool(pool)) pool.clear();
         const size_t missing_pool_entries = std::count_if(
             operation->outputs.begin(), operation->outputs.end(),
             [&](const ProviderMaintenanceOutput& output) {
@@ -2638,8 +2716,8 @@ UniValue SessionToJSON(
             const ClientAuthorizationManifest& manifest =
                 attempt.client_manifest;
             if (manifest.manifest_id.IsNull() ||
-                !IsSupportedClientAuthorizationManifestVersion(
-                    manifest.version) ||
+                manifest.version !=
+                    ClientAuthorizationManifest::CURRENT_VERSION ||
                 manifest.recipient_amount.value < 0 ||
                 manifest.service_fee.value < 0 ||
                 manifest.recipient_amount.value >
@@ -3561,16 +3639,19 @@ bool QueueRecoveryMessage(WalletContext& context,
         error = "PAYMASTER_DISABLED";
         return false;
     }
+    const bool allow_local_endpoint{
+        Params().GetChainType() == ChainType::REGTEST};
     CService endpoint = LookupNumeric(recovery.recovery_provider_endpoint);
-    state.route_available = endpoint.IsValid() &&
-                            (recovery.privacy_profile != PrivacyProfile::HIGH || endpoint.IsTor());
+    state.route_available = IsEndpointAllowedForPrivacyProfile(
+        endpoint, recovery.privacy_profile, allow_local_endpoint);
     if (!state.route_available) {
         for (const Announcement& announcement :
              context.paymaster->GetDirectory().List(now)) {
             if (GetPaymasterId(announcement.identity_key) ==
                     recovery.recovery_provider_id &&
-                (recovery.privacy_profile != PrivacyProfile::HIGH ||
-                 announcement.endpoint.IsTor())) {
+                IsEndpointAllowedForPrivacyProfile(
+                    announcement.endpoint, recovery.privacy_profile,
+                    allow_local_endpoint)) {
                 endpoint = announcement.endpoint;
                 state.route_available = true;
                 break;
@@ -3743,8 +3824,8 @@ bool HasDurableClientAuthorization(
     using namespace DigiDollar::Paymaster;
     // A persisted signature or later attempt state is never a substitute for
     // the wallet's durable acceptance of this exact, current manifest.
-    return IsSupportedClientAuthorizationManifestVersion(
-               attempt.client_manifest.version) &&
+    return attempt.client_manifest.version ==
+               ClientAuthorizationManifest::CURRENT_VERSION &&
            !attempt.client_manifest.manifest_id.IsNull() &&
            !attempt.accepted_client_manifest_id.IsNull() &&
            attempt.accepted_client_manifest_id ==
@@ -3892,13 +3973,19 @@ bool QueuePersistedPaymasterSubmit(
     if (!ValidateSubmitEnvelope(submit, submit.genesis_hash, error)) return false;
 
     CService endpoint;
+    const bool allow_local_endpoint{
+        Params().GetChainType() == ChainType::REGTEST};
     if (!attempt.provider_endpoint.empty()) {
         endpoint = LookupNumeric(attempt.provider_endpoint);
-        state.route_available = endpoint.IsValid();
+        state.route_available = IsEndpointAllowedForPrivacyProfile(
+            endpoint, attempt.privacy_profile, allow_local_endpoint);
     }
     if (!state.route_available) {
         for (const Announcement& announcement : context.paymaster->GetDirectory().List(now)) {
-            if (GetPaymasterId(announcement.identity_key) == attempt.provider_id) {
+            if (GetPaymasterId(announcement.identity_key) == attempt.provider_id &&
+                IsEndpointAllowedForPrivacyProfile(
+                    announcement.endpoint, attempt.privacy_profile,
+                    allow_local_endpoint)) {
                 endpoint = announcement.endpoint;
                 state.route_available = true;
                 break;
@@ -4272,7 +4359,8 @@ bool RejectUnavailableTemplateInputs(
     result.updated_at = now;
     result.identity_signature.resize(64);
     if (!identity_key.SignSchnorr(GetPaymasterResultSignatureHash(result),
-                                  result.identity_signature, nullptr, uint256{})) {
+                                  result.identity_signature, nullptr,
+                                  GetRandHash())) {
         error = "PAYMASTER_RESULT_SIGNING_FAILED";
         return false;
     }
@@ -4323,7 +4411,8 @@ bool BuildFinalProviderResult(
     result.updated_at = now;
     result.identity_signature.resize(64);
     if (!identity_key.SignSchnorr(GetPaymasterResultSignatureHash(result),
-                                  result.identity_signature, nullptr, uint256{})) {
+                                  result.identity_signature, nullptr,
+                                  GetRandHash())) {
         error = "PAYMASTER_RESULT_SIGNING_FAILED";
         return false;
     }
@@ -4372,17 +4461,15 @@ bool InsertAndBroadcastProviderCommit(CWallet& wallet,
     if (!ValidateProviderCommitForExecution(attempt, commit, now, decoded, error) ||
         !store.ValidateProviderBudgetAuthorization(
             attempt, BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/true, error)) {
+            /*allow_historical_policy=*/true, error)) {
         return false;
     }
-    // A V1/current manifest has enough immutable information to prove every
-    // provider input and return script belongs to this wallet. Manifest-less
-    // V9/V10 records are permitted only here as already durable, byte-exact
-    // commits; they can never authorize a new signature.
-    if (!attempt.provider_manifest.manifest_id.IsNull() &&
+    if (attempt.provider_manifest.manifest_id.IsNull() ||
         !ValidateProviderAuthorizationOwnership(
             wallet, attempt.provider_manifest, error)) {
+        if (error.empty()) {
+            error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
+        }
         return false;
     }
     const CTransactionRef transaction = MakeTransactionRef(decoded);
@@ -4416,7 +4503,8 @@ bool MarkProviderResultBroadcastAttempted(
     result.updated_at = std::max(result.updated_at, now);
     result.identity_signature.assign(64, 0);
     if (!identity_key.SignSchnorr(GetPaymasterResultSignatureHash(result),
-                                  result.identity_signature, nullptr, uint256{})) {
+                                  result.identity_signature, nullptr,
+                                  GetRandHash())) {
         error = "PAYMASTER_RESULT_SIGNING_FAILED";
         return false;
     }
@@ -4493,8 +4581,7 @@ bool ReloadExactProviderCommitAttempt(
             reloaded, commit, now, validated, error) ||
         !store.ValidateProviderBudgetAuthorization(
             reloaded, BudgetReservationState::SPENT,
-            /*allow_historical_policy=*/true,
-            /*allow_legacy_durable_commit=*/true, error)) {
+            /*allow_historical_policy=*/true, error)) {
         if (error.empty()) error = "PAYMASTER_PROVIDER_COMMIT_CONFLICT";
         return false;
     }
@@ -4567,10 +4654,8 @@ ProviderCommitRecoveryResult RecoverProviderCommit(
         return result;
     }
     // The caller supplied the exact durable ProviderCommitRecord. The
-    // broadcast helper below reloads its attempt and applies the
-    // legacy-capable commit/budget firewall. Requiring the current manifest
-    // version here would strand pre-v2 commits that can no longer create a
-    // signature but must remain exactly broadcastable.
+    // broadcast helper reloads its current attempt and applies the complete
+    // commit, manifest, ownership, and budget firewall.
     result.broadcast = InsertAndBroadcastProviderCommit(
         wallet, store, commit, now, result.already_confirmed, result.error);
     if (!result.broadcast) return result;
@@ -7077,8 +7162,7 @@ RPCHelpMan submitpaymasterdigidollar()
                     !store.ValidateProviderBudgetAuthorization(
                         committing_attempt,
                         BudgetReservationState::RESERVED,
-                        /*allow_historical_policy=*/true,
-                        /*allow_legacy_durable_commit=*/false, error)) {
+                        /*allow_historical_policy=*/true, error)) {
                     throw JSONRPCError(
                         RPC_TRANSACTION_REJECTED,
                         error.empty() ? "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_INVALID" : error);
@@ -8706,7 +8790,30 @@ RPCHelpMan preparepaymasterpool()
             constexpr int64_t carrier_value{100};
             const int64_t operational_value = std::max<int64_t>(
                 MIN_ADMISSION_DGB_SATOSHIS, policy.maximum_network_fee.value);
-            const int64_t total = admission_value * missing_admission + operational_value * missing_operational;
+            const auto checked_product = [](int64_t value, int count) {
+                if (value < 0 || count < 0 ||
+                    (count != 0 &&
+                     value > std::numeric_limits<int64_t>::max() / count)) {
+                    return std::optional<int64_t>{};
+                }
+                return std::optional<int64_t>{value * count};
+            };
+            const auto admission_total = checked_product(
+                admission_value, missing_admission);
+            const auto operational_total = checked_product(
+                operational_value, missing_operational);
+            std::optional<int64_t> total;
+            if (admission_total && operational_total) {
+                total = CheckedAdd(*admission_total, *operational_total);
+            }
+            // This preview feeds one wallet transaction. Reject arithmetic
+            // overflow and aggregate values outside DigiByte's monetary range
+            // before deriving destinations or unlocking the wallet.
+            if (!total || !MoneyRange(*total)) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "PAYMASTER_POOL_VALUE_OUT_OF_RANGE");
+            }
             const int64_t total_carriers = carrier_value *
                                            (missing_admission_carriers + missing_operational_carriers);
             UniValue result{UniValue::VOBJ};
@@ -8721,7 +8828,7 @@ RPCHelpMan preparepaymasterpool()
             result.pushKV("admission_dgb_satoshis_each", admission_value);
             result.pushKV("operational_dgb_satoshis_each", operational_value);
             result.pushKV("carrier_cents_each", carrier_value);
-            result.pushKV("total_output_satoshis", total);
+            result.pushKV("total_output_satoshis", *total);
             result.pushKV("total_carrier_cents", total_carriers);
             if (!execute) {
                 result.pushKV("executed", false);
@@ -12259,8 +12366,8 @@ RPCHelpMan processpaymasterresult()
                             user_total,
                             history_error)) {
                         LogPrintf(
-                            "Paymaster: unable to record client DD history for %s: %s\n",
-                            attempt.final_txid.GetHex(), history_error);
+                            "Paymaster: unable to record client DD history: %s\n",
+                            history_error);
                     }
                 }
             }
@@ -13370,7 +13477,7 @@ RPCHelpMan processpaymasterrequests()
                         response.recovery_provider_id ||
                     !identity_key.SignSchnorr(
                         GetAlternativeRecoveryResponseSignatureHash(response),
-                        response.identity_signature, nullptr, uint256{})) {
+                        response.identity_signature, nullptr, GetRandHash())) {
                     throw JSONRPCError(
                         RPC_WALLET_ERROR,
                         error.empty() ? "PAYMASTER_RECOVERY_RESPONSE_SIGNING_FAILED" : error);
@@ -13737,7 +13844,8 @@ RPCHelpMan processpaymasterrequests()
             built.quote.identity_signature.resize(64);
             if (!GetPaymasterIdentityKey(*wallet, identity_key, identity, error) ||
                 !identity_key.SignSchnorr(GetPaymasterQuoteSignatureHash(built.quote),
-                                          built.quote.identity_signature, nullptr, uint256{})) {
+                                          built.quote.identity_signature, nullptr,
+                                          GetRandHash())) {
                 throw JSONRPCError(RPC_WALLET_ERROR,
                                    error.empty() ? "PAYMASTER_QUOTE_SIGNING_FAILED" : error);
             }

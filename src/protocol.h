@@ -321,6 +321,10 @@ extern const char* PMRECOVERYRESULT;
 
 /** Whether a message carries private Paymaster direct-session data. */
 bool IsPaymasterDirectMessage(const std::string& message_type);
+/** Whether a direct-session message flows from client to provider. */
+bool IsPaymasterDirectRequest(const std::string& message_type);
+/** Whether a direct-session message flows from provider to client. */
+bool IsPaymasterDirectResponse(const std::string& message_type);
 /** Whether a message is permitted on an isolated Paymaster connection. */
 bool IsPaymasterConnectionMessage(const std::string& message_type);
 }; // namespace NetMsgType

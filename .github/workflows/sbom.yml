@@ -1,0 +1,34 @@
+# Copyright (c) 2026 The DigiByte Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: Export SPDX SBOM
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Export repository dependency graph as SPDX
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" \
+            --jq '.sbom' > digibyte-dependency-graph.spdx.json
+
+      - name: Upload SPDX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digibyte-dependency-graph-sbom
+          path: digibyte-dependency-graph.spdx.json
+          if-no-files-found: error

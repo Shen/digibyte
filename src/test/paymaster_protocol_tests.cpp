@@ -173,7 +173,7 @@ BOOST_AUTO_TEST_CASE(intent_control_proof_binds_provider_session_and_payment)
     const PaymentIntent authorized{intent};
 
     for (const uint16_t unsupported_version :
-         {PaymentIntent::LEGACY_VERSION,
+         {uint16_t{PaymentIntent::CURRENT_VERSION - 1},
           uint16_t{PaymentIntent::CURRENT_VERSION + 1}}) {
         PaymentIntent wrong_protocol{authorized};
         wrong_protocol.version = unsupported_version;

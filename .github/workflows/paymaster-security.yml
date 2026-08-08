@@ -1,0 +1,175 @@
+# Copyright (c) 2026 The DigiByte Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: Paymaster Security
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/paymaster-security.yml'
+      - 'src/dandelion.cpp'
+      - 'src/net.cpp'
+      - 'src/net.h'
+      - 'src/net_processing.cpp'
+      - 'src/netbase.cpp'
+      - 'src/netbase.h'
+      - 'src/paymaster/**'
+      - 'src/protocol.cpp'
+      - 'src/protocol.h'
+      - 'src/rpc/net.cpp'
+      - 'src/test/fuzz/paymaster_*.cpp'
+      - 'src/test/paymaster_*.cpp'
+      - 'src/wallet/paymaster*.cpp'
+      - 'src/wallet/paymaster*.h'
+      - 'src/wallet/db.h'
+      - 'src/wallet/digidollarwallet.cpp'
+      - 'src/wallet/rpc/paymaster.cpp'
+      - 'src/wallet/spend.cpp'
+      - 'src/wallet/test/paymaster_*.cpp'
+      - 'src/wallet/walletdb.cpp'
+      - 'src/wallet/walletdb.h'
+      - 'test/functional/*paymaster*.py'
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  asan-ubsan-unit:
+    name: ASan and UBSan Paymaster unit tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake bsdmainutils build-essential clang libboost-dev \
+            libdb++-dev libevent-dev libminiupnpc-dev libnatpmp-dev \
+            libsqlite3-dev libtool pkg-config python3 systemtap-sdt-dev
+
+      - name: Configure sanitizer build
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          ./autogen.sh
+          ./configure \
+            --with-sanitizers=address,undefined \
+            --disable-bench --disable-fuzz --disable-fuzz-binary \
+            --with-gui=no --disable-man --disable-zmq \
+            --without-utils --without-daemon
+
+      - name: Build unit test binary
+        run: make -j2 -C src test/test_digibyte
+
+      - name: Run Paymaster unit tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/test/sanitizer_suppressions/lsan
+          UBSAN_OPTIONS: suppressions=${{ github.workspace }}/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1
+        run: |
+          set -euo pipefail
+          for suite in \
+            paymaster_client_tests \
+            paymaster_directory_tests \
+            paymaster_protocol_tests \
+            paymaster_provider_tests \
+            paymaster_psbt_tests \
+            paymaster_recovery_tests \
+            paymaster_reputation_tests \
+            paymaster_reservation_tests \
+            paymaster_sponsorship_tests \
+            paymaster_txbuilder_tests \
+            paymaster_types_tests \
+            paymaster_wire_tests \
+            paymaster_wallet_identity_tests \
+            paymaster_wallet_psbt_tests \
+            paymaster_wallet_security_tests \
+            paymaster_wallet_store_tests
+          do
+            ./src/test/test_digibyte \
+              --run_test="$suite" --log_level=error --report_level=short
+          done
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paymaster-sanitizer-test-log
+          path: src/test-suite.log
+          if-no-files-found: ignore
+
+  sanitizer-fuzz:
+    name: Scheduled Paymaster sanitizer fuzzing
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake bsdmainutils build-essential clang libboost-dev \
+            libdb++-dev libevent-dev libminiupnpc-dev libnatpmp-dev \
+            libsqlite3-dev libtool pkg-config python3 systemtap-sdt-dev
+
+      - name: Configure fuzz build
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          ./autogen.sh
+          ./configure \
+            --enable-fuzz \
+            --with-sanitizers=address,fuzzer,undefined \
+            --disable-bench --with-gui=no --disable-man --disable-zmq \
+            --without-utils --without-daemon
+
+      - name: Build fuzz binary
+        run: make -j2 -C src test/fuzz/fuzz
+
+      - name: Run bounded Paymaster campaigns
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/test/sanitizer_suppressions/lsan
+          UBSAN_OPTIONS: suppressions=${{ github.workspace }}/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1
+        run: |
+          set -euo pipefail
+          for target in \
+            paymaster_wire_envelopes \
+            paymaster_stateful_security \
+            paymaster_pool_lifecycle
+          do
+            corpus="${RUNNER_TEMP}/paymaster-corpus/${target}"
+            mkdir -p "$corpus"
+            FUZZ="$target" ./src/test/fuzz/fuzz \
+              -max_total_time=300 -timeout=30 "$corpus"
+          done
+
+      - name: Upload reproducer artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paymaster-fuzz-reproducers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

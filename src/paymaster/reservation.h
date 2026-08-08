@@ -100,14 +100,11 @@ struct PaymentSession {
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_used),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SessionState::CONFLICTED)>>(obj.state),
                   Using<EnumByteFormatter<static_cast<uint8_t>(PendingPhase::CANCEL_MEMPOOL)>>(obj.pending_phase),
-                  obj.user_inputs, obj.attempt_ids, obj.created_at, obj.updated_at, obj.final_txid,
-                  obj.provider_side);
-        if (obj.version >= 3) READWRITE(obj.recovery_txid);
-        if (obj.version >= 4) {
-            READWRITE(obj.requested_amount,
-                      obj.subtract_paymaster_fee_from_amount,
-                      obj.send_all_spendable_dd);
-        }
+                  obj.user_inputs, obj.attempt_ids, obj.created_at, obj.updated_at,
+                  obj.final_txid, obj.provider_side, obj.recovery_txid,
+                  obj.requested_amount,
+                  obj.subtract_paymaster_fee_from_amount,
+                  obj.send_all_spendable_dd);
     }
 };
 
@@ -171,12 +168,9 @@ struct IdempotencyTombstone {
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_requested),
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_used),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SessionState::CONFLICTED)>>(obj.final_state),
-                  obj.final_txid);
-        if (obj.version >= 2) {
-            READWRITE(obj.requested_amount,
-                      obj.subtract_paymaster_fee_from_amount,
-                      obj.send_all_spendable_dd);
-        }
+                  obj.final_txid, obj.requested_amount,
+                  obj.subtract_paymaster_fee_from_amount,
+                  obj.send_all_spendable_dd);
     }
 };
 
@@ -188,7 +182,6 @@ struct IdempotencyTombstone {
  * conflicting live sessions. */
 struct ValidatedCapacitySnapshot {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     uint256 snapshot_id;
@@ -214,12 +207,9 @@ struct ValidatedCapacitySnapshot {
         READWRITE(obj.version, obj.snapshot_id, obj.resource_commitment,
                   obj.session_id, obj.attempt_id, obj.provider_id,
                   obj.client_nonce, obj.request_hash, obj.capacity_proof,
-                  obj.created_at, obj.expires_at, obj.validated_at);
-        if (obj.version >= 2) {
-            READWRITE(
-                Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
-                obj.requires_carrier);
-        }
+                  obj.created_at, obj.expires_at, obj.validated_at,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
+                  obj.requires_carrier);
     }
 };
 
@@ -279,7 +269,6 @@ struct ProviderCapacityReleaseRecord {
  * client DGB input: such an input is categorically outside this authority. */
 struct ClientAuthorizationManifest {
     static constexpr uint16_t CURRENT_VERSION{4};
-    static constexpr uint16_t LEGACY_VERSION{3};
 
     uint16_t version{CURRENT_VERSION};
     uint256 manifest_id;
@@ -301,9 +290,7 @@ struct ClientAuthorizationManifest {
     int64_t expires_at{0};
     uint256 unsigned_txid;
     uint256 template_commitment;
-    /** Exact redacted PMCAPREQ and signed PMCAPRESP bindings. These are
-     * appended in v2 so v1 records remain decodable for explicit migration,
-     * but v1 is never accepted for a new signature. */
+    /** Exact redacted PMCAPREQ and signed PMCAPRESP bindings. */
     uint256 capacity_client_nonce;
     uint256 capacity_request_hash;
     uint256 capacity_proof_hash;
@@ -331,31 +318,17 @@ struct ClientAuthorizationManifest {
                   obj.user_dd_inputs, obj.recipient_script, obj.recipient_amount,
                   obj.user_dd_change_script, obj.maximum_service_fee,
                   obj.service_fee, obj.expires_at, obj.unsigned_txid,
-                  obj.template_commitment);
-        if (obj.version >= 2) {
-            READWRITE(obj.capacity_client_nonce,
-                      obj.capacity_request_hash,
-                      obj.capacity_proof_hash);
-        }
-        if (obj.version >= 3) {
-            READWRITE(obj.canonical_request_hash,
-                      Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.requested_fee_mode),
-                      Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
-                      Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection_mode));
-        }
-        if (obj.version >= 4) {
-            READWRITE(obj.requested_amount,
-                      obj.subtract_paymaster_fee_from_amount,
-                      obj.send_all_spendable_dd);
-        }
+                  obj.template_commitment, obj.capacity_client_nonce,
+                  obj.capacity_request_hash, obj.capacity_proof_hash,
+                  obj.canonical_request_hash,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.requested_fee_mode),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection_mode),
+                  obj.requested_amount,
+                  obj.subtract_paymaster_fee_from_amount,
+                  obj.send_all_spendable_dd);
     }
 };
-
-constexpr bool IsSupportedClientAuthorizationManifestVersion(uint16_t version)
-{
-    return version == ClientAuthorizationManifest::LEGACY_VERSION ||
-           version == ClientAuthorizationManifest::CURRENT_VERSION;
-}
 
 /** The complete local authority granted by a provider wallet. Scripts in
  * this record are generated by that wallet before quote signing. Empty
@@ -363,7 +336,6 @@ constexpr bool IsSupportedClientAuthorizationManifestVersion(uint16_t version)
  * contain exactly one value. */
 struct ProviderAuthorizationManifest {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     uint256 manifest_id;
@@ -400,19 +372,14 @@ struct ProviderAuthorizationManifest {
                   obj.provider_dgb_inputs, obj.provider_carrier_inputs,
                   obj.carrier_return_scripts, obj.provider_fee_scripts,
                   obj.dgb_change_scripts, obj.service_fee, obj.network_fee,
-                  obj.safety_policy_hash);
-        if (obj.version >= 2) {
-            READWRITE(obj.budget_reservation_id,
-                      obj.maximum_network_fee);
-        }
-        READWRITE(obj.expires_at, obj.unsigned_txid,
+                  obj.safety_policy_hash, obj.budget_reservation_id,
+                  obj.maximum_network_fee, obj.expires_at, obj.unsigned_txid,
                   obj.template_commitment);
     }
 };
 
 struct ProviderAttempt {
     static constexpr uint16_t CURRENT_VERSION{15};
-    static constexpr uint16_t LEGACY_VERSION{9};
 
     uint16_t version{CURRENT_VERSION};
     uint256 session_id;
@@ -449,9 +416,7 @@ struct ProviderAttempt {
     int64_t retry_until{0};
     int64_t created_at{0};
     int64_t updated_at{0};
-    /** Explicit local approval of the exact client authorization manifest.
-     * These fields are deliberately last so V9--V12 records remain readable
-     * with an empty (therefore non-authorizing) approval. */
+    /** Explicit local approval of the exact client authorization manifest. */
     uint256 accepted_client_manifest_id;
     int64_t client_manifest_accepted_at{0};
     /** Time at which the provider input signature was created. This is a
@@ -478,30 +443,22 @@ struct ProviderAttempt {
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
                   Using<EnumByteFormatter<static_cast<uint8_t>(AttemptState::CONFLICTED)>>(obj.state),
                   obj.commit_key, obj.client_nonce, obj.intent_hash, obj.quote_id,
-                  obj.unsigned_txid, obj.template_commitment);
-        if (obj.version >= 9) READWRITE(obj.sponsorship_capability_hash);
-        if (obj.version >= 10) READWRITE(obj.capacity_request, obj.capacity_snapshot);
-        if (obj.version >= 11) READWRITE(obj.client_manifest, obj.provider_manifest);
-        if (obj.version >= 12) READWRITE(obj.provider_netgroup_bucket);
-        READWRITE(obj.unsigned_intent,
+                  obj.unsigned_txid, obj.template_commitment,
+                  obj.sponsorship_capability_hash, obj.capacity_request,
+                  obj.capacity_snapshot, obj.client_manifest,
+                  obj.provider_manifest, obj.provider_netgroup_bucket,
+                  obj.unsigned_intent,
                   obj.quote_request,
                   obj.signed_quote, obj.unsigned_transaction,
                   obj.unsigned_psbt,
                   Using<VectorFormatter<EnumByteFormatter<static_cast<uint8_t>(ReservationRole::PROVIDER_DGB)>>>(obj.input_roles),
                   obj.user_signed_psbt, obj.final_transaction, obj.final_txid,
-                  obj.quote_expires_at, obj.retry_until, obj.created_at, obj.updated_at);
-        if (obj.version >= 13) {
-            READWRITE(obj.accepted_client_manifest_id,
-                      obj.client_manifest_accepted_at);
-        }
-        if (obj.version >= 14) {
-            READWRITE(obj.provider_signed_at,
-                      obj.provider_signed_result);
-        }
-        if (obj.version >= 15) {
-            READWRITE(obj.capacity_proof_claim_candidate,
-                      obj.quote_response_claim_candidate);
-        }
+                  obj.quote_expires_at, obj.retry_until, obj.created_at,
+                  obj.updated_at, obj.accepted_client_manifest_id,
+                  obj.client_manifest_accepted_at, obj.provider_signed_at,
+                  obj.provider_signed_result,
+                  obj.capacity_proof_claim_candidate,
+                  obj.quote_response_claim_candidate);
     }
 };
 

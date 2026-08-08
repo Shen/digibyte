@@ -336,13 +336,6 @@ enum class AlternativeRecoveryPhase : uint8_t {
  * by recovery_request_hash to avoid treating an untrusted UUID as authority. */
 struct AlternativeRecoveryRecord {
     static constexpr uint16_t CURRENT_VERSION{4};
-    static constexpr uint16_t LEGACY_VERSION{2};
-
-    static constexpr bool IsSupportedVersion(uint16_t version)
-    {
-        return version == CURRENT_VERSION || version == 3 ||
-               version == LEGACY_VERSION;
-    }
 
     uint16_t version{CURRENT_VERSION};
     bool provider_side{false};
@@ -389,9 +382,7 @@ struct AlternativeRecoveryRecord {
     int64_t updated_at{0};
     /** Provider-wallet-local authority for consuming the recovery fee budget.
      * These fields are never supplied by the peer. They are committed with the
-     * provider's recovery quote and remain immutable through every later phase.
-     * A v2 record has no such binding and may only drain work for which a user
-     * authorization or exact final artifact was already durable. */
+     * provider's recovery quote and remain immutable through every later phase. */
     uint256 provider_safety_policy_hash;
     uint256 provider_budget_reservation_id;
     uint256 provider_netgroup_bucket;
@@ -423,16 +414,12 @@ struct AlternativeRecoveryRecord {
                   obj.expired,
                   obj.user_signed_psbt, obj.final_transaction,
                   obj.expected_wtxid, obj.signed_result,
-                  obj.created_at, obj.updated_at);
-        if (obj.version >= 3) {
-            READWRITE(obj.provider_safety_policy_hash,
-                      obj.provider_budget_reservation_id,
-                      obj.provider_netgroup_bucket,
-                      obj.provider_maximum_network_fee);
-        }
-        if (obj.version >= 4) {
-            READWRITE(obj.capacity_proof_claim_candidate);
-        }
+                  obj.created_at, obj.updated_at,
+                  obj.provider_safety_policy_hash,
+                  obj.provider_budget_reservation_id,
+                  obj.provider_netgroup_bucket,
+                  obj.provider_maximum_network_fee,
+                  obj.capacity_proof_claim_candidate);
     }
 };
 

@@ -188,6 +188,12 @@ bool ValidateAdmissionProofs(const Announcement& announcement,
     const CChain& active_chain = chainman.ActiveChain();
     const int tip_height = active_chain.Height();
     const CCoinsViewCache& coins = chainman.ActiveChainstate().CoinsTip();
+    CTxMemPool* const mempool = chainman.ActiveChainstate().GetMempool();
+    const auto has_mempool_conflict = [&](const COutPoint& outpoint) {
+        if (mempool == nullptr) return false;
+        LOCK(mempool->cs);
+        return mempool->GetConflictTx(outpoint) != nullptr;
+    };
 
     for (const AdmissionSlotProof& slot : announcement.admission_slots) {
         const CBlockIndex* reference = chainman.m_blockman.LookupBlockIndex(slot.reference_block);
@@ -201,6 +207,7 @@ bool ValidateAdmissionProofs(const Announcement& announcement,
         if (dgb_coin.IsSpent() || dgb_coin.IsCoinBase() || dgb_tx.GetHash() != slot.dgb_outpoint.hash ||
             slot.dgb_outpoint.n >= dgb_tx.vout.size() || dgb_coin.out != dgb_tx.vout[slot.dgb_outpoint.n] ||
             dgb_coin.out.nValue != slot.dgb_value.value || slot.dgb_value.value < MIN_ADMISSION_DGB_SATOSHIS ||
+            has_mempool_conflict(slot.dgb_outpoint) ||
             reference->nHeight < static_cast<int>(dgb_coin.nHeight) ||
             tip_height - static_cast<int>(dgb_coin.nHeight) + 1 < announcement.min_confirmations) {
             error = "PAYMASTER_INVALID_DGB_ADMISSION_PROOF";
@@ -224,6 +231,7 @@ bool ValidateAdmissionProofs(const Announcement& announcement,
             carrier_coin.out != carrier_tx.vout[slot.carrier_outpoint.n] ||
             !ExtractDDAmountFromTransaction(carrier_tx, slot.carrier_outpoint, carrier_amount) ||
             carrier_amount != slot.carrier_value.value || carrier_amount < 100 ||
+            has_mempool_conflict(slot.carrier_outpoint) ||
             reference->nHeight < static_cast<int>(carrier_coin.nHeight) ||
             tip_height - static_cast<int>(carrier_coin.nHeight) + 1 < announcement.min_confirmations) {
             error = "PAYMASTER_INVALID_CARRIER_ADMISSION_PROOF";

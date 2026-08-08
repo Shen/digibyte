@@ -26,6 +26,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/wallet.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <optional>
@@ -909,6 +910,23 @@ bool WalletBatch::EraseCryptedOracleKey(uint32_t oracle_id)
 // security transitions belong to PaymasterStore and must use one explicit DB
 // transaction; callers must not compose a signing transition from independent
 // WritePaymaster* calls.
+template <typename K, typename T>
+DatabaseReadStatus WalletBatch::ReadPaymasterVersionedRecord(const K& key,
+                                                              T& value)
+{
+    value = T{};
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(key, value);
+    // Deserialization of an authentic shortened old layout may stop after its
+    // leading version field. Preserve that distinction instead of treating the
+    // record as absent or as an unspecified storage failure.
+    if ((status == DatabaseReadStatus::FOUND ||
+         status == DatabaseReadStatus::READ_ERROR) &&
+        value.version != T::CURRENT_VERSION) {
+        return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    }
+    return status;
+}
+
 bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSession& session, bool overwrite)
 {
     if (!DigiDollar::Paymaster::IsCanonicalRequestId(session.request_id) ||
@@ -918,19 +936,34 @@ bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSess
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), session, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterSession(const std::string& request_id, DigiDollar::Paymaster::PaymentSession& session)
+DatabaseReadStatus WalletBatch::ReadPaymasterSessionWithStatus(
+    const std::string& request_id,
+    DigiDollar::Paymaster::PaymentSession& session)
 {
-    // Accepted legacy versions are upgraded in memory only. The store verifies
-    // whether their missing fields are safe for the requested continuation
-    // before a current-version record is persisted.
-    if (!m_batch->Read(std::make_pair(DBKeys::PAYMASTER_SESSION, request_id), session) ||
-        (session.version != 2 && session.version != 3 &&
-         session.version != DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION) ||
-        session.request_id != request_id) {
-        return false;
+    using namespace DigiDollar::Paymaster;
+    if (!IsCanonicalRequestId(request_id)) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_SESSION, request_id), session);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (session.request_id != request_id || session.session_id.IsNull() ||
+        !CanTransition(session.state, session.state)) {
+        return DatabaseReadStatus::READ_ERROR;
     }
-    session.version = DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION;
-    return true;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterSession(
+    const std::string& request_id,
+    DigiDollar::Paymaster::PaymentSession& session)
+{
+    return ReadPaymasterSessionWithStatus(request_id, session) ==
+           DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::HasPaymasterSession(const std::string& request_id)
+{
+    return m_batch->Exists(
+        std::make_pair(DBKeys::PAYMASTER_SESSION, request_id));
 }
 
 bool WalletBatch::ListPaymasterSessions(
@@ -954,14 +987,13 @@ bool WalletBatch::ListPaymasterSessions(
             key >> type >> request_id;
             value >> session;
             if (type != DBKeys::PAYMASTER_SESSION ||
-                (session.version != 2 && session.version != 3 &&
-                 session.version != DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION) ||
+                session.version !=
+                    DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION ||
                 session.request_id != request_id ||
                 !DigiDollar::Paymaster::IsCanonicalRequestId(request_id) ||
                 session.session_id.IsNull()) {
                 return false;
             }
-            session.version = DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION;
             sessions.push_back(std::move(session));
         } catch (const std::ios_base::failure&) {
             return false;
@@ -990,16 +1022,30 @@ bool WalletBatch::WritePaymasterRecovery(
                    recovery, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterRecoveryWithStatus(
+    const std::string& request_id,
+    DigiDollar::Paymaster::SelfRecoveryRecord& recovery)
+{
+    using namespace DigiDollar::Paymaster;
+    if (!IsCanonicalRequestId(request_id)) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_RECOVERY, request_id), recovery);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (recovery.request_id != request_id || recovery.session_id.IsNull() ||
+        recovery.user_inputs.empty() || recovery.recovery_txid.IsNull() ||
+        recovery.raw_transaction_hash.IsNull() ||
+        recovery.final_transaction.empty() || recovery.created_at <= 0) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    return DatabaseReadStatus::FOUND;
+}
+
 bool WalletBatch::ReadPaymasterRecovery(
     const std::string& request_id,
     DigiDollar::Paymaster::SelfRecoveryRecord& recovery)
 {
-    return m_batch->Read(std::make_pair(DBKeys::PAYMASTER_RECOVERY, request_id), recovery) &&
-           recovery.version == DigiDollar::Paymaster::SelfRecoveryRecord::CURRENT_VERSION &&
-           recovery.request_id == request_id && !recovery.session_id.IsNull() &&
-           !recovery.user_inputs.empty() && !recovery.recovery_txid.IsNull() &&
-           !recovery.raw_transaction_hash.IsNull() && !recovery.final_transaction.empty() &&
-           recovery.created_at > 0;
+    return ReadPaymasterRecoveryWithStatus(request_id, recovery) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterRecovery(const std::string& request_id)
@@ -1012,7 +1058,7 @@ bool WalletBatch::WritePaymasterAlternativeRecovery(
     bool overwrite)
 {
     using namespace DigiDollar::Paymaster;
-    if (!AlternativeRecoveryRecord::IsSupportedVersion(recovery.version) ||
+    if (recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         !IsCanonicalRequestId(recovery.request_id) ||
         recovery.session_id.IsNull() || recovery.recovery_id.IsNull() ||
         recovery.original_provider_id.IsNull() ||
@@ -1038,36 +1084,45 @@ bool WalletBatch::WritePaymasterAlternativeRecovery(
         recovery, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterAlternativeRecovery(
+DatabaseReadStatus WalletBatch::ReadPaymasterAlternativeRecoveryWithStatus(
     const uint256& recovery_id,
     DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery)
 {
     using namespace DigiDollar::Paymaster;
-    return !recovery_id.IsNull() &&
-           m_batch->Read(
-               std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery_id),
-               recovery) &&
-           AlternativeRecoveryRecord::IsSupportedVersion(recovery.version) &&
-           recovery.recovery_id == recovery_id &&
-           IsCanonicalRequestId(recovery.request_id) &&
-           !recovery.session_id.IsNull() &&
-           !recovery.original_provider_id.IsNull() &&
-           !recovery.recovery_provider_id.IsNull() &&
-           !recovery.offer_id.IsNull() && !recovery.policy_hash.IsNull() &&
-           recovery.original_provider_id != recovery.recovery_provider_id &&
-           recovery.recovery_provider_identity_key.IsFullyValid() &&
-           GetPaymasterId(recovery.recovery_provider_identity_key) ==
-               recovery.recovery_provider_id &&
-           !recovery.original_commit_key.IsNull() &&
-           !recovery.original_template_commitment.IsNull() &&
-           !recovery.client_nonce.IsNull() &&
-           recovery.capacity_proof_claim_candidate.size() <=
-               MAX_EQUIVOCATION_ARTIFACT_BYTES &&
-           recovery.recovery_id == GetAlternativeRecoveryId(
-                                       recovery.request_id, recovery.session_id,
-                                       recovery.recovery_provider_id, recovery.client_nonce) &&
-           recovery.created_at > 0 &&
-           recovery.updated_at >= recovery.created_at;
+    if (recovery_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery_id), recovery);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (recovery.recovery_id != recovery_id ||
+        !IsCanonicalRequestId(recovery.request_id) ||
+        recovery.session_id.IsNull() || recovery.original_provider_id.IsNull() ||
+        recovery.recovery_provider_id.IsNull() || recovery.offer_id.IsNull() ||
+        recovery.policy_hash.IsNull() ||
+        recovery.original_provider_id == recovery.recovery_provider_id ||
+        !recovery.recovery_provider_identity_key.IsFullyValid() ||
+        GetPaymasterId(recovery.recovery_provider_identity_key) !=
+            recovery.recovery_provider_id ||
+        recovery.original_commit_key.IsNull() ||
+        recovery.original_template_commitment.IsNull() ||
+        recovery.client_nonce.IsNull() ||
+        recovery.capacity_proof_claim_candidate.size() >
+            MAX_EQUIVOCATION_ARTIFACT_BYTES ||
+        recovery.recovery_id != GetAlternativeRecoveryId(
+                                    recovery.request_id, recovery.session_id,
+                                    recovery.recovery_provider_id,
+                                    recovery.client_nonce) ||
+        recovery.created_at <= 0 || recovery.updated_at < recovery.created_at) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterAlternativeRecovery(
+    const uint256& recovery_id,
+    DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery)
+{
+    return ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ListPaymasterAlternativeRecoveries(
@@ -1096,8 +1151,7 @@ bool WalletBatch::ListPaymasterAlternativeRecoveries(
             if (type != DBKeys::PAYMASTER_ALT_RECOVERY ||
                 !recovery_stream.empty() ||
                 recovery_id.IsNull() || recovery.recovery_id != recovery_id ||
-                !AlternativeRecoveryRecord::IsSupportedVersion(
-                    recovery.version) ||
+                recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
                 recovery.capacity_proof_claim_candidate.size() >
                     DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES) {
                 return false;
@@ -1129,15 +1183,26 @@ bool WalletBatch::WritePaymasterAlternativeRecoveryRequest(
                    recovery_id, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterAlternativeRecoveryRequestWithStatus(
+    const std::string& request_id, uint256& recovery_id)
+{
+    recovery_id.SetNull();
+    if (!DigiDollar::Paymaster::IsCanonicalRequestId(request_id)) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST, request_id),
+        recovery_id);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return recovery_id.IsNull() ? DatabaseReadStatus::READ_ERROR
+                                : DatabaseReadStatus::FOUND;
+}
+
 bool WalletBatch::ReadPaymasterAlternativeRecoveryRequest(
     const std::string& request_id, uint256& recovery_id)
 {
-    return DigiDollar::Paymaster::IsCanonicalRequestId(request_id) &&
-           m_batch->Read(
-               std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST,
-                              request_id),
-               recovery_id) &&
-           !recovery_id.IsNull();
+    return ReadPaymasterAlternativeRecoveryRequestWithStatus(
+               request_id, recovery_id) == DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterAlternativeRecoveryRequest(
@@ -1160,30 +1225,39 @@ bool WalletBatch::WritePaymasterAttempt(const DigiDollar::Paymaster::ProviderAtt
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt.attempt_id), attempt, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterAttempt(const uint256& attempt_id, DigiDollar::Paymaster::ProviderAttempt& attempt)
+DatabaseReadStatus WalletBatch::ReadPaymasterAttemptWithStatus(
+    const uint256& attempt_id,
+    DigiDollar::Paymaster::ProviderAttempt& attempt)
 {
-    if (!m_batch->Read(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id), attempt) ||
-        attempt.version < DigiDollar::Paymaster::ProviderAttempt::LEGACY_VERSION ||
-        attempt.version > DigiDollar::Paymaster::ProviderAttempt::CURRENT_VERSION ||
-        attempt.attempt_id != attempt_id ||
+    using namespace DigiDollar::Paymaster;
+    if (attempt_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id), attempt);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (attempt.attempt_id != attempt_id ||
+        !CanTransition(attempt.state, attempt.state) ||
         attempt.capacity_proof_claim_candidate.size() >
-            DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES ||
+            MAX_EQUIVOCATION_ARTIFACT_BYTES ||
         attempt.quote_response_claim_candidate.size() >
-            DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES) {
-        return false;
+            MAX_EQUIVOCATION_ARTIFACT_BYTES) {
+        return DatabaseReadStatus::READ_ERROR;
     }
-    // V9 attempts predate the mandatory capacity handshake, V10 attempts the
-    // independent authorization manifests, V11 attempts predate the
-    // persistent pseudonymous netgroup budget binding, V12 attempts predate
-    // explicit client-manifest acceptance, and V13 attempts predate the
-    // durable provider-signature time/result envelope, and V14 attempts
-    // predate evidence-only signed-claim candidates. Missing fields
-    // deserialize to zero. In particular, updated_at is never promoted into
-    // provider_signed_at and a legacy artifact is never synthesized as a
-    // candidate: only an exact legacy ProviderCommit may retain old signing
-    // authority after restart.
-    attempt.version = DigiDollar::Paymaster::ProviderAttempt::CURRENT_VERSION;
-    return true;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterAttempt(
+    const uint256& attempt_id,
+    DigiDollar::Paymaster::ProviderAttempt& attempt)
+{
+    return ReadPaymasterAttemptWithStatus(attempt_id, attempt) ==
+           DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::HasPaymasterAttempt(const uint256& attempt_id)
+{
+    return !attempt_id.IsNull() &&
+           m_batch->Exists(
+               std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id));
 }
 
 bool WalletBatch::ErasePaymasterAttempt(const uint256& attempt_id)
@@ -1204,16 +1278,28 @@ bool WalletBatch::WritePaymasterCapacitySnapshot(
                    snapshot, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacitySnapshotWithStatus(
+    const uint256& snapshot_id,
+    DigiDollar::Paymaster::ValidatedCapacitySnapshot& snapshot)
+{
+    using DigiDollar::Paymaster::ValidatedCapacitySnapshot;
+    if (snapshot_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot_id), snapshot);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return snapshot.snapshot_id == snapshot_id &&
+                   !snapshot.resource_commitment.IsNull() &&
+                   !snapshot.session_id.IsNull() && !snapshot.attempt_id.IsNull()
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterCapacitySnapshot(
     const uint256& snapshot_id,
     DigiDollar::Paymaster::ValidatedCapacitySnapshot& snapshot)
 {
-    return !snapshot_id.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot_id), snapshot) &&
-           (snapshot.version == DigiDollar::Paymaster::ValidatedCapacitySnapshot::LEGACY_VERSION ||
-            snapshot.version == DigiDollar::Paymaster::ValidatedCapacitySnapshot::CURRENT_VERSION) &&
-           snapshot.snapshot_id == snapshot_id && !snapshot.resource_commitment.IsNull() &&
-           !snapshot.session_id.IsNull() && !snapshot.attempt_id.IsNull();
+    return ReadPaymasterCapacitySnapshotWithStatus(snapshot_id, snapshot) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ListPaymasterCapacitySnapshots(
@@ -1239,8 +1325,7 @@ bool WalletBatch::ListPaymasterCapacitySnapshots(
             value >> snapshot;
             if (type != DBKeys::PAYMASTER_CAPACITY || snapshot_id.IsNull() ||
                 snapshot.snapshot_id != snapshot_id ||
-                (snapshot.version != ValidatedCapacitySnapshot::LEGACY_VERSION &&
-                 snapshot.version != ValidatedCapacitySnapshot::CURRENT_VERSION) ||
+                snapshot.version != ValidatedCapacitySnapshot::CURRENT_VERSION ||
                 snapshot.resource_commitment.IsNull() ||
                 snapshot.provider_id.IsNull() || snapshot.session_id.IsNull() ||
                 snapshot.attempt_id.IsNull()) {
@@ -1305,24 +1390,39 @@ bool WalletBatch::WritePaymasterCapacityResource(
         binding, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterCapacityResource(
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacityResourceWithStatus(
     const DigiDollar::Paymaster::PaymasterId& provider_id,
     const COutPoint& outpoint,
     DigiDollar::Paymaster::CapacityResourceBinding& binding)
 {
     using DigiDollar::Paymaster::CapacityResourceBinding;
-    return !provider_id.IsNull() && !outpoint.IsNull() &&
-           m_batch->Read(
-               std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESOURCE,
-                              std::make_pair(provider_id, outpoint)),
-               binding) &&
-           binding.version == CapacityResourceBinding::CURRENT_VERSION &&
-           binding.provider_id == provider_id && binding.outpoint == outpoint &&
-           !binding.snapshot_id.IsNull() &&
-           !binding.resource_commitment.IsNull() &&
-           !binding.session_id.IsNull() && !binding.attempt_id.IsNull() &&
-           !binding.proof_hash.IsNull() && !binding.creating_txid.IsNull() &&
-           binding.value > 0 && binding.expires_at > 0;
+    if (provider_id.IsNull() || outpoint.IsNull()) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESOURCE,
+                       std::make_pair(provider_id, outpoint)),
+        binding);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return binding.provider_id == provider_id && binding.outpoint == outpoint &&
+                   !binding.snapshot_id.IsNull() &&
+                   !binding.resource_commitment.IsNull() &&
+                   !binding.session_id.IsNull() && !binding.attempt_id.IsNull() &&
+                   !binding.proof_hash.IsNull() &&
+                   !binding.creating_txid.IsNull() && binding.value > 0 &&
+                   binding.expires_at > 0
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterCapacityResource(
+    const DigiDollar::Paymaster::PaymasterId& provider_id,
+    const COutPoint& outpoint,
+    DigiDollar::Paymaster::CapacityResourceBinding& binding)
+{
+    return ReadPaymasterCapacityResourceWithStatus(provider_id, outpoint,
+                                                    binding) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterCapacityResource(
@@ -1456,17 +1556,27 @@ bool WalletBatch::WritePaymasterCapacityRelease(
                    release, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacityReleaseWithStatus(
+    const uint256& request_hash,
+    DigiDollar::Paymaster::ProviderCapacityReleaseRecord& release)
+{
+    if (request_hash.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE, request_hash),
+        release);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return release.request_hash == request_hash &&
+                   !release.client_nonce.IsNull() && release.released_at > 0
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterCapacityRelease(
     const uint256& request_hash,
     DigiDollar::Paymaster::ProviderCapacityReleaseRecord& release)
 {
-    return !request_hash.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE,
-                                        request_hash),
-                         release) &&
-           release.version == DigiDollar::Paymaster::ProviderCapacityReleaseRecord::CURRENT_VERSION &&
-           release.request_hash == request_hash && !release.client_nonce.IsNull() &&
-           release.released_at > 0;
+    return ReadPaymasterCapacityReleaseWithStatus(request_hash, release) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterCapacityRelease(const uint256& request_hash)
@@ -1491,11 +1601,24 @@ bool WalletBatch::WritePaymasterTemplate(const uint256& template_commitment,
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment), attempt_id, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterTemplate(const uint256& template_commitment, uint256& attempt_id)
+DatabaseReadStatus WalletBatch::ReadPaymasterTemplateWithStatus(
+    const uint256& template_commitment, uint256& attempt_id)
 {
-    return !template_commitment.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment), attempt_id) &&
-           !attempt_id.IsNull();
+    attempt_id.SetNull();
+    if (template_commitment.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment),
+        attempt_id);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return attempt_id.IsNull() ? DatabaseReadStatus::READ_ERROR
+                               : DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterTemplate(const uint256& template_commitment,
+                                        uint256& attempt_id)
+{
+    return ReadPaymasterTemplateWithStatus(template_commitment, attempt_id) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterTemplate(const uint256& template_commitment)
@@ -1511,11 +1634,24 @@ bool WalletBatch::WritePaymasterUnsignedTx(const uint256& unsigned_txid,
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid), attempt_id, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterUnsignedTx(const uint256& unsigned_txid, uint256& attempt_id)
+DatabaseReadStatus WalletBatch::ReadPaymasterUnsignedTxWithStatus(
+    const uint256& unsigned_txid, uint256& attempt_id)
 {
-    return !unsigned_txid.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid), attempt_id) &&
-           !attempt_id.IsNull();
+    attempt_id.SetNull();
+    if (unsigned_txid.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid),
+        attempt_id);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return attempt_id.IsNull() ? DatabaseReadStatus::READ_ERROR
+                               : DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterUnsignedTx(const uint256& unsigned_txid,
+                                          uint256& attempt_id)
+{
+    return ReadPaymasterUnsignedTxWithStatus(unsigned_txid, attempt_id) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterUnsignedTx(const uint256& unsigned_txid)
@@ -1529,11 +1665,24 @@ bool WalletBatch::WritePaymasterSessionId(const uint256& session_id, const std::
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id), request_id, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterSessionId(const uint256& session_id, std::string& request_id)
+DatabaseReadStatus WalletBatch::ReadPaymasterSessionIdWithStatus(
+    const uint256& session_id, std::string& request_id)
 {
-    return !session_id.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id), request_id) &&
-           DigiDollar::Paymaster::IsCanonicalRequestId(request_id);
+    request_id.clear();
+    if (session_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id), request_id);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::IsCanonicalRequestId(request_id)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterSessionId(const uint256& session_id,
+                                         std::string& request_id)
+{
+    return ReadPaymasterSessionIdWithStatus(session_id, request_id) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterSessionId(const uint256& session_id)
@@ -1549,11 +1698,28 @@ bool WalletBatch::WritePaymasterReservation(const DigiDollar::Paymaster::InputRe
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_RESERVATION, reservation.outpoint), reservation, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterReservation(const COutPoint& outpoint, DigiDollar::Paymaster::InputReservation& reservation)
+DatabaseReadStatus WalletBatch::ReadPaymasterReservationWithStatus(
+    const COutPoint& outpoint,
+    DigiDollar::Paymaster::InputReservation& reservation)
 {
-    return m_batch->Read(std::make_pair(DBKeys::PAYMASTER_RESERVATION, outpoint), reservation) &&
-           reservation.version == DigiDollar::Paymaster::InputReservation::CURRENT_VERSION &&
-           reservation.outpoint == outpoint;
+    if (outpoint.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_RESERVATION, outpoint), reservation);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return reservation.outpoint == outpoint &&
+                   !reservation.session_id.IsNull() &&
+                   DigiDollar::Paymaster::IsCanonicalRequestId(
+                       reservation.request_id)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterReservation(
+    const COutPoint& outpoint,
+    DigiDollar::Paymaster::InputReservation& reservation)
+{
+    return ReadPaymasterReservationWithStatus(outpoint, reservation) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterReservation(const COutPoint& outpoint)
@@ -1569,17 +1735,28 @@ bool WalletBatch::WritePaymasterTombstone(const DigiDollar::Paymaster::Idempoten
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, tombstone.request_id), tombstone, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterTombstone(const std::string& request_id, DigiDollar::Paymaster::IdempotencyTombstone& tombstone)
+DatabaseReadStatus WalletBatch::ReadPaymasterTombstoneWithStatus(
+    const std::string& request_id,
+    DigiDollar::Paymaster::IdempotencyTombstone& tombstone)
 {
-    if (!m_batch->Read(std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, request_id), tombstone) ||
-        (tombstone.version != 1 &&
-         tombstone.version != DigiDollar::Paymaster::IdempotencyTombstone::CURRENT_VERSION) ||
-        tombstone.request_id != request_id || tombstone.session_id.IsNull() ||
-        !DigiDollar::Paymaster::IsTerminal(tombstone.final_state)) {
-        return false;
+    using namespace DigiDollar::Paymaster;
+    if (!IsCanonicalRequestId(request_id)) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, request_id), tombstone);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (tombstone.request_id != request_id || tombstone.session_id.IsNull() ||
+        !IsTerminal(tombstone.final_state)) {
+        return DatabaseReadStatus::READ_ERROR;
     }
-    tombstone.version = DigiDollar::Paymaster::IdempotencyTombstone::CURRENT_VERSION;
-    return true;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterTombstone(
+    const std::string& request_id,
+    DigiDollar::Paymaster::IdempotencyTombstone& tombstone)
+{
+    return ReadPaymasterTombstoneWithStatus(request_id, tombstone) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::WritePaymasterProviderCommit(const DigiDollar::Paymaster::ProviderCommitRecord& commit, bool overwrite)
@@ -1592,11 +1769,31 @@ bool WalletBatch::WritePaymasterProviderCommit(const DigiDollar::Paymaster::Prov
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit.commit_key), commit, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterProviderCommit(const uint256& commit_key, DigiDollar::Paymaster::ProviderCommitRecord& commit)
+DatabaseReadStatus WalletBatch::ReadPaymasterProviderCommitWithStatus(
+    const uint256& commit_key,
+    DigiDollar::Paymaster::ProviderCommitRecord& commit)
 {
-    return m_batch->Read(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit_key), commit) &&
-           commit.version == DigiDollar::Paymaster::ProviderCommitRecord::CURRENT_VERSION &&
-           commit.commit_key == commit_key && !commit.final_transaction.empty();
+    if (commit_key.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit_key), commit);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return commit.commit_key == commit_key && !commit.provider_id.IsNull() &&
+                   !commit.quote_id.IsNull() &&
+                   !commit.template_commitment.IsNull() &&
+                   !commit.final_txid.IsNull() &&
+                   !commit.raw_transaction_hash.IsNull() &&
+                   !commit.final_transaction.empty() &&
+                   !commit.provider_inputs.empty()
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterProviderCommit(
+    const uint256& commit_key,
+    DigiDollar::Paymaster::ProviderCommitRecord& commit)
+{
+    return ReadPaymasterProviderCommitWithStatus(commit_key, commit) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterProviderCommit(const uint256& commit_key)
@@ -1652,15 +1849,29 @@ bool WalletBatch::WritePaymasterUserAuthorization(
                    authorization, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterUserAuthorizationWithStatus(
+    const uint256& commit_key,
+    DigiDollar::Paymaster::UserAuthorizationRecord& authorization)
+{
+    if (commit_key.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_USER_AUTH, commit_key), authorization);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return authorization.commit_key == commit_key &&
+                   !authorization.attempt_id.IsNull() &&
+                   !authorization.canonical_psbt_hash.IsNull() &&
+                   authorization.accepted_at > 0 &&
+                   authorization.retry_until >= authorization.accepted_at
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterUserAuthorization(
     const uint256& commit_key,
     DigiDollar::Paymaster::UserAuthorizationRecord& authorization)
 {
-    return !commit_key.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, commit_key), authorization) &&
-           authorization.version == DigiDollar::Paymaster::UserAuthorizationRecord::CURRENT_VERSION &&
-           authorization.commit_key == commit_key && !authorization.attempt_id.IsNull() &&
-           !authorization.canonical_psbt_hash.IsNull();
+    return ReadPaymasterUserAuthorizationWithStatus(commit_key, authorization) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterUserAuthorization(const uint256& commit_key)
@@ -1676,11 +1887,22 @@ bool WalletBatch::WritePaymasterIdentity(
     return WriteIC(DBKeys::PAYMASTER_IDENTITY, identity, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterIdentityWithStatus(
+    DigiDollar::Paymaster::ProviderIdentityRecord& identity)
+{
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_IDENTITY, identity);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterIdentity(
     DigiDollar::Paymaster::ProviderIdentityRecord& identity)
 {
-    return m_batch->Read(DBKeys::PAYMASTER_IDENTITY, identity) &&
-           DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity);
+    return ReadPaymasterIdentityWithStatus(identity) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::WritePaymasterPolicy(const DigiDollar::Paymaster::ProviderPolicy& policy,
@@ -1691,11 +1913,22 @@ bool WalletBatch::WritePaymasterPolicy(const DigiDollar::Paymaster::ProviderPoli
     return WriteIC(DBKeys::PAYMASTER_POLICY, policy, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterPolicy(DigiDollar::Paymaster::ProviderPolicy& policy)
+DatabaseReadStatus WalletBatch::ReadPaymasterPolicyWithStatus(
+    DigiDollar::Paymaster::ProviderPolicy& policy)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_POLICY, policy) &&
-           DigiDollar::Paymaster::ValidateProviderPolicy(policy, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_POLICY, policy);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderPolicy(policy, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterPolicy(
+    DigiDollar::Paymaster::ProviderPolicy& policy)
+{
+    return ReadPaymasterPolicyWithStatus(policy) == DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::WritePaymasterSettings(const DigiDollar::Paymaster::ProviderSettings& settings,
@@ -1706,30 +1939,38 @@ bool WalletBatch::WritePaymasterSettings(const DigiDollar::Paymaster::ProviderSe
     return WriteIC(DBKeys::PAYMASTER_SETTINGS, settings, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterSettings(DigiDollar::Paymaster::ProviderSettings& settings)
+DatabaseReadStatus WalletBatch::ReadPaymasterSettingsWithStatus(
+    DigiDollar::Paymaster::ProviderSettings& settings)
 {
-    if (!m_batch->Read(DBKeys::PAYMASTER_SETTINGS, settings) ||
-        settings.version < 1 ||
-        settings.version > DigiDollar::Paymaster::ProviderSettings::CURRENT_VERSION ||
-        settings.updated_at <= 0 ||
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_SETTINGS, settings);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (settings.updated_at <= 0 ||
         (settings.enabled && settings.policy_hash.IsNull()) ||
         static_cast<uint8_t>(settings.operation_mode) >
             static_cast<uint8_t>(
                 DigiDollar::Paymaster::ProviderOperationMode::MANUAL)) {
-        return false;
+        return DatabaseReadStatus::READ_ERROR;
     }
-    // V1 predates unattended queue servicing. The release migration selects
-    // the new safe-by-policy automatic default but never enables autostart.
-    // Normalize in memory so the next ordinary settings write upgrades the
-    // record without a separate migration transaction during wallet load.
-    if (settings.version == 1) {
-        settings.operation_mode =
-            DigiDollar::Paymaster::ProviderOperationMode::AUTOMATIC;
-        settings.autostart = false;
-        settings.version =
-            DigiDollar::Paymaster::ProviderSettings::CURRENT_VERSION;
-    }
-    return true;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterSettings(
+    DigiDollar::Paymaster::ProviderSettings& settings)
+{
+    return ReadPaymasterSettingsWithStatus(settings) ==
+           DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::HasPaymasterTombstone(const std::string& request_id)
+{
+    return m_batch->Exists(
+        std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, request_id));
+}
+
+bool WalletBatch::HasPaymasterSettings()
+{
+    return m_batch->Exists(DBKeys::PAYMASTER_SETTINGS);
 }
 
 bool WalletBatch::WritePaymasterProviderSafetyPolicy(
@@ -1745,14 +1986,28 @@ bool WalletBatch::WritePaymasterProviderSafetyPolicy(
     return WriteIC(DBKeys::PAYMASTER_PROVIDER_SAFETY, safety, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterProviderSafetyPolicy(
+DatabaseReadStatus WalletBatch::ReadPaymasterProviderSafetyPolicyWithStatus(
     DigiDollar::Paymaster::ProviderSafetyPolicy& safety)
 {
     DigiDollar::Paymaster::ProviderPolicy advertised;
     std::string error;
-    return ReadPaymasterPolicy(advertised) &&
-           m_batch->Read(DBKeys::PAYMASTER_PROVIDER_SAFETY, safety) &&
-           DigiDollar::Paymaster::ValidateProviderSafetyPolicy(safety, advertised, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_PROVIDER_SAFETY, safety);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (ReadPaymasterPolicyWithStatus(advertised) !=
+            DatabaseReadStatus::FOUND ||
+        !DigiDollar::Paymaster::ValidateProviderSafetyPolicy(
+            safety, advertised, error)) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ReadPaymasterProviderSafetyPolicy(
+    DigiDollar::Paymaster::ProviderSafetyPolicy& safety)
+{
+    return ReadPaymasterProviderSafetyPolicyWithStatus(safety) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterProviderSafetyPolicy()
@@ -1769,12 +2024,23 @@ bool WalletBatch::WritePaymasterClientSafetyPolicy(
            WriteIC(DBKeys::PAYMASTER_CLIENT_SAFETY, policy, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterClientSafetyPolicy(
+DatabaseReadStatus WalletBatch::ReadPaymasterClientSafetyPolicyWithStatus(
     DigiDollar::Paymaster::ClientSafetyPolicy& policy)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_CLIENT_SAFETY, policy) &&
-           DigiDollar::Paymaster::ValidateClientSafetyPolicy(policy, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_CLIENT_SAFETY, policy);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateClientSafetyPolicy(policy, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterClientSafetyPolicy(
+    DigiDollar::Paymaster::ClientSafetyPolicy& policy)
+{
+    return ReadPaymasterClientSafetyPolicyWithStatus(policy) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterClientSafetyPolicy()
@@ -1791,12 +2057,23 @@ bool WalletBatch::WritePaymasterProviderBudgetLedger(
            WriteIC(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterProviderBudgetLedger(
+DatabaseReadStatus WalletBatch::ReadPaymasterProviderBudgetLedgerWithStatus(
     DigiDollar::Paymaster::ProviderBudgetLedger& ledger)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger) &&
-           DigiDollar::Paymaster::ValidateProviderBudgetLedger(ledger, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderBudgetLedger(ledger, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterProviderBudgetLedger(
+    DigiDollar::Paymaster::ProviderBudgetLedger& ledger)
+{
+    return ReadPaymasterProviderBudgetLedgerWithStatus(ledger) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterProviderBudgetLedger()
@@ -1813,12 +2090,23 @@ bool WalletBatch::WritePaymasterClientFeeLedger(
            WriteIC(DBKeys::PAYMASTER_CLIENT_FEES, ledger, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterClientFeeLedger(
+DatabaseReadStatus WalletBatch::ReadPaymasterClientFeeLedgerWithStatus(
     DigiDollar::Paymaster::ClientFeeLedger& ledger)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_CLIENT_FEES, ledger) &&
-           DigiDollar::Paymaster::ValidateClientFeeLedger(ledger, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_CLIENT_FEES, ledger);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateClientFeeLedger(ledger, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterClientFeeLedger(
+    DigiDollar::Paymaster::ClientFeeLedger& ledger)
+{
+    return ReadPaymasterClientFeeLedgerWithStatus(ledger) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterClientFeeLedger()
@@ -1836,15 +2124,29 @@ bool WalletBatch::WritePaymasterSponsorshipAuthorization(
                    authorization, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterSponsorshipAuthorizationWithStatus(
+    const uint256& capability_hash,
+    DigiDollar::Paymaster::SponsorshipAuthorizationRecord& authorization)
+{
+    if (capability_hash.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    std::string error;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_SPONSOR_AUTH, capability_hash),
+        authorization);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return authorization.capability_hash == capability_hash &&
+                   DigiDollar::Paymaster::ValidateSponsorshipAuthorizationRecord(
+                       authorization, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterSponsorshipAuthorization(
     const uint256& capability_hash,
     DigiDollar::Paymaster::SponsorshipAuthorizationRecord& authorization)
 {
-    std::string error;
-    return !capability_hash.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_SPONSOR_AUTH, capability_hash), authorization) &&
-           authorization.capability_hash == capability_hash &&
-           DigiDollar::Paymaster::ValidateSponsorshipAuthorizationRecord(authorization, error);
+    return ReadPaymasterSponsorshipAuthorizationWithStatus(
+               capability_hash, authorization) == DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::WritePaymasterProviderPool(
@@ -1852,38 +2154,37 @@ bool WalletBatch::WritePaymasterProviderPool(
     bool overwrite)
 {
     using namespace DigiDollar::Paymaster;
-    std::vector<ProviderPoolEntry> normalized{entries};
-    for (ProviderPoolEntry& entry : normalized) {
-        if (entry.version == ProviderPoolEntry::LEGACY_VERSION) {
-            entry.version = ProviderPoolEntry::CURRENT_VERSION;
-            if (entry.state == PoolEntryState::PENDING_SUCCESSOR) {
-                entry.origin_commit_key = entry.reservation_id;
-            }
-        }
-    }
     std::string error;
-    if (!ValidateProviderPoolEntries(normalized, error)) return false;
-    return WriteIC(DBKeys::PAYMASTER_PROVIDER_POOL, normalized, overwrite);
+    if (!ValidateProviderPoolEntries(entries, error)) return false;
+    return WriteIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite);
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterProviderPoolWithStatus(
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries)
+{
+    using namespace DigiDollar::Paymaster;
+    entries.clear();
+    std::string error;
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
+        DBKeys::PAYMASTER_PROVIDER_POOL, entries);
+    const auto outdated = std::find_if(
+        entries.begin(), entries.end(), [](const ProviderPoolEntry& entry) {
+            return entry.version != ProviderPoolEntry::CURRENT_VERSION;
+        });
+    if (outdated != entries.end()) {
+        return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    }
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return ValidateProviderPoolEntries(entries, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::ReadPaymasterProviderPool(
     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries)
 {
-    using namespace DigiDollar::Paymaster;
-    std::string error;
-    if (!m_batch->Read(DBKeys::PAYMASTER_PROVIDER_POOL, entries) ||
-        !ValidateProviderPoolEntries(entries, error)) {
-        return false;
-    }
-    for (ProviderPoolEntry& entry : entries) {
-        if (entry.version == ProviderPoolEntry::LEGACY_VERSION) {
-            entry.version = ProviderPoolEntry::CURRENT_VERSION;
-            if (entry.state == PoolEntryState::PENDING_SUCCESSOR) {
-                entry.origin_commit_key = entry.reservation_id;
-            }
-        }
-    }
-    return ValidateProviderPoolEntries(entries, error);
+    return ReadPaymasterProviderPoolWithStatus(entries) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterProviderPool()
@@ -1902,12 +2203,24 @@ bool WalletBatch::WritePaymasterLiquidityPolicy(
     return WriteIC(DBKeys::PAYMASTER_LIQUIDITY_POLICY, policy, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterLiquidityPolicy(
+DatabaseReadStatus WalletBatch::ReadPaymasterLiquidityPolicyWithStatus(
     DigiDollar::Paymaster::ProviderLiquidityPolicy& policy)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_LIQUIDITY_POLICY, policy) &&
-           DigiDollar::Paymaster::ValidateProviderLiquidityPolicy(policy, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_LIQUIDITY_POLICY, policy);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderLiquidityPolicy(policy,
+                                                                   error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterLiquidityPolicy(
+    DigiDollar::Paymaster::ProviderLiquidityPolicy& policy)
+{
+    return ReadPaymasterLiquidityPolicyWithStatus(policy) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterLiquidityPolicy()
@@ -1926,12 +2239,24 @@ bool WalletBatch::WritePaymasterMaintenanceLedger(
     return WriteIC(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterMaintenanceLedger(
+DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceLedgerWithStatus(
     DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger) &&
-           DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger,
+                                                                    error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterMaintenanceLedger(
+    DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger)
+{
+    return ReadPaymasterMaintenanceLedgerWithStatus(ledger) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterMaintenanceLedger()
@@ -1948,12 +2273,23 @@ bool WalletBatch::WritePaymasterFinanceLedger(
            WriteIC(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterFinanceLedger(
+DatabaseReadStatus WalletBatch::ReadPaymasterFinanceLedgerWithStatus(
     DigiDollar::Paymaster::ProviderFinanceLedger& ledger)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger) &&
-           DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_FINANCE_LEDGER, ledger);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterFinanceLedger(
+    DigiDollar::Paymaster::ProviderFinanceLedger& ledger)
+{
+    return ReadPaymasterFinanceLedgerWithStatus(ledger) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterFinanceLedger()
@@ -1970,12 +2306,23 @@ bool WalletBatch::WritePaymasterBackupStatus(
            WriteIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterBackupStatus(
+DatabaseReadStatus WalletBatch::ReadPaymasterBackupStatusWithStatus(
     DigiDollar::Paymaster::ProviderBackupStatus& status)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_BACKUP_STATUS, status) &&
-           DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error);
+    const DatabaseReadStatus read_status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_BACKUP_STATUS, status);
+    if (read_status != DatabaseReadStatus::FOUND) return read_status;
+    return DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterBackupStatus(
+    DigiDollar::Paymaster::ProviderBackupStatus& status)
+{
+    return ReadPaymasterBackupStatusWithStatus(status) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterBackupStatus()
@@ -1993,13 +2340,24 @@ bool WalletBatch::WritePaymasterCarrierWithdrawalPlan(
            WriteIC(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL, plan, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterCarrierWithdrawalPlan(
+DatabaseReadStatus WalletBatch::ReadPaymasterCarrierWithdrawalPlanWithStatus(
     DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan)
 {
     std::string error;
-    return m_batch->Read(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL, plan) &&
-           DigiDollar::Paymaster::ValidateProviderCarrierWithdrawalPlan(
-               plan, error);
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        DBKeys::PAYMASTER_CARRIER_WITHDRAWAL, plan);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderCarrierWithdrawalPlan(
+               plan, error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterCarrierWithdrawalPlan(
+    DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan)
+{
+    return ReadPaymasterCarrierWithdrawalPlanWithStatus(plan) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterCarrierWithdrawalPlan()
@@ -2031,14 +2389,28 @@ bool WalletBatch::WritePaymasterResult(const DigiDollar::Paymaster::PaymasterRes
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_RESULT, result.commit_key), result, overwrite);
 }
 
-bool WalletBatch::ReadPaymasterResult(const uint256& commit_key,
-                                      DigiDollar::Paymaster::PaymasterResult& result)
+DatabaseReadStatus WalletBatch::ReadPaymasterResultWithStatus(
+    const uint256& commit_key,
+    DigiDollar::Paymaster::PaymasterResult& result)
 {
     std::string error;
-    return !commit_key.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_RESULT, commit_key), result) &&
-           result.commit_key == commit_key &&
-           DigiDollar::Paymaster::ValidatePaymasterResultShape(result, error);
+    if (commit_key.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_RESULT, commit_key), result);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return result.commit_key == commit_key &&
+                   DigiDollar::Paymaster::ValidatePaymasterResultShape(result,
+                                                                       error)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterResult(
+    const uint256& commit_key,
+    DigiDollar::Paymaster::PaymasterResult& result)
+{
+    return ReadPaymasterResultWithStatus(commit_key, result) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::HasPaymasterResult(const uint256& commit_key)
@@ -2060,14 +2432,26 @@ bool WalletBatch::WritePaymasterReliability(
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, record.provider_id), record, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterReliabilityWithStatus(
+    const DigiDollar::Paymaster::PaymasterId& provider_id,
+    DigiDollar::Paymaster::PaymasterReliabilityRecord& record)
+{
+    if (provider_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id), record);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return record.provider_id == provider_id &&
+                   DigiDollar::Paymaster::ValidateReliabilityRecord(record)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
+}
+
 bool WalletBatch::ReadPaymasterReliability(
     const DigiDollar::Paymaster::PaymasterId& provider_id,
     DigiDollar::Paymaster::PaymasterReliabilityRecord& record)
 {
-    return !provider_id.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id), record) &&
-           record.provider_id == provider_id &&
-           DigiDollar::Paymaster::ValidateReliabilityRecord(record);
+    return ReadPaymasterReliabilityWithStatus(provider_id, record) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ListPaymasterReliability(
@@ -2268,14 +2652,30 @@ bool WalletBatch::WritePaymasterOutcomeMarker(
     return WriteIC(std::make_pair(DBKeys::PAYMASTER_OUTCOME, marker.attempt_id), marker, overwrite);
 }
 
+DatabaseReadStatus WalletBatch::ReadPaymasterOutcomeMarkerWithStatus(
+    const uint256& attempt_id,
+    DigiDollar::Paymaster::PaymasterOutcomeMarker& marker)
+{
+    using namespace DigiDollar::Paymaster;
+    if (attempt_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_OUTCOME, attempt_id), marker);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (marker.attempt_id != attempt_id || marker.provider_id.IsNull() ||
+        marker.observed_at <= 0 ||
+        static_cast<uint8_t>(marker.outcome) >
+            static_cast<uint8_t>(ReliabilityOutcome::AVAILABILITY_TIMEOUT)) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    return DatabaseReadStatus::FOUND;
+}
+
 bool WalletBatch::ReadPaymasterOutcomeMarker(
     const uint256& attempt_id,
     DigiDollar::Paymaster::PaymasterOutcomeMarker& marker)
 {
-    return !attempt_id.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_OUTCOME, attempt_id), marker) &&
-           marker.version == DigiDollar::Paymaster::PaymasterOutcomeMarker::CURRENT_VERSION &&
-           marker.attempt_id == attempt_id && !marker.provider_id.IsNull() && marker.observed_at > 0;
+    return ReadPaymasterOutcomeMarkerWithStatus(attempt_id, marker) ==
+           DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ErasePaymasterOutcomeMarker(const uint256& attempt_id)

@@ -3063,13 +3063,14 @@ void DigiDollarSendWidget::showError(const QString& title, const QString& messag
     QMessageBox msgBox(this);
     msgBox.setIcon(QMessageBox::Critical);
     msgBox.setWindowTitle(title);
+    // Backend errors are presentation data, never trusted rich text.
+    msgBox.setTextFormat(Qt::PlainText);
     msgBox.setText(message);
     msgBox.setStandardButtons(QMessageBox::Ok);
     msgBox.exec();
 
-    // Log for debugging
-    LogPrintf("DigiDollar GUI Error: %s - %s\n",
-              title.toStdString(), message.toStdString());
+    // Dialog text can contain wallet-local payment details or backend data.
+    LogPrintf("DigiDollar GUI error displayed\n");
 }
 
 // PHASE 7.3: Warning display helper
@@ -3078,13 +3079,14 @@ void DigiDollarSendWidget::showWarning(const QString& title, const QString& mess
     QMessageBox msgBox(this);
     msgBox.setIcon(QMessageBox::Warning);
     msgBox.setWindowTitle(title);
+    // Backend warnings are presentation data, never trusted rich text.
+    msgBox.setTextFormat(Qt::PlainText);
     msgBox.setText(message);
     msgBox.setStandardButtons(QMessageBox::Ok);
     msgBox.exec();
 
-    // Log for debugging
-    LogPrintf("DigiDollar GUI Warning: %s - %s\n",
-              title.toStdString(), message.toStdString());
+    // Dialog text can contain wallet-local payment details or backend data.
+    LogPrintf("DigiDollar GUI warning displayed\n");
 }
 
 // PHASE 7.3: Wallet state validation
@@ -3261,8 +3263,7 @@ bool DigiDollarSendWidget::showConfirmationDialog(const QString& address, double
 
     if (result == QMessageBox::Yes) {
         if (paymaster_only) {
-            LogPrintf("DigiDollar: User approved preparing a Paymaster offer for %f DD to %s after 3-second review\n",
-                      amount, address.toStdString());
+            LogPrintf("DigiDollar: User approved preparing a Paymaster offer after the required review\n");
         } else {
             LogPrintf("DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
                       amount, address.toStdString());
@@ -3354,7 +3355,7 @@ void DigiDollarSendWidget::showSuccess(const QString& txid, double amount)
     msgBox.setStandardButtons(QMessageBox::Ok);
     msgBox.exec();
 
-    LogPrintf("DigiDollar: Transfer broadcast - txid: %s\n", txid.toStdString());
+    LogPrintf("DigiDollar: Transfer broadcast\n");
 }
 
 // PHASE 7.3: Backend error message mapping

@@ -6,6 +6,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <consensus/amount.h>
 #include <hash.h>
 #include <key.h>
 #include <paymaster/directory.h>
@@ -269,6 +270,10 @@ BOOST_AUTO_TEST_CASE(policy_and_carrier_limits_fail_closed)
     std::string error;
     auto policy = UserPaidPolicy(50);
     policy.maximum_network_fee = DGBSatoshis{0};
+    BOOST_CHECK(!ValidateProviderPolicy(policy, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_NETWORK_FEE_CAP");
+
+    policy.maximum_network_fee = DGBSatoshis{MAX_MONEY + 1};
     BOOST_CHECK(!ValidateProviderPolicy(policy, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_NETWORK_FEE_CAP");
 
@@ -810,39 +815,23 @@ BOOST_AUTO_TEST_CASE(provider_maintenance_withdrawal_sources_are_versioned_and_b
         replenishment_with_source, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_SOURCE_INPUTS");
 
-    ProviderMaintenanceLedger legacy{ledger};
-    legacy.records.front().version =
-        ProviderMaintenanceRecord::LEGACY_VERSION;
-    legacy.records.front().source_inputs.clear();
-    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(legacy, error));
+    ProviderMaintenanceLedger outdated{ledger};
+    --outdated.records.front().version;
+    const uint256 outdated_hash{SerializedPaymasterHash(outdated)};
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(outdated, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_RECORD");
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(outdated), outdated_hash);
 
     CDataStream encoded{SER_DISK, ::PROTOCOL_VERSION};
-    encoded << legacy;
+    encoded << outdated;
     ProviderMaintenanceLedger decoded;
     encoded >> decoded;
     BOOST_REQUIRE_EQUAL(decoded.records.size(), 1U);
-    BOOST_CHECK_EQUAL(
-        decoded.records.front().version,
-        ProviderMaintenanceRecord::LEGACY_VERSION);
-    BOOST_CHECK(decoded.records.front().source_inputs.empty());
-
-    ProviderMaintenanceLedger source_inputs_v2{ledger};
-    source_inputs_v2.records.front().version =
-        ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION;
-    CDataStream encoded_v2{SER_DISK, ::PROTOCOL_VERSION};
-    encoded_v2 << source_inputs_v2;
-    ProviderMaintenanceLedger decoded_v2;
-    encoded_v2 >> decoded_v2;
-    BOOST_REQUIRE_EQUAL(decoded_v2.records.size(), 1U);
-    BOOST_CHECK_EQUAL(
-        decoded_v2.records.front().version,
-        ProviderMaintenanceRecord::SOURCE_INPUTS_VERSION);
-    BOOST_CHECK_EQUAL(decoded_v2.records.front().source_inputs.size(), 2U);
-    BOOST_CHECK(decoded_v2.records.front()
-                    .withdrawal_excess_script_pub_key.empty());
-    BOOST_CHECK_EQUAL(
-        decoded_v2.records.front().withdrawal_excess_amount.value, 0);
-    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(decoded_v2, error));
+    BOOST_CHECK_EQUAL(decoded.records.front().version,
+                      ProviderMaintenanceRecord::CURRENT_VERSION - 1);
+    BOOST_CHECK_EQUAL(decoded.records.front().source_inputs.size(), 2U);
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_RECORD");
 
     ProviderMaintenanceLedger reservations;
     ProviderMaintenanceRecord first{withdrawal};
@@ -1036,6 +1025,12 @@ BOOST_AUTO_TEST_CASE(public_sponsorship_requires_explicit_finite_safety_limits)
     BOOST_CHECK(!ValidateProviderSafetyPolicy(safety, advertised, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_SAFETY_LIMITS");
 
+    safety.public_sponsored = SafetyLimits();
+    safety.public_sponsored.maximum_network_fee_per_day =
+        DGBSatoshis{MAX_MONEY + 1};
+    BOOST_CHECK(!ValidateProviderSafetyPolicy(safety, advertised, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_SAFETY_LIMITS");
+
     ProviderPolicy user_paid_only = advertised;
     user_paid_only.funding_models = FUNDING_MODEL_USER_PAID;
     safety.public_sponsored = {};
@@ -1131,7 +1126,6 @@ BOOST_AUTO_TEST_CASE(provider_quote_request_rate_is_monotonic_persistent_and_ide
     ProviderSafetyPolicy safety = SafetyPolicy(SafetyLimits());
     safety.maximum_quote_requests_per_netgroup_per_minute = 2;
     ProviderBudgetLedger ledger = ProviderLedger();
-    ledger.version = ProviderBudgetLedger::LEGACY_VERSION;
     const std::vector<unsigned char> first_canonical_group{1, 10, 20};
     const std::vector<unsigned char> second_canonical_group{1, 10, 21};
     const uint256 first_group = GetNetgroupBudgetBucket(
@@ -1145,6 +1139,14 @@ BOOST_AUTO_TEST_CASE(provider_quote_request_rate_is_monotonic_persistent_and_ide
     BOOST_CHECK(GetNetgroupBudgetBucket(restarted_bucket_ledger,
                                         second_canonical_group) != first_group);
     std::string error;
+
+    ProviderBudgetLedger outdated{ledger};
+    --outdated.version;
+    const uint256 outdated_hash{SerializedPaymasterHash(outdated)};
+    BOOST_CHECK(!RecordProviderQuoteRequest(
+        outdated, safety, uint256S("d0"), first_group, 999, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER");
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(outdated), outdated_hash);
 
     BOOST_REQUIRE(RecordProviderQuoteRequest(
         ledger, safety, uint256S("d1"), first_group, 1000, error));

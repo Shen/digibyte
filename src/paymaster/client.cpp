@@ -27,6 +27,25 @@ bool IsP2TR(const CScript& script)
 
 } // namespace
 
+bool IsEndpointAllowedForPrivacyProfile(
+    const CService& endpoint,
+    PrivacyProfile privacy_profile,
+    bool allow_local_endpoint)
+{
+    if (!endpoint.IsValid() ||
+        (!endpoint.IsRoutable() &&
+         !(allow_local_endpoint && endpoint.IsLocal()))) {
+        return false;
+    }
+    switch (privacy_profile) {
+    case PrivacyProfile::STANDARD:
+        return true;
+    case PrivacyProfile::HIGH:
+        return endpoint.IsTor();
+    }
+    return false;
+}
+
 std::optional<PaymentIntent> BuildUnsignedPaymentIntent(
     const OfferCandidate& offer,
     const PaymentIntentParameters& parameters,

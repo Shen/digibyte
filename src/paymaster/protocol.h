@@ -64,7 +64,6 @@ struct UserInputControlProof {
 
 struct PaymentIntent {
     static constexpr uint16_t CURRENT_VERSION{2};
-    static constexpr uint16_t LEGACY_VERSION{1};
 
     uint16_t version{CURRENT_VERSION};
     uint256 genesis_hash;
@@ -100,13 +99,11 @@ struct PaymentIntent {
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),
                   obj.policy_hash, obj.sponsorship_authorization_hash,
-                  obj.expires_at, obj.user_input_proofs);
-        if (obj.version >= 2) {
-            READWRITE(obj.canonical_request_hash,
-                      Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.requested_fee_mode),
-                      Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
-                      Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection_mode));
-        }
+                  obj.expires_at, obj.user_input_proofs,
+                  obj.canonical_request_hash,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.requested_fee_mode),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection_mode));
     }
 };
 

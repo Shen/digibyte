@@ -35,6 +35,40 @@ provider can retain data it necessarily receives, and can later publish the
 exact transaction that the client already authorized. Local wallet compromise,
 malicious release artifacts, and key theft are outside this threat model.
 
+### Local metadata and retention
+
+Wallet encryption protects private-key use; it must not be interpreted as
+encryption of every value in the wallet database. Paymaster restart and
+recovery records can contain provider endpoints, canonical requests and
+responses, authorization manifests, unsigned and signed PSBTs, final
+transactions, timing information, and links between attempts. High-privacy
+mode protects the network path and suppresses endpoint-bearing logs, but it
+does not add field-level encryption to these durable wallet records.
+
+Treat the wallet file, full-wallet backups, storage snapshots, and diagnostic
+archives as sensitive metadata even when private keys are encrypted. Do not
+attach them to public issue reports. The secret restricted-sponsorship
+capability is deliberately removed before a quote request is persisted; only
+its cryptographic binding is retained.
+
+These records are retained while they can still be needed for exact retry,
+budget accounting, conflict handling, or recovery. Once an observed final
+transaction reaches the 240-block reorganization safety depth, reconciliation
+replaces an eligible final session and its validated children with a compact
+idempotency tombstone. The tombstone still retains the minimum fields needed
+to prevent a conflicting reuse, including the request/session binding, final
+state and transaction identifier, fee modes, and local payment-order flags.
+Unconfirmed, ambiguous, conflicting, or unreadable records are not deleted
+automatically. Stopping Paymaster, locking the wallet, or disabling the feature
+does not erase durable records. Do not edit or delete Paymaster database keys
+manually; there is intentionally no destructive reset RPC.
+
+An unreadable input-reservation record remains conservatively reserved. If the
+provider-pool safety record cannot be decoded, automatic wallet coin selection
+offers no inputs instead of treating an unknown pool as empty. Preserve the
+wallet and diagnose or replace the development Paymaster data; do not work
+around this condition by editing individual database keys.
+
 ## Node requirements
 
 Discovery, relay, and client support default to `-paymaster=1`; use
@@ -48,6 +82,10 @@ prune=0
 txindex=1
 v2transport=1
 ```
+
+The Paymaster P2P handshake, directory exchange, announcements, and direct
+session messages all remain inactive until the shared DigiDollar activation
+gate is active at the current chain tip.
 
 The wallet requires `txindex` to be fully synchronized before it creates a
 quote or a new Paymaster signature. Discovery and relay remain available to
@@ -181,6 +219,12 @@ merely accepted to the mempool; it becomes final only after confirmation.
 
 ## Capacity and signing firewalls
 
+Relayed admission reserves are checked against both the active UTXO view and
+the current mempool; an outpoint already used by a mempool transaction is not
+advertised as available capacity. Directory replies copy at most the requested
+bounded subset and rotate their starting point so a directory larger than one
+reply is not permanently truncated to the same providers.
+
 Before sending a payment intent, user DD outpoints, or a restricted capability,
 the client sends `PMCAPREQ` and validates `PMCAPRESP`. The response binds the
 genesis, provider and request IDs, client nonce, reference block, expiry, and
@@ -194,6 +238,11 @@ equivocation evidence and block that provider locally. A proof cannot be reused
 for contradictory local sessions. Exact protocol retries are idempotent;
 reusing the same semantic message identity with different content is rejected,
 even when it arrives over another peer connection.
+
+The isolated channel is directional: the outbound client half sends only
+Capacity, quote, submit, and recovery requests, while the accepted provider
+half sends only their corresponding responses. Both send and receive paths
+enforce that classification before a payload can enter the shared inbox.
 
 Before an inbox message is acknowledged or subjected to the deeper chainstate
 or PSBT firewall, the first valid identity-signed Capacity or quote claim is
@@ -325,9 +374,10 @@ Provider runtime preferences are persisted in the provider wallet:
 - `operation_mode=manual` is an expert mode. Core keeps the provider reachable,
   but the operator explicitly invokes the processing RPCs. A mode change is
   accepted only while the provider is stopped.
-- `autostart=false` is the default, including migration of existing provider
-  records. Enabling autostart permits an already configured wallet to start its
-  provider runtime when readiness permits after load. No passphrase is stored.
+- `autostart=false` is the default for current-format provider settings.
+  Enabling autostart permits an already configured wallet to start its provider
+  runtime when readiness permits after load. Older settings records are rejected
+  rather than migrated or overwritten. No passphrase is stored.
 
 An encrypted, locked provider wallet does not consume queued work or create new
 signatures. The automatic service reports `waiting_for_unlock` and continues
@@ -381,8 +431,9 @@ The provider lifecycle is deliberately staged:
    rolling-hour, and rolling-day fee limits.
 8. Keep the recommended automatic runtime, or while stopped use
    `setpaymasterruntimesettings` to select manual expert operation and/or opt in
-   to autostart. Legacy settings records migrate to `automatic` with autostart
-   off.
+   to autostart. Paymaster settings must use the current persisted format;
+   older development records are not migrated and must be replaced together
+   with the development Paymaster data before provider operation can continue.
 9. Inspect `getpaymasterinfo`, `getpaymasterpoolinfo`,
    `getpaymastersafetystatus`, `getpaymasterliquiditystatus`, and
    `getpaymasterfinancestatus`, review the effective finite budgets, and
@@ -458,9 +509,10 @@ sponsored and restricted sponsored operation. Native DD and DGB values are
 authoritative. When a
 current Oracle price exists, the RPC and Qt may show a current-price USD
 estimate and its valuation time; no historical exchange rate is invented.
-Migration reconstructs exact older events only when durable wallet records
-still prove their amounts. The result explicitly marks earlier history as
-partially reconstructable otherwise.
+Accounting reconciliation derives an event only from current-format durable
+wallet records that still prove its exact native amounts. It never upgrades an
+older record format or estimates missing amounts; the result marks any earlier
+unprovable history as partial.
 
 The Finances page links to the existing preview-first carrier-withdrawal,
 carrier-release, DGB-retirement and liquidity-preparation controls. Preview and
@@ -483,6 +535,14 @@ acknowledgepaymasterproviderbackup {"external_backup":true}
 That acknowledgement does not create or validate a backup and must never be
 used for seed-only or descriptor-only exports. Existing downgrade protection
 through `WALLET_FLAG_PAYMASTER_AUTHORIZATION` remains unchanged.
+
+A complete backup necessarily includes the durable Paymaster metadata and
+signed artifacts described above. Wallet key encryption alone does not imply
+field-level encryption of that metadata. Store and transport backup files with
+access controls appropriate for transaction history and provider-relationship
+data, keep only the required generations, and securely retire obsolete copies
+according to the operator's backup policy. Never use CSV finance export as a
+substitute for this backup or as a source for recovery.
 
 `setpaymasterruntimesettings` accepts an object containing
 `operation_mode` (`automatic` or `manual`) and/or `autostart` (boolean).
@@ -528,9 +588,10 @@ The successor provenance is persisted with the provider commit or maintenance
 operation that created it. After the required confirmation it becomes
 `AVAILABLE`; a reorg moves it back to `PENDING_SUCCESSOR`, and a conflicting or
 otherwise unusable output becomes `INVALIDATED`. Startup reconciliation is
-idempotent and also reconstructs still-unspent successors from older confirmed
-provider commits. Only active pool states protect funds from ordinary wallet
-coin selection; `RELEASED` and `INVALIDATED` entries do not.
+idempotent and can reconstruct still-unspent successors from previously
+confirmed current-format provider commits. Only active pool states protect
+funds from ordinary wallet coin selection; `RELEASED` and `INVALIDATED` entries
+do not.
 
 `ProviderLiquidityPolicy` is wallet local and controls:
 
@@ -723,6 +784,11 @@ identifiers, descriptors, capabilities, PSBTs, recovery transactions, and key
 material in either node's `debug.log`. Session responses expose authoritative
 `session_state`, `pending_phase`, `final`, `broadcast_state`, and
 `confirmation_state` fields.
+
+SOCKS authentication values used for stream isolation are never logged.
+Connections opened for high-privacy Paymaster operation also redact the target
+host and port from proxy success and failure messages. This log protection does
+not reduce the sensitivity of the wallet database or its backups.
 
 All Paymaster clients require `-v2transport=1`; a direct Paymaster connection
 never falls back to plaintext P2P v1. High privacy additionally requires an

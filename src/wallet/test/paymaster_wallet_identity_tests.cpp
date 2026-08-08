@@ -46,16 +46,14 @@ private:
     const std::chrono::seconds m_previous;
 };
 
-/** On-disk shape used by provider settings before automatic servicing was
- * introduced. Keep this local to the migration test so production code never
- * gains a second legacy writer. */
-struct LegacyProviderSettingsV1 {
+/** Authentic shortened provider-settings v1 disk shape. */
+struct ProviderSettingsV1 {
     uint16_t version{1};
     bool enabled{false};
     uint256 policy_hash;
     int64_t updated_at{0};
 
-    SERIALIZE_METHODS(LegacyProviderSettingsV1, obj)
+    SERIALIZE_METHODS(ProviderSettingsV1, obj)
     {
         READWRITE(obj.version, obj.enabled, obj.policy_hash, obj.updated_at);
     }
@@ -143,6 +141,41 @@ BOOST_AUTO_TEST_CASE(paymaster_dd_reservations_are_owned_but_not_spendable)
     BOOST_CHECK_EQUAL(released.paymaster_reserved, 0);
 }
 
+BOOST_AUTO_TEST_CASE(unreadable_paymaster_locks_fail_closed_for_coin_selection)
+{
+    const COutPoint reserved_input{uint256S("05"), 0};
+    InputReservation reservation;
+    reservation.version = 0;
+    reservation.outpoint = reserved_input;
+    reservation.request_id = "550e8400-e29b-41d4-a716-446655440098";
+    reservation.session_id = uint256S("06");
+    reservation.created_at = 1;
+    {
+        auto batch = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(batch->Write(
+            std::make_pair(DBKeys::PAYMASTER_RESERVATION, reserved_input),
+            reservation));
+    }
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, reserved_input));
+
+    ProviderPoolEntry outdated_pool_entry;
+    outdated_pool_entry.version = 1;
+    outdated_pool_entry.outpoint = COutPoint{uint256S("07"), 0};
+    outdated_pool_entry.state = PoolEntryState::AVAILABLE;
+    {
+        auto batch = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(batch->Write(
+            DBKeys::PAYMASTER_PROVIDER_POOL,
+            std::vector<ProviderPoolEntry>{outdated_pool_entry}));
+    }
+    std::set<COutPoint> pool_inputs;
+    BOOST_CHECK(GetPaymasterProviderPoolInputs(m_wallet, pool_inputs) ==
+                DatabaseReadStatus::UNSUPPORTED_VERSION);
+    BOOST_CHECK(pool_inputs.empty());
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet,
+                                         outdated_pool_entry.outpoint));
+}
+
 BOOST_AUTO_TEST_CASE(legacy_wallet_is_rejected)
 {
     ProviderIdentityRecord identity;
@@ -151,61 +184,89 @@ BOOST_AUTO_TEST_CASE(legacy_wallet_is_rejected)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_REQUIRES_DESCRIPTOR_WALLET");
 }
 
-BOOST_AUTO_TEST_CASE(provider_runtime_settings_migrate_persist_and_fail_closed)
+BOOST_AUTO_TEST_CASE(provider_runtime_settings_are_current_only_and_fail_closed)
 {
-    constexpr int64_t legacy_update_time{100};
+    constexpr int64_t base_time{100};
     const uint256 policy_hash{uint256S("01")};
     {
-        LegacyProviderSettingsV1 legacy;
-        legacy.enabled = true;
-        legacy.policy_hash = policy_hash;
-        legacy.updated_at = legacy_update_time;
+        ProviderSettingsV1 outdated;
+        outdated.enabled = true;
+        outdated.policy_hash = policy_hash;
+        outdated.updated_at = base_time;
         auto batch = m_wallet.GetDatabase().MakeBatch();
-        BOOST_REQUIRE(batch->Write(DBKeys::PAYMASTER_SETTINGS, legacy));
+        BOOST_REQUIRE(batch->Write(DBKeys::PAYMASTER_SETTINGS, outdated));
     }
 
     ProviderSettings settings;
-    BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, settings));
-    BOOST_CHECK_EQUAL(settings.version, ProviderSettings::CURRENT_VERSION);
-    BOOST_CHECK(settings.enabled);
-    BOOST_CHECK_EQUAL(settings.policy_hash, policy_hash);
-    BOOST_CHECK_EQUAL(settings.updated_at, legacy_update_time);
-    BOOST_CHECK(settings.operation_mode == ProviderOperationMode::AUTOMATIC);
-    BOOST_CHECK(!settings.autostart);
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_CHECK(batch.ReadPaymasterSettingsWithStatus(settings) ==
+                    DatabaseReadStatus::UNSUPPORTED_VERSION);
+        BOOST_CHECK_EQUAL(settings.version, 1U);
+    }
+    BOOST_CHECK(!GetPaymasterProviderSettings(m_wallet, settings));
 
     std::string error;
+    const auto before_outdated =
+        GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!SetPaymasterProviderRuntimeSettings(
+        m_wallet, ProviderOperationMode::MANUAL, true,
+        base_time + 1, error));
+    BOOST_CHECK_EQUAL(
+        error,
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=ProviderSettings found=1 expected=2");
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_outdated);
+    BOOST_CHECK(!SetPaymasterProviderEnabled(
+        m_wallet, false, base_time + 1, error));
+    BOOST_CHECK_EQUAL(
+        error,
+        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=ProviderSettings found=1 expected=2");
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_outdated);
+
+    settings = {};
+    settings.enabled = false;
+    settings.policy_hash = policy_hash;
+    settings.updated_at = base_time;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}
+                          .WritePaymasterSettings(settings));
+    }
+    BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, settings));
+
     BOOST_CHECK(!SetPaymasterProviderRuntimeSettings(
         m_wallet, static_cast<ProviderOperationMode>(255), true,
-        legacy_update_time + 1, error));
+        base_time + 1, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_OPERATION_MODE");
     BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, settings));
     BOOST_CHECK(settings.operation_mode == ProviderOperationMode::AUTOMATIC);
     BOOST_CHECK(!settings.autostart);
-    BOOST_CHECK_EQUAL(settings.updated_at, legacy_update_time);
+    BOOST_CHECK_EQUAL(settings.updated_at, base_time);
 
     BOOST_REQUIRE_MESSAGE(SetPaymasterProviderRuntimeSettings(
                               m_wallet, ProviderOperationMode::MANUAL, true,
-                              legacy_update_time + 2, error),
+                              base_time + 2, error),
                           error);
     BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, settings));
     BOOST_CHECK(settings.operation_mode == ProviderOperationMode::MANUAL);
     BOOST_CHECK(settings.autostart);
-    BOOST_CHECK_EQUAL(settings.updated_at, legacy_update_time + 2);
+    BOOST_CHECK_EQUAL(settings.updated_at, base_time + 2);
 
     BOOST_REQUIRE_MESSAGE(SetPaymasterProviderRuntimeSettings(
                               m_wallet, ProviderOperationMode::AUTOMATIC,
-                              false, legacy_update_time + 3, error),
+                              false, base_time + 3, error),
                           error);
     BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, settings));
     BOOST_CHECK(settings.operation_mode == ProviderOperationMode::AUTOMATIC);
     BOOST_CHECK(!settings.autostart);
-    BOOST_CHECK_EQUAL(settings.updated_at, legacy_update_time + 3);
+    BOOST_CHECK_EQUAL(settings.updated_at, base_time + 3);
 
     {
         RawProviderSettingsV2 malformed;
         malformed.enabled = true;
         malformed.policy_hash = policy_hash;
-        malformed.updated_at = legacy_update_time + 4;
+        malformed.updated_at = base_time + 4;
         malformed.operation_mode = 2;
         malformed.autostart = true;
         auto batch = m_wallet.GetDatabase().MakeBatch();

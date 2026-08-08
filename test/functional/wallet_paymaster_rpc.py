@@ -20,7 +20,11 @@ from test_framework.paymaster import (
     value_snapshot,
 )
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal, assert_raises_rpc_error
+from test_framework.util import (
+    assert_equal,
+    assert_raises_rpc_error,
+    try_rpc,
+)
 
 
 class PaymasterRPCContractsTest(DigiByteTestFramework):
@@ -423,6 +427,12 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             })
             return policy
 
+        def set_liquidity_policy_when_idle(policy):
+            """Wait for bounded in-flight work after stopping the provider."""
+            self.wait_until(lambda: not try_rpc(
+                -4, "PAYMASTER_PROVIDER_BUSY",
+                provider.setpaymasterliquiditypolicy, policy))
+
         def release_operational_carrier():
             """Release exactly one confirmed operational carrier and target."""
             entry = next(
@@ -478,7 +488,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
         self.log.info(
             "Automatic carrier maintenance creates one durable replacement")
-        provider.setpaymasterliquiditypolicy(carrier_policy())
+        set_liquidity_policy_when_idle(carrier_policy())
         maintenance_start = provider.startpaymaster()
         assert_equal(maintenance_start["running"], True)
         assert_equal(maintenance_start["ready"], False)
@@ -561,8 +571,12 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.log.info(
             "Rolling maintenance budget blocks a second paid replacement")
         assert_equal(provider.stoppaymaster()["running"], False)
+        # Stop rejects new work but deliberately lets a bounded scheduler step
+        # release its exclusive guard.  Use an idempotent policy write as a
+        # barrier before the multi-RPC release sequence.
+        set_liquidity_policy_when_idle(carrier_policy())
         release_operational_carrier()
-        provider.setpaymasterliquiditypolicy(carrier_policy(
+        set_liquidity_policy_when_idle(carrier_policy(
             per_transaction=200_000_000,
             per_hour=200_000_000,
             per_day=200_000_000))
