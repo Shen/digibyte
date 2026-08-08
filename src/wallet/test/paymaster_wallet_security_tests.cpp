@@ -9,8 +9,10 @@
 #include <chainparams.h>
 #include <coins.h>
 #include <hash.h>
+#include <index/txindex.h>
 #include <key.h>
 #include <key_io.h>
+#include <node/transaction.h>
 #include <paymaster/protocol.h>
 #include <paymaster/provider.h>
 #include <paymaster/psbt.h>
@@ -19,6 +21,7 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <test/util/index.h>
 #include <validation.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
@@ -502,6 +505,21 @@ struct PaymasterMempoolTestingSetup : public WalletTestingSetup {
     PaymasterMempoolTestingSetup()
         : WalletTestingSetup{ChainType::REGTEST}
     {
+        BOOST_REQUIRE(!g_txindex);
+        auto txindex = std::make_unique<TxIndex>(
+            interfaces::MakeChain(m_node), 1 << 20,
+            /*f_memory=*/true);
+        BOOST_REQUIRE(txindex->Init());
+        BOOST_REQUIRE(txindex->StartBackgroundSync());
+        g_txindex = std::move(txindex);
+        IndexWaitSynced(*g_txindex);
+    }
+
+    ~PaymasterMempoolTestingSetup()
+    {
+        SyncWithValidationInterfaceQueue();
+        g_txindex->Stop();
+        g_txindex.reset();
     }
 };
 
@@ -2443,9 +2461,8 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         });
     BOOST_CHECK_EQUAL(user_only_report.candidates, 0U);
 
-    // Place the exact transaction in the local mempool without a provider
-    // peer message. Startup recovery must promote the orphan and reconcile
-    // these exact bytes while the key-bearing wallet is locked.
+    // Make the exact final transaction valid for every crash-boundary replay.
+    // The same chainstate coins can be reused after each mempool removal.
     {
         LOCK(::cs_main);
         auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();
@@ -2463,6 +2480,218 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     }
     const CTransactionRef final_ref =
         MakeTransactionRef(final_transaction);
+
+    enum class FinalizationCrashBoundary {
+        AFTER_SIGNATURE,
+        AFTER_DATABASE_COMMIT,
+        AFTER_WALLET_INSERTION,
+        AFTER_BROADCAST,
+    };
+    struct CrashBoundaryCase {
+        FinalizationCrashBoundary boundary;
+        const char* name;
+    };
+    const std::vector<CrashBoundaryCase> crash_boundaries{
+        {FinalizationCrashBoundary::AFTER_SIGNATURE, "after-signature"},
+        {FinalizationCrashBoundary::AFTER_DATABASE_COMMIT,
+         "after-database-commit"},
+        {FinalizationCrashBoundary::AFTER_WALLET_INSERTION,
+         "after-wallet-insertion"},
+        {FinalizationCrashBoundary::AFTER_BROADCAST, "after-broadcast"},
+    };
+    const MockableData signature_boundary_records = database.m_records;
+    for (const CrashBoundaryCase& crash_case : crash_boundaries) {
+        BOOST_TEST_CONTEXT("crash boundary=" << crash_case.name)
+        {
+            std::unique_ptr<WalletDatabase> restart_database;
+            {
+                auto boundary_database =
+                    std::make_unique<MockableDatabase>(
+                        signature_boundary_records);
+                wallet::CWallet boundary_wallet{
+                    m_node.chain.get(), crash_case.name,
+                    std::move(boundary_database)};
+                BOOST_REQUIRE(boundary_wallet.LoadWallet() ==
+                              DBErrors::LOAD_OK);
+                PaymasterStore boundary_store{boundary_wallet};
+
+                const bool database_committed =
+                    crash_case.boundary !=
+                    FinalizationCrashBoundary::AFTER_SIGNATURE;
+                if (database_committed) {
+                    BOOST_REQUIRE_MESSAGE(
+                        boundary_store.CommitProviderFinalTransaction(
+                            request_id, provider_signed.attempt_id, commit,
+                            result, result.genesis_hash, error),
+                        error);
+                }
+
+                const bool wallet_inserted =
+                    crash_case.boundary ==
+                        FinalizationCrashBoundary::AFTER_WALLET_INSERTION ||
+                    crash_case.boundary ==
+                        FinalizationCrashBoundary::AFTER_BROADCAST;
+                if (wallet_inserted) {
+                    LOCK(boundary_wallet.cs_wallet);
+                    BOOST_REQUIRE(boundary_wallet.AddToWallet(
+                        final_ref, TxStateInactive{},
+                        [](CWalletTx& wallet_tx, bool) {
+                            wallet_tx.fTimeReceivedIsTxTime = true;
+                            wallet_tx.fFromMe = true;
+                            wallet_tx.mapValue["paymaster_durable_commit"] =
+                                "1";
+                            return true;
+                        }));
+                }
+
+                const bool broadcast =
+                    crash_case.boundary ==
+                    FinalizationCrashBoundary::AFTER_BROADCAST;
+                if (broadcast) {
+                    std::string broadcast_error;
+                    BOOST_REQUIRE(
+                        node::BroadcastTransaction(
+                            m_node, final_ref, broadcast_error,
+                            /*max_tx_fee=*/0, /*relay=*/true,
+                            /*wait_callback=*/false) ==
+                        TransactionError::OK);
+                }
+
+                ProviderCommitRecord boundary_commit;
+                BOOST_CHECK_EQUAL(
+                    boundary_store.GetProviderCommit(
+                        provider_signed.commit_key, boundary_commit),
+                    database_committed);
+                {
+                    LOCK(boundary_wallet.cs_wallet);
+                    BOOST_CHECK_EQUAL(
+                        boundary_wallet.GetWalletTx(
+                            provider_signed.final_txid) != nullptr,
+                        wallet_inserted);
+                }
+                const bool mempool_contains_final = WITH_LOCK(
+                    ::cs_main,
+                    return m_node.mempool->get(
+                               provider_signed.final_txid) != nullptr);
+                BOOST_CHECK_EQUAL(mempool_contains_final, broadcast);
+
+                // This database copy is the simulated abrupt process stop:
+                // only records durable at the selected boundary survive.
+                restart_database =
+                    DuplicateMockDatabase(boundary_wallet.GetDatabase());
+            }
+
+            wallet::CWallet restarted_boundary_wallet{
+                m_node.chain.get(),
+                std::string{"restart-"} + crash_case.name,
+                std::move(restart_database)};
+            BOOST_REQUIRE(restarted_boundary_wallet.LoadWallet() ==
+                          DBErrors::LOAD_OK);
+            PaymasterStore restarted_boundary_store{
+                restarted_boundary_wallet};
+            const DurablePaymasterRecoveryReport boundary_recovery =
+                RecoverDurablePaymasterCommits(
+                    restarted_boundary_wallet, commit.committed_at);
+            BOOST_CHECK_EQUAL(boundary_recovery.candidates, 1U);
+            BOOST_CHECK_EQUAL(boundary_recovery.recovered, 1U);
+            BOOST_CHECK_EQUAL(boundary_recovery.already_confirmed, 0U);
+            const std::string boundary_error =
+                boundary_recovery.errors.empty() ? "unexpected empty recovery diagnostic" : boundary_recovery.errors.front();
+            BOOST_CHECK_MESSAGE(
+                boundary_recovery.errors.empty(), boundary_error);
+
+            ProviderCommitRecord recovered_commit;
+            BOOST_REQUIRE(restarted_boundary_store.GetProviderCommit(
+                provider_signed.commit_key, recovered_commit));
+            BOOST_CHECK(SerializePaymasterSecurityObject(recovered_commit) ==
+                        SerializePaymasterSecurityObject(commit));
+            PaymasterResult recovered_result;
+            BOOST_REQUIRE(restarted_boundary_store.GetProviderResult(
+                provider_signed.commit_key, recovered_result));
+            BOOST_CHECK(SerializePaymasterSecurityObject(recovered_result) ==
+                        SerializePaymasterSecurityObject(result));
+            ProviderAttempt recovered_attempt;
+            BOOST_REQUIRE(restarted_boundary_store.GetAttempt(
+                provider_signed.attempt_id, recovered_attempt));
+            BOOST_CHECK(recovered_attempt.state == AttemptState::MEMPOOL);
+            BOOST_CHECK(recovered_attempt.provider_signed_result ==
+                        provider_signed.provider_signed_result);
+
+            {
+                LOCK(restarted_boundary_wallet.cs_wallet);
+                const CWalletTx* recovered_wallet_tx =
+                    restarted_boundary_wallet.GetWalletTx(
+                        provider_signed.final_txid);
+                BOOST_REQUIRE(recovered_wallet_tx != nullptr);
+                BOOST_CHECK(
+                    SerializePaymasterSecurityObject(
+                        *recovered_wallet_tx->tx) ==
+                    SerializePaymasterSecurityObject(*final_ref));
+                BOOST_CHECK_EQUAL(
+                    recovered_wallet_tx
+                        ->mapValue.at("paymaster_durable_commit"),
+                    "1");
+            }
+
+            ProviderBudgetLedger recovered_ledger;
+            std::vector<ProviderPoolEntry> recovered_pool;
+            BOOST_REQUIRE(ReadProviderSecurityState(
+                restarted_boundary_wallet, recovered_ledger,
+                recovered_pool));
+            BOOST_CHECK_EQUAL(
+                std::count_if(
+                    recovered_ledger.reservations.begin(),
+                    recovered_ledger.reservations.end(),
+                    [&](const ProviderBudgetReservation& reservation) {
+                        return reservation.commit_key ==
+                               provider_signed.commit_key;
+                    }),
+                1U);
+            const ProviderBudgetReservation* recovered_reservation =
+                FindBudgetReservation(
+                    recovered_ledger, provider_signed.commit_key);
+            BOOST_REQUIRE(recovered_reservation != nullptr);
+            BOOST_CHECK(recovered_reservation->state ==
+                        BudgetReservationState::SPENT);
+            BOOST_REQUIRE_EQUAL(recovered_pool.size(), 1U);
+            BOOST_CHECK(recovered_pool.front().state ==
+                        PoolEntryState::COMMITTED);
+
+            // A second startup pass must be an exact, accounting-neutral
+            // replay and must never produce another signature or winner.
+            const DurablePaymasterRecoveryReport retry_recovery =
+                RecoverDurablePaymasterCommits(
+                    restarted_boundary_wallet, commit.committed_at + 1);
+            BOOST_CHECK_EQUAL(retry_recovery.candidates, 1U);
+            BOOST_CHECK_EQUAL(retry_recovery.recovered, 1U);
+            BOOST_CHECK(retry_recovery.errors.empty());
+            PaymasterResult retried_result;
+            BOOST_REQUIRE(restarted_boundary_store.GetProviderResult(
+                provider_signed.commit_key, retried_result));
+            BOOST_CHECK(SerializePaymasterSecurityObject(retried_result) ==
+                        SerializePaymasterSecurityObject(result));
+            BOOST_REQUIRE(ReadProviderSecurityState(
+                restarted_boundary_wallet, recovered_ledger,
+                recovered_pool));
+            BOOST_CHECK_EQUAL(
+                std::count_if(
+                    recovered_ledger.reservations.begin(),
+                    recovered_ledger.reservations.end(),
+                    [&](const ProviderBudgetReservation& reservation) {
+                        return reservation.commit_key ==
+                               provider_signed.commit_key;
+                    }),
+                1U);
+
+            WITH_LOCK(m_node.mempool->cs,
+                      m_node.mempool->removeRecursive(
+                          *final_ref, MemPoolRemovalReason::CONFLICT));
+        }
+    }
+
+    // Place the exact transaction in the local mempool without a provider
+    // peer message. Startup recovery must promote the orphan and reconcile
+    // these exact bytes while the key-bearing wallet is locked.
     const MempoolAcceptResult accepted = WITH_LOCK(
         ::cs_main,
         return m_node.chainman->ProcessTransaction(

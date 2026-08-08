@@ -27,6 +27,7 @@ on:
       - 'src/wallet/rpc/paymaster*.cpp'
       - 'src/wallet/rpc/paymaster*.h'
       - 'src/wallet/spend.cpp'
+      - 'src/wallet/test/fuzz/paymaster_*.cpp'
       - 'src/wallet/test/paymaster_*.cpp'
       - 'src/wallet/walletdb.cpp'
       - 'src/wallet/walletdb.h'
@@ -155,7 +156,8 @@ jobs:
           for target in \
             paymaster_wire_envelopes \
             paymaster_stateful_security \
-            paymaster_pool_lifecycle
+            paymaster_pool_lifecycle \
+            paymaster_persistence_records
           do
             corpus="${RUNNER_TEMP}/paymaster-corpus/${target}"
             mkdir -p "$corpus"

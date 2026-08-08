@@ -1440,7 +1440,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records |
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs and signing only the requested collaborative input role |
 | `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records |
-| `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, crash windows, final-witness validation, and malicious client/provider persistence failures |
+| `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, and malicious client/provider persistence failures |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |
@@ -1550,10 +1550,11 @@ compatibility but is a legacy/superseded scaffold; the live oracle P2P proof is
 | `wallet_digidollar_transfer_reorg.py` | DD transfer reorg replay |
 | `wallet_digidollar_wave16_load_rescan.py` | Wave 16 wallet load/rescan persistence coverage |
 
-### Fuzz Targets (`src/test/fuzz/`)
+### Fuzz Targets (`src/test/fuzz/`, `src/wallet/test/fuzz/`)
 
-Wave 23 registered 247 total fuzz targets in the active fuzz binary. Of those,
-52 target names currently match DigiDollar/oracle/MuSig2/DD surfaces. The tree
+Wave 23 plus the Paymaster persistence target register 248 total fuzz targets
+in the active wallet-enabled fuzz binary. Of those, 53 target names currently
+match DigiDollar/oracle/MuSig2/DD surfaces. The tree
 contains additional DD/oracle fuzz source files and helpers; authoritative
 target registration is the `PRINT_ALL_FUZZ_TARGETS_AND_ABORT=1` output from
 `src/test/fuzz/fuzz` plus `src/Makefile.test.include`.
@@ -1581,13 +1582,14 @@ Current Paymaster fuzz source inventory:
 | `paymaster_pool_lifecycle.cpp` | Stateful provider-pool and maintenance-ledger operation ordering, successor creation/confirmation/reorg/conflict, restart serialization, target accounting, withdrawal binding, and duplicate-operation resistance |
 | `paymaster_wire.cpp` | Announcement and all direct-message deserialization plus bounded envelope-validation paths |
 | `paymaster_stateful.cpp` | Stateful Capacity → Intent → Quote → Submit → Result → Recovery transitions, budgets, replay, and timestamp/amount boundaries |
+| `wallet/test/fuzz/paymaster_persistence.cpp` | Raw wallet-record decoding across all 35 status-aware Paymaster codecs plus property mutations for session-id, template-commitment, and unsigned-txid referential integrity |
 
 ### Paymaster Assurance Workflows (`.github/workflows/`)
 
 | File | Coverage Area |
 |------|--------------|
 | `codeql.yml` | Wallet-enabled C++ CodeQL build of `test_digibyte`, including Paymaster wallet, persistence, provider, and RPC translation units |
-| `paymaster-security.yml` | Pull-request/weekly ASan+UBSan run of the 16 Paymaster unit suites and scheduled/manual campaigns for the three Paymaster fuzz targets |
+| `paymaster-security.yml` | Pull-request/weekly ASan+UBSan run of the 16 Paymaster unit suites and scheduled/manual campaigns for the four Paymaster fuzz targets |
 | `dependency-review.yml` | Pull-request dependency-diff review with high-severity failure threshold |
 | `sbom.yml` | Release/manual export of the repository dependency graph as SPDX JSON |
 
