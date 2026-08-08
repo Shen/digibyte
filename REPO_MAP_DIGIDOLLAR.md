@@ -1,6 +1,6 @@
 # REPO_MAP_DIGIDOLLAR.md — DigiDollar, Oracle, and Paymaster Subsystems v9.26.5
 
-*Last updated: 2026-07-30 (v9.26.5 / `feature/digidollar-paymaster-v1`)*
+*Last updated: 2026-08-08 (v9.26.5 / `feature/digidollar-paymaster-v1`)*
 
 This is the granular file index for DigiDollar, Oracle, and Paymaster source code. Read `DIGIDOLLAR_ARCHITECTURE.md`, `DIGIDOLLAR_ORACLE_ARCHITECTURE.md`, and `DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md` first for system design context. The implementation status of all 28 Paymaster V1 acceptance criteria is tracked in `doc/digidollar-paymaster-release-gate.md`.
 
@@ -1455,18 +1455,23 @@ present in the tree but not compiled into the current unit-test binary.
 
 ### Python Functional Tests (`test/functional/`)
 
-Authoritative registration is `test/functional/test_runner.py:261-340`.
-As of the Wave 23 rerun the standard runner contains 80 DD/oracle/wallet
-functional entries. `feature_oracle_p2p.py` remains registered for historical
-compatibility but is a legacy/superseded scaffold; the live oracle P2P proof is
-`digidollar_wave20_oracle_p2p.py`.
+Authoritative registration is the `BASE_SCRIPTS` list in
+`test/functional/test_runner.py`. `feature_oracle_p2p.py` remains registered
+for historical compatibility but is a legacy/superseded scaffold; the live
+oracle P2P proof is `digidollar_wave20_oracle_p2p.py`.
 
 | File | Coverage Area |
 |------|--------------|
 | `wallet_paymaster_readiness.py` | Pre-session client/provider rejection with disabled Paymaster or inactive DigiDollar, pruning, missing txindex or BIP324, and unsafe high-privacy logging/proxy/capture configuration |
 | `wallet_paymaster_lifecycle.py` | Authorized-submit restart recovery plus automatic DGB/carrier replenishment, pending-target accounting, restart idempotency, locked-wallet autostart pause, unlock continuation, confirmation promotion, and absence of duplicate maintenance transactions |
 | `wallet_paymaster_rpc.py` | Direct RPC contracts plus automatic carrier-maintenance gates: deliberate zero target, disabled automation, missing paid-maintenance approval, exactly one pending replacement, restart without duplication, confirmation promotion, and rolling-budget exhaustion without another transaction |
-| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public/restricted sponsorship, provider-finance periods/pagination/native accounting and backup acknowledgement, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, and production-log redaction of payment artifacts |
+| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public/restricted sponsorship, provider-finance periods/pagination/native accounting and backup acknowledgement, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, production-log redaction of payment artifacts, and optional official-pre-Paymaster third-node relay/validation with no Paymaster-announcement traffic |
+| `wallet_paymaster_offer_selection.py` | Three independent current-version daemons with two differently priced USER_PAID providers and one DGB-less client; verifies both visible offers, exact-total ordering, monotonic price replacements, stale-announcement expiry/fresh refresh, automatic cheapest selection, selected-provider-only capacity/intent/reservations, one completed transfer, and no pool/budget/finance mutation at the unselected provider |
+| `wallet_paymaster_failover.py` | Four current-version daemons with two independent providers, one relay, and two client wallets contending for a single cheap operational slot; verifies explicit pre-signature fallback, immutable DD inputs across providers, sequential direct-channel replacement, the post-user-PSBT no-fallback boundary, exactly one standby-provider payment, and clean release of the unsigned contender |
+| `wallet_paymaster_reorg.py` | Three current-version daemons create a confirmed Paymaster branch and a longer transaction-free competing branch; verifies session `CONFIRMED`→`MEMPOOL` rollback, finance `confirmed`→`pending`, successor liquidity `available`→`pending_successor`, and exact-txid reconfirmation without duplicate finance events |
+| `p2p_paymaster_v9_26_5_bridge.py` | Current provider and client separated only by an official v9.26.5 node; proves ordinary DGB/DD relay and old-node mining, no Paymaster-gossip relay or eligible offer across the old bridge, fail-closed selection, and discovery restoration after a direct current-current link |
+| `wallet_v9_26_5_compatibility.py --legacy-wallet/--descriptors` | Bidirectional official-v9.26.5/current DGB wallet transfers, descriptor-only bidirectional DD transfers, relay to both mempools, identical raw transactions, confirmation by the receiving version, exact wallet accounting/history, raw v9.26.5 wallet-directory loading by the current daemon, preserved encryption/active-DD state, post-upgrade signing and spending, restart persistence, and a non-Paymaster round trip back to v9.26.5 |
+| `wallet_v9_26_5_inplace_upgrade.py` | Official-v9.26.5 descriptor wallets upgraded by replacing the daemon on the unchanged datadir; verifies blocks/Chainstate/txindex, wallet-independent `mempool.dat` loading, encrypted multi-wallet pending DGB/DD state, exact raw transactions and histories, current-version confirmation, active-position redemption, and final restart persistence |
 | `digidollar_activation.py` | Basic activation of DD features at the buried height on regtest (BIP9 signaling lifecycle removed in the v9.26.5 burial) |
 | `digidollar_activation_boundary.py` | Activation edge cases: exact height, off-by-one, pre/post activation behavior |
 | `digidollar_activation_multinode.py` | Multi-node activation state and deployment synchronization |
