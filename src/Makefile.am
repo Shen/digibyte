@@ -375,6 +375,7 @@ DIGIBYTE_CORE_H = \
   wallet/rpc/util.h \
   wallet/rpc/wallet.h \
   wallet/rpc/paymaster.h \
+  wallet/rpc/paymaster_internal.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
   wallet/spend.h \
@@ -387,6 +388,7 @@ DIGIBYTE_CORE_H = \
   wallet/paymasteridentity.h \
   wallet/paymasterprovider.h \
   wallet/paymasterstore.h \
+  wallet/paymasterstore_internal.h \
   wallet/wallettool.h \
   wallet/walletutil.h \
   walletinitinterface.h \
@@ -552,6 +554,12 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/rpc/util.cpp \
   wallet/rpc/wallet.cpp \
   wallet/rpc/paymaster.cpp \
+  wallet/rpc/paymaster_client.cpp \
+  wallet/rpc/paymaster_discovery.cpp \
+  wallet/rpc/paymaster_integration.cpp \
+  wallet/rpc/paymaster_processing.cpp \
+  wallet/rpc/paymaster_provider.cpp \
+  wallet/rpc/paymaster_runtime.cpp \
   wallet/scriptpubkeyman.cpp \
   wallet/spend.cpp \
   wallet/transaction.cpp \
@@ -561,6 +569,12 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/paymasteridentity.cpp \
   wallet/paymasterprovider.cpp \
   wallet/paymasterstore.cpp \
+  wallet/paymasterstore_client.cpp \
+  wallet/paymasterstore_finalization.cpp \
+  wallet/paymasterstore_provider.cpp \
+  wallet/paymasterstore_reconciliation.cpp \
+  wallet/paymasterstore_recovery.cpp \
+  wallet/paymasterstore_reputation.cpp \
   wallet/walletutil.cpp \
   wallet/coinselection.cpp \
   $(DIGIBYTE_CORE_H)

@@ -957,7 +957,7 @@ Authentication Methods:
 | **rawtransaction** | createrawtransaction, signrawtransaction... | rawtransaction.cpp |
 | **wallet** | getnewaddress, sendtoaddress, listunspent... | wallet/rpc/*.cpp |
 | **digidollar** | mintdigidollar, redeemdigidollar, getoracleprice... | digidollar.cpp |
-| **paymaster** | listpaymasters, getpaymasteroffers, session and provider operations... | rpc/digidollar.cpp, wallet/rpc/paymaster.cpp |
+| **paymaster** | listpaymasters, getpaymasteroffers, session and provider operations... | rpc/digidollar.cpp, wallet/rpc/paymaster*.cpp |
 
 ### 11.3 DigiByte-Specific RPC
 
@@ -974,13 +974,13 @@ Authentication Methods:
 | `mintdigidollar` / `senddigidollar` / `redeemdigidollar` (wallet) | `wallet/rpc/wallet.cpp` | DigiDollar mint/transfer/redeem |
 | `setmockoracleprice` / `getmockoracleprice` / `simulatepricevolatility` / `enablemockoracle` | `rpc/digidollar.cpp` | Regtest-only oracle helpers |
 | `listpaymasters` | `rpc/digidollar.cpp` | List locally verified, unexpired announcements |
-| `getpaymasteroffers` / `requestpaymasterquote` | `wallet/rpc/paymaster.cpp` | Select offers and advance a persistent client session |
-| `getdigidollarsendsession` / `resolvepaymastersession` | `wallet/rpc/paymaster.cpp` | Inspect, retry, fall back, or recover a session safely |
-| `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster.cpp` | Configure a wallet-scoped provider and its isolated pools |
-| `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
-| `withdrawpaymastercarrier` | `wallet/rpc/paymaster.cpp` | Preview and execute wallet-owned carrier-excess consolidation or release one stopped-provider carrier slot |
-| `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster.cpp` | Create a non-gossiped provider-signed restricted sponsorship descriptor |
-| `startpaymaster` / `stoppaymaster` / `getpaymasterinfo` | `wallet/rpc/paymaster.cpp` | Operate and inspect an explicitly enabled provider |
+| `getpaymasteroffers` / `requestpaymasterquote` | `wallet/rpc/paymaster_discovery.cpp` | Select offers and advance a persistent client session |
+| `getdigidollarsendsession` / `resolvepaymastersession` | `wallet/rpc/paymaster_client.cpp` | Inspect, retry, fall back, or recover a session safely |
+| `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster_provider.cpp` | Configure a wallet-scoped provider and its isolated pools |
+| `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster_provider.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
+| `withdrawpaymastercarrier` | `wallet/rpc/paymaster_provider.cpp` | Preview and execute wallet-owned carrier-excess consolidation or release one stopped-provider carrier slot |
+| `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster_provider.cpp` | Create a non-gossiped provider-signed restricted sponsorship descriptor |
+| `startpaymaster` / `stoppaymaster` / `getpaymasterinfo` | `wallet/rpc/paymaster_runtime.cpp`, `wallet/rpc/paymaster_provider.cpp` | Operate and inspect an explicitly enabled provider |
 
 Both `sendoracleprice` and `submitoracleprice` are absent from the source tree — `sendoracleprice` was removed as a fake-price-injection vulnerability and `submitoracleprice` never existed. Oracle prices come exclusively from live exchange aggregation. See `REPO_MAP_DIGIDOLLAR.md` for the complete RPC inventory.
 
@@ -1198,7 +1198,7 @@ This avoids rescanning the entire UTXO set for every health check. The ERR syste
 
 **Specification:** [`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
 **Key files:** `src/paymaster/`, `src/wallet/paymaster*.{cpp,h}`,
-`src/wallet/rpc/paymaster.cpp`
+`src/wallet/rpc/paymaster*.{cpp,h}`
 
 The Paymaster Network lets a wallet with confirmed DD but no spendable DGB
 construct a normal `DD_TX_TRANSFER` with a provider supplying the DGB miner-fee
@@ -1583,7 +1583,7 @@ This architecture document has been spot-validated against the active DigiByte C
 | RPC Interface | Verified | `rpc/server.cpp`, `rpc/digidollar.cpp`, `httprpc.cpp`, `wallet/rpc/wallet.cpp` |
 | DigiDollar Stablecoin | Verified | `digidollar/*`, `consensus/dca.cpp`, `consensus/err.cpp` |
 | Oracle System | Verified | `oracle/*`, `primitives/oracle.h` |
-| Paymaster Network | Implemented; release-gate testing in progress | `paymaster/*`, `wallet/paymaster*`, `wallet/rpc/paymaster.cpp`, Qt DD send/provider surfaces |
+| Paymaster Network | Implemented; release-gate testing in progress | `paymaster/*`, `wallet/paymaster*`, `wallet/rpc/paymaster*`, Qt DD send/provider surfaces |
 
 ### Key Verified Constants
 

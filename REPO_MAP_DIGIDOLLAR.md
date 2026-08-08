@@ -731,7 +731,24 @@ or chain parameters.
   funding keeps the full recipient amount; exact-gross inversion is used only
   for an actual Paymaster path.
 
-### src/wallet/rpc/paymaster.{h,cpp}
+### src/wallet/rpc/paymaster*.{h,cpp}
+- `paymaster.cpp` and `paymaster_internal.h` contain private serialization,
+  validation, readiness, accounting, and exact-final helpers shared across the
+  domain translation units; `paymaster.h` remains the public registration and
+  wallet-lifecycle surface.
+- `paymaster_client.cpp` owns persistent session inspection/resolution,
+  alternative recovery, role-limited PSBT processing, submit, and client result
+  handling.
+- `paymaster_discovery.cpp` owns offer discovery, automatic/manual quote
+  selection, reputation, pool inspection, reservations, and quote cancellation.
+- `paymaster_provider.cpp` owns provider identity, policies, safety limits,
+  liquidity preparation/rebalancing/withdrawal, finance reporting, backup
+  acknowledgement, and provider status.
+- `paymaster_processing.cpp` owns the bounded provider handlers for result,
+  submit, Capacity, quote, and recovery messages.
+- `paymaster_runtime.cpp` owns provider start/stop and the automatic service
+  scheduler; `paymaster_integration.cpp` owns wallet reconciliation and durable
+  equivocation-inbox maintenance.
 - Client RPCs expose offers, persistent session status/resolution, reputation,
   quote advancement, role-limited PSBT processing, submit, and result handling.
 - Provider RPCs create the BIP86 identity, configure policy/enablement, prepare
@@ -896,7 +913,21 @@ or chain parameters.
   - `UnSelect(output)` / `UnSelectAll()` → removes selections
   - `ListSelected()` → returns vector of selected outpoints
 
-### src/wallet/paymasterstore.{h,cpp}
+### src/wallet/paymasterstore*.{h,cpp}
+- `paymasterstore.cpp` and `paymasterstore_internal.h` provide shared
+  fail-closed record validation, canonical artifact decoding, Capacity binding,
+  and atomic helper boundaries; `paymasterstore.h` remains the public store API.
+- `paymasterstore_client.cpp` owns client sessions, reservations, Capacity
+  snapshots, intent state, and safe fallback transitions.
+- `paymasterstore_provider.cpp` owns provider quote admission, authorization,
+  expiry, capacity lifecycle, and quote-equivocation state.
+- `paymasterstore_finalization.cpp` owns user authorization, provider commits,
+  exact results, and final client observations.
+- `paymasterstore_recovery.cpp` owns self-recovery and independent-provider
+  recovery state; `paymasterstore_reputation.cpp` owns outcomes, reputation,
+  and durable equivocation evidence.
+- `paymasterstore_reconciliation.cpp` owns exact-final rebroadcast validation,
+  wallet/mempool/reorg reconciliation, and safe pruning.
 - `PaymasterStore` atomically persists sessions, exact append-only attempts,
   reservations, authorizations, provider commits/results, self-recovery raw
   transactions, outcome markers, and permanent idempotency tombstones.

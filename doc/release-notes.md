@@ -101,6 +101,10 @@ script rule, chain parameter, or global Paymaster service bit was added.
 - Persistent sessions, reservations, provider commits, self-recovery records,
   local reputation, and idempotency tombstones protect retry, restart, reorg,
   and duplicate-payment handling.
+- Wallet Paymaster RPC orchestration and durable store transitions are split
+  into domain-specific client, provider, recovery, processing, finance,
+  reputation, reconciliation, and runtime translation units. Their public RPC
+  and wallet-store interfaces are unchanged.
 - Paymaster direct connections require BIP324 v2. High-privacy mode additionally
   requires onion-only operation and Tor stream isolation. These controls reduce
   metadata but do not guarantee anonymity. SOCKS stream-isolation credentials
