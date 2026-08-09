@@ -207,8 +207,10 @@ class PaymasterFunctionalHarness:
             "operational_dgb_slots": 1,
             "admission_carrier_slots": 3 if carriers else 0,
             "operational_carrier_slots": 1 if carriers else 0,
-            "execute": True,
         }
+        preview = self.provider_cli.preparepaymasterpool(targets)
+        targets["execute"] = True
+        targets["plan_id"] = preview["plan_id"]
         prepared = self.provider_cli.preparepaymasterpool(targets)
         assert_equal(prepared["executed"], True)
         self.test.generatetoaddress(

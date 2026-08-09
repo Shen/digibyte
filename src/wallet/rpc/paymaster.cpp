@@ -2578,6 +2578,16 @@ std::string ResultStatusName(DigiDollar::Paymaster::PaymasterResultStatus status
     return "unknown";
 }
 
+std::optional<std::string> DigiDollarAddressForScript(const CScript& script)
+{
+    CTxDestination destination;
+    if (!ExtractDestination(script, destination)) return std::nullopt;
+    const std::string address = EncodeDigiDollarAddress(destination);
+    const CDigiDollarAddress decoded{address};
+    if (address.empty() || !decoded.IsValid()) return std::nullopt;
+    return address;
+}
+
 // -------------------------------------------------------------------------
 // Client session serialization, replay, and equivocation handling
 // -------------------------------------------------------------------------
@@ -2660,6 +2670,10 @@ UniValue SessionToJSON(
                 continue;
             }
             result.pushKV("provider_id", manifest.provider_id.GetHex());
+            result.pushKV(
+                "privacy_profile",
+                attempt.privacy_profile == PrivacyProfile::HIGH
+                    ? "high" : "standard");
             result.pushKV("offer_id", manifest.offer_id.GetHex());
             result.pushKV("policy_hash", manifest.policy_hash.GetHex());
             result.pushKV(
@@ -2675,6 +2689,10 @@ UniValue SessionToJSON(
                 "user_total_cents",
                 manifest.recipient_amount.value +
                     manifest.service_fee.value);
+            if (const auto address = DigiDollarAddressForScript(
+                    manifest.recipient_script)) {
+                result.pushKV("to_address", *address);
+            }
             break;
         }
     }
@@ -2715,6 +2733,9 @@ UniValue AttemptToJSON(const DigiDollar::Paymaster::ProviderAttempt& attempt)
         result.pushKV("provider_endpoint", attempt.provider_endpoint);
     }
     result.pushKV("attempt_state", std::string{AttemptStateName(attempt.state)});
+    result.pushKV("privacy_profile",
+                  attempt.privacy_profile == PrivacyProfile::HIGH
+                      ? "high" : "standard");
     if (!attempt.quote_id.IsNull()) result.pushKV("quote_id", attempt.quote_id.GetHex());
     if (!attempt.template_commitment.IsNull()) {
         result.pushKV("template_commitment", attempt.template_commitment.GetHex());
@@ -4057,6 +4078,10 @@ UniValue DurableClientAuthorizationToJSON(
     result.pushKV("service_fee_cents", quote.service_fee.value);
     result.pushKV("user_total_cents",
                   intent.recipient_amount.value + quote.service_fee.value);
+    if (const auto address = DigiDollarAddressForScript(
+            intent.recipient_script)) {
+        result.pushKV("to_address", *address);
+    }
     result.pushKV("expires_at", intent.expires_at);
     result.pushKV("queued", false);
     result.pushKV("connection_pending", false);

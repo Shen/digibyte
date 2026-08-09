@@ -68,6 +68,7 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                                         const UniValue& options,
                                         const std::vector<COutPoint>* preset_inputs);
 RPCHelpMan getdigidollarsendsession();
+RPCHelpMan listdigidollarsendsessions();
 RPCHelpMan getpaymasterreputation();
 RPCHelpMan clearpaymasterreputation();
 RPCHelpMan getpaymasteroffers();

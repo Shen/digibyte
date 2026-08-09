@@ -117,7 +117,7 @@ public:
     class UnlockContext
     {
     public:
-        UnlockContext(WalletModel *wallet, bool valid, bool relock);
+        UnlockContext(std::shared_ptr<interfaces::Wallet> wallet, bool valid, bool relock);
         ~UnlockContext();
 
         bool isValid() const { return valid; }
@@ -129,7 +129,10 @@ public:
         UnlockContext& operator=(UnlockContext&&) = delete;
 
     private:
-        WalletModel *wallet;
+        /** Keep the wallet interface alive until an asynchronous operation has
+         * released its unlock lease. The GUI model may be destroyed first when
+         * its wallet is closed. */
+        std::shared_ptr<interfaces::Wallet> wallet;
         const bool valid;
         const bool relock;
     };

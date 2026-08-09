@@ -15,6 +15,7 @@
 #include <primitives/transaction.h>
 
 #include <functional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -82,7 +83,9 @@ public:
     void setPaymasterSessionForTesting(const QString& state, const QString& artifact,
                                        bool persisted, const QString& address, double amount,
                                        const QString& attempt_state = QString{},
-                                       const QString& pending_phase = QString{});
+                                       const QString& pending_phase = QString{},
+                                       const QStringList& allowed_actions = {},
+                                       bool allowed_actions_known = false);
     /**
      * Install a deterministic wallet RPC transport for Paymaster widget tests.
      *
@@ -93,6 +96,11 @@ public:
     using PaymasterRpcExecutorForTesting =
         std::function<UniValue(const std::string&, const UniValue&)>;
     void setPaymasterRpcExecutorForTesting(PaymasterRpcExecutorForTesting executor);
+    /** Delayed transport hook for lifecycle and callback-ordering tests. */
+    using PaymasterAsyncRpcExecutorForTesting = std::function<void(
+        const std::string&, const UniValue&, WalletModel::RpcCallback)>;
+    void setPaymasterAsyncRpcExecutorForTesting(
+        PaymasterAsyncRpcExecutorForTesting executor);
     using DialogHandlerForTesting = std::function<QMessageBox::StandardButton(
         QMessageBox::Icon, const QString&, const QString&,
         QMessageBox::StandardButtons, QMessageBox::StandardButton)>;
@@ -132,6 +140,7 @@ private Q_SLOTS:
     void configureClientSafetyPolicy();
     void refreshClientSafetyStatus();
     void refreshPaymasterOffers();
+    void loadSelectedPersistedPaymasterSession();
     void refreshPaymasterSessionState();
     void pollPaymasterSession();
     void retryPaymasterSession();
@@ -161,7 +170,15 @@ private:
     void updateClientSafetyDisplay();
     void updateFeeChoiceLayout();
     void updatePaymasterFocusMode();
+    void applyPaymasterPrivacy();
     void invalidatePaymasterOfferPreview();
+    void discoverPersistedPaymasterSessions();
+    void activatePersistedPaymasterSession(const QString& request_id);
+    void refreshPaymasterSessionForAction(
+        const QString& required_action,
+        std::function<void()> continuation);
+    void schedulePaymasterPoll(bool state_changed);
+    void stopPaymasterPolling();
     QString friendlyPaymasterSessionStatus() const;
     void onPaymasterPrimaryAction();
     QString feeMode() const;
@@ -191,11 +208,14 @@ private:
     void executeTransfer(const QString& address, double amount);
     void executePaymasterRpcAsync(std::string command, UniValue params,
                                   WalletModel::RpcCallback callback);
-    void executePaymasterTransfer(const QString& address, double amount, bool allow_unlock);
+    void executePaymasterTransfer(const QString& address, CAmount amount_cents,
+                                  bool allow_unlock);
     UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
     void handlePaymasterResult(const UniValue& result, const QString& error,
-                               const QString& address, double amount);
-    void updatePaymasterSessionView(const UniValue& result);
+                               const QString& address, CAmount amount_cents);
+    bool updatePaymasterSessionView(const UniValue& result,
+                                    QString* decode_error = nullptr);
+    bool handleAuthoritativePaymasterCompletion(const UniValue& result);
     PaymasterConfirmationSelection paymasterConfirmationSelection(
         const UniValue& result, const QString& address) const;
     bool confirmPaymasterSelectionBeforeSigning(
@@ -212,6 +232,7 @@ private:
                                            const QString& detail);
     bool paymasterModeSelected() const;
     void setPaymasterBusy(bool busy);
+    void reportPaymasterOperationNotStarted(const QString& reason);
     void showSuccess(const QString& txid, double amount);
     void showBackendError(int status, const QString& reasonFailed);
 
@@ -276,6 +297,9 @@ private:
     QPushButton* m_refreshOffersButton;
     QLabel* m_offersStatus;
     QTableWidget* m_offersTable;
+    QFrame* m_persistedPaymasterSessionsFrame;
+    QComboBox* m_persistedPaymasterSessions;
+    QPushButton* m_loadPersistedPaymasterSessionButton;
     QFrame* m_clientSafetyFrame;
     QLabel* m_clientSafetyStatus;
     QLabel* m_clientSafetyDetails;
@@ -333,14 +357,25 @@ private:
     QString m_paymasterPendingPhase;
     QString m_paymasterBroadcastState;
     QString m_paymasterConfirmationState;
+    QString m_paymasterTransactionId;
+    QString m_paymasterRecoveryTransactionId;
+    QString m_paymasterResultStatus;
+    qint64 m_paymasterResultSequence{-1};
+    qint64 m_paymasterRecoveryExpiresAt{-1};
+    QStringList m_paymasterAllowedActions;
     QString m_paymasterAddress;
     QString m_paymasterAuthorizationCommitment;
     QString m_paymasterSessionPrivacy;
     QString m_paymasterRecoveryAuthorizationCommitment;
     double m_paymasterAmount{0.0};
+    CAmount m_paymasterAmountCents{0};
     qint64 m_paymasterPreviewRecipientCents{-1};
     qint64 m_paymasterPreviewServiceFeeCents{-1};
     qint64 m_paymasterPreviewTotalCents{-1};
+    uint64_t m_paymasterOfferPreviewGeneration{0};
+    uint64_t m_paymasterWalletGeneration{0};
+    uint64_t m_clientSafetyRefreshGeneration{0};
+    uint64_t m_oraclePriceRequestGeneration{0};
     bool m_sendAllSpendableDD{false};
     bool m_settingSweepAmount{false};
     qint64 m_paymasterRecoveryMaximumServiceFeeCents{0};
@@ -349,6 +384,7 @@ private:
     bool m_paymasterRecoveryActive{false};
     enum class PaymasterPrimaryAction {
         REFRESH,
+        RESUME,
         REVIEW_OFFER,
         FALLBACK,
         RECOVER,
@@ -365,7 +401,12 @@ private:
     qint64 m_clientSafetyAvailableTodayCents{0};
     QString m_clientSafetyError;
     QTimer* m_paymasterPollTimer;
+    int m_paymasterPollIntervalMs{1500};
+    static constexpr int MAX_PAYMASTER_POLL_INTERVAL_MS{15000};
+    bool m_paymasterAllowedActionsKnown{false};
+    bool m_paymasterTerminalNoticeShown{false};
     PaymasterRpcExecutorForTesting m_paymasterRpcExecutorForTesting;
+    PaymasterAsyncRpcExecutorForTesting m_paymasterAsyncRpcExecutorForTesting;
     DialogHandlerForTesting m_dialogHandlerForTesting;
     PaymasterConfirmationGuard m_paymasterConfirmationGuard;
     PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;

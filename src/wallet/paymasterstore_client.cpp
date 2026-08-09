@@ -282,6 +282,42 @@ bool PaymasterStore::ListClientSessions(
     return true;
 }
 
+bool PaymasterStore::ClientSessionHasLiveReservations(
+    const PaymentSession& session,
+    bool& has_live_reservations,
+    std::string& error) const
+{
+    has_live_reservations = false;
+    error.clear();
+    if (session.provider_side || !IsCanonicalRequestId(session.request_id) ||
+        session.session_id.IsNull()) {
+        error = "PAYMASTER_CLIENT_SESSION_REQUIRED";
+        return false;
+    }
+
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    for (const COutPoint& outpoint : session.user_inputs) {
+        InputReservation reservation;
+        const DatabaseReadStatus status =
+            batch.ReadPaymasterReservationWithStatus(outpoint, reservation);
+        if (status == DatabaseReadStatus::NOT_FOUND) continue;
+        if (status != DatabaseReadStatus::FOUND) {
+            error = "PAYMASTER_RESERVATION_DATABASE_READ";
+            return false;
+        }
+        if (reservation.request_id != session.request_id ||
+            reservation.session_id != session.session_id ||
+            reservation.outpoint != outpoint ||
+            reservation.role != ReservationRole::USER_DD) {
+            error = "PAYMASTER_RESERVATION_SESSION_CONFLICT";
+            return false;
+        }
+        has_live_reservations = true;
+    }
+    return true;
+}
+
 bool PaymasterStore::ReserveInputs(
     const std::string& request_id,
     const std::vector<std::pair<COutPoint, ReservationRole>>& inputs,

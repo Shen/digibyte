@@ -113,6 +113,23 @@ RPCHelpMan startpaymaster()
             for (const std::string& recovery_error : recovery.errors) {
                 recovery_errors.push_back(recovery_error);
             }
+            ProviderIdentityRecord guarded_identity;
+            std::optional<ProviderWorkGuard> start_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, guarded_identity)) {
+                // Hold the same wallet-local transition slot used by disable
+                // and policy updates while taking the authoritative readiness
+                // snapshot. Completion below atomically converts this slot to
+                // the running state.
+                start_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    guarded_identity.provider_id,
+                    /*require_running=*/false);
+                if (!start_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
             const ProviderReadiness readiness =
                 GetProviderReadiness(*wallet, context, !automatic_autostart);
             bool running{false};
@@ -144,6 +161,13 @@ RPCHelpMan startpaymaster()
                             is_liquidity_error);
             Announcement announcement;
             if (readiness.ready || drain_only || maintenance_start) {
+                if (!start_guard ||
+                    guarded_identity.provider_id !=
+                        readiness.identity.provider_id) {
+                    throw JSONRPCError(
+                        RPC_WALLET_ERROR,
+                        "PAYMASTER_PROVIDER_RUNTIME_CONFLICT");
+                }
                 node::NodeContext* node = wallet->chain().context();
                 if (!node || !node->chainman) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context unavailable");
@@ -182,7 +206,7 @@ RPCHelpMan startpaymaster()
                             error.empty() ? "PAYMASTER_ANNOUNCEMENT_REJECTED" : error);
                     }
                 }
-                running = context.paymaster->StartProvider(wallet->GetName(), readiness.identity.provider_id);
+                running = start_guard->CompleteProviderStart();
                 if (!running) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_RUNTIME_CONFLICT");
                 ProviderServiceState initial_state{ProviderServiceState::ACTIVE};
                 if (drain_only) {
@@ -271,7 +295,8 @@ RPCHelpMan stoppaymaster()
 {
     return RPCHelpMan{
         "stoppaymaster",
-        "Stop the ephemeral Paymaster provider runtime for this wallet. Durable recovery records are retained.\n",
+        "Stop the ephemeral Paymaster provider runtime for this wallet. Durable recovery records are retained. "
+        "A saved autostart setting may start it again later; disable autostart or the provider configuration when the stop must persist.\n",
         {},
         RPCResult{RPCResult::Type::OBJ, "", "Provider runtime result", {{RPCResult::Type::BOOL, "running", "Always false after a successful stop"}}},
         RPCExamples{HelpExampleCli("stoppaymaster", "")},
@@ -279,7 +304,21 @@ RPCHelpMan stoppaymaster()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            if (context.paymaster) context.paymaster->StopProvider(wallet->GetName());
+            ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> stop_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                stop_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    identity.provider_id, /*require_running=*/false);
+                if (!stop_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
+            if (context.paymaster) {
+                context.paymaster->StopProvider(wallet->GetName());
+            }
             UniValue result{UniValue::VOBJ};
             result.pushKV("running", false);
             return result;

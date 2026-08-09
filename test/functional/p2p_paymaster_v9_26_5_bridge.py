@@ -213,13 +213,16 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
             "operation_mode": "manual",
             "autostart": False,
         })
-        prepared = provider_cli.preparepaymasterpool({
+        pool_targets = {
             "admission_dgb_slots": 3,
             "operational_dgb_slots": 1,
             "admission_carrier_slots": 3,
             "operational_carrier_slots": 1,
-            "execute": True,
-        })
+        }
+        pool_preview = provider_cli.preparepaymasterpool(pool_targets)
+        pool_targets["execute"] = True
+        pool_targets["plan_id"] = pool_preview["plan_id"]
+        prepared = provider_cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
         self.generatetoaddress(provider_node, 1, provider.getnewaddress())
         provider.setpaymasterliquiditypolicy(

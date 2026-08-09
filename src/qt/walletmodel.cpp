@@ -49,6 +49,7 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 
 #include <QDebug>
 #include <QMessageBox>
@@ -532,7 +533,7 @@ WalletModel::UnlockContext WalletModel::requestUnlock()
     // If wallet is still locked, unlock was failed or cancelled, mark context as invalid
     bool valid = getEncryptionStatus() != Locked;
 
-    return UnlockContext(this, valid, was_locked);
+    return UnlockContext(m_wallet, valid, was_locked);
 }
 
 std::shared_ptr<WalletModel::UnlockContext> WalletModel::requestUnlockForAsync()
@@ -540,11 +541,11 @@ std::shared_ptr<WalletModel::UnlockContext> WalletModel::requestUnlockForAsync()
     const bool was_locked = getEncryptionStatus() == Locked;
     if (was_locked) Q_EMIT requireUnlock();
     const bool valid = getEncryptionStatus() != Locked;
-    return std::make_shared<UnlockContext>(this, valid, was_locked);
+    return std::make_shared<UnlockContext>(m_wallet, valid, was_locked);
 }
 
-WalletModel::UnlockContext::UnlockContext(WalletModel *_wallet, bool _valid, bool _relock):
-        wallet(_wallet),
+WalletModel::UnlockContext::UnlockContext(std::shared_ptr<interfaces::Wallet> _wallet, bool _valid, bool _relock):
+        wallet(std::move(_wallet)),
         valid(_valid),
         relock(_relock)
 {
@@ -554,7 +555,7 @@ WalletModel::UnlockContext::~UnlockContext()
 {
     if(valid && relock)
     {
-        wallet->setWalletLocked(true);
+        wallet->lock();
     }
 }
 

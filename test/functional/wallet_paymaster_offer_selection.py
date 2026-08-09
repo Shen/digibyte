@@ -63,13 +63,16 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         assert_equal(runtime["operation_mode"], "manual")
         assert_equal(runtime["autostart"], False)
 
-        prepared = cli.preparepaymasterpool({
+        pool_targets = {
             "admission_dgb_slots": 3,
             "operational_dgb_slots": 1,
             "admission_carrier_slots": 3,
             "operational_carrier_slots": 1,
-            "execute": True,
-        })
+        }
+        pool_preview = cli.preparepaymasterpool(pool_targets)
+        pool_targets["execute"] = True
+        pool_targets["plan_id"] = pool_preview["plan_id"]
+        prepared = cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
         assert_equal(len(prepared["dgb_txid"]), 64)
         assert_equal(len(prepared["dd_txid"]), 64)

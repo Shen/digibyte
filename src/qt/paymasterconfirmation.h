@@ -10,17 +10,43 @@
 
 #include <limits>
 
+/** Return true only for the canonical lower/upper-case hexadecimal encoding
+ * used by Core for transaction and Paymaster commitment identifiers. */
+inline bool IsCanonicalPaymasterHash(const QString& value)
+{
+    if (value.size() != 64) return false;
+    for (const QChar character : value) {
+        const ushort code = character.unicode();
+        if (!((code >= '0' && code <= '9') ||
+              (code >= 'a' && code <= 'f') ||
+              (code >= 'A' && code <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool IsCanonicalNonNullPaymasterHash(const QString& value)
+{
+    return IsCanonicalPaymasterHash(value) &&
+        value != QString(64, QLatin1Char('0'));
+}
+
 /** Return true only for a response that identifies an exact transaction and
  * reports a Core-validated completion state. This check deliberately does not
  * depend on the response echo of the pre-signing commitment: Core has already
  * enforced that durable manifest before returning either Paymaster result. */
-inline bool IsValidatedPaymasterCompletion(bool has_txid,
+inline bool IsValidatedPaymasterCompletion(const QString& txid,
                                            const QString& session_state,
                                            const QString& direct_status,
                                            const QString& result_status,
-                                           bool final)
+                                           bool reported_final = false)
 {
-    if (!has_txid) return false;
+    // The field is deliberately accepted only so callers and tests can prove
+    // that it has no authority over the success decision. Core marks every
+    // terminal state final, including failure, conflict and safe recovery.
+    (void)reported_final;
+    if (!IsCanonicalNonNullPaymasterHash(txid)) return false;
     const bool direct_success = session_state.isEmpty() &&
         direct_status == QStringLiteral("success");
     const bool result_state_is_final =
@@ -29,7 +55,10 @@ inline bool IsValidatedPaymasterCompletion(bool has_txid,
     const bool validated_result = result_state_is_final &&
         (result_status == QStringLiteral("final_committed") ||
          result_status == QStringLiteral("broadcast_attempted"));
-    return direct_success || validated_result || final;
+    // `final` is intentionally not an input to this decision. Core uses that
+    // field for every terminal session, including FAILED, CANCELED_SAFE and
+    // CONFLICTED, none of which proves that the recipient was paid.
+    return direct_success || validated_result;
 }
 
 /** The exact user-visible fields that must be reviewed before a Paymaster
@@ -45,6 +74,7 @@ struct PaymasterConfirmationSelection {
     qint64 payment_cents{-1};
     qint64 service_fee_cents{-1};
     qint64 user_total_cents{-1};
+    qint64 expires_at{-1};
 
     bool IsComplete() const
     {
@@ -52,9 +82,12 @@ struct PaymasterConfirmationSelection {
                                  funding_model == QStringLiteral("sponsored");
         const bool addition_is_safe = payment_cents >= 0 && service_fee_cents >= 0 &&
             payment_cents <= std::numeric_limits<qint64>::max() - service_fee_cents;
-        return !provider_id.isEmpty() && !offer_id.isEmpty() &&
-               !policy_hash.isEmpty() && known_model && !recipient.isEmpty() &&
-               !authorization_commitment.isEmpty() && addition_is_safe &&
+        return IsCanonicalNonNullPaymasterHash(provider_id) &&
+               IsCanonicalNonNullPaymasterHash(offer_id) &&
+               IsCanonicalNonNullPaymasterHash(policy_hash) && known_model &&
+               !recipient.isEmpty() &&
+               IsCanonicalNonNullPaymasterHash(authorization_commitment) &&
+               addition_is_safe && expires_at > 0 &&
                user_total_cents == payment_cents + service_fee_cents &&
                (funding_model != QStringLiteral("sponsored") ||
                 service_fee_cents == 0);
@@ -71,7 +104,8 @@ struct PaymasterConfirmationSelection {
                lhs.authorization_commitment == rhs.authorization_commitment &&
                lhs.payment_cents == rhs.payment_cents &&
                lhs.service_fee_cents == rhs.service_fee_cents &&
-               lhs.user_total_cents == rhs.user_total_cents;
+               lhs.user_total_cents == rhs.user_total_cents &&
+               lhs.expires_at == rhs.expires_at;
     }
 };
 
@@ -112,6 +146,7 @@ public:
                     QStringLiteral("recipient"), QStringLiteral("amount"),
                     QStringLiteral("service_fee"),
                     QStringLiteral("total"),
+                    QStringLiteral("expiry"),
                     QStringLiteral("authorization_commitment")};
         }
         QStringList changed;
@@ -123,6 +158,7 @@ public:
         if (candidate.payment_cents != m_accepted.payment_cents) changed.push_back(QStringLiteral("amount"));
         if (candidate.service_fee_cents != m_accepted.service_fee_cents) changed.push_back(QStringLiteral("service_fee"));
         if (candidate.user_total_cents != m_accepted.user_total_cents) changed.push_back(QStringLiteral("total"));
+        if (candidate.expires_at != m_accepted.expires_at) changed.push_back(QStringLiteral("expiry"));
         if (candidate.authorization_commitment != m_accepted.authorization_commitment) {
             changed.push_back(QStringLiteral("authorization_commitment"));
         }
@@ -165,12 +201,17 @@ struct PaymasterRecoveryConfirmationSelection {
 
     bool IsComplete() const
     {
-        if (recovery_provider_id.isEmpty() || privacy_profile.isEmpty() ||
-            offer_id.isEmpty() || policy_hash.isEmpty() ||
-            original_commit_key.isEmpty() ||
-            original_template_commitment.isEmpty() || wallet_returns.isEmpty() ||
-            authorization_commitment.isEmpty() ||
+        const bool known_privacy = privacy_profile == QStringLiteral("standard") ||
+            privacy_profile == QStringLiteral("high");
+        if (!IsCanonicalNonNullPaymasterHash(recovery_provider_id) || !known_privacy ||
+            !IsCanonicalNonNullPaymasterHash(offer_id) ||
+            !IsCanonicalNonNullPaymasterHash(policy_hash) ||
+            !IsCanonicalNonNullPaymasterHash(original_commit_key) ||
+            !IsCanonicalNonNullPaymasterHash(original_template_commitment) ||
+            wallet_returns.isEmpty() ||
+            !IsCanonicalNonNullPaymasterHash(authorization_commitment) ||
             maximum_service_fee_cents < 0 || service_fee_cents < 0 ||
+            service_fee_cents > maximum_service_fee_cents ||
             network_fee_satoshis < 0 || expires_at <= 0) {
             return false;
         }

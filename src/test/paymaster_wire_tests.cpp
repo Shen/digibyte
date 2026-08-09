@@ -3114,6 +3114,20 @@ BOOST_AUTO_TEST_CASE(manager_provider_work_is_serialized_and_status_is_ephemeral
     BOOST_CHECK(!manager.StartProvider("provider-wallet", provider_id));
     manager.EndProviderWork("provider-wallet");
 
+    // A readiness owner can atomically consume its work slot to start the
+    // provider. No unguarded start can interleave between those two states.
+    BOOST_REQUIRE(manager.TryBeginProviderWork(
+        "provider-wallet", provider_id, /*require_running=*/false));
+    BOOST_CHECK(!manager.CompleteProviderStart(
+        "provider-wallet", other_provider));
+    BOOST_CHECK(!manager.IsProviderRunning("provider-wallet", provider_id));
+    BOOST_REQUIRE(manager.CompleteProviderStart(
+        "provider-wallet", provider_id));
+    BOOST_CHECK(manager.IsProviderRunning("provider-wallet", provider_id));
+    BOOST_CHECK(!manager.TryBeginProviderWork(
+        "provider-wallet", provider_id, /*require_running=*/false));
+    manager.EndProviderWork("provider-wallet");
+
     BOOST_REQUIRE_EQUAL(manager.TakeCapacityRequests(provider_id, 1).size(),
                         1U);
     BOOST_REQUIRE_EQUAL(manager.TakeRecoverySubmits(provider_id, 1).size(),

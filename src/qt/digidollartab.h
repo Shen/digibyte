@@ -56,6 +56,13 @@ public:
     void setPaymasterLiquidityPoolForTesting(const UniValue& pool_info);
     /** Test hook for exercising external Paymaster readiness and Oracle presentation without RPC I/O. */
     void setPaymasterReadinessStatusForTesting(const UniValue& status);
+    /**
+     * Mark the three mutation precondition snapshots as available in focused
+     * workflow tests. Production obtains these flags only from decoded RPC
+     * responses; this hook deliberately does not fabricate policy values.
+     */
+    void setPaymasterMutationSnapshotsAvailableForTesting(
+        bool provider_info, bool provider_safety, bool liquidity);
     /** Test hook for exercising the provider-start result presentation without opening the start confirmation. */
     void setPaymasterStartResultForTesting(const UniValue& result);
     /**
@@ -69,6 +76,8 @@ public:
     using PaymasterRpcExecutorForTesting =
         std::function<UniValue(const std::string&, const UniValue&)>;
     void setPaymasterRpcExecutorForTesting(PaymasterRpcExecutorForTesting executor);
+    /** Test hook for complete paginated finance exports without native dialogs. */
+    void setPaymasterFinanceExportFilenameForTesting(const QString& filename);
 
     /** Show incoming DigiDollar transaction notification */
     void incomingDDTransaction(const QString& date, const QString& amount,

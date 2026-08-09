@@ -64,13 +64,16 @@ class PaymasterFailoverTest(DigiByteTestFramework):
             "operation_mode": "manual",
             "autostart": False,
         })
-        prepared = cli.preparepaymasterpool({
+        pool_targets = {
             "admission_dgb_slots": 3,
             "operational_dgb_slots": 1,
             "admission_carrier_slots": 3,
             "operational_carrier_slots": 1,
-            "execute": True,
-        })
+        }
+        pool_preview = cli.preparepaymasterpool(pool_targets)
+        pool_targets["execute"] = True
+        pool_targets["plan_id"] = pool_preview["plan_id"]
+        prepared = cli.preparepaymasterpool(pool_targets)
         assert_equal(prepared["executed"], True)
         wallet.setpaymasterliquiditypolicy(
             default_liquidity_policy(carriers=True))
@@ -266,6 +269,10 @@ class PaymasterFailoverTest(DigiByteTestFramework):
         abandoned_attempt = fallback_client.resolvepaymastersession(
             lookup, "fallback")
         assert_equal(abandoned_attempt["attempt"]["attempt_state"], "REJECTED")
+        assert_equal(abandoned_attempt["artifact"], "none")
+        assert "refresh" in abandoned_attempt["allowed_actions"]
+        assert "fallback" not in abandoned_attempt["allowed_actions"]
+        assert_equal(abandoned_attempt["recovery"], None)
         assert_equal(
             abandoned_attempt["session"]["session_state"],
             "INPUTS_RESERVED")
@@ -376,6 +383,8 @@ class PaymasterFailoverTest(DigiByteTestFramework):
             {"request_id": blocking_request}, "abandon_unsigned")
         assert_equal(abandoned_session["session"]["session_state"], "FAILED")
         assert_equal(abandoned_session["session"]["final"], True)
+        assert_equal(abandoned_session["artifact"], "none")
+        assert_equal(abandoned_session["allowed_actions"], ["refresh"])
         assert_equal(
             abandoned_session["session"]["reserved_user_inputs"],
             blocking_inputs)

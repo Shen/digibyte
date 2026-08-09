@@ -104,7 +104,8 @@ RPCHelpMan setpaymasterpolicy()
 {
     return RPCHelpMan{
         "setpaymasterpolicy",
-        "Validate and atomically persist this wallet's Paymaster operating policy.\n",
+        "Validate and atomically persist this wallet's Paymaster operating policy. "
+        "The provider must be stopped so it cannot accept new work under a previously announced policy while the wallet commit changes; the next start publishes a replacement announcement.\n",
         {
             {"policy", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Complete provider policy", {
                                                                                                 {"funding_models", RPCArg::Type::ARR, RPCArg::Optional::NO, "Non-empty funding model allowlist", {{"model", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sponsored or user_paid"}}},
@@ -128,8 +129,30 @@ RPCHelpMan setpaymasterpolicy()
                                                                                               }},
         RPCExamples{HelpExampleCli("setpaymasterpolicy", "'{\"funding_models\":[\"sponsored\",\"user_paid\"],\"sponsorship_scope\":\"public\",\"fee_rate_bps\":50,\"min_amount_cents\":100,\"max_amount_cents\":100000,\"quote_ttl\":60,\"maximum_network_fee_dgb_satoshis\":20000000}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            DigiDollar::Paymaster::ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> policy_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                // The stopped-state check and the database write must form one
+                // scheduler exclusion window. Otherwise autostart could begin
+                // the provider after IsProviderRunning() returned false but
+                // before the new advertised policy reached the wallet.
+                policy_guard.emplace(
+                    *context.paymaster, wallet->GetName(), identity.provider_id,
+                    /*require_running=*/false);
+                if (!policy_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+                if (context.paymaster->IsProviderRunning(
+                        wallet->GetName(), identity.provider_id)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_RUNNING");
+                }
+            }
             const DigiDollar::Paymaster::ProviderPolicy policy = ParseProviderPolicy(request.params[0].get_obj());
             std::string error;
             if (!SetPaymasterProviderPolicy(*wallet, policy, GetTime(), error)) {
@@ -161,8 +184,24 @@ RPCHelpMan setpaymastersafetypolicy()
         RPCResult{RPCResult::Type::OBJ, "", "Persisted wallet-local safety policy", ProviderSafetyPolicyResults()},
         RPCExamples{HelpExampleCli("setpaymastersafetypolicy", "'{\"user_paid\":{\"maximum_network_fee_per_transaction_satoshis\":1000000,\"maximum_reserved_network_fee_satoshis\":5000000,\"maximum_network_fee_per_hour_satoshis\":10000000,\"maximum_network_fee_per_day_satoshis\":50000000,\"maximum_completed_per_hour\":10,\"maximum_completed_per_day\":100},\"public_sponsored\":{\"maximum_network_fee_per_transaction_satoshis\":0,\"maximum_reserved_network_fee_satoshis\":0,\"maximum_network_fee_per_hour_satoshis\":0,\"maximum_network_fee_per_day_satoshis\":0,\"maximum_completed_per_hour\":0,\"maximum_completed_per_day\":0},\"restricted_sponsored\":{\"maximum_network_fee_per_transaction_satoshis\":0,\"maximum_reserved_network_fee_satoshis\":0,\"maximum_network_fee_per_hour_satoshis\":0,\"maximum_network_fee_per_day_satoshis\":0,\"maximum_completed_per_hour\":0,\"maximum_completed_per_day\":0},\"maximum_active_quotes_total\":16,\"maximum_active_quotes_per_netgroup\":4,\"maximum_active_quotes_per_recipient\":2,\"maximum_quote_requests_per_netgroup_per_minute\":10}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> safety_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                // Safety updates may remain available while the provider is
+                // online, but the authoritative read/commit must not overlap
+                // a scheduler step that is reserving against the old limits.
+                safety_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    identity.provider_id, /*require_running=*/false);
+                if (!safety_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
             auto policy = ParseProviderSafetyPolicy(request.params[0].get_obj());
             std::string error;
             if (!SetPaymasterProviderSafetyPolicy(*wallet, policy, GetTime(), error) ||
@@ -430,7 +469,7 @@ RPCHelpMan setpaymasterenabled()
     return RPCHelpMan{
         "setpaymasterenabled",
         "Persistently enable or disable Paymaster provider operation for this wallet.\n"
-        "Enabling does not start the provider until startpaymaster passes readiness checks.\n",
+        "Enabling does not synchronously start the provider. A saved autostart setting may bring it online later when all readiness checks pass; otherwise use startpaymaster explicitly.\n",
         {
             {"enabled", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Provider enablement"},
         },
@@ -444,8 +483,27 @@ RPCHelpMan setpaymasterenabled()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            const bool requested_enabled = request.params[0].get_bool();
+            DigiDollar::Paymaster::ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> disable_guard;
+            if (!requested_enabled && context.paymaster &&
+                context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                // Serialize the persistent disable and runtime stop with the
+                // guarded start transition and all provider work. Whichever
+                // operation owns the slot first determines a coherent final
+                // state.
+                disable_guard.emplace(
+                    *context.paymaster, wallet->GetName(), identity.provider_id,
+                    /*require_running=*/false);
+                if (!disable_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
             std::string error;
-            if (!SetPaymasterProviderEnabled(*wallet, request.params[0].get_bool(), GetTime(), error)) {
+            if (!SetPaymasterProviderEnabled(
+                    *wallet, requested_enabled, GetTime(), error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, error);
             }
             DigiDollar::Paymaster::ProviderSettings settings;
@@ -455,7 +513,6 @@ RPCHelpMan setpaymasterenabled()
             UniValue result{UniValue::VOBJ};
             result.pushKV("enabled", settings.enabled);
             if (!settings.enabled && context.paymaster) context.paymaster->StopProvider(wallet->GetName());
-            DigiDollar::Paymaster::ProviderIdentityRecord identity;
             const bool running = settings.enabled && context.paymaster &&
                                  GetPaymasterIdentity(*wallet, identity) &&
                                  context.paymaster->IsProviderRunning(wallet->GetName(), identity.provider_id);
@@ -498,6 +555,24 @@ RPCHelpMan setpaymasterruntimesettings()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
 
+            ProviderIdentityRecord identity;
+            const bool have_identity =
+                GetPaymasterIdentity(*wallet, identity);
+            std::optional<ProviderWorkGuard> runtime_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                have_identity) {
+                // A mode change and a guarded start must be ordered against
+                // each other. Otherwise both could observe the stopped state
+                // before the database commit makes the new mode authoritative.
+                runtime_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    identity.provider_id, /*require_running=*/false);
+                if (!runtime_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
+
             const UniValue& value = request.params[0].get_obj();
             RPCTypeCheckObj(
                 value,
@@ -533,9 +608,8 @@ RPCHelpMan setpaymasterruntimesettings()
                                        ? current.autostart
                                        : autostart_value.get_bool();
 
-            ProviderIdentityRecord identity;
             const bool running = context.paymaster &&
-                                 GetPaymasterIdentity(*wallet, identity) &&
+                                 have_identity &&
                                  context.paymaster->IsProviderRunning(
                                      wallet->GetName(), identity.provider_id);
             if (running && mode != current.operation_mode) {
@@ -1520,7 +1594,7 @@ RPCHelpMan preparepaymasterpool()
     return RPCHelpMan{
         "preparepaymasterpool",
         "Preview or create dedicated P2TR DGB and DD-carrier outputs for the Paymaster admission and operational pools.\n"
-        "The default is a side-effect-free preview. Set execute=true only after reviewing the returned amounts.\n"
+        "The default is a side-effect-free preview. Execution requires the unchanged plan_id returned by that preview.\n"
         "Existing live entries count toward the requested totals, so an interrupted preparation can be resumed safely.\n" +
             HELP_REQUIRING_PASSPHRASE,
         {
@@ -1530,10 +1604,12 @@ RPCHelpMan preparepaymasterpool()
                                                                                                                     {"admission_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "Three to sixteen admission carriers for USER_PAID"},
                                                                                                                     {"operational_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "One to sixteen operational carriers for USER_PAID"},
                                                                                                                     {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Create and broadcast the reviewed pool transaction"},
+                                                                                                                    {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
                                                                                                                 }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Pool preparation preview or transaction", {
                                                                                            {RPCResult::Type::BOOL, "executed", "Whether wallet funds were committed"},
+                                                                                           {RPCResult::Type::STR_HEX, "plan_id", "Plan bound to the policy, targets, current deficits, and output values"},
                                                                                            {RPCResult::Type::NUM, "admission_dgb_slots", "Admission DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "operational_dgb_slots", "Operational DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "admission_carrier_slots", "Admission DD carriers"},
@@ -1568,16 +1644,34 @@ RPCHelpMan preparepaymasterpool()
         RPCExamples{HelpExampleCli("preparepaymasterpool", "'{\"admission_dgb_slots\":3,\"operational_dgb_slots\":1,\"admission_carrier_slots\":3,\"operational_carrier_slots\":1}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             using namespace DigiDollar::Paymaster;
+            WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             wallet->BlockUntilSyncedToCurrentChain();
+            ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> pool_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                // Manual previews and executions share the scheduler's
+                // wallet-local exclusion slot. This prevents two callers, or
+                // automatic replenishment and an expert action, from deriving
+                // and committing changes from the same stale pool snapshot.
+                pool_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    identity.provider_id, /*require_running=*/false);
+                if (!pool_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
             const UniValue& options = request.params[0];
             RPCTypeCheckObj(options,
                             {{"admission_dgb_slots", UniValueType(UniValue::VNUM)},
                              {"operational_dgb_slots", UniValueType(UniValue::VNUM)},
                              {"admission_carrier_slots", UniValueType(UniValue::VNUM)},
                              {"operational_carrier_slots", UniValueType(UniValue::VNUM)},
-                             {"execute", UniValueType(UniValue::VBOOL)}},
+                             {"execute", UniValueType(UniValue::VBOOL)},
+                             {"plan_id", UniValueType(UniValue::VSTR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const int admission = options.find_value("admission_dgb_slots").getInt<int>();
             const int operational = options.find_value("operational_dgb_slots").getInt<int>();
@@ -1609,23 +1703,31 @@ RPCHelpMan preparepaymasterpool()
                 !RefreshPoolConfirmationHeights(*wallet, existing, refresh_error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, refresh_error);
             }
-            const auto live_count = [&](PoolPurpose purpose, PoolAsset asset) {
+            constexpr int64_t admission_value{MIN_ADMISSION_DGB_SATOSHIS};
+            constexpr int64_t carrier_value{100};
+            const int64_t operational_value = std::max<int64_t>(
+                MIN_ADMISSION_DGB_SATOSHIS, policy.maximum_network_fee.value);
+            const auto live_count = [&](PoolPurpose purpose, PoolAsset asset,
+                                        int64_t minimum_dgb_value = 0) {
                 return static_cast<int>(std::count_if(existing.begin(), existing.end(),
                                                       [&](const ProviderPoolEntry& entry) {
                                                           return entry.purpose == purpose && entry.asset == asset &&
+                                                                 (asset != PoolAsset::DGB ||
+                                                                  entry.dgb_value.value >= minimum_dgb_value) &&
                                                                  (entry.state == PoolEntryState::AVAILABLE ||
                                                                   entry.state == PoolEntryState::RESERVED ||
                                                                   entry.state == PoolEntryState::PENDING_SUCCESSOR);
                                                       }));
             };
-            const int missing_admission = std::max(0, admission - live_count(PoolPurpose::ADMISSION, PoolAsset::DGB));
-            const int missing_operational = std::max(0, operational - live_count(PoolPurpose::OPERATIONAL, PoolAsset::DGB));
+            const int missing_admission = std::max(
+                0, admission - live_count(PoolPurpose::ADMISSION,
+                                          PoolAsset::DGB, admission_value));
+            const int missing_operational = std::max(
+                0, operational - live_count(PoolPurpose::OPERATIONAL,
+                                            PoolAsset::DGB,
+                                            operational_value));
             const int missing_admission_carriers = std::max(0, admission_carriers - live_count(PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER));
             const int missing_operational_carriers = std::max(0, operational_carriers - live_count(PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER));
-            constexpr int64_t admission_value{MIN_ADMISSION_DGB_SATOSHIS};
-            constexpr int64_t carrier_value{100};
-            const int64_t operational_value = std::max<int64_t>(
-                MIN_ADMISSION_DGB_SATOSHIS, policy.maximum_network_fee.value);
             const auto checked_product = [](int64_t value, int count) {
                 if (value < 0 || count < 0 ||
                     (count != 0 &&
@@ -1652,7 +1754,20 @@ RPCHelpMan preparepaymasterpool()
             }
             const int64_t total_carriers = carrier_value *
                                            (missing_admission_carriers + missing_operational_carriers);
+            HashWriter plan_hasher = TaggedHash(
+                "DigiByte Paymaster Pool Preparation Plan v1");
+            plan_hasher << Params().GenesisBlock().GetHash()
+                        << GetProviderPolicyHash(policy)
+                        << admission << operational
+                        << admission_carriers << operational_carriers
+                        << missing_admission << missing_operational
+                        << missing_admission_carriers
+                        << missing_operational_carriers
+                        << admission_value << operational_value
+                        << carrier_value << *total << total_carriers;
+            const uint256 plan_id = plan_hasher.GetSHA256();
             UniValue result{UniValue::VOBJ};
+            result.pushKV("plan_id", plan_id.GetHex());
             result.pushKV("admission_dgb_slots", admission);
             result.pushKV("operational_dgb_slots", operational);
             result.pushKV("admission_carrier_slots", admission_carriers);
@@ -1669,6 +1784,16 @@ RPCHelpMan preparepaymasterpool()
             if (!execute) {
                 result.pushKV("executed", false);
                 return result;
+            }
+
+            const UniValue& supplied_plan = options.find_value("plan_id");
+            if (supplied_plan.isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_POOL_PLAN_REQUIRED");
+            }
+            if (ParseHashV(supplied_plan, "plan_id") != plan_id) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_POOL_PLAN_CHANGED");
             }
 
             EnsureWalletIsUnlocked(*wallet);
@@ -1855,7 +1980,7 @@ RPCHelpMan rebalancepaymasterpool()
     return RPCHelpMan{
         "rebalancepaymasterpool",
         "Preview or retire excess available Paymaster pool entries.\n"
-        "The default is side-effect-free. Set execute=true only after reviewing the exact retired values.\n"
+        "The default is side-effect-free. Execution requires the unchanged plan_id returned by that preview.\n"
         "Active reservations are never touched. Increasing a target remains an additive preparepaymasterpool operation.\n" +
             HELP_REQUIRING_PASSPHRASE,
         {
@@ -1865,10 +1990,12 @@ RPCHelpMan rebalancepaymasterpool()
                                                                                                                     {"admission_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "Remaining admission carriers"},
                                                                                                                     {"operational_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "Remaining operational carriers"},
                                                                                                                     {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Commit the reviewed retirement transactions"},
+                                                                                                                    {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
                                                                                                                 }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Pool rebalance preview or result", {
                                                                                     {RPCResult::Type::BOOL, "executed", "Whether a retirement transaction was committed"},
+                                                                                    {RPCResult::Type::STR_HEX, "plan_id", "Plan bound to the policy, targets, and exact retired pool inputs"},
                                                                                     {RPCResult::Type::NUM, "retired_admission_dgb_slots", "Admission DGB entries selected for retirement"},
                                                                                     {RPCResult::Type::NUM, "retired_operational_dgb_slots", "Operational DGB entries selected for retirement"},
                                                                                     {RPCResult::Type::NUM, "retired_admission_carrier_slots", "Admission carriers selected for retirement"},
@@ -1895,16 +2022,30 @@ RPCHelpMan rebalancepaymasterpool()
         RPCExamples{HelpExampleCli("rebalancepaymasterpool", "'{\"admission_dgb_slots\":3,\"operational_dgb_slots\":1,\"admission_carrier_slots\":3,\"operational_carrier_slots\":1}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             using namespace DigiDollar::Paymaster;
+            WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             wallet->BlockUntilSyncedToCurrentChain();
+            ProviderIdentityRecord identity;
+            std::optional<ProviderWorkGuard> pool_guard;
+            if (context.paymaster && context.paymaster->Enabled() &&
+                GetPaymasterIdentity(*wallet, identity)) {
+                pool_guard.emplace(
+                    *context.paymaster, wallet->GetName(),
+                    identity.provider_id, /*require_running=*/false);
+                if (!pool_guard->Acquired()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_PROVIDER_BUSY");
+                }
+            }
             const UniValue& options = request.params[0];
             RPCTypeCheckObj(options,
                             {{"admission_dgb_slots", UniValueType(UniValue::VNUM)},
                              {"operational_dgb_slots", UniValueType(UniValue::VNUM)},
                              {"admission_carrier_slots", UniValueType(UniValue::VNUM)},
                              {"operational_carrier_slots", UniValueType(UniValue::VNUM)},
-                             {"execute", UniValueType(UniValue::VBOOL)}},
+                             {"execute", UniValueType(UniValue::VBOOL)},
+                             {"plan_id", UniValueType(UniValue::VSTR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const int admission = options.find_value("admission_dgb_slots").getInt<int>();
             const int operational = options.find_value("operational_dgb_slots").getInt<int>();
@@ -1953,7 +2094,16 @@ RPCHelpMan rebalancepaymasterpool()
                         result.push_back(&entry);
                     }
                 }
-                std::sort(result.begin(), result.end(), [](const auto* a, const auto* b) {
+                // Retain the most useful entries when reducing a target. In
+                // particular, a policy increase can leave old operational DGB
+                // outputs below the new advertised fee ceiling; those must be
+                // retired before larger, still-ready slots.
+                std::sort(result.begin(), result.end(), [asset](const auto* a, const auto* b) {
+                    const int64_t a_value = asset == PoolAsset::DGB
+                        ? a->dgb_value.value : a->carrier_value.value;
+                    const int64_t b_value = asset == PoolAsset::DGB
+                        ? b->dgb_value.value : b->carrier_value.value;
+                    if (a_value != b_value) return a_value > b_value;
                     return a->outpoint < b->outpoint;
                 });
                 return result;
@@ -1994,21 +2144,71 @@ RPCHelpMan rebalancepaymasterpool()
             const int retired_operational_dgb = count_retired(retire_dgb, PoolPurpose::OPERATIONAL);
             const int retired_admission_dd = count_retired(retire_dd, PoolPurpose::ADMISSION);
             const int retired_operational_dd = count_retired(retire_dd, PoolPurpose::OPERATIONAL);
-            const int64_t retired_dgb_value = std::accumulate(retire_dgb.begin(), retire_dgb.end(), int64_t{0},
-                                                              [](int64_t total, const auto* entry) { return total + entry->dgb_value.value; });
-            const int64_t retired_dd_value = std::accumulate(retire_dd.begin(), retire_dd.end(), int64_t{0},
-                                                             [](int64_t total, const auto* entry) { return total + entry->carrier_value.value; });
+            const auto checked_pool_sum = [](const auto& selected,
+                                             const auto& amount) {
+                std::optional<int64_t> total{int64_t{0}};
+                for (const ProviderPoolEntry* entry : selected) {
+                    total = CheckedAdd(*total, amount(*entry));
+                    if (!total) break;
+                }
+                return total;
+            };
+            const auto retired_dgb_value = checked_pool_sum(
+                retire_dgb,
+                [](const ProviderPoolEntry& entry) {
+                    return entry.dgb_value.value;
+                });
+            const auto retired_dd_value = checked_pool_sum(
+                retire_dd,
+                [](const ProviderPoolEntry& entry) {
+                    return entry.carrier_value.value;
+                });
+            if (!retired_dgb_value || !MoneyRange(*retired_dgb_value) ||
+                !retired_dd_value || *retired_dd_value < 0) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "PAYMASTER_REBALANCE_VALUE_OUT_OF_RANGE");
+            }
+
+            HashWriter plan_hasher = TaggedHash(
+                "DigiByte Paymaster Pool Rebalance Plan v1");
+            plan_hasher << Params().GenesisBlock().GetHash()
+                        << GetProviderPolicyHash(policy)
+                        << admission << operational
+                        << admission_carriers << operational_carriers;
+            for (const ProviderPoolEntry* entry : retire_dgb) {
+                plan_hasher << entry->outpoint
+                            << static_cast<uint8_t>(entry->purpose)
+                            << entry->dgb_value.value;
+            }
+            for (const ProviderPoolEntry* entry : retire_dd) {
+                plan_hasher << entry->outpoint
+                            << static_cast<uint8_t>(entry->purpose)
+                            << entry->carrier_value.value;
+            }
+            const uint256 plan_id = plan_hasher.GetSHA256();
 
             UniValue result{UniValue::VOBJ};
+            result.pushKV("plan_id", plan_id.GetHex());
             result.pushKV("retired_admission_dgb_slots", retired_admission_dgb);
             result.pushKV("retired_operational_dgb_slots", retired_operational_dgb);
             result.pushKV("retired_admission_carrier_slots", retired_admission_dd);
             result.pushKV("retired_operational_carrier_slots", retired_operational_dd);
-            result.pushKV("retired_dgb_satoshis", retired_dgb_value);
-            result.pushKV("retired_carrier_cents", retired_dd_value);
+            result.pushKV("retired_dgb_satoshis", *retired_dgb_value);
+            result.pushKV("retired_carrier_cents", *retired_dd_value);
             if (!execute) {
                 result.pushKV("executed", false);
                 return result;
+            }
+
+            const UniValue& supplied_plan = options.find_value("plan_id");
+            if (supplied_plan.isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_POOL_PLAN_REQUIRED");
+            }
+            if (ParseHashV(supplied_plan, "plan_id") != plan_id) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "PAYMASTER_POOL_PLAN_CHANGED");
             }
 
             EnsureWalletIsUnlocked(*wallet);
@@ -2075,7 +2275,7 @@ RPCHelpMan rebalancepaymasterpool()
                 coin_control.m_min_depth = 1;
                 for (const ProviderPoolEntry* entry : retire_dgb)
                     coin_control.Select(entry->outpoint);
-                std::vector<CRecipient> recipients{{*destination, retired_dgb_value, /*subtract_fee=*/true}};
+                std::vector<CRecipient> recipients{{*destination, *retired_dgb_value, /*subtract_fee=*/true}};
                 auto created = CreateTransaction(*wallet, recipients, /*change_pos=*/-1,
                                                  coin_control, /*sign=*/true);
                 if (!created) {
@@ -2679,6 +2879,7 @@ RPCHelpMan getpaymasterinfo()
         "Return this wallet's authoritative Paymaster provider configuration and staged readiness.\n",
         {},
         RPCResult{RPCResult::Type::OBJ, "", "Provider information", {
+                                                                        {RPCResult::Type::BOOL, "settings_present", "Whether this wallet has a persisted provider settings record"},
                                                                         {RPCResult::Type::BOOL, "enabled", "Configured provider enablement"},
                                                                         {RPCResult::Type::BOOL, "running", "Runtime provider state"},
                                                                         {RPCResult::Type::STR, "operation_mode", "automatic or manual"},
@@ -2790,6 +2991,7 @@ RPCHelpMan getpaymasterinfo()
                         static_cast<uint64_t>(readiness.pool.complete_operational_slots));
 
             UniValue result{UniValue::VOBJ};
+            result.pushKV("settings_present", readiness.have_settings);
             result.pushKV("enabled", readiness.settings.enabled);
             result.pushKV("running", running);
             result.pushKV("operation_mode",

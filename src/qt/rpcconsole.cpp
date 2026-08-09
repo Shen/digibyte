@@ -68,13 +68,20 @@ const struct {
 
 namespace {
 
-// don't add private key handling cmd's to the history
+// Do not add commands carrying private keys or other spend-authorizing
+// capabilities to the console transcript or history.
 const QStringList historyFilter = QStringList()
     << "importprivkey"
     << "importmulti"
     << "sethdseed"
     << "signmessagewithprivkey"
     << "signrawtransactionwithkey"
+    // Paymaster calls can contain a one-payment sponsorship capability or a
+    // partially signed transaction. Hide the complete invocation in both the
+    // console transcript and command history.
+    << "requestpaymasterquote"
+    << "senddigidollar"
+    << "walletprocesspaymasterpsbt"
     << "walletpassphrase"
     << "walletpassphrasechange"
     << "encryptwallet";
@@ -1060,6 +1067,9 @@ void RPCConsole::on_lineEdit_returnPressed()
     //: A console message indicating an entered command is currently being executed.
     message(CMD_REPLY, tr("Executing…"));
     m_is_executing = true;
+    // Sensitive RPCs can echo a PSBT or another spend-authorizing artifact in
+    // their result. Redact the reply as well as the invocation and history.
+    m_hide_current_reply = strFilteredCmd != cmd.toStdString();
 
     QMetaObject::invokeMethod(m_executor, [this, cmd, wallet_model] {
         m_executor->request(cmd, wallet_model);
@@ -1112,9 +1122,14 @@ void RPCConsole::startExecutor()
     connect(m_executor, &RPCExecutor::reply, this, [this](int category, const QString& command) {
         // Remove "Executing…" message.
         ui->messagesWidget->undo();
-        message(category, command);
+        if (m_hide_current_reply) {
+            message(CMD_REPLY, tr("Sensitive command result hidden."));
+        } else {
+            message(category, command);
+        }
         scrollToEnd();
         m_is_executing = false;
+        m_hide_current_reply = false;
     });
 
     // Make sure executor object is deleted in its own thread

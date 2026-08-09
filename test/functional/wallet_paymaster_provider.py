@@ -139,6 +139,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         self.log.info("Check the initial provider readiness boundary")
         initial = wallet.getpaymasterinfo()
+        assert_equal(initial["settings_present"], False)
         assert_equal(initial["enabled"], False)
         assert_equal(initial["running"], False)
         assert_equal(initial["ready"], False)
@@ -179,6 +180,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         )
 
         staged = wallet.getpaymasterinfo()
+        assert_equal(staged["settings_present"], True)
         assert_equal(staged["enabled"], False)
         assert_equal(staged["provider_id"], identity["provider_id"])
         assert_equal(staged["policy"], persisted_policy)
@@ -222,8 +224,17 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(preview["admission_dgb_slots"], 4)
         assert_equal(preview["operational_dgb_slots"], 2)
         assert_equal(preview["total_output_satoshis"], 80000000)
+        assert_equal(len(preview["plan_id"]), 64)
 
         pool_target["execute"] = True
+        pool_target["plan_id"] = "00" * 32
+        assert_raises_rpc_error(
+            -8,
+            "PAYMASTER_POOL_PLAN_CHANGED",
+            cli.preparepaymasterpool,
+            pool_target,
+        )
+        pool_target["plan_id"] = preview["plan_id"]
         prepared = cli.preparepaymasterpool(pool_target)
         assert_equal(prepared["executed"], True)
         assert_equal(len(prepared["txid"]), 64)
@@ -248,7 +259,86 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(started["endpoint"], f"127.0.0.1:{p2p_port(0)}")
         assert_equal(started["announcement_sequence"], 1)
         assert_equal(wallet.getpaymasterinfo()["announcement_sequence"], 1)
-        assert_equal(wallet.stoppaymaster()["running"], False)
+        changed_while_running = policy.copy()
+        changed_while_running["max_amount_cents"] += 1
+        assert_raises_rpc_error(
+            -4,
+            "PAYMASTER_PROVIDER_RUNNING",
+            cli.setpaymasterpolicy,
+            changed_while_running,
+        )
+        disabled = cli.setpaymasterenabled(False)
+        assert_equal(disabled["enabled"], False)
+        assert_equal(disabled["running"], False)
+        disabled_status = wallet.getpaymasterinfo()
+        assert_equal(disabled_status["enabled"], False)
+        assert_equal(disabled_status["running"], False)
+        reenabled = cli.setpaymasterenabled(True)
+        assert_equal(reenabled["enabled"], True)
+        assert_equal(reenabled["running"], False)
+
+        self.log.info("Do not count operational DGB slots below a changed fee ceiling")
+        raised_fee_policy = policy.copy()
+        raised_fee_policy["maximum_network_fee_dgb_satoshis"] = 30000000
+        cli.setpaymasterpolicy(raised_fee_policy)
+        raised_preview = cli.preparepaymasterpool({
+            "admission_dgb_slots": 4,
+            "operational_dgb_slots": 2,
+        })
+        assert_equal(raised_preview["missing_admission_dgb_slots"], 0)
+        assert_equal(raised_preview["missing_operational_dgb_slots"], 2)
+        assert_equal(raised_preview["operational_dgb_satoshis_each"], 30000000)
+        assert_equal(raised_preview["total_output_satoshis"], 60000000)
+        raised_execute = {
+            "admission_dgb_slots": 4,
+            "operational_dgb_slots": 2,
+            "execute": True,
+            "plan_id": raised_preview["plan_id"],
+        }
+        raised_pool = cli.preparepaymasterpool(raised_execute)
+        assert_equal(raised_pool["executed"], True)
+        self.generatetoaddress(node, 1, wallet.getnewaddress())
+
+        policy_bound_preview = cli.preparepaymasterpool({
+            "admission_dgb_slots": 4,
+            "operational_dgb_slots": 5,
+        })
+        assert_equal(policy_bound_preview["missing_operational_dgb_slots"], 1)
+        cli.setpaymasterpolicy(policy)
+        assert_raises_rpc_error(
+            -8,
+            "PAYMASTER_POOL_PLAN_CHANGED",
+            cli.preparepaymasterpool,
+            {
+                "admission_dgb_slots": 4,
+                "operational_dgb_slots": 5,
+                "execute": True,
+                "plan_id": policy_bound_preview["plan_id"],
+            },
+        )
+        value_rebalance_target = {
+            "admission_dgb_slots": 4,
+            "operational_dgb_slots": 2,
+        }
+        value_rebalance_preview = cli.rebalancepaymasterpool(
+            value_rebalance_target)
+        assert_equal(value_rebalance_preview[
+            "retired_operational_dgb_slots"], 2)
+        # Keep the two 0.30 DGB outputs and retire the older undersized 0.20
+        # DGB outputs, not the other way around.
+        assert_equal(value_rebalance_preview["retired_dgb_satoshis"], 40000000)
+        value_rebalance_target["execute"] = True
+        value_rebalance_target["plan_id"] = value_rebalance_preview["plan_id"]
+        value_rebalanced = cli.rebalancepaymasterpool(value_rebalance_target)
+        assert_equal(value_rebalanced["executed"], True)
+        self.generatetoaddress(node, 1, wallet.getnewaddress())
+        retained_operational_values = sorted(
+            entry["dgb_satoshis"]
+            for entry in wallet.getpaymasterpoolinfo()["pool"]
+            if entry["purpose"] == "operational" and
+            entry["asset"] == "dgb" and entry["state"] == "available"
+        )
+        assert_equal(retained_operational_values, [30000000, 30000000])
 
         self.log.info("Add the USER_PAID carrier pool without replacing existing DGB slots")
         node.setmockoracleprice(500000)
@@ -280,6 +370,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(carrier_preview["total_carrier_cents"], 600)
 
         carrier_target["execute"] = True
+        carrier_target["plan_id"] = carrier_preview["plan_id"]
         carriers = cli.preparepaymasterpool(carrier_target)
         assert_equal(carriers["executed"], True)
         assert_equal(len(carriers["dd_txid"]), 64)
@@ -295,6 +386,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(provider_ready["pool"]["operational_carriers"], 2)
         assert_equal(provider_ready["pool"]["complete_operational_slots"], 2)
 
+        carrier_target.pop("execute")
+        carrier_target.pop("plan_id")
         retry = cli.preparepaymasterpool(carrier_target)
         assert_equal(retry["executed"], False)
         assert_equal(retry["missing_admission_carrier_slots"], 0)
@@ -314,10 +407,11 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(rebalance_preview["retired_operational_dgb_slots"], 1)
         assert_equal(rebalance_preview["retired_admission_carrier_slots"], 1)
         assert_equal(rebalance_preview["retired_operational_carrier_slots"], 1)
-        assert_equal(rebalance_preview["retired_dgb_satoshis"], 30000000)
+        assert_equal(rebalance_preview["retired_dgb_satoshis"], 40000000)
         assert_equal(rebalance_preview["retired_carrier_cents"], 200)
 
         minimum_target["execute"] = True
+        minimum_target["plan_id"] = rebalance_preview["plan_id"]
         rebalanced = cli.rebalancepaymasterpool(minimum_target)
         assert_equal(rebalanced["executed"], True)
         assert_equal(len(rebalanced["dd_txid"]), 64)
@@ -333,6 +427,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(minimum_ready["pool"]["operational_carriers"], 1)
         assert_equal(minimum_ready["pool"]["complete_operational_slots"], 1)
 
+        minimum_target.pop("execute")
+        minimum_target.pop("plan_id")
         rebalance_retry = cli.rebalancepaymasterpool(minimum_target)
         assert_equal(rebalance_retry["executed"], False)
         assert_equal(rebalance_retry["retired_dgb_satoshis"], 0)
@@ -1355,6 +1451,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(sponsored_preview["missing_operational_dgb_slots"], 1)
 
         sponsored_target["execute"] = True
+        sponsored_target["plan_id"] = sponsored_preview["plan_id"]
         sponsored_pool = cli.preparepaymasterpool(sponsored_target)
         assert_equal(sponsored_pool["executed"], True)
         assert_equal(len(sponsored_pool["dgb_txid"]), 64)
@@ -1408,8 +1505,11 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         shadow_pool_target = {
             "admission_dgb_slots": 3,
             "operational_dgb_slots": 2,
-            "execute": True,
         }
+        shadow_pool_preview = shadow_cli.preparepaymasterpool(
+            shadow_pool_target)
+        shadow_pool_target["execute"] = True
+        shadow_pool_target["plan_id"] = shadow_pool_preview["plan_id"]
         shadow_pool = shadow_cli.preparepaymasterpool(shadow_pool_target)
         assert_equal(shadow_pool["executed"], True)
         assert_equal(len(shadow_pool["dgb_txid"]), 64)
@@ -1511,6 +1611,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 "missing_admission_carrier_slots",
                 "missing_operational_carrier_slots")):
             recovery_pool_target["execute"] = True
+            recovery_pool_target["plan_id"] = recovery_pool_preview["plan_id"]
             recovery_pool = shadow_cli.preparepaymasterpool(
                 recovery_pool_target)
             assert_equal(recovery_pool["executed"], True)
@@ -1552,6 +1653,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         initial_recovery = client.resolvepaymastersession(
             recovery_lookup, "cancel_to_self", prepare_recovery_options)
         assert_equal(initial_recovery["artifact"], "alternative_recovery")
+        assert "refresh" in initial_recovery["allowed_actions"]
+        assert "cancel_to_self" in initial_recovery["allowed_actions"]
+        assert_equal(initial_recovery["result_status"], None)
+        assert_equal(initial_recovery["result_sequence"], None)
         assert_equal(initial_recovery["recovery"]["phase"],
                      "capacity_pending")
         assert_equal(initial_recovery["recovery"]["user_dd_inputs"], [])
@@ -1659,6 +1764,13 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             self.connect_nodes(1, 2, peer_advertises_v2=True)
         client_node = self.nodes[1]
         client = client_node.get_wallet_rpc("client")
+        restarted_inbox = client.listdigidollarsendsessions()
+        restarted_summary = next(
+            entry for entry in restarted_inbox["sessions"]
+            if entry["request_id"] == recovery_request_id)
+        assert_equal(restarted_summary["artifact"], "alternative_recovery")
+        assert_equal(restarted_summary["requires_attention"], True)
+        assert "cancel_to_self" in restarted_summary["allowed_actions"]
         restarted_prepared = client.resolvepaymastersession(
             recovery_lookup, "cancel_to_self", prepare_recovery_options)
         assert_equal(restarted_prepared["recovery"]["authorization_commitment"],
@@ -1793,6 +1905,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         if (restricted_preview["missing_admission_dgb_slots"] > 0 or
                 restricted_preview["missing_operational_dgb_slots"] > 0):
             restricted_target["execute"] = True
+            restricted_target["plan_id"] = restricted_preview["plan_id"]
             restricted_pool = cli.preparepaymasterpool(restricted_target)
             assert_equal(restricted_pool["executed"], True)
             assert_equal(len(restricted_pool["dgb_txid"]), 64)

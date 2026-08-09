@@ -205,6 +205,7 @@ Useful client inspection and recovery RPCs:
 listpaymasters
 getpaymasteroffers
 getdigidollarsendsession
+listdigidollarsendsessions
 resolvepaymastersession
 getpaymasterreputation
 clearpaymasterreputation
@@ -310,6 +311,14 @@ weaken the backend limits. A running or ambiguous collaborative transfer is
 shown separately from fee selection so retry, fallback, and same-input recovery
 remain visible without presenting them as ordinary fee settings.
 
+Qt treats Core as authoritative for both the durable session snapshot and its
+allowed recovery actions. It never treats the generic `final` field alone as a
+successful payment, never combines a refreshed session with an older attempt or
+artifact, and never resumes signing automatically after a wallet or process
+restart. `listdigidollarsendsessions` supplies a bounded wallet-local inbox for
+unfinished or recovery-relevant sessions; Qt refreshes the selected session
+before enabling an action.
+
 ## Provider setup
 
 In Qt, the provider-only **Paymaster Network** tab is hidden by default. Enable
@@ -335,18 +344,32 @@ wallet: choosing another wallet closes the assistant and directs the operator
 to Core's normal wallet menu before reopening Paymaster Network. The selected
 wallet name is pinned throughout the review and Core rechecks descriptor,
 private-key, and external-signer eligibility immediately before the first
-write.
+write. The assistant opens only after provider, safety, and liquidity status
+have all been read successfully. On later runs it imports the authoritative
+wallet-persisted values instead of replacing them with setup defaults; every
+editable page also offers an explicit **Restore defaults** action.
 
-Applying the reviewed plan saves the identity, operating policy and safety
-policy, liquidity targets and finite maintenance limits, enables the provider
-configuration, and creates only still-missing pool outputs after an exact
-funding confirmation. Existing identity and pool outputs are retained. The
-completion page confirms that no additional Save buttons are required. Guided
-setup selects the recommended `automatic` operation mode with
-`autostart=false`. It never starts the provider; starting service remains a
-separate, explicit Overview action after readiness is complete. Paid automatic
-maintenance is separately disclosed and approved because it may create DGB-fee
-transactions. The assistant remains available from Overview for later review.
+Applying the reviewed plan first places an existing enabled provider safely
+offline. It then creates or reuses the identity, writes a temporary compatible
+safety bridge when an operating-policy transition requires one, saves the new
+operating and final safety policies, saves liquidity targets and finite
+maintenance limits, and rechecks the pool. Only still-missing outputs are
+created, and only after a second confirmation of the exact current funding
+plan. Runtime mode, autostart, and the requested enabled state are persisted
+last. Existing identity and pool outputs are retained. Completed write steps
+remain durable and retryable after a later failure; closing before the final
+Apply confirmation writes nothing. The completion page confirms that no
+additional Save buttons are required.
+
+A fresh guided setup defaults to the recommended `automatic` operation mode,
+`autostart=false`, and an enabled provider configuration. Reopening the
+assistant preserves existing runtime, autostart, and enabled choices. Therefore
+an explicitly selected enabled/autostart combination may start after setup when
+all readiness gates pass; otherwise starting remains an explicit Overview
+action. Disabling a provider configuration always prevents a saved autostart
+preference from bringing it online. Paid automatic maintenance is separately
+disclosed and approved because it may create DGB-fee transactions. The
+assistant remains available from Overview for later review.
 Manual queue processing and provider autostart are advanced operator settings.
 Manual expert setup exposes all detailed controls after an explicit risk
 warning.
@@ -373,11 +396,22 @@ Provider runtime preferences are persisted in the provider wallet:
   atomic wallet writes as the expert RPC path.
 - `operation_mode=manual` is an expert mode. Core keeps the provider reachable,
   but the operator explicitly invokes the processing RPCs. A mode change is
-  accepted only while the provider is stopped.
+  accepted only while the provider is stopped. The stopped-state check and
+  runtime-settings commit share the wallet-local provider-work guard with
+  start/autostart, so a concurrent start cannot overtake the mode change.
 - `autostart=false` is the default for current-format provider settings.
   Enabling autostart permits an already configured wallet to start its provider
   runtime when readiness permits after load. Older settings records are rejected
   rather than migrated or overwritten. No passphrase is stored.
+- The low-level `stoppaymaster` RPC serializes with a provider start and returns
+  `PAYMASTER_PROVIDER_BUSY` instead of falsely reporting success while another
+  wallet-local provider operation owns the transition. It remains an ephemeral
+  stop when autostart is saved as enabled.
+- The Qt **Stop** action is persistent: when autostart is enabled it first
+  saves `autostart=false` and only then stops the runtime. The separate
+  **Disable provider configuration** action persists `enabled=false` and also
+  stops the runtime, so neither scheduler polling nor a wallet reload can undo
+  the operator's intent.
 
 An encrypted, locked provider wallet does not consume queued work or create new
 signatures. The automatic service reports `waiting_for_unlock` and continues
@@ -394,7 +428,9 @@ The provider lifecycle is deliberately staged:
    Immediately create a full-wallet backup. Restoring that file preserves the
    same provider ID and its wallet-local metadata; creating a new wallet starts
    a new identity and a separate finance history.
-3. Set a policy with `setpaymasterpolicy`. The absolute
+3. While the provider is stopped, set a policy with `setpaymasterpolicy`. The
+   RPC holds the wallet-scoped provider-work guard across the stopped-state
+   check and database commit, so autostart cannot race the policy change. The absolute
    `maximum_network_fee_dgb_satoshis` must be positive.
    A public provider may advertise `user_paid` and `sponsored` at the same
    time. User-paid transfers use the configured DD service-fee rate, while
@@ -404,22 +440,33 @@ The provider lifecycle is deliberately staged:
    `setpaymastersafetypolicy` and inspect it with
    `getpaymastersafetystatus`. A funding model that the provider advertises
    requires six positive limits; six zero values disable only an unadvertised
-   model and never mean unlimited.
+   model and never mean unlimited. The setter shares the wallet-scoped
+   provider-work guard with automatic servicing, so a scheduler step cannot
+   reserve work against the old limits while their replacement is committed.
    The Qt Safety limits page explains these wallet-local spending and request
    controls. Its reset buttons change only the unsaved form: user-paid limits
    return to finite recommended starting values, unused sponsored models return
    to safe all-zero disabled values, and quote/client sections return to their
    recommended starting values. Saving is always required before a reset takes
-   effect in the wallet backend.
+   effect in the wallet backend. Qt only assembles and displays these values;
+   the Core RPC remains solely responsible for validating every safety-policy
+   relationship and rejecting an invalid configuration.
 5. Enable the wallet using `setpaymasterenabled true`.
-6. Preview and explicitly execute `preparepaymasterpool`. Admission requires at
+6. Preview and explicitly execute `preparepaymasterpool`, passing the returned
+   `plan_id` unchanged with `execute=true`. Admission requires at
    least three independent confirmed DGB slots of at least 10,000,000 sat each.
    A `USER_PAID` policy additionally requires at least three confirmed admission
    DD carriers. Admission and operational pool entries are separate.
    The Qt Liquidity page explains the four target classes and guides a new
    operator through restore/choose targets, preview, review, execution, and
    confirmation. Restoring targets never moves funds. Execution is enabled only
-   for the unchanged target set from the matching latest preview. The default
+   for the unchanged target set and cryptographic plan from the matching latest
+   preview; Core recomputes that plan before unlocking or constructing a
+   transaction. `rebalancepaymasterpool` uses the same binding for the exact
+   entries being retired. Manual pool calls also share the provider-work guard
+   with automatic maintenance. Operational DGB entries below the current
+   advertised network-fee ceiling do not satisfy a target, and rebalancing
+   retains higher-value usable entries before retiring undersized ones. The default
    targets are three admission and one operational DGB slot, plus three
    admission and one operational DD carrier when `USER_PAID` is selected;
    sponsored-only defaults use no carriers.
@@ -451,6 +498,11 @@ The provider lifecycle is deliberately staged:
    passes the existing provider authorization manifest and safety policy.
 10. Use `stoppaymaster` before planned maintenance or changing operation mode.
    Configuration and durable commits remain in the wallet database.
+
+`getpaymasterinfo` includes `settings_present` so an identity-only wallet can
+be distinguished from a deliberately disabled persisted provider
+configuration. Qt uses this distinction when deciding whether a reopened
+wizard should preserve `enabled=false` or apply the fresh-setup default.
 
 Provider RPCs include:
 
@@ -500,10 +552,12 @@ conflict changes rebuild the UTC daily totals instead of incrementing them a
 second time.
 
 `getpaymasterfinancestatus` accepts `today`, `7d`, `30d` or `all`, and can
-optionally return up to 10,000 event rows with cursor pagination. The detailed
-form also returns the latest 366 materialized UTC-day totals for the selected
-period so operator interfaces do not need to load or expose transaction IDs to
-draw the daily progression. Its selected-period model breakdown separates
+optionally return bounded event pages with cursor pagination. Qt requests 250
+rows per page; a complete CSV export loads every page asynchronously and writes
+the destination atomically, while the interactive table remains bounded. The
+detailed form also returns the latest 366 materialized UTC-day totals for the
+selected period so operator interfaces do not need to load or expose transaction
+IDs to draw the daily progression. Its selected-period model breakdown separates
 transfer counts, DD income and DGB transfer costs for user-paid, public
 sponsored and restricted sponsored operation. Native DD and DGB values are
 authoritative. When a
@@ -774,6 +828,7 @@ getpaymasterliquiditystatus
 getpaymasterclientsafetystatus
 listpaymasters
 getdigidollarsendsession <request_id>
+listdigidollarsendsessions
 listpaymasterreservations
 ```
 

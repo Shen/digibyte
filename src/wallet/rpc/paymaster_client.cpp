@@ -65,6 +65,427 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_rpc::internal;
 
+namespace {
+
+struct ClientSessionView {
+    std::optional<ProviderAttempt> attempt;
+    std::optional<AlternativeRecoveryRecord> recovery;
+    std::optional<PaymasterResult> provider_result;
+    std::optional<std::string> recipient_address;
+    std::string artifact{"none"};
+    bool has_retriable_final{false};
+    bool authorization_may_exist{false};
+    bool requires_attention{false};
+    std::vector<std::string> allowed_actions;
+};
+
+bool LoadClientIntentDisplayBinding(const PaymentSession& session,
+                                    const ProviderAttempt& attempt,
+                                    std::string& recipient_address,
+                                    std::string& error)
+{
+    PaymentIntent intent;
+    try {
+        SpanReader stream{::PROTOCOL_VERSION, attempt.unsigned_intent};
+        stream >> intent;
+        if (!stream.empty() ||
+            SerializePaymentIntent(intent) != attempt.unsigned_intent) {
+            throw std::ios_base::failure(
+                "non-canonical persisted payment intent");
+        }
+    } catch (const std::ios_base::failure&) {
+        error = "PAYMASTER_PERSISTED_INTENT_CORRUPT";
+        return false;
+    }
+
+    if (intent.version != PaymentIntent::CURRENT_VERSION ||
+        intent.genesis_hash != Params().GenesisBlock().GetHash() ||
+        attempt.provider_id.IsNull() ||
+        !attempt.provider_identity_key.IsFullyValid() ||
+        GetPaymasterId(attempt.provider_identity_key) != attempt.provider_id ||
+        intent.request_id != session.request_id ||
+        intent.session_id != session.session_id ||
+        intent.canonical_request_hash != session.canonical_request_hash ||
+        intent.requested_fee_mode != session.fee_mode_requested ||
+        intent.provider_id != attempt.provider_id ||
+        intent.client_nonce != attempt.client_nonce ||
+        intent.user_dd_inputs != session.user_inputs ||
+        intent.privacy_profile != attempt.privacy_profile ||
+        intent.sponsorship_authorization_hash !=
+            attempt.sponsorship_capability_hash ||
+        (intent.funding_model != FundingModel::USER_PAID &&
+         intent.funding_model != FundingModel::SPONSORED) ||
+        (intent.sponsorship_scope != SponsorshipScope::PUBLIC &&
+         intent.sponsorship_scope != SponsorshipScope::RESTRICTED) ||
+        (intent.requested_fee_mode != FeeMode::PAYMASTER &&
+         intent.requested_fee_mode != FeeMode::AUTO) ||
+        (intent.privacy_profile != PrivacyProfile::STANDARD &&
+         intent.privacy_profile != PrivacyProfile::HIGH) ||
+        (intent.selection_mode != SelectionMode::LOWEST_TOTAL_COST &&
+         intent.selection_mode != SelectionMode::PRIVACY_WEIGHTED) ||
+        intent.offer_id.IsNull() || intent.policy_hash.IsNull() ||
+        intent.user_dd_inputs.empty() ||
+        intent.user_dd_inputs.size() > MAX_PAYMENT_INTENT_INPUTS ||
+        !intent.user_input_proofs.empty() ||
+        intent.recipient_amount.value < 100 ||
+        intent.recipient_amount.value > MAX_DD_OUTPUT_CENTS ||
+        attempt.created_at <= 0 || intent.expires_at <= attempt.created_at ||
+        TimeDeltaExceeds(intent.expires_at, attempt.created_at,
+                         MAX_DIRECT_MESSAGE_TTL_SECONDS)) {
+        error = "PAYMASTER_PERSISTED_INTENT_BINDING_MISMATCH";
+        return false;
+    }
+    std::set<COutPoint> unique_inputs;
+    if (std::any_of(intent.user_dd_inputs.begin(), intent.user_dd_inputs.end(),
+                    [&](const COutPoint& input) {
+                        return input.IsNull() ||
+                            !unique_inputs.insert(input).second;
+                    })) {
+        error = "PAYMASTER_PERSISTED_INTENT_BINDING_MISMATCH";
+        return false;
+    }
+    std::string sponsorship_error;
+    if (!ValidateSponsorshipBinding(
+            intent.funding_model, intent.sponsorship_scope,
+            /*fee_rate_bps=*/0, DDCents{0},
+            intent.sponsorship_authorization_hash, sponsorship_error)) {
+        error = sponsorship_error.empty()
+            ? "PAYMASTER_PERSISTED_INTENT_BINDING_MISMATCH"
+            : sponsorship_error;
+        return false;
+    }
+
+    const ClientAuthorizationManifest& manifest = attempt.client_manifest;
+    if (!manifest.manifest_id.IsNull() &&
+        (manifest.version != ClientAuthorizationManifest::CURRENT_VERSION ||
+         GetClientAuthorizationManifestId(manifest) != manifest.manifest_id ||
+         manifest.request_id != intent.request_id ||
+         manifest.session_id != intent.session_id ||
+         manifest.provider_id != intent.provider_id ||
+         manifest.offer_id != intent.offer_id ||
+         manifest.policy_hash != intent.policy_hash ||
+         manifest.user_dd_inputs != intent.user_dd_inputs ||
+         manifest.recipient_script != intent.recipient_script ||
+         manifest.recipient_amount != intent.recipient_amount ||
+         manifest.canonical_request_hash != intent.canonical_request_hash ||
+         manifest.requested_fee_mode != intent.requested_fee_mode ||
+         manifest.privacy_profile != intent.privacy_profile)) {
+        error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
+        return false;
+    }
+
+    const auto address = DigiDollarAddressForScript(intent.recipient_script);
+    if (!address ||
+        (!intent.user_dd_change_script.empty() &&
+         !DigiDollarAddressForScript(intent.user_dd_change_script))) {
+        error = "PAYMASTER_PERSISTED_RECIPIENT_INVALID";
+        return false;
+    }
+    recipient_address = *address;
+    return true;
+}
+
+bool IsUnsignedAttempt(const ProviderAttempt& attempt)
+{
+    return (attempt.state == AttemptState::CANDIDATE ||
+            attempt.state == AttemptState::QUOTED ||
+            attempt.state == AttemptState::REJECTED ||
+            attempt.state == AttemptState::QUOTE_EXPIRED) &&
+           attempt.user_signed_psbt.empty() &&
+           attempt.final_transaction.empty() && attempt.final_txid.IsNull() &&
+           attempt.provider_signed_at == 0 &&
+           attempt.provider_signed_result.empty();
+}
+
+bool LoadClientSessionView(PaymasterStore& store,
+                           const PaymentSession& session,
+                           int64_t now,
+                           ClientSessionView& view,
+                           std::string& error)
+{
+    view = {};
+    error.clear();
+    if (session.provider_side) {
+        error = "PAYMASTER_CLIENT_SESSION_REQUIRED";
+        return false;
+    }
+
+    std::vector<ProviderAttempt> attempts;
+    attempts.reserve(session.attempt_ids.size());
+    for (const uint256& attempt_id : session.attempt_ids) {
+        ProviderAttempt attempt;
+        if (!store.GetAttempt(attempt_id, attempt) ||
+            attempt.attempt_id != attempt_id ||
+            attempt.session_id != session.session_id) {
+            error = "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ";
+            return false;
+        }
+        if (!IsUnsignedAttempt(attempt)) view.authorization_may_exist = true;
+        attempts.push_back(std::move(attempt));
+    }
+    if (!attempts.empty()) view.attempt = attempts.back();
+
+    for (const ProviderAttempt& attempt : attempts) {
+        std::string recipient_address;
+        if (!LoadClientIntentDisplayBinding(
+                session, attempt, recipient_address, error)) {
+            return false;
+        }
+        if (view.recipient_address &&
+            *view.recipient_address != recipient_address) {
+            error = "PAYMASTER_SESSION_RECIPIENT_CONFLICT";
+            return false;
+        }
+        view.recipient_address = std::move(recipient_address);
+    }
+
+    if (view.attempt && !view.attempt->commit_key.IsNull()) {
+        PaymasterResult provider_result;
+        if (store.GetProviderResult(view.attempt->commit_key,
+                                    provider_result)) {
+            if (!ValidatePaymasterResult(
+                    provider_result, Params().GenesisBlock().GetHash(),
+                    view.attempt->provider_id,
+                    view.attempt->commit_key,
+                    view.attempt->provider_identity_key, 1, error)) {
+                if (error.empty()) {
+                    error = "PAYMASTER_PERSISTED_RESULT_CORRUPT";
+                }
+                return false;
+            }
+            view.provider_result = std::move(provider_result);
+        }
+    }
+
+    bool has_live_reservations{false};
+    if (!store.ClientSessionHasLiveReservations(
+            session, has_live_reservations, error)) {
+        return false;
+    }
+    if (has_live_reservations) view.authorization_may_exist = true;
+
+    AlternativeRecoveryRecord recovery;
+    if (store.GetAlternativeRecovery(session.request_id, recovery)) {
+        if (recovery.session_id != session.session_id) {
+            error = "PAYMASTER_RECOVERY_SESSION_CONFLICT";
+            return false;
+        }
+        view.recovery = std::move(recovery);
+        view.artifact = "alternative_recovery";
+        view.authorization_may_exist = true;
+    } else if (view.attempt &&
+               (!view.attempt->final_transaction.empty() ||
+                !view.attempt->final_txid.IsNull())) {
+        // The client-side attempt is the durable authority for a received
+        // provider result. ProviderCommitRecord belongs to the provider
+        // wallet and is therefore not required for this classification.
+        if (view.attempt->final_transaction.empty() ||
+            view.attempt->final_txid.IsNull()) {
+            error = "PAYMASTER_PERSISTED_FINAL_ARTIFACT_CORRUPT";
+            return false;
+        }
+        try {
+            CMutableTransaction decoded;
+            SpanReader stream{::PROTOCOL_VERSION,
+                              view.attempt->final_transaction};
+            stream >> decoded;
+            if (!stream.empty() ||
+                SerializeTransaction(decoded) !=
+                    view.attempt->final_transaction ||
+                CTransaction{decoded}.GetHash() !=
+                    view.attempt->final_txid) {
+                error = "PAYMASTER_PERSISTED_FINAL_ARTIFACT_CORRUPT";
+                return false;
+            }
+            const bool final_result_status =
+                view.provider_result &&
+                (view.provider_result->status ==
+                     PaymasterResultStatus::FINAL_COMMITTED ||
+                 view.provider_result->status ==
+                     PaymasterResultStatus::BROADCAST_ATTEMPTED);
+            view.has_retriable_final =
+                final_result_status && view.provider_result->txid &&
+                *view.provider_result->txid ==
+                    view.attempt->final_txid &&
+                view.provider_result->raw_transaction_hash &&
+                *view.provider_result->raw_transaction_hash ==
+                    CTransaction{decoded}.GetWitnessHash() &&
+                view.provider_result->final_transaction &&
+                SerializeTransaction(
+                    *view.provider_result->final_transaction) ==
+                    view.attempt->final_transaction;
+        } catch (const std::ios_base::failure&) {
+            error = "PAYMASTER_PERSISTED_FINAL_ARTIFACT_CORRUPT";
+            return false;
+        }
+        view.artifact = "final_transaction";
+        view.authorization_may_exist = true;
+    } else if (view.attempt && !view.attempt->user_signed_psbt.empty()) {
+        view.artifact = "user_psbt";
+        view.authorization_may_exist = true;
+    }
+
+    view.allowed_actions.push_back("refresh");
+    if (!IsTerminal(session.state) && !view.recovery) {
+        const bool early_session =
+            session.state == SessionState::CREATED ||
+            session.state == SessionState::INPUTS_RESERVED ||
+            session.state == SessionState::AWAITING_WALLET_UNLOCK ||
+            session.state == SessionState::AWAITING_USER_SIGNATURE ||
+            session.state == SessionState::AUTHORIZED;
+        if (view.artifact == "none" && early_session) {
+            // Resume is deliberately a capability token for the idempotent
+            // send RPC, not a new resolvepaymastersession mutation.
+            view.allowed_actions.push_back("resume");
+        }
+        if (view.attempt && view.artifact == "none" &&
+            (view.attempt->state == AttemptState::CANDIDATE ||
+             view.attempt->state == AttemptState::QUOTED ||
+             view.attempt->state == AttemptState::QUOTE_EXPIRED) &&
+            (session.state == SessionState::INPUTS_RESERVED ||
+             session.state == SessionState::AWAITING_WALLET_UNLOCK ||
+             session.state == SessionState::AWAITING_USER_SIGNATURE ||
+             session.state == SessionState::AUTHORIZED)) {
+            view.allowed_actions.push_back("fallback");
+        }
+        if (view.artifact == "none" &&
+            (session.state == SessionState::CREATED ||
+             session.state == SessionState::INPUTS_RESERVED ||
+             session.state == SessionState::AWAITING_WALLET_UNLOCK ||
+             session.state == SessionState::AWAITING_USER_SIGNATURE) &&
+            std::all_of(attempts.begin(), attempts.end(), IsUnsignedAttempt)) {
+            view.allowed_actions.push_back("abandon_unsigned");
+        }
+        if (view.attempt && view.artifact == "user_psbt" &&
+            (view.attempt->retry_until <= 0 || now <= view.attempt->retry_until)) {
+            view.allowed_actions.push_back("retry_same");
+        } else if (view.has_retriable_final) {
+            view.allowed_actions.push_back("retry_same");
+        }
+    }
+
+    const bool resumable_recovery =
+        view.recovery && !view.recovery->expired &&
+        !IsTerminal(session.state);
+    const bool recoverable_original =
+        !view.recovery && view.attempt &&
+        session.state == SessionState::PENDING_PROVIDER &&
+        !view.attempt->commit_key.IsNull() &&
+        !view.attempt->template_commitment.IsNull() &&
+        ((view.attempt->state >= AttemptState::USER_SIGNED &&
+          view.attempt->state <= AttemptState::MEMPOOL) ||
+         view.attempt->state == AttemptState::AMBIGUOUS);
+    if (resumable_recovery || recoverable_original) {
+        view.allowed_actions.push_back("cancel_to_self");
+    }
+
+    view.requires_attention =
+        session.state == SessionState::CONFLICTED ||
+        (session.state == SessionState::FAILED &&
+         view.authorization_may_exist) ||
+        (view.artifact == "final_transaction" &&
+         !view.has_retriable_final) ||
+        (view.recovery && !IsTerminal(session.state));
+    return true;
+}
+
+UniValue AllowedActionsToJSON(const ClientSessionView& view)
+{
+    UniValue actions{UniValue::VARR};
+    for (const std::string& action : view.allowed_actions) {
+        actions.push_back(action);
+    }
+    return actions;
+}
+
+UniValue ClientSessionSnapshotToJSON(PaymasterStore& store,
+                                     const PaymentSession& session,
+                                     std::string_view action)
+{
+    ClientSessionView view;
+    std::string error;
+    if (!LoadClientSessionView(store, session, GetTime(), view, error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, error);
+    }
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("action", std::string{action});
+    UniValue session_result = SessionToJSON(session, &store);
+    if (view.recipient_address && !session_result.exists("to_address")) {
+        session_result.pushKV("to_address", *view.recipient_address);
+    }
+    result.pushKV("session", std::move(session_result));
+    if (view.attempt) {
+        result.pushKV("attempt", AttemptToJSON(*view.attempt));
+    } else {
+        result.pushKV("attempt", UniValue{UniValue::VNULL});
+    }
+    result.pushKV("artifact", view.artifact);
+    if (view.recovery) {
+        result.pushKV("recovery", AlternativeRecoveryToJSON(*view.recovery));
+    } else {
+        result.pushKV("recovery", UniValue{UniValue::VNULL});
+    }
+    if (view.provider_result) {
+        result.pushKV("result_status",
+                      ResultStatusName(view.provider_result->status));
+        result.pushKV("result_sequence",
+                      view.provider_result->result_sequence);
+    } else {
+        result.pushKV("result_status", UniValue{UniValue::VNULL});
+        result.pushKV("result_sequence", UniValue{UniValue::VNULL});
+    }
+    result.pushKV("requires_attention", view.requires_attention);
+    result.pushKV("allowed_actions", AllowedActionsToJSON(view));
+    return result;
+}
+
+UniValue ClientSessionSummaryToJSON(const PaymentSession& session,
+                                    const ClientSessionView& view)
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("request_id", session.request_id);
+    result.pushKV("session_id", session.session_id.GetHex());
+    if (session.requested_amount.value > 0) {
+        result.pushKV("requested_amount_cents", session.requested_amount.value);
+    }
+    result.pushKV("requested_fee_mode", FeeModeName(session.fee_mode_requested));
+    result.pushKV("fee_mode_used", FeeModeName(session.fee_mode_used));
+    result.pushKV("session_state", std::string{SessionStateName(session.state)});
+    if (session.pending_phase != PendingPhase::NONE) {
+        result.pushKV("pending_phase", std::string{PendingPhaseName(session.pending_phase)});
+    }
+    result.pushKV("created_at", session.created_at);
+    result.pushKV("updated_at", session.updated_at);
+    result.pushKV("provider_attempts",
+                  static_cast<uint64_t>(session.attempt_ids.size()));
+    if (!session.final_txid.IsNull()) {
+        result.pushKV("txid", session.final_txid.GetHex());
+    }
+    if (!session.recovery_txid.IsNull()) {
+        result.pushKV("recovery_txid", session.recovery_txid.GetHex());
+    }
+    result.pushKV("artifact", view.artifact);
+    result.pushKV("requires_attention", view.requires_attention);
+    result.pushKV("allowed_actions", AllowedActionsToJSON(view));
+    return result;
+}
+
+bool IsActiveClientSession(const PaymentSession& session,
+                           const ClientSessionView& view)
+{
+    if (session.state == SessionState::CONFIRMED ||
+        session.state == SessionState::CANCELED_SAFE) {
+        return false;
+    }
+    if (session.state == SessionState::FAILED &&
+        !view.authorization_may_exist) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
 RPCHelpMan getdigidollarsendsession()
 {
     return RPCHelpMan{
@@ -86,12 +507,14 @@ RPCHelpMan getdigidollarsendsession()
                                                                                          {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
                                                                                          {RPCResult::Type::STR, "fee_mode_used", "Persisted effective fee mode"},
                                                                                          {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Provider bound by the latest durable client authorization"},
+                                                                                         {RPCResult::Type::STR, "privacy_profile", /*optional=*/true, "standard or high privacy profile of the latest durable attempt"},
                                                                                          {RPCResult::Type::STR_HEX, "offer_id", /*optional=*/true, "Offer bound by the latest durable client authorization"},
                                                                                          {RPCResult::Type::STR_HEX, "policy_hash", /*optional=*/true, "Provider policy bound by the latest durable client authorization"},
                                                                                          {RPCResult::Type::STR, "funding_model", /*optional=*/true, "Exact sponsored or user_paid funding model"},
                                                                                          {RPCResult::Type::NUM, "payment_cents", /*optional=*/true, "Exact recipient amount from the latest durable client authorization"},
                                                                                          {RPCResult::Type::NUM, "service_fee_cents", /*optional=*/true, "Exact rounded provider service fee"},
                                                                                          {RPCResult::Type::NUM, "user_total_cents", /*optional=*/true, "Exact recipient amount plus service fee"},
+                                                                                                                                                                        {RPCResult::Type::STR, "to_address", /*optional=*/true, "Canonical DigiDollar recipient from the bound persisted intent or durable authorization"},
                                                                                          {RPCResult::Type::STR, "session_state", "Authoritative session state"},
                                                                                         {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Persisted phase for PENDING_PROVIDER"},
                                                                                         {RPCResult::Type::BOOL, "final", "Whether the state is terminal"},
@@ -120,6 +543,137 @@ RPCHelpMan getdigidollarsendsession()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster session not found");
             }
             return SessionToJSON(session, &store);
+        },
+    };
+}
+
+RPCHelpMan listdigidollarsendsessions()
+{
+    return RPCHelpMan{
+        "listdigidollarsendsessions",
+        "List bounded wallet-local Paymaster client session summaries without "
+        "creating, signing, retrying, broadcasting, or recovering a payment.\n"
+        "The cursor is the exclusive request_id of the previous page. "
+        "active_only retains conflicted and otherwise terminal sessions whenever "
+        "durable authorization evidence may still require attention.\n",
+        {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Read-only pagination options", {
+                                                                                                           {"active_only", RPCArg::Type::BOOL, RPCArg::Default{true}, "Exclude completed and harmless unsigned-failed sessions"},
+                                                                                                           {"limit", RPCArg::Type::NUM, RPCArg::Default{20}, "Maximum summaries to return, from 1 through 100"},
+                                                                                                           {"cursor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Exclusive canonical request_id cursor"},
+                                                                                                       }},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "A bounded read-only session page", {
+                                                                                       {RPCResult::Type::BOOL, "active_only", "Applied active-session filter"},
+                                                                                       {RPCResult::Type::NUM, "count", "Number of summaries in this page"},
+                                                                                       {RPCResult::Type::ARR, "sessions", "Wallet-local client session summaries", {
+                                                                                                                                                                         {RPCResult::Type::OBJ, "", "One persistent session summary", {
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "session_id", "Persistent session identifier"},
+                                                                                                                                                                                                                                        {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original wallet-local amount"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "fee_mode_used", "Effective fee mode"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "session_state", "Authoritative session state"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Pending provider phase"},
+                                                                                                                                                                                                                                        {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
+                                                                                                                                                                                                                                        {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
+                                                                                                                                                                                                                                        {RPCResult::Type::NUM, "provider_attempts", "Persistent provider attempt count"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known payment transaction"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known recovery transaction"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "artifact", "none, user_psbt, final_transaction, or alternative_recovery"},
+                                                                                                                                                                                                                                        {RPCResult::Type::BOOL, "requires_attention", "Whether durable state requires explicit user attention"},
+                                                                                                                                                                                                                                        {RPCResult::Type::ARR, "allowed_actions", "Core-derived actions; Qt may only remove entries", {{RPCResult::Type::STR, "", "Action name"}}},
+                                                                                                                                                                                                                                    }},
+                                                                                                                                                                     }},
+                                                                                       {RPCResult::Type::STR, "next_cursor", /*optional=*/true, "Exclusive cursor for the next page"},
+                                                                                   }},
+        RPCExamples{HelpExampleCli("listdigidollarsendsessions", "'{\"active_only\":true,\"limit\":20}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+
+            const UniValue options = request.params[0].isNull()
+                ? UniValue{UniValue::VOBJ} : request.params[0].get_obj();
+            RPCTypeCheckObj(options,
+                            {{"active_only", UniValueType(UniValue::VBOOL)},
+                             {"limit", UniValueType(UniValue::VNUM)},
+                             {"cursor", UniValueType(UniValue::VSTR)}},
+                            /*fAllowNull=*/true, /*fStrict=*/true);
+            const bool active_only = options.find_value("active_only").isNull()
+                ? true : options.find_value("active_only").get_bool();
+            const int64_t limit = options.find_value("limit").isNull()
+                ? 20 : options.find_value("limit").getInt<int64_t>();
+            const std::string cursor = options.find_value("cursor").isNull()
+                ? std::string{} : options.find_value("cursor").get_str();
+            if (limit < 1 || limit > 100) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   "limit must be between 1 and 100");
+            }
+            if (!cursor.empty() && !IsCanonicalRequestId(cursor)) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "cursor must be a canonical lowercase request UUID");
+            }
+
+            // Keep the live-session list and each derived attempt/recovery
+            // view on one wallet database snapshot. PaymasterStore uses the
+            // same recursive wallet lock internally.
+            LOCK(wallet->cs_wallet);
+            PaymasterStore store{*wallet};
+            std::vector<PaymentSession> sessions;
+            std::string error;
+            if (!store.ListClientSessions(sessions, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            std::sort(sessions.begin(), sessions.end(),
+                      [](const PaymentSession& lhs,
+                         const PaymentSession& rhs) {
+                          return lhs.request_id < rhs.request_id;
+                      });
+
+            struct ListedSession {
+                PaymentSession session;
+                ClientSessionView view;
+            };
+            std::vector<ListedSession> listed;
+            listed.reserve(static_cast<size_t>(limit) + 1);
+            for (PaymentSession& session : sessions) {
+                if (!cursor.empty() && session.request_id <= cursor) {
+                    continue;
+                }
+                if (active_only &&
+                    (session.state == SessionState::CONFIRMED ||
+                     session.state == SessionState::CANCELED_SAFE)) {
+                    continue;
+                }
+                ClientSessionView view;
+                if (!LoadClientSessionView(
+                        store, session, GetTime(), view, error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                }
+                if (active_only && !IsActiveClientSession(session, view)) {
+                    continue;
+                }
+                listed.push_back({std::move(session), std::move(view)});
+                if (listed.size() > static_cast<size_t>(limit)) break;
+            }
+
+            const size_t page_size = std::min(
+                listed.size(), static_cast<size_t>(limit));
+            UniValue page{UniValue::VARR};
+            for (size_t index = 0; index < page_size; ++index) {
+                page.push_back(ClientSessionSummaryToJSON(
+                    listed[index].session, listed[index].view));
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("active_only", active_only);
+            result.pushKV("count", static_cast<uint64_t>(page_size));
+            result.pushKV("sessions", std::move(page));
+            if (page_size < listed.size() && page_size > 0) {
+                result.pushKV("next_cursor",
+                              listed[page_size - 1].session.request_id);
+            }
+            return result;
         },
     };
 }
@@ -349,12 +903,11 @@ UniValue ResolveAlternativePaymasterRecovery(
             throw JSONRPCError(RPC_WALLET_ERROR,
                                "PAYMASTER_SESSION_NOT_FOUND");
         }
-        UniValue result{UniValue::VOBJ};
-        result.pushKV("action", "cancel_to_self");
-        result.pushKV("session", SessionToJSON(current_session));
-        result.pushKV("attempt", AttemptToJSON(original_attempt));
-        result.pushKV("artifact", "alternative_recovery");
-        result.pushKV("recovery", AlternativeRecoveryToJSON(record));
+        // Every resolve mutation returns the same authoritative envelope as a
+        // refresh. Callers can therefore replace the complete snapshot and
+        // never retain an artifact from an older recovery phase.
+        UniValue result = ClientSessionSnapshotToJSON(
+            store, current_session, "cancel_to_self");
         result.pushKV("queued", queue.queued);
         result.pushKV("connection_pending", queue.connection_pending);
         result.pushKV("route_available", queue.route_available);
@@ -1053,7 +1606,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                  {"request_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Canonical lowercase UUID"},
                                                                                                                  {"session_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Persistent session identifier"},
                                                                                                              }},
-            {"action", RPCArg::Type::STR, RPCArg::Optional::NO, "refresh, retry_same, fallback, abandon_unsigned, or cancel_to_self"},
+            {"action", RPCArg::Type::STR, RPCArg::Optional::NO, "refresh, retry_same, fallback, abandon_unsigned, or cancel_to_self; mutations must be present in the current Core-derived allowed_actions"},
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Exact recovery selection and authorization", {
                                                                                                                         {"attempt_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Existing original attempt identifier"},
                                                                                                                         {"recovery_provider_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional exact distinct recovery provider"},
@@ -1074,6 +1627,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                                                                        {RPCResult::Type::NUM, "requested_amount_cents", /*optional=*/true, "Original recipient amount or exact total DD outflow"},
                                                                                                                                                                        {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", /*optional=*/true, "Whether the Paymaster fee is deducted from the requested amount"},
                                                                                                                                                                        {RPCResult::Type::BOOL, "send_all_spendable_dd", /*optional=*/true, "Whether the requested amount was bound to all spendable confirmed DD"},
+                                                                                                                                                                       {RPCResult::Type::STR, "to_address", /*optional=*/true, "Canonical DigiDollar recipient from the durable authorization"},
                                                                                                                                                                        {RPCResult::Type::STR, "session_state", "Authoritative session state"},
                                                                                                                                                                       {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Pending provider phase"},
                                                                                                                                                                       {RPCResult::Type::BOOL, "final", "Whether the session is terminal"},
@@ -1091,11 +1645,12 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                                                                                                                                                  }},
                                                                                                                                                                       {RPCResult::Type::NUM, "provider_attempts", "Persistent provider attempt count"},
                                                                                                                                                                   }},
-                                                                                      {RPCResult::Type::OBJ, "attempt", /*optional=*/true, "Selected persistent attempt", {
+                                                                                       {RPCResult::Type::OBJ, "attempt", /*optional=*/false, "Selected persistent attempt, or null when none exists", {
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "attempt_id", "Persistent attempt identifier"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "provider_id", "Provider identifier"},
                                                                                                                                                                               {RPCResult::Type::STR, "provider_endpoint", /*optional=*/true, "Direct provider endpoint"},
                                                                                                                                                                               {RPCResult::Type::STR, "attempt_state", "Authoritative attempt state"},
+                                                                                                                                                                              {RPCResult::Type::STR, "privacy_profile", "standard or high privacy profile"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "quote_id", /*optional=*/true, "Provider quote identifier"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "template_commitment", /*optional=*/true, "Bound transaction template"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "unsigned_txid", /*optional=*/true, "Unsigned transaction identifier"},
@@ -1106,8 +1661,10 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                                                                               {RPCResult::Type::BOOL, "authorization_accepted", /*optional=*/true, "Whether that exact commitment was accepted"},
                                                                                                                                                                               {RPCResult::Type::NUM_TIME, "authorization_accepted_at", /*optional=*/true, "Durable acceptance time"},
                                                                                                                                                                           }},
-                                                                                      {RPCResult::Type::STR, "artifact", /*optional=*/true, "none, user_psbt, final_transaction, or alternative_recovery"},
-                                                                                      {RPCResult::Type::OBJ, "recovery", /*optional=*/true, "Persistent alternative-recovery authority and state", {
+                                                                                       {RPCResult::Type::STR, "artifact", "none, user_psbt, final_transaction, or alternative_recovery"},
+                                                                                       {RPCResult::Type::BOOL, "requires_attention", "Whether durable state requires explicit user attention"},
+                                                                                       {RPCResult::Type::ARR, "allowed_actions", "Core-derived actions returned for every resolve action; Qt may only remove entries", {{RPCResult::Type::STR, "", "Action name"}}},
+                                                                                       {RPCResult::Type::OBJ, "recovery", /*optional=*/false, "Persistent alternative-recovery authority and state, or null when none exists", {
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "recovery_id", "Stable recovery identifier"},
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "recovery_provider_id", "Distinct recovery provider"},
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "offer_id", "Exact USER_PAID offer"},
@@ -1148,8 +1705,8 @@ RPCHelpMan resolvepaymastersession()
                                                                                       {RPCResult::Type::BOOL, "queued", /*optional=*/true, "Whether the exact persisted submit is queued"},
                                                                                       {RPCResult::Type::BOOL, "connection_pending", /*optional=*/true, "Whether a dedicated provider reconnection was requested"},
                                                                                       {RPCResult::Type::BOOL, "route_available", /*optional=*/true, "Whether the persisted provider route is available"},
-                                                                                      {RPCResult::Type::STR, "result_status", /*optional=*/true, "Latest signed provider result"},
-                                                                                      {RPCResult::Type::NUM, "result_sequence", /*optional=*/true, "Latest monotonic result sequence"},
+                                                                                       {RPCResult::Type::STR, "result_status", /*optional=*/false, "Latest signed provider result, or null when none exists"},
+                                                                                       {RPCResult::Type::NUM, "result_sequence", /*optional=*/false, "Latest monotonic result sequence, or null when none exists"},
                                                                                   }},
         RPCExamples{HelpExampleCli("resolvepaymastersession", "'{\"request_id\":\"550e8400-e29b-41d4-a716-446655440000\"}' retry_same")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
@@ -1189,11 +1746,33 @@ RPCHelpMan resolvepaymastersession()
                                        equivocation_error);
                 }
             }
-            UniValue result{UniValue::VOBJ};
-            result.pushKV("action", action);
-            result.pushKV("session", SessionToJSON(session));
-            if (action == "refresh") return result;
-
+            {
+                // Re-read under one recursive wallet lock after inbox
+                // observation. The same authoritative action set exposed to
+                // Qt is also the fail-closed gate for direct CLI mutations.
+                LOCK(wallet->cs_wallet);
+                if (!FindSession(request.params[0].get_obj(), store,
+                                 session)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "Paymaster session not found");
+                }
+                if (action == "refresh") {
+                    return ClientSessionSnapshotToJSON(store, session, action);
+                }
+                ClientSessionView view;
+                std::string view_error;
+                if (!LoadClientSessionView(
+                        store, session, GetTime(), view, view_error)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, view_error);
+                }
+                if (std::find(view.allowed_actions.begin(),
+                              view.allowed_actions.end(), action) ==
+                    view.allowed_actions.end()) {
+                    throw JSONRPCError(
+                        RPC_WALLET_ERROR,
+                        "PAYMASTER_SESSION_ACTION_NOT_ALLOWED");
+                }
+            }
             if (action == "abandon_unsigned") {
                 std::string error;
                 if (!store.AbandonUnsignedClientSession(
@@ -1203,9 +1782,7 @@ RPCHelpMan resolvepaymastersession()
                         RPC_WALLET_ERROR,
                         error.empty() ? "PAYMASTER_UNSIGNED_ABANDON_FAILED" : error);
                 }
-                result.pushKV("session", SessionToJSON(session));
-                result.pushKV("artifact", "none");
-                return result;
+                return ClientSessionSnapshotToJSON(store, session, action);
             }
 
             if (session.attempt_ids.empty()) {
@@ -1237,41 +1814,76 @@ RPCHelpMan resolvepaymastersession()
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        error.empty() ? "PAYMASTER_FALLBACK_FAILED" : error);
                 }
-                result.pushKV("session", SessionToJSON(session));
-                result.pushKV("attempt", AttemptToJSON(attempt));
-                result.pushKV("artifact", "none");
-                return result;
+                return ClientSessionSnapshotToJSON(store, session, action);
             }
-            result.pushKV("attempt", AttemptToJSON(attempt));
 
-            DigiDollar::Paymaster::ProviderCommitRecord commit;
-            if (!attempt.commit_key.IsNull() && store.GetProviderCommit(attempt.commit_key, commit)) {
-                result.pushKV("artifact", "final_transaction");
-                result.pushKV("raw_transaction", HexStr(commit.final_transaction));
-                result.pushKV("txid", commit.final_txid.GetHex());
+            if (!attempt.final_transaction.empty() &&
+                !attempt.final_txid.IsNull()) {
+                bool broadcast{false};
+                bool already_confirmed{false};
+                std::string broadcast_error;
                 if (action == "retry_same") {
                     const int64_t now{GetTime()};
-                    bool already_confirmed{false};
-                    std::string broadcast_error;
-                    CTransactionRef exact_transaction;
-                    const bool broadcast = InsertAndBroadcastProviderCommit(
-                        *wallet, store, commit, now, already_confirmed,
-                        broadcast_error, &exact_transaction);
-                    result.pushKV("broadcast", broadcast);
-                    if (!broadcast_error.empty()) {
-                        result.pushKV("broadcast_error", broadcast_error);
+                    CMutableTransaction decoded;
+                    try {
+                        SpanReader stream{::PROTOCOL_VERSION,
+                                          attempt.final_transaction};
+                        stream >> decoded;
+                        if (!stream.empty() ||
+                            SerializeTransaction(decoded) !=
+                                attempt.final_transaction ||
+                            CTransaction{decoded}.GetHash() !=
+                                attempt.final_txid) {
+                            throw std::ios_base::failure(
+                                "non-canonical client final transaction");
+                        }
+                    } catch (const std::ios_base::failure&) {
+                        throw JSONRPCError(
+                            RPC_WALLET_ERROR,
+                            "PAYMASTER_PERSISTED_FINAL_ARTIFACT_CORRUPT");
                     }
+                    const CTransactionRef exact_transaction =
+                        MakeTransactionRef(decoded);
+                    FinalTransactionPresence presence{
+                        FinalTransactionPresence::NONE};
+                    std::string validation_error;
+                    if (!PreflightFinalPaymasterTransaction(
+                            *wallet, exact_transaction, presence,
+                            validation_error) ||
+                        !store.ValidateClientDurableFinalForBroadcast(
+                            *exact_transaction, now,
+                            presence != FinalTransactionPresence::NONE,
+                            validation_error)) {
+                        throw JSONRPCError(
+                            RPC_TRANSACTION_REJECTED,
+                            validation_error.empty()
+                                ? "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED"
+                                : validation_error);
+                    }
+                    broadcast = InsertAndBroadcastPaymasterTransaction(
+                        *wallet, exact_transaction, already_confirmed,
+                        broadcast_error);
                     std::string reconcile_error;
                     if (broadcast && !store.ReconcileFinalTransaction(
-                                         *exact_transaction, already_confirmed ? 1 : 0,
+                                         *exact_transaction,
+                                         already_confirmed ? 1 : 0,
                                          !already_confirmed, now, reconcile_error)) {
                         throw JSONRPCError(RPC_WALLET_ERROR, reconcile_error);
                     }
                 }
-                DigiDollar::Paymaster::PaymasterResult provider_result;
-                if (store.GetProviderResult(commit.commit_key, provider_result)) {
-                    result.pushKV("result_status", ResultStatusName(provider_result.status));
-                    result.pushKV("result_sequence", provider_result.result_sequence);
+                if (!store.GetSessionByRequestId(session.request_id,
+                                                 session)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_SESSION_DATABASE_READ");
+                }
+                UniValue result = ClientSessionSnapshotToJSON(
+                    store, session, action);
+                result.pushKV("raw_transaction",
+                              HexStr(attempt.final_transaction));
+                result.pushKV("txid", attempt.final_txid.GetHex());
+                result.pushKV("broadcast", broadcast);
+                if (!broadcast_error.empty()) {
+                    result.pushKV("broadcast_error", broadcast_error);
                 }
                 return result;
             }
@@ -1279,10 +1891,8 @@ RPCHelpMan resolvepaymastersession()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster retry window expired");
             }
             if (!attempt.user_signed_psbt.empty()) {
-                result.pushKV("artifact", "user_psbt");
-                result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
+                PaymasterSubmitQueueState queue_state;
                 if (action == "retry_same") {
-                    PaymasterSubmitQueueState queue_state;
                     std::string error;
                     if (!QueuePersistedPaymasterSubmit(context, *wallet, session, attempt,
                                                        GetTime(), queue_state, error)) {
@@ -1290,14 +1900,28 @@ RPCHelpMan resolvepaymastersession()
                             error == "PAYMASTER_DIRECT_QUEUE_FULL" ? RPC_CLIENT_NODE_CAPACITY_REACHED : RPC_WALLET_ERROR,
                             error);
                     }
-                    result.pushKV("queued", queue_state.queued);
-                    result.pushKV("connection_pending", queue_state.connection_pending);
-                    result.pushKV("route_available", queue_state.route_available);
                 }
+                if (!store.GetSessionByRequestId(session.request_id,
+                                                 session)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_SESSION_DATABASE_READ");
+                }
+                UniValue result = ClientSessionSnapshotToJSON(
+                    store, session, action);
+                result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
+                if (action == "retry_same") {
+                    result.pushKV("queued", queue_state.queued);
+                    result.pushKV("connection_pending",
+                                  queue_state.connection_pending);
+                    result.pushKV("route_available",
+                                  queue_state.route_available);
+                }
+                return result;
             } else {
-                result.pushKV("artifact", "none");
+                throw JSONRPCError(
+                    RPC_WALLET_ERROR,
+                    "PAYMASTER_RETRY_ARTIFACT_UNAVAILABLE");
             }
-            return result;
         },
     };
 }

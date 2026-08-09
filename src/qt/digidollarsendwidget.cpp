@@ -18,14 +18,17 @@
 #include <logging.h>
 #include <kernel/chainparams.h>
 #include <oracle/mock_oracle.h>
+#include <paymaster/types.h>
 #include <interfaces/node.h>
 #include <univalue.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <limits>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -108,6 +111,546 @@ protected:
 private:
     QRadioButton* m_button{nullptr};
 };
+
+bool DecodeClientSafetyPolicy(const UniValue& policy,
+                              qint64& maximum_per_transaction,
+                              qint64& maximum_per_day)
+{
+    const UniValue& per_transaction =
+        policy.find_value("maximum_service_fee_per_transaction_cents");
+    const UniValue& per_day =
+        policy.find_value("maximum_service_fee_per_day_cents");
+    if (!policy.isObject() || !per_transaction.isNum() || !per_day.isNum()) {
+        return false;
+    }
+    try {
+        maximum_per_transaction = per_transaction.getInt<qint64>();
+        maximum_per_day = per_day.getInt<qint64>();
+    } catch (const std::exception&) {
+        return false;
+    }
+    // These are representation checks only. Relationships between the two
+    // limits are Core policy and must not be reimplemented in Qt.
+    return maximum_per_transaction >= 0 &&
+        maximum_per_transaction <=
+            DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS &&
+        maximum_per_day >= 0 &&
+        maximum_per_day <= DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS;
+}
+
+bool DecodeClientSafetyStatus(const UniValue& result, bool& configured,
+                              qint64& maximum_per_transaction,
+                              qint64& maximum_per_day,
+                              qint64& active_reservations,
+                              qint64& reserved_cents,
+                              qint64& spent_cents,
+                              qint64& available_cents)
+{
+    const UniValue& configured_value = result.find_value("configured");
+    if (!result.isObject() || !configured_value.isBool()) return false;
+    configured = configured_value.get_bool();
+    if (!configured) return true;
+
+    const UniValue& active = result.find_value("active_reservations");
+    const UniValue& reserved =
+        result.find_value("reserved_service_fee_cents");
+    const UniValue& spent =
+        result.find_value("spent_service_fee_last_day_cents");
+    const UniValue& available =
+        result.find_value("available_service_fee_today_cents");
+    if (!DecodeClientSafetyPolicy(
+            result.find_value("policy"), maximum_per_transaction,
+            maximum_per_day) ||
+        !active.isNum() || !reserved.isNum() || !spent.isNum() ||
+        !available.isNum()) {
+        return false;
+    }
+    try {
+        active_reservations = active.getInt<qint64>();
+        reserved_cents = reserved.getInt<qint64>();
+        spent_cents = spent.getInt<qint64>();
+        available_cents = available.getInt<qint64>();
+    } catch (const std::exception&) {
+        return false;
+    }
+    return active_reservations >= 0 && reserved_cents >= 0 &&
+        spent_cents >= 0 && available_cents >= 0;
+}
+
+bool ReadInt64(const UniValue& object, const char* key, qint64& value)
+{
+    const UniValue& encoded = object.find_value(key);
+    if (!encoded.isNum()) return false;
+    try {
+        value = encoded.getInt<qint64>();
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
+}
+
+bool ParseDigiDollarCents(const QString& text, CAmount& cents)
+{
+    static const QRegularExpression DECIMAL_PATTERN{
+        QStringLiteral("^(0|[1-9][0-9]*)(?:\\.([0-9]{1,2}))?$")};
+    const QRegularExpressionMatch match =
+        DECIMAL_PATTERN.match(text.trimmed());
+    if (!match.hasMatch()) return false;
+
+    bool whole_ok{false};
+    const qint64 whole = match.captured(1).toLongLong(&whole_ok);
+    if (!whole_ok || whole >
+            DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS / 100) {
+        return false;
+    }
+    QString fraction = match.captured(2);
+    if (fraction.size() == 1) fraction.append(QLatin1Char('0'));
+    const qint64 fractional = fraction.isEmpty() ? 0 : fraction.toInt();
+    if (whole > (std::numeric_limits<qint64>::max() - fractional) / 100) {
+        return false;
+    }
+    cents = whole * 100 + fractional;
+    return cents >= 100 &&
+        cents <= DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS;
+}
+
+bool IsKnownSessionState(const QString& state)
+{
+    static const QStringList STATES{
+        QStringLiteral("CREATED"),
+        QStringLiteral("INPUTS_RESERVED"),
+        QStringLiteral("AWAITING_WALLET_UNLOCK"),
+        QStringLiteral("AWAITING_USER_SIGNATURE"),
+        QStringLiteral("AUTHORIZED"),
+        QStringLiteral("DGB_COMMITTING"),
+        QStringLiteral("STEMPOOL"),
+        QStringLiteral("MEMPOOL"),
+        QStringLiteral("CONFIRMED"),
+        QStringLiteral("PENDING_PROVIDER"),
+        QStringLiteral("FAILED"),
+        QStringLiteral("CANCELED_SAFE"),
+        QStringLiteral("CONFLICTED"),
+    };
+    return STATES.contains(state);
+}
+
+bool IsKnownAttemptState(const QString& state)
+{
+    static const QStringList STATES{
+        QStringLiteral("CANDIDATE"),
+        QStringLiteral("QUOTED"),
+        QStringLiteral("USER_SIGNED"),
+        QStringLiteral("USER_PSBT_ACCEPTED"),
+        QStringLiteral("PROVIDER_SIGNED"),
+        QStringLiteral("FINAL_COMMITTED"),
+        QStringLiteral("BROADCAST"),
+        QStringLiteral("STEMPOOL"),
+        QStringLiteral("MEMPOOL"),
+        QStringLiteral("REJECTED"),
+        QStringLiteral("QUOTE_EXPIRED"),
+        QStringLiteral("AMBIGUOUS"),
+        QStringLiteral("CONFLICTED"),
+    };
+    return STATES.contains(state);
+}
+
+bool IsKnownPaymasterArtifact(const QString& artifact)
+{
+    return artifact == QStringLiteral("none") ||
+        artifact == QStringLiteral("user_psbt") ||
+        artifact == QStringLiteral("final_transaction") ||
+        artifact == QStringLiteral("alternative_recovery");
+}
+
+bool IsKnownPaymasterResultStatus(const QString& status)
+{
+    return status == QStringLiteral("no_final_commit") ||
+        status == QStringLiteral("user_psbt_accepted") ||
+        status == QStringLiteral("final_committed") ||
+        status == QStringLiteral("broadcast_attempted") ||
+        status == QStringLiteral("slot_unavailable") ||
+        status == QStringLiteral("rejected");
+}
+
+bool IsKnownPaymasterAction(const QString& action)
+{
+    return action == QStringLiteral("refresh") ||
+        action == QStringLiteral("resume") ||
+        action == QStringLiteral("retry_same") ||
+        action == QStringLiteral("fallback") ||
+        action == QStringLiteral("abandon_unsigned") ||
+        action == QStringLiteral("recover") ||
+        action == QStringLiteral("cancel_to_self");
+}
+
+bool IsTerminalPaymasterState(const QString& state)
+{
+    return state == QStringLiteral("CONFIRMED") ||
+        state == QStringLiteral("CANCELED_SAFE") ||
+        state == QStringLiteral("FAILED") ||
+        state == QStringLiteral("CONFLICTED");
+}
+
+struct PaymasterSessionSnapshot {
+    bool authoritative{false};
+    bool reported_final{false};
+    QString request_id;
+    QString session_id;
+    QString state;
+    QString pending_phase;
+    QString broadcast_state;
+    QString confirmation_state;
+    QString provider_id;
+    QString policy_hash;
+    QString artifact;
+    QString attempt_state;
+    QString recipient;
+    QString privacy_profile;
+    QString transaction_id;
+    QString recovery_transaction_id;
+    QString result_status;
+    qint64 result_sequence{-1};
+    qint64 recovery_expires_at{-1};
+    QStringList allowed_actions;
+    qint64 payment_cents{-1};
+    qint64 service_fee_cents{-1};
+    qint64 total_cents{-1};
+    qint64 expires_at{-1};
+    qint64 requested_amount_cents{-1};
+    bool has_costs{false};
+    bool has_expiry{false};
+    bool allowed_actions_known{false};
+};
+
+bool DecodePaymasterSessionSnapshot(const UniValue& result,
+                                    PaymasterSessionSnapshot& snapshot,
+                                    QString& error)
+{
+    if (!result.isObject()) {
+        error = QStringLiteral("response is not an object");
+        return false;
+    }
+    const UniValue& embedded_session = result.find_value("session");
+    const bool wrapped = embedded_session.isObject();
+    snapshot.authoritative = wrapped;
+    const UniValue& session = wrapped ? embedded_session : result;
+    const auto read_string = [](const UniValue& object, const char* key) {
+        const UniValue& value = object.find_value(key);
+        return value.isStr() ? QString::fromStdString(value.get_str())
+                             : QString{};
+    };
+
+    snapshot.request_id = read_string(session, "request_id");
+    snapshot.session_id = read_string(session, "session_id");
+    snapshot.state = read_string(session, "session_state");
+    snapshot.pending_phase = read_string(session, "pending_phase");
+    snapshot.broadcast_state = read_string(session, "broadcast_state");
+    snapshot.confirmation_state = read_string(session, "confirmation_state");
+    snapshot.recipient = read_string(session, "to_address");
+    if (!wrapped && snapshot.recipient.isEmpty()) {
+        snapshot.recipient = read_string(result, "to_address");
+    }
+    snapshot.privacy_profile = read_string(session, "privacy_profile");
+    snapshot.transaction_id = read_string(session, "txid");
+    snapshot.recovery_transaction_id = read_string(session, "recovery_txid");
+    const UniValue& reported_final = session.find_value("final");
+    if ((wrapped && !reported_final.isBool()) ||
+        (!reported_final.isNull() && !reported_final.isBool())) {
+        error = QStringLiteral("session final marker is not a boolean");
+        return false;
+    }
+    snapshot.reported_final = reported_final.isBool() &&
+        reported_final.get_bool();
+
+    if (!IsKnownSessionState(snapshot.state) ||
+        (wrapped && (snapshot.request_id.isEmpty() ||
+                     snapshot.session_id.isEmpty())) ||
+        (!snapshot.session_id.isEmpty() &&
+         !IsCanonicalNonNullPaymasterHash(snapshot.session_id)) ||
+        (!snapshot.request_id.isEmpty() &&
+         !DigiDollar::Paymaster::IsCanonicalRequestId(
+             snapshot.request_id.toStdString())) ||
+        snapshot.recipient.size() > 160) {
+        error = QStringLiteral("invalid session identity, state or recipient");
+        return false;
+    }
+    if ((!snapshot.transaction_id.isEmpty() &&
+         !IsCanonicalNonNullPaymasterHash(snapshot.transaction_id)) ||
+        (!snapshot.recovery_transaction_id.isEmpty() &&
+         !IsCanonicalNonNullPaymasterHash(
+             snapshot.recovery_transaction_id))) {
+        error = QStringLiteral("invalid payment or recovery transaction id");
+        return false;
+    }
+
+    if (!snapshot.pending_phase.isEmpty() &&
+        snapshot.pending_phase != QStringLiteral("NONE") &&
+        snapshot.pending_phase != QStringLiteral("USER_SIGNATURE_SENT") &&
+        snapshot.pending_phase != QStringLiteral("PROVIDER_SIGNED_KNOWN") &&
+        snapshot.pending_phase != QStringLiteral("PENDING_NETWORK") &&
+        snapshot.pending_phase != QStringLiteral("CANCEL_MEMPOOL")) {
+        error = QStringLiteral("unknown pending phase");
+        return false;
+    }
+    if (!snapshot.confirmation_state.isEmpty() &&
+        snapshot.confirmation_state != QStringLiteral("unconfirmed") &&
+        snapshot.confirmation_state != QStringLiteral("payment_confirmed") &&
+        snapshot.confirmation_state != QStringLiteral("recovery_confirmed") &&
+        snapshot.confirmation_state != QStringLiteral("conflicted")) {
+        error = QStringLiteral("unknown confirmation state");
+        return false;
+    }
+    if (!snapshot.broadcast_state.isEmpty() &&
+        snapshot.broadcast_state != QStringLiteral("not_attempted") &&
+        snapshot.broadcast_state != QStringLiteral("unknown") &&
+        snapshot.broadcast_state != QStringLiteral("accepted_mempool") &&
+        snapshot.broadcast_state != QStringLiteral("accepted_stempool") &&
+        snapshot.broadcast_state != QStringLiteral("confirmed")) {
+        error = QStringLiteral("unknown broadcast state");
+        return false;
+    }
+
+    const UniValue& attempt = result.find_value("attempt");
+    if ((wrapped && !result.exists("attempt")) ||
+        (!attempt.isNull() && !attempt.isObject())) {
+        error = QStringLiteral("attempt is not an object");
+        return false;
+    }
+    const UniValue& recovery = result.find_value("recovery");
+    if (wrapped && (!result.exists("recovery") ||
+                    (!recovery.isNull() && !recovery.isObject()))) {
+        error = QStringLiteral("recovery is neither an object nor null");
+        return false;
+    }
+    const UniValue& requires_attention =
+        result.find_value("requires_attention");
+    if (wrapped && !requires_attention.isBool()) {
+        error = QStringLiteral("refresh response omitted requires_attention");
+        return false;
+    }
+    snapshot.attempt_state = attempt.isObject()
+        ? read_string(attempt, "attempt_state")
+        : read_string(result, "attempt_state");
+    if (snapshot.privacy_profile.isEmpty() && attempt.isObject()) {
+        snapshot.privacy_profile = read_string(attempt, "privacy_profile");
+    }
+    if (snapshot.privacy_profile.isEmpty()) {
+        snapshot.privacy_profile = read_string(result, "privacy_profile");
+    }
+    if (!snapshot.privacy_profile.isEmpty() &&
+        snapshot.privacy_profile != QStringLiteral("standard") &&
+        snapshot.privacy_profile != QStringLiteral("high")) {
+        error = QStringLiteral("unknown privacy profile");
+        return false;
+    }
+    if (!snapshot.attempt_state.isEmpty() &&
+        !IsKnownAttemptState(snapshot.attempt_state)) {
+        error = QStringLiteral("unknown attempt state");
+        return false;
+    }
+    snapshot.provider_id = read_string(session, "provider_id");
+    if (!wrapped && snapshot.provider_id.isEmpty()) {
+        snapshot.provider_id = read_string(result, "provider_id");
+    }
+    if (snapshot.provider_id.isEmpty() && attempt.isObject()) {
+        snapshot.provider_id = read_string(attempt, "provider_id");
+    }
+    snapshot.policy_hash = read_string(session, "policy_hash");
+    if (!wrapped && snapshot.policy_hash.isEmpty()) {
+        snapshot.policy_hash = read_string(result, "policy_hash");
+    }
+    if ((!snapshot.provider_id.isEmpty() &&
+         !IsCanonicalNonNullPaymasterHash(snapshot.provider_id)) ||
+        (!snapshot.policy_hash.isEmpty() &&
+         !IsCanonicalNonNullPaymasterHash(snapshot.policy_hash))) {
+        error = QStringLiteral("invalid provider or policy binding");
+        return false;
+    }
+
+    const UniValue& artifact = result.find_value("artifact");
+    if (artifact.isStr()) {
+        snapshot.artifact = QString::fromStdString(artifact.get_str());
+        if (!IsKnownPaymasterArtifact(snapshot.artifact)) {
+            error = QStringLiteral("unknown persisted artifact");
+            return false;
+        }
+    } else if (wrapped) {
+        error = QStringLiteral("refresh response omitted the artifact");
+        return false;
+    }
+
+    const UniValue& actions = result.find_value("allowed_actions");
+    if (actions.isArray()) {
+        if (actions.size() > 8) {
+            error = QStringLiteral("too many allowed actions");
+            return false;
+        }
+        for (const UniValue& action_value : actions.getValues()) {
+            if (!action_value.isStr()) {
+                error = QStringLiteral("allowed action is not a string");
+                return false;
+            }
+            const QString action = QString::fromStdString(action_value.get_str());
+            if (!IsKnownPaymasterAction(action) ||
+                snapshot.allowed_actions.contains(action)) {
+                error = QStringLiteral("unknown or duplicate allowed action");
+                return false;
+            }
+            snapshot.allowed_actions.push_back(action);
+        }
+        snapshot.allowed_actions_known = true;
+    } else if (wrapped) {
+        error = QStringLiteral("refresh response omitted allowed actions");
+        return false;
+    }
+    if (wrapped) {
+        const bool recovery_artifact =
+            snapshot.artifact == QStringLiteral("alternative_recovery");
+        if (recovery_artifact != recovery.isObject() ||
+            ((snapshot.artifact == QStringLiteral("user_psbt") ||
+              snapshot.artifact == QStringLiteral("final_transaction")) &&
+             !attempt.isObject()) ||
+            (snapshot.allowed_actions.contains(
+                 QStringLiteral("retry_same")) &&
+             snapshot.artifact != QStringLiteral("user_psbt") &&
+             snapshot.artifact != QStringLiteral("final_transaction")) ||
+            ((snapshot.allowed_actions.contains(QStringLiteral("resume")) ||
+              snapshot.allowed_actions.contains(QStringLiteral("fallback")) ||
+              snapshot.allowed_actions.contains(
+                  QStringLiteral("abandon_unsigned"))) &&
+             snapshot.artifact != QStringLiteral("none"))) {
+            error = QStringLiteral(
+                "artifact, attempt, recovery and allowed actions disagree");
+            return false;
+        }
+
+        if (recovery.isObject()) {
+            const UniValue& expired = recovery.find_value("expired");
+            qint64 recovery_expires_at{-1};
+            if (!expired.isBool() ||
+                !ReadInt64(recovery, "expires_at", recovery_expires_at) ||
+                recovery_expires_at <= 0 ||
+                !QDateTime::fromSecsSinceEpoch(recovery_expires_at).isValid()) {
+                error = QStringLiteral("invalid recovery expiry fields");
+                return false;
+            }
+            const bool elapsed = recovery_expires_at <=
+                QDateTime::currentSecsSinceEpoch();
+            if (expired.get_bool() != elapsed) {
+                error = QStringLiteral("inconsistent recovery expiry fields");
+                return false;
+            }
+            if (elapsed) {
+                // Keep an expired recovery snapshot visible, but never expose
+                // an action that could advance it to wallet signing.
+                snapshot.allowed_actions.removeAll(QStringLiteral("recover"));
+                snapshot.allowed_actions.removeAll(
+                    QStringLiteral("cancel_to_self"));
+            }
+            snapshot.recovery_expires_at = recovery_expires_at;
+        }
+
+        // A crash may leave Core with a durable CREATED record before an
+        // attempt and recipient have been persisted. Keep that record visible
+        // after restart, but reduce it to read-only refresh/unsigned-abandon
+        // handling. Every state that can sign, send, retry or select another
+        // provider still requires the authoritative recipient binding.
+        const bool recipientless_created = snapshot.recipient.isEmpty() &&
+            snapshot.state == QStringLiteral("CREATED") &&
+            snapshot.artifact == QStringLiteral("none") &&
+            !attempt.isObject();
+        if (snapshot.recipient.isEmpty() && !recipientless_created) {
+            error = QStringLiteral(
+                "session recipient is unavailable for an actionable artifact");
+            return false;
+        }
+        if (recipientless_created) {
+            snapshot.allowed_actions.removeAll(QStringLiteral("resume"));
+            snapshot.allowed_actions.removeAll(QStringLiteral("fallback"));
+            snapshot.allowed_actions.removeAll(QStringLiteral("retry_same"));
+            snapshot.allowed_actions.removeAll(QStringLiteral("recover"));
+            snapshot.allowed_actions.removeAll(QStringLiteral("cancel_to_self"));
+        }
+    }
+
+    const UniValue& result_status = result.find_value("result_status");
+    const UniValue& result_sequence = result.find_value("result_sequence");
+    if (wrapped && (!result.exists("result_status") ||
+                    !result.exists("result_sequence"))) {
+        error = QStringLiteral("refresh response omitted provider result state");
+        return false;
+    }
+    if (result_status.isNull() != result_sequence.isNull()) {
+        error = QStringLiteral("provider result status and sequence disagree");
+        return false;
+    }
+    if (!result_status.isNull()) {
+        if (!result_status.isStr()) {
+            error = QStringLiteral("invalid provider result status");
+            return false;
+        }
+        snapshot.result_status =
+            QString::fromStdString(result_status.get_str());
+        if (!IsKnownPaymasterResultStatus(snapshot.result_status)) {
+            error = QStringLiteral("unknown provider result status");
+            return false;
+        }
+    }
+    if (!result_sequence.isNull() &&
+        (!ReadInt64(result, "result_sequence",
+                    snapshot.result_sequence) ||
+         snapshot.result_sequence < 0)) {
+        error = QStringLiteral("invalid provider result sequence");
+        return false;
+    }
+
+    const UniValue& presentation = wrapped ? session : result;
+    const UniValue& payment = presentation.find_value("payment_cents");
+    const UniValue& fee = presentation.find_value("service_fee_cents");
+    const UniValue& total = presentation.find_value("user_total_cents");
+    const bool any_cost = !payment.isNull() || !fee.isNull() || !total.isNull();
+    if (any_cost) {
+        if (!ReadInt64(presentation, "payment_cents", snapshot.payment_cents) ||
+            !ReadInt64(presentation, "service_fee_cents", snapshot.service_fee_cents) ||
+            !ReadInt64(presentation, "user_total_cents", snapshot.total_cents) ||
+            snapshot.payment_cents <= 0 || snapshot.service_fee_cents < 0 ||
+            snapshot.payment_cents >
+                DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+            snapshot.service_fee_cents >
+                DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+            snapshot.payment_cents >
+                std::numeric_limits<qint64>::max() -
+                    snapshot.service_fee_cents ||
+            snapshot.total_cents !=
+                snapshot.payment_cents + snapshot.service_fee_cents) {
+            error = QStringLiteral("invalid payment totals");
+            return false;
+        }
+        snapshot.has_costs = true;
+    }
+
+    const UniValue& requested = session.find_value("requested_amount_cents");
+    if (!requested.isNull() &&
+        (!ReadInt64(session, "requested_amount_cents",
+                    snapshot.requested_amount_cents) ||
+         snapshot.requested_amount_cents <= 0 ||
+         snapshot.requested_amount_cents >
+             DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS)) {
+        error = QStringLiteral("invalid requested amount");
+        return false;
+    }
+
+    const UniValue& expiry = presentation.find_value("expires_at");
+    if (!expiry.isNull()) {
+        if (!ReadInt64(presentation, "expires_at", snapshot.expires_at) ||
+            snapshot.expires_at <= 0) {
+            error = QStringLiteral("invalid expiry");
+            return false;
+        }
+        snapshot.has_expiry = true;
+    }
+    return true;
+}
 } // namespace
 
 DigiDollarSendWidget::DigiDollarSendWidget(const PlatformStyle *platformStyle, QWidget *parent) :
@@ -164,6 +707,9 @@ DigiDollarSendWidget::DigiDollarSendWidget(const PlatformStyle *platformStyle, Q
     m_refreshOffersButton(nullptr),
     m_offersStatus(nullptr),
     m_offersTable(nullptr),
+    m_persistedPaymasterSessionsFrame(nullptr),
+    m_persistedPaymasterSessions(nullptr),
+    m_loadPersistedPaymasterSessionButton(nullptr),
     m_clientSafetyFrame(nullptr),
     m_clientSafetyStatus(nullptr),
     m_clientSafetyDetails(nullptr),
@@ -739,6 +1285,31 @@ void DigiDollarSendWidget::setupFeeSection()
     advanced_layout->addWidget(m_offersTable, 8, 0, 1, 2);
     m_feeLayout->addWidget(m_advancedPaymasterFrame, 6, 0, 1, 2);
 
+    m_persistedPaymasterSessionsFrame = new QFrame(m_feeFrame);
+    m_persistedPaymasterSessionsFrame->setObjectName(
+        "persistedPaymasterSessionsFrame");
+    auto* persisted_layout = new QGridLayout(
+        m_persistedPaymasterSessionsFrame);
+    auto* persisted_label = new QLabel(
+        tr("Interrupted Paymaster transfers:"),
+        m_persistedPaymasterSessionsFrame);
+    persisted_label->setWordWrap(true);
+    m_persistedPaymasterSessions = new QComboBox(
+        m_persistedPaymasterSessionsFrame);
+    m_persistedPaymasterSessions->setObjectName(
+        "persistedPaymasterSessions");
+    m_persistedPaymasterSessions->setAccessibleDescription(tr(
+        "Persisted wallet sessions found by Core. Selecting one never signs, broadcasts or recovers it."));
+    m_loadPersistedPaymasterSessionButton = new QPushButton(
+        tr("Review selected transfer"), m_persistedPaymasterSessionsFrame);
+    m_loadPersistedPaymasterSessionButton->setObjectName(
+        "loadPersistedPaymasterSession");
+    persisted_layout->addWidget(persisted_label, 0, 0, 1, 2);
+    persisted_layout->addWidget(m_persistedPaymasterSessions, 1, 0);
+    persisted_layout->addWidget(m_loadPersistedPaymasterSessionButton, 1, 1);
+    m_feeLayout->addWidget(m_persistedPaymasterSessionsFrame, 8, 0, 1, 2);
+    m_persistedPaymasterSessionsFrame->hide();
+
     auto* totals = new QFrame(m_feeFrame);
     totals->setObjectName("feeTotalsFrame");
     auto* totals_layout = new QGridLayout(totals);
@@ -789,24 +1360,28 @@ void DigiDollarSendWidget::setupFeeSection()
     m_paymasterNextStepValue = new QLabel(tr("Checking the protected transfer…"), m_paymasterSessionFrame);
     m_paymasterNextStepValue->setObjectName("paymasterSessionNextStep");
     m_paymasterNextStepValue->setWordWrap(true);
+    m_paymasterNextStepValue->setTextFormat(Qt::PlainText);
     m_paymasterNextStepValue->setAccessibleName(tr("Paymaster transfer status and next step"));
     session_layout->addWidget(m_paymasterNextStepValue, 1, 0, 1, 2);
 
     m_paymasterTransferValue = new QLabel(tr("—"), m_paymasterSessionFrame);
     m_paymasterTransferValue->setObjectName("paymasterSessionTransfer");
     m_paymasterTransferValue->setWordWrap(true);
+    m_paymasterTransferValue->setTextFormat(Qt::PlainText);
     m_paymasterTransferValue->setAccessibleName(tr("Locked Paymaster transfer recipient and amount"));
     session_layout->addWidget(new QLabel(tr("Transfer:"), m_paymasterSessionFrame), 2, 0);
     session_layout->addWidget(m_paymasterTransferValue, 2, 1);
 
     m_paymasterIdentityValue = new QLabel(tr("Provider not selected yet"), m_paymasterSessionFrame);
     m_paymasterIdentityValue->setObjectName("paymasterSessionProvider");
+    m_paymasterIdentityValue->setTextFormat(Qt::PlainText);
     m_paymasterIdentityValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
     session_layout->addWidget(new QLabel(tr("Provider:"), m_paymasterSessionFrame), 3, 0);
     session_layout->addWidget(m_paymasterIdentityValue, 3, 1);
     m_paymasterCostValue = new QLabel(tr("No service fee authorized yet"), m_paymasterSessionFrame);
     m_paymasterCostValue->setObjectName("paymasterSessionCost");
     m_paymasterCostValue->setWordWrap(true);
+    m_paymasterCostValue->setTextFormat(Qt::PlainText);
     session_layout->addWidget(new QLabel(tr("Cost:"), m_paymasterSessionFrame), 4, 0);
     session_layout->addWidget(m_paymasterCostValue, 4, 1);
 
@@ -869,15 +1444,17 @@ void DigiDollarSendWidget::setupFeeSection()
     technical_layout->setContentsMargins(0, 4, 0, 0);
     m_paymasterStateValue = new QLabel(tr("No active session"), m_paymasterTechnicalDetails);
     m_paymasterStateValue->setObjectName("paymasterSessionState");
+    m_paymasterStateValue->setTextFormat(Qt::PlainText);
     m_paymasterStateValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_paymasterExpiryValue = new QLabel(tr("—"), m_paymasterTechnicalDetails);
+    m_paymasterExpiryValue->setTextFormat(Qt::PlainText);
     technical_layout->addWidget(new QLabel(tr("Core state:"), m_paymasterTechnicalDetails), 0, 0);
     technical_layout->addWidget(m_paymasterStateValue, 0, 1);
     technical_layout->addWidget(new QLabel(tr("Valid until:"), m_paymasterTechnicalDetails), 1, 0);
     technical_layout->addWidget(m_paymasterExpiryValue, 1, 1);
     session_layout->addWidget(m_paymasterTechnicalDetails, 8, 0, 1, 2);
 
-    m_feeLayout->addWidget(m_paymasterSessionFrame, 8, 0, 1, 2);
+    m_feeLayout->addWidget(m_paymasterSessionFrame, 9, 0, 1, 2);
 
     m_mainLayout->addWidget(m_feeFrame);
 
@@ -996,6 +1573,8 @@ void DigiDollarSendWidget::connectSignals()
             this, [this] { invalidatePaymasterOfferPreview(); });
     connect(m_refreshOffersButton, &QPushButton::clicked,
             this, &DigiDollarSendWidget::refreshPaymasterOffers);
+    connect(m_loadPersistedPaymasterSessionButton, &QPushButton::clicked,
+            this, &DigiDollarSendWidget::loadSelectedPersistedPaymasterSession);
     connect(m_retrySessionButton, &QPushButton::clicked,
             this, &DigiDollarSendWidget::retryPaymasterSession);
     connect(m_fallbackSessionButton, &QPushButton::clicked,
@@ -1014,14 +1593,23 @@ void DigiDollarSendWidget::connectSignals()
             m_paymasterTechnicalDetails, &QFrame::setVisible);
     connect(m_paymasterPollTimer, &QTimer::timeout,
             this, &DigiDollarSendWidget::pollPaymasterSession);
+    m_paymasterPollTimer->setObjectName("paymasterSessionPollTimer");
     m_paymasterPollTimer->setInterval(1500);
+    m_paymasterPollTimer->setSingleShot(true);
 }
 
 void DigiDollarSendWidget::setWalletModel(WalletModel* model)
 {
-    if (m_walletModel != model) {
-        m_paymasterPollTimer->stop();
-        m_paymasterBusy = false;
+    const bool wallet_changed = m_walletModel != model;
+    if (wallet_changed) {
+        if (m_walletModel) {
+            disconnect(m_walletModel, nullptr, this, nullptr);
+        }
+        // Invalidate every wallet-bound callback before touching visible
+        // state. This is the Paymaster-local operation token across close and
+        // wallet switch boundaries.
+        ++m_paymasterWalletGeneration;
+        stopPaymasterPolling();
         m_paymasterRequestId.clear();
         m_paymasterSessionId.clear();
         m_paymasterSessionState.clear();
@@ -1030,12 +1618,21 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         m_paymasterPendingPhase.clear();
         m_paymasterBroadcastState.clear();
         m_paymasterConfirmationState.clear();
+        m_paymasterTransactionId.clear();
+        m_paymasterRecoveryTransactionId.clear();
+        m_paymasterResultStatus.clear();
+        m_paymasterResultSequence = -1;
+        m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterTerminalNoticeShown = false;
+        m_paymasterAllowedActions.clear();
+        m_paymasterAllowedActionsKnown = false;
         m_paymasterSessionPersisted = false;
         m_paymasterAddress.clear();
         m_paymasterAuthorizationCommitment.clear();
         m_paymasterSessionPrivacy.clear();
         m_paymasterRecoveryAuthorizationCommitment.clear();
         m_paymasterAmount = 0.0;
+        m_paymasterAmountCents = 0;
         m_paymasterInitialAvailableBalance = 0.0;
         m_paymasterPreviewRecipientCents = -1;
         m_paymasterPreviewServiceFeeCents = -1;
@@ -1058,6 +1655,8 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         m_paymasterCostValue->setText(tr("—"));
         m_paymasterExpiryValue->setText(tr("—"));
         m_paymasterSessionFrame->hide();
+        m_persistedPaymasterSessions->clear();
+        m_persistedPaymasterSessionsFrame->hide();
         invalidatePaymasterOfferPreview();
     }
     m_walletModel = model;
@@ -1066,11 +1665,23 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         // Connect wallet model signals
         updateBalance();
         refreshClientSafetyStatus();
+        if (wallet_changed) discoverPersistedPaymasterSessions();
         // REMOVED: applyTheme() - Let CSS handle all theming
     } else {
         updateClientSafetyDisplay();
     }
-    updatePaymasterFocusMode();
+    // Reset controls through the same path used by completed asynchronous
+    // work. Assigning m_paymasterBusy directly left buttons disabled after a
+    // wallet switch, while enabling them without a wallet was equally wrong.
+    // Keep controls and polling paused while response parsing or a modal
+    // authorization/error dialog is active. The unlock lease was already
+    // released by executePaymasterTransfer()'s callback.
+    if (wallet_changed) {
+        setPaymasterBusy(false);
+    } else {
+        updatePaymasterFocusMode();
+    }
+    applyPaymasterPrivacy();
 }
 
 void DigiDollarSendWidget::setClientModel(ClientModel* model)
@@ -1121,6 +1732,7 @@ void DigiDollarSendWidget::updateBalance()
 void DigiDollarSendWidget::updateOraclePrice()
 {
     if (!isVisible()) return;
+    const uint64_t request_generation = ++m_oraclePriceRequestGeneration;
     // Get oracle price from RPC for testnet/mainnet, MockOracleManager for regtest
     if (Params().GetChainType() == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
         // BUG #6 FIX: GetCurrentPrice() returns micro-USD, not cents
@@ -1129,14 +1741,24 @@ void DigiDollarSendWidget::updateOraclePrice()
     } else if (m_walletModel) {
         UniValue params{UniValue::VARR};
         QPointer<DigiDollarSendWidget> guard{this};
-        m_walletModel->executeRpcAsync("getoracleprice", std::move(params),
-            [guard](UniValue result, QString error) {
-                if (!guard) return;
-                if (!error.isEmpty()) {
-                    guard->m_oraclePrice = 0.0;
-                } else {
-                    guard->m_oraclePrice = result.find_value("price_micro_usd").getInt<int64_t>() / 1000000.0;
+        executePaymasterRpcAsync(
+            "getoracleprice", std::move(params),
+            [guard, request_generation](UniValue result, QString error) {
+                if (!guard || guard->m_oraclePriceRequestGeneration !=
+                                  request_generation) {
+                    return;
                 }
+                qint64 price_micro_usd{0};
+                const UniValue& price = result.find_value("price_micro_usd");
+                if (error.isEmpty() && price.isNum()) {
+                    try {
+                        price_micro_usd = price.getInt<qint64>();
+                    } catch (const std::exception&) {
+                        price_micro_usd = 0;
+                    }
+                }
+                guard->m_oraclePrice = price_micro_usd > 0
+                    ? price_micro_usd / 1000000.0 : 0.0;
                 guard->updateUSDEquivalent();
             });
         return;
@@ -1213,7 +1835,16 @@ void DigiDollarSendWidget::onSendClicked()
         return;
     }
 
-    double amount = amountText.toDouble();
+    CAmount amount_cents{0};
+    if (!ParseDigiDollarCents(amountText, amount_cents)) {
+        // validateAmount() uses the same parser, so reaching this branch means
+        // the text changed during a nested UI event. Fail closed instead of
+        // converting a different floating-point value.
+        showError(tr("Invalid Amount"),
+                  tr("The DigiDollar amount changed while it was being validated. Please review it and try again."));
+        return;
+    }
+    const double amount = amount_cents / 100.0;
 
     // Error: Insufficient balance
     if (!validateBalance()) {
@@ -1239,7 +1870,6 @@ void DigiDollarSendWidget::onSendClicked()
     }
 
     if (m_coinControl && m_coinControl->HasSelected()) {
-        const CAmount amount_cents = static_cast<CAmount>(std::llround(amount * 100));
         const CAmount selected_amount = selectedDigiDollarAmount();
         if (selected_amount < amount_cents) {
             showError(tr("Insufficient Selected DigiDollar Inputs"),
@@ -1265,9 +1895,7 @@ void DigiDollarSendWidget::onSendClicked()
     }
 
     if (paymasterModeSelected()) {
-        const CAmount amount_cents = static_cast<CAmount>(std::llround(amount * 100));
-        const CAmount active_amount_cents =
-            static_cast<CAmount>(std::llround(m_paymasterAmount * 100));
+        const CAmount active_amount_cents = m_paymasterAmountCents;
         const bool new_request = m_paymasterRequestId.isEmpty();
 
         if (!new_request &&
@@ -1299,6 +1927,12 @@ void DigiDollarSendWidget::onSendClicked()
             m_paymasterPendingPhase.clear();
             m_paymasterBroadcastState.clear();
             m_paymasterConfirmationState.clear();
+            m_paymasterTransactionId.clear();
+            m_paymasterRecoveryTransactionId.clear();
+            m_paymasterResultStatus.clear();
+            m_paymasterResultSequence = -1;
+            m_paymasterRecoveryExpiresAt = -1;
+            m_paymasterTerminalNoticeShown = false;
             m_paymasterAuthorizationCommitment.clear();
             m_paymasterSessionPrivacy = m_privacyCombo->currentData().toString();
             m_paymasterRecoveryAuthorizationCommitment.clear();
@@ -1313,8 +1947,10 @@ void DigiDollarSendWidget::onSendClicked()
             m_paymasterExpiryValue->setText(tr("—"));
         }
         m_paymasterAddress = address;
-        m_paymasterAmount = amount;
-        executePaymasterTransfer(address, amount, /*allow_unlock=*/false);
+        m_paymasterAmountCents = amount_cents;
+        m_paymasterAmount = amount_cents / 100.0;
+        executePaymasterTransfer(address, amount_cents,
+                                 /*allow_unlock=*/false);
     } else {
         // PHASE 7.2: Enhanced confirmation dialog with fee display. The direct
         // path has only one signing/broadcast confirmation.
@@ -1351,12 +1987,19 @@ void DigiDollarSendWidget::onClearClicked()
         m_paymasterPendingPhase.clear();
         m_paymasterBroadcastState.clear();
         m_paymasterConfirmationState.clear();
+        m_paymasterTransactionId.clear();
+        m_paymasterRecoveryTransactionId.clear();
+        m_paymasterResultStatus.clear();
+        m_paymasterResultSequence = -1;
+        m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterTerminalNoticeShown = false;
         m_paymasterSessionPersisted = false;
         m_paymasterAddress.clear();
         m_paymasterAuthorizationCommitment.clear();
         m_paymasterSessionPrivacy.clear();
         m_paymasterRecoveryAuthorizationCommitment.clear();
         m_paymasterAmount = 0.0;
+        m_paymasterAmountCents = 0;
         m_paymasterRecoveryMaximumServiceFeeCents = 0;
         m_paymasterRecoveryActive = false;
         m_paymasterConfirmationGuard.Reset();
@@ -1474,8 +2117,18 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
     // mutates an already persisted authorization.
     if (!m_feeChoicesFrame || !m_paymasterSessionFrame) return;
     const bool focus = !m_paymasterRequestId.isEmpty();
-    const bool terminal = m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
-                          m_paymasterSessionState == QStringLiteral("CANCELED_SAFE");
+    const bool completed =
+        m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
+        m_paymasterSessionState == QStringLiteral("CANCELED_SAFE") ||
+        (m_paymasterSessionState == QStringLiteral("MEMPOOL") &&
+         m_paymasterTerminalNoticeShown &&
+         IsValidatedPaymasterCompletion(
+             m_paymasterTransactionId, m_paymasterSessionState, QString{},
+             m_paymasterResultStatus));
+    const auto core_allows = [this](const QString& action) {
+        return m_paymasterAllowedActionsKnown &&
+            m_paymasterAllowedActions.contains(action);
+    };
 
     m_feeHeading->setVisible(!focus);
     m_feeIntroduction->setVisible(!focus);
@@ -1508,17 +2161,26 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
     if (!focus) return;
 
     m_paymasterTransferValue->setText(
-        tr("%1 to %2").arg(formatDDAmount(m_paymasterAmount), m_paymasterAddress));
+        m_paymasterAddress.isEmpty()
+            ? tr("Recipient and amount are not yet available; Core only persisted the initial request")
+            : tr("%1 to %2").arg(formatDDAmount(m_paymasterAmount),
+                                  m_paymasterAddress));
     m_paymasterNextStepValue->setText(friendlyPaymasterSessionStatus());
 
-    const bool artifact_unknown = m_paymasterArtifact.isEmpty();
     const bool artifact_none = m_paymasterArtifact == QStringLiteral("none");
     const bool signed_artifact = m_paymasterArtifact == QStringLiteral("user_psbt") ||
                                  m_paymasterArtifact == QStringLiteral("final_transaction") ||
                                  m_paymasterArtifact == QStringLiteral("alternative_recovery");
     const bool exact_offer_reviewable =
         m_paymasterSessionState == QStringLiteral("AWAITING_USER_SIGNATURE") &&
-        (artifact_unknown || artifact_none);
+        artifact_none && core_allows(QStringLiteral("resume"));
+    const bool unlock_and_resume =
+        m_paymasterSessionState == QStringLiteral("AWAITING_WALLET_UNLOCK") &&
+        artifact_none && core_allows(QStringLiteral("resume"));
+    const bool preparation_resumable =
+        (m_paymasterSessionState == QStringLiteral("CREATED") ||
+         m_paymasterSessionState == QStringLiteral("INPUTS_RESERVED")) &&
+        artifact_none && core_allows(QStringLiteral("resume"));
     const bool fallback_state =
         m_paymasterSessionState == QStringLiteral("INPUTS_RESERVED") ||
         m_paymasterSessionState == QStringLiteral("AWAITING_WALLET_UNLOCK") ||
@@ -1531,7 +2193,8 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
         (m_paymasterAttemptState == QStringLiteral("REJECTED") &&
          m_paymasterSessionState == QStringLiteral("INPUTS_RESERVED"));
     const bool safe_fallback = m_paymasterSessionPersisted && artifact_none &&
-                               fallback_state && fallback_attempt;
+                               fallback_state && fallback_attempt &&
+                               core_allows(QStringLiteral("fallback"));
     const bool signed_state_consistent =
         m_paymasterSessionState == QStringLiteral("AUTHORIZED") ||
         m_paymasterSessionState == QStringLiteral("PENDING_PROVIDER") ||
@@ -1539,14 +2202,25 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
         m_paymasterSessionState == QStringLiteral("MEMPOOL") ||
         m_paymasterSessionState == QStringLiteral("FAILED") ||
         m_paymasterSessionState == QStringLiteral("CONFLICTED");
+    const bool recovery_not_expired =
+        m_paymasterRecoveryExpiresAt <= 0 ||
+        m_paymasterRecoveryExpiresAt > QDateTime::currentSecsSinceEpoch();
     const bool safe_recovery = m_paymasterSessionPersisted && signed_artifact &&
-                               signed_state_consistent && !terminal;
-    if (terminal) {
+                               signed_state_consistent && !completed &&
+                               recovery_not_expired &&
+                               (core_allows(QStringLiteral("cancel_to_self")) ||
+                                core_allows(QStringLiteral("recover")));
+    if (completed) {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::NEW_TRANSFER;
         m_paymasterPrimaryButton->setText(tr("Start a new transfer"));
     } else if (exact_offer_reviewable) {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::REVIEW_OFFER;
         m_paymasterPrimaryButton->setText(tr("Review exact offer"));
+    } else if (unlock_and_resume || preparation_resumable) {
+        m_paymasterPrimaryAction = PaymasterPrimaryAction::RESUME;
+        m_paymasterPrimaryButton->setText(
+            unlock_and_resume ? tr("Unlock and continue")
+                              : tr("Resume preparation"));
     } else if (safe_fallback) {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::FALLBACK;
         m_paymasterPrimaryButton->setText(
@@ -1573,15 +2247,18 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
     const bool consistent_artifact_state =
         (artifact_none && unsigned_state_consistent) ||
         (signed_artifact && signed_state_consistent);
-    const bool can_retry = have_persisted && consistent_artifact_state && !terminal;
+    const bool can_retry = have_persisted && signed_artifact &&
+        signed_state_consistent && !completed &&
+        core_allows(QStringLiteral("retry_same"));
     const bool no_pending_provider_action =
         m_paymasterPendingPhase.isEmpty() || m_paymasterPendingPhase == QStringLiteral("NONE");
     const bool can_fallback = safe_fallback;
     const bool can_abandon = have_persisted && artifact_none && abandon_state &&
-                             no_pending_provider_action && !terminal;
+                             no_pending_provider_action && !completed &&
+                             core_allows(QStringLiteral("abandon_unsigned"));
     const bool can_recover = safe_recovery;
     const bool can_stop = m_paymasterPollTimer->isActive() &&
-                          consistent_artifact_state && !terminal;
+                          consistent_artifact_state && !completed;
     m_retrySessionButton->setVisible(can_retry);
     m_fallbackSessionButton->setVisible(
         can_fallback && m_paymasterPrimaryAction != PaymasterPrimaryAction::FALLBACK);
@@ -1595,13 +2272,49 @@ void DigiDollarSendWidget::updatePaymasterFocusMode()
         m_paymasterMoreButton->setChecked(false);
         m_paymasterSecondaryActions->hide();
     }
+    bool primary_allowed{false};
+    switch (m_paymasterPrimaryAction) {
+    case PaymasterPrimaryAction::REFRESH:
+        primary_allowed = !m_paymasterAllowedActionsKnown ||
+            core_allows(QStringLiteral("refresh"));
+        break;
+    case PaymasterPrimaryAction::RESUME:
+    case PaymasterPrimaryAction::REVIEW_OFFER:
+        primary_allowed = core_allows(QStringLiteral("resume"));
+        break;
+    case PaymasterPrimaryAction::FALLBACK:
+        primary_allowed = can_fallback;
+        break;
+    case PaymasterPrimaryAction::RECOVER:
+        primary_allowed = can_recover;
+        break;
+    case PaymasterPrimaryAction::NEW_TRANSFER:
+        primary_allowed = completed;
+        break;
+    }
+    const bool action_needs_wallet =
+        m_paymasterPrimaryAction != PaymasterPrimaryAction::NEW_TRANSFER;
+    m_paymasterPrimaryButton->setEnabled(
+        !m_paymasterBusy && primary_allowed &&
+        (!action_needs_wallet || m_walletModel));
+    applyPaymasterPrivacy();
 }
 
 void DigiDollarSendWidget::onPaymasterPrimaryAction()
 {
     switch (m_paymasterPrimaryAction) {
     case PaymasterPrimaryAction::REVIEW_OFFER:
-        executePaymasterTransfer(m_paymasterAddress, m_paymasterAmount, /*allow_unlock=*/false);
+    case PaymasterPrimaryAction::RESUME:
+        refreshPaymasterSessionForAction(
+            QStringLiteral("resume"),
+            [guard = QPointer<DigiDollarSendWidget>(this)] {
+                if (!guard) return;
+                guard->executePaymasterTransfer(
+                    guard->m_paymasterAddress,
+                    guard->m_paymasterAmountCents,
+                    guard->m_paymasterSessionState ==
+                        QStringLiteral("AWAITING_WALLET_UNLOCK"));
+            });
         break;
     case PaymasterPrimaryAction::FALLBACK:
         fallbackPaymasterSession();
@@ -1610,7 +2323,7 @@ void DigiDollarSendWidget::onPaymasterPrimaryAction()
         recoverPaymasterSessionToSelf();
         break;
     case PaymasterPrimaryAction::NEW_TRANSFER:
-        m_paymasterPollTimer->stop();
+        stopPaymasterPolling();
         m_paymasterRequestId.clear();
         m_paymasterSessionId.clear();
         m_paymasterSessionState.clear();
@@ -1619,9 +2332,16 @@ void DigiDollarSendWidget::onPaymasterPrimaryAction()
         m_paymasterPendingPhase.clear();
         m_paymasterBroadcastState.clear();
         m_paymasterConfirmationState.clear();
+        m_paymasterTransactionId.clear();
+        m_paymasterRecoveryTransactionId.clear();
+        m_paymasterResultStatus.clear();
+        m_paymasterResultSequence = -1;
+        m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterTerminalNoticeShown = false;
         m_paymasterSessionPersisted = false;
         m_paymasterAddress.clear();
         m_paymasterAmount = 0.0;
+        m_paymasterAmountCents = 0;
         m_paymasterInitialAvailableBalance = 0.0;
         m_sendAllSpendableDD = false;
         if (m_subtractPaymasterFeeCheck) m_subtractPaymasterFeeCheck->setChecked(false);
@@ -1729,9 +2449,16 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
         return;
     }
 
+    // Invalidate a status read that may still contain the policy from before
+    // this edit. The exact write acknowledgement below remains authoritative
+    // until its own follow-up refresh completes.
+    ++m_clientSafetyRefreshGeneration;
     UniValue policy{UniValue::VOBJ};
-    policy.pushKV("maximum_service_fee_per_transaction_cents", per_transfer->value());
-    policy.pushKV("maximum_service_fee_per_day_cents", per_day->value());
+    const qint64 requested_per_transaction = per_transfer->value();
+    const qint64 requested_per_day = per_day->value();
+    policy.pushKV("maximum_service_fee_per_transaction_cents",
+                  requested_per_transaction);
+    policy.pushKV("maximum_service_fee_per_day_cents", requested_per_day);
     UniValue params{UniValue::VARR};
     params.push_back(std::move(policy));
     m_configureClientSafetyButton->setEnabled(false);
@@ -1739,7 +2466,8 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
     QPointer<DigiDollarSendWidget> guard{this};
     WalletModel* requested_model = m_walletModel;
     executePaymasterRpcAsync("setpaymasterclientsafetypolicy", std::move(params),
-        [guard, requested_model](UniValue result, QString error) {
+        [guard, requested_model, requested_per_transaction,
+         requested_per_day](UniValue result, QString error) {
             if (!guard || guard->m_walletModel != requested_model) return;
             guard->m_configureClientSafetyButton->setEnabled(true);
             if (!error.isEmpty()) {
@@ -1750,10 +2478,25 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
                 guard->showWarning(guard->tr("Paymaster service-fee limits"), error);
                 return;
             }
+            qint64 persisted_per_transaction{0};
+            qint64 persisted_per_day{0};
+            if (!DecodeClientSafetyPolicy(
+                    result, persisted_per_transaction, persisted_per_day) ||
+                persisted_per_transaction != requested_per_transaction ||
+                persisted_per_day != requested_per_day) {
+                const QString malformed = guard->tr(
+                    "Core did not confirm the exact wallet-local Paymaster service-fee limits. The controls remain fail-closed until status is refreshed.");
+                guard->m_clientSafetyStatusKnown = true;
+                guard->m_clientSafetyConfigured = false;
+                guard->m_clientSafetyError = malformed;
+                guard->updateClientSafetyDisplay();
+                guard->showWarning(
+                    guard->tr("Paymaster service-fee limits"), malformed);
+                return;
+            }
             guard->m_clientSafetyMaximumPerTransaction =
-                result.find_value("maximum_service_fee_per_transaction_cents").getInt<qint64>();
-            guard->m_clientSafetyMaximumPerDay =
-                result.find_value("maximum_service_fee_per_day_cents").getInt<qint64>();
+                persisted_per_transaction;
+            guard->m_clientSafetyMaximumPerDay = persisted_per_day;
             guard->m_clientSafetyStatusKnown = true;
             guard->m_clientSafetyConfigured = true;
             guard->m_clientSafetyError.clear();
@@ -1778,28 +2521,41 @@ void DigiDollarSendWidget::refreshClientSafetyStatus()
     updateClientSafetyDisplay();
     QPointer<DigiDollarSendWidget> guard{this};
     WalletModel* requested_model = m_walletModel;
+    const uint64_t refresh_generation = ++m_clientSafetyRefreshGeneration;
     executePaymasterRpcAsync("getpaymasterclientsafetystatus", UniValue{UniValue::VARR},
-        [guard, requested_model](UniValue result, QString error) {
-            if (!guard || guard->m_walletModel != requested_model) return;
+        [guard, requested_model, refresh_generation](UniValue result,
+                                                      QString error) {
+            if (!guard || guard->m_walletModel != requested_model ||
+                guard->m_clientSafetyRefreshGeneration !=
+                    refresh_generation) {
+                return;
+            }
+            bool configured{false};
+            qint64 maximum_per_transaction{0};
+            qint64 maximum_per_day{0};
+            qint64 active_reservations{0};
+            qint64 reserved_cents{0};
+            qint64 spent_cents{0};
+            qint64 available_cents{0};
+            if (error.isEmpty() &&
+                !DecodeClientSafetyStatus(
+                    result, configured, maximum_per_transaction,
+                    maximum_per_day, active_reservations, reserved_cents,
+                    spent_cents, available_cents)) {
+                error = guard->tr(
+                    "Core returned an incomplete Paymaster client-safety status. No provider fee is authorized until a complete refresh succeeds.");
+            }
             guard->m_clientSafetyStatusKnown = true;
-            guard->m_clientSafetyConfigured = error.isEmpty() &&
-                result.find_value("configured").isBool() &&
-                result.find_value("configured").get_bool();
+            guard->m_clientSafetyConfigured = error.isEmpty() && configured;
             guard->m_clientSafetyError = error;
-            const UniValue& policy = result.find_value("policy");
-            if (guard->m_clientSafetyConfigured && policy.isObject()) {
+            if (guard->m_clientSafetyConfigured) {
                 guard->m_clientSafetyMaximumPerTransaction =
-                    policy.find_value("maximum_service_fee_per_transaction_cents").getInt<qint64>();
-                guard->m_clientSafetyMaximumPerDay =
-                    policy.find_value("maximum_service_fee_per_day_cents").getInt<qint64>();
-                guard->m_clientSafetyActiveReservations =
-                    result.find_value("active_reservations").getInt<qint64>();
-                guard->m_clientSafetyReservedCents =
-                    result.find_value("reserved_service_fee_cents").getInt<qint64>();
-                guard->m_clientSafetySpentTodayCents =
-                    result.find_value("spent_service_fee_last_day_cents").getInt<qint64>();
-                guard->m_clientSafetyAvailableTodayCents =
-                    result.find_value("available_service_fee_today_cents").getInt<qint64>();
+                    maximum_per_transaction;
+                guard->m_clientSafetyMaximumPerDay = maximum_per_day;
+                guard->m_clientSafetyActiveReservations = active_reservations;
+                guard->m_clientSafetyReservedCents = reserved_cents;
+                guard->m_clientSafetySpentTodayCents = spent_cents;
+                guard->m_clientSafetyAvailableTodayCents = available_cents;
                 if (guard->m_feeCapSpin->value() > guard->m_clientSafetyMaximumPerTransaction) {
                     guard->m_feeCapSpin->setValue(
                         static_cast<int>(guard->m_clientSafetyMaximumPerTransaction));
@@ -1867,25 +2623,192 @@ void DigiDollarSendWidget::updateClientSafetyDisplay()
 
 void DigiDollarSendWidget::setPaymasterBusy(bool busy)
 {
+    if (busy && m_paymasterPollTimer) {
+        // A mutation or user-confirmation sequence owns the session while it
+        // is busy. Pause the single-shot poll without resetting its backoff;
+        // the result handler will explicitly reschedule when appropriate.
+        m_paymasterPollTimer->stop();
+    }
     m_paymasterBusy = busy;
     updateSendButton();
-    m_refreshOffersButton->setEnabled(!busy);
+    const bool idle_with_wallet = !busy && m_walletModel;
+    m_refreshOffersButton->setEnabled(idle_with_wallet);
     updateClientSafetyDisplay();
     const bool have_persisted_session =
         !m_paymasterRequestId.isEmpty() && m_paymasterSessionPersisted;
-    m_retrySessionButton->setEnabled(!busy && have_persisted_session);
-    m_fallbackSessionButton->setEnabled(!busy && have_persisted_session);
-    m_recoverSessionButton->setEnabled(!busy && have_persisted_session);
-    m_abandonSessionButton->setEnabled(!busy && have_persisted_session);
-    m_cancelQuoteButton->setEnabled(!busy && have_persisted_session);
-    m_paymasterPrimaryButton->setEnabled(!busy);
+    m_retrySessionButton->setEnabled(idle_with_wallet &&
+                                     have_persisted_session);
+    m_fallbackSessionButton->setEnabled(idle_with_wallet &&
+                                        have_persisted_session);
+    m_recoverSessionButton->setEnabled(idle_with_wallet &&
+                                       have_persisted_session);
+    m_abandonSessionButton->setEnabled(idle_with_wallet &&
+                                       have_persisted_session);
+    m_cancelQuoteButton->setEnabled(idle_with_wallet &&
+                                    have_persisted_session);
+    m_paymasterPrimaryButton->setEnabled(idle_with_wallet);
     updatePaymasterFocusMode();
+}
+
+void DigiDollarSendWidget::reportPaymasterOperationNotStarted(
+    const QString& reason)
+{
+    if (m_paymasterStateValue) {
+        m_paymasterStateValue->setText(
+            tr("Paymaster operation not started: %1").arg(reason));
+    }
+    applyPaymasterPrivacy();
+}
+
+void DigiDollarSendWidget::discoverPersistedPaymasterSessions()
+{
+    if (!m_walletModel || !m_paymasterRequestId.isEmpty()) return;
+
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("active_only", true);
+    // The RPC caps one page at 100. Refuse to display a partial active-session
+    // set: a truncated chooser could make an older transfer look absent.
+    options.pushKV("limit", 100);
+    UniValue params{UniValue::VARR};
+    params.push_back(std::move(options));
+    executePaymasterRpcAsync(
+        "listdigidollarsendsessions", std::move(params),
+        [guard = QPointer<DigiDollarSendWidget>(this)](
+            UniValue result, QString error) {
+            if (!guard || !error.isEmpty() || !result.isObject() ||
+                !result.find_value("active_only").isBool() ||
+                !result.find_value("active_only").get_bool() ||
+                !result.find_value("sessions").isArray()) {
+                return;
+            }
+            const UniValue& sessions = result.find_value("sessions");
+            const UniValue& next_cursor = result.find_value("next_cursor");
+            qint64 count{0};
+            if (!ReadInt64(result, "count", count) || count < 0 ||
+                count != static_cast<qint64>(sessions.size()) ||
+                sessions.size() > 100 ||
+                (!next_cursor.isNull() &&
+                 (!next_cursor.isStr() ||
+                  !next_cursor.get_str().empty()))) {
+                return;
+            }
+
+            struct ListedSession {
+                QString request_id;
+                QString state;
+                qint64 amount_cents{-1};
+            };
+            std::vector<ListedSession> decoded;
+            decoded.reserve(sessions.size());
+            QStringList request_ids;
+            for (const UniValue& session : sessions.getValues()) {
+                if (!session.isObject()) return;
+                const UniValue& request = session.find_value("request_id");
+                const UniValue& session_id = session.find_value("session_id");
+                const UniValue& state = session.find_value("session_state");
+                if (!request.isStr() || !session_id.isStr() ||
+                    !state.isStr()) {
+                    return;
+                }
+                ListedSession entry;
+                entry.request_id = QString::fromStdString(request.get_str());
+                entry.state = QString::fromStdString(state.get_str());
+                const QString session_hash =
+                    QString::fromStdString(session_id.get_str());
+                if (!DigiDollar::Paymaster::IsCanonicalRequestId(
+                        entry.request_id.toStdString()) ||
+                    !IsCanonicalNonNullPaymasterHash(session_hash) ||
+                    !IsKnownSessionState(entry.state) ||
+                    request_ids.contains(entry.request_id)) {
+                    return;
+                }
+                request_ids.push_back(entry.request_id);
+                const UniValue& amount =
+                    session.find_value("requested_amount_cents");
+                if (!amount.isNull() &&
+                    (!ReadInt64(session, "requested_amount_cents",
+                                entry.amount_cents) ||
+                     entry.amount_cents <= 0 ||
+                     entry.amount_cents >
+                         DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS)) {
+                    return;
+                }
+                decoded.push_back(std::move(entry));
+            }
+
+            if (decoded.empty()) return;
+            if (decoded.size() == 1) {
+                guard->activatePersistedPaymasterSession(
+                    decoded.front().request_id);
+                return;
+            }
+
+            guard->m_persistedPaymasterSessions->clear();
+            for (const ListedSession& entry : decoded) {
+                const QString amount = entry.amount_cents > 0
+                    ? guard->formatCents(entry.amount_cents)
+                    : guard->tr("amount unavailable");
+                guard->m_persistedPaymasterSessions->addItem(
+                    guard->tr("%1 · %2 · request %3…")
+                        .arg(entry.state, amount,
+                             entry.request_id.left(12)),
+                    entry.request_id);
+            }
+            guard->m_persistedPaymasterSessionsFrame->show();
+            guard->applyPaymasterPrivacy();
+        });
+}
+
+void DigiDollarSendWidget::loadSelectedPersistedPaymasterSession()
+{
+    if (!m_walletModel || m_paymasterBusy ||
+        m_persistedPaymasterSessions->currentIndex() < 0) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+                              tr("no persisted transfer is selected"));
+        return;
+    }
+    const QString request_id =
+        m_persistedPaymasterSessions->currentData().toString();
+    if (!DigiDollar::Paymaster::IsCanonicalRequestId(
+            request_id.toStdString())) {
+        reportPaymasterOperationNotStarted(
+            tr("the selected persisted request identifier is invalid"));
+        return;
+    }
+    activatePersistedPaymasterSession(request_id);
+}
+
+void DigiDollarSendWidget::activatePersistedPaymasterSession(
+    const QString& request_id)
+{
+    if (!m_walletModel || !m_paymasterRequestId.isEmpty() ||
+        !DigiDollar::Paymaster::IsCanonicalRequestId(
+            request_id.toStdString())) {
+        return;
+    }
+    m_paymasterRequestId = request_id;
+    m_paymasterSessionPersisted = true;
+    m_paymasterAllowedActions.clear();
+    m_paymasterAllowedActionsKnown = false;
+    m_paymasterStateValue->setText(
+        tr("Loading the authoritative persisted Paymaster transfer…"));
+    m_persistedPaymasterSessionsFrame->hide();
+    m_paymasterSessionFrame->show();
+    updatePaymasterFocusMode();
+    applyPaymasterPrivacy();
+    // This is deliberately read-only. The user must explicitly choose every
+    // subsequent resume, retry or recovery action returned by Core.
+    refreshPaymasterSessionState();
 }
 
 void DigiDollarSendWidget::invalidatePaymasterOfferPreview()
 {
     if (!m_paymasterRequestId.isEmpty()) return;
+    ++m_paymasterOfferPreviewGeneration;
     const bool had_preview =
+        m_paymasterBusy ||
         m_paymasterPreviewRecipientCents >= 0 ||
         m_paymasterPreviewServiceFeeCents >= 0 ||
         m_paymasterPreviewTotalCents >= 0 ||
@@ -1904,10 +2827,15 @@ void DigiDollarSendWidget::invalidatePaymasterOfferPreview()
 
 void DigiDollarSendWidget::refreshPaymasterOffers()
 {
-    if (!m_walletModel || m_paymasterBusy) return;
+    if (!m_walletModel || m_paymasterBusy) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+                             tr("another Paymaster operation is still active"));
+        return;
+    }
     invalidatePaymasterOfferPreview();
-    const CAmount amount_cents = static_cast<CAmount>(std::llround(m_amountEdit->text().toDouble() * 100));
-    if (amount_cents <= 0) {
+    CAmount amount_cents{0};
+    if (!ParseDigiDollarCents(m_amountEdit->text(), amount_cents)) {
         DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::ACTION);
         m_offersStatus->setText(tr("! Action required · enter a valid $DD amount before requesting Paymaster offers."));
         m_offersStatus->setAccessibleDescription(m_offersStatus->text());
@@ -1924,12 +2852,24 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
     preview_options.pushKV(
         "subtract_paymaster_fee_from_amount",
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
+    const bool subtract_from_amount =
+        m_subtractPaymasterFeeCheck &&
+        m_subtractPaymasterFeeCheck->isChecked();
+    const uint64_t preview_generation = m_paymasterOfferPreviewGeneration;
     params.push_back(std::move(preview_options));
     QPointer<DigiDollarSendWidget> guard{this};
     executePaymasterRpcAsync("getpaymasteroffers", std::move(params),
-        [guard](UniValue result, QString error) {
+        [guard, preview_generation, amount_cents,
+         subtract_from_amount](UniValue result, QString error) {
             if (!guard) return;
-            guard->setPaymasterBusy(false);
+            if (guard->m_paymasterOfferPreviewGeneration !=
+                preview_generation) {
+                // Inputs changed while this asynchronous preview was in
+                // flight. Keep the invalidated state instead of presenting a
+                // response bound to the old amount or limits.
+                guard->setPaymasterBusy(false);
+                return;
+            }
             guard->m_offersTable->setRowCount(0);
             guard->m_paymasterPreviewRecipientCents = -1;
             guard->m_paymasterPreviewServiceFeeCents = -1;
@@ -1941,6 +2881,101 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                 guard->m_offersStatus->setAccessibleDescription(
                     guard->m_offersStatus->text());
                 guard->showWarning(guard->tr("Paymaster offers unavailable"), error);
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            const auto fail_malformed = [guard] {
+                guard->m_offersTable->setRowCount(0);
+                guard->m_paymasterPreviewRecipientCents = -1;
+                guard->m_paymasterPreviewServiceFeeCents = -1;
+                guard->m_paymasterPreviewTotalCents = -1;
+                DigiDollarStatus::SetBanner(
+                    guard->m_offersStatus, DigiDollarStatus::Kind::ERR);
+                guard->m_offersStatus->setText(guard->tr(
+                    "✕ The Paymaster offer response was malformed. No provider was selected and no fee was authorized."));
+                guard->m_offersStatus->setAccessibleDescription(
+                    guard->m_offersStatus->text());
+                guard->showWarning(
+                    guard->tr("Paymaster offers unavailable"),
+                    guard->tr("Core returned an invalid Paymaster offer preview. Refresh node and wallet status before trying again."));
+                guard->setPaymasterBusy(false);
+            };
+            constexpr size_t MAX_VISIBLE_PAYMASTER_OFFERS{100};
+            if (!result.isArray() ||
+                result.size() > MAX_VISIBLE_PAYMASTER_OFFERS) {
+                fail_malformed();
+                return;
+            }
+            try {
+                for (const UniValue& offer : result.getValues()) {
+                    const UniValue& display_name = offer.find_value("display_name");
+                    const UniValue& funding_model = offer.find_value("funding_model");
+                    const UniValue& service_fee = offer.find_value("service_fee_cents");
+                    const UniValue& payment = offer.find_value("payment_cents");
+                    const UniValue& total = offer.find_value("user_total_cents");
+                    const UniValue& enough = offer.find_value("reputation_sufficient_data");
+                    const UniValue& success_rate = offer.find_value("success_rate_basis_points");
+                    const UniValue& expiry = offer.find_value("expires_at");
+                    const UniValue& provider_id = offer.find_value("provider_id");
+                    const UniValue& offer_id = offer.find_value("offer_id");
+                    const UniValue& policy_hash = offer.find_value("policy_hash");
+                    const UniValue& subtract =
+                        offer.find_value("subtract_paymaster_fee_from_amount");
+                    if (!offer.isObject() || !display_name.isStr() ||
+                        !funding_model.isStr() || !service_fee.isNum() ||
+                        !payment.isNum() || !total.isNum() || !enough.isBool() ||
+                        !expiry.isNum() || !provider_id.isStr() ||
+                        !offer_id.isStr() || !policy_hash.isStr() ||
+                        !subtract.isBool() ||
+                        (enough.get_bool() && !success_rate.isNum())) {
+                        fail_malformed();
+                        return;
+                    }
+                    const std::string model = funding_model.get_str();
+                    const std::string provider = provider_id.get_str();
+                    const std::string bound_offer = offer_id.get_str();
+                    const std::string bound_policy = policy_hash.get_str();
+                    const qint64 fee_cents = service_fee.getInt<qint64>();
+                    const qint64 payment_cents = payment.getInt<qint64>();
+                    const qint64 total_cents = total.getInt<qint64>();
+                    const qint64 expires_at = expiry.getInt<qint64>();
+                    const int success_bps = enough.get_bool()
+                        ? success_rate.getInt<int>() : 0;
+                    const QString display =
+                        QString::fromStdString(display_name.get_str());
+                    const QDateTime expiry_time =
+                        QDateTime::fromSecsSinceEpoch(expires_at);
+                    if ((model != "user_paid" && model != "sponsored") ||
+                        display.size() > 128 ||
+                        display_name.get_str().size() > 512 ||
+                        fee_cents < 0 || payment_cents <= 0 ||
+                        fee_cents > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+                        payment_cents >
+                            DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+                        payment_cents >
+                            std::numeric_limits<qint64>::max() - fee_cents ||
+                        total_cents != payment_cents + fee_cents ||
+                        (subtract_from_amount
+                             ? total_cents != amount_cents
+                             : payment_cents != amount_cents) ||
+                        (model == "sponsored" && fee_cents != 0) ||
+                        !IsCanonicalNonNullPaymasterHash(
+                            QString::fromStdString(provider)) ||
+                        !IsCanonicalNonNullPaymasterHash(
+                            QString::fromStdString(bound_offer)) ||
+                        !IsCanonicalNonNullPaymasterHash(
+                            QString::fromStdString(bound_policy)) ||
+                        !expiry_time.isValid() ||
+                        expires_at <= QDateTime::currentSecsSinceEpoch() ||
+                        subtract.get_bool() != subtract_from_amount ||
+                        success_bps < 0 ||
+                        success_bps > 10000) {
+                        fail_malformed();
+                        return;
+                    }
+                }
+            } catch (const std::exception&) {
+                fail_malformed();
                 return;
             }
             int row{0};
@@ -1983,7 +3018,9 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                 : guard->tr("✓ %1 eligible offer(s) shown as a preview. Core will authenticate, bind and re-confirm the exact selection before signing.").arg(row));
             guard->m_offersStatus->setAccessibleDescription(
                 guard->m_offersStatus->text());
+            guard->setPaymasterBusy(false);
             guard->updateFeeDisplay();
+            guard->applyPaymasterPrivacy();
         });
 }
 
@@ -2030,6 +3067,31 @@ UniValue DigiDollarSendWidget::buildPaymasterSendParams(const QString& address, 
 void DigiDollarSendWidget::executePaymasterRpcAsync(
     std::string command, UniValue params, WalletModel::RpcCallback callback)
 {
+    const uint64_t wallet_generation = m_paymasterWalletGeneration;
+    QPointer<DigiDollarSendWidget> guard{this};
+    WalletModel::RpcCallback wallet_bound_callback =
+        [guard, wallet_generation, callback = std::move(callback)](
+            UniValue result, QString error) mutable {
+            // A reply from a previously selected wallet must never populate
+            // the current wallet's offer, session, recovery or safety state.
+            if (!guard || guard->m_paymasterWalletGeneration !=
+                              wallet_generation) {
+                return;
+            }
+            callback(std::move(result), std::move(error));
+        };
+    if (m_paymasterAsyncRpcExecutorForTesting) {
+        try {
+            m_paymasterAsyncRpcExecutorForTesting(
+                command, params, wallet_bound_callback);
+        } catch (const std::exception& exception) {
+            wallet_bound_callback(
+                UniValue{}, QString::fromUtf8(exception.what()));
+        } catch (...) {
+            wallet_bound_callback(UniValue{}, tr("Unknown RPC error"));
+        }
+        return;
+    }
     if (m_paymasterRpcExecutorForTesting) {
         UniValue result;
         QString error;
@@ -2045,48 +3107,70 @@ void DigiDollarSendWidget::executePaymasterRpcAsync(
         } catch (...) {
             error = tr("Unknown RPC error");
         }
-        callback(std::move(result), std::move(error));
+        wallet_bound_callback(std::move(result), std::move(error));
         return;
     }
 
     if (!m_walletModel) {
-        callback(UniValue{}, tr("Wallet is not available"));
+        wallet_bound_callback(UniValue{}, tr("Wallet is not available"));
         return;
     }
     m_walletModel->executeRpcAsync(
-        std::move(command), std::move(params), std::move(callback));
+        std::move(command), std::move(params),
+        std::move(wallet_bound_callback));
 }
 
-void DigiDollarSendWidget::executePaymasterTransfer(const QString& address, double amount, bool allow_unlock)
+void DigiDollarSendWidget::executePaymasterTransfer(
+    const QString& address, CAmount amount_cents, bool allow_unlock)
 {
     // The first call prepares and authenticates an offer only. Signing is never
     // inferred from clicking Send: handlePaymasterResult requires the exact
     // authorization commitment and presents the second confirmation separately.
-    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
+    if (!m_walletModel) {
+        reportPaymasterOperationNotStarted(tr("wallet is no longer available"));
+        return;
+    }
+    if (m_paymasterBusy) {
+        reportPaymasterOperationNotStarted(
+            tr("another Paymaster operation is still active"));
+        return;
+    }
+    if (m_paymasterRequestId.isEmpty()) {
+        reportPaymasterOperationNotStarted(
+            tr("no durable request is selected"));
+        return;
+    }
+    // Reserve the operation before a wallet-unlock dialog can re-enter the
+    // event loop. No Paymaster button or poll may start a second operation.
+    setPaymasterBusy(true);
     std::shared_ptr<WalletModel::UnlockContext> unlock;
     if (allow_unlock) {
         unlock = m_walletModel->requestUnlockForAsync();
         if (!unlock->isValid()) {
             m_paymasterStateValue->setText(tr("AWAITING_WALLET_UNLOCK"));
+            setPaymasterBusy(false);
             return;
         }
     }
-    setPaymasterBusy(true);
     m_paymasterSessionFrame->show();
     m_paymasterStateValue->setText(tr("Contacting Paymaster Network…"));
-    const CAmount amount_cents = static_cast<CAmount>(std::llround(amount * 100));
     QPointer<DigiDollarSendWidget> guard{this};
     executePaymasterRpcAsync("senddigidollar", buildPaymasterSendParams(address, amount_cents),
-        [guard, address, amount, unlock = std::move(unlock)](UniValue result, QString error) mutable {
-            if (guard) guard->handlePaymasterResult(result, error, address, amount);
+        [guard, address, amount_cents, unlock = std::move(unlock)](UniValue result, QString error) mutable {
+            // Relock before result handling: that path may open confirmation or
+            // error dialogs and must never extend the signing unlock across a
+            // user-controlled modal wait.
             unlock.reset();
+            if (guard) {
+                guard->handlePaymasterResult(result, error, address,
+                                             amount_cents);
+            }
         });
 }
 
 void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const QString& error,
-                                                 const QString& address, double amount)
+                                                 const QString& address, CAmount amount_cents)
 {
-    setPaymasterBusy(false);
     if (!error.isEmpty()) {
         if (error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_REQUIRED")) ||
             error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH")) ||
@@ -2112,6 +3196,12 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
             m_paymasterPendingPhase.clear();
             m_paymasterBroadcastState.clear();
             m_paymasterConfirmationState.clear();
+            m_paymasterTransactionId.clear();
+            m_paymasterRecoveryTransactionId.clear();
+            m_paymasterResultStatus.clear();
+            m_paymasterResultSequence = -1;
+            m_paymasterRecoveryExpiresAt = -1;
+            m_paymasterTerminalNoticeShown = false;
             m_paymasterSessionPersisted = false;
             m_paymasterAuthorizationCommitment.clear();
             m_paymasterConfirmationGuard.Reset();
@@ -2120,58 +3210,99 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
             m_paymasterIdentityValue->setText(tr("No provider selected"));
             m_paymasterCostValue->setText(tr("No service fee reserved or authorized"));
             m_paymasterExpiryValue->setText(tr("—"));
-            setPaymasterBusy(false);
         } else {
             m_paymasterStateValue->setText(tr("Paymaster error: %1").arg(error));
         }
-        m_paymasterPollTimer->stop();
+        stopPaymasterPolling();
         updatePaymasterFocusMode();
         showBackendError(static_cast<int>(WalletModel::TransactionCreationFailed), error);
+        setPaymasterBusy(false);
         return;
     }
-    updatePaymasterSessionView(result);
+    const UniValue& txid = result.find_value("txid");
+    const UniValue& direct_status = result.find_value("status");
+    const QString direct_status_text = direct_status.isStr()
+        ? QString::fromStdString(direct_status.get_str()) : QString{};
+    const bool direct_status_present = !direct_status.isNull();
+    const bool direct_success = direct_status_present &&
+        direct_status.isStr() &&
+        result.find_value("session_state").isNull() &&
+        result.find_value("session").isNull() &&
+        IsValidatedPaymasterCompletion(
+            txid.isStr() ? QString::fromStdString(txid.get_str()) : QString{},
+            QString{}, direct_status_text, QString{});
+    if (direct_status_present && !direct_success) {
+        stopPaymasterPolling();
+        m_paymasterStateValue->setText(
+            tr("Transfer status blocked: malformed direct completion"));
+        showWarning(
+            tr("DigiDollar transfer status unavailable"),
+            tr("Core returned a direct-transfer status without the exact successful status and a valid nonzero transaction id. The form was not cleared and no Paymaster continuation was started."));
+        setPaymasterBusy(false);
+        return;
+    }
+    if (!direct_success) {
+        QString decode_error;
+        if (!updatePaymasterSessionView(result, &decode_error)) {
+            stopPaymasterPolling();
+            m_paymasterStateValue->setText(
+                tr("Paymaster status blocked: malformed Core response"));
+            showWarning(
+                tr("Paymaster status unavailable"),
+                tr("Core returned an incomplete or inconsistent Paymaster session (%1). No automatic signing, retry or recovery will continue.")
+                    .arg(decode_error));
+            setPaymasterBusy(false);
+            return;
+        }
+        if (handleAuthoritativePaymasterCompletion(result)) {
+            setPaymasterBusy(false);
+            return;
+        }
+    }
     // updatePaymasterSessionView() may have learned that Core persisted the
     // session. Re-evaluate the recovery controls with that authoritative fact.
-    setPaymasterBusy(false);
-    const UniValue& txid = result.find_value("txid");
-    const UniValue& final = result.find_value("final");
-    const UniValue& direct_status = result.find_value("status");
-    const UniValue& result_status = result.find_value("result_status");
-    const QString state = QString::fromStdString(result.find_value("session_state").isStr()
-                                                     ? result.find_value("session_state").get_str()
-                                                     : std::string{});
-    if (IsValidatedPaymasterCompletion(
-            txid.isStr(), state,
-            direct_status.isStr()
-                ? QString::fromStdString(direct_status.get_str())
-                : QString{},
-            result_status.isStr()
-                ? QString::fromStdString(result_status.get_str())
-                : QString{},
-            final.isBool() && final.get_bool())) {
+    const QString txid_text = txid.isStr()
+        ? QString::fromStdString(txid.get_str()) : QString{};
+    if (direct_success && IsValidatedPaymasterCompletion(
+            txid_text, QString{}, direct_status_text, QString{})) {
         // A FINAL_COMMITTED result reaches Qt only after Core has reloaded the
         // durable client manifest, validated every final input/output and
         // witness, and accepted or observed the exact transaction. The
         // response echo is presentation metadata at this point; a missing echo
         // must not turn a completed payment into a false authorization error.
-        m_paymasterPollTimer->stop();
-        const UniValue& payment = result.find_value("payment_cents");
-        const double recipient_amount = payment.isNum()
-            ? payment.getInt<qint64>() / 100.0
-            : amount;
-        showSuccess(QString::fromStdString(txid.get_str()), recipient_amount);
+        stopPaymasterPolling();
+        qint64 payment_cents{0};
+        const double recipient_amount =
+            ReadInt64(result, "payment_cents", payment_cents) &&
+                payment_cents > 0 &&
+                payment_cents <= DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS
+            ? payment_cents / 100.0
+            : amount_cents / 100.0;
+        showSuccess(txid_text, recipient_amount);
         onClearClicked();
         updateBalance();
+        setPaymasterBusy(false);
         return;
     }
     const UniValue& returned_commitment_value = result.find_value("authorization_commitment");
     const QString returned_commitment = returned_commitment_value.isStr()
         ? QString::fromStdString(returned_commitment_value.get_str())
         : QString{};
+    if (!returned_commitment.isEmpty() &&
+        !IsCanonicalNonNullPaymasterHash(returned_commitment)) {
+        stopPaymasterPolling();
+        m_paymasterAuthorizationCommitment.clear();
+        m_paymasterConfirmationGuard.Reset();
+        showWarning(
+            tr("Paymaster authorization blocked"),
+            tr("Core returned a malformed Paymaster authorization commitment. No signature or automatic retry will continue."));
+        setPaymasterBusy(false);
+        return;
+    }
     if (!m_paymasterAuthorizationCommitment.isEmpty() &&
         (returned_commitment.isEmpty() ||
          returned_commitment != m_paymasterAuthorizationCommitment)) {
-        m_paymasterPollTimer->stop();
+        stopPaymasterPolling();
         m_paymasterAuthorizationCommitment.clear();
         m_paymasterConfirmationGuard.Reset();
         m_paymasterStateValue->setText(
@@ -2181,14 +3312,24 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
             tr("The wallet did not return the exact authorization commitment that was "
                "approved. No signature or automatic retry will continue. Review the "
                "current provider offer again."));
+        setPaymasterBusy(false);
         return;
     }
     const UniValue& authorization_required_value =
         result.find_value("authorization_required");
+    if (!authorization_required_value.isNull() &&
+        !authorization_required_value.isBool()) {
+        stopPaymasterPolling();
+        showWarning(
+            tr("Paymaster authorization blocked"),
+            tr("Core returned an invalid authorization-required flag. No signature or automatic retry will continue."));
+        setPaymasterBusy(false);
+        return;
+    }
     const bool authorization_required = authorization_required_value.isBool() &&
         authorization_required_value.get_bool();
     if (authorization_required) {
-        m_paymasterPollTimer->stop();
+        stopPaymasterPolling();
         if (returned_commitment.isEmpty()) {
             m_paymasterStateValue->setText(
                 tr("Paymaster authorization blocked: missing exact commitment"));
@@ -2196,95 +3337,274 @@ void DigiDollarSendWidget::handlePaymasterResult(const UniValue& result, const Q
                 tr("Paymaster authorization blocked"),
                 tr("The prepared Paymaster transaction did not include its exact client "
                    "authorization commitment. No Qt authorization will continue."));
+            setPaymasterBusy(false);
             return;
         }
-        if (!confirmPaymasterSelectionBeforeSigning(result, address)) return;
+        if (!confirmPaymasterSelectionBeforeSigning(result, address)) {
+            setPaymasterBusy(false);
+            return;
+        }
         m_paymasterAuthorizationCommitment = returned_commitment;
-        executePaymasterTransfer(address, amount, /*allow_unlock=*/true);
+        setPaymasterBusy(false);
+        executePaymasterTransfer(address, amount_cents, /*allow_unlock=*/true);
         return;
     }
-    if (state == QStringLiteral("AWAITING_WALLET_UNLOCK")) {
+    if (m_paymasterSessionState == QStringLiteral("AWAITING_WALLET_UNLOCK")) {
         // Before a quote exists, Core may need the unlocked wallet only for
         // the input-control proof. prepare_only remains set, so this call
         // cannot produce the collaborative transaction signature. If the
         // exact authorization was already approved, the same unlock also
         // permits the separately committed authorize stage.
-        m_paymasterPollTimer->stop();
-        executePaymasterTransfer(address, amount, /*allow_unlock=*/true);
+        stopPaymasterPolling();
+        // The first response may predate the authoritative action list. An
+        // explicit Core `resume` capability is required once a refresh has
+        // supplied one.
+        if (!m_paymasterAllowedActionsKnown ||
+            m_paymasterAllowedActions.contains(QStringLiteral("resume"))) {
+            setPaymasterBusy(false);
+            executePaymasterTransfer(address, amount_cents,
+                                     /*allow_unlock=*/true);
+        } else {
+            setPaymasterBusy(false);
+        }
         return;
     }
-    if (!m_paymasterPollTimer->isActive()) m_paymasterPollTimer->start();
+    setPaymasterBusy(false);
+    schedulePaymasterPoll(/*state_changed=*/false);
     updatePaymasterFocusMode();
 }
 
-void DigiDollarSendWidget::updatePaymasterSessionView(const UniValue& result)
+bool DigiDollarSendWidget::updatePaymasterSessionView(
+    const UniValue& result, QString* decode_error)
 {
+    PaymasterSessionSnapshot snapshot;
+    QString error;
+    if (!DecodePaymasterSessionSnapshot(result, snapshot, error)) {
+        if (decode_error) *decode_error = error;
+        return false;
+    }
+    if (!m_paymasterRequestId.isEmpty() && !snapshot.request_id.isEmpty() &&
+        snapshot.request_id != m_paymasterRequestId) {
+        if (decode_error) {
+            *decode_error = tr("response belongs to a different request");
+        }
+        return false;
+    }
+    if (!m_paymasterSessionId.isEmpty() && !snapshot.session_id.isEmpty() &&
+        snapshot.session_id != m_paymasterSessionId) {
+        if (decode_error) {
+            *decode_error = tr("response belongs to a different session");
+        }
+        return false;
+    }
+    if (!m_paymasterAddress.isEmpty() && !snapshot.recipient.isEmpty() &&
+        snapshot.recipient != m_paymasterAddress) {
+        if (decode_error) {
+            *decode_error = tr("response recipient does not match the active transfer");
+        }
+        return false;
+    }
+
+    const QString previous_state = m_paymasterSessionState;
     m_paymasterSessionFrame->show();
-    const UniValue& embedded_session = result.find_value("session");
-    const UniValue& session_view = embedded_session.isObject() ? embedded_session : result;
-    const auto string_value = [&](const char* key) {
-        const UniValue& value = session_view.find_value(key);
-        return value.isStr() ? QString::fromStdString(value.get_str()) : QString{};
-    };
-    const QString session = string_value("session_id");
-    if (!session.isEmpty()) {
-        m_paymasterSessionId = session;
+    if (!snapshot.request_id.isEmpty()) m_paymasterRequestId = snapshot.request_id;
+    if (!snapshot.session_id.isEmpty()) {
+        m_paymasterSessionId = snapshot.session_id;
         m_paymasterSessionPersisted = true;
     }
-    const QString state = string_value("session_state");
-    m_paymasterSessionState = state;
-    const QString phase = string_value("pending_phase");
-    const QString broadcast = string_value("broadcast_state");
-    const QString confirmation = string_value("confirmation_state");
-    m_paymasterPendingPhase = phase;
-    m_paymasterBroadcastState = broadcast;
-    m_paymasterConfirmationState = confirmation;
-    const UniValue& artifact = result.find_value("artifact");
-    if (artifact.isStr()) m_paymasterArtifact = QString::fromStdString(artifact.get_str());
-    const UniValue& attempt = result.find_value("attempt");
-    if (attempt.isObject() && attempt.find_value("attempt_state").isStr()) {
-        m_paymasterAttemptState =
-            QString::fromStdString(attempt.find_value("attempt_state").get_str());
-    } else if (result.find_value("attempt_state").isStr()) {
-        m_paymasterAttemptState =
-            QString::fromStdString(result.find_value("attempt_state").get_str());
+    m_paymasterSessionState = snapshot.state;
+    m_paymasterPendingPhase = snapshot.pending_phase;
+    m_paymasterBroadcastState = snapshot.broadcast_state;
+    m_paymasterConfirmationState = snapshot.confirmation_state;
+    m_paymasterTransactionId = snapshot.transaction_id;
+    m_paymasterRecoveryTransactionId = snapshot.recovery_transaction_id;
+    m_paymasterResultStatus = snapshot.result_status;
+    m_paymasterResultSequence = snapshot.result_sequence;
+    m_paymasterRecoveryExpiresAt = snapshot.recovery_expires_at;
+    // Replace optional state atomically. Missing fields explicitly clear stale
+    // values; a new session can never inherit an old attempt or artifact.
+    m_paymasterArtifact = snapshot.artifact;
+    m_paymasterAttemptState = snapshot.attempt_state;
+    m_paymasterAllowedActions = snapshot.allowed_actions;
+    m_paymasterAllowedActionsKnown = snapshot.allowed_actions_known;
+    if (snapshot.state != QStringLiteral("MEMPOOL") &&
+        snapshot.state != QStringLiteral("CONFIRMED") &&
+        snapshot.state != QStringLiteral("CANCELED_SAFE") &&
+        snapshot.state != QStringLiteral("FAILED") &&
+        snapshot.state != QStringLiteral("CONFLICTED")) {
+        m_paymasterTerminalNoticeShown = false;
     }
-    QString status = phase.isEmpty() ? state : tr("%1 — %2").arg(state, phase);
-    if (!broadcast.isEmpty() || !confirmation.isEmpty()) {
+    if (snapshot.authoritative || !snapshot.recipient.isEmpty()) {
+        m_paymasterAddress = snapshot.recipient;
+    }
+    if (snapshot.authoritative || !snapshot.privacy_profile.isEmpty()) {
+        m_paymasterSessionPrivacy = snapshot.privacy_profile;
+    }
+    if (snapshot.requested_amount_cents > 0) {
+        m_paymasterAmountCents = snapshot.requested_amount_cents;
+        m_paymasterAmount = snapshot.requested_amount_cents / 100.0;
+    } else if (snapshot.has_costs) {
+        m_paymasterAmountCents = snapshot.payment_cents;
+        m_paymasterAmount = snapshot.payment_cents / 100.0;
+    } else if (snapshot.authoritative) {
+        // Do not let a sparse restart snapshot inherit an amount from a
+        // previously displayed session.
+        m_paymasterAmountCents = 0;
+        m_paymasterAmount = 0.0;
+    }
+
+    QString status = snapshot.pending_phase.isEmpty()
+        ? snapshot.state
+        : tr("%1 — %2").arg(snapshot.state, snapshot.pending_phase);
+    if (!snapshot.broadcast_state.isEmpty() ||
+        !snapshot.confirmation_state.isEmpty()) {
         status += tr(" · broadcast: %1 · confirmation: %2")
-            .arg(broadcast.isEmpty() ? tr("unknown") : broadcast,
-                 confirmation.isEmpty() ? tr("unknown") : confirmation);
+            .arg(snapshot.broadcast_state.isEmpty()
+                     ? tr("unknown") : snapshot.broadcast_state,
+                 snapshot.confirmation_state.isEmpty()
+                     ? tr("unknown") : snapshot.confirmation_state);
     }
     m_paymasterStateValue->setText(status);
-    QString provider = string_value("provider_id");
-    QString policy = string_value("policy_hash");
-    if (provider.isEmpty() && attempt.isObject() && attempt.find_value("provider_id").isStr()) {
-        provider = QString::fromStdString(attempt.find_value("provider_id").get_str());
-    }
-    m_paymasterIdentityValue->setText(provider.isEmpty()
+    m_paymasterIdentityValue->setText(snapshot.provider_id.isEmpty()
         ? tr("Provider not selected yet")
-        : tr("Selected provider · %1…").arg(provider.left(12)));
+        : tr("Selected provider · %1…").arg(snapshot.provider_id.left(12)));
     m_paymasterIdentityValue->setToolTip(
-        tr("Provider: %1\nPolicy: %2").arg(provider, policy));
-    const UniValue& payment = result.find_value("payment_cents");
-    const UniValue& fee = result.find_value("service_fee_cents");
-    const UniValue& total = result.find_value("user_total_cents");
-    if (payment.isNum() && fee.isNum() && total.isNum()) {
+        snapshot.provider_id.isEmpty() ? QString{} :
+        tr("Provider: %1\nPolicy: %2")
+            .arg(snapshot.provider_id, snapshot.policy_hash));
+    if (snapshot.has_costs) {
         m_paymasterCostValue->setText(tr("Recipient %1 + service fee %2 = %3 maximum wallet outflow (limit %4)")
-            .arg(formatCents(payment.getInt<qint64>()), formatCents(fee.getInt<qint64>()),
-                 formatCents(total.getInt<qint64>()), formatCents(m_feeCapSpin->value())));
+            .arg(formatCents(snapshot.payment_cents),
+                 formatCents(snapshot.service_fee_cents),
+                 formatCents(snapshot.total_cents),
+                 formatCents(m_feeCapSpin->value())));
+    } else {
+        m_paymasterCostValue->setText(tr("Exact service fee not available in this status snapshot"));
     }
-    const UniValue& expiry = result.find_value("expires_at");
-    if (expiry.isNum()) {
+    if (snapshot.has_expiry) {
         m_paymasterExpiryValue->setText(
-            QDateTime::fromSecsSinceEpoch(expiry.getInt<qint64>()).toLocalTime().toString(Qt::ISODate));
+            QDateTime::fromSecsSinceEpoch(snapshot.expires_at)
+                .toLocalTime().toString(Qt::ISODate));
+    } else {
+        m_paymasterExpiryValue->setText(tr("—"));
+    }
+    if (IsTerminalPaymasterState(m_paymasterSessionState)) {
+        stopPaymasterPolling();
+    } else if (previous_state != m_paymasterSessionState) {
+        m_paymasterPollIntervalMs = 1500;
     }
     updatePaymasterFocusMode();
+    applyPaymasterPrivacy();
+    return true;
+}
+
+bool DigiDollarSendWidget::handleAuthoritativePaymasterCompletion(
+    const UniValue& result)
+{
+    const UniValue& embedded_session = result.find_value("session");
+    const UniValue& completion_session = embedded_session.isObject()
+        ? embedded_session : result;
+    const UniValue& reported_final_value =
+        completion_session.find_value("final");
+    const bool reported_final = reported_final_value.isBool() &&
+        reported_final_value.get_bool();
+    const bool payment_success = IsValidatedPaymasterCompletion(
+        m_paymasterTransactionId, m_paymasterSessionState, QString{},
+        m_paymasterResultStatus, reported_final);
+    const bool payment_state =
+        m_paymasterSessionState == QStringLiteral("MEMPOOL") ||
+        m_paymasterSessionState == QStringLiteral("CONFIRMED");
+    const bool recovery_state =
+        m_paymasterSessionState == QStringLiteral("CANCELED_SAFE");
+    const bool attention_state =
+        m_paymasterSessionState == QStringLiteral("FAILED") ||
+        m_paymasterSessionState == QStringLiteral("CONFLICTED");
+    if (!payment_state && !recovery_state && !attention_state) return false;
+
+    stopPaymasterPolling();
+    m_paymasterRecoveryActive = false;
+    if (attention_state) {
+        if (!m_paymasterTerminalNoticeShown) {
+            m_paymasterStateValue->setText(
+                tr("Paymaster transfer requires attention; no successful transfer was reported"));
+            applyPaymasterPrivacy();
+            m_paymasterTerminalNoticeShown = true;
+        }
+        return true;
+    }
+    if (m_paymasterTerminalNoticeShown) return true;
+
+    if (payment_state) {
+        if (!payment_success ||
+            (m_paymasterSessionState == QStringLiteral("CONFIRMED") &&
+             m_paymasterConfirmationState !=
+                 QStringLiteral("payment_confirmed"))) {
+            m_paymasterStateValue->setText(
+                tr("Payment status blocked: inconsistent confirmation"));
+            showWarning(
+                tr("Paymaster payment status unavailable"),
+                tr("Core reported a payment state without the matching validated result status, transaction id and confirmation state."));
+            m_paymasterTerminalNoticeShown = true;
+            return true;
+        }
+        showSuccess(m_paymasterTransactionId, m_paymasterAmount);
+        onClearClicked();
+        m_paymasterStateValue->setText(
+            m_paymasterSessionState == QStringLiteral("CONFIRMED")
+                ? tr("Original payment confirmed")
+                : tr("Payment transaction accepted by the network"));
+        updateBalance();
+        m_paymasterTerminalNoticeShown = true;
+        return true;
+    }
+
+    const UniValue& recovery = result.find_value("recovery");
+    if (!recovery.isObject()) {
+        m_paymasterStateValue->setText(
+            tr("Recovery status blocked: missing recovery manifest"));
+        showWarning(
+            tr("Paymaster recovery status unavailable"),
+            tr("Core reported a safely canceled session without its authoritative recovery record."));
+        m_paymasterTerminalNoticeShown = true;
+        return true;
+    }
+    const UniValue& recovery_txid_value = recovery.find_value("txid");
+    const QString recovery_txid = recovery_txid_value.isStr()
+        ? QString::fromStdString(recovery_txid_value.get_str()) : QString{};
+    if (m_paymasterConfirmationState !=
+            QStringLiteral("recovery_confirmed") ||
+        !IsCanonicalNonNullPaymasterHash(
+            m_paymasterRecoveryTransactionId) ||
+        !IsCanonicalNonNullPaymasterHash(recovery_txid) ||
+        recovery_txid != m_paymasterRecoveryTransactionId) {
+        m_paymasterStateValue->setText(
+            tr("Recovery status blocked: inconsistent confirmation"));
+        showWarning(
+            tr("Paymaster recovery status unavailable"),
+            tr("Core reported a safely canceled session without one matching confirmed recovery transaction id."));
+        m_paymasterTerminalNoticeShown = true;
+        return true;
+    }
+
+    m_paymasterStateValue->setText(
+        tr("Recovery confirmed; reserved inputs are safely resolved"));
+    updateBalance();
+    applyPaymasterPrivacy();
+    showDialog(
+        QMessageBox::Information,
+        tr("Paymaster recovery confirmed"),
+        m_privacy
+            ? tr("The Paymaster recovery is confirmed. Details are hidden while privacy mode is enabled.")
+            : tr("The Paymaster recovery transaction is confirmed.\n\nRecovery transaction ID: %1")
+                  .arg(m_paymasterRecoveryTransactionId));
+    m_paymasterTerminalNoticeShown = true;
+    return true;
 }
 
 PaymasterConfirmationSelection DigiDollarSendWidget::paymasterConfirmationSelection(
     const UniValue& result, const QString& address) const
 {
+    Q_UNUSED(address)
     const auto string_value = [&result](const char* key) {
         const UniValue& value = result.find_value(key);
         return value.isStr() ? QString::fromStdString(value.get_str()) : QString{};
@@ -2294,31 +3614,36 @@ PaymasterConfirmationSelection DigiDollarSendWidget::paymasterConfirmationSelect
     selection.offer_id = string_value("offer_id");
     selection.policy_hash = string_value("policy_hash");
     selection.funding_model = string_value("funding_model");
-    selection.recipient = address;
+    selection.recipient = string_value("to_address");
     selection.authorization_commitment = string_value("authorization_commitment");
-    const UniValue& payment = result.find_value("payment_cents");
-    if (payment.isNum()) selection.payment_cents = payment.getInt<qint64>();
-    const UniValue& fee = result.find_value("service_fee_cents");
-    if (fee.isNum()) selection.service_fee_cents = fee.getInt<qint64>();
-    const UniValue& total = result.find_value("user_total_cents");
-    if (total.isNum()) selection.user_total_cents = total.getInt<qint64>();
+    ReadInt64(result, "payment_cents", selection.payment_cents);
+    ReadInt64(result, "service_fee_cents", selection.service_fee_cents);
+    ReadInt64(result, "user_total_cents", selection.user_total_cents);
+    ReadInt64(result, "expires_at", selection.expires_at);
     return selection;
 }
 
 bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
     const UniValue& result, const QString& address)
 {
+    if (m_privacy) {
+        showWarning(
+            tr("Paymaster authorization paused"),
+            tr("Disable privacy mode to review the exact recipient, provider, amount and authorization commitment before signing."));
+        return false;
+    }
     // Display values are taken from Core's bound selection, not recomputed from
     // the currently visible widgets. Any provider, model, recipient, amount, or
     // fee change therefore produces a new commitment and another confirmation.
     const PaymasterConfirmationSelection selection =
         paymasterConfirmationSelection(result, address);
-    if (!selection.IsComplete()) {
+    if (!selection.IsComplete() || selection.recipient != address ||
+        selection.expires_at <= QDateTime::currentSecsSinceEpoch()) {
         m_paymasterStateValue->setText(tr("Paymaster authorization blocked: incomplete exact offer details"));
         showWarning(
             tr("Paymaster authorization blocked"),
             tr("The exact provider, offer, policy, funding model, recipient, amount, "
-               "service fee, total outflow or validated authorization commitment was "
+               "service fee, total outflow, unexpired validity or validated authorization commitment was "
                "not returned consistently by the wallet. "
                "No Qt authorization will continue until those details are available."));
         return false;
@@ -2335,6 +3660,7 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
         else if (field == QStringLiteral("amount")) changed_fields.push_back(tr("amount"));
         else if (field == QStringLiteral("service_fee")) changed_fields.push_back(tr("service fee"));
         else if (field == QStringLiteral("total")) changed_fields.push_back(tr("total wallet outflow"));
+        else if (field == QStringLiteral("expiry")) changed_fields.push_back(tr("offer expiry"));
         else if (field == QStringLiteral("authorization_commitment")) {
             changed_fields.push_back(tr("transaction or capacity commitment"));
         }
@@ -2344,7 +3670,7 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
         "Provider: %1\nPayment model: %2\nRecipient: %3\n\n"
         "Total $DD outflow: %6\nRecipient receives: %4\nProvider receives: %5\n"
         "Spendable $DD remaining after this transfer: %9\n\n"
-        "Technical authorization commitment: %7\n\n"
+        "Valid until: %10\nTechnical authorization commitment: %7\n\n"
         "New or changed fields: %8\n\nContinue to wallet unlock and signature?")
         .arg(selection.provider_id, friendlyFundingModel(selection.funding_model), selection.recipient)
         .arg(formatCents(selection.payment_cents))
@@ -2354,7 +3680,9 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
         .arg(changed_fields.join(tr(", ")))
         .arg(formatDDAmount(std::max(
             0.0, m_paymasterInitialAvailableBalance -
-                     selection.user_total_cents / 100.0)));
+                     selection.user_total_cents / 100.0)))
+        .arg(QDateTime::fromSecsSinceEpoch(selection.expires_at)
+                 .toLocalTime().toString(Qt::ISODate));
     if (showDialog(QMessageBox::Question,
                    tr("Confirm exact Paymaster authorization"), prompt,
                    QMessageBox::Yes | QMessageBox::Cancel,
@@ -2368,11 +3696,14 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
 void DigiDollarSendWidget::pollPaymasterSession()
 {
     if (m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
-    if (m_paymasterRecoveryActive) {
-        executeAlternativePaymasterRecovery(/*allow_unlock=*/false);
-    } else if (!m_paymasterAddress.isEmpty()) {
-        executePaymasterTransfer(m_paymasterAddress, m_paymasterAmount, /*allow_unlock=*/false);
-    }
+    // Polling is observation-only. In particular, a wallet that was reopened
+    // with a persisted authorization must never sign, rebroadcast or resume a
+    // recovery merely because a timer fired.
+    refreshPaymasterSessionForAction(
+        QStringLiteral("refresh"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
+            if (guard) guard->schedulePaymasterPoll(/*state_changed=*/false);
+        });
 }
 
 void DigiDollarSendWidget::refreshPaymasterSessionState()
@@ -2382,6 +3713,62 @@ void DigiDollarSendWidget::refreshPaymasterSessionState()
     // by the artifact/state fields returned by resolvepaymastersession.
     if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty() ||
         !m_paymasterSessionPersisted) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+                              tr("no durable session is selected"));
+        return;
+    }
+    refreshPaymasterSessionForAction(
+        QStringLiteral("refresh"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
+            if (guard) guard->schedulePaymasterPoll(/*state_changed=*/true);
+        });
+}
+
+void DigiDollarSendWidget::stopPaymasterPolling()
+{
+    m_paymasterPollTimer->stop();
+    m_paymasterPollIntervalMs = 1500;
+    m_paymasterPollTimer->setProperty("paymasterPollScheduled", false);
+}
+
+void DigiDollarSendWidget::schedulePaymasterPoll(bool state_changed)
+{
+    if (m_paymasterRequestId.isEmpty() ||
+        IsTerminalPaymasterState(m_paymasterSessionState)) {
+        stopPaymasterPolling();
+        return;
+    }
+    if (state_changed) {
+        m_paymasterPollIntervalMs = 1500;
+        m_paymasterPollTimer->setProperty("paymasterPollScheduled", false);
+    } else if (m_paymasterPollTimer->property(
+                   "paymasterPollScheduled").toBool()) {
+        m_paymasterPollIntervalMs = std::min(
+            MAX_PAYMASTER_POLL_INTERVAL_MS,
+            m_paymasterPollIntervalMs * 2);
+    }
+    m_paymasterPollTimer->setProperty("paymasterPollScheduled", true);
+    m_paymasterPollTimer->start(m_paymasterPollIntervalMs);
+    updatePaymasterFocusMode();
+}
+
+void DigiDollarSendWidget::refreshPaymasterSessionForAction(
+    const QString& required_action, std::function<void()> continuation)
+{
+    if (!m_walletModel) {
+        reportPaymasterOperationNotStarted(tr("wallet is no longer available"));
+        return;
+    }
+    if (m_paymasterBusy) {
+        reportPaymasterOperationNotStarted(
+            tr("another Paymaster operation is still active"));
+        return;
+    }
+    if (m_paymasterRequestId.isEmpty() || !m_paymasterSessionPersisted) {
+        reportPaymasterOperationNotStarted(
+            tr("no durable session is selected"));
         return;
     }
     UniValue lookup{UniValue::VOBJ};
@@ -2392,152 +3779,293 @@ void DigiDollarSendWidget::refreshPaymasterSessionState()
     setPaymasterBusy(true);
     QPointer<DigiDollarSendWidget> guard{this};
     executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
-        [guard](UniValue result, QString error) {
+        [guard, required_action,
+         continuation = std::move(continuation)](
+            UniValue result, QString error) mutable {
             if (!guard) return;
-            guard->setPaymasterBusy(false);
             if (!error.isEmpty()) {
                 guard->showWarning(guard->tr("Paymaster status unavailable"), error);
+                guard->setPaymasterBusy(false);
                 return;
             }
-            guard->updatePaymasterSessionView(result);
+            QString decode_error;
+            if (!guard->updatePaymasterSessionView(result, &decode_error)) {
+                guard->stopPaymasterPolling();
+                guard->showWarning(
+                    guard->tr("Paymaster status unavailable"),
+                    guard->tr("Core returned an incomplete or inconsistent Paymaster session (%1). No action was performed.")
+                        .arg(decode_error));
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            const bool terminal_handled =
+                guard->handleAuthoritativePaymasterCompletion(result);
+            const bool attention_state =
+                guard->m_paymasterSessionState == QStringLiteral("FAILED") ||
+                guard->m_paymasterSessionState == QStringLiteral("CONFLICTED");
+            if (terminal_handled && !attention_state) {
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            if (!guard->m_paymasterAllowedActionsKnown ||
+                !guard->m_paymasterAllowedActions.contains(required_action)) {
+                guard->showWarning(
+                    guard->tr("Paymaster action no longer available"),
+                    guard->tr("Core no longer allows this action for the refreshed session. No wallet mutation was performed."));
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            guard->setPaymasterBusy(false);
+            if (continuation) continuation();
         });
 }
 
 void DigiDollarSendWidget::retryPaymasterSession()
 {
-    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
-    UniValue lookup{UniValue::VOBJ};
-    lookup.pushKV("request_id", m_paymasterRequestId.toStdString());
-    UniValue params{UniValue::VARR};
-    params.push_back(std::move(lookup));
-    params.push_back("retry_same");
-    setPaymasterBusy(true);
-    QPointer<DigiDollarSendWidget> guard{this};
-    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
-        [guard](UniValue result, QString error) {
+    if (!m_walletModel) {
+        reportPaymasterOperationNotStarted(tr("wallet is no longer available"));
+        return;
+    }
+    if (m_paymasterBusy) {
+        reportPaymasterOperationNotStarted(
+            tr("another Paymaster operation is still active"));
+        return;
+    }
+    if (m_paymasterRequestId.isEmpty()) {
+        reportPaymasterOperationNotStarted(
+            tr("no durable request is selected"));
+        return;
+    }
+    refreshPaymasterSessionForAction(
+        QStringLiteral("retry_same"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
             if (!guard) return;
-            guard->setPaymasterBusy(false);
-            if (!error.isEmpty()) {
-                guard->showWarning(guard->tr("Paymaster recovery"), error);
+            if (guard->m_paymasterArtifact != QStringLiteral("user_psbt") &&
+                guard->m_paymasterArtifact !=
+                    QStringLiteral("final_transaction")) {
+                guard->reportPaymasterOperationNotStarted(
+                    guard->tr("the refreshed session has no retryable signed artifact"));
                 return;
             }
-            guard->updatePaymasterSessionView(result);
-            if (!guard->m_paymasterPollTimer->isActive()) guard->m_paymasterPollTimer->start();
+            UniValue lookup{UniValue::VOBJ};
+            lookup.pushKV("request_id",
+                          guard->m_paymasterRequestId.toStdString());
+            UniValue params{UniValue::VARR};
+            params.push_back(std::move(lookup));
+            params.push_back("retry_same");
+            guard->setPaymasterBusy(true);
+            guard->executePaymasterRpcAsync(
+                "resolvepaymastersession", std::move(params),
+                [guard](UniValue result, QString error) {
+                    if (!guard) return;
+                    if (!error.isEmpty()) {
+                        guard->showWarning(
+                            guard->tr("Paymaster recovery"), error);
+                        guard->setPaymasterBusy(false);
+                        return;
+                    }
+                    QString decode_error;
+                    if (!guard->updatePaymasterSessionView(
+                            result, &decode_error)) {
+                        guard->stopPaymasterPolling();
+                        guard->showWarning(
+                            guard->tr("Paymaster status unavailable"),
+                            guard->tr("Core returned an invalid retry snapshot (%1).")
+                                .arg(decode_error));
+                        guard->setPaymasterBusy(false);
+                        return;
+                    }
+                    guard->setPaymasterBusy(false);
+                    guard->schedulePaymasterPoll(
+                        /*state_changed=*/false);
+                });
         });
 }
 
 void DigiDollarSendWidget::fallbackPaymasterSession()
 {
-    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
-    UniValue lookup{UniValue::VOBJ};
-    lookup.pushKV("request_id", m_paymasterRequestId.toStdString());
-    UniValue params{UniValue::VARR};
-    params.push_back(std::move(lookup));
-    params.push_back("fallback");
-    params.push_back(UniValue{UniValue::VOBJ});
-    setPaymasterBusy(true);
-    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
-        [guard = QPointer<DigiDollarSendWidget>(this)](UniValue result, QString error) {
+    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+                              tr("no durable session is selected"));
+        return;
+    }
+    refreshPaymasterSessionForAction(
+        QStringLiteral("fallback"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
             if (!guard) return;
-            guard->setPaymasterBusy(false);
-            if (!error.isEmpty()) {
-                guard->m_paymasterStateValue->setText(
-                    guard->tr("Paymaster fallback unavailable: %1").arg(error));
+            if (guard->m_paymasterArtifact != QStringLiteral("none")) {
+                guard->reportPaymasterOperationNotStarted(
+                    guard->tr("the refreshed session is no longer unsigned"));
                 return;
             }
-            guard->m_paymasterAuthorizationCommitment.clear();
-            guard->m_paymasterConfirmationGuard.Reset();
-            guard->m_paymasterRecoveryAuthorizationCommitment.clear();
-            guard->m_paymasterRecoveryMaximumServiceFeeCents = 0;
-            guard->m_paymasterRecoveryActive = false;
-            guard->m_paymasterRecoveryConfirmationGuard.Reset();
-            guard->updatePaymasterSessionView(result);
-            guard->m_paymasterStateValue->setText(
-                guard->tr("Previous unsigned attempt closed; selecting another Paymaster"));
-            if (!guard->m_paymasterPollTimer->isActive()) guard->m_paymasterPollTimer->start();
-            guard->pollPaymasterSession();
+            UniValue lookup{UniValue::VOBJ};
+            lookup.pushKV("request_id",
+                          guard->m_paymasterRequestId.toStdString());
+            UniValue params{UniValue::VARR};
+            params.push_back(std::move(lookup));
+            params.push_back("fallback");
+            params.push_back(UniValue{UniValue::VOBJ});
+            guard->setPaymasterBusy(true);
+            guard->executePaymasterRpcAsync(
+                "resolvepaymastersession", std::move(params),
+                [guard](UniValue result, QString error) {
+                    if (!guard) return;
+                    if (!error.isEmpty()) {
+                        guard->m_paymasterStateValue->setText(
+                            guard->tr("Paymaster fallback unavailable: %1")
+                                .arg(error));
+                        guard->applyPaymasterPrivacy();
+                        guard->setPaymasterBusy(false);
+                        return;
+                    }
+                    guard->m_paymasterAuthorizationCommitment.clear();
+                    guard->m_paymasterConfirmationGuard.Reset();
+                    guard->m_paymasterRecoveryAuthorizationCommitment.clear();
+                    guard->m_paymasterRecoveryMaximumServiceFeeCents = 0;
+                    guard->m_paymasterRecoveryActive = false;
+                    guard->m_paymasterRecoveryConfirmationGuard.Reset();
+                    QString decode_error;
+                    if (!guard->updatePaymasterSessionView(
+                            result, &decode_error)) {
+                        guard->stopPaymasterPolling();
+                        guard->showWarning(
+                            guard->tr("Paymaster status unavailable"),
+                            guard->tr("Core returned an invalid fallback snapshot (%1).")
+                                .arg(decode_error));
+                        guard->setPaymasterBusy(false);
+                        return;
+                    }
+                    guard->m_paymasterStateValue->setText(guard->tr(
+                        "Previous unsigned attempt closed; selecting another Paymaster"));
+                    guard->setPaymasterBusy(false);
+                    guard->schedulePaymasterPoll(
+                        /*state_changed=*/true);
+                    guard->pollPaymasterSession();
+                });
         });
 }
 
 void DigiDollarSendWidget::recoverPaymasterSessionToSelf()
 {
-    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
-    if (m_paymasterSessionPrivacy.isEmpty()) {
-        showWarning(
-            tr("Paymaster recovery unavailable"),
-            tr("The original session privacy profile is not available in this Qt session. "
-               "Recovery will not continue because Qt must never guess or downgrade it."));
+    if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty()) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+                              tr("no durable session is selected"));
         return;
     }
-    const auto answer = showDialog(
-        QMessageBox::Warning, tr("Prepare alternative-provider self-recovery"),
-        tr("The wallet will first select and authenticate a different recovery provider, then "
-           "show the exact wallet returns, provider, fees, privacy profile and Core authorization "
-           "commitment before any recovery transaction signature. The original authorized "
-           "payment may still confirm first; recovery is not final until confirmed.\n\n"
-           "Wallet unlock at this stage may create input-control proofs only. Core's prepare-only "
-           "gate cannot create the recovery transaction signature."),
-        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    if (answer != QMessageBox::Yes) return;
+    refreshPaymasterSessionForAction(
+        QStringLiteral("cancel_to_self"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
+            if (!guard) return;
+            // The refresh operation has completed, but this confirmation is
+            // still part of the same user operation. Keep controls and the
+            // poll timer paused across the modal dialog.
+            guard->setPaymasterBusy(true);
+            if (guard->m_paymasterSessionPrivacy.isEmpty()) {
+                guard->showWarning(
+                    guard->tr("Paymaster recovery unavailable"),
+                    guard->tr("The authoritative original-session privacy profile is unavailable. Recovery will not continue because Qt must never guess or downgrade it."));
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            const auto answer = guard->showDialog(
+                QMessageBox::Warning,
+                guard->tr("Prepare alternative-provider self-recovery"),
+                guard->tr("The wallet will first select and authenticate a different recovery provider, then "
+                          "show the exact wallet returns, provider, fees, privacy profile and Core authorization "
+                          "commitment before any recovery transaction signature. The original authorized "
+                          "payment may still confirm first; recovery is not final until confirmed.\n\n"
+                          "Wallet unlock at this stage may create input-control proofs only. Core's prepare-only "
+                          "gate cannot create the recovery transaction signature."),
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) {
+                guard->setPaymasterBusy(false);
+                return;
+            }
 
-    m_paymasterPollTimer->stop();
-    m_paymasterRecoveryAuthorizationCommitment.clear();
-    m_paymasterRecoveryConfirmationGuard.Reset();
-    m_paymasterRecoveryMaximumServiceFeeCents = m_feeCapSpin->value();
-    m_paymasterRecoveryActive = true;
-    executeAlternativePaymasterRecovery(/*allow_unlock=*/true);
+            guard->stopPaymasterPolling();
+            guard->m_paymasterRecoveryAuthorizationCommitment.clear();
+            guard->m_paymasterRecoveryConfirmationGuard.Reset();
+            guard->m_paymasterRecoveryMaximumServiceFeeCents =
+                guard->m_feeCapSpin->value();
+            guard->m_paymasterRecoveryActive = true;
+            guard->setPaymasterBusy(false);
+            guard->executeAlternativePaymasterRecovery(
+                /*allow_unlock=*/true);
+        });
 }
 
 void DigiDollarSendWidget::abandonUnsignedPaymasterSession()
 {
     if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty() ||
         !m_paymasterSessionPersisted) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+                              tr("no durable session is selected"));
         return;
     }
-    if (showDialog(
-            QMessageBox::Question, tr("Cancel unsigned Paymaster transfer"),
-            tr("Core will release the reserved $DD only if it can prove that no "
-               "transaction signature or final transaction exists. If any spending "
-               "authorization may exist, cancellation is refused and the protected "
-               "recovery choices remain available.\n\nContinue?"),
-            QMessageBox::Yes | QMessageBox::Cancel,
-            QMessageBox::Cancel) != QMessageBox::Yes) {
-        return;
-    }
-
-    m_paymasterPollTimer->stop();
-    UniValue lookup{UniValue::VOBJ};
-    lookup.pushKV("request_id", m_paymasterRequestId.toStdString());
-    UniValue params{UniValue::VARR};
-    params.push_back(std::move(lookup));
-    params.push_back("abandon_unsigned");
-    params.push_back(UniValue{UniValue::VOBJ});
-    setPaymasterBusy(true);
-    m_paymasterStateValue->setText(
-        tr("Verifying that the unsigned transfer can be canceled safely…"));
-    executePaymasterRpcAsync(
-        "resolvepaymastersession", std::move(params),
-        [guard = QPointer<DigiDollarSendWidget>(this)](UniValue result,
-                                                       QString error) {
+    refreshPaymasterSessionForAction(
+        QStringLiteral("abandon_unsigned"),
+        [guard = QPointer<DigiDollarSendWidget>(this)] {
             if (!guard) return;
-            guard->setPaymasterBusy(false);
+            if (guard->m_paymasterArtifact != QStringLiteral("none")) {
+                guard->reportPaymasterOperationNotStarted(
+                    guard->tr("the refreshed session is no longer unsigned"));
+                return;
+            }
+            guard->setPaymasterBusy(true);
+            if (guard->showDialog(
+                    QMessageBox::Question,
+                    guard->tr("Cancel unsigned Paymaster transfer"),
+                    guard->tr("Core will release the reserved $DD only if it can prove that no "
+                              "transaction signature or final transaction exists. If any spending "
+                              "authorization may exist, cancellation is refused and the protected "
+                              "recovery choices remain available.\n\nContinue?"),
+                    QMessageBox::Yes | QMessageBox::Cancel,
+                    QMessageBox::Cancel) != QMessageBox::Yes) {
+                guard->setPaymasterBusy(false);
+                return;
+            }
+
+            guard->stopPaymasterPolling();
+            UniValue lookup{UniValue::VOBJ};
+            lookup.pushKV("request_id",
+                          guard->m_paymasterRequestId.toStdString());
+            UniValue params{UniValue::VARR};
+            params.push_back(std::move(lookup));
+            params.push_back("abandon_unsigned");
+            params.push_back(UniValue{UniValue::VOBJ});
+            guard->setPaymasterBusy(true);
+            guard->m_paymasterStateValue->setText(guard->tr(
+                "Verifying that the unsigned transfer can be canceled safely…"));
+            guard->executePaymasterRpcAsync(
+                "resolvepaymastersession", std::move(params),
+                [guard](UniValue result, QString error) {
+            if (!guard) return;
             if (!error.isEmpty()) {
                 guard->m_paymasterStateValue->setText(
                     guard->tr("Cancellation refused; reservations remain protected"));
                 guard->showWarning(
                     guard->tr("Paymaster transfer was not canceled"), error);
+                guard->setPaymasterBusy(false);
                 return;
             }
-            const UniValue& session = result.find_value("session");
-            const bool canceled = session.isObject() &&
-                session.find_value("session_state").isStr() &&
-                session.find_value("session_state").get_str() == "FAILED";
-            if (!canceled) {
+            QString decode_error;
+            if (!guard->updatePaymasterSessionView(result, &decode_error) ||
+                guard->m_paymasterSessionState != QStringLiteral("FAILED") ||
+                guard->m_paymasterArtifact != QStringLiteral("none")) {
                 guard->m_paymasterStateValue->setText(
                     guard->tr("Cancellation returned an unexpected wallet state"));
                 guard->showWarning(
                     guard->tr("Paymaster transfer was not cleared"),
-                    guard->tr("Core did not confirm the terminal FAILED state."));
+                    guard->tr("Core did not confirm a terminal unsigned FAILED state (%1).")
+                        .arg(decode_error));
+                guard->setPaymasterBusy(false);
                 return;
             }
             guard->m_paymasterRequestId.clear();
@@ -2548,12 +4076,21 @@ void DigiDollarSendWidget::abandonUnsignedPaymasterSession()
             guard->m_paymasterPendingPhase.clear();
             guard->m_paymasterBroadcastState.clear();
             guard->m_paymasterConfirmationState.clear();
+            guard->m_paymasterTransactionId.clear();
+            guard->m_paymasterRecoveryTransactionId.clear();
+            guard->m_paymasterResultStatus.clear();
+            guard->m_paymasterResultSequence = -1;
+            guard->m_paymasterRecoveryExpiresAt = -1;
+            guard->m_paymasterTerminalNoticeShown = false;
+            guard->m_paymasterAllowedActions.clear();
+            guard->m_paymasterAllowedActionsKnown = false;
             guard->m_paymasterSessionPersisted = false;
             guard->m_paymasterAddress.clear();
             guard->m_paymasterAuthorizationCommitment.clear();
             guard->m_paymasterSessionPrivacy.clear();
             guard->m_paymasterRecoveryAuthorizationCommitment.clear();
             guard->m_paymasterAmount = 0.0;
+            guard->m_paymasterAmountCents = 0;
             guard->m_paymasterRecoveryMaximumServiceFeeCents = 0;
             guard->m_paymasterRecoveryActive = false;
             guard->m_paymasterConfirmationGuard.Reset();
@@ -2568,6 +4105,9 @@ void DigiDollarSendWidget::abandonUnsignedPaymasterSession()
             guard->refreshClientSafetyStatus();
             guard->updatePaymasterFocusMode();
             guard->updateSendButton();
+            guard->applyPaymasterPrivacy();
+            guard->setPaymasterBusy(false);
+                });
         });
 }
 
@@ -2595,18 +4135,24 @@ void DigiDollarSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock
 {
     if (!m_walletModel || m_paymasterBusy || !m_paymasterRecoveryActive ||
         m_paymasterRequestId.isEmpty()) {
+        reportPaymasterOperationNotStarted(
+            !m_walletModel ? tr("wallet is no longer available") :
+            m_paymasterBusy ? tr("another Paymaster operation is still active") :
+            !m_paymasterRecoveryActive ? tr("no recovery operation was approved") :
+                                         tr("no durable session is selected"));
         return;
     }
+    setPaymasterBusy(true);
     std::shared_ptr<WalletModel::UnlockContext> unlock;
     if (allow_unlock) {
         unlock = m_walletModel->requestUnlockForAsync();
         if (!unlock->isValid()) {
             m_paymasterStateValue->setText(tr("RECOVERY_AWAITING_WALLET_UNLOCK"));
             m_paymasterRecoveryActive = false;
+            setPaymasterBusy(false);
             return;
         }
     }
-    setPaymasterBusy(true);
     m_paymasterStateValue->setText(
         m_paymasterRecoveryAuthorizationCommitment.isEmpty()
             ? tr("Preparing authenticated alternative recovery…")
@@ -2630,8 +4176,8 @@ DigiDollarSendWidget::paymasterRecoveryConfirmationSelection(
         return value.isStr() ? QString::fromStdString(value.get_str()) : QString{};
     };
     const auto number_value = [&recovery](const char* key) {
-        const UniValue& value = recovery.find_value(key);
-        return value.isNum() ? value.getInt<qint64>() : qint64{-1};
+        qint64 value{-1};
+        return ReadInt64(recovery, key, value) ? value : qint64{-1};
     };
 
     PaymasterRecoveryConfirmationSelection selection;
@@ -2650,8 +4196,9 @@ DigiDollarSendWidget::paymasterRecoveryConfirmationSelection(
     selection.expires_at = number_value("expires_at");
 
     const UniValue& wallet_returns = recovery.find_value("wallet_returns");
-    if (wallet_returns.isArray()) {
+    if (wallet_returns.isArray() && wallet_returns.size() <= 64) {
         int output_index{0};
+        qint64 total_return_cents{0};
         for (const UniValue& wallet_return : wallet_returns.getValues()) {
             if (!wallet_return.isObject()) {
                 selection.wallet_returns.push_back(QString{});
@@ -2659,20 +4206,34 @@ DigiDollarSendWidget::paymasterRecoveryConfirmationSelection(
             }
             const UniValue& script = wallet_return.find_value("script_pub_key");
             const UniValue& address = wallet_return.find_value("address");
-            const UniValue& amount = wallet_return.find_value("amount_cents");
-            if (!script.isStr() || script.get_str().empty() || !amount.isNum()) {
+            qint64 amount_cents{-1};
+            const std::string script_hex =
+                script.isStr() ? script.get_str() : std::string{};
+            const QString return_address = address.isStr()
+                ? QString::fromStdString(address.get_str()) : QString{};
+            if (script_hex.empty() || script_hex.size() > 20000 ||
+                script_hex.size() % 2 != 0 || !IsHex(script_hex) ||
+                return_address.size() > 160 ||
+                !ReadInt64(wallet_return, "amount_cents", amount_cents) ||
+                amount_cents <= 0 ||
+                amount_cents > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+                total_return_cents >
+                    std::numeric_limits<qint64>::max() - amount_cents) {
                 selection.wallet_returns.push_back(QString{});
                 continue;
             }
+            total_return_cents += amount_cents;
             selection.wallet_returns.push_back(
                 tr("Output %1: %2 cents to %3 (script %4)")
                     .arg(++output_index)
-                    .arg(amount.getInt<qint64>())
-                    .arg(address.isStr()
-                             ? QString::fromStdString(address.get_str())
+                    .arg(amount_cents)
+                    .arg(!return_address.isEmpty()
+                             ? return_address
                              : tr("fresh wallet-owned script"))
-                    .arg(QString::fromStdString(script.get_str())));
+                    .arg(QString::fromStdString(script_hex)));
         }
+    } else if (!wallet_returns.isNull()) {
+        selection.wallet_returns.push_back(QString{});
     }
     return selection;
 }
@@ -2680,6 +4241,12 @@ DigiDollarSendWidget::paymasterRecoveryConfirmationSelection(
 bool DigiDollarSendWidget::confirmPaymasterRecoveryBeforeSigning(
     const PaymasterRecoveryConfirmationSelection& selection)
 {
+    if (m_privacy) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery authorization paused by privacy mode"),
+            tr("Disable privacy mode to review the exact recovery provider, wallet returns, fees and authorization commitment before signing."));
+        return false;
+    }
     if (!selection.IsComplete()) {
         blockAlternativePaymasterRecovery(
             tr("Recovery authorization blocked: incomplete exact manifest"),
@@ -2751,28 +4318,40 @@ bool DigiDollarSendWidget::confirmPaymasterRecoveryBeforeSigning(
 void DigiDollarSendWidget::blockAlternativePaymasterRecovery(
     const QString& reason, const QString& detail)
 {
-    m_paymasterPollTimer->stop();
+    stopPaymasterPolling();
     m_paymasterRecoveryActive = false;
     m_paymasterStateValue->setText(reason);
     showWarning(tr("Paymaster recovery blocked"), detail);
+    setPaymasterBusy(false);
 }
 
 void DigiDollarSendWidget::handleAlternativePaymasterRecoveryResult(
     const UniValue& result, const QString& error)
 {
-    setPaymasterBusy(false);
     if (!error.isEmpty()) {
         m_paymasterRecoveryActive = false;
-        m_paymasterPollTimer->stop();
+        stopPaymasterPolling();
         m_paymasterStateValue->setText(tr("Paymaster recovery failed: %1").arg(error));
         // Keep the backend's stable error text unchanged so RPC and Qt expose
         // the same recovery/security failure.
         showWarning(tr("Paymaster recovery"), error);
+        setPaymasterBusy(false);
         return;
     }
 
-    const UniValue& session = result.find_value("session");
-    if (session.isObject()) updatePaymasterSessionView(session);
+    QString decode_error;
+    if (!updatePaymasterSessionView(result, &decode_error)) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery status blocked: malformed Core response"),
+            tr("Core returned an incomplete or inconsistent authoritative recovery snapshot (%1). No signature or automatic retry will continue.")
+                .arg(decode_error));
+        return;
+    }
+    if (handleAuthoritativePaymasterCompletion(result)) {
+        setPaymasterBusy(false);
+        return;
+    }
+
     const UniValue& recovery = result.find_value("recovery");
     if (!recovery.isObject()) {
         blockAlternativePaymasterRecovery(
@@ -2795,7 +4374,16 @@ void DigiDollarSendWidget::handleAlternativePaymasterRecoveryResult(
         return;
     }
     const UniValue& expired = recovery.find_value("expired");
-    if (expired.isBool() && expired.get_bool()) {
+    const bool expiry_elapsed = selection.expires_at > 0 &&
+        selection.expires_at <= QDateTime::currentSecsSinceEpoch();
+    if (!expired.isBool() || selection.expires_at <= 0 ||
+        expired.get_bool() != expiry_elapsed) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery authorization blocked: inconsistent expiry"),
+            tr("Core returned inconsistent recovery expiry fields. Qt will not guess which authorization is current."));
+        return;
+    }
+    if (expired.get_bool()) {
         blockAlternativePaymasterRecovery(
             tr("Recovery authorization expired"),
             tr("The exact alternative recovery authorization expired. Start a fresh "
@@ -2804,12 +4392,22 @@ void DigiDollarSendWidget::handleAlternativePaymasterRecoveryResult(
     }
 
     const UniValue& accepted_value = recovery.find_value("authorization_accepted");
+    if (!accepted_value.isNull() && !accepted_value.isBool()) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery authorization blocked: invalid acceptance state"),
+            tr("Core returned a malformed recovery authorization acceptance flag."));
+        return;
+    }
     const bool authorization_accepted = accepted_value.isBool() &&
                                         accepted_value.get_bool();
     if (m_paymasterRecoveryAuthorizationCommitment.isEmpty() &&
         !returned_commitment.isEmpty()) {
-        if (!confirmPaymasterRecoveryBeforeSigning(selection)) return;
+        if (!confirmPaymasterRecoveryBeforeSigning(selection)) {
+            setPaymasterBusy(false);
+            return;
+        }
         m_paymasterRecoveryAuthorizationCommitment = returned_commitment;
+        setPaymasterBusy(false);
         executeAlternativePaymasterRecovery(/*allow_unlock=*/true);
         return;
     }
@@ -2826,18 +4424,28 @@ void DigiDollarSendWidget::handleAlternativePaymasterRecoveryResult(
     const QString phase = phase_value.isStr()
         ? QString::fromStdString(phase_value.get_str())
         : QString{};
-    const UniValue& session_final = session.find_value("final");
-    if (session_final.isBool() && session_final.get_bool()) {
-        m_paymasterRecoveryActive = false;
-        m_paymasterPollTimer->stop();
-        m_paymasterStateValue->setText(
-            tr("Recovery confirmed; reserved inputs are safely resolved"));
-        updateBalance();
+    if (phase != QStringLiteral("capacity_pending") &&
+        phase != QStringLiteral("request_ready") &&
+        phase != QStringLiteral("response_validated") &&
+        phase != QStringLiteral("user_signed") &&
+        phase != QStringLiteral("final_committed")) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery status blocked: unknown phase"),
+            tr("Core returned an unknown alternative-recovery phase."));
         return;
     }
 
     const UniValue& broadcast = result.find_value("broadcast");
     const UniValue& broadcast_error = result.find_value("broadcast_error");
+    if ((!broadcast.isNull() && !broadcast.isBool()) ||
+        (!broadcast_error.isNull() &&
+         (!broadcast_error.isStr() ||
+          broadcast_error.get_str().size() > 1024))) {
+        blockAlternativePaymasterRecovery(
+            tr("Recovery status blocked: malformed broadcast state"),
+            tr("Core returned invalid recovery broadcast metadata."));
+        return;
+    }
     if (broadcast_error.isStr()) {
         m_paymasterStateValue->setText(
             tr("Recovery %1; broadcast pending: %2")
@@ -2851,12 +4459,14 @@ void DigiDollarSendWidget::handleAlternativePaymasterRecoveryResult(
                 ? tr("Alternative recovery preparation pending")
                 : tr("Alternative recovery: %1").arg(phase));
     }
-    if (!m_paymasterPollTimer->isActive()) m_paymasterPollTimer->start();
+    setPaymasterBusy(false);
+    applyPaymasterPrivacy();
+    schedulePaymasterPoll(/*state_changed=*/false);
 }
 
 void DigiDollarSendWidget::cancelPaymasterQuote()
 {
-    m_paymasterPollTimer->stop();
+    stopPaymasterPolling();
     m_paymasterRecoveryActive = false;
     m_paymasterStateValue->setText(tr("Automatic checks stopped; durable reservations remain protected"));
     updatePaymasterFocusMode();
@@ -3096,12 +4706,8 @@ bool DigiDollarSendWidget::validateAddress() const
 
 bool DigiDollarSendWidget::validateAmount() const
 {
-    QString amountText = m_amountEdit->text();
-    if (amountText.isEmpty()) return false;
-
-    int pos = 0;
-    QString amountCopy = amountText;
-    return m_amountValidator->validate(amountCopy, pos) == QValidator::Acceptable;
+    CAmount amount_cents{0};
+    return ParseDigiDollarCents(m_amountEdit->text(), amount_cents);
 }
 
 bool DigiDollarSendWidget::validateBalance() const
@@ -3109,10 +4715,12 @@ bool DigiDollarSendWidget::validateBalance() const
     QString amountText = m_amountEdit->text();
     if (amountText.isEmpty()) return true; // Empty is valid for enabling/disabling
 
-    double amount = amountText.toDouble();
+    CAmount amount_cents{0};
+    if (!ParseDigiDollarCents(amountText, amount_cents)) return false;
     // The exact Paymaster fee is not known until a quote is authenticated.
     // Validate the recipient amount here and the fee again before signing.
-    bool valid = amount <= m_availableBalance && amount > 0;
+    const bool valid = amount_cents <=
+        static_cast<CAmount>(std::llround(m_availableBalance * 100));
 
     // Note: Cannot call updateAmountValidation() from const method
 
@@ -3208,6 +4816,12 @@ bool DigiDollarSendWidget::checkWalletState()
 // This matches the DGB send confirmation flow exactly
 bool DigiDollarSendWidget::showConfirmationDialog(const QString& address, double amount)
 {
+    if (m_privacy) {
+        showWarning(
+            tr("Transfer review paused"),
+            tr("Disable privacy mode to review the exact recipient and amount before preparing or signing this transfer."));
+        return false;
+    }
     const QString mode = feeMode();
     const bool paymaster_only = mode == QStringLiteral("paymaster");
     const bool automatic = mode == QStringLiteral("auto");
@@ -3353,8 +4967,10 @@ bool DigiDollarSendWidget::showConfirmationDialog(const QString& address, double
     int result = confirmationDialog->exec();
 
     if (result == QMessageBox::Yes) {
-        if (paymaster_only) {
-            LogPrintf("DigiDollar: User approved preparing a Paymaster offer after the required review\n");
+        if (paymaster_only || automatic) {
+            // Automatic mode may fall back to a Paymaster. Do not put a
+            // Paymaster-capable recipient or amount into the standard log.
+            LogPrintf("DigiDollar: User approved Paymaster-capable transfer preparation after the required review\n");
         } else {
             LogPrintf("DigiDollar: User confirmed transfer of %f DD to %s after 3-second review\n",
                       amount, address.toStdString());
@@ -3421,30 +5037,17 @@ void DigiDollarSendWidget::executeTransfer(const QString& address, double amount
 // PHASE 7.3: Success notification
 QString DigiDollarSendWidget::buildSuccessMessage(const QString& txid, double amount) const
 {
-    return tr(
-        "<b style='font-size: 14px; color: green;'>✓ DigiDollar Transfer Broadcast</b><br/><br/>"
-        "<table cellpadding='4' style='font-size: 12px;'>"
-        "<tr><td><b>Amount Sent:</b></td><td align='right'>%1</td></tr>"
-        "<tr><td><b>Transaction ID:</b></td><td style='font-family: monospace; font-size: 10px;'>%2</td></tr>"
-        "</table><br/>"
-        "<span style='color: #666; font-size: 11px;'>"
-        "Your transaction has been broadcast to the network.<br/>"
-        "It is pending until miners include it in a block and the block confirms."
-        "</span>"
-    ).arg(formatDDAmount(amount))
-     .arg(txid);
+    if (m_privacy) {
+        return tr("DigiDollar transfer broadcast. Transfer details are hidden while privacy mode is enabled.\n\nThe transaction is pending until miners include it in a block and the block confirms.");
+    }
+    return tr("DigiDollar transfer broadcast\n\nAmount sent: %1\nTransaction ID: %2\n\nThe transaction has been broadcast to the network. It is pending until miners include it in a block and the block confirms.")
+        .arg(formatDDAmount(amount), txid);
 }
 
 void DigiDollarSendWidget::showSuccess(const QString& txid, double amount)
 {
-    QString successMsg = buildSuccessMessage(txid, amount);
-
-    QMessageBox msgBox(this);
-    msgBox.setWindowTitle(tr("Transfer Broadcast"));
-    msgBox.setText(successMsg);
-    msgBox.setIcon(QMessageBox::Information);
-    msgBox.setStandardButtons(QMessageBox::Ok);
-    msgBox.exec();
+    showDialog(QMessageBox::Information, tr("Transfer Broadcast"),
+               buildSuccessMessage(txid, amount));
 
     LogPrintf("DigiDollar: Transfer broadcast\n");
 }
@@ -3692,6 +5295,7 @@ DDSendConfirmationDialog::DDSendConfirmationDialog(const QString& title, const Q
 {
     setIcon(QMessageBox::Question);
     setWindowTitle(title); // On macOS, the window title is ignored (as required by the macOS Guidelines).
+    setTextFormat(Qt::RichText);
     setText(text);
     setInformativeText(informative_text);
     setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
@@ -3894,16 +5498,22 @@ QString DigiDollarSendWidget::successMessageForTesting(const QString& txid, doub
 void DigiDollarSendWidget::setPaymasterSessionForTesting(
     const QString& state, const QString& artifact, bool persisted,
     const QString& address, double amount, const QString& attempt_state,
-    const QString& pending_phase)
+    const QString& pending_phase, const QStringList& allowed_actions,
+    bool allowed_actions_known)
 {
     m_paymasterRequestId = QStringLiteral("00000000-0000-4000-8000-000000000001");
+    m_paymasterSessionId = QString(64, QLatin1Char('1'));
     m_paymasterSessionState = state;
     m_paymasterArtifact = artifact;
     m_paymasterAttemptState = attempt_state;
     m_paymasterPendingPhase = pending_phase;
+    m_paymasterAllowedActions = allowed_actions;
+    m_paymasterAllowedActionsKnown = allowed_actions_known;
+    m_paymasterRecoveryExpiresAt = -1;
     m_paymasterSessionPersisted = persisted;
     m_paymasterAddress = address;
     m_paymasterAmount = amount;
+    m_paymasterAmountCents = static_cast<CAmount>(std::llround(amount * 100));
     updatePaymasterFocusMode();
 }
 
@@ -3913,10 +5523,150 @@ void DigiDollarSendWidget::setPaymasterRpcExecutorForTesting(
     m_paymasterRpcExecutorForTesting = std::move(executor);
 }
 
+void DigiDollarSendWidget::setPaymasterAsyncRpcExecutorForTesting(
+    PaymasterAsyncRpcExecutorForTesting executor)
+{
+    m_paymasterAsyncRpcExecutorForTesting = std::move(executor);
+}
+
 void DigiDollarSendWidget::setDialogHandlerForTesting(
     DialogHandlerForTesting handler)
 {
     m_dialogHandlerForTesting = std::move(handler);
+}
+
+void DigiDollarSendWidget::applyPaymasterPrivacy()
+{
+    if (!m_paymasterSessionFrame || !m_offersTable) return;
+
+    const QString hidden = tr("Hidden while privacy mode is enabled");
+    const auto mask_label = [this, &hidden](QLabel* label) {
+        if (!label) return;
+        constexpr auto MASKED = "paymasterPrivacyMasked";
+        constexpr auto RAW_TEXT = "paymasterPrivacyRawText";
+        constexpr auto RAW_TOOLTIP = "paymasterPrivacyRawTooltip";
+        constexpr auto RAW_ACCESSIBLE = "paymasterPrivacyRawAccessible";
+        constexpr auto RAW_INTERACTION = "paymasterPrivacyRawInteraction";
+        const bool masked = label->property(MASKED).toBool();
+        if (m_privacy) {
+            // A status callback may update a label while it is already masked.
+            // Preserve that new value without exposing it for one event loop.
+            if (!masked || label->text() != hidden) {
+                label->setProperty(RAW_TEXT, label->text());
+                label->setProperty(RAW_TOOLTIP, label->toolTip());
+                label->setProperty(RAW_ACCESSIBLE,
+                                   label->accessibleDescription());
+                label->setProperty(
+                    RAW_INTERACTION,
+                    static_cast<int>(label->textInteractionFlags()));
+            }
+            label->setText(hidden);
+            label->setToolTip(QString{});
+            label->setAccessibleDescription(QString{});
+            label->setTextInteractionFlags(Qt::NoTextInteraction);
+            label->setProperty(MASKED, true);
+        } else if (masked) {
+            label->setText(label->property(RAW_TEXT).toString());
+            label->setToolTip(label->property(RAW_TOOLTIP).toString());
+            label->setAccessibleDescription(
+                label->property(RAW_ACCESSIBLE).toString());
+            label->setTextInteractionFlags(Qt::TextInteractionFlags(
+                label->property(RAW_INTERACTION).toInt()));
+            label->setProperty(MASKED, false);
+        }
+    };
+
+    for (QLabel* label : {m_paymasterTransferValue,
+                          m_paymasterIdentityValue,
+                          m_paymasterCostValue,
+                          m_paymasterExpiryValue,
+                          m_paymasterStateValue,
+                          m_paymasterNextStepValue,
+                          m_offersStatus,
+                          m_clientSafetyStatus,
+                          m_clientSafetyDetails}) {
+        mask_label(label);
+    }
+
+    for (QLineEdit* edit : {m_addressEdit, m_amountEdit, m_noteEdit}) {
+        if (edit) {
+            edit->setEchoMode(m_privacy ? QLineEdit::Password
+                                        : QLineEdit::Normal);
+        }
+    }
+
+    constexpr int RAW_TEXT_ROLE = Qt::UserRole + 70;
+    constexpr int RAW_TOOLTIP_ROLE = Qt::UserRole + 71;
+    constexpr int RAW_ACCESSIBLE_TEXT_ROLE = Qt::UserRole + 72;
+    constexpr int RAW_ACCESSIBLE_DESCRIPTION_ROLE = Qt::UserRole + 73;
+    constexpr int MASKED_ROLE = Qt::UserRole + 74;
+    for (int row = 0; row < m_offersTable->rowCount(); ++row) {
+        for (int column = 0; column < m_offersTable->columnCount(); ++column) {
+            QTableWidgetItem* item = m_offersTable->item(row, column);
+            if (!item) continue;
+            const bool masked = item->data(MASKED_ROLE).toBool();
+            if (m_privacy) {
+                if (!masked || item->text() != hidden) {
+                    item->setData(RAW_TEXT_ROLE, item->text());
+                    item->setData(RAW_TOOLTIP_ROLE, item->toolTip());
+                    item->setData(RAW_ACCESSIBLE_TEXT_ROLE,
+                                  item->data(Qt::AccessibleTextRole));
+                    item->setData(RAW_ACCESSIBLE_DESCRIPTION_ROLE,
+                                  item->data(Qt::AccessibleDescriptionRole));
+                }
+                item->setText(hidden);
+                item->setToolTip(QString{});
+                item->setData(Qt::AccessibleTextRole, hidden);
+                item->setData(Qt::AccessibleDescriptionRole, QString{});
+                item->setData(MASKED_ROLE, true);
+            } else if (masked) {
+                item->setText(item->data(RAW_TEXT_ROLE).toString());
+                item->setToolTip(item->data(RAW_TOOLTIP_ROLE).toString());
+                item->setData(Qt::AccessibleTextRole,
+                              item->data(RAW_ACCESSIBLE_TEXT_ROLE));
+                item->setData(Qt::AccessibleDescriptionRole,
+                              item->data(RAW_ACCESSIBLE_DESCRIPTION_ROLE));
+                item->setData(MASKED_ROLE, false);
+            }
+        }
+    }
+    m_offersTable->setEnabled(!m_privacy);
+
+    constexpr int RAW_COMBO_TEXT_ROLE = Qt::UserRole + 70;
+    constexpr int COMBO_MASKED_ROLE = Qt::UserRole + 71;
+    for (int index = 0; index < m_persistedPaymasterSessions->count(); ++index) {
+        const bool masked = m_persistedPaymasterSessions
+            ->itemData(index, COMBO_MASKED_ROLE).toBool();
+        if (m_privacy) {
+            const QString numbered_hidden =
+                tr("Hidden persisted transfer %1").arg(index + 1);
+            if (!masked || m_persistedPaymasterSessions->itemText(index) !=
+                               numbered_hidden) {
+                m_persistedPaymasterSessions->setItemData(
+                    index, m_persistedPaymasterSessions->itemText(index),
+                    RAW_COMBO_TEXT_ROLE);
+            }
+            m_persistedPaymasterSessions->setItemText(index,
+                                                       numbered_hidden);
+            m_persistedPaymasterSessions->setItemData(index, true,
+                                                       COMBO_MASKED_ROLE);
+        } else if (masked) {
+            m_persistedPaymasterSessions->setItemText(
+                index, m_persistedPaymasterSessions
+                           ->itemData(index, RAW_COMBO_TEXT_ROLE).toString());
+            m_persistedPaymasterSessions->setItemData(index, false,
+                                                       COMBO_MASKED_ROLE);
+        }
+    }
+    m_persistedPaymasterSessions->setEnabled(!m_privacy);
+    m_loadPersistedPaymasterSessionButton->setEnabled(
+        !m_privacy && !m_paymasterBusy && m_walletModel);
+
+    if (m_privacy) {
+        m_paymasterTechnicalButton->setChecked(false);
+        m_paymasterTechnicalDetails->hide();
+    }
+    m_paymasterTechnicalButton->setEnabled(!m_privacy && !m_paymasterBusy);
 }
 
 void DigiDollarSendWidget::setPrivacy(bool privacy)
@@ -3931,6 +5681,7 @@ void DigiDollarSendWidget::setPrivacy(bool privacy)
         m_totalValue->setText(maskValue(formatDDAmount(0)));
         m_feeSummary->setText(maskValue(m_feeSummary->text()));
     }
+    applyPaymasterPrivacy();
 }
 
 QString DigiDollarSendWidget::maskValue(const QString& value) const

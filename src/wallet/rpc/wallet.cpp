@@ -974,6 +974,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"digidollar", &listdigidollarutxos},
         {"digidollar", &validateddaddress},
         {"digidollar", &getdigidollarsendsession},
+        {"digidollar", &listdigidollarsendsessions},
         {"digidollar", &getpaymasterreputation},
         {"digidollar", &clearpaymasterreputation},
         {"digidollar", &getpaymasteroffers},

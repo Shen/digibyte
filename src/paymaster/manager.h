@@ -379,6 +379,12 @@ public:
     /** Provider runtime state is intentionally ephemeral. Persistent
      * enablement and policy remain owned by the provider wallet. */
     bool StartProvider(const std::string& wallet_name, const PaymasterId& provider_id);
+    /** Atomically turn a caller-owned provider-work slot into the running
+     * state while retaining that slot. The caller releases it only after
+     * service status and announcement publication are complete, so disable
+     * cannot split the start transition. */
+    bool CompleteProviderStart(const std::string& wallet_name,
+                               const PaymasterId& provider_id);
     void StopProvider(const std::string& wallet_name);
     bool IsProviderRunning(const std::string& wallet_name,
                            const PaymasterId& provider_id) const;
@@ -474,7 +480,9 @@ private:
     std::map<std::pair<PaymasterId, uint64_t>, RateWindow> m_provider_quote_netgroup_events GUARDED_BY(m_rate_mutex);
     mutable Mutex m_provider_mutex;
     std::map<std::string, PaymasterId> m_running_providers GUARDED_BY(m_provider_mutex);
-    std::set<std::string> m_provider_work GUARDED_BY(m_provider_mutex);
+    /** Provider work ownership is bound to both wallet and identity. A caller
+     * holding a wallet slot must not complete a start for another provider. */
+    std::map<std::string, PaymasterId> m_provider_work GUARDED_BY(m_provider_mutex);
     std::map<std::string, ProviderServiceStatus> m_provider_service_status GUARDED_BY(m_provider_mutex);
 };
 

@@ -46,6 +46,7 @@ public:
                       const DigiDollar::Paymaster::PaymasterId& provider_id,
                       bool require_running = true)
         : m_manager{manager}, m_wallet_name{wallet_name},
+          m_provider_id{provider_id},
           m_acquired{manager.TryBeginProviderWork(
               wallet_name, provider_id, require_running)}
     {
@@ -58,10 +59,16 @@ public:
         if (m_acquired) m_manager.EndProviderWork(m_wallet_name);
     }
     bool Acquired() const noexcept { return m_acquired; }
+    bool CompleteProviderStart()
+    {
+        return m_acquired &&
+            m_manager.CompleteProviderStart(m_wallet_name, m_provider_id);
+    }
 
 private:
     DigiDollar::Paymaster::Manager& m_manager;
     const std::string m_wallet_name;
+    const DigiDollar::Paymaster::PaymasterId m_provider_id;
     const bool m_acquired;
 };
 
@@ -263,6 +270,7 @@ UniValue ReliabilityToJSON(
 std::string FeeModeName(DigiDollar::Paymaster::FeeMode mode);
 std::string ResultStatusName(
     DigiDollar::Paymaster::PaymasterResultStatus status);
+std::optional<std::string> DigiDollarAddressForScript(const CScript& script);
 UniValue SessionToJSON(const DigiDollar::Paymaster::PaymentSession& session,
                        const PaymasterStore* store = nullptr);
 bool FindSession(const UniValue& lookup,

@@ -70,10 +70,16 @@ private Q_SLOTS:
     void paymasterClientSessionActionMatrix_data();
     void paymasterClientSessionActionMatrix();
     void paymasterClientSessionRpcActionsAreBound();
+    void paymasterClientRestartCreatedSessionWithoutRecipientIsReadOnly();
+    void paymasterClientMultipleRestartSessionsRequireSelection();
+    void paymasterClientRecoveryExpiryIsFailClosed();
+    void paymasterClientDelayedCallbackIgnoresWalletClose();
+    void paymasterClientUnlockLeaseSurvivesWalletModelClose();
     void paymasterClientDatabaseReadErrorIsActionable();
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();
     void paymasterGuidedSetupRendersConsistentTheme();
+    void paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep();
     void overviewPrivacyMaskHidesAmountUnits();
     void overviewLayoutStretchFavorsBlockchainTotals();
     void overviewBlockchainTotalsFitLaunchScaleValues();

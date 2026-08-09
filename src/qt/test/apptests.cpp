@@ -122,6 +122,34 @@ void TestRpcCommand(RPCConsole* console)
     const QString pattern = QStringLiteral("\"chain\": \"(\\w+)\"");
     QCOMPARE(FindInConsole(output, pattern), QString("regtest"));
 }
+
+//! Check that a Paymaster capability is absent from the console transcript,
+//! result, and command history even when the RPC itself fails.
+void TestSensitivePaymasterRpcCommand(RPCConsole* console)
+{
+    QTextEdit* messages_widget = console->findChild<QTextEdit*>("messagesWidget");
+    QLineEdit* line_edit = console->findChild<QLineEdit*>("lineEdit");
+    QVERIFY(messages_widget != nullptr);
+    QVERIFY(line_edit != nullptr);
+
+    constexpr auto SECRET = "PAYMASTER_CAPABILITY_MUST_NOT_APPEAR";
+    QSignalSpy messages_spy(messages_widget, &QTextEdit::textChanged);
+    QVERIFY(messages_spy.isValid());
+    QTest::keyClicks(
+        line_edit,
+        QStringLiteral("requestpaymasterquote %1").arg(SECRET));
+    QTest::keyClick(line_edit, Qt::Key_Return);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        messages_widget->toPlainText().contains(
+            QStringLiteral("Sensitive command result hidden.")),
+        1000);
+    QVERIFY(!messages_widget->toPlainText().contains(SECRET));
+
+    QTest::keyClick(line_edit, Qt::Key_Up);
+    QCOMPARE(line_edit->text(), QStringLiteral("requestpaymasterquote(…)"));
+    QVERIFY(!line_edit->text().contains(SECRET));
+    line_edit->clear();
+}
 } // namespace
 
 //! Entry point for DigiByteApplication tests.
@@ -213,6 +241,7 @@ void AppTests::consoleTests(RPCConsole* console)
 {
     HandleCallback callback{"consoleTests", *this};
     TestRpcCommand(console);
+    TestSensitivePaymasterRpcCommand(console);
 }
 
 //! Destructor to shut down after the last expected callback completes.

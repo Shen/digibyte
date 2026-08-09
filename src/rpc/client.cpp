@@ -326,6 +326,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "requestpaymasterquote", 1, "intent" },
     { "resolvepaymastersession", 0, "lookup" },
     { "resolvepaymastersession", 2, "options" },
+    { "listdigidollarsendsessions", 0, "options" },
     { "setpaymasterpolicy", 0, "policy" },
     { "setpaymastersafetypolicy", 0, "policy" },
     { "setpaymasterclientsafetypolicy", 0, "policy" },

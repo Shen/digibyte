@@ -180,6 +180,9 @@ private:
     RPCExecutor* m_executor{nullptr};
     WalletModel* m_last_wallet_model{nullptr};
     bool m_is_executing{false};
+    /** Suppress the complete reply for commands whose arguments may carry a
+     * spend-authorizing capability or a partially signed transaction. */
+    bool m_hide_current_reply{false};
     QByteArray m_peer_widget_header_state;
     QByteArray m_banlist_widget_header_state;
 

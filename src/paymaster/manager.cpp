@@ -1519,6 +1519,29 @@ bool Manager::StartProvider(const std::string& wallet_name, const PaymasterId& p
     return m_running_providers.emplace(wallet_name, provider_id).second;
 }
 
+bool Manager::CompleteProviderStart(const std::string& wallet_name,
+                                    const PaymasterId& provider_id)
+{
+    if (wallet_name.empty() || provider_id.IsNull()) return false;
+    LOCK(m_provider_mutex);
+    const auto work = m_provider_work.find(wallet_name);
+    if (!Enabled() || work == m_provider_work.end() ||
+        work->second != provider_id) {
+        return false;
+    }
+
+    const auto existing = m_running_providers.find(wallet_name);
+    if (existing != m_running_providers.end() &&
+        existing->second != provider_id) {
+        return false;
+    }
+    if (existing == m_running_providers.end() &&
+        !m_running_providers.emplace(wallet_name, provider_id).second) {
+        return false;
+    }
+    return true;
+}
+
 void Manager::StopProvider(const std::string& wallet_name)
 {
     LOCK(m_provider_mutex);
@@ -1553,7 +1576,7 @@ bool Manager::TryBeginProviderWork(const std::string& wallet_name,
          running->second != provider_id)) {
         return false;
     }
-    return m_provider_work.insert(wallet_name).second;
+    return m_provider_work.emplace(wallet_name, provider_id).second;
 }
 
 void Manager::EndProviderWork(const std::string& wallet_name)

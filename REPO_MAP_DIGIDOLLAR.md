@@ -749,8 +749,11 @@ or chain parameters.
 - `paymaster_runtime.cpp` owns provider start/stop and the automatic service
   scheduler; `paymaster_integration.cpp` owns wallet reconciliation and durable
   equivocation-inbox maintenance.
-- Client RPCs expose offers, persistent session status/resolution, reputation,
-  quote advancement, role-limited PSBT processing, submit, and result handling.
+- Client RPCs expose offers, bounded persistent-session listing and exact
+  status/resolution, reputation, quote advancement, role-limited PSBT
+  processing, submit, and result handling. Refresh responses include one
+  authoritative attempt/artifact/action snapshot so Qt never merges state from
+  different observations.
 - Provider RPCs create the BIP86 identity, configure policy/enablement, prepare
   and rebalance isolated pools, inspect/cancel reservations, process inboxes,
   create non-gossiped restricted sponsorship descriptors, and explicitly
@@ -758,12 +761,22 @@ or chain parameters.
 - `setpaymasterruntimesettings` persists automatic/manual operation and optional
   autostart. `getpaymasterinfo`/`startpaymaster` expose the effective mode,
   autostart, service state, privacy-neutral service error, and start-time safety
-  policy. Manual processing RPCs fail while automatic servicing is active.
+  policy; `getpaymasterinfo.settings_present` distinguishes a persisted
+  disabled configuration from identity-only state. Manual processing RPCs fail
+  while automatic servicing is active. Advertised operating-policy changes
+  require a stopped provider and hold the manager work guard through the
+  wallet commit, preventing an autostart race and stale peer announcements.
 - `setpaymasterliquiditypolicy` persists automatic replenishment, exact
   admission/operational DGB and carrier targets, explicit paid-maintenance
   approval, and finite fee ceilings. `getpaymasterliquiditystatus` reports
   ready/pending/missing slots, maintenance state/accounting, carrier principal,
   and withdrawable carrier excess; `getpaymasterinfo` embeds that summary.
+- Manual preparation and rebalancing return a policy/pool-bound `plan_id` that
+  must be echoed for execution. They share the wallet provider-work guard with
+  automatic maintenance, reject operational DGB slots below the advertised fee
+  ceiling as target capacity, and retain higher-value usable entries first when
+  reducing a pool. Provider safety-policy commits use the same guard so a
+  scheduler reservation cannot straddle a limit change.
 - Automatic service reconciliation promotes confirmed successors, resumes
   restartable DGB/carrier maintenance, creates only missing targets, and blocks
   new requests until confirmed capacity is available while still allowing safe
@@ -1192,7 +1205,8 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   collapsed by default.
   The operator navigation includes a green-theme Finances page with native DD
   income, DGB operating costs, current-price result estimate, model breakdown,
-  wallet-owned pool capital, bounded event details, privacy-limited CSV export,
+  wallet-owned pool capital, 250-row cursor pages, privacy-limited asynchronous
+  complete CSV export with atomic file replacement,
   and links to the existing preview-first liquidity controls. Overview includes
   a compact finance summary. Backup notices on Overview, Finances and a newly
   completed identity setup invoke WalletView's existing full-wallet backup
@@ -1201,21 +1215,28 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   The guided setup dialog uses a non-native, theme-controlled classic wizard
   surface so its page text and controls remain readable under both dark and
   light Windows themes. It covers prerequisites, identity, service model,
-  offer limits, finite safety profiles, policy-aware liquidity, validation,
-  and a final funding review. Its first page names and pins the current wallet,
+  offer limits, finite safety profiles (including fully editable Custom
+  aggregate, request, and maintenance limits), policy-aware liquidity,
+  validation, and a final funding review. Its first page names and pins the current wallet,
   recommends a dedicated provider wallet, requires explicit confirmation, and
   directs operators through the normal wallet menu when another wallet should
   be created or selected. Wallet eligibility is checked again before any
-  mutation. Applying the reviewed plan runs an asynchronous,
-  retryable sequence that reuses or creates the provider identity, persists the
-  operating and provider-safety policies, enables the wallet-local provider
-  configuration, rechecks the live pool, and creates only still-missing pool
-  outputs after a separate funding confirmation. Completed steps remain
-  idempotently resumable after an error. The completion page states that no
-  additional Save actions are required and returns to an automatically
-  refreshed Overview while new liquidity confirms. Starting the provider is
-  always a separate, explicit Overview action and is never performed by the
-  wizard.
+  mutation. It requires complete authoritative provider/safety/liquidity
+  snapshots, imports existing persisted values on reopen, and provides an
+  explicit restore-defaults action on every editable page. Applying the
+  reviewed plan runs an asynchronous, retryable sequence that first disables
+  an existing enabled provider, reuses or creates the provider identity,
+  persists a safety bridge when required, then the operating, final safety,
+  and liquidity policies, rechecks the live pool, and creates only
+  still-missing outputs after a separate funding confirmation. Runtime,
+  autostart, and requested enablement are restored last. Completed steps remain
+  idempotently resumable after an error, while closing before Apply writes
+  nothing. The completion page states that no additional Save actions are
+  required and returns to an automatically refreshed Overview while new
+  liquidity confirms. Fresh setup defaults to autostart off; a deliberately
+  selected enabled/autostart combination may start later when readiness passes.
+  Qt's Stop action first disables saved autostart when necessary, and disabling
+  the provider configuration persistently stops the runtime.
 
 ### src/qt/digidollaroverviewwidget.cpp/h
 - `DigiDollarOverviewWidget` → DD balance overview and system health display.
@@ -1238,6 +1259,8 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   wallet-local client safety policy, and keeps offer/privacy/provider controls
   collapsed. It renders persistent unlock, signature, provider, fallback,
   retry, and same-input recovery states in a separate active-session section.
+  On wallet attachment it can surface bounded, durable, recovery-relevant
+  sessions without automatically unlocking, signing, retrying, or recovering.
   Automatic/Paymaster modes additionally offer an explicit fee-deduction and
   wallet-empty action, with separate total-outflow, recipient, provider-fee,
   and remaining-balance summaries; direct DGB retains the original layout.

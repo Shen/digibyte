@@ -88,6 +88,13 @@ public:
     bool ListClientSessions(
         std::vector<DigiDollar::Paymaster::PaymentSession>& sessions,
         std::string& error) const;
+    /** Report whether a client session still owns any live USER_DD
+     * reservation. This is a read-only inbox/status aid; mutation RPCs remain
+     * the sole authority for deciding whether an input can be released. */
+    bool ClientSessionHasLiveReservations(
+        const DigiDollar::Paymaster::PaymentSession& session,
+        bool& has_live_reservations,
+        std::string& error) const;
 
     bool ReserveInputs(const std::string& request_id,
                        const std::vector<std::pair<COutPoint, DigiDollar::Paymaster::ReservationRole>>& inputs,
