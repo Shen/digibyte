@@ -73,6 +73,7 @@ private Q_SLOTS:
     void paymasterClientDatabaseReadErrorIsActionable();
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();
+    void paymasterGuidedSetupRendersConsistentTheme();
     void overviewPrivacyMaskHidesAmountUnits();
     void overviewLayoutStretchFavorsBlockchainTotals();
     void overviewBlockchainTotalsFitLaunchScaleValues();

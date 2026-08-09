@@ -6361,6 +6361,139 @@ void DigiDollarWidgetTests::paymasterOfferTableRendersGreenTheme()
     require_green_header(dark, QStringLiteral("dark"));
 }
 
+void DigiDollarWidgetTests::paymasterGuidedSetupRendersConsistentTheme()
+{
+    struct RenderStats {
+        bool wizard_opened{false};
+        bool expected_local_theme{false};
+        bool scroll_visible{false};
+        bool surfaces_use_qss{false};
+        bool native_fill_disabled{false};
+        int total_pixels{0};
+        int dark_pixels{0};
+        int light_pixels{0};
+    };
+
+    const QString original_stylesheet = qApp->styleSheet();
+    const QPalette original_palette = qApp->palette();
+    qApp->setStyleSheet(QString{});
+
+    const auto render_theme = [&](const QColor& window, const QColor& text,
+                                  const QString& expected_background) {
+        RenderStats stats;
+        QPalette palette = original_palette;
+        palette.setColor(QPalette::Window, window);
+        palette.setColor(QPalette::WindowText, text);
+        palette.setColor(QPalette::Base, window);
+        palette.setColor(QPalette::Text, text);
+        qApp->setPalette(palette);
+
+        std::unique_ptr<const PlatformStyle> platform_style(
+            PlatformStyle::instantiate("other"));
+        DigiDollarTab tab(platform_style.get());
+        QPushButton* guided_setup = tab.findChild<QPushButton*>(
+            QStringLiteral("paymasterChooseGuidedSetup"));
+        if (!guided_setup) return stats;
+
+        QTimer::singleShot(0, [&] {
+            auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
+            if (!wizard || wizard->objectName() != QLatin1String("PaymasterSetupWizard")) {
+                wizard = nullptr;
+                for (QWidget* widget : QApplication::topLevelWidgets()) {
+                    auto* candidate = qobject_cast<QWizard*>(widget);
+                    if (candidate &&
+                        candidate->objectName() == QLatin1String("PaymasterSetupWizard")) {
+                        wizard = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!wizard) return;
+
+            stats.wizard_opened = true;
+            stats.expected_local_theme = wizard->styleSheet().contains(
+                expected_background, Qt::CaseInsensitive);
+            QScrollArea* scroll = wizard->findChild<QScrollArea*>(
+                QStringLiteral("paymasterSetupRequirementsScroll"));
+            QWidget* contents = wizard->findChild<QWidget*>(
+                QStringLiteral("paymasterSetupRequirementsContent"));
+            QFrame* wallet_card = wizard->findChild<QFrame*>(
+                QStringLiteral("paymasterSetupWalletCard"));
+            if (scroll && contents && wallet_card) {
+                QCoreApplication::processEvents();
+                stats.scroll_visible = scroll->isVisibleTo(wizard);
+                stats.surfaces_use_qss =
+                    scroll->testAttribute(Qt::WA_StyledBackground) &&
+                    scroll->viewport()->testAttribute(Qt::WA_StyledBackground) &&
+                    contents->testAttribute(Qt::WA_StyledBackground);
+                stats.native_fill_disabled =
+                    !scroll->viewport()->autoFillBackground() &&
+                    !contents->autoFillBackground();
+
+                const QImage image = scroll->viewport()->grab().toImage()
+                                         .convertToFormat(QImage::Format_RGB32);
+                for (int y = 1; y + 1 < image.height(); ++y) {
+                    for (int x = 1; x + 1 < image.width(); ++x) {
+                        const QColor color = QColor::fromRgb(image.pixel(x, y));
+                        ++stats.total_pixels;
+                        if (color.lightness() < 100) ++stats.dark_pixels;
+                        if (color.lightness() > 210) ++stats.light_pixels;
+                    }
+                }
+            }
+            wizard->reject();
+        });
+        guided_setup->click();
+        return stats;
+    };
+
+    const RenderStats dark = render_theme(
+        QColor(QStringLiteral("#0b2419")), QColor(QStringLiteral("#ffffff")),
+        QStringLiteral("#0b2419"));
+    const RenderStats light = render_theme(
+        QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#123f2b")),
+        QStringLiteral("#eef9f2"));
+
+    qApp->setStyleSheet(original_stylesheet);
+    qApp->setPalette(original_palette);
+    QCoreApplication::processEvents();
+
+    const auto require_common_contract = [](const RenderStats& stats,
+                                            const QString& theme) {
+        QVERIFY2(stats.wizard_opened,
+                 qPrintable(QStringLiteral("Paymaster setup wizard did not open under %1").arg(theme)));
+        QVERIFY2(stats.expected_local_theme,
+                 qPrintable(QStringLiteral("Paymaster setup wizard selected the wrong %1 theme").arg(theme)));
+        QVERIFY2(stats.scroll_visible,
+                 qPrintable(QStringLiteral("Paymaster setup content was not visible under %1").arg(theme)));
+        QVERIFY2(stats.surfaces_use_qss,
+                 qPrintable(QStringLiteral("Paymaster setup surfaces bypassed QSS under %1").arg(theme)));
+        QVERIFY2(stats.native_fill_disabled,
+                 qPrintable(QStringLiteral("Paymaster setup leaked a native background under %1").arg(theme)));
+        QVERIFY(stats.total_pixels > 0);
+    };
+    require_common_contract(dark, QStringLiteral("dark"));
+    require_common_contract(light, QStringLiteral("light"));
+
+    QVERIFY2(dark.dark_pixels * 100 >= dark.total_pixels * 60,
+             qPrintable(QStringLiteral(
+                 "dark Paymaster setup surface was not predominantly dark (%1/%2 dark, %3 light pixels)")
+                            .arg(dark.dark_pixels)
+                            .arg(dark.total_pixels)
+                            .arg(dark.light_pixels)));
+    QVERIFY2(dark.light_pixels * 100 < dark.total_pixels * 25,
+             qPrintable(QStringLiteral(
+                 "dark Paymaster setup leaked a large light surface (%1/%2 light pixels)")
+                            .arg(dark.light_pixels)
+                            .arg(dark.total_pixels)));
+    QVERIFY2(light.light_pixels * 100 >= light.total_pixels * 60,
+             qPrintable(QStringLiteral(
+                 "light Paymaster setup surface was not predominantly light (%1/%2 light, %3 dark pixels)")
+                            .arg(light.light_pixels)
+                            .arg(light.total_pixels)
+                            .arg(light.dark_pixels)));
+}
+
 void DigiDollarWidgetTests::overviewPrivacyMaskHidesAmountUnits()
 {
     DigiDollarOverviewWidget overviewWidget;

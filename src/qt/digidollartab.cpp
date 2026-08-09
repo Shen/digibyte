@@ -426,6 +426,17 @@ QString PaymasterWizardStyleSheet(bool dark_theme)
             "  background-color: #0b2419;"
             "  color: #ffffff;"
             "}"
+            "QWizard#PaymasterSetupWizard QScrollArea#paymasterSetupRequirementsScroll,"
+            "QWizard#PaymasterSetupWizard QWidget#paymasterSetupRequirementsContent {"
+            "  background-color: #0b2419;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "}"
+            "QWizard#PaymasterSetupWizard QFrame#paymasterSetupWalletCard {"
+            "  background-color: #123a29;"
+            "  border: 1px solid #42d884;"
+            "  border-radius: 5px;"
+            "}"
             "QWizard#PaymasterSetupWizard QLabel {"
             "  background-color: transparent;"
             "  color: #ffffff;"
@@ -536,6 +547,17 @@ QString PaymasterWizardStyleSheet(bool dark_theme)
         "QWizard#PaymasterSetupWizard QWizardPage {"
         "  background-color: #eef9f2;"
         "  color: #123f2b;"
+        "}"
+        "QWizard#PaymasterSetupWizard QScrollArea#paymasterSetupRequirementsScroll,"
+        "QWizard#PaymasterSetupWizard QWidget#paymasterSetupRequirementsContent {"
+        "  background-color: #eef9f2;"
+        "  color: #123f2b;"
+        "  border: none;"
+        "}"
+        "QWizard#PaymasterSetupWizard QFrame#paymasterSetupWalletCard {"
+        "  background-color: #ffffff;"
+        "  border: 1px solid #9bcbb0;"
+        "  border-radius: 5px;"
         "}"
         "QWizard#PaymasterSetupWizard QLabel {"
         "  background-color: transparent;"
@@ -6428,7 +6450,6 @@ private:
         auto* intro_scroll = new QScrollArea(intro);
         intro_scroll->setObjectName("paymasterSetupRequirementsScroll");
         intro_scroll->setWidgetResizable(true);
-        intro_scroll->setFrameShape(QFrame::NoFrame);
         intro_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* intro_content = new QWidget(intro_scroll);
         intro_content->setObjectName("paymasterSetupRequirementsContent");
@@ -6438,6 +6459,10 @@ private:
         // complete content height and let the page scroll on compact displays.
         intro_layout->setSizeConstraint(QLayout::SetMinimumSize);
         intro_scroll->setWidget(intro_content);
+        // setWidget() enables the content widget's native background fill.
+        // Disable it so Windows cannot paint a light system surface through
+        // the wizard's dark theme.
+        ConfigurePaymasterScrollArea(intro_scroll, intro_content);
         intro_page_layout->addWidget(intro_scroll);
         auto* intro_text = new QLabel(tr(
             "A Paymaster supplies DGB network fees for DigiDollar transfers. This assistant "
