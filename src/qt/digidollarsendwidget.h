@@ -14,6 +14,8 @@
 #include <qt/walletmodel.h>
 #include <primitives/transaction.h>
 
+#include <functional>
+#include <string>
 #include <vector>
 
 class ClientModel;
@@ -81,6 +83,20 @@ public:
                                        bool persisted, const QString& address, double amount,
                                        const QString& attempt_state = QString{},
                                        const QString& pending_phase = QString{});
+    /**
+     * Install a deterministic wallet RPC transport for Paymaster widget tests.
+     *
+     * Production leaves this unset and continues through WalletModel's
+     * asynchronous worker. The synchronous test transport makes each client
+     * state transition observable without a live Paymaster network.
+     */
+    using PaymasterRpcExecutorForTesting =
+        std::function<UniValue(const std::string&, const UniValue&)>;
+    void setPaymasterRpcExecutorForTesting(PaymasterRpcExecutorForTesting executor);
+    using DialogHandlerForTesting = std::function<QMessageBox::StandardButton(
+        QMessageBox::Icon, const QString&, const QString&,
+        QMessageBox::StandardButtons, QMessageBox::StandardButton)>;
+    void setDialogHandlerForTesting(DialogHandlerForTesting handler);
 
 Q_SIGNALS:
     /** Fired when a message should be reported to the user */
@@ -145,6 +161,7 @@ private:
     void updateClientSafetyDisplay();
     void updateFeeChoiceLayout();
     void updatePaymasterFocusMode();
+    void invalidatePaymasterOfferPreview();
     QString friendlyPaymasterSessionStatus() const;
     void onPaymasterPrimaryAction();
     QString feeMode() const;
@@ -164,10 +181,16 @@ private:
     // Phase 7.2-7.3: Helper methods for improved UX
     void showError(const QString& title, const QString& message);
     void showWarning(const QString& title, const QString& message);
+    QMessageBox::StandardButton showDialog(
+        QMessageBox::Icon icon, const QString& title, const QString& message,
+        QMessageBox::StandardButtons buttons = QMessageBox::Ok,
+        QMessageBox::StandardButton default_button = QMessageBox::Ok);
     bool checkWalletState();
     bool showConfirmationDialog(const QString& address, double amount);
     QString buildSuccessMessage(const QString& txid, double amount) const;
     void executeTransfer(const QString& address, double amount);
+    void executePaymasterRpcAsync(std::string command, UniValue params,
+                                  WalletModel::RpcCallback callback);
     void executePaymasterTransfer(const QString& address, double amount, bool allow_unlock);
     UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
     void handlePaymasterResult(const UniValue& result, const QString& error,
@@ -342,6 +365,8 @@ private:
     qint64 m_clientSafetyAvailableTodayCents{0};
     QString m_clientSafetyError;
     QTimer* m_paymasterPollTimer;
+    PaymasterRpcExecutorForTesting m_paymasterRpcExecutorForTesting;
+    DialogHandlerForTesting m_dialogHandlerForTesting;
     PaymasterConfirmationGuard m_paymasterConfirmationGuard;
     PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;
 

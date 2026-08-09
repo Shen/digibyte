@@ -58,6 +58,7 @@
 #include <thread>
 
 #include <QApplication>
+#include <QAccessible>
 #include <QAbstractButton>
 #include <QColor>
 #include <QCheckBox>
@@ -73,6 +74,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHelpEvent>
+#include <QHeaderView>
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
@@ -104,6 +106,7 @@
 #include <QWizard>
 #include <QTimer>
 #include <QToolTip>
+#include <QtTest/QtTestWidgets>
 #include <QtWidgets/qtestsupport_widgets.h>
 
 using wallet::AddWallet;
@@ -568,6 +571,82 @@ UniValue PaymasterLiquidityPoolStatus()
     pool.push_back(std::move(pending_dgb));
     UniValue result{UniValue::VOBJ};
     result.pushKV("pool", std::move(pool));
+    return result;
+}
+
+UniValue PaymasterClientSafetyStatus()
+{
+    UniValue policy{UniValue::VOBJ};
+    policy.pushKV("maximum_service_fee_per_transaction_cents", 100);
+    policy.pushKV("maximum_service_fee_per_day_cents", 1000);
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("configured", true);
+    result.pushKV("policy", std::move(policy));
+    result.pushKV("active_reservations", 0);
+    result.pushKV("reserved_service_fee_cents", 0);
+    result.pushKV("spent_service_fee_last_day_cents", 0);
+    result.pushKV("available_service_fee_today_cents", 1000);
+    return result;
+}
+
+UniValue PaymasterOffer(const std::string& display_name,
+                        const std::string& provider_id,
+                        const std::string& funding_model,
+                        int64_t service_fee_cents,
+                        int64_t payment_cents,
+                        bool established_reputation,
+                        int64_t expires_at)
+{
+    UniValue offer{UniValue::VOBJ};
+    offer.pushKV("display_name", display_name);
+    offer.pushKV("provider_id", provider_id);
+    offer.pushKV("policy_hash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    offer.pushKV("funding_model", funding_model);
+    offer.pushKV("service_fee_cents", service_fee_cents);
+    offer.pushKV("payment_cents", payment_cents);
+    offer.pushKV("user_total_cents", payment_cents + service_fee_cents);
+    offer.pushKV("reputation_sufficient_data", established_reputation);
+    offer.pushKV("success_rate_basis_points", established_reputation ? 9875 : 0);
+    offer.pushKV("expires_at", expires_at);
+    return offer;
+}
+
+UniValue PaymasterSessionView(const std::string& state,
+                              const std::string& artifact,
+                              const std::string& attempt_state)
+{
+    UniValue attempt{UniValue::VOBJ};
+    attempt.pushKV("attempt_state", attempt_state);
+    attempt.pushKV("provider_id", "provider-a");
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("session_id", "11111111-1111-4111-8111-111111111111");
+    result.pushKV("session_state", state);
+    result.pushKV("pending_phase", "NONE");
+    result.pushKV("broadcast_state", "NONE");
+    result.pushKV("confirmation_state", "NONE");
+    result.pushKV("provider_id", "provider-a");
+    result.pushKV("policy_hash", "policy-a");
+    result.pushKV("artifact", artifact);
+    result.pushKV("attempt", std::move(attempt));
+    result.pushKV("payment_cents", 325);
+    result.pushKV("service_fee_cents", 2);
+    result.pushKV("user_total_cents", 327);
+    result.pushKV("expires_at", int64_t{2000000000});
+    return result;
+}
+
+UniValue PaymasterAuthorizationResult(bool authorization_required,
+                                      const std::string& commitment,
+                                      const std::string& state,
+                                      const std::string& artifact)
+{
+    UniValue result = PaymasterSessionView(state, artifact, "QUOTED");
+    result.pushKV("offer_id", "offer-a");
+    result.pushKV("funding_model", "user_paid");
+    result.pushKV("authorization_required", authorization_required);
+    result.pushKV("authorization_commitment", commitment);
     return result;
 }
 
@@ -5558,6 +5637,730 @@ void DigiDollarWidgetTests::paymasterRecoveryConfirmationGuardDetectsMaterialCha
     QVERIFY(guard.RequiresConfirmation(accepted));
 }
 
+void DigiDollarWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(
+        *test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(
+        m_node, test, "qt-paymaster-client-offers");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
+    QStringList commands;
+    std::vector<UniValue> parameters;
+    int offer_calls{0};
+    bool waiting_seen{false};
+    bool refresh_disabled_while_busy{false};
+    bool stale_rows_cleared_before_rpc{false};
+    bool duplicate_refresh_blocked{false};
+    send_widget.setPaymasterRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params) {
+            if (command == "getpaymasterclientsafetystatus") {
+                return PaymasterClientSafetyStatus();
+            }
+            commands.push_back(QString::fromStdString(command));
+            parameters.push_back(params);
+            if (command == "getpaymasteroffers") {
+                ++offer_calls;
+                QLabel* status = send_widget.findChild<QLabel*>(
+                    QStringLiteral("paymasterOffersStatus"));
+                QPushButton* refresh = send_widget.findChild<QPushButton*>(
+                    QStringLiteral("refreshPaymasterOffers"));
+                QTableWidget* table = send_widget.findChild<QTableWidget*>(
+                    QStringLiteral("paymasterOffers"));
+                waiting_seen = status &&
+                    status->property("statusKind").toString() == QStringLiteral("waiting");
+                refresh_disabled_while_busy = refresh && !refresh->isEnabled();
+                stale_rows_cleared_before_rpc = table && table->rowCount() == 0;
+                const int calls_before_reentry = offer_calls;
+                QMetaObject::invokeMethod(
+                    &send_widget, "refreshPaymasterOffers", Qt::DirectConnection);
+                duplicate_refresh_blocked = offer_calls == calls_before_reentry;
+
+                UniValue offers{UniValue::VARR};
+                offers.push_back(PaymasterOffer(
+                    "<b>Alice & Co</b>", "provider-a", "user_paid",
+                    2, 325, true, 2000000000));
+                offers.push_back(PaymasterOffer(
+                    "Sponsor", "provider-b", "sponsored",
+                    0, 325, false, 2000000100));
+                return offers;
+            }
+            throw std::runtime_error("unexpected Paymaster RPC");
+        });
+    send_widget.setWalletModel(mini_gui.walletModel.get());
+    commands.clear();
+    parameters.clear();
+
+    QRadioButton* paymaster = send_widget.findChild<QRadioButton*>(
+        QStringLiteral("feeFundingPaymaster"));
+    QLineEdit* amount = send_widget.findChild<QLineEdit*>(
+        QStringLiteral("amountEdit"));
+    QTableWidget* table = send_widget.findChild<QTableWidget*>(
+        QStringLiteral("paymasterOffers"));
+    QLabel* status = send_widget.findChild<QLabel*>(
+        QStringLiteral("paymasterOffersStatus"));
+    QVERIFY(paymaster != nullptr);
+    QVERIFY(amount != nullptr);
+    QVERIFY(table != nullptr);
+    QVERIFY(status != nullptr);
+
+    paymaster->setChecked(true);
+    amount->setText(QStringLiteral("3.25"));
+    table->setRowCount(1); // Must disappear before the next RPC is entered.
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "refreshPaymasterOffers", Qt::DirectConnection));
+
+    QCOMPARE(offer_calls, 1);
+    QVERIFY(waiting_seen);
+    QVERIFY(refresh_disabled_while_busy);
+    QVERIFY(stale_rows_cleared_before_rpc);
+    QVERIFY(duplicate_refresh_blocked);
+    QCOMPARE(commands, QStringList{QStringLiteral("getpaymasteroffers")});
+    QCOMPARE(parameters.size(), size_t{1});
+    QVERIFY(parameters.front().isArray());
+    QCOMPARE(parameters.front().size(), size_t{2});
+    QCOMPARE(parameters.front()[0].getInt<int64_t>(), int64_t{325});
+    const UniValue& preview_options = parameters.front()[1];
+    QVERIFY(preview_options.isObject());
+    QCOMPARE(preview_options.find_value(
+                 "subtract_paymaster_fee_from_amount").get_bool(), false);
+
+    QCOMPARE(table->rowCount(), 2);
+    QCOMPARE(table->item(0, 0)->text(), QStringLiteral("<b>Alice & Co</b>"));
+    QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Service fee in $DD"));
+    QCOMPARE(table->item(0, 2)->text(), QStringLiteral("0.02 $DD (2 cents)"));
+    QCOMPARE(table->item(0, 3)->text(), QStringLiteral("3.27 $DD (327 cents)"));
+    QCOMPARE(table->item(0, 4)->text(), QStringLiteral("98.75%"));
+    QVERIFY(table->item(0, 5)->text().contains(QStringLiteral("2033")));
+    QVERIFY(table->item(0, 0)->toolTip().contains(QStringLiteral("provider-a")));
+    QCOMPARE(table->item(1, 1)->text(), QStringLiteral("Sponsored by provider"));
+    QCOMPARE(table->item(1, 4)->text(),
+             QStringLiteral("New provider — not enough history yet"));
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("ready"));
+    QVERIFY(status->text().contains(QStringLiteral("2 eligible offer(s)")));
+    QCOMPARE(status->accessibleDescription(), status->text());
+}
+
+void DigiDollarWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailures()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(
+        *test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(
+        m_node, test, "qt-paymaster-client-offer-states");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
+    int offer_response{0};
+    QString dialog_title;
+    QString dialog_message;
+    send_widget.setDialogHandlerForTesting(
+        [&](QMessageBox::Icon, const QString& title, const QString& message,
+            QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+            dialog_title = title;
+            dialog_message = message;
+            return QMessageBox::Ok;
+        });
+    send_widget.setPaymasterRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue&) {
+            if (command == "getpaymasterclientsafetystatus") {
+                return PaymasterClientSafetyStatus();
+            }
+            if (command != "getpaymasteroffers") {
+                throw std::runtime_error("unexpected Paymaster RPC");
+            }
+            if (offer_response == 2) {
+                throw std::runtime_error("preview transport failed");
+            }
+            UniValue offers{UniValue::VARR};
+            if (offer_response == 0) {
+                offers.push_back(PaymasterOffer(
+                    "Provider", "provider-a", "user_paid",
+                    2, 325, true, 2000000000));
+            }
+            return offers;
+        });
+    send_widget.setWalletModel(mini_gui.walletModel.get());
+
+    QRadioButton* paymaster = send_widget.findChild<QRadioButton*>(
+        QStringLiteral("feeFundingPaymaster"));
+    QRadioButton* direct_dgb = send_widget.findChild<QRadioButton*>(
+        QStringLiteral("feeFundingDgb"));
+    QLineEdit* amount = send_widget.findChild<QLineEdit*>(
+        QStringLiteral("amountEdit"));
+    QCheckBox* subtract = send_widget.findChild<QCheckBox*>(
+        QStringLiteral("subtractPaymasterFeeFromAmount"));
+    QSpinBox* fee_cap = send_widget.findChild<QSpinBox*>(
+        QStringLiteral("paymasterFeeCap"));
+    QSpinBox* attempts = send_widget.findChild<QSpinBox*>(
+        QStringLiteral("paymasterMaximumAttempts"));
+    QComboBox* privacy = send_widget.findChild<QComboBox*>(
+        QStringLiteral("paymasterPrivacy"));
+    QComboBox* selection = send_widget.findChild<QComboBox*>(
+        QStringLiteral("paymasterSelection"));
+    QTableWidget* table = send_widget.findChild<QTableWidget*>(
+        QStringLiteral("paymasterOffers"));
+    QLabel* status = send_widget.findChild<QLabel*>(
+        QStringLiteral("paymasterOffersStatus"));
+    QPushButton* refresh = send_widget.findChild<QPushButton*>(
+        QStringLiteral("refreshPaymasterOffers"));
+    QVERIFY(paymaster && direct_dgb && amount && subtract && fee_cap && attempts);
+    QVERIFY(privacy && selection && table && status && refresh);
+
+    paymaster->setChecked(true);
+    amount->setText(QStringLiteral("3.25"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 1);
+
+    const auto seed_stale_row = [&] {
+        table->setRowCount(1);
+        table->setItem(0, 0, new QTableWidgetItem(QStringLiteral("stale")));
+    };
+    amount->setText(QStringLiteral("3.26"));
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
+    seed_stale_row();
+    subtract->setChecked(true);
+    QCOMPARE(table->rowCount(), 0);
+    seed_stale_row();
+    fee_cap->setValue(fee_cap->value() - 1);
+    QCOMPARE(table->rowCount(), 0);
+    seed_stale_row();
+    privacy->setCurrentIndex(privacy->findData(QStringLiteral("high")));
+    QCOMPARE(table->rowCount(), 0);
+    seed_stale_row();
+    selection->setCurrentIndex(
+        selection->findData(QStringLiteral("privacy_weighted")));
+    QCOMPARE(table->rowCount(), 0);
+    privacy->setCurrentIndex(privacy->findData(QStringLiteral("standard")));
+    seed_stale_row();
+    attempts->setValue(2);
+    QCOMPARE(table->rowCount(), 0);
+    seed_stale_row();
+    direct_dgb->setChecked(true);
+    QCOMPARE(table->rowCount(), 0);
+
+    paymaster->setChecked(true);
+    amount->setText(QStringLiteral("3.25"));
+    subtract->setChecked(false);
+    offer_response = 1;
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("waiting"));
+    QVERIFY(status->text().contains(QStringLiteral("No eligible public offer")));
+
+    offer_response = 2;
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("error"));
+    QVERIFY(refresh->isEnabled());
+    QCOMPARE(dialog_title, QStringLiteral("Paymaster offers unavailable"));
+    QCOMPARE(dialog_message, QStringLiteral("preview transport failed"));
+
+    seed_stale_row();
+    send_widget.setWalletModel(nullptr);
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
+}
+
+void DigiDollarWidgetTests::paymasterClientAuthorizationIsTwoStageAndFailClosed()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(
+        *test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(
+        m_node, test, "qt-paymaster-client-authorization");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
+    QMessageBox::StandardButton authorization_answer{QMessageBox::Cancel};
+    QStringList dialog_titles;
+    send_widget.setDialogHandlerForTesting(
+        [&](QMessageBox::Icon, const QString& title, const QString&,
+            QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+            dialog_titles.push_back(title);
+            return title == QStringLiteral("Confirm exact Paymaster authorization")
+                ? authorization_answer
+                : QMessageBox::Ok;
+        });
+
+    std::vector<UniValue> send_parameters;
+    int send_calls{0};
+    send_widget.setPaymasterRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params) {
+            if (command == "getpaymasterclientsafetystatus") {
+                return PaymasterClientSafetyStatus();
+            }
+            if (command != "senddigidollar") {
+                throw std::runtime_error("unexpected Paymaster RPC");
+            }
+            ++send_calls;
+            send_parameters.push_back(params);
+            if (send_calls <= 2) {
+                return PaymasterAuthorizationResult(
+                    true, "commitment-a", "AWAITING_USER_SIGNATURE", "none");
+            }
+            return PaymasterAuthorizationResult(
+                false, "commitment-b", "PENDING_PROVIDER", "user_psbt");
+        });
+    send_widget.setWalletModel(mini_gui.walletModel.get());
+    send_widget.setPaymasterSessionForTesting(
+        QStringLiteral("AWAITING_USER_SIGNATURE"), QStringLiteral("none"),
+        true, QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"),
+        3.25, QStringLiteral("QUOTED"));
+
+    QPushButton* primary = send_widget.findChild<QPushButton*>(
+        QStringLiteral("paymasterSessionPrimaryAction"));
+    QLabel* state = send_widget.findChild<QLabel*>(
+        QStringLiteral("paymasterSessionState"));
+    QVERIFY(primary != nullptr);
+    QVERIFY(state != nullptr);
+    QCOMPARE(primary->text(), QStringLiteral("Review exact offer"));
+
+    primary->click();
+    QCOMPARE(send_calls, 1);
+    QVERIFY(state->text().contains(QStringLiteral("paused by user")));
+    const UniValue& canceled_options = send_parameters.at(0)[5];
+    QCOMPARE(canceled_options.find_value("prepare_only").get_bool(), true);
+    QVERIFY(canceled_options.find_value("authorization_commitment").isNull());
+
+    authorization_answer = QMessageBox::Yes;
+    primary->click();
+    QCOMPARE(send_calls, 3);
+    const UniValue& reviewed_options = send_parameters.at(1)[5];
+    const UniValue& authorized_options = send_parameters.at(2)[5];
+    QCOMPARE(reviewed_options.find_value("prepare_only").get_bool(), true);
+    QVERIFY(reviewed_options.find_value("authorization_commitment").isNull());
+    QVERIFY(authorized_options.find_value("prepare_only").isNull());
+    QCOMPARE(QString::fromStdString(
+                 authorized_options.find_value("authorization_commitment").get_str()),
+             QStringLiteral("commitment-a"));
+    QCOMPARE(QString::fromStdString(
+                 authorized_options.find_value("selection").get_str()),
+             QStringLiteral("lowest_total_cost"));
+    QCOMPARE(QString::fromStdString(
+                 authorized_options.find_value("privacy").get_str()),
+             QStringLiteral("standard"));
+    QVERIFY(state->text().contains(
+        QStringLiteral("authorization blocked: commitment changed or missing")));
+    QCOMPARE(dialog_titles.count(
+                 QStringLiteral("Confirm exact Paymaster authorization")), 2);
+    QVERIFY(dialog_titles.contains(QStringLiteral("Paymaster authorization blocked")));
+}
+
+void DigiDollarWidgetTests::paymasterClientSessionActionMatrix_data()
+{
+    QTest::addColumn<QString>("state");
+    QTest::addColumn<QString>("artifact");
+    QTest::addColumn<QString>("attempt_state");
+    QTest::addColumn<QString>("pending_phase");
+    QTest::addColumn<QString>("primary_text");
+    QTest::addColumn<bool>("retry_visible");
+    QTest::addColumn<bool>("fallback_visible");
+    QTest::addColumn<bool>("recover_visible");
+    QTest::addColumn<bool>("abandon_visible");
+    QTest::addColumn<bool>("more_visible");
+
+    QTest::newRow("created-unsigned")
+        << QStringLiteral("CREATED") << QStringLiteral("none") << QString{}
+        << QStringLiteral("NONE") << QStringLiteral("Check current status")
+        << true << false << false << true << true;
+    QTest::newRow("awaiting-unlock-unsigned")
+        << QStringLiteral("AWAITING_WALLET_UNLOCK") << QStringLiteral("none")
+        << QStringLiteral("CANDIDATE") << QStringLiteral("NONE")
+        << QStringLiteral("Try another Paymaster")
+        << true << false << false << true << true;
+    QTest::newRow("exact-offer-review")
+        << QStringLiteral("AWAITING_USER_SIGNATURE") << QStringLiteral("none")
+        << QStringLiteral("QUOTED") << QStringLiteral("NONE")
+        << QStringLiteral("Review exact offer")
+        << true << true << false << true << true;
+    QTest::newRow("authorized-signed")
+        << QStringLiteral("AUTHORIZED") << QStringLiteral("user_psbt")
+        << QStringLiteral("QUOTED") << QStringLiteral("NONE")
+        << QStringLiteral("Check current status")
+        << true << false << true << false << true;
+    QTest::newRow("provider-pending-signed")
+        << QStringLiteral("PENDING_PROVIDER") << QStringLiteral("user_psbt")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Check current status")
+        << true << false << true << false << true;
+    QTest::newRow("mempool-final")
+        << QStringLiteral("MEMPOOL") << QStringLiteral("final_transaction")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Check current status")
+        << true << false << true << false << true;
+    QTest::newRow("failed-unsigned")
+        << QStringLiteral("FAILED") << QStringLiteral("none")
+        << QStringLiteral("REJECTED") << QStringLiteral("NONE")
+        << QStringLiteral("Check current status")
+        << true << false << false << true << true;
+    QTest::newRow("failed-signed")
+        << QStringLiteral("FAILED") << QStringLiteral("user_psbt")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Start safe recovery")
+        << true << false << false << false << true;
+    QTest::newRow("conflicted-final")
+        << QStringLiteral("CONFLICTED") << QStringLiteral("final_transaction")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Start safe recovery")
+        << true << false << false << false << true;
+    QTest::newRow("contradictory-unsigned-provider-pending")
+        << QStringLiteral("PENDING_PROVIDER") << QStringLiteral("none")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Check current status")
+        << false << false << false << false << false;
+    QTest::newRow("confirmed-terminal")
+        << QStringLiteral("CONFIRMED") << QStringLiteral("final_transaction")
+        << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
+        << QStringLiteral("Start a new transfer")
+        << false << false << false << false << false;
+    QTest::newRow("canceled-terminal")
+        << QStringLiteral("CANCELED_SAFE") << QStringLiteral("none")
+        << QStringLiteral("REJECTED") << QStringLiteral("NONE")
+        << QStringLiteral("Start a new transfer")
+        << false << false << false << false << false;
+}
+
+void DigiDollarWidgetTests::paymasterClientSessionActionMatrix()
+{
+    QFETCH(QString, state);
+    QFETCH(QString, artifact);
+    QFETCH(QString, attempt_state);
+    QFETCH(QString, pending_phase);
+    QFETCH(QString, primary_text);
+    QFETCH(bool, retry_visible);
+    QFETCH(bool, fallback_visible);
+    QFETCH(bool, recover_visible);
+    QFETCH(bool, abandon_visible);
+    QFETCH(bool, more_visible);
+
+    std::unique_ptr<const PlatformStyle> platform_style(
+        PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget send_widget(platform_style.get());
+    send_widget.setPaymasterSessionForTesting(
+        state, artifact, true,
+        QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"),
+        3.25, attempt_state, pending_phase);
+
+    QPushButton* primary = send_widget.findChild<QPushButton*>(
+        QStringLiteral("paymasterSessionPrimaryAction"));
+    QPushButton* retry = send_widget.findChild<QPushButton*>(
+        QStringLiteral("retryPaymasterSession"));
+    QPushButton* fallback = send_widget.findChild<QPushButton*>(
+        QStringLiteral("fallbackPaymasterSession"));
+    QPushButton* recover = send_widget.findChild<QPushButton*>(
+        QStringLiteral("recoverPaymasterSession"));
+    QPushButton* abandon = send_widget.findChild<QPushButton*>(
+        QStringLiteral("abandonUnsignedPaymasterSession"));
+    QPushButton* more = send_widget.findChild<QPushButton*>(
+        QStringLiteral("paymasterSessionMoreOptions"));
+    QLineEdit* address = send_widget.findChild<QLineEdit*>(
+        QStringLiteral("addressEdit"));
+    QLineEdit* amount = send_widget.findChild<QLineEdit*>(
+        QStringLiteral("amountEdit"));
+    QVERIFY(primary && retry && fallback && recover && abandon && more);
+    QVERIFY(address && amount);
+
+    QCOMPARE(primary->text(), primary_text);
+    QCOMPARE(!retry->isHidden(), retry_visible);
+    QCOMPARE(!fallback->isHidden(), fallback_visible);
+    QCOMPARE(!recover->isHidden(), recover_visible);
+    QCOMPARE(!abandon->isHidden(), abandon_visible);
+    QCOMPARE(!more->isHidden(), more_visible);
+    QVERIFY(address->isReadOnly());
+    QVERIFY(amount->isReadOnly());
+}
+
+void DigiDollarWidgetTests::paymasterClientSessionRpcActionsAreBound()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(
+        *test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(
+        m_node, test, "qt-paymaster-client-session-actions");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
+    QStringList commands;
+    QStringList resolve_actions;
+    std::vector<UniValue> send_parameters;
+    send_widget.setPaymasterRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params) {
+            if (command == "getpaymasterclientsafetystatus") {
+                return PaymasterClientSafetyStatus();
+            }
+            commands.push_back(QString::fromStdString(command));
+            if (command == "resolvepaymastersession") {
+                resolve_actions.push_back(
+                    QString::fromStdString(params[1].get_str()));
+                return PaymasterSessionView(
+                    "INPUTS_RESERVED", "none", "CANDIDATE");
+            }
+            if (command == "senddigidollar") {
+                send_parameters.push_back(params);
+                return PaymasterSessionView(
+                    "INPUTS_RESERVED", "none", "CANDIDATE");
+            }
+            throw std::runtime_error("unexpected Paymaster RPC");
+        });
+    send_widget.setWalletModel(mini_gui.walletModel.get());
+    commands.clear();
+    send_widget.setPaymasterSessionForTesting(
+        QStringLiteral("INPUTS_RESERVED"), QStringLiteral("none"), true,
+        QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"),
+        3.25, QStringLiteral("CANDIDATE"));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "refreshPaymasterSessionState", Qt::DirectConnection));
+    QVERIFY(QMetaObject::invokeMethod(
+        &send_widget, "retryPaymasterSession", Qt::DirectConnection));
+    QPushButton* primary = send_widget.findChild<QPushButton*>(
+        QStringLiteral("paymasterSessionPrimaryAction"));
+    QVERIFY(primary != nullptr);
+    QCOMPARE(primary->text(), QStringLiteral("Try another Paymaster"));
+    primary->click();
+
+    QCOMPARE(resolve_actions,
+             QStringList({QStringLiteral("refresh"),
+                          QStringLiteral("retry_same"),
+                          QStringLiteral("fallback")}));
+    QCOMPARE(commands,
+             QStringList({QStringLiteral("resolvepaymastersession"),
+                          QStringLiteral("resolvepaymastersession"),
+                          QStringLiteral("resolvepaymastersession"),
+                          QStringLiteral("senddigidollar")}));
+    QCOMPARE(send_parameters.size(), size_t{1});
+    const UniValue& options = send_parameters.front()[5];
+    QCOMPARE(options.find_value("prepare_only").get_bool(), true);
+    QVERIFY(options.find_value("authorization_commitment").isNull());
+    QCOMPARE(QString::fromStdString(options.find_value("request_id").get_str()),
+             QStringLiteral("00000000-0000-4000-8000-000000000001"));
+}
+
+void DigiDollarWidgetTests::paymasterClientDatabaseReadErrorIsActionable()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(
+        *test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(
+        m_node, test, "qt-paymaster-client-database-error");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+
+    DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
+    QString title;
+    QString message;
+    send_widget.setDialogHandlerForTesting(
+        [&](QMessageBox::Icon, const QString& dialog_title,
+            const QString& dialog_message, QMessageBox::StandardButtons,
+            QMessageBox::StandardButton) {
+            title = dialog_title;
+            message = dialog_message;
+            return QMessageBox::Ok;
+        });
+    send_widget.setPaymasterRpcExecutorForTesting(
+        [](const std::string& command, const UniValue&) {
+            if (command == "getpaymasterclientsafetystatus") {
+                return PaymasterClientSafetyStatus();
+            }
+            if (command == "senddigidollar") {
+                throw std::runtime_error("PAYMASTER_SESSION_DATABASE_READ");
+            }
+            throw std::runtime_error("unexpected Paymaster RPC");
+        });
+    send_widget.setWalletModel(mini_gui.walletModel.get());
+    send_widget.setPaymasterSessionForTesting(
+        QStringLiteral("AWAITING_USER_SIGNATURE"), QStringLiteral("none"),
+        true, QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"),
+        3.25, QStringLiteral("QUOTED"));
+
+    QPushButton* primary = send_widget.findChild<QPushButton*>(
+        QStringLiteral("paymasterSessionPrimaryAction"));
+    QVERIFY(primary != nullptr);
+    primary->click();
+
+    QCOMPARE(title, QStringLiteral("Paymaster wallet data unavailable"));
+    QVERIFY(message.contains(QStringLiteral("authoritative persisted session state")));
+    QVERIFY(message.contains(QStringLiteral("existing reservations or prior authorizations")));
+    QVERIFY(message.contains(QStringLiteral("Preserve the wallet backup and debug log")));
+    QVERIFY(message.contains(QStringLiteral("PAYMASTER_SESSION_DATABASE_READ")));
+    QVERIFY(!message.contains(QStringLiteral("Wallet synchronization status")));
+    QVERIFY(!message.contains(QStringLiteral("Network connection")));
+    QVERIFY(!message.contains(QStringLiteral("Available DigiDollar balance")));
+}
+
+void DigiDollarWidgetTests::paymasterClientControlsAreAccessible()
+{
+    std::unique_ptr<const PlatformStyle> platform_style(
+        PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget send_widget(platform_style.get());
+    QTableWidget* table = send_widget.findChild<QTableWidget*>(
+        QStringLiteral("paymasterOffers"));
+    QLabel* status = send_widget.findChild<QLabel*>(
+        QStringLiteral("paymasterOffersStatus"));
+    QPushButton* refresh = send_widget.findChild<QPushButton*>(
+        QStringLiteral("refreshPaymasterOffers"));
+    QSpinBox* fee_cap = send_widget.findChild<QSpinBox*>(
+        QStringLiteral("paymasterFeeCap"));
+    QSpinBox* attempts = send_widget.findChild<QSpinBox*>(
+        QStringLiteral("paymasterMaximumAttempts"));
+    QComboBox* privacy = send_widget.findChild<QComboBox*>(
+        QStringLiteral("paymasterPrivacy"));
+    QComboBox* selection = send_widget.findChild<QComboBox*>(
+        QStringLiteral("paymasterSelection"));
+    QVERIFY(table && status && refresh && fee_cap && attempts && privacy && selection);
+
+    QCOMPARE(table->selectionMode(), QAbstractItemView::NoSelection);
+    QCOMPARE(table->focusPolicy(), Qt::StrongFocus);
+    QVERIFY(table->alternatingRowColors());
+    QVERIFY(table->verticalHeader()->isHidden());
+    QCOMPARE(table->horizontalHeader()->objectName(),
+             QStringLiteral("paymasterOffersHeader"));
+    QVERIFY(!table->accessibleName().isEmpty());
+    QVERIFY(!table->accessibleDescription().isEmpty());
+    QCOMPARE(status->accessibleDescription(), status->text());
+    QVERIFY(!refresh->accessibleDescription().isEmpty());
+    QVERIFY(!fee_cap->accessibleName().isEmpty());
+    QVERIFY(!attempts->accessibleName().isEmpty());
+    QVERIFY(!privacy->accessibleName().isEmpty());
+    QVERIFY(!selection->accessibleName().isEmpty());
+    QCOMPARE(table->horizontalHeaderItem(0)->text(), QStringLiteral("Provider"));
+    QCOMPARE(table->horizontalHeaderItem(5)->text(), QStringLiteral("Valid until"));
+
+    QAccessibleInterface* interface = QAccessible::queryAccessibleInterface(table);
+    QVERIFY(interface != nullptr);
+    QCOMPARE(interface->role(), QAccessible::Table);
+
+    table->setRowCount(2);
+    table->setItem(0, 0, new QTableWidgetItem(QStringLiteral("Provider A")));
+    table->setItem(1, 0, new QTableWidgetItem(QStringLiteral("Provider B")));
+    send_widget.resize(1200, 900);
+    send_widget.show();
+    QFrame* advanced = send_widget.findChild<QFrame*>(
+        QStringLiteral("advancedPaymasterSettings"));
+    QVERIFY(advanced != nullptr);
+    advanced->show();
+    table->show();
+    QCoreApplication::processEvents();
+    table->setCurrentCell(0, 0);
+    QTest::keyClick(table, Qt::Key_Down);
+    QCOMPARE(table->currentRow(), 1);
+}
+
+void DigiDollarWidgetTests::paymasterOfferTableRendersGreenTheme()
+{
+    struct RenderStats {
+        bool stylesheet_loaded{false};
+        bool table_visible{false};
+        int total_pixels{0};
+        int green_pixels{0};
+        int blue_pixels{0};
+    };
+
+    const QString original_stylesheet = qApp->styleSheet();
+    const QPalette original_palette = qApp->palette();
+    const auto render_theme = [](const QString& resource) {
+        RenderStats stats;
+        QFile file(resource);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return stats;
+        stats.stylesheet_loaded = true;
+        qApp->setStyleSheet(QString::fromUtf8(file.readAll()));
+
+        std::unique_ptr<const PlatformStyle> platform_style(
+            PlatformStyle::instantiate("other"));
+        DigiDollarSendWidget send_widget(platform_style.get());
+        QRadioButton* paymaster = send_widget.findChild<QRadioButton*>(
+            QStringLiteral("feeFundingPaymaster"));
+        QPushButton* advanced_toggle = send_widget.findChild<QPushButton*>(
+            QStringLiteral("advancedPaymasterSettingsToggle"));
+        QTableWidget* table = send_widget.findChild<QTableWidget*>(
+            QStringLiteral("paymasterOffers"));
+        if (!paymaster || !advanced_toggle || !table) return stats;
+        paymaster->setChecked(true);
+        advanced_toggle->setChecked(true);
+        table->setRowCount(1);
+        table->setItem(0, 0, new QTableWidgetItem(QStringLiteral("Provider")));
+        send_widget.resize(1500, 1200);
+        send_widget.show();
+        table->resize(1200, 160);
+        QCoreApplication::processEvents();
+        QTest::qWait(25);
+        stats.table_visible = table->isVisibleTo(&send_widget);
+
+        QHeaderView* horizontal_header = table->horizontalHeader();
+        const QImage header = horizontal_header->grab().toImage()
+                                  .convertToFormat(QImage::Format_RGB32);
+        // The minimal Qt platform can leave an unpainted viewport strip after
+        // the last section. Restrict the sample to the actual header sections
+        // so that the window size does not dilute their rendered colour.
+        const int painted_width = std::min(header.width(), horizontal_header->length());
+        for (int y = 1; y + 1 < header.height(); ++y) {
+            for (int x = 1; x + 1 < painted_width; ++x) {
+                const QColor color = QColor::fromRgb(header.pixel(x, y));
+                ++stats.total_pixels;
+                if (color.green() > color.red() + 20 &&
+                    color.green() > color.blue() + 10) {
+                    ++stats.green_pixels;
+                }
+                if (color.blue() > color.green() + 30) {
+                    ++stats.blue_pixels;
+                }
+            }
+        }
+        return stats;
+    };
+
+    const RenderStats light = render_theme(QStringLiteral(":/css/light"));
+    const RenderStats dark = render_theme(QStringLiteral(":/css/dark"));
+    qApp->setStyleSheet(original_stylesheet);
+    qApp->setPalette(original_palette);
+    QCoreApplication::processEvents();
+
+    const auto require_green_header = [](const RenderStats& stats,
+                                         const QString& theme) {
+        QVERIFY2(stats.stylesheet_loaded,
+                 qPrintable(QStringLiteral("could not load %1 stylesheet resource").arg(theme)));
+        QVERIFY2(stats.table_visible,
+                 qPrintable(QStringLiteral("Paymaster offer table was not visible under %1").arg(theme)));
+        QVERIFY(stats.total_pixels > 0);
+        QVERIFY2(stats.green_pixels * 100 >= stats.total_pixels * 40,
+                 qPrintable(QStringLiteral(
+                     "%1 rendered Paymaster header is not predominantly green (%2/%3 green, %4 blue pixels)")
+                                .arg(theme)
+                                .arg(stats.green_pixels)
+                                .arg(stats.total_pixels)
+                                .arg(stats.blue_pixels)));
+        QVERIFY2(stats.blue_pixels * 100 < stats.total_pixels * 5,
+                 qPrintable(QStringLiteral(
+                     "%1 rendered Paymaster header leaked the DGB blue palette (%2/%3 blue pixels)")
+                                .arg(theme)
+                                .arg(stats.blue_pixels)
+                                .arg(stats.total_pixels)));
+    };
+    require_green_header(light, QStringLiteral("light"));
+    require_green_header(dark, QStringLiteral("dark"));
+}
+
 void DigiDollarWidgetTests::overviewPrivacyMaskHidesAmountUnits()
 {
     DigiDollarOverviewWidget overviewWidget;
@@ -5782,8 +6585,8 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
             // Qt styles the viewport, headers, and corner button independently;
             // require all three overrides to prevent the global DGB blue from leaking through.
             QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers"),
-            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers QHeaderView::section"),
-            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers QTableCornerButton::section"),
+            QStringLiteral("QHeaderView#paymasterOffersHeader::section"),
+            QStringLiteral("QTableWidget#paymasterOffers QTableCornerButton::section"),
             QStringLiteral("DigiDollarMintWidget QFrame#amountFrame"),
             QStringLiteral("DigiDollarRedeemWidget QFrame#positionFrame"),
             QStringLiteral("DigiDollarRedeemWidget QPushButton#coinControlButton"),
@@ -5825,6 +6628,40 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
                  qPrintable(QString("%1 must include the green primary DigiDollar accent").arg(theme)));
         QVERIFY2(!css.contains(QStringLiteral("QToolBar > QToolButton#digiDollarToolButton:checked {\n    background-color:#0066CC")),
                  qPrintable(QString("%1 must not style the checked DigiDollar top-nav button with the DGB blue accent").arg(theme)));
+
+        const int offer_theme_start = css.indexOf(
+            QStringLiteral("DigiDollarSendWidget QTableWidget#paymasterOffers {"));
+        const int session_theme_start = css.indexOf(
+            QStringLiteral("/* Send $DD: focused protected Paymaster session."),
+            offer_theme_start);
+        QVERIFY2(offer_theme_start >= 0 && session_theme_start > offer_theme_start,
+                 qPrintable(QStringLiteral("%1 must contain one bounded Paymaster offer-table theme block")
+                                .arg(theme)));
+        const QString offer_theme = css.mid(
+            offer_theme_start, session_theme_start - offer_theme_start);
+        const QStringList offer_rules{
+            QStringLiteral("QTableWidget#paymasterOffers {"),
+            QStringLiteral("QTableWidget#paymasterOffers::item {"),
+            QStringLiteral("QTableWidget#paymasterOffers::item:alternate {"),
+            QStringLiteral("QHeaderView#paymasterOffersHeader::section"),
+            QStringLiteral("QTableWidget#paymasterOffers QTableCornerButton::section"),
+        };
+        for (const QString& rule : offer_rules) {
+            QVERIFY2(offer_theme.contains(rule),
+                     qPrintable(QStringLiteral("%1 Paymaster offer theme is missing %2")
+                                    .arg(theme, rule)));
+        }
+        const QStringList offer_blue_colors{
+            QStringLiteral("#002352"), QStringLiteral("#003366"),
+            QStringLiteral("#0066cc"), QStringLiteral("#0088ff"),
+            QStringLiteral("#0044aa"), QStringLiteral("#0055aa"),
+            QStringLiteral("#a7c6ed"), QStringLiteral("#9bb8e8"),
+        };
+        for (const QString& color : offer_blue_colors) {
+            QVERIFY2(!offer_theme.contains(color, Qt::CaseInsensitive),
+                     qPrintable(QStringLiteral("%1 Paymaster offer preview must not reuse DGB blue color %2")
+                                    .arg(theme, color)));
+        }
 
         const int paymasterThemeStart = css.indexOf(
             QStringLiteral("Paymaster operator console — DigiDollar visual system v2"));

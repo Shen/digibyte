@@ -6422,8 +6422,8 @@ DigiDollarSendWidget QTableWidget#paymasterOffers::item:alternate {
     background-color: #e6f7ec;
 }
 
-DigiDollarSendWidget QTableWidget#paymasterOffers QHeaderView::section,
-DigiDollarSendWidget QTableWidget#paymasterOffers QTableCornerButton::section {
+QHeaderView#paymasterOffersHeader::section,
+QTableWidget#paymasterOffers QTableCornerButton::section {
     background-color: #1f9d57;
     color: #ffffff;
     border: none;

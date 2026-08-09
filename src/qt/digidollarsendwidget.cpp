@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <exception>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -665,6 +666,7 @@ void DigiDollarSendWidget::setupFeeSection()
     m_feeCapSpin->setValue(100);
     m_feeCapSpin->setSuffix(tr(" cents"));
     m_feeCapSpin->setToolTip(tr("Hard maximum Paymaster service fee; it can never be exceeded"));
+    m_feeCapSpin->setAccessibleName(tr("Maximum additional Paymaster service fee"));
     advanced_layout->addWidget(new QLabel(tr("Maximum additional Paymaster fee:"), m_advancedPaymasterFrame), 2, 0);
     advanced_layout->addWidget(m_feeCapSpin, 2, 1);
 
@@ -673,6 +675,7 @@ void DigiDollarSendWidget::setupFeeSection()
     m_maxAttemptsSpin->setRange(1, 16);
     m_maxAttemptsSpin->setValue(3);
     m_maxAttemptsSpin->setToolTip(tr("Maximum number of strictly sequential provider attempts"));
+    m_maxAttemptsSpin->setAccessibleName(tr("Maximum Paymaster provider attempts"));
     advanced_layout->addWidget(new QLabel(tr("Maximum provider attempts:"), m_advancedPaymasterFrame), 3, 0);
     advanced_layout->addWidget(m_maxAttemptsSpin, 3, 1);
 
@@ -683,10 +686,12 @@ void DigiDollarSendWidget::setupFeeSection()
     m_privacyCombo->setToolTip(tr(
         "Paymaster privacy improves pseudonymity but does not guarantee anonymity. "
         "The selected provider necessarily receives the payment details needed to sign."));
+    m_privacyCombo->setAccessibleName(tr("Paymaster privacy profile"));
     m_selectionCombo = new NoWheelComboBox(m_advancedPaymasterFrame);
     m_selectionCombo->setObjectName("paymasterSelection");
     m_selectionCombo->addItem(tr("Lowest total cost"), QStringLiteral("lowest_total_cost"));
     m_selectionCombo->addItem(tr("Privacy weighted"), QStringLiteral("privacy_weighted"));
+    m_selectionCombo->setAccessibleName(tr("Paymaster provider selection policy"));
     advanced_layout->addWidget(new QLabel(tr("Privacy:"), m_advancedPaymasterFrame), 4, 0);
     advanced_layout->addWidget(m_privacyCombo, 4, 1);
     advanced_layout->addWidget(new QLabel(tr("Provider selection:"), m_advancedPaymasterFrame), 5, 0);
@@ -694,23 +699,40 @@ void DigiDollarSendWidget::setupFeeSection()
 
     m_refreshOffersButton = new QPushButton(tr("Show currently eligible Paymaster offers"), m_advancedPaymasterFrame);
     m_refreshOffersButton->setObjectName("refreshPaymasterOffers");
+    m_refreshOffersButton->setAccessibleDescription(
+        tr("Load a read-only preview of currently eligible Paymaster offers"));
     advanced_layout->addWidget(m_refreshOffersButton, 6, 0, 1, 2);
     m_offersStatus = new QLabel(
         tr("Enter a transfer amount, then request offers if you want to inspect them manually."),
         m_advancedPaymasterFrame);
     m_offersStatus->setObjectName("paymasterOffersStatus");
     m_offersStatus->setWordWrap(true);
+    m_offersStatus->setAccessibleDescription(m_offersStatus->text());
     DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::INFO);
     advanced_layout->addWidget(m_offersStatus, 7, 0, 1, 2);
     m_offersTable = new QTableWidget(0, 6, m_advancedPaymasterFrame);
     m_offersTable->setObjectName("paymasterOffers");
+    QHeaderView* offers_header = m_offersTable->horizontalHeader();
+    offers_header->setObjectName("paymasterOffersHeader");
+    // QTableWidget constructs and may polish its internal header before the
+    // caller can assign an object name. Re-polish it so the scoped header rule
+    // wins immediately even when the application stylesheet was loaded first.
+    offers_header->style()->unpolish(offers_header);
+    offers_header->style()->polish(offers_header);
+    // Row numbers do not add information to this read-only preview and would
+    // otherwise expose a separately styled header strip beside the DD table.
+    m_offersTable->verticalHeader()->hide();
+    m_offersTable->setAccessibleName(tr("Eligible Paymaster offer preview"));
+    m_offersTable->setAccessibleDescription(tr(
+        "Read-only preview. Core authenticates and confirms the exact selected offer before signing."));
     m_offersTable->setHorizontalHeaderLabels({tr("Provider"), tr("Payment model"), tr("Service fee"),
                                                tr("Total $DD"), tr("Reliability"), tr("Valid until")});
-    m_offersTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    offers_header->setSectionResizeMode(QHeaderView::Stretch);
     m_offersTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_offersTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_offersTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_offersTable->setFocusPolicy(Qt::NoFocus);
+    m_offersTable->setFocusPolicy(Qt::StrongFocus);
+    m_offersTable->setAlternatingRowColors(true);
     m_offersTable->setToolTip(tr(
         "Offer preview only. Core authenticates and selects the exact offer when the transfer is prepared."));
     m_offersTable->setMinimumHeight(130);
@@ -939,12 +961,13 @@ void DigiDollarSendWidget::connectSignals()
         m_feeModeCombo->setCurrentIndex(m_feeModeCombo->findData(QStringLiteral("paymaster")));
     });
     connect(m_feeModeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &DigiDollarSendWidget::onFeeModeChanged);
+            this, [this] {
+                invalidatePaymasterOfferPreview();
+                onFeeModeChanged();
+            });
     connect(m_subtractPaymasterFeeCheck, &QCheckBox::toggled, this, [this](bool checked) {
         if (!checked) m_sendAllSpendableDD = false;
-        m_paymasterPreviewRecipientCents = -1;
-        m_paymasterPreviewServiceFeeCents = -1;
-        m_paymasterPreviewTotalCents = -1;
+        invalidatePaymasterOfferPreview();
         updateFeeDisplay();
     });
     connect(m_paymasterExplanationButton, &QPushButton::clicked,
@@ -958,16 +981,19 @@ void DigiDollarSendWidget::connectSignals()
     connect(m_configureClientSafetyButton, &QPushButton::clicked,
             this, &DigiDollarSendWidget::configureClientSafetyPolicy);
     connect(m_feeCapSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
-        m_paymasterPreviewRecipientCents = -1;
-        m_paymasterPreviewServiceFeeCents = -1;
-        m_paymasterPreviewTotalCents = -1;
+        invalidatePaymasterOfferPreview();
         updateFeeDisplay();
     });
     connect(m_privacyCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         const bool high = m_privacyCombo->currentData().toString() == QStringLiteral("high");
         if (high) m_maxAttemptsSpin->setValue(1);
         m_maxAttemptsSpin->setEnabled(!high);
+        invalidatePaymasterOfferPreview();
     });
+    connect(m_selectionCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this] { invalidatePaymasterOfferPreview(); });
+    connect(m_maxAttemptsSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this] { invalidatePaymasterOfferPreview(); });
     connect(m_refreshOffersButton, &QPushButton::clicked,
             this, &DigiDollarSendWidget::refreshPaymasterOffers);
     connect(m_retrySessionButton, &QPushButton::clicked,
@@ -1032,6 +1058,7 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         m_paymasterCostValue->setText(tr("—"));
         m_paymasterExpiryValue->setText(tr("—"));
         m_paymasterSessionFrame->hide();
+        invalidatePaymasterOfferPreview();
     }
     m_walletModel = model;
 
@@ -1132,9 +1159,7 @@ void DigiDollarSendWidget::onAddressChanged()
 void DigiDollarSendWidget::onAmountChanged()
 {
     if (!m_settingSweepAmount) m_sendAllSpendableDD = false;
-    m_paymasterPreviewRecipientCents = -1;
-    m_paymasterPreviewServiceFeeCents = -1;
-    m_paymasterPreviewTotalCents = -1;
+    invalidatePaymasterOfferPreview();
 
     // Validate amount format
     updateAmountValidation();
@@ -1713,7 +1738,7 @@ void DigiDollarSendWidget::configureClientSafetyPolicy()
     m_clientSafetyStatus->setText(tr("Saving wallet-local Paymaster service-fee limits…"));
     QPointer<DigiDollarSendWidget> guard{this};
     WalletModel* requested_model = m_walletModel;
-    m_walletModel->executeRpcAsync("setpaymasterclientsafetypolicy", std::move(params),
+    executePaymasterRpcAsync("setpaymasterclientsafetypolicy", std::move(params),
         [guard, requested_model](UniValue result, QString error) {
             if (!guard || guard->m_walletModel != requested_model) return;
             guard->m_configureClientSafetyButton->setEnabled(true);
@@ -1753,7 +1778,7 @@ void DigiDollarSendWidget::refreshClientSafetyStatus()
     updateClientSafetyDisplay();
     QPointer<DigiDollarSendWidget> guard{this};
     WalletModel* requested_model = m_walletModel;
-    m_walletModel->executeRpcAsync("getpaymasterclientsafetystatus", UniValue{UniValue::VARR},
+    executePaymasterRpcAsync("getpaymasterclientsafetystatus", UniValue{UniValue::VARR},
         [guard, requested_model](UniValue result, QString error) {
             if (!guard || guard->m_walletModel != requested_model) return;
             guard->m_clientSafetyStatusKnown = true;
@@ -1857,18 +1882,41 @@ void DigiDollarSendWidget::setPaymasterBusy(bool busy)
     updatePaymasterFocusMode();
 }
 
+void DigiDollarSendWidget::invalidatePaymasterOfferPreview()
+{
+    if (!m_paymasterRequestId.isEmpty()) return;
+    const bool had_preview =
+        m_paymasterPreviewRecipientCents >= 0 ||
+        m_paymasterPreviewServiceFeeCents >= 0 ||
+        m_paymasterPreviewTotalCents >= 0 ||
+        (m_offersTable && m_offersTable->rowCount() > 0);
+    m_paymasterPreviewRecipientCents = -1;
+    m_paymasterPreviewServiceFeeCents = -1;
+    m_paymasterPreviewTotalCents = -1;
+    if (m_offersTable) m_offersTable->setRowCount(0);
+    if (had_preview && m_offersStatus) {
+        DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::INFO);
+        m_offersStatus->setText(tr(
+            "Offer inputs changed. Request a fresh preview before relying on provider or fee details."));
+        m_offersStatus->setAccessibleDescription(m_offersStatus->text());
+    }
+}
+
 void DigiDollarSendWidget::refreshPaymasterOffers()
 {
     if (!m_walletModel || m_paymasterBusy) return;
+    invalidatePaymasterOfferPreview();
     const CAmount amount_cents = static_cast<CAmount>(std::llround(m_amountEdit->text().toDouble() * 100));
     if (amount_cents <= 0) {
         DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::ACTION);
         m_offersStatus->setText(tr("! Action required · enter a valid $DD amount before requesting Paymaster offers."));
+        m_offersStatus->setAccessibleDescription(m_offersStatus->text());
         showWarning(tr("Paymaster offers"), tr("Enter an amount before refreshing offers."));
         return;
     }
     DigiDollarStatus::SetBanner(m_offersStatus, DigiDollarStatus::Kind::WAITING);
     m_offersStatus->setText(tr("… Looking for eligible Paymaster offers…"));
+    m_offersStatus->setAccessibleDescription(m_offersStatus->text());
     setPaymasterBusy(true);
     UniValue params{UniValue::VARR};
     params.push_back(amount_cents);
@@ -1878,7 +1926,7 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
     params.push_back(std::move(preview_options));
     QPointer<DigiDollarSendWidget> guard{this};
-    m_walletModel->executeRpcAsync("getpaymasteroffers", std::move(params),
+    executePaymasterRpcAsync("getpaymasteroffers", std::move(params),
         [guard](UniValue result, QString error) {
             if (!guard) return;
             guard->setPaymasterBusy(false);
@@ -1890,6 +1938,8 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                 DigiDollarStatus::SetBanner(guard->m_offersStatus, DigiDollarStatus::Kind::ERR);
                 guard->m_offersStatus->setText(guard->tr(
                     "✕ Offers are currently unavailable. No provider was selected and no fee was authorized."));
+                guard->m_offersStatus->setAccessibleDescription(
+                    guard->m_offersStatus->text());
                 guard->showWarning(guard->tr("Paymaster offers unavailable"), error);
                 return;
             }
@@ -1931,6 +1981,8 @@ void DigiDollarSendWidget::refreshPaymasterOffers()
                        ? guard->tr("… No exact offer is available. Try a sponsored offer, another provider or a slightly different total.")
                        : guard->tr("… No eligible public offer currently matches this amount and your limits."))
                 : guard->tr("✓ %1 eligible offer(s) shown as a preview. Core will authenticate, bind and re-confirm the exact selection before signing.").arg(row));
+            guard->m_offersStatus->setAccessibleDescription(
+                guard->m_offersStatus->text());
             guard->updateFeeDisplay();
         });
 }
@@ -1975,6 +2027,36 @@ UniValue DigiDollarSendWidget::buildPaymasterSendParams(const QString& address, 
     return params;
 }
 
+void DigiDollarSendWidget::executePaymasterRpcAsync(
+    std::string command, UniValue params, WalletModel::RpcCallback callback)
+{
+    if (m_paymasterRpcExecutorForTesting) {
+        UniValue result;
+        QString error;
+        try {
+            result = m_paymasterRpcExecutorForTesting(command, params);
+        } catch (const UniValue& rpc_error) {
+            const UniValue& message = rpc_error.find_value("message");
+            error = message.isStr()
+                ? QString::fromStdString(message.get_str())
+                : QString::fromStdString(rpc_error.write());
+        } catch (const std::exception& exception) {
+            error = QString::fromUtf8(exception.what());
+        } catch (...) {
+            error = tr("Unknown RPC error");
+        }
+        callback(std::move(result), std::move(error));
+        return;
+    }
+
+    if (!m_walletModel) {
+        callback(UniValue{}, tr("Wallet is not available"));
+        return;
+    }
+    m_walletModel->executeRpcAsync(
+        std::move(command), std::move(params), std::move(callback));
+}
+
 void DigiDollarSendWidget::executePaymasterTransfer(const QString& address, double amount, bool allow_unlock)
 {
     // The first call prepares and authenticates an offer only. Signing is never
@@ -1994,7 +2076,7 @@ void DigiDollarSendWidget::executePaymasterTransfer(const QString& address, doub
     m_paymasterStateValue->setText(tr("Contacting Paymaster Network…"));
     const CAmount amount_cents = static_cast<CAmount>(std::llround(amount * 100));
     QPointer<DigiDollarSendWidget> guard{this};
-    m_walletModel->executeRpcAsync("senddigidollar", buildPaymasterSendParams(address, amount_cents),
+    executePaymasterRpcAsync("senddigidollar", buildPaymasterSendParams(address, amount_cents),
         [guard, address, amount, unlock = std::move(unlock)](UniValue result, QString error) mutable {
             if (guard) guard->handlePaymasterResult(result, error, address, amount);
             unlock.reset();
@@ -2273,9 +2355,10 @@ bool DigiDollarSendWidget::confirmPaymasterSelectionBeforeSigning(
         .arg(formatDDAmount(std::max(
             0.0, m_paymasterInitialAvailableBalance -
                      selection.user_total_cents / 100.0)));
-    if (QMessageBox::question(this, tr("Confirm exact Paymaster authorization"), prompt,
-                              QMessageBox::Yes | QMessageBox::Cancel,
-                              QMessageBox::Cancel) != QMessageBox::Yes) {
+    if (showDialog(QMessageBox::Question,
+                   tr("Confirm exact Paymaster authorization"), prompt,
+                   QMessageBox::Yes | QMessageBox::Cancel,
+                   QMessageBox::Cancel) != QMessageBox::Yes) {
         m_paymasterStateValue->setText(tr("Paymaster authorization paused by user"));
         return false;
     }
@@ -2308,7 +2391,7 @@ void DigiDollarSendWidget::refreshPaymasterSessionState()
     params.push_back("refresh");
     setPaymasterBusy(true);
     QPointer<DigiDollarSendWidget> guard{this};
-    m_walletModel->executeRpcAsync("resolvepaymastersession", std::move(params),
+    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
         [guard](UniValue result, QString error) {
             if (!guard) return;
             guard->setPaymasterBusy(false);
@@ -2330,7 +2413,7 @@ void DigiDollarSendWidget::retryPaymasterSession()
     params.push_back("retry_same");
     setPaymasterBusy(true);
     QPointer<DigiDollarSendWidget> guard{this};
-    m_walletModel->executeRpcAsync("resolvepaymastersession", std::move(params),
+    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
         [guard](UniValue result, QString error) {
             if (!guard) return;
             guard->setPaymasterBusy(false);
@@ -2353,7 +2436,7 @@ void DigiDollarSendWidget::fallbackPaymasterSession()
     params.push_back("fallback");
     params.push_back(UniValue{UniValue::VOBJ});
     setPaymasterBusy(true);
-    m_walletModel->executeRpcAsync("resolvepaymastersession", std::move(params),
+    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
         [guard = QPointer<DigiDollarSendWidget>(this)](UniValue result, QString error) {
             if (!guard) return;
             guard->setPaymasterBusy(false);
@@ -2386,8 +2469,8 @@ void DigiDollarSendWidget::recoverPaymasterSessionToSelf()
                "Recovery will not continue because Qt must never guess or downgrade it."));
         return;
     }
-    const auto answer = QMessageBox::warning(
-        this, tr("Prepare alternative-provider self-recovery"),
+    const auto answer = showDialog(
+        QMessageBox::Warning, tr("Prepare alternative-provider self-recovery"),
         tr("The wallet will first select and authenticate a different recovery provider, then "
            "show the exact wallet returns, provider, fees, privacy profile and Core authorization "
            "commitment before any recovery transaction signature. The original authorized "
@@ -2411,8 +2494,8 @@ void DigiDollarSendWidget::abandonUnsignedPaymasterSession()
         !m_paymasterSessionPersisted) {
         return;
     }
-    if (QMessageBox::question(
-            this, tr("Cancel unsigned Paymaster transfer"),
+    if (showDialog(
+            QMessageBox::Question, tr("Cancel unsigned Paymaster transfer"),
             tr("Core will release the reserved $DD only if it can prove that no "
                "transaction signature or final transaction exists. If any spending "
                "authorization may exist, cancellation is refused and the protected "
@@ -2432,7 +2515,7 @@ void DigiDollarSendWidget::abandonUnsignedPaymasterSession()
     setPaymasterBusy(true);
     m_paymasterStateValue->setText(
         tr("Verifying that the unsigned transfer can be canceled safely…"));
-    m_walletModel->executeRpcAsync(
+    executePaymasterRpcAsync(
         "resolvepaymastersession", std::move(params),
         [guard = QPointer<DigiDollarSendWidget>(this)](UniValue result,
                                                        QString error) {
@@ -2528,7 +2611,7 @@ void DigiDollarSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock
         m_paymasterRecoveryAuthorizationCommitment.isEmpty()
             ? tr("Preparing authenticated alternative recovery…")
             : tr("Submitting the exact confirmed recovery authorization…"));
-    m_walletModel->executeRpcAsync(
+    executePaymasterRpcAsync(
         "resolvepaymastersession", buildAlternativePaymasterRecoveryParams(),
         [guard = QPointer<DigiDollarSendWidget>(this), unlock = std::move(unlock)](
             UniValue result, QString error) mutable {
@@ -2652,8 +2735,9 @@ bool DigiDollarSendWidget::confirmPaymasterRecoveryBeforeSigning(
                  .toLocalTime().toString(Qt::ISODate))
         .arg(selection.authorization_commitment)
         .arg(changed_fields.join(tr(", ")));
-    if (QMessageBox::question(
-            this, tr("Confirm exact Paymaster recovery authorization"), prompt,
+    if (showDialog(
+            QMessageBox::Question,
+            tr("Confirm exact Paymaster recovery authorization"), prompt,
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes) {
         m_paymasterRecoveryActive = false;
@@ -3057,17 +3141,31 @@ QString DigiDollarSendWidget::formatUSDAmount(double amount) const
     return QString::number(amount, 'f', 2) + " $USD";
 }
 
-// PHASE 7.3: Error display helper
-void DigiDollarSendWidget::showError(const QString& title, const QString& message)
+QMessageBox::StandardButton DigiDollarSendWidget::showDialog(
+    QMessageBox::Icon icon, const QString& title, const QString& message,
+    QMessageBox::StandardButtons buttons,
+    QMessageBox::StandardButton default_button)
 {
+    if (m_dialogHandlerForTesting) {
+        return m_dialogHandlerForTesting(
+            icon, title, message, buttons, default_button);
+    }
+
     QMessageBox msgBox(this);
-    msgBox.setIcon(QMessageBox::Critical);
+    msgBox.setIcon(icon);
     msgBox.setWindowTitle(title);
     // Backend errors are presentation data, never trusted rich text.
     msgBox.setTextFormat(Qt::PlainText);
     msgBox.setText(message);
-    msgBox.setStandardButtons(QMessageBox::Ok);
-    msgBox.exec();
+    msgBox.setStandardButtons(buttons);
+    msgBox.setDefaultButton(default_button);
+    return static_cast<QMessageBox::StandardButton>(msgBox.exec());
+}
+
+// PHASE 7.3: Error display helper
+void DigiDollarSendWidget::showError(const QString& title, const QString& message)
+{
+    showDialog(QMessageBox::Critical, title, message);
 
     // Dialog text can contain wallet-local payment details or backend data.
     LogPrintf("DigiDollar GUI error displayed\n");
@@ -3076,14 +3174,7 @@ void DigiDollarSendWidget::showError(const QString& title, const QString& messag
 // PHASE 7.3: Warning display helper
 void DigiDollarSendWidget::showWarning(const QString& title, const QString& message)
 {
-    QMessageBox msgBox(this);
-    msgBox.setIcon(QMessageBox::Warning);
-    msgBox.setWindowTitle(title);
-    // Backend warnings are presentation data, never trusted rich text.
-    msgBox.setTextFormat(Qt::PlainText);
-    msgBox.setText(message);
-    msgBox.setStandardButtons(QMessageBox::Ok);
-    msgBox.exec();
+    showDialog(QMessageBox::Warning, title, message);
 
     // Dialog text can contain wallet-local payment details or backend data.
     LogPrintf("DigiDollar GUI warning displayed\n");
@@ -3451,6 +3542,18 @@ void DigiDollarSendWidget::showBackendError(int status, const QString& reasonFai
                 "The node is not currently ready for Paymaster transfers. Check node "
                 "synchronization, txindex and Paymaster prerequisites, or select Own DGB.\n\n"
                 "Technical details: %1").arg(reasonFailed);
+        } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_SESSION_DATABASE_READ"))) {
+            errorTitle = tr("Paymaster wallet data unavailable");
+            errorMessage = tr(
+                "Core could not safely read this wallet's persisted Paymaster session. "
+                "Core stopped rather than continue without authoritative persisted session "
+                "state. It did not create a replacement authorization; existing reservations "
+                "or prior authorizations may remain protected.\n\n"
+                "Do not delete the wallet or repeatedly start a new transfer. Preserve the "
+                "wallet backup and debug log, restart Core once, and check the protected "
+                "session again. If the error remains, use a verified wallet backup or seek "
+                "technical support before changing the wallet files.\n\n"
+                "Technical details: %1").arg(reasonFailed);
         } else if (reasonFailed.contains("Insufficient DGB", Qt::CaseInsensitive)) {
             errorTitle = tr("Not enough DGB for the network fee");
             errorMessage = tr(
@@ -3802,6 +3905,18 @@ void DigiDollarSendWidget::setPaymasterSessionForTesting(
     m_paymasterAddress = address;
     m_paymasterAmount = amount;
     updatePaymasterFocusMode();
+}
+
+void DigiDollarSendWidget::setPaymasterRpcExecutorForTesting(
+    PaymasterRpcExecutorForTesting executor)
+{
+    m_paymasterRpcExecutorForTesting = std::move(executor);
+}
+
+void DigiDollarSendWidget::setDialogHandlerForTesting(
+    DialogHandlerForTesting handler)
+{
+    m_dialogHandlerForTesting = std::move(handler);
 }
 
 void DigiDollarSendWidget::setPrivacy(bool privacy)
