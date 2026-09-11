@@ -16,6 +16,15 @@
 
 <img width="450" type="image/svg+xml" src="./doc/logo_horizontal_github.svg" />
 
+## DigiDollar Paymaster development branch
+
+For the purpose, current design, implementation plan, code review map, and
+verification status of this branch, start with
+**[DigiDollar Paymaster: developer starting point](PAYMASTER.md)**.
+The feature allows a separate provider to fund the DGB miner fee for an
+ordinary DigiDollar transfer. The linked release gate distinguishes dated
+test evidence from outstanding release acceptance.
+
 # Development is now occurring on the DigiByte-Core repo
 
 As of 2020, development has now moved to the DigiByte-Core organization, under the digibyte repo

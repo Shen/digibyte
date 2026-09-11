@@ -5,6 +5,18 @@
 *Document Version: 6.8 - Validated against codebase*
 *Validation Status: Validated Against Codebase (2026-05-20)*
 
+## Paymaster architecture in this branch
+
+For the Paymaster implementation at `bd270044c1`, see the
+[developer starting point](PAYMASTER.md) and
+[implementation reference](doc/digidollar-paymaster-implementation.md).
+It adds collaborative DD transfer construction, wallet authorization and
+persistence, provider discovery, and direct P2P sessions. The resulting
+transaction is an ordinary `DD_TX_TRANSFER`. The broader branch also contains
+arithmetic portability changes in consensus source, which require separate
+equivalence review. Verification is tracked in the
+[Paymaster release gate](doc/digidollar-paymaster-release-gate.md).
+
 ## Executive Summary
 
 ### What is DigiDollar?

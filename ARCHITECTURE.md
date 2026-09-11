@@ -6,6 +6,18 @@
 
 ---
 
+## Paymaster architecture in this branch
+
+For the Paymaster implementation at `bd270044c1`, see the
+[developer starting point](PAYMASTER.md) and
+[implementation reference](doc/digidollar-paymaster-implementation.md).
+It adds collaborative DD transfer construction, wallet authorization and
+persistence, provider discovery, and direct P2P sessions. The resulting
+transaction is an ordinary `DD_TX_TRANSFER`. The broader branch also contains
+arithmetic portability changes in consensus source, which require separate
+equivalence review. Verification is tracked in the
+[Paymaster release gate](doc/digidollar-paymaster-release-gate.md).
+
 ## Executive Summary
 
 DigiByte is a decentralized, open-source blockchain focused on speed, security, and decentralization. This document provides a complete architectural overview of the DigiByte Core implementation, validated against the actual codebase.

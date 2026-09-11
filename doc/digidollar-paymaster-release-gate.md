@@ -1,27 +1,29 @@
 # DigiDollar Paymaster V1 release gate
 
-This matrix maps the 28 normative acceptance criteria in
+**Status review:** 2026-09-11, source commit `bd270044c1` on
+`feature/digidollar-paymaster-v1`. See the [developer starting point](../PAYMASTER.md)
+and [implementation reference](digidollar-paymaster-implementation.md).
+
+This matrix maps the 28 acceptance criteria in
 [`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](../DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
 and the post-proposal adversarial-counterparty hardening to their verification
 surfaces. It is an audit aid, not a substitute for a clean release build and
 test run.
 
-> **Current gate: LOCAL CANDIDATE VERIFICATION COMPLETE — RELEASE APPROVAL
-> PENDING.** On the 2026-07-30 working-tree candidate, the MSVC Debug and
-> Release core targets, Release Qt targets, complete 3,605-case Debug and
-> Release suites, focused Paymaster/wallet tests, provider/readiness functional
-> tests in both configurations, all eight native Qt 5.15.10 suites, and the
-> same-revision WSL Clang ASan/UBSan/libFuzzer checks passed. Both official
-> v9.26.5/current wallet-file compatibility variants and the official
-> v9.26.5/current mixed-node Paymaster relay scenario subsequently passed on
-> 2026-08-08. This is not a release approval or security proof: real-Tor
-> deployment and independent review remain open.
+> **Current gate: RELEASE ACCEPTANCE OPEN.** The implementation is present in
+> the inspected branch. The recorded broad local matrix belongs to the
+> 2026-07-30 candidate; additional functional and official-v9.26.5 compatibility
+> results were recorded on 2026-08-08 and 2026-08-09. Later source changes mean
+> those results must not be presented as a fresh complete pass of `bd270044c1`.
+> A release revision, affected-surface reruns, real-Tor deployment testing and
+> independent review still need to be resolved. The 2026-09-11 documentation
+> update does not run or renew the executable test matrix.
 
 Status meanings:
 
 - **Covered**: implementation and a focused automated test exist; this does not
   imply that the test passed on the current source tree.
-- **Candidate pass**: the listed in-tree acceptance checks passed on the dated
+- **Candidate pass**: historical candidate evidence; the listed in-tree acceptance checks passed on the dated
   working-tree candidate; this does not by itself satisfy an unlisted release
   gate.
 - **Partial**: important coverage exists, but the listed test gap remains.
@@ -33,7 +35,7 @@ The local MSVC, functional, broad-regression, Qt, and same-revision WSL reruns
 covered by the 2026-07-30 matrix are satisfied for that working-tree candidate.
 Real-Tor deployment and independent-review requirements remain open. Official
 v9.26.5/current wallet-file, mixed-node relay, old-only bridge, and unchanged-
-datadir upgrade compatibility all have current passing evidence. The historical
+datadir upgrade compatibility have dated passing evidence from 2026-08-08/09. The historical
 snapshot records only superseded pre-hardening states.
 
 | # | Coverage status | Coverage or historical evidence | Original/remaining release gate |
@@ -47,7 +49,7 @@ snapshot records only superseded pre-hardening states.
 | 7 | Covered | Template-binding tests reject mutations and require a newly verified attempt for provider-dependent fallback changes. | Final focused unit run. |
 | 8 | Covered | Persistent request IDs, monotonic attempt state, same-input recovery, and duplicate-payment guards are tested. `wallet_paymaster_failover.py` additionally proves the exact reserved DD input set survives a real provider change and produces one payment. | Crash-specific variants are tracked under 22 and 23. |
 | 9 | Covered | A three-node functional rerun on 2026-08-08 used the official v9.26.5 daemon: the old node accepted the Paymaster-created transaction in its mempool and validated it in the same block/tip as the upgraded nodes. The unchanged-datadir upgrade and old-only bridge scenarios also passed against that official daemon on 2026-08-09. | Satisfied by the official v9.26.5/current functional reruns. |
-| 10 | Covered | Paymaster code is outside consensus and consensus validation remains unchanged. | Final diff review and broad consensus regression run. |
+| 10 | Covered | Paymaster transaction/protocol rules are wallet/P2P policy. The broader branch also changes DCA, ERR and volatility source to use portable 128-bit types; those changes require separate arithmetic-equivalence review. | Final diff review, cross-platform arithmetic checks and broad consensus regression run. |
 | 11 | Covered | Reputation tests cover local-only storage, neutral failures, cooldown, and security-first eligibility. | Final focused unit run. |
 | 12 | Covered | Headless selection, fee caps, durable sessions, and request-id idempotency are covered by client/store and provider functional tests. | Final focused and functional run. |
 | 13 | Covered | Legacy `senddigidollar` without options remains on the wallet-funded path and has regression coverage. | Final broad wallet regression run. |
@@ -67,6 +69,20 @@ snapshot records only superseded pre-hardening states.
 | 27 | Covered | Store/RPC tests distinguish mempool from confirmation and expose the shared state/finality fields; Qt renders those fields. | Final RPC and Qt regression run. |
 | 28 | Covered | Locked-wallet tests pause the same session without fallback, and provider policy requires a positive absolute DGB network-fee cap. | Final focused and functional run. |
 
+## Revision and evidence requirements
+
+Before a release decision, attach the exact source commit, build configuration,
+binary identification, command, exit code, date, and retained output for each
+required surface. A test file or workflow being present is coverage, not a
+successful run. The records below retain earlier reported counts without
+claiming a new independent reproduction.
+
+Later branch changes include current-only persistence handling, wallet metadata
+documentation, RPC/store decomposition, compatibility extensions, and Qt
+workflow hardening. Re-run the checks affected by those changes on the selected
+release revision. Independent review and real-Tor testing remain explicit
+external gates; documentation reconciliation does not close either one.
+
 ## Adversarial-counterparty hardening gate
 
 These checks extend, rather than replace, the 28 proposal criteria. A release
@@ -85,10 +101,10 @@ manifest.
 | H7 | Candidate pass | `resolvepaymastersession ... cancel_to_self` can use a distinct `USER_PAID` provider that passes Capacity V5. The recovery manifest permits only the original user inputs, fresh wallet-owned DD returns, a locally capped recovery fee, and recovery-provider DGB inputs. | End-to-end recovery without client DGB, same-provider rejection, privacy inheritance, malicious outputs/fees, ambiguous original broadcast race, restart, exact retry, and confirmation-dependent release tests. |
 | H8 | Candidate pass | Stateful fuzz targets cover Capacity → Intent → Quote → Submit → Result → Recovery; focused wallet/P2P tests cover manifests, budgets, replay, and finality. On 2026-07-30 the exact synchronized candidate was rebuilt with Clang ASan/UBSan/libFuzzer, all saved artifacts/corpora replayed successfully, and both fresh targets completed 100,000 runs. | Repeat this matrix after any affected source, build, or dependency change. |
 
-## Current candidate verification (2026-07-30)
+## Recorded candidate verification (2026-07-30 through 2026-08-09)
 
-These results apply to the current uncommitted working-tree candidate, not to a
-tagged or reproducibly built release artifact:
+These are previously recorded results for the candidates and dates named below.
+They do not certify the current branch head or a tagged release artifact:
 
 | Surface | Verified result |
 |---|---|
@@ -96,8 +112,8 @@ tagged or reproducibly built release artifact:
 | MSVC Release | `test_digibyte`, `digibyted`, `digibyte-cli`, `digibyte-qt`, and `test_digibyte-qt` built successfully. The focused Paymaster plus `walletload_tests` selection passed 196/196, and the complete core suite passed 3,605/3,605 with exit code 0. |
 | Functional Debug | `wallet_paymaster_provider.py` and `wallet_paymaster_readiness.py` completed successfully against the Debug candidate. Explicit safe port seeds avoided locally reserved Windows TCP ranges. |
 | Functional Release | `wallet_paymaster_provider.py` and `wallet_paymaster_readiness.py` completed successfully against the Release candidate. |
-| Current multi-provider selection | On 2026-08-08 the registered `wallet_paymaster_offer_selection.py --descriptors` scenario passed all 17 framework unit tests and its 1/1 functional test in 27 seconds. Two independent current-version provider daemons advertised 50-bps and 200-bps USER_PAID offers to a DGB-less client; the client ordered both exact totals, selected only the cheaper provider, completed and confirmed one transfer, and left the expensive provider's pool, safety budget, and finance ledger unchanged. |
-| Extended current multi-provider/reorg checks | On 2026-08-08 one registered local Windows `test_runner.py --jobs=1` invocation passed all 17 framework unit tests plus `wallet_paymaster_offer_selection.py --descriptors` in 21 seconds, `wallet_paymaster_failover.py --descriptors` in 47 seconds, and `wallet_paymaster_reorg.py --descriptors` in 9 seconds (77 seconds accumulated). The same registered group then passed under x86_64 WSL with all 17 framework tests and durations of 12, 24, and 3 seconds (39 seconds accumulated). The scenarios cover monotonic repricing and expiry/refresh; one-slot contention, same-input standby fallback, post-signature rejection, and exact single-provider accounting; plus finance/pool rollback and same-txid reconfirmation. |
+| Multi-provider selection (2026-08-08) | On 2026-08-08 the registered `wallet_paymaster_offer_selection.py --descriptors` scenario passed all 17 framework unit tests and its 1/1 functional test in 27 seconds. Two independent current-version provider daemons advertised 50-bps and 200-bps USER_PAID offers to a DGB-less client; the client ordered both exact totals, selected only the cheaper provider, completed and confirmed one transfer, and left the expensive provider's pool, safety budget, and finance ledger unchanged. |
+| Extended multi-provider/reorg checks (2026-08-08) | On 2026-08-08 one registered local Windows `test_runner.py --jobs=1` invocation passed all 17 framework unit tests plus `wallet_paymaster_offer_selection.py --descriptors` in 21 seconds, `wallet_paymaster_failover.py --descriptors` in 47 seconds, and `wallet_paymaster_reorg.py --descriptors` in 9 seconds (77 seconds accumulated). The same registered group then passed under x86_64 WSL with all 17 framework tests and durations of 12, 24, and 3 seconds (39 seconds accumulated). The scenarios cover monotonic repricing and expiry/refresh; one-slot contention, same-input standby fallback, post-signature rejection, and exact single-provider accounting; plus finance/pool rollback and same-txid reconfirmation. |
 | Official v9.26.5/current compatibility | On 2026-08-08 an x86_64 WSL build ran both registered `wallet_v9_26_5_compatibility.py` variants and the three-node `wallet_paymaster_provider.py --descriptors` scenario against the official v9.26.5 Linux daemon. Each invocation passed all 17 framework unit tests. The legacy and descriptor wallet variants passed in 36 accumulated seconds; the provider scenario passed in 27 seconds after its restart path was corrected to reconnect the third node. |
 | New official-v9.26.5 scenarios | On 2026-08-09 `p2p_paymaster_v9_26_5_bridge.py --descriptors` passed against the official Linux daemon in 38 seconds after all 17 framework tests passed. It relayed and confirmed ordinary DGB and DD through the old-only bridge, proved through raw message capture that the old node received but did not relay `pmannounce`, failed Paymaster selection closed, and restored discovery over a direct current-current link. `wallet_v9_26_5_inplace_upgrade.py --descriptors` subsequently passed in 7 seconds after all 17 framework tests passed. It created encrypted v9.26.5 wallets, two active positions, and isolated pending DGB/DD transfers; loaded the exact datadir's blocks, Chainstate, txindex, and mempool with the current daemon while wallets were disabled; then loaded, reannounced, confirmed, spent, redeemed, and restarted the inherited wallet state. |
 | Native Qt | Qt 5.15.10 was rebuilt and installed with the bundled-zlib namespace backport. Inspection found the three affected `z_crc32_combine_*` symbols prefixed and no conflicting unprefixed definitions in `Qt5Core.lib`; the Release Qt targets linked and all eight registered suites completed with exit code 0. |
@@ -109,22 +125,22 @@ be repeated.
 
 ## Required closing sequence
 
-Steps 1, 2, 4, 5, 6, and 8 have current-candidate evidence above. Step 3 has
+Steps 1, 2, 4, 5, 6, and 8 have dated candidate evidence above. Step 3 has
 passing local and WSL evidence, but still requires the listed release-build
 rerun. Steps 7 and 9 remain open. Completed steps must be repeated after any
 affected source, build, or dependency change.
 
-1. **Current candidate complete — final review:** The final Paymaster security
+1. **Dated candidate evidence — final review:** The final Paymaster security
    diff was reviewed for consensus isolation, protocol V5/no-downgrade,
    manifest call-site completeness, atomic wallet writes, finite limits, and
    absence of raw IP/payment material in persistent rate/accounting keys. No
    obvious release-blocking counterparty theft path was found; this does not
    replace the independent review in step 9.
-2. **Current candidate complete — MSVC:** Build `test_digibyte`, `digibyted`, and `digibyte-cli` with MSVC in Debug and
+2. **Dated candidate evidence — MSVC:** Build `test_digibyte`, `digibyted`, and `digibyte-cli` with MSVC in Debug and
    Release. Run the complete focused Paymaster unit/wallet suites in both
    configurations, including malicious-counterparty, expiry, replay,
    last-budget/slot, crash, restart, and final-witness regressions.
-3. **Current candidate extended locally — functional:** Run
+3. **Dated local evidence — functional:** Run
    `wallet_paymaster_provider.py`, `wallet_paymaster_offer_selection.py`,
    `wallet_paymaster_failover.py`, `wallet_paymaster_reorg.py`, and
    `wallet_paymaster_readiness.py` with
@@ -140,7 +156,7 @@ affected source, build, or dependency change.
    registered local current-build `test_runner.py` run including all 17
    framework unit tests; repeat it on the release build before closing this
    step.
-4. **Current candidate complete — official
+4. **Dated candidate evidence — official
    v9.26.5/current compatibility:** On
    2026-08-08 both registered variants of
    `wallet_v9_26_5_compatibility.py` passed against the official v9.26.5 Linux
@@ -162,10 +178,10 @@ affected source, build, or dependency change.
    `wallet_v9_26_5_inplace_upgrade.py --descriptors` adds the unchanged-datadir
    pending-state/redeem path and also passed against the official daemon on
    2026-08-09.
-5. **Current candidate complete — Qt 5.15.10:** Build and run the complete native Qt 5.15.10 suite, including client/provider
+5. **Dated candidate evidence — Qt 5.15.10:** Build and run the complete native Qt 5.15.10 suite, including client/provider
    safety-policy RPC parity, authorization confirmation, warning persistence,
    recovery, and authoritative finality rendering.
-6. **Current candidate complete — WSL2:** The exact synchronized candidate was
+6. **Dated candidate evidence — WSL2:** The exact synchronized candidate was
    rebuilt in WSL2/Ubuntu with Clang/libFuzzer plus ASan/UBSan. Saved artifacts
    and both corpora replayed successfully; fresh `paymaster_wire_envelopes` and
    stateful Capacity → Recovery campaigns each completed 100,000 runs with
@@ -173,7 +189,7 @@ affected source, build, or dependency change.
 7. **Open — real Tor deployment:** Exercise high-privacy mode against a real Tor proxy and onion service,
    including stream isolation, `-logips=0`, capture rejection, one-attempt
    enforcement, and no clearnet/v1 fallback.
-8. **Current candidate complete — broad local regressions:** The complete MSVC
+8. **Dated candidate evidence — broad local regressions:** The complete MSVC
    Debug and Release core suites each passed 3,605/3,605, and the complete
    native Qt suite passed all eight registered suites. Platform- or
    configuration-specific release matrices beyond these local surfaces remain

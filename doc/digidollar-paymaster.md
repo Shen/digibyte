@@ -5,10 +5,18 @@ selected provider contributes the DGB inputs needed for the miner fee. The
 result is an ordinary `DD_TX_TRANSFER`; Paymasters have no consensus privilege
 and existing validators need no Paymaster configuration.
 
-The approved protocol and its 28 V1 release criteria are in
-[`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](../DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md).
-Their implementation and verification status is tracked in the
-[`DigiDollar Paymaster V1 release gate`](digidollar-paymaster-release-gate.md).
+**Documentation baseline:** source commit `bd270044c1` on
+`feature/digidollar-paymaster-v1`, reviewed 2026-09-11. This is the operator and
+RPC guide. Developers should start with [PAYMASTER.md](../PAYMASTER.md) and the
+[implementation reference](digidollar-paymaster-implementation.md).
+
+The current design and 28 V1 acceptance criteria are in the
+[design specification](../DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md).
+The [implementation plan](../DIGIDOLLAR_PAYMASTER_PLAN.md) explains the work
+packages; the [hardening plan](../DIGIDOLLAR_PAYMASTER_HARDENING_PLAN.md) maps
+the counterparty protections. Verification evidence and outstanding release
+acceptance are recorded in the
+[release gate](digidollar-paymaster-release-gate.md).
 
 ## Privacy and safety model
 
@@ -155,6 +163,49 @@ restart and use a monotonic accounting-time high-water mark.
 - `privacy` is `standard` or `high`; `selection` is `lowest_total_cost` or
   `privacy_weighted`.
 
+### Prepare and authorize a Paymaster payment
+
+For a Paymaster path, every `senddigidollar` call without an
+`authorization_commitment` prepares the payment without creating a new user
+signature. This remains true when `prepare_only` is omitted or false. A client
+application must explicitly accept the exact returned commitment before Core
+may sign. `prepare_only=true` and `authorization_commitment` are mutually
+exclusive.
+
+After configuring client safety limits, prepare a 10.00-DD recipient payment
+using an integer amount of 1,000 cents:
+
+```text
+senddigidollar <address> 1000 "" 0 null {
+  "fee_mode": "paymaster",
+  "request_id": "550e8400-e29b-41d4-a716-446655440120",
+  "maximum_paymaster_fee_cents": 100
+}
+```
+
+Advance or inspect the same session as indicated by Core until its exact
+authorization is ready. Review the returned provider, funding model,
+recipient amount, fee and maximum outflow. To approve, repeat the identical
+request with the returned commitment:
+
+```text
+senddigidollar <same-address> 1000 "" 0 null {
+  "fee_mode": "paymaster",
+  "request_id": "550e8400-e29b-41d4-a716-446655440120",
+  "maximum_paymaster_fee_cents": 100,
+  "authorization_commitment": "<exact-returned-hex-commitment>"
+}
+```
+
+The placeholders must be replaced by the original recipient and exact returned
+commitment. A mismatch is rejected. A locked wallet may still require unlocking
+the same session. Inspect `authorization_required`, `authorization_accepted`,
+session state and allowed actions; a prepared or authorized request is not yet
+a confirmed payment. The examples are RPC-console notation; JSON-RPC clients
+should pass structured parameters and shell users must quote the JSON for
+their shell. Integer `amount` values are cents; values containing a decimal
+point are interpreted as DD dollars by this RPC.
+
 ### Exact total outflow and emptying a DD wallet
 
 By default, `amount` is the amount delivered to the recipient and a user-paid
@@ -179,7 +230,8 @@ cannot be combined with manually selected inputs, and excludes unconfirmed,
 reserved, and provider-pool DD. If that spendable snapshot changes before the
 reservation is committed, Core stops with `PAYMASTER_SWEEP_BALANCE_CHANGED`.
 
-Example for an exact 50.00 DD wallet sweep:
+Preparation example for an exact 50.00 DD wallet sweep; the same explicit
+authorization step above is required before signing:
 
 ```text
 senddigidollar <address> 5000 "" 0 null {
@@ -212,6 +264,11 @@ clearpaymasterreputation
 setpaymasterclientsafetypolicy
 getpaymasterclientsafetystatus
 ```
+
+`resolvepaymastersession` permits ordinary provider `fallback` only before a
+user PSBT exists; `abandon_unsigned` additionally requires that no transaction
+authorization can exist. Use the current Core-derived `allowed_actions`, not
+the age of a quote, to determine which mutations are permitted.
 
 After the user signature, timeout never releases the reserved inputs. An
 ambiguous session must be checked again, retried with its exact provider and

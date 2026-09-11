@@ -2,7 +2,16 @@
 
 *Last updated: 2026-08-08 (v9.26.5 / `feature/digidollar-paymaster-v1`)*
 
-This is the granular file index for DigiDollar, Oracle, and Paymaster source code. Read `DIGIDOLLAR_ARCHITECTURE.md`, `DIGIDOLLAR_ORACLE_ARCHITECTURE.md`, and `DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md` first for system design context. The implementation status of all 28 Paymaster V1 acceptance criteria is tracked in `doc/digidollar-paymaster-release-gate.md`.
+This is the granular file index for DigiDollar, Oracle, and Paymaster source code.
+Read `DIGIDOLLAR_ARCHITECTURE.md` and `DIGIDOLLAR_ORACLE_ARCHITECTURE.md` for DD
+and oracle design context. For Paymaster, start with [PAYMASTER.md](PAYMASTER.md)
+and the [current implementation reference](doc/digidollar-paymaster-implementation.md),
+then use the [design specification](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
+and [implementation plan](DIGIDOLLAR_PAYMASTER_PLAN.md).
+The 28 acceptance criteria and additional hardening checks map to dated evidence
+in the [release gate](doc/digidollar-paymaster-release-gate.md).
+Paymaster navigation was reconciled against `bd270044c1` on 2026-09-11; the
+earlier inventory date above does not represent a new whole-repository audit.
 
 ---
 
