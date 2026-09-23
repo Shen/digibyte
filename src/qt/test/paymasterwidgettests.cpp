@@ -252,6 +252,11 @@ UniValue PaymasterSessionView(const std::string& state,
     session.pushKV("request_id", "00000000-0000-4000-8000-000000000001");
     session.pushKV("session_id", std::string(64, '1'));
     session.pushKV("session_state", state);
+    session.pushKV("payment_confirmed", state == "CONFIRMED");
+    session.pushKV("status", state == "CONFIRMED" ? "success" :
+                   state == "CANCELED_SAFE" ? "canceled" :
+                   state == "FAILED" ? "failed" :
+                   state == "CONFLICTED" ? "conflicted" : "pending");
     session.pushKV("pending_phase", "NONE");
     session.pushKV("broadcast_state",
                    state == "MEMPOOL" ? "accepted_mempool" :
@@ -342,6 +347,8 @@ UniValue PaymasterAuthorizationResult(bool authorization_required,
     result.pushKV("request_id", "00000000-0000-4000-8000-000000000001");
     result.pushKV("session_id", std::string(64, '1'));
     result.pushKV("session_state", state);
+    result.pushKV("status", "pending");
+    result.pushKV("payment_confirmed", false);
     result.pushKV("pending_phase", "NONE");
     result.pushKV("broadcast_state", "not_attempted");
     result.pushKV("confirmation_state", "unconfirmed");
@@ -2474,18 +2481,67 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
              static_cast<int>(LARGE_EXPORT_EVENTS + 1));
 }
 
+void PaymasterWidgetTests::paymasterClientConfirmationRequiresObservation()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-paymaster-confirmation-observation");
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(mini_gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    QVERIFY(client);
+    UniValue snapshot = PaymasterSessionView("MEMPOOL", "final_transaction", "MEMPOOL");
+    QStringList dialogs;
+    QStringList calls;
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString& title, const QString&,
+                                       QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        dialogs.push_back(title);
+        return QMessageBox::Ok;
+    });
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        calls.push_back(QString::fromStdString(command));
+        if (command == "resolvepaymastersession") return snapshot;
+        throw std::runtime_error("unexpected payment mutation during observation");
+    });
+    form.setWalletModel(mini_gui.walletModel.get());
+    client->setPaymasterSessionForTesting(QStringLiteral("MEMPOOL"), QStringLiteral("final_transaction"),
+        true, QStringLiteral("recipient"), 3.25, QStringLiteral("MEMPOOL"));
+    dialogs.clear();
+    calls.clear();
+    QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterSessionState", Qt::DirectConnection));
+    QVERIFY(dialogs.isEmpty());
+    QCOMPARE(calls, QStringList{QStringLiteral("resolvepaymastersession")});
+    snapshot = PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
+    UniValue missing = snapshot.find_value("session");
+    missing.pushKV("payment_confirmed", false);
+    missing.pushKV("status", "pending");
+    missing.pushKV("confirmation_state", "unconfirmed");
+    snapshot.pushKV("session", missing);
+    QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterSessionState", Qt::DirectConnection));
+    QVERIFY(dialogs.contains(QStringLiteral("Paymaster payment status unavailable")));
+    QVERIFY(!dialogs.contains(QStringLiteral("Payment sent")));
+    QCOMPARE(calls.size(), 2);
+}
+
 void PaymasterWidgetTests::paymasterConfirmationGuardDetectsMaterialChanges()
 {
-    // A terminal high-level response may omit presentation echoes, but it is
-    // still a success once Core returns the validated txid and result status.
-    // This is the regression case that previously displayed an authorization
-    // error after the exact transaction had already reached the mempool.
-    QVERIFY(IsValidatedPaymasterCompletion(
+    // A provider result proves submission, not recipient confirmation.
+    QVERIFY(!IsValidatedPaymasterCompletion(
         QString(64, QLatin1Char('1')), QStringLiteral("MEMPOOL"), QString{},
         QStringLiteral("broadcast_attempted")));
-    QVERIFY(IsValidatedPaymasterCompletion(
+    QVERIFY(!IsValidatedPaymasterCompletion(
         QString(64, QLatin1Char('1')), QStringLiteral("MEMPOOL"), QString{},
         QStringLiteral("final_committed")));
+    QVERIFY(IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
+        QStringLiteral("success"), QStringLiteral("final_committed"), true, true));
+    QVERIFY(!IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
+        QStringLiteral("success"), QStringLiteral("final_committed"), true, false));
     QVERIFY(IsValidatedPaymasterCompletion(
         QString(64, QLatin1Char('1')), QString{}, QStringLiteral("success"),
         QString{}));
@@ -2530,9 +2586,7 @@ void PaymasterWidgetTests::paymasterConfirmationGuardDetectsMaterialChanges()
     for (const QString& terminal_state : terminal_states) {
         for (const bool reported_final : {false, true}) {
             for (const bool has_txid : {false, true}) {
-                const bool expected = has_txid &&
-                    (terminal_state == QStringLiteral("MEMPOOL") ||
-                     terminal_state == QStringLiteral("CONFIRMED"));
+                const bool expected = false; // no local confirmation evidence
                 QCOMPARE(IsValidatedPaymasterCompletion(
                              has_txid ? valid_txid : QString{},
                              terminal_state, QString{},

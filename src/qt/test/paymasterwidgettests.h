@@ -29,6 +29,7 @@ private Q_SLOTS:
     void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
     void paymasterManualActivityUsesExpectedRpcAndReadableStates();
     void paymasterFinancesAndBackupWorkflow();
+    void paymasterClientConfirmationRequiresObservation();
     void paymasterConfirmationGuardDetectsMaterialChanges();
     void paymasterRecoveryConfirmationGuardDetectsMaterialChanges();
     void paymasterClientOfferPreviewUsesExactRpcAndPlainText();

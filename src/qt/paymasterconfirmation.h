@@ -40,7 +40,8 @@ inline bool IsValidatedPaymasterCompletion(const QString& txid,
                                            const QString& session_state,
                                            const QString& direct_status,
                                            const QString& result_status,
-                                           bool reported_final = false)
+                                           bool reported_final = false,
+                                           bool payment_confirmed = false)
 {
     // The field is deliberately accepted only so callers and tests can prove
     // that it has no authority over the success decision. Core marks every
@@ -52,7 +53,8 @@ inline bool IsValidatedPaymasterCompletion(const QString& txid,
     const bool result_state_is_final =
         session_state == QStringLiteral("MEMPOOL") ||
         session_state == QStringLiteral("CONFIRMED");
-    const bool validated_result = result_state_is_final &&
+    const bool validated_result = result_state_is_final && payment_confirmed &&
+        direct_status == QStringLiteral("success") &&
         (result_status == QStringLiteral("final_committed") ||
          result_status == QStringLiteral("broadcast_attempted"));
     // `final` is intentionally not an input to this decision. Core uses that

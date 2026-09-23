@@ -334,6 +334,13 @@ the same request with that exact commitment. A mismatch is rejected. The
 the missing-commitment guard. A headless application must implement this
 explicit acceptance step too.
 
+The additive [client integration contract](digidollar-paymaster-integration.md)
+defines `getpaymasterclientinfo`, the transient payment/recovery view, and common
+RPC/Qt status semantics. `success` requires validated local recipient confirmation;
+`final` alone is never sufficient. Open client service-fee reservations remain
+liabilities beyond 24 hours; only spent fees age out of the existing daily window.
+No agent budget, consensus rule, wire field or persistent version is added.
+
 Prepared, authorized and confirmed are different results. Read
 `authorization_required`, `authorization_accepted`, the session state and
 Core-derived actions; do not treat the first RPC response as a payment receipt.

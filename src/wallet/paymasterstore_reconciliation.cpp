@@ -38,6 +38,95 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_store::internal;
 
+bool PaymasterSessionObservation::PaymentConfirmed(SessionState state) const
+{
+    return state != SessionState::FAILED && state != SessionState::CONFLICTED &&
+           state != SessionState::CANCELED_SAFE && payment.details_available &&
+           payment.recipient_vout.has_value() && payment.observation_available &&
+           payment.confirmations > 0 && recovery.confirmations <= 0;
+}
+
+std::string_view PaymasterSessionObservation::Status(SessionState state) const
+{
+    if (state == SessionState::CONFLICTED) return "conflicted";
+    if (state == SessionState::FAILED) return "failed";
+    // A confirmed recovery normally conflicts with the original payment.
+    if (state == SessionState::CANCELED_SAFE || recovery.confirmations > 0) return "canceled";
+    if (payment.confirmations < 0) return "conflicted";
+    return PaymentConfirmed(state) ? "success" : "pending";
+}
+
+bool PaymasterStore::GetSessionObservation(
+    const PaymentSession& session, PaymasterSessionObservation& observation,
+    std::string& error) const
+{
+    observation = {};
+    error.clear();
+    LOCK(m_wallet.cs_wallet);
+    observation.tip_hash = m_wallet.GetLastBlockHash();
+    observation.tip_height = m_wallet.GetLastBlockHeight();
+    observation.payment.txid = session.final_txid;
+    observation.recovery.txid = session.recovery_txid;
+    // Tombstones deliberately retain no payment proof. A stored terminal
+    // state or transaction id alone must never become a receipt.
+    if (session.provider_side || session.attempt_ids.empty()) return true;
+
+    WalletBatch batch{m_wallet.GetDatabase()};
+    ExactFinalArtifact payment;
+    ExactFinalArtifact recovery;
+    std::optional<ProviderAttempt> attempt;
+    if (!LoadPaymentFinalArtifact(batch, session, payment, attempt, error) ||
+        !LoadRecoveryFinalArtifact(batch, session, recovery, error)) return false;
+
+    if (attempt) {
+        CMutableTransaction validated;
+        if (attempt->session_id != session.session_id ||
+            attempt->client_manifest.canonical_request_hash != session.canonical_request_hash ||
+            !ValidateClientFinalForExecution(*attempt, payment.wtxid, validated, error)) {
+            if (error.empty()) error = "PAYMASTER_FINAL_SESSION_BINDING_MISMATCH";
+            return false;
+        }
+        const CTransaction transaction{validated};
+        const auto& manifest = attempt->client_manifest;
+        // BuildPaymasterQuote puts RECIPIENT first, before change and fee
+        // outputs. Bind that exact index as well as its script and DD amount;
+        // equal-valued change to the same address is not a second recipient.
+        constexpr uint32_t recipient_index{0};
+        CAmount amount{0};
+        if (transaction.vout.empty() ||
+            transaction.vout[recipient_index].scriptPubKey != manifest.recipient_script ||
+            !DigiDollar::ExtractDDAmountFromTransaction(
+                transaction, COutPoint{payment.txid, recipient_index}, amount) ||
+            amount != manifest.recipient_amount.value) {
+            error = "PAYMASTER_RECIPIENT_OUTPUT_MISMATCH";
+            return false;
+        }
+        observation.payment.recipient_vout = recipient_index;
+        observation.payment.recipient_script = manifest.recipient_script;
+        observation.payment.recipient_amount = manifest.recipient_amount;
+    }
+    const auto observe = [&](const ExactFinalArtifact& artifact,
+                             PaymasterTransactionObservation& result) {
+        if (artifact.txid.IsNull()) return true;
+        ExactFinalObservation exact;
+        if (!ObserveExactWalletArtifact(m_wallet, artifact, exact, error)) return false;
+        result.details_available = true;
+        const auto it = m_wallet.mapWallet.find(artifact.txid);
+        if (it == m_wallet.mapWallet.end()) return true;
+        result.observation_available = true;
+        result.confirmations = exact.confirmation_depth;
+        result.in_mempool = exact.in_mempool;
+        if (exact.confirmation_depth > 0) {
+            if (const auto* confirmed = it->second.state<TxStateConfirmed>()) {
+                result.block_hash = confirmed->confirmed_block_hash;
+                result.block_height = confirmed->confirmed_block_height;
+            }
+        }
+        return true;
+    };
+    return observe(payment, observation.payment) && observe(recovery, observation.recovery);
+}
+
 bool PaymasterStore::ListClientDurableFinalTransactions(
     std::vector<CTransactionRef>& transactions,
     std::string& error) const

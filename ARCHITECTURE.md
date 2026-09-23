@@ -15,7 +15,12 @@ the original send form retains its editable inputs and ordinary transfer path.
 Paymaster record codecs remain `WalletBatch` methods in `wallet/paymasterdb.cpp`;
 `PaymasterStore` still owns atomic state transitions. Free functions in
 `wallet/rpc/paymaster_send.cpp` isolate the existing send RPC integration without
-adding RPC endpoints, persisted state, or another service layer. See the
+adding a payment endpoint, persisted state, or another service layer.
+The additive `getpaymasterclientinfo` RPC reports local integration support and
+readiness. Transient payment/recovery observations in `PaymasterStore` feed one
+shared RPC/Qt outcome derivation; only validated, locally confirmed recipient
+payments count as success. There is no agent spending budget or new wallet
+record. See the [client integration contract](doc/digidollar-paymaster-integration.md). See the
 [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
 and pending verification.
 

@@ -69,6 +69,39 @@
 #include <string_view>
 
 namespace wallet {
+
+RPCResult PaymasterPaymentViewResult()
+{
+    const auto transaction = [](const char* key, bool recipient) {
+        std::vector<RPCResult> fields{
+            {RPCResult::Type::BOOL, "details_available", "Validated durable transaction details are available"},
+            {RPCResult::Type::BOOL, "observation_available", "Exact transaction is present in the local wallet"},
+            {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known transaction id; alone is not proof of payment"},
+            {RPCResult::Type::NUM, "confirmations", /*optional=*/true, "Local active-chain depth; negative means conflicted"},
+            {RPCResult::Type::BOOL, "in_mempool", /*optional=*/true, "Locally observed mempool membership"},
+            {RPCResult::Type::STR_HEX, "block_hash", /*optional=*/true, "Confirming block on the observed chain"},
+            {RPCResult::Type::NUM, "block_height", /*optional=*/true, "Confirming block height"},
+        };
+        if (recipient) {
+            fields.emplace_back(RPCResult::Type::OBJ, "recipient", /*optional=*/true,
+                                "Output bound by the validated client authorization", std::vector<RPCResult>{
+                {RPCResult::Type::NUM, "vout", "Recipient output index"},
+                {RPCResult::Type::STR_HEX, "script_pub_key", "Exact recipient script"},
+                {RPCResult::Type::NUM, "amount_cents", "Recipient DD amount, excluding service fee"},
+            });
+        }
+        return RPCResult{RPCResult::Type::OBJ, key, "Read-only transaction observation", std::move(fields)};
+    };
+    return {RPCResult::Type::OBJ, "payment_view", /*optional=*/true,
+            "Local snapshot, not a transferable receipt; details may be unavailable after pruning", {
+        {RPCResult::Type::STR_HEX, "observed_tip_hash", "Wallet's last processed block hash"},
+        {RPCResult::Type::NUM, "observed_tip_height", "Wallet's last processed block height"},
+        {RPCResult::Type::STR, "error", /*optional=*/true, "Artifact validation/read error; no positive payment claim is made"},
+        transaction("payment", true),
+        transaction("recovery", false),
+    }};
+}
+
 namespace paymaster_rpc::internal {
 
 std::string PersistedVersionError(std::string_view record_type,
@@ -2660,6 +2693,75 @@ std::optional<std::string> DigiDollarAddressForScript(const CScript& script)
 // -------------------------------------------------------------------------
 // Client session serialization, replay, and equivocation handling
 // -------------------------------------------------------------------------
+void AddSessionPaymentStatus(UniValue& result,
+                             const DigiDollar::Paymaster::PaymentSession& session,
+                             const PaymasterStore* store)
+{
+    using namespace DigiDollar::Paymaster;
+    PaymasterSessionObservation observation;
+    std::string error;
+    if (store) {
+        if (!store->GetSessionObservation(session, observation, error)) {
+            // A partially validated snapshot must not leak a positive claim.
+            const auto tip_hash = observation.tip_hash;
+            const auto tip_height = observation.tip_height;
+            observation = {};
+            observation.tip_hash = tip_hash;
+            observation.tip_height = tip_height;
+            observation.payment.txid = session.final_txid;
+            observation.recovery.txid = session.recovery_txid;
+        }
+        const auto transaction = [](const PaymasterTransactionObservation& value) {
+            UniValue json{UniValue::VOBJ};
+            json.pushKV("details_available", value.details_available);
+            json.pushKV("observation_available", value.observation_available);
+            if (!value.txid.IsNull()) json.pushKV("txid", value.txid.GetHex());
+            if (value.observation_available) {
+                json.pushKV("confirmations", value.confirmations);
+                json.pushKV("in_mempool", value.in_mempool);
+            }
+            if (!value.block_hash.IsNull()) {
+                json.pushKV("block_hash", value.block_hash.GetHex());
+                json.pushKV("block_height", value.block_height);
+            }
+            if (value.recipient_vout) {
+                UniValue recipient{UniValue::VOBJ};
+                recipient.pushKV("vout", *value.recipient_vout);
+                recipient.pushKV("script_pub_key", HexStr(value.recipient_script));
+                recipient.pushKV("amount_cents", value.recipient_amount.value);
+                json.pushKV("recipient", std::move(recipient));
+            }
+            return json;
+        };
+        UniValue view{UniValue::VOBJ};
+        view.pushKV("observed_tip_hash", observation.tip_hash.GetHex());
+        view.pushKV("observed_tip_height", observation.tip_height);
+        if (!error.empty()) view.pushKV("error", error);
+        view.pushKV("payment", transaction(observation.payment));
+        view.pushKV("recovery", transaction(observation.recovery));
+        result.pushKV("payment_view", std::move(view));
+    }
+    const bool paid = observation.PaymentConfirmed(session.state);
+    const bool recovered = observation.recovery.observation_available &&
+                           observation.recovery.confirmations > 0;
+    const std::string status{observation.Status(session.state)};
+    result.pushKV("status", status);
+    result.pushKV("payment_confirmed", paid);
+    result.pushKV("final", IsTerminal(session.state));
+    result.pushKV("confirmation_state", paid ? "payment_confirmed" :
+                  (recovered ? "recovery_confirmed" :
+                   (status == "conflicted" ? "conflicted" : "unconfirmed")));
+    std::string broadcast_state{"not_attempted"};
+    if (paid || recovered) broadcast_state = "confirmed";
+    else if (observation.payment.in_mempool || observation.recovery.in_mempool ||
+             session.state == SessionState::MEMPOOL ||
+             session.pending_phase == PendingPhase::CANCEL_MEMPOOL) broadcast_state = "accepted_mempool";
+    else if (session.state == SessionState::STEMPOOL) broadcast_state = "accepted_stempool";
+    else if (session.state == SessionState::PENDING_PROVIDER ||
+             !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) broadcast_state = "unknown";
+    result.pushKV("broadcast_state", broadcast_state);
+}
+
 UniValue SessionToJSON(
     const DigiDollar::Paymaster::PaymentSession& session,
     const PaymasterStore* store)
@@ -2682,23 +2784,7 @@ UniValue SessionToJSON(
     if (session.pending_phase != PendingPhase::NONE) {
         result.pushKV("pending_phase", std::string{PendingPhaseName(session.pending_phase)});
     }
-    result.pushKV("final", IsTerminal(session.state));
-    const bool has_final_transaction = !session.final_txid.IsNull();
-    std::string broadcast_state{"not_attempted"};
-    if (session.state == SessionState::CONFIRMED ||
-        session.state == SessionState::CANCELED_SAFE)
-        broadcast_state = "confirmed";
-    else if (session.pending_phase == PendingPhase::CANCEL_MEMPOOL)
-        broadcast_state = "accepted_mempool";
-    else if (session.state == SessionState::MEMPOOL)
-        broadcast_state = "accepted_mempool";
-    else if (session.state == SessionState::STEMPOOL)
-        broadcast_state = "accepted_stempool";
-    else if (session.state == SessionState::PENDING_PROVIDER || has_final_transaction)
-        broadcast_state = "unknown";
-    result.pushKV("broadcast_state", broadcast_state);
-    const std::string confirmation_state = session.state == SessionState::CONFIRMED ? "payment_confirmed" : (session.state == SessionState::CANCELED_SAFE ? "recovery_confirmed" : (session.state == SessionState::CONFLICTED ? "conflicted" : "unconfirmed"));
-    result.pushKV("confirmation_state", confirmation_state);
+    AddSessionPaymentStatus(result, session, store);
     result.pushKV("created_at", session.created_at);
     result.pushKV("updated_at", session.updated_at);
     if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());

@@ -1448,6 +1448,30 @@ BOOST_AUTO_TEST_CASE(client_fee_budget_enforces_limits_and_idempotent_transition
     BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, high_water_before_failed_spend);
 }
 
+BOOST_AUTO_TEST_CASE(client_fee_open_reservations_do_not_expire)
+{
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{100};
+    policy.maximum_service_fee_per_day = DDCents{100};
+    policy.updated_at = 1000;
+    ClientFeeLedger ledger = ClientLedger();
+    std::string error;
+    constexpr int64_t later{1000 + 86401};
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, uint256S("01"), DDCents{100}, 1000, error));
+    BOOST_CHECK(ReserveClientFee(ledger, policy, uint256S("01"), DDCents{100}, later, error));
+    BOOST_CHECK_EQUAL(ledger.reservations.size(), 1U);
+    BOOST_CHECK(!ReserveClientFee(ledger, policy, uint256S("02"), DDCents{1}, later, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_DAILY_FEE_LIMIT_EXCEEDED");
+    BOOST_REQUIRE(SpendClientFee(ledger, uint256S("01"), later, error));
+    BOOST_CHECK(!ReserveClientFee(ledger, policy, uint256S("02"), DDCents{1}, later + 86400, error));
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, uint256S("02"), DDCents{100}, later + 86401, error));
+    // A clock rollback cannot make an open reservation disappear either.
+    BOOST_CHECK(!ReserveClientFee(ledger, policy, uint256S("03"), DDCents{1}, 1000, error));
+    BOOST_REQUIRE(ReleaseClientFee(ledger, uint256S("02"), 1000, error));
+    BOOST_CHECK(ReleaseClientFee(ledger, uint256S("02"), 999, error));
+    BOOST_CHECK(ReserveClientFee(ledger, policy, uint256S("03"), DDCents{100}, 1000, error));
+}
+
 BOOST_AUTO_TEST_CASE(client_fee_clock_high_water_prevents_window_rollback)
 {
     ClientSafetyPolicy policy;

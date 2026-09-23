@@ -10,6 +10,7 @@ idempotency, redacted reservation output, and atomic release semantics.
 """
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hmac
 import http.client
 import json
@@ -157,6 +158,32 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
         self.check_rpc_access(provider, client, recipient_wallet)
 
+        self.log.info("Client capabilities are wallet-scoped and do not reserve or reconcile")
+        before_info = value_snapshot(self.nodes[0], provider, client, recipient_wallet)
+        reservations = client.listpaymasterreservations()
+        client_info = client.getpaymasterclientinfo()
+        assert_equal(client_info["integration_version"], 1)
+        assert_equal(client_info["network"], "regtest")
+        assert_equal(client_info["genesis_hash"], self.nodes[1].getblockhash(0))
+        assert_equal(client_info["amount_unit"], "cents")
+        assert_equal(client_info["minimum_payment_cents"], 100)
+        assert_equal(client_info["maximum_payment_cents"], 10_000_000)
+        assert_equal(client_info["supported"], True)
+        self.wait_until(lambda: client.getpaymasterclientinfo()["ready"])
+        assert_equal(client.listpaymasterreservations(), reservations)
+        assert_snapshot_equal(before_info, value_snapshot(
+            self.nodes[0], provider, client, recipient_wallet))
+        self.nodes[1].createwallet(wallet_name="locked_info", descriptors=True,
+                                  passphrase="client-info-test")
+        locked = self.nodes[1].get_wallet_rpc("locked_info")
+        locked_info = locked.getpaymasterclientinfo()
+        assert_equal(locked_info["supported"], True)
+        assert_equal(locked_info["ready"], False)
+        assert "PAYMASTER_WALLET_LOCKED" in locked_info["readiness_errors"]
+        assert_equal(locked.listpaymasterreservations(), [])
+        assert_equal(locked.listdigidollarsendsessions()["count"], 0)
+        self.nodes[1].unloadwallet("locked_info")
+
         started = provider.startpaymaster()
         assert_equal(started["running"], True)
         self.wait_until(lambda: len(client.getpaymasteroffers(500)) > 0)
@@ -270,6 +297,18 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(dollars_retry["request_id"], second_request_id)
         assert_equal(dollars_retry["requested_amount_cents"], 200)
         assert_equal(dollars_retry["session_id"], second_pending["session_id"])
+        # Independent HTTP clients exercise concurrent idempotent resumes.
+        def same_order(_):
+            rpc = self.nodes[1].get_wallet_rpc("client")
+            return rpc.senddigidollar(recipient, 200, "", 0, None, "cents", second_options)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            repeats = list(pool.map(same_order, range(2)))
+        assert_equal({entry["session_id"] for entry in repeats}, {second_pending["session_id"]})
+        assert_equal(client.getdigidollarsendsession(
+            {"request_id": second_request_id})["reserved_user_inputs"],
+            second_snapshot["session"]["reserved_user_inputs"])
+        assert_raises_rpc_error(-4, "CONFLICT",
+            client.senddigidollar, recipient, 201, "", 0, None, "cents", second_options)
 
 
         first_page = client.listdigidollarsendsessions({"limit": 1})
@@ -442,9 +481,20 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
         self.log.info("Manual submit rejects mutation and commits exact retries once")
         submit_request_id = "550e8400-e29b-41d4-a716-446655441002"
+        assert_equal(client.getbalance(), 0)
         options, _, send = harness.wait_for_quote(
             submit_request_id, recipient, 500)
+        # Simulated external client: prepare without authorization, explicitly
+        # accept the returned commitment, then discard one response and resume.
+        options["prepare_only"] = True
+        self.wait_until(lambda: send().get("authorization_required", False))
+        options.pop("prepare_only")
         authorization = harness.authorize_quote(options, send)
+        send()  # response deliberately lost; the same request id is retained
+        resumed = send()
+        assert_equal(resumed["session_id"], authorization["session_id"])
+        assert_equal(resumed["status"], "pending")
+        assert_equal(resumed["payment_confirmed"], False)
         psbt = authorization["psbt"]
 
         authorized_snapshot = client.resolvepaymastersession(
@@ -517,6 +567,30 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.wait_until(
             lambda: recipient_wallet.getdigidollarbalance()["total"] == 500)
         assert_equal(client.getdigidollarbalance()["total"], 905)
+        # Resume exclusively through the documented high-level client API.
+        self.wait_until(lambda: send()["payment_confirmed"])
+        paid = client.getdigidollarsendsession({"request_id": submit_request_id})
+        assert_equal(paid["status"], "success")
+        assert_equal(send()["payment_view"], paid["payment_view"])
+        assert_raises_rpc_error(-4, "PAYMASTER_REQUEST_ID_CONFLICT",
+            client.senddigidollar, client.getdigidollaraddress(), 500, "", 0, None, "cents", options)
+        changed_cap = dict(options, maximum_paymaster_fee_cents=101)
+        assert_raises_rpc_error(-4, "PAYMASTER_REQUEST_ID_CONFLICT",
+            client.senddigidollar, recipient, 500, "", 0, None, "cents", changed_cap)
+        proof = paid["payment_view"]["payment"]
+        assert_equal(proof["txid"], commit["txid"])
+        assert_equal(proof["recipient"]["amount_cents"], 500)
+        assert_equal(proof["confirmations"], 1)
+        assert_equal(client.getbalance(), 0)
+        self.nodes[1].unloadwallet("client")
+        self.nodes[1].loadwallet("client")
+        client = self.nodes[1].get_wallet_rpc("client")
+        harness.client = client
+        self.wait_until(lambda: client.getpaymasterclientinfo()["ready"])
+        recovered_receipt = client.getdigidollarsendsession({"request_id": submit_request_id})
+        assert_equal(recovered_receipt["payment_view"], paid["payment_view"])
+        assert_equal(send()["txid"], commit["txid"])
+        assert_equal(send()["status"], "success")
         check_public_transaction_metadata()
 
         # A single sub-DD fee is intentionally below the minimum ordinary DD

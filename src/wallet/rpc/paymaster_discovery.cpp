@@ -65,6 +65,35 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_rpc::internal;
 
+namespace {
+
+// Preserve the existing v1 hash bytes, including the original selected inputs.
+// Both entry points must enforce the same binding on terminal retries.
+uint256 CanonicalClientRequestHash(
+    const std::string& request_id, const CScript& recipient_script,
+    DDCents order_amount, DDCents fee_cap, const std::vector<COutPoint>& inputs,
+    FeeMode mode, PrivacyProfile privacy, SelectionMode selection,
+    int maximum_attempts, bool subtract_fee, bool send_all,
+    const std::optional<XOnlyPubKey>& restricted_key,
+    const std::optional<RestrictedServiceDescriptor>& descriptor,
+    const std::optional<SponsorshipCapability>& capability)
+{
+    HashWriter hasher = TaggedHash("DigiByte Paymaster RPC Request v1");
+    hasher << request_id << recipient_script << order_amount << fee_cap << inputs
+           << static_cast<uint8_t>(mode) << static_cast<uint8_t>(privacy)
+           << static_cast<uint8_t>(selection) << maximum_attempts;
+    if (subtract_fee || send_all) {
+        hasher << std::string{"gross-amount-v1"} << order_amount << subtract_fee << send_all;
+    }
+    if (restricted_key) {
+        hasher << *restricted_key << GetRestrictedDescriptorSignatureHash(*descriptor)
+               << GetSponsorshipCapabilityHash(*capability);
+    }
+    return hasher.GetSHA256();
+}
+
+} // namespace
+
 RPCHelpMan getpaymasteroffers()
 {
     return RPCHelpMan{
@@ -218,6 +247,9 @@ RPCHelpMan requestpaymasterquote()
                                                                                             {RPCResult::Type::STR, "session_state", "Authoritative wallet session state"},
                                                                                             {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Outstanding asynchronous phase"},
                                                                                             {RPCResult::Type::BOOL, "final", "Whether the session is terminal"},
+                                                                                            {RPCResult::Type::STR, "status", "success, canceled, failed, conflicted, or pending; success requires a locally confirmed recipient payment"},
+                                                                                            {RPCResult::Type::BOOL, "payment_confirmed", "Validated recipient payment has positive local confirmation depth"},
+                                                                                            PaymasterPaymentViewResult(),
                                                                                             {RPCResult::Type::STR, "broadcast_state", "not_attempted, unknown, accepted_mempool, accepted_stempool, or confirmed"},
                                                                                             {RPCResult::Type::STR, "confirmation_state", "unconfirmed, payment_confirmed, recovery_confirmed, or conflicted"},
                                                                                             {RPCResult::Type::NUM_TIME, "created_at", "Persistent session creation time"},
@@ -485,29 +517,11 @@ RPCHelpMan requestpaymasterquote()
             // the idempotent tombstone dependent on remote state. All fields
             // which define the local order are still committed below; a hash
             // mismatch remains a hard conflict in CreateOrJoinSession().
-            HashWriter request_hasher = TaggedHash("DigiByte Paymaster RPC Request v1");
-            // The session hash commits the provider-independent local order.
-            // In subtract mode the exact provider-dependent recipient and fee
-            // remain bound by each signed intent/quote/authorization manifest,
-            // allowing a safe pre-signature provider fallback to produce a
-            // new exact confirmation under the same gross order.
-            request_hasher << request_id << recipient_script
-                           << DDCents{subtract_fee ? requested_amount : payment}
-                           << DDCents{fee_cap} << requested_inputs
-                           << static_cast<uint8_t>(requested_mode)
-                           << static_cast<uint8_t>(privacy)
-                           << static_cast<uint8_t>(selection) << maximum_attempts;
-            if (subtract_fee || send_all) {
-                request_hasher << std::string{"gross-amount-v1"}
-                               << DDCents{requested_amount}
-                               << subtract_fee << send_all;
-            }
-            if (restricted) {
-                request_hasher << *restricted_identity_key
-                               << GetRestrictedDescriptorSignatureHash(*restricted_descriptor)
-                               << GetSponsorshipCapabilityHash(*restricted_capability);
-            }
-            const uint256 canonical_request_hash = request_hasher.GetSHA256();
+            const uint256 canonical_request_hash = CanonicalClientRequestHash(
+                request_id, recipient_script, DDCents{subtract_fee ? requested_amount : payment},
+                DDCents{fee_cap}, requested_inputs, requested_mode, privacy, selection,
+                maximum_attempts, subtract_fee, send_all, restricted_identity_key,
+                restricted_descriptor, restricted_capability);
             if (have_durable_session && IsTerminal(durable_session.state)) {
                 if (durable_session.canonical_request_hash !=
                         canonical_request_hash ||
@@ -1528,6 +1542,23 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
         store.GetSessionByRequestId(request_id, persisted_session);
     if (have_persisted_session) {
         if (IsTerminal(persisted_session.state)) {
+            // After pruning, the current format retains the order hash but
+            // not its original inputs. Require the caller's saved input set
+            // to verify a send replay; identity-only status reads still work.
+            const auto& original_inputs = preset_inputs ? *preset_inputs : persisted_session.user_inputs;
+            if (original_inputs.empty()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
+            }
+            const CDigiDollarAddress dd_address{address};
+            const uint256 request_hash = CanonicalClientRequestHash(
+                request_id, GetScriptForDestination(dd_address.GetDigiDollarDestination()),
+                DDCents{amount}, DDCents{fee_cap}, original_inputs, requested_mode,
+                privacy, selection, maximum_attempts, subtract_fee, send_all,
+                restricted_identity_key, restricted_descriptor, restricted_capability);
+            if (request_hash != persisted_session.canonical_request_hash ||
+                requested_mode != persisted_session.fee_mode_requested) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_REQUEST_ID_CONFLICT");
+            }
             if (persisted_session.requested_amount.value == 0
                     ? (subtract_fee || send_all)
                     : (persisted_session.requested_amount != DDCents{amount} ||

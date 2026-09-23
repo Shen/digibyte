@@ -19,6 +19,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wallet {
@@ -53,6 +54,30 @@ enum class CreatePaymasterSessionResult {
     FINAL_TOMBSTONE,
     CONFLICT,
     DATABASE_ERROR,
+};
+
+/** Read-only, transient views; these are never serialized to the wallet DB. */
+struct PaymasterTransactionObservation {
+    uint256 txid;
+    bool details_available{false};
+    bool observation_available{false};
+    int confirmations{0};
+    bool in_mempool{false};
+    uint256 block_hash;
+    int block_height{-1};
+    std::optional<uint32_t> recipient_vout;
+    CScript recipient_script;
+    DigiDollar::Paymaster::DDCents recipient_amount;
+};
+
+struct PaymasterSessionObservation {
+    uint256 tip_hash;
+    int tip_height{-1};
+    PaymasterTransactionObservation payment;
+    PaymasterTransactionObservation recovery;
+
+    bool PaymentConfirmed(DigiDollar::Paymaster::SessionState state) const;
+    std::string_view Status(DigiDollar::Paymaster::SessionState state) const;
 };
 
 class PaymasterStore
@@ -99,6 +124,13 @@ public:
     bool ClientSessionHasLiveReservations(
         const DigiDollar::Paymaster::PaymentSession& session,
         bool& has_live_reservations,
+        std::string& error) const;
+
+    /** Validate durable artifacts and read the current wallet chain snapshot.
+     * Does not reconcile, reserve, sign, broadcast, or contact providers. */
+    bool GetSessionObservation(
+        const DigiDollar::Paymaster::PaymentSession& session,
+        PaymasterSessionObservation& observation,
         std::string& error) const;
 
     bool ReserveInputs(const std::string& request_id,

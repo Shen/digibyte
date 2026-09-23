@@ -6,6 +6,13 @@ They do not establish release readiness or completed public-network testing.
 
 ## Paymaster architecture in this branch
 
+The [client integration contract](doc/digidollar-paymaster-integration.md)
+uses the existing `senddigidollar` authorization flow. `getpaymasterclientinfo`
+reads capabilities/readiness; shared payment and recovery observations are
+computed from existing durable artifacts and the wallet chain snapshot. They
+introduce no consensus rule, agent budget, wire field, or persistent format.
+`final` marks a closed session; confirmed recipient payment determines success.
+
 The v9.26.6rc2 integration keeps the provider panel in
 `src/qt/paymasterwidget.cpp`, behind a small embedding interface. See the
 [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope

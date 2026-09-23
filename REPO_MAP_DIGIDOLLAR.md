@@ -773,6 +773,8 @@ or chain parameters.
   resumption, balance/fee-funding checks and Paymaster result presentation.
   Ordinary amount/address validation and direct transfer stay in the original
   RPC handler; argument positions and validation order are unchanged.
+- `getpaymasterclientinfo` in `paymaster_client.cpp` reads integration capabilities
+  and local readiness without provider traffic, reservations, or reconciliation.
 - `paymaster_client.cpp` owns persistent session inspection/resolution,
   alternative recovery, role-limited PSBT processing, submit, and client result
   handling.
@@ -980,7 +982,12 @@ or chain parameters.
   recovery state; `paymasterstore_reputation.cpp` owns outcomes, reputation,
   and durable equivocation evidence.
 - `paymasterstore_reconciliation.cpp` owns exact-final rebroadcast validation,
-  wallet/mempool/reorg reconciliation, and safe pruning.
+  wallet/mempool/reorg reconciliation, safe pruning, and the transient
+  `GetSessionObservation` view of exact payment/recovery artifacts.
+  `AddSessionPaymentStatus` in `rpc/paymaster.cpp` shares its outcome across RPCs;
+  `PaymasterPaymentViewResult` shares the additive observation schema.
+  See [client integration contract](doc/digidollar-paymaster-integration.md).
+  Neither the view nor the RPC integration version changes record formats.
 - `PaymasterStore` atomically persists sessions, exact append-only attempts,
   reservations, authorizations, provider commits/results, self-recovery raw
   transactions, outcome markers, and permanent idempotency tombstones.

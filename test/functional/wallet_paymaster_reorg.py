@@ -116,6 +116,10 @@ class PaymasterReorgTest(DigiByteTestFramework):
         assert_equal(confirmed_session["confirmation_state"],
                      "payment_confirmed")
         assert_equal(confirmed_session["txid"], txid)
+        assert_equal(confirmed_session["status"], "success")
+        assert_equal(confirmed_session["payment_confirmed"], True)
+        assert_equal(confirmed_session["payment_view"]["payment"]["block_hash"], branch_a_block)
+        assert_equal(confirmed_session["payment_view"]["payment"]["recipient"]["amount_cents"], 1_000)
         self.wait_until(lambda: provider.getpaymasterfinancestatus({
             "period": "all",
         })["successful_transfers"] == 1)
@@ -163,6 +167,10 @@ class PaymasterReorgTest(DigiByteTestFramework):
         reorged_session = client.getdigidollarsendsession(lookup)
         assert_equal(reorged_session["confirmation_state"], "unconfirmed")
         assert_equal(reorged_session["txid"], txid)
+        assert_equal(reorged_session["status"], "pending")
+        assert_equal(reorged_session["payment_confirmed"], False)
+        assert_equal(reorged_session["payment_view"]["payment"]["confirmations"], 0)
+        assert "block_hash" not in reorged_session["payment_view"]["payment"]
         assert_equal(
             reorged_session["reserved_user_inputs"],
             confirmed_session["reserved_user_inputs"])
@@ -201,6 +209,9 @@ class PaymasterReorgTest(DigiByteTestFramework):
             lookup)["session_state"] == "CONFIRMED")
         reconfirmed_session = client.getdigidollarsendsession(lookup)
         assert_equal(reconfirmed_session["txid"], txid)
+        assert_equal(reconfirmed_session["status"], "success")
+        assert_equal(reconfirmed_session["payment_confirmed"], True)
+        assert_equal(reconfirmed_session["payment_view"]["payment"]["block_hash"], reconfirmation_block)
         assert_equal(reconfirmed_session["confirmation_state"],
                      "payment_confirmed")
 

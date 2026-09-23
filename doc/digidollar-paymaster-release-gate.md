@@ -2,6 +2,10 @@
 
 The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
 recorded in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md).
+The subsequent [client integration contract](digidollar-paymaster-integration.md)
+adds focused fee, payment-observation, RPC and Qt regressions. Its targeted local
+checks do not replace the clean build, functional reruns, independent review or
+real-Tor release gates below.
 
 **Status review:** 2026-09-11, source commit `bd270044c1` on
 `feature/digidollar-paymaster-v1`. See the [developer starting point](../PAYMASTER.md)

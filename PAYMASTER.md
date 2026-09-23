@@ -24,6 +24,7 @@ results or establish that a release candidate has passed.
 | [Implementation reference](doc/digidollar-paymaster-implementation.md) | How does the current code work? Transaction example, protocol sequence, trust boundaries, state and persistence rules, and source map. |
 | [Implementation plan](DIGIDOLLAR_PAYMASTER_PLAN.md) | Why was the work divided this way? Delivered work packages, review order, remaining work, and acceptance expectations. |
 | [Hardening plan](DIGIDOLLAR_PAYMASTER_HARDENING_PLAN.md) | What must hold when either remote party is malicious? Required controls and their implementation/test locations. |
+| [Client integration contract](doc/digidollar-paymaster-integration.md) | How do external clients prepare, explicitly authorize, resume and inspect a payment? Includes the future x402 boundary. |
 | [Operator and RPC guide](doc/digidollar-paymaster.md) | How are clients and providers configured and used? Includes fee selection, liquidity, finance, and recovery. |
 | [Release gate](doc/digidollar-paymaster-release-gate.md) | Which checks have dated evidence, which still need a release-build rerun, and what remains open? |
 | [Design specification](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md) | What are the current architectural decisions, constraints, and 28 numbered V1 acceptance criteria? |

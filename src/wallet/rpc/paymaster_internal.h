@@ -280,6 +280,9 @@ std::string FeeModeName(DigiDollar::Paymaster::FeeMode mode);
 std::string ResultStatusName(
     DigiDollar::Paymaster::PaymasterResultStatus status);
 std::optional<std::string> DigiDollarAddressForScript(const CScript& script);
+void AddSessionPaymentStatus(UniValue& result,
+                             const DigiDollar::Paymaster::PaymentSession& session,
+                             const PaymasterStore* store);
 UniValue SessionToJSON(const DigiDollar::Paymaster::PaymentSession& session,
                        const PaymasterStore* store = nullptr);
 bool FindSession(const UniValue& lookup,

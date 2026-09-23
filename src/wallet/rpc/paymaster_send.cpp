@@ -13,6 +13,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
+#include <wallet/rpc/paymaster_internal.h>
 #include <wallet/wallet.h>
 
 #include <utility>
@@ -161,6 +162,19 @@ std::optional<UniValue> PrepareDigiDollarFeeFunding(
     const auto& [fee_mode, subtract_paymaster_fee_from_amount, send_all_spendable_dd, send_options] = options;
     const auto finalize_paymaster_result =
         [&](UniValue result) -> UniValue {
+            // Low-level signing/result RPCs return different shapes. Always
+            // attach the same current read-only session view at this boundary.
+            LOCK(wallet.cs_wallet);
+            PaymasterStore store{wallet};
+            DigiDollar::Paymaster::PaymentSession session;
+            const UniValue& request_id = result.find_value("request_id");
+            if (!request_id.isStr() ||
+                store.GetSessionByRequestIdWithStatus(request_id.get_str(), session) !=
+                    DatabaseReadStatus::FOUND) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_READ_FAILED");
+            }
+            const UniValue snapshot = paymaster_rpc::internal::SessionToJSON(session, &store);
+            for (const auto& key : snapshot.getKeys()) result.pushKV(key, snapshot.find_value(key));
             result.pushKV("to_address", addressStr);
             const UniValue& payment =
                 result.find_value("payment_cents");
@@ -172,10 +186,6 @@ std::optional<UniValue> PrepareDigiDollarFeeFunding(
                           subtract_paymaster_fee_from_amount);
             result.pushKV("send_all_spendable_dd",
                           send_all_spendable_dd);
-            result.pushKV("status",
-                          result.find_value("final").isTrue()
-                              ? "success"
-                              : "pending");
             return result;
         };
 

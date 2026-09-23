@@ -207,7 +207,8 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
                                      int64_t now,
                                      ValidClientResultArtifacts& artifacts,
                                      std::string& error,
-                                     const ProviderPolicy* provider_policy = nullptr)
+                                     const ProviderPolicy* provider_policy = nullptr,
+                                     bool with_dd_output = false)
 {
     artifacts.provider_identity_key = CKey{};
     artifacts.attempt = ProviderAttempt{};
@@ -255,7 +256,17 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
     CMutableTransaction transaction;
     transaction.vin.emplace_back(COutPoint{user_tx->GetHash(), 0});
     transaction.vin.emplace_back(COutPoint{provider_tx->GetHash(), 0});
-    transaction.vout.emplace_back(5500, wallet_script);
+    if (with_dd_output) {
+        transaction.SetDigiDollarType(::DD_TX_TRANSFER);
+        transaction.vout.emplace_back(0, wallet_script); // recipient
+        transaction.vout.emplace_back(0, wallet_script); // equal-valued self-change
+        transaction.vout.emplace_back(5500, wallet_script);
+        transaction.vout.emplace_back(0, CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{'D', 'D'} << CScriptNum(::DD_TX_TRANSFER) <<
+            CScriptNum(1000) << CScriptNum(1000));
+    } else {
+        transaction.vout.emplace_back(5500, wallet_script);
+    }
     CollaborativePSBTTemplate trusted;
     if (!CreateCollaborativePSBTTemplate(
             transaction,
@@ -443,6 +454,163 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(client_session_v4_and_tombstone_v2_compatibility_vectors)
+{
+    // Frozen bytes from the 46add7e4d3 record layout. RPC integration version
+    // changes must not silently change either persistent encoding.
+    const auto session_bytes = ParseHex(
+        "04002435353065383430302d653239622d343164342d613731362d343436363535343430393032010000000000000000"
+        "000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000"
+        "000000000000000101080001030000000000000000000000000000000000000000000000000000000000000002000000"
+        "010400000000000000000000000000000000000000000000000000000000000000640000000000000065000000000000"
+        "000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000f4010000000000000000");
+    const auto tombstone_bytes = ParseHex(
+        "02002435353065383430302d653239622d343164342d613731362d343436363535343430393032010000000000000000"
+        "000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000"
+        "000000000000000101080500000000000000000000000000000000000000000000000000000000000000f40100000000"
+        "00000000");
+    PaymentSession session;
+    SpanReader session_reader{::PROTOCOL_VERSION, session_bytes};
+    session_reader >> session;
+    BOOST_CHECK(session_reader.empty());
+    BOOST_CHECK_EQUAL(session.version, 4);
+    BOOST_CHECK_EQUAL(session.request_id, "550e8400-e29b-41d4-a716-446655440902");
+    BOOST_CHECK(session.state == SessionState::CONFIRMED);
+    BOOST_CHECK_EQUAL(session.requested_amount.value, 500);
+    BOOST_REQUIRE_EQUAL(session.user_inputs.size(), 1U);
+    BOOST_CHECK(session.user_inputs.front() == COutPoint(uint256S("03"), 2));
+    BOOST_CHECK(SerializePaymasterTestObject(session) == session_bytes);
+    IdempotencyTombstone tombstone;
+    SpanReader tombstone_reader{::PROTOCOL_VERSION, tombstone_bytes};
+    tombstone_reader >> tombstone;
+    BOOST_CHECK(tombstone_reader.empty());
+    BOOST_CHECK_EQUAL(tombstone.version, 2);
+    BOOST_CHECK(tombstone.final_state == SessionState::CONFIRMED);
+    BOOST_CHECK_EQUAL(tombstone.canonical_request_hash, session.canonical_request_hash);
+    BOOST_CHECK_EQUAL(tombstone.final_txid, session.final_txid);
+    BOOST_CHECK(SerializePaymasterTestObject(tombstone) == tombstone_bytes);
+}
+
+BOOST_AUTO_TEST_CASE(session_status_requires_current_recipient_evidence)
+{
+    using namespace wallet::paymaster_rpc::internal;
+    const SessionState states[]{SessionState::CREATED, SessionState::INPUTS_RESERVED,
+        SessionState::AWAITING_WALLET_UNLOCK, SessionState::AWAITING_USER_SIGNATURE,
+        SessionState::AUTHORIZED, SessionState::DGB_COMMITTING, SessionState::STEMPOOL,
+        SessionState::MEMPOOL, SessionState::CONFIRMED, SessionState::PENDING_PROVIDER,
+        SessionState::FAILED, SessionState::CANCELED_SAFE, SessionState::CONFLICTED};
+    for (const auto state : states) {
+        PaymentSession session;
+        session.state = state;
+        session.final_txid = uint256::ONE;
+        const UniValue result = SessionToJSON(session);
+        BOOST_CHECK(!result.find_value("payment_confirmed").get_bool());
+        BOOST_CHECK_EQUAL(result.find_value("final").get_bool(), IsTerminal(state));
+        const std::string expected = state == SessionState::FAILED ? "failed" :
+            state == SessionState::CANCELED_SAFE ? "canceled" :
+            state == SessionState::CONFLICTED ? "conflicted" : "pending";
+        BOOST_CHECK_EQUAL(result.find_value("status").get_str(), expected);
+        BOOST_CHECK(result.find_value("confirmation_state").get_str() != "payment_confirmed");
+    }
+    PaymasterSessionObservation observation;
+    observation.payment.details_available = true;
+    observation.payment.recipient_vout = 0;
+    observation.payment.observation_available = true;
+    observation.payment.confirmations = 1;
+    BOOST_CHECK(observation.PaymentConfirmed(SessionState::MEMPOOL));
+    observation.recovery.confirmations = 1;
+    observation.recovery.observation_available = true;
+    BOOST_CHECK(!observation.PaymentConfirmed(SessionState::CONFIRMED));
+    BOOST_CHECK_EQUAL(std::string{observation.Status(SessionState::CANCELED_SAFE)}, "canceled");
+    observation.payment.confirmations = -1;
+    BOOST_CHECK_EQUAL(std::string{observation.Status(SessionState::CANCELED_SAFE)}, "canceled");
+}
+
+BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
+{
+    using namespace wallet::paymaster_rpc::internal;
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440901";
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256::ONE, FeeMode::PAYMASTER,
+                                            100, session, error) == CreatePaymasterSessionResult::CREATED);
+    ValidClientResultArtifacts artifacts;
+    BOOST_REQUIRE_MESSAGE(BuildValidClientResultArtifacts(m_wallet, session, request_id,
+        uint256S("901"), 101, artifacts, error, nullptr, true), error);
+    auto& attempt = artifacts.attempt;
+    const auto transaction = MakeTransactionRef(artifacts.final_transaction);
+    attempt.state = AttemptState::MEMPOOL;
+    attempt.final_txid = transaction->GetHash();
+    attempt.final_transaction = SerializePaymasterTestObject(artifacts.final_transaction);
+    session.attempt_ids = {attempt.attempt_id};
+    session.final_txid = attempt.final_txid;
+    session.state = SessionState::CONFIRMED; // deliberately stale persisted state
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        m_wallet.SetLastBlockProcessed(10, uint256S("a1"));
+    }
+    auto& database = GetMockableDatabase(m_wallet);
+    const MockableData records = database.m_records;
+    database.FailWriteAt(0);
+    PaymasterSessionObservation observation;
+    BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
+    BOOST_CHECK(observation.payment.details_available);
+    BOOST_CHECK(!observation.payment.observation_available);
+    BOOST_CHECK(!observation.PaymentConfirmed(session.state));
+    BOOST_REQUIRE(observation.payment.recipient_vout);
+    BOOST_CHECK_EQUAL(*observation.payment.recipient_vout, 0U);
+    BOOST_CHECK_EQUAL(observation.payment.recipient_amount.value, 1000);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.mapWallet.try_emplace(transaction->GetHash(), transaction,
+            TxStateConfirmed{uint256S("a1"), 10, 0});
+    }
+    const UniValue confirmed = SessionToJSON(session, &store);
+    BOOST_CHECK_EQUAL(confirmed.find_value("status").get_str(), "success");
+    BOOST_CHECK(confirmed.find_value("payment_confirmed").get_bool());
+    const UniValue& payment = confirmed.find_value("payment_view").find_value("payment");
+    BOOST_CHECK_EQUAL(payment.find_value("confirmations").getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(payment.find_value("block_hash").get_str(), uint256S("a1").GetHex());
+    BOOST_CHECK_EQUAL(payment.find_value("recipient").find_value("vout").getInt<int>(), 0);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateInMempool{};
+    }
+    const UniValue reorged = SessionToJSON(session, &store);
+    BOOST_CHECK(reorged.find_value("final").get_bool()); // terminal marker stays independent
+    BOOST_CHECK(!reorged.find_value("payment_confirmed").get_bool());
+    BOOST_CHECK_EQUAL(reorged.find_value("status").get_str(), "pending");
+    BOOST_CHECK(reorged.find_value("payment_view").find_value("payment").find_value("block_hash").isNull());
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConflicted{uint256S("a1"), 10};
+    }
+    BOOST_CHECK_EQUAL(SessionToJSON(session, &store).find_value("status").get_str(), "conflicted");
+    {
+        LOCK(m_wallet.cs_wallet);
+        auto altered = artifacts.final_transaction;
+        altered.vin[0].scriptWitness.stack[0][0] ^= 1;
+        m_wallet.mapWallet.at(transaction->GetHash()).tx = MakeTransactionRef(altered);
+    }
+    const UniValue invalid = SessionToJSON(session, &store);
+    BOOST_CHECK(!invalid.find_value("payment_confirmed").get_bool());
+    BOOST_CHECK_EQUAL(invalid.find_value("payment_view").find_value("error").get_str(),
+                      "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH");
+    // A tombstone retains identity and terminal state, never payment proof.
+    session.attempt_ids.clear();
+    const UniValue pruned = SessionToJSON(session, &store);
+    BOOST_CHECK_EQUAL(pruned.find_value("status").get_str(), "pending");
+    BOOST_CHECK(!pruned.find_value("payment_view").find_value("payment").find_value("details_available").get_bool());
+    BOOST_CHECK_EQUAL(database.m_write_count, 0U);
+    BOOST_CHECK(database.m_records == records);
+    database.ClearFailureInjection();
+}
 
 BOOST_AUTO_TEST_CASE(capacity_replay_readiness_requires_exact_stored_response)
 {

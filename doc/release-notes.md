@@ -32,6 +32,22 @@ Please report problems using the issue tracker at GitHub:
 Changes since RC1
 =================
 
+Paymaster integrations can query wallet-local support and readiness through
+`getpaymasterclientinfo`. Session responses provide separate read-only recipient
+payment and recovery observations. Paymaster `senddigidollar` reports success
+only after validated local recipient confirmation; `final` continues to describe
+terminal session state, including failure and cancellation. Qt keeps submitted
+payments pending until confirmation. Missing/pruned evidence does not prove a
+payment. Terminal retries now validate the complete existing order hash; after
+pruning, send replay requires the original input set or returns an explicit
+unavailable-details error. Status inspection remains available.
+
+The existing daily service-fee limit now counts open reservations regardless of
+age. This package adds no agent budget, x402 support, payment RPC, persistent
+record format, wallet feature flag, or Paymaster wire/consensus change. See the
+[client integration contract](digidollar-paymaster-integration.md) for units,
+side effects, retry behavior, versioning and remaining validation gates.
+
 **Block validation no longer reads the wallet's script table.** The node keeps
 an in-memory table that the wallet and the transaction builder fill in with the
 DigiDollar amount behind each output script. The table is keyed by the script

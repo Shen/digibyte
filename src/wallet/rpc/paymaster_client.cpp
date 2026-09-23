@@ -47,6 +47,7 @@
 #include <wallet/spend.h>
 
 #include <univalue.h>
+#include <util/chaintype.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -54,6 +55,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -439,7 +441,8 @@ UniValue ClientSessionSnapshotToJSON(PaymasterStore& store,
     return result;
 }
 
-UniValue ClientSessionSummaryToJSON(const PaymentSession& session,
+UniValue ClientSessionSummaryToJSON(const PaymasterStore& store,
+                                    const PaymentSession& session,
                                     const ClientSessionView& view)
 {
     UniValue result{UniValue::VOBJ};
@@ -464,6 +467,7 @@ UniValue ClientSessionSummaryToJSON(const PaymentSession& session,
     if (!session.recovery_txid.IsNull()) {
         result.pushKV("recovery_txid", session.recovery_txid.GetHex());
     }
+    AddSessionPaymentStatus(result, session, &store);
     result.pushKV("artifact", view.artifact);
     result.pushKV("requires_attention", view.requires_attention);
     result.pushKV("allowed_actions", AllowedActionsToJSON(view));
@@ -508,6 +512,9 @@ RPCResult ClientSessionResult(std::string key)
         {RPCResult::Type::STR, "session_state", "Authoritative session state"},
         {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Persisted phase for PENDING_PROVIDER"},
         {RPCResult::Type::BOOL, "final", "Whether the state is terminal"},
+        {RPCResult::Type::STR, "status", "success, canceled, failed, conflicted, or pending; success requires a locally confirmed recipient payment"},
+        {RPCResult::Type::BOOL, "payment_confirmed", "Validated recipient payment has positive local confirmation depth"},
+        PaymasterPaymentViewResult(),
         {RPCResult::Type::STR, "broadcast_state", "not_attempted, unknown, accepted_mempool, accepted_stempool, or confirmed"},
         {RPCResult::Type::STR, "confirmation_state", "unconfirmed, payment_confirmed, recovery_confirmed, or conflicted"},
         {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
@@ -526,6 +533,85 @@ RPCResult ClientSessionResult(std::string key)
 
 } // namespace
 
+RPCHelpMan getpaymasterclientinfo()
+{
+    return RPCHelpMan{
+        "getpaymasterclientinfo",
+        "Return wallet-scoped Paymaster capabilities and current local prerequisites.\n"
+        "Read-only: no reservations, signatures, provider requests, or financial reconciliation.\n"
+        "Readiness does not guarantee funds, provider connectivity, or a quote.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "Client integration information", {
+            {RPCResult::Type::NUM, "integration_version", "RPC contract version, independent of wire and wallet record versions"},
+            {RPCResult::Type::STR, "network", "Node network name"},
+            {RPCResult::Type::STR_HEX, "genesis_hash", "Full network genesis hash"},
+            {RPCResult::Type::STR, "amount_unit", "cents"},
+            {RPCResult::Type::NUM, "minimum_payment_cents", "Minimum recipient output"},
+            {RPCResult::Type::NUM, "maximum_payment_cents", "Maximum recipient output; fees can further constrain the order"},
+            {RPCResult::Type::NUM, "maximum_user_total_cents", "Upper bound on recipient amount plus service fee"},
+            {RPCResult::Type::ARR, "fee_modes", "Supported senddigidollar fee modes", {{RPCResult::Type::STR, "", "Mode"}}},
+            {RPCResult::Type::ARR, "funding_models", "Supported Paymaster funding models", {{RPCResult::Type::STR, "", "Model"}}},
+            {RPCResult::Type::ARR, "sponsorship_scopes", "Supported sponsorship scopes", {{RPCResult::Type::STR, "", "Scope"}}},
+            {RPCResult::Type::BOOL, "supported", "This binary implements the client integration contract"},
+            {RPCResult::Type::BOOL, "ready", "Local prerequisites for authorization currently met"},
+            {RPCResult::Type::ARR, "readiness_errors", "Local blockers; preparation and session reads may still work", {{RPCResult::Type::STR, "", "Stable error identifier"}}},
+        }},
+        RPCExamples{HelpExampleCli("getpaymasterclientinfo", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            const auto wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            WalletContext& context = EnsureWalletContext(request.context);
+            UniValue errors{UniValue::VARR};
+            if (!context.paymaster || !context.paymaster->Enabled()) errors.push_back("PAYMASTER_DISABLED");
+            if (!context.args || context.args->GetIntArg("-prune", 0) != 0) errors.push_back("PAYMASTER_REQUIRES_PRUNE_0");
+            if (!context.args || !context.args->GetBoolArg("-txindex", DEFAULT_TXINDEX)) errors.push_back("PAYMASTER_REQUIRES_TXINDEX");
+            if (context.args && Params().GetChainType() == ChainType::MAIN &&
+                context.args->GetBoolArg("-capturemessages", false)) errors.push_back("PAYMASTER_MESSAGE_CAPTURE_ENABLED");
+            const auto* node = wallet->chain().context();
+            if (!node || !node->connman || !(node->connman->GetLocalServices() & NODE_P2P_V2)) errors.push_back("PAYMASTER_REQUIRES_V2_TRANSPORT");
+            if (!context.chain || context.chain->isInitialBlockDownload() ||
+                !context.chain->isReadyToBroadcast()) errors.push_back("PAYMASTER_NODE_NOT_READY");
+            const auto chain_height = wallet->chain().getHeight();
+            const auto index = g_txindex ? g_txindex->GetSummary() : IndexSummary{};
+            {
+                LOCK(wallet->cs_wallet);
+                if (wallet->IsLocked()) errors.push_back("PAYMASTER_WALLET_LOCKED");
+                if (wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) errors.push_back("PAYMASTER_PRIVATE_KEYS_REQUIRED");
+                if (!chain_height || wallet->GetLastBlockHeight() != *chain_height) errors.push_back("PAYMASTER_WALLET_NOT_SYNCED");
+                if (wallet->GetLastBlockHeight() + 1 < Params().GetConsensus().DeploymentHeight(Consensus::DEPLOYMENT_DIGIDOLLAR)) errors.push_back("PAYMASTER_DIGIDOLLAR_NOT_ACTIVE");
+                if (!index.synced || index.best_block_hash != wallet->GetLastBlockHash()) errors.push_back("PAYMASTER_REQUIRES_READY_TXINDEX");
+                ClientSafetyPolicy policy;
+                std::string error;
+                if (!GetPaymasterClientSafetyPolicy(*wallet, policy)) errors.push_back("PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
+                else if (!ValidateClientSafetyPolicy(policy, error)) errors.push_back(error);
+                ClientFeeLedger ledger;
+                if (!GetPaymasterClientFeeLedger(*wallet, ledger)) errors.push_back("PAYMASTER_CLIENT_FEE_LEDGER_REQUIRED");
+                else if (!ValidateClientFeeLedger(ledger, error)) errors.push_back(error);
+            }
+            const auto strings = [](std::initializer_list<const char*> values) {
+                UniValue array{UniValue::VARR};
+                for (const auto* value : values) array.push_back(value);
+                return array;
+            };
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("integration_version", 1);
+            result.pushKV("network", ChainTypeToString(Params().GetChainType()));
+            result.pushKV("genesis_hash", Params().GenesisBlock().GetHash().GetHex());
+            result.pushKV("amount_unit", "cents");
+            result.pushKV("minimum_payment_cents", 100);
+            result.pushKV("maximum_payment_cents", MAX_DD_OUTPUT_CENTS);
+            result.pushKV("maximum_user_total_cents", MAX_DD_OUTPUT_CENTS);
+            result.pushKV("fee_modes", strings({"dgb", "paymaster", "auto"}));
+            result.pushKV("funding_models", strings({"user_paid", "sponsored"}));
+            result.pushKV("sponsorship_scopes", strings({"public", "restricted"}));
+            result.pushKV("supported", true);
+            result.pushKV("ready", errors.empty());
+            result.pushKV("readiness_errors", std::move(errors));
+            return result;
+        },
+    };
+}
+
 RPCHelpMan getdigidollarsendsession()
 {
     return RPCHelpMan{
@@ -543,6 +629,8 @@ RPCHelpMan getdigidollarsendsession()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
 
+            wallet->BlockUntilSyncedToCurrentChain();
+            LOCK(wallet->cs_wallet);
             PaymasterStore store{*wallet};
             DigiDollar::Paymaster::PaymentSession session;
             if (!FindSession(request.params[0].get_obj(), store, session)) {
@@ -580,6 +668,12 @@ RPCHelpMan listdigidollarsendsessions()
                                                                                                                                                                                                                                         {RPCResult::Type::STR, "requested_fee_mode", "Requested fee mode"},
                                                                                                                                                                                                                                         {RPCResult::Type::STR, "fee_mode_used", "Effective fee mode"},
                                                                                                                                                                                                                                         {RPCResult::Type::STR, "session_state", "Authoritative session state"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "status", "success, canceled, failed, conflicted, or pending"},
+                                                                                                                                                                                                                                        {RPCResult::Type::BOOL, "payment_confirmed", "Validated recipient payment is locally confirmed"},
+                                                                                                                                                                                                                                        {RPCResult::Type::BOOL, "final", "Whether the persisted session state is terminal"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "broadcast_state", "Last known broadcast state"},
+                                                                                                                                                                                                                                        {RPCResult::Type::STR, "confirmation_state", "Locally observed confirmation state"},
+                                                                                                                                                                                                                                        PaymasterPaymentViewResult(),
                                                                                                                                                                                                                                         {RPCResult::Type::STR, "pending_phase", /*optional=*/true, "Pending provider phase"},
                                                                                                                                                                                                                                         {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
                                                                                                                                                                                                                                         {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
@@ -621,6 +715,7 @@ RPCHelpMan listdigidollarsendsessions()
                     "cursor must be a canonical lowercase request UUID");
             }
 
+            wallet->BlockUntilSyncedToCurrentChain();
             // Keep the live-session list and each derived attempt/recovery
             // view on one wallet database snapshot. PaymasterStore uses the
             // same recursive wallet lock internally.
@@ -669,7 +764,7 @@ RPCHelpMan listdigidollarsendsessions()
             UniValue page{UniValue::VARR};
             for (size_t index = 0; index < page_size; ++index) {
                 page.push_back(ClientSessionSummaryToJSON(
-                    listed[index].session, listed[index].view));
+                    store, listed[index].session, listed[index].view));
             }
             UniValue result{UniValue::VOBJ};
             result.pushKV("active_only", active_only);
@@ -1606,6 +1701,8 @@ RPCHelpMan resolvepaymastersession()
     return RPCHelpMan{
         "resolvepaymastersession",
         "Inspect or recover an existing Paymaster session.\n"
+        "refresh may persist already-received provider equivocation evidence, but creates no payment, signature or reservation. "
+        "Use getdigidollarsendsession for a strictly read-only payment observation.\n"
         "retry_same never creates a quote, attempt, reservation, or signature. "
         "fallback is allowed only before a user PSBT exists. abandon_unsigned "
         "atomically releases a session for which no transaction authorization can exist. "
@@ -1720,6 +1817,7 @@ RPCHelpMan resolvepaymastersession()
             if (!FindSession(request.params[0].get_obj(), store, session)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster session not found");
             }
+            if (action == "refresh") wallet->BlockUntilSyncedToCurrentChain();
             if (context.paymaster && context.paymaster->Enabled()) {
                 std::string equivocation_error;
                 if (!DrainClientSessionEquivocations(

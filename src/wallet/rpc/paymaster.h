@@ -17,6 +17,7 @@
 
 class JSONRPCRequest;
 class RPCHelpMan;
+struct RPCResult;
 class UniValue;
 
 namespace wallet {
@@ -70,6 +71,9 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                                         CAmount amount,
                                         const UniValue& options,
                                         const std::vector<COutPoint>* preset_inputs);
+/** Shared additive RPC schema, independent of wire and wallet record versions. */
+RPCResult PaymasterPaymentViewResult();
+RPCHelpMan getpaymasterclientinfo();
 RPCHelpMan getdigidollarsendsession();
 RPCHelpMan listdigidollarsendsessions();
 RPCHelpMan getpaymasterreputation();

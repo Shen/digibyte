@@ -1221,8 +1221,11 @@ bool ReserveClientFee(ClientFeeLedger& ledger,
     const int64_t effective_now = EffectiveAccountingTime(now, ledger.accounting_time_high_water);
     int64_t projected{service_fee.value};
     for (const ClientFeeReservation& reservation : ledger.reservations) {
+        // Open authorizations remain liabilities regardless of age. Only a
+        // completed charge can age out of the rolling daily window.
         if (reservation.state == BudgetReservationState::RELEASED ||
-            TimeDeltaExceeds(effective_now, reservation.updated_at, SAFETY_DAY_SECONDS)) {
+            (reservation.state == BudgetReservationState::SPENT &&
+             TimeDeltaExceeds(effective_now, reservation.updated_at, SAFETY_DAY_SECONDS))) {
             continue;
         }
         if (!AddAmount(projected, reservation.service_fee.value)) {

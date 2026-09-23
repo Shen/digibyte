@@ -356,6 +356,17 @@ bool DecodePaymasterSessionSnapshot(const UniValue& result,
         error = QStringLiteral("unknown confirmation state");
         return false;
     }
+    const UniValue& payment_confirmed = session.find_value("payment_confirmed");
+    const QString payment_status = read_string(session, "status");
+    if ((!payment_confirmed.isNull() && !payment_confirmed.isBool()) ||
+        (snapshot.confirmation_state == QStringLiteral("payment_confirmed") &&
+         (!payment_confirmed.isTrue() || payment_status != QStringLiteral("success"))) ||
+        (payment_confirmed.isTrue() &&
+         (snapshot.confirmation_state != QStringLiteral("payment_confirmed") ||
+          payment_status != QStringLiteral("success")))) {
+        error = QStringLiteral("inconsistent recipient payment confirmation");
+        return false;
+    }
     if (!snapshot.broadcast_state.isEmpty() &&
         snapshot.broadcast_state != QStringLiteral("not_attempted") &&
         snapshot.broadcast_state != QStringLiteral("unknown") &&
@@ -1229,11 +1240,15 @@ QString PaymasterSendWidget::friendlyPaymasterSessionStatus() const
     if (m_paymasterBusy) {
         return DigiDollarSendWidget::tr("Core is securely checking the current Paymaster transfer. Please wait.");
     }
-    if (m_paymasterSessionState == QStringLiteral("CONFIRMED")) {
+    if (m_paymasterConfirmationState == QStringLiteral("payment_confirmed")) {
         return DigiDollarSendWidget::tr("Transfer confirmed. The recipient has received the DigiDollar payment.");
     }
-    if (m_paymasterSessionState == QStringLiteral("CANCELED_SAFE")) {
-        return DigiDollarSendWidget::tr("Transfer canceled safely. Reserved DigiDollar is available again.");
+    if (m_paymasterConfirmationState == QStringLiteral("recovery_confirmed")) {
+        return DigiDollarSendWidget::tr("Recovery confirmed. The original recipient payment was canceled.");
+    }
+    if (m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
+        m_paymasterSessionState == QStringLiteral("CANCELED_SAFE")) {
+        return DigiDollarSendWidget::tr("This session is closed. A current payment or recovery confirmation is unavailable.");
     }
     if (m_paymasterSessionState == QStringLiteral("AWAITING_USER_SIGNATURE")) {
         return DigiDollarSendWidget::tr("An exact provider offer is ready for your review. Nothing has been signed yet.");
@@ -1276,14 +1291,13 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
     // mutates an already persisted authorization.
     if (!m_feeChoicesFrame || !m_paymasterSessionFrame) return;
     const bool focus = !m_paymasterRequestId.isEmpty();
+    // A closed session permits composing another transfer, independently of
+    // whether retained artifacts can still prove its outcome.
     const bool completed =
         m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
         m_paymasterSessionState == QStringLiteral("CANCELED_SAFE") ||
-        (m_paymasterSessionState == QStringLiteral("MEMPOOL") &&
-         m_paymasterTerminalNoticeShown &&
-         IsValidatedPaymasterCompletion(
-             m_paymasterTransactionId, m_paymasterSessionState, QString{},
-             m_paymasterResultStatus));
+        m_paymasterConfirmationState == QStringLiteral("payment_confirmed") ||
+        m_paymasterConfirmationState == QStringLiteral("recovery_confirmed");
     const auto core_allows = [this](const QString& action) {
         return m_paymasterAllowedActionsKnown &&
             m_paymasterAllowedActions.contains(action);
@@ -2368,7 +2382,9 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
     const UniValue& direct_status = result.find_value("status");
     const QString direct_status_text = direct_status.isStr()
         ? QString::fromStdString(direct_status.get_str()) : QString{};
-    const bool direct_status_present = !direct_status.isNull();
+    const bool direct_status_present = !direct_status.isNull() &&
+        result.find_value("session_state").isNull() &&
+        result.find_value("session").isNull();
     const bool direct_success = direct_status_present &&
         direct_status.isStr() &&
         result.find_value("session_state").isNull() &&
@@ -2401,6 +2417,13 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
         }
         if (handleAuthoritativePaymasterCompletion(result)) {
             setPaymasterBusy(false);
+            return;
+        }
+        if (m_paymasterSessionState == QStringLiteral("MEMPOOL")) {
+            // Submission is complete, but payment confirmation is still pending.
+            // Continue read-only polling without requesting another signature.
+            setPaymasterBusy(false);
+            schedulePaymasterPoll(/*state_changed=*/true);
             return;
         }
     }
@@ -2653,11 +2676,13 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
         completion_session.find_value("final");
     const bool reported_final = reported_final_value.isBool() &&
         reported_final_value.get_bool();
+    const UniValue& status = completion_session.find_value("status");
     const bool payment_success = IsValidatedPaymasterCompletion(
-        m_paymasterTransactionId, m_paymasterSessionState, QString{},
-        m_paymasterResultStatus, reported_final);
-    const bool payment_state =
-        m_paymasterSessionState == QStringLiteral("MEMPOOL") ||
+        m_paymasterTransactionId, m_paymasterSessionState,
+        status.isStr() ? QString::fromStdString(status.get_str()) : QString{},
+        m_paymasterResultStatus, reported_final,
+        completion_session.find_value("payment_confirmed").isTrue());
+    const bool payment_state = payment_success ||
         m_paymasterSessionState == QStringLiteral("CONFIRMED");
     const bool recovery_state =
         m_paymasterSessionState == QStringLiteral("CANCELED_SAFE");
@@ -2680,36 +2705,41 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
     if (m_paymasterTerminalNoticeShown) return true;
 
     if (payment_state) {
+        int64_t recipient_cents{0};
         if (!payment_success ||
+            !ReadInt64(completion_session, "payment_cents", recipient_cents) ||
+            recipient_cents <= 0 ||
+            recipient_cents > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
             (m_paymasterSessionState == QStringLiteral("CONFIRMED") &&
              m_paymasterConfirmationState !=
                  QStringLiteral("payment_confirmed"))) {
             m_paymasterStateValue->setText(
-                DigiDollarSendWidget::tr("Payment status blocked: inconsistent confirmation"));
+                DigiDollarSendWidget::tr("Recipient payment confirmation is unavailable"));
             m_form.showWarning(
                 DigiDollarSendWidget::tr("Paymaster payment status unavailable"),
-                DigiDollarSendWidget::tr("Core reported a payment state without the matching validated result status, transaction id and confirmation state."));
+                DigiDollarSendWidget::tr("The stored session state alone does not prove payment. A current validated recipient amount, transaction and local confirmation are required; retained details may be unavailable."));
             m_paymasterTerminalNoticeShown = true;
             return true;
         }
-        m_form.showSuccess(m_paymasterTransactionId, m_paymasterAmount);
+        m_form.showSuccess(m_paymasterTransactionId, recipient_cents / 100.0);
         m_form.onClearClicked();
         m_paymasterStateValue->setText(
-            m_paymasterSessionState == QStringLiteral("CONFIRMED")
-                ? DigiDollarSendWidget::tr("Original payment confirmed")
-                : DigiDollarSendWidget::tr("Payment transaction accepted by the network"));
+            DigiDollarSendWidget::tr("Original payment confirmed"));
         m_form.updateBalance();
         m_paymasterTerminalNoticeShown = true;
         return true;
     }
 
-    const UniValue& recovery = result.find_value("recovery");
-    if (!recovery.isObject()) {
+    const UniValue& recovery = completion_session.find_value("payment_view").find_value("recovery");
+    int64_t recovery_depth{0};
+    if (!recovery.isObject() || !recovery.find_value("details_available").isTrue() ||
+        !recovery.find_value("observation_available").isTrue() ||
+        !ReadInt64(recovery, "confirmations", recovery_depth) || recovery_depth <= 0) {
         m_paymasterStateValue->setText(
-            DigiDollarSendWidget::tr("Recovery status blocked: missing recovery manifest"));
+            DigiDollarSendWidget::tr("Recovery confirmation is unavailable"));
         m_form.showWarning(
             DigiDollarSendWidget::tr("Paymaster recovery status unavailable"),
-            DigiDollarSendWidget::tr("Core reported a safely canceled session without its authoritative recovery record."));
+            DigiDollarSendWidget::tr("This session is closed, but its recovery transaction is not currently confirmed by the local wallet observation."));
         m_paymasterTerminalNoticeShown = true;
         return true;
     }

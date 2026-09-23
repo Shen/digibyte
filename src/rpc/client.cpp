@@ -319,6 +319,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "senddigidollar", 3, "fee_rate" },
     { "senddigidollar", 4, "selected_inputs" },
     { "senddigidollar", 6, "options" },
+    // getpaymasterclientinfo has no parameters to convert.
     { "getdigidollarsendsession", 0, "lookup" },
     { "getpaymasteroffers", 0, "amount_cents" },
     { "getpaymasteroffers", 1, "options" },

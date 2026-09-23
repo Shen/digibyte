@@ -18,6 +18,18 @@ the counterparty protections. Verification evidence and outstanding release
 acceptance are recorded in the
 [release gate](digidollar-paymaster-release-gate.md).
 
+## External client integration
+
+Use the [version 1 integration contract](digidollar-paymaster-integration.md)
+for `getpaymasterclientinfo`, explicit cent amounts, preparation side effects,
+authorization, exact retries and the read-only payment/recovery view.
+`final` is a terminal session marker, not payment success. Paymaster
+`status="success"` and `payment_confirmed=true` require validated local recipient
+confirmation; recovery is `canceled`, and mempool submission remains `pending`.
+Missing/pruned evidence cannot prove payment. Open service-fee reservations
+continue to count against the existing daily limit after 24 hours. This adds no
+agent-wide budget and does not enable x402.
+
 ## Privacy and safety model
 
 Paymaster transport and data minimization improve privacy but do not guarantee

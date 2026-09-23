@@ -1,5 +1,14 @@
 # Paymaster integration with DigiByte v9.26.6rc2
 
+The later [client integration package](digidollar-paymaster-integration.md)
+is based on `46add7e4d3`. It adds a read-only capability RPC and transient
+payment/recovery observations, corrects terminal-success and service-fee-window
+semantics, and binds terminal send retries to the existing canonical hash.
+The separation work described below remains historical; its statement that no
+new public RPC was added refers to that earlier refactoring. This package adds
+no payment endpoint, agent budget, wire field, wallet flag or record format.
+Current package verification does not renew earlier release acceptance.
+
 ## Scope and base
 
 This integration adapts Paymaster to upstream commit

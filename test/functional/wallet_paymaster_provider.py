@@ -1906,6 +1906,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         self.wait_until(recovery_confirmed)
         assert_equal(confirmed_recovery["final"], True)
+        assert_equal(confirmed_recovery["status"], "canceled")
+        assert_equal(confirmed_recovery["payment_confirmed"], False)
+        assert_equal(confirmed_recovery["payment_view"]["recovery"]["confirmations"], 1)
+        assert_equal(confirmed_recovery["payment_view"]["recovery"]["txid"], recovery_txid)
         assert_equal(confirmed_recovery["confirmation_state"],
                      "recovery_confirmed")
         assert_equal(confirmed_recovery["recovery_txid"], recovery_txid)
