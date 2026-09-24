@@ -10,6 +10,7 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/guiutil.h>
 #include <wallet/digidollarwallet.h>
+#include <digidollar/amount.h>
 #include <logging.h>
 #include <univalue.h>
 
@@ -29,6 +30,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QComboBox>
+#include <QStyledItemDelegate>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
@@ -181,26 +183,6 @@ public:
     }
 };
 
-class DigiDollarTimestampTableItem final : public QTableWidgetItem
-{
-public:
-    DigiDollarTimestampTableItem(const QString& display_text, uint64_t timestamp)
-        : QTableWidgetItem(display_text)
-    {
-        setData(Qt::UserRole, QVariant::fromValue(timestamp));
-    }
-
-    bool operator<(const QTableWidgetItem& other) const override
-    {
-        // The visible date is localized for the operator (for example,
-        // "Aug 02, 2026 23:30") and therefore cannot be sorted as text.
-        // Compare the underlying Unix timestamps so both sort directions stay
-        // chronological across hours, days, months, locales, and year changes.
-        return data(Qt::UserRole).toULongLong() <
-               other.data(Qt::UserRole).toULongLong();
-    }
-};
-
 QString DetailRow(const QString& label, const QString& value)
 {
     if (value.isEmpty()) return QString();
@@ -259,6 +241,8 @@ void DigiDollarTransactionsWidget::setupFilterBar()
     // Type filter
     QLabel* typeLabel = new QLabel(tr("Type:"), this);
     m_typeFilter = new QComboBox(this);
+    // Use the styled list so popup items follow the DigiDollar theme.
+    m_typeFilter->setItemDelegate(new QStyledItemDelegate(m_typeFilter));
     m_typeFilter->addItem(tr("All Types"), "");
     m_typeFilter->addItem(tr("Mints"), "mint");
     m_typeFilter->addItem(tr("Sends"), "send");
@@ -321,7 +305,7 @@ void DigiDollarTransactionsWidget::setupTable()
     // Let the table inherit colors from the application palette/theme
     // Don't override with custom colors - this ensures proper dark/light mode support
 
-    m_table->setColumnWidth(Column::Date, 130);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Date, QHeaderView::ResizeToContents);
     // The type column has to fit the longest name a row can carry, which is
     // the name for DigiDollars a redemption hands back.
     m_table->setColumnWidth(Column::Type,
@@ -330,7 +314,7 @@ void DigiDollarTransactionsWidget::setupTable()
     m_table->setColumnWidth(Column::Amount, 110);
     m_table->setColumnWidth(Column::LockPeriod, 90);
     m_table->setColumnWidth(Column::Note, 150);
-    m_table->setColumnWidth(Column::Confirmations, 100);
+    m_table->horizontalHeader()->setSectionResizeMode(Column::Confirmations, QHeaderView::ResizeToContents);
 
     m_table->horizontalHeader()->setStretchLastSection(false);
     m_table->horizontalHeader()->setSectionResizeMode(Column::TxId, QHeaderView::Stretch);
@@ -582,8 +566,8 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Date
             uint64_t timestamp = tx.find_value("time").getInt<uint64_t>();
-            QTableWidgetItem* dateItem =
-                new DigiDollarTimestampTableItem(formatTimestamp(timestamp), timestamp);
+            QTableWidgetItem* dateItem = new GUIUtil::NumericTableWidgetItem(formatTimestamp(timestamp));
+            dateItem->setData(Qt::UserRole, QVariant::fromValue(timestamp));
             m_table->setItem(row, Column::Date, dateItem);
 
             // Get lock tier early so we can use it for Type column
@@ -613,7 +597,7 @@ void DigiDollarTransactionsWidget::populateTable()
 
             // Amount
             CAmount amount = tx.find_value("amount").getInt<int64_t>();
-            QTableWidgetItem* amountItem = new QTableWidgetItem(formatDDAmount(amount));
+            QTableWidgetItem* amountItem = new GUIUtil::NumericTableWidgetItem(formatDDAmount(amount));
             amountItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
             amountItem->setData(Qt::UserRole, QVariant::fromValue(amount));
 
@@ -655,9 +639,13 @@ void DigiDollarTransactionsWidget::populateTable()
             if (walletStateVal.isStr()) {
                 isLocal = walletStateVal.get_str() == "local";
             }
-            QTableWidgetItem* confItem = new QTableWidgetItem(formatConfirmations(confirmations, isAbandoned, isLocal));
+            const bool isExpiredMint = walletStateVal.isStr() && walletStateVal.get_str() == "expired_mint";
+            QTableWidgetItem* confItem = new QTableWidgetItem(isExpiredMint ? tr("Expired mint") :
+                formatConfirmations(confirmations, isAbandoned, isLocal));
             confItem->setTextAlignment(Qt::AlignCenter);
-            if (isLocal) {
+            if (isExpiredMint) {
+                confItem->setToolTip(tr("This mint was not confirmed before its deadline."));
+            } else if (isLocal) {
                 confItem->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
             }
             m_table->setItem(row, Column::Confirmations, confItem);
@@ -830,7 +818,7 @@ QString DigiDollarTransactionsWidget::formatDDAmount(CAmount amount) const
 QString DigiDollarTransactionsWidget::formatTimestamp(uint64_t timestamp) const
 {
     QDateTime dt = QDateTime::fromSecsSinceEpoch(timestamp);
-    return dt.toString("MMM dd, yyyy hh:mm");
+    return GUIUtil::dateTimeStr(dt);
 }
 
 QString DigiDollarTransactionsWidget::formatConfirmations(int confirmations, bool isAbandoned, bool isLocal) const
@@ -928,6 +916,8 @@ void DigiDollarTransactionsWidget::exportClicked()
             if (item) {
                 if (col == Column::TxId) {
                     value = item->data(Qt::UserRole).toString();
+                } else if (col == Column::Amount) {
+                    value = QString::fromStdString(DigiDollar::FormatDDAmountDollars(item->data(Qt::UserRole).toLongLong()));
                 } else {
                     value = item->text();
                 }

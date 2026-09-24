@@ -28,6 +28,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QComboBox>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -245,6 +246,8 @@ void DigiDollarMintWidget::setupLockTierSection()
     m_lockTierLabel = new QLabel(tr("Time Lock Period:"), this);
     m_lockTierLabel->setToolTip(tr("Select how long your DGB collateral will be locked"));
     m_lockTierCombo = new QComboBox(this);
+    // Use the styled list so popup items follow the DigiDollar theme.
+    m_lockTierCombo->setItemDelegate(new QStyledItemDelegate(m_lockTierCombo));
     m_lockTierCombo->setObjectName("lockTierCombo");
     m_lockTierCombo->setToolTip(tr("WARNING: Your DGB will be locked for this period and cannot be accessed until the timelock expires.\nLonger locks require less collateral (30 days: 500%, 10 years: 200%)"));
     m_lockTierLabel->setBuddy(m_lockTierCombo);
@@ -512,12 +515,13 @@ void DigiDollarMintWidget::updateOraclePrice()
             const bool healthReady = health.find_value("ready").get_bool();
             const bool emergency = healthReady && health.find_value("health_percentage").getInt<int>() < 100;
             m_mintVolatilityAllowed = ready && quoted && !restricted && healthReady && !emergency;
-            const QString reason = !quoted ? tr("No valid oracle quote; minting is paused.") :
-                (!ready ? tr("Required price history is unavailable; restore or download the missing blocks.") :
-                (restricted ? tr("Minting is paused: the quote differs by at least 20% from the ancestor reference.") :
-                 tr("Quote is within the mint volatility limit. Health, collateral and fees must also pass.")));
-            m_mintStatusLabel->setText(!healthReady ? tr("Canonical health is unavailable; wait for synchronization and retry.") :
-                (emergency ? tr("Minting is paused by emergency health calculated from open vaults.") : reason));
+            const QString reason = !quoted ? tr("Minting is paused while waiting for a valid oracle price.") :
+                (!ready ? tr("Minting is paused because required price history is unavailable.") :
+                (!healthReady ? tr("Minting is paused because the network health check is unavailable.") :
+                (emergency ? tr("Minting is paused because the network has too little collateral.") :
+                (restricted ? tr("Minting is paused: the price differs by at least 20% from recent block prices.") :
+                 tr("Minting is available. Enter an amount to check collateral and fees.")))));
+            m_mintStatusLabel->setText(reason);
             m_mintStatusLabel->setToolTip(tr("Candidate height: %1\nRule version: %2\nReference: %3 micro-USD\nSamples: %4\nWindow: %5 through %6\nDeviation: %7 basis points\nConfirmation conditions may change.")
                 .arg(status.find_value("candidate_height").getInt<int>())
                 .arg(status.find_value("rule_version").getInt<int>())
@@ -1139,13 +1143,12 @@ int DigiDollarMintWidget::getLockTierBlocks(int tier) const
 void DigiDollarMintWidget::updateAmountValidation()
 {
     QString amountText = m_amountEdit->text();
-    QPalette palette = QApplication::palette();
-    int lightness = palette.color(QPalette::WindowText).lightness();
-    bool isDarkTheme = lightness > 127;
+    const QPalette palette = this->palette();
+    const bool isDarkTheme = palette.color(QPalette::Window).lightness() < 128;
 
-    QString successColor = isDarkTheme ? "#4caf50" : "#28a745";
-    QString warningColor = isDarkTheme ? "#ff9800" : "#ffc107";
-    QString errorColor = isDarkTheme ? "#f44336" : "#dc3545";
+    QString successColor = isDarkTheme ? "#8fe3b1" : "#147a42";
+    QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
+    QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
     // Get min/max limits from chain params
     const auto& ddParams = Params().GetDigiDollarParams();

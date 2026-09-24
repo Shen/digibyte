@@ -22,6 +22,9 @@ public:
 
 private Q_SLOTS:
     void overviewWidgetTests();
+    void failedMintsKeepTheirWalletStatus();
+    void digiDollarControlsStayReadableInBothThemes();
+    void overviewExplainsMintAvailability();
     void overviewPaymasterReservationUsesConditionalBalanceBreakdown();
     void watchOnlyDigiDollarBalanceHiddenInWalletModel();
     void privateKeyDisabledWalletCannotGenerateDigiDollarAddress();
@@ -44,6 +47,7 @@ private Q_SLOTS:
     void addressBookTests();
     void transactionsWidgetTests();
     void transactionsWidgetExportTests();
+    void datesFollowComputerLocale();
     void privacyTabSetPrivacySlotTests();
     void privacyOverviewMaskTests();
     void overviewUsdValueShowsUsdSuffixWhenPrivacyOff();

@@ -85,10 +85,11 @@ UniValue SerializeDigiDollarHistory(const std::vector<DDTransaction>& transactio
         tx_info.pushKV("abandoned", tx.abandoned);
         tx_info.pushKV("lock_tier", tx.lock_tier);
         tx_info.pushKV("in_mempool", tx.in_mempool);
-        tx_info.pushKV("wallet_state", tx.is_local ? "local" :
-            (tx.abandoned ? "abandoned" :
-             (tx.confirmations < 0 ? "conflicted" :
-              (tx.confirmations > 0 ? "confirmed" : "pending"))));
+        tx_info.pushKV("wallet_state", tx.is_expired_mint ? "expired_mint" :
+            (tx.is_local ? "local" :
+             (tx.abandoned ? "abandoned" :
+              (tx.confirmations < 0 ? "conflicted" :
+               (tx.confirmations > 0 ? "confirmed" : "pending")))));
         result.push_back(std::move(tx_info));
     }
     return result;

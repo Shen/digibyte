@@ -80,6 +80,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QGuiApplication>
@@ -91,6 +92,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPixmap>
@@ -104,9 +106,11 @@
 #include <QRadioButton>
 #include <QListWidget>
 #include <QTableWidget>
+#include <QStyleOptionViewItem>
 #include <QTreeWidget>
 #include <QTextDocumentFragment>
 #include <QTextEdit>
+#include <QTemporaryDir>
 #include <QDialogButtonBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
@@ -2703,6 +2707,21 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+    const CAmount amounts[]{12345, 105, 500};
+    for (int i = 0; i < 3; ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.amount = amounts[i];
+        tx.incoming = i != 1;
+        tx.category = tx.incoming ? "receive" : "send";
+        tx.timestamp = GetTime() + i;
+        tx.confirmations = 1;
+        tx.comment = "note, \"quoted\"\nsecond line";
+        dd_wallet->AddMockTransaction(tx);
+    }
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
@@ -2710,6 +2729,12 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     DigiDollarTransactionsWidget transactionsWidget;
     transactionsWidget.setWalletModel(mini_gui.walletModel.get());
     transactionsWidget.setClientModel(mini_gui.clientModel.get());
+    transactionsWidget.show();
+    transactionsWidget.updateView();
+
+    QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->rowCount(), 3);
 
     QPushButton* exportButton = transactionsWidget.findChild<QPushButton*>("m_exportButton");
     if (!exportButton) {
@@ -2723,6 +2748,188 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     }
     QVERIFY(exportButton != nullptr);
     QVERIFY(exportButton->isEnabled());
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath("transactions.csv");
+    const bool native_dialogs_disabled = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    bool timed_out = false;
+    bool file_selected = false;
+    QTimer close_dialogs;
+    connect(&close_dialogs, &QTimer::timeout, [&] {
+        for (QWidget* window : QApplication::topLevelWidgets()) {
+            if (!window->isVisible()) continue;
+            if (auto* dialog = qobject_cast<QFileDialog*>(window)) {
+                if (!file_selected) {
+                    dialog->setDirectory(directory.path());
+                    // Enter the name as a user would. selectFile() may ignore
+                    // a visible dialog when its filename field has focus.
+                    auto* filename = dialog->findChild<QLineEdit*>("fileNameEdit");
+                    if (filename) filename->setText(path);
+                    file_selected = true;
+                } else {
+                    QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+                }
+            } else if (auto* message = qobject_cast<QMessageBox*>(window)) {
+                QMetaObject::invokeMethod(message, "accept", Qt::QueuedConnection);
+            }
+        }
+    });
+    QTimer::singleShot(10000, &close_dialogs, [&] {
+        timed_out = true;
+        close_dialogs.stop();
+        for (QWidget* window : QApplication::topLevelWidgets()) {
+            if (qobject_cast<QFileDialog*>(window) || qobject_cast<QMessageBox*>(window)) {
+                QMetaObject::invokeMethod(window, "reject", Qt::QueuedConnection);
+            }
+        }
+    });
+    close_dialogs.start(10);
+    exportButton->click();
+    close_dialogs.stop();
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, native_dialogs_disabled);
+    QVERIFY2(!timed_out, "The export dialogs did not finish");
+
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QString csv = QString::fromUtf8(file.readAll());
+    QVERIFY2(!csv.contains("$DD"), qPrintable(csv));
+    QVERIFY(csv.contains("\"123.45\""));
+    QVERIFY(csv.contains("\"-1.05\""));
+    QVERIFY(csv.contains("\"5.00\""));
+    QVERIFY(csv.contains("\"note, \"\"quoted\"\"\nsecond line\""));
+    for (int i = 0; i < 3; ++i) {
+        QVERIFY(csv.contains(QString::fromStdString(std::string(64, '1' + i))));
+    }
+}
+
+void DigiDollarWidgetTests::datesFollowComputerLocale()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    const QList<qint64> timestamps{1704110400, 1706788800, 1735732800};
+    const QLocale locale = QLocale::system();
+    QFile theme(":/css/dark");
+    QVERIFY(theme.open(QIODevice::ReadOnly));
+    const QString css = QString::fromUtf8(theme.readAll());
+    // Cover desktops that use a larger font as well as longer regional dates.
+    QFont font = QApplication::font();
+    font.setPointSize(14);
+    const auto dateFits = [](QTableWidget* table, int column) {
+        QStyleOptionViewItem option;
+        option.initFrom(table);
+        option.font = table->font();
+        const auto index = table->model()->index(0, column);
+        const int required = table->itemDelegate()->sizeHint(option, index).width();
+        QVERIFY2(table->columnWidth(column) >= required,
+                 qPrintable(QString("Date column is %1 pixels wide but needs %2").arg(table->columnWidth(column)).arg(required)));
+    };
+
+    for (int i = 0; i < timestamps.size(); ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.timestamp = timestamps[i];
+        tx.amount = 100;
+        tx.incoming = true;
+        tx.category = "receive";
+        tx.confirmations = 1;
+        wallet->GetDDWallet()->AddMockTransaction(tx);
+    }
+    DigiDollarTransactionsWidget history;
+    history.setStyleSheet(css);
+    history.setFont(font);
+    history.setWalletModel(mini_gui.walletModel.get());
+    history.setClientModel(mini_gui.clientModel.get());
+    history.show();
+    history.updateView();
+    auto* history_table = history.findChild<QTableWidget*>();
+    QVERIFY(history_table);
+    QTRY_COMPARE_WITH_TIMEOUT(history_table->rowCount(), 3, 5000);
+    QCoreApplication::processEvents();
+    dateFits(history_table, 0);
+    for (int row = 0; row < 3; ++row) {
+        const auto* date = history_table->item(row, 0);
+        QCOMPARE(date->text(), GUIUtil::dateTimeStr(date->data(Qt::UserRole).toLongLong()));
+    }
+
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(mini_gui.walletModel.get());
+    overview.setClientModel(mini_gui.clientModel.get());
+    overview.show();
+    overview.updateView();
+    auto* recent = overview.findChild<QListWidget*>("transactionsList");
+    QVERIFY(recent);
+    QTRY_COMPARE_WITH_TIMEOUT(recent->count(), 3, 5000);
+    for (int row = 0; row < 3; ++row) {
+        const auto labels = recent->itemWidget(recent->item(row))->findChildren<QLabel*>();
+        QCOMPARE(labels.at(4)->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamps[2 - row]).date(), QLocale::ShortFormat));
+    }
+
+    const QString address = mini_gui.walletModel->getNewDigiDollarAddress("date-test");
+    QVERIFY(!address.isEmpty());
+    for (int i = 0; i < timestamps.size(); ++i) {
+        RecentRequestEntry entry;
+        entry.id = i + 1;
+        entry.date = QDateTime::fromSecsSinceEpoch(timestamps[i]);
+        entry.recipient.address = address;
+        entry.recipient.label = QString::number(timestamps[i]);
+        entry.recipient.amount = 100;
+        DataStream stream{};
+        stream << entry;
+        QVERIFY(mini_gui.walletModel->wallet().setAddressReceiveRequest(
+            DecodeDigiDollarAddress(address.toStdString()), ToString(entry.id), stream.str()));
+    }
+    DigiDollarReceiveWidget receive;
+    receive.setWalletModel(mini_gui.walletModel.get());
+    receive.updateRecentRequests();
+    auto* requests = receive.findChild<QTableWidget*>("requestsTable");
+    QVERIFY(requests);
+    QCOMPARE(requests->rowCount(), 3);
+    for (const auto order : {Qt::AscendingOrder, Qt::DescendingOrder}) {
+        requests->sortItems(0, order);
+        receive.updateRecentRequests();
+        for (int row = 0; row < 3; ++row) {
+            const qint64 timestamp = timestamps[order == Qt::AscendingOrder ? row : 2 - row];
+            QCOMPARE(requests->item(row, 0)->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamp).date(), QLocale::ShortFormat));
+            QCOMPARE(requests->item(row, 1)->text(), QString::number(timestamp));
+            QCOMPARE(requests->item(row, 3)->data(Qt::UserRole + 1).toLongLong(), qint64(order == Qt::AscendingOrder ? row + 1 : 3 - row));
+        }
+    }
+
+    DigiDollarPositionsWidget vaults;
+    vaults.setStyleSheet(css);
+    vaults.setFont(font);
+    for (int i = 0; i < timestamps.size(); ++i) {
+        DigiDollarPosition position{};
+        position.positionId = QString::number(i);
+        position.mintTime = timestamps[i];
+        position.lockTier = 1;
+        position.health = 300;
+        position.blocksRemaining = 40;
+        vaults.m_positions.append(position);
+    }
+    vaults.populatePositionsTable();
+    vaults.show();
+    QCoreApplication::processEvents();
+    auto* positions = vaults.findChild<QTableWidget*>("positionsTable");
+    QVERIFY(positions);
+    dateFits(positions, DigiDollarPositionsWidget::COL_LOCK_DATE);
+    for (const auto order : {Qt::AscendingOrder, Qt::DescendingOrder}) {
+        positions->sortItems(DigiDollarPositionsWidget::COL_LOCK_DATE, order);
+        for (int row = 0; row < 3; ++row) {
+            const qint64 timestamp = timestamps[order == Qt::AscendingOrder ? row : 2 - row];
+            const auto* date = positions->item(row, DigiDollarPositionsWidget::COL_LOCK_DATE);
+            QCOMPARE(date->text(), locale.toString(QDateTime::fromSecsSinceEpoch(timestamp).date(), QLocale::ShortFormat));
+            QVERIFY(date->toolTip().contains(GUIUtil::dateTimeStr(timestamp)));
+        }
+    }
 }
 
 void DigiDollarWidgetTests::addressBookTests()
@@ -7184,4 +7391,349 @@ void DigiDollarWidgetTests::sendWidgetSaysWhyAnAmountIsRefused()
     QPushButton* sendButton = sendWidget.findChild<QPushButton*>("sendButton");
     QVERIFY(sendButton != nullptr);
     QVERIFY2(!sendButton->isEnabled(), "an amount the form refuses must leave the Send button off");
+}
+
+void DigiDollarWidgetTests::overviewExplainsMintAvailability()
+{
+    TestChain100Setup test(ChainType::REGTEST,
+        {"-digidollaractivationheight=100", "-ddthawdayheight=109", "-digidollarstatsindex=0"});
+    struct ResetOracleState {
+        std::chrono::seconds mock_time{GetMockTime()};
+        ~ResetOracleState()
+        {
+            SetMockTime(mock_time);
+            OracleBundleManager::GetInstance().Clear();
+            MockOracleManager::GetInstance().Reset();
+            DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+            DigiDollar::SystemHealthMonitor::ResetMetrics();
+        }
+    } reset;
+    OracleBundleManager::GetInstance().Clear();
+    MockOracleManager::GetInstance().Reset();
+    DigiDollar::Volatility::VolatilityMonitor::ClearHistory();
+    DigiDollar::SystemHealthMonitor::ResetMetrics();
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(gui.walletModel.get());
+    overview.setClientModel(gui.clientModel.get());
+    overview.show();
+    overview.updateSystemHealth();
+    auto* status = overview.findChild<QLabel*>("mintStatusLabel");
+    QVERIFY2(status, "Overview must show whether new mints are available");
+    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+
+    DigiDollar::Volatility::VolatilityMonitor::TriggerFreeze(false, 106);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("paused"), qPrintable(status->text()));
+    QVERIFY(status->text().contains("price protection"));
+
+    // The next block reaches Thaw Day. The old freeze no longer applies.
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    CreateAndProcessOracleQuoteBlock(test, 1000000);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+
+    SetMockTime(GetTime() + ORACLE_MAX_AGE_SECONDS + 60);
+    overview.updateSystemHealth();
+    QVERIFY2(status->text().contains("oracle price"), qPrintable(status->text()));
+    QVERIFY(status->text().contains("paused"));
+
+    DigiDollarMintWidget mint;
+    mint.setWalletModel(gui.walletModel.get());
+    mint.setClientModel(gui.clientModel.get());
+    mint.show();
+    mint.updateOraclePrice();
+    auto* network_status = mint.findChild<QLabel*>("mintVolatilityStatus");
+    QVERIFY(network_status);
+    QVERIFY2(network_status->text().contains("oracle price"), qPrintable(network_status->text()));
+    auto* amount = mint.findChild<QLineEdit*>("amountEdit");
+    auto* warning = mint.findChild<QLabel*>("amountWarningLabel");
+    QVERIFY(amount);
+    QVERIFY(warning);
+    amount->setText("0");
+    QVERIFY(warning->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(&mint, "onClearClicked", Qt::DirectConnection));
+    QVERIFY(amount->text().isEmpty());
+    QVERIFY(!warning->isVisible());
+    QVERIFY(network_status->isVisible());
+    QVERIFY(network_status->text().contains("oracle price"));
+    auto* mint_button = mint.findChild<QPushButton*>("mintButton");
+    QVERIFY(mint_button);
+    QVERIFY(!mint_button->isEnabled());
+
+    overview.setClientModel(nullptr);
+    overview.updateSystemHealth();
+    QVERIFY(status->text().contains("unknown"));
+}
+
+void DigiDollarWidgetTests::failedMintsKeepTheirWalletStatus()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    wallet->EnsureDDWallet();
+    auto* dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet);
+    const auto tip_hash = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    std::map<QString, QString> expected;
+    uint256 expired_id;
+    const DigiDollarWallet::MintAttemptState states[]{DigiDollarWallet::MintAttemptState::Expired,
+        DigiDollarWallet::MintAttemptState::Abandoned, DigiDollarWallet::MintAttemptState::Conflicted,
+        DigiDollarWallet::MintAttemptState::Confirmed, DigiDollarWallet::MintAttemptState::Local};
+    for (int i = 0; i < 5; ++i) {
+        CMutableTransaction tx;
+        tx.SetDigiDollarType(DD_TX_MINT);
+        tx.vin.emplace_back(COutPoint(uint256::ONE, i));
+        tx.vout.emplace_back(COIN, CScript() << OP_TRUE);
+        const auto transaction = MakeTransactionRef(tx);
+        const auto id = transaction->GetHash();
+        {
+            LOCK(wallet->cs_wallet);
+            wallet::TxState state = wallet::TxStateInactive{};
+            if (i == 1) state = wallet::TxStateInactive{true};
+            if (i == 2) state = wallet::TxStateConflicted{tip_hash, 105};
+            if (i == 3) state = wallet::TxStateConfirmed{tip_hash, 105, 1};
+            QVERIFY(wallet->AddToWallet(transaction, state));
+        }
+        WalletCollateralPosition position(id, 100, COIN, 0, i == 0 ? 0 : 10000);
+        position.is_active = false;
+        dd_wallet->AddCollateralPosition(position);
+        QVERIFY(dd_wallet->GetMintAttemptState(id) == states[i]);
+        const QStringList labels{"Expired mint", "Abandoned", "Conflicted", "Redeemed", "Confirming"};
+        expected[QString::fromStdString(id.GetHex())] = labels[i];
+        if (i == 0) expired_id = id;
+    }
+    QVERIFY(dd_wallet->GetMintAttemptState(expired_id) == DigiDollarWallet::MintAttemptState::Expired);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarPositionsWidget vaults;
+    vaults.setWalletModel(gui.walletModel.get());
+    vaults.setClientModel(gui.clientModel.get());
+    vaults.loadPositionsFromWallet();
+    vaults.populatePositionsTable();
+    auto* table = vaults.findChild<QTableWidget*>("positionsTable");
+    QVERIFY(table);
+    QCOMPARE(table->rowCount(), 5);
+    for (int row = 0; row < table->rowCount(); ++row) {
+        const QString id = table->item(row, DigiDollarPositionsWidget::COL_POSITION_ID)->text();
+        QCOMPARE(table->item(row, DigiDollarPositionsWidget::COL_TIME_REMAINING)->text(), expected.at(id));
+        auto* action = qobject_cast<QPushButton*>(table->cellWidget(row, DigiDollarPositionsWidget::COL_ACTIONS));
+        QVERIFY(action);
+        QCOMPARE(action->text(), expected.at(id));
+        QVERIFY(!action->isEnabled());
+        // Check text width with the rendered Qt backend.
+        if (QApplication::platformName() != "minimal") {
+            action->ensurePolished();
+            QVERIFY(action->width() >= action->sizeHint().width());
+        }
+    }
+
+    DigiDollarTransactionsWidget transactions;
+    transactions.setWalletModel(gui.walletModel.get());
+    transactions.setClientModel(gui.clientModel.get());
+    transactions.show();
+    transactions.updateView();
+    auto* history_table = transactions.findChild<QTableWidget*>();
+    QVERIFY(history_table);
+    QTRY_COMPARE_WITH_TIMEOUT(history_table->rowCount(), 5, 5000);
+    int expired_row = -1;
+    for (int row = 0; row < history_table->rowCount(); ++row) {
+        if (history_table->item(row, 5)->data(Qt::UserRole).toString() == QString::fromStdString(expired_id.GetHex())) {
+            expired_row = row;
+            break;
+        }
+    }
+    QVERIFY(expired_row >= 0);
+    QCOMPARE(history_table->item(expired_row, 6)->text(), QString("Expired mint"));
+    QFont large_font = history_table->font();
+    large_font.setPointSize(16);
+    history_table->setFont(large_font);
+    QCoreApplication::processEvents();
+    QVERIFY(history_table->columnWidth(6) >= history_table->fontMetrics().horizontalAdvance("Expired mint") + 16);
+
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(gui.walletModel.get());
+    overview.setClientModel(gui.clientModel.get());
+    overview.show();
+    QTRY_COMPARE_WITH_TIMEOUT(overview.findChildren<QLabel*>("recentTxStatusLabel").size(), 5, 5000);
+    const auto statuses = overview.findChildren<QLabel*>("recentTxStatusLabel");
+    QCOMPARE(statuses.size(), 5);
+    QCOMPARE(std::count_if(statuses.begin(), statuses.end(), [](const QLabel* label) {
+        return label->text() == "Expired mint";
+    }), 1);
+}
+
+void DigiDollarWidgetTests::digiDollarControlsStayReadableInBothThemes()
+{
+    struct RestoreStyle {
+        QString previous{qApp->styleSheet()};
+        ~RestoreStyle() { qApp->setStyleSheet(previous); }
+    } restore_style;
+    const auto luminance = [](const QColor& color) {
+        const auto linear = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+    };
+    const auto readable = [&](QColor foreground, QColor background) {
+        const double a = luminance(foreground), b = luminance(background);
+        return (std::max(a, b) + 0.05) / (std::min(a, b) + 0.05) >= 4.5;
+    };
+    const auto check = [&](QWidget& widget, const QString& theme) {
+        QFile file(":/css/" + theme);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        qApp->setStyleSheet(QString::fromUtf8(file.readAll()));
+        widget.resize(1000, 700);
+        widget.show();
+        QCoreApplication::processEvents();
+        for (auto* edit : widget.findChildren<QLineEdit*>()) {
+            if (!edit->isVisible()) continue;
+            const auto palette = edit->palette();
+            const QColor text = palette.color(QPalette::Text);
+            QColor base = palette.color(QPalette::Base);
+            // Transparent inputs are drawn over their parent frame.
+            if (base.alpha() < 255) {
+                const QColor behind = edit->parentWidget()->palette().color(QPalette::Window);
+                const double alpha = base.alphaF();
+                base = QColor::fromRgbF(base.redF() * alpha + behind.redF() * (1 - alpha),
+                    base.greenF() * alpha + behind.greenF() * (1 - alpha),
+                    base.blueF() * alpha + behind.blueF() * (1 - alpha));
+            }
+            QVERIFY2(readable(text, base), qPrintable(theme + " input text: " + edit->objectName()));
+            QVERIFY2(text.green() >= text.blue(), qPrintable(theme + " input uses blue text: " + edit->objectName()));
+            if (theme == "light") QVERIFY2(base.lightness() > 230, qPrintable(edit->objectName()));
+        }
+        for (auto* combo : widget.findChildren<QComboBox*>()) {
+            combo->showPopup();
+            QCoreApplication::processEvents();
+            const auto palette = combo->view()->palette();
+            const QColor highlight = palette.color(QPalette::Highlight);
+            QVERIFY2(highlight.green() > highlight.blue(), qPrintable(theme + " dropdown selection must use DD green"));
+            QVERIFY(readable(palette.color(QPalette::HighlightedText), highlight));
+            if (QApplication::platformName() != "minimal") {
+                const QModelIndex current = combo->model()->index(combo->currentIndex(), 0);
+                const QRect row = combo->view()->visualRect(current);
+                QVERIFY(!row.isEmpty());
+                const QImage rendered = combo->view()->viewport()->grab().toImage();
+                const QPoint sample(row.right() - 5, row.center().y());
+                const QColor selected = rendered.pixelColor(sample * rendered.devicePixelRatio());
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " dropdown must paint its selection green"));
+            }
+            combo->hidePopup();
+        }
+        if (QApplication::platformName() != "minimal") {
+            for (auto* table : widget.findChildren<QTableWidget*>()) {
+                if (!table->isVisible()) continue;
+                table->setRowCount(1);
+                table->setItem(0, 0, new QTableWidgetItem(QString()));
+                table->selectRow(0);
+                table->setFocus();
+                QCoreApplication::processEvents();
+                const QRect cell = table->visualItemRect(table->item(0, 0));
+                QVERIFY(!cell.isEmpty());
+                const QImage rendered = table->viewport()->grab().toImage();
+                const QColor selected = rendered.pixelColor(cell.center() * rendered.devicePixelRatio());
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " selected table row must use DD green"));
+                QVERIFY(readable(table->palette().color(QPalette::HighlightedText), selected));
+            }
+        }
+    };
+    TestChain100Setup chain;
+    auto wallet_loader = interfaces::MakeWalletLoader(*chain.m_node.chain, *Assert(chain.m_node.args));
+    chain.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&chain.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, chain);
+    wallet->EnsureDDWallet();
+    for (int i = 0; i < 2; ++i) {
+        DDTransaction tx;
+        tx.txid = std::string(64, '1' + i);
+        tx.amount = 100;
+        tx.incoming = i == 0;
+        tx.category = tx.incoming ? "receive" : "send";
+        tx.timestamp = GetTime() + i;
+        wallet->GetDDWallet()->AddMockTransaction(tx);
+    }
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    for (const auto& theme : {QString("light"), QString("dark")}) {
+        DigiDollarOverviewWidget overview;
+        overview.setWalletModel(gui.walletModel.get());
+        overview.setClientModel(gui.clientModel.get());
+        check(overview, theme);
+        QTRY_COMPARE_WITH_TIMEOUT(overview.findChildren<QLabel*>("recentTxAmountLabel").size(), 2, 5000);
+        const auto amounts = overview.findChildren<QLabel*>("recentTxAmountLabel");
+        QCOMPARE(amounts.size(), 2);
+        const auto* recent = overview.findChild<QListWidget*>("transactionsList");
+        QVERIFY(recent);
+        for (const auto* amount : amounts) {
+            QVERIFY2(readable(amount->palette().color(QPalette::WindowText), recent->palette().color(QPalette::Base)),
+                     qPrintable(theme + " recent amount: " + amount->text()));
+        }
+        const auto check_headings = [&] {
+            const auto labels = overview.findChildren<QLabel*>();
+            const auto title = std::find_if(labels.begin(), labels.end(), [](const QLabel* label) {
+                return label->text() == "DigiDollar Balances";
+            });
+            QVERIFY(title != labels.end());
+            QVERIFY((*title)->font().bold());
+            QVERIFY(overview.findChild<QLabel*>("healthTitle")->font().bold());
+            for (const auto& name : {"ddBalanceLabel", "ddPendingLabel", "dgbCollateralLabel"}) {
+                const auto* label = overview.findChild<QLabel*>(name);
+                QVERIFY(label);
+                QVERIFY(label->text().endsWith(':'));
+            }
+        };
+        check_headings();
+        std::unique_ptr<const PlatformStyle> platform(PlatformStyle::instantiate("other"));
+        DigiDollarSendWidget send(platform.get());
+        check(send, theme);
+        send.updateView();
+        auto* send_amount = send.findChild<QLineEdit*>("amountEdit");
+        send_amount->setText("0");
+        send.setFixedSize(1194, 645);
+        QCoreApplication::processEvents();
+        const auto* amount_help = send.findChild<QLabel*>("amountValidationLabel");
+        const int input_bottom = send_amount->mapTo(&send, send_amount->rect().bottomLeft()).y();
+        const int help_top = amount_help->mapTo(&send, amount_help->rect().topLeft()).y();
+        QVERIFY2(help_top > input_bottom, qPrintable(QString("%1 amount message top %2 overlaps input bottom %3; page minimum height %4")
+            .arg(theme).arg(help_top).arg(input_bottom).arg(send.minimumSizeHint().height())));
+        for (const auto& name : {"addressValidationLabel", "amountValidationLabel"}) {
+            const auto* label = send.findChild<QLabel*>(name);
+            QVERIFY(label);
+            QVERIFY2(readable(label->palette().color(QPalette::WindowText),
+                              label->parentWidget()->palette().color(QPalette::Window)), name);
+        }
+        DigiDollarReceiveWidget receive;
+        check(receive, theme);
+        DigiDollarMintWidget mint;
+        check(mint, theme);
+        auto* amount = mint.findChild<QLineEdit*>("amountEdit");
+        amount->setText("0");
+        const auto* warning = mint.findChild<QLabel*>("amountWarningLabel");
+        QVERIFY(warning->isVisible());
+        QVERIFY2(readable(warning->palette().color(QPalette::WindowText),
+                          warning->parentWidget()->palette().color(QPalette::Window)), qPrintable(theme + " mint warning"));
+        DigiDollarRedeemWidget redeem;
+        check(redeem, theme);
+        const auto* suffix = redeem.findChild<QLabel*>("amountSuffix");
+        QVERIFY(suffix);
+        QVERIFY2(readable(suffix->palette().color(QPalette::WindowText),
+                          suffix->parentWidget()->palette().color(QPalette::Window)), qPrintable(theme + " redeem unit"));
+        DigiDollarPositionsWidget vault;
+        check(vault, theme);
+        DigiDollarTransactionsWidget transactions;
+        check(transactions, theme);
+    }
 }

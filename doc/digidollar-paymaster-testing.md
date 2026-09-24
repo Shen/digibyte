@@ -134,6 +134,50 @@ binaries and generated runner configuration. Existing compatibility/bridge tests
 require their separately documented historical binaries; the commands above do
 not claim to execute those external scenarios.
 
+## Upstream merge regressions
+
+The 2026-09-24 merge incorporates upstream RC2 through `d96d58545a` on top of
+fork commit `49f7faa7d8`. The baseline at the top of this document identifies the
+earlier client package; use the actual merge commit and freshly rebuilt binaries
+for acceptance. Project generation, 13 changed Python files' AST parsing, CSS
+brace checks and `git diff --check` passed. Targeted MSVC `/Zs` checks cover the
+four changed/conflict-adapted Qt implementation units, two Qt regression units,
+network processing, connection shutdown, DigiDollar RPC and wallet units, the
+new Dandelion shutdown test, and regenerated MOC code for the two changed Qt
+headers. These are compile-time checks, not linked binaries or runtime results.
+
+After the Windows build and Paymaster checks above, run the additional upstream
+regressions from `D:\Digibyte\digibyte-fork` in PowerShell. They use the same
+prerequisites; allow seconds to minutes for unit/Qt groups and tens of minutes
+or longer for functional tests. Every selected test must execute successfully;
+missing dependencies, skips and stale executables do not establish acceptance.
+
+```powershell
+.\src\test_digibyte.exe '--run_test=dandelion_*,headers_sync_chainwork_tests,headers_work_*,digidollar_mint_cleanup_tests' --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'Upstream unit regressions failed' }
+
+$env:QT_QPA_PLATFORM = 'windows'
+$env:QT_FORCE_STDERR_LOGGING = '1'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    foreach ($suite in @('DigiDollarWidgetTests', 'DigiDollarWave19WidgetTests', 'WalletTests')) {
+        $env:DIGIBYTE_QT_TEST_SUITE = $suite
+        .\src\test_digibyte-qt.exe
+        if ($LASTEXITCODE -ne 0) { throw "Qt regression failed: $suite" }
+    }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE -ErrorAction SilentlyContinue
+}
+
+$env:PYTHONUTF8 = '1'
+python test/functional/test_runner.py p2p_block_pow_order.py p2p_compactblock_logging.py p2p_dandelion_inventory.py p2p_headers_chainwork.py p2p_unrequested_blocks.py feature_block.py digidollar_estimate_mint_restrictions.py digidollar_redemption_closed_position.py digidollar_redemption_unlock_boundary.py digidollar_rpc_quote_readiness.py digidollar_stats_reordered_mint.py wallet_digidollar_transfer_ancestor_reorg.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Upstream functional regressions failed' }
+```
+
+On Linux/WSL use the executable paths and Qt platform from the preceding Linux
+section with the same suite and script selections. The complete build, runtime
+matrix, independent review and real Tor check remain operator release gates.
+
 ## What the focused matrix must establish
 
 | Surface | Required checks |

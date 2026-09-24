@@ -109,7 +109,10 @@ namespace {
 #ifdef ENABLE_WALLET
     bool HasPendingDigiDollarRedeem(const wallet::CWallet& wallet, const uint256& position_id)
     {
-        const COutPoint collateral_outpoint(position_id, 0);
+        const auto* dd_wallet = wallet.GetDDWallet();
+        COutPoint collateral_outpoint;
+        // Legacy mints can place ordinary change before the collateral.
+        if (!dd_wallet || !dd_wallet->GetMintCollateralOutpoint(position_id, collateral_outpoint)) return false;
         for (const auto& wallet_entry : wallet.mapWallet) {
             const wallet::CWalletTx& wtx = wallet_entry.second;
             if (!wtx.tx || ::GetDigiDollarTxType(*wtx.tx) != ::DD_TX_REDEEM) continue;
@@ -421,8 +424,13 @@ namespace {
 
     void RequireCandidateHealth(const CandidateHealthQuote& candidate)
     {
-        if (candidate.active && !candidate.ready) throw JSONRPCError(RPC_MISC_ERROR,
-            candidate.error.empty() ? "DigiDollar candidate health state not ready" : candidate.error);
+        if (candidate.active && !candidate.ready) {
+            throw JSONRPCError(RPC_MISC_ERROR, candidate.price <= 0 ?
+                "Waiting for a valid signed oracle quote for the next block. "
+                "Retry after oracle data is available; see getdigidollarstats.next_block_health.data_error for details." :
+                "DigiDollar health state is not ready. "
+                "Check getdigidollarstats.next_block_health.data_error before retrying.");
+        }
     }
 
     /**
@@ -2261,6 +2269,7 @@ RPCHelpMan senddigidollar()
     return RPCHelpMan{"senddigidollar",
                 "\nSend DigiDollar to another DigiDollar address.\n"
                 "Creates a transaction that transfers DigiDollar from your wallet to the specified address.\n"
+                "In DGB fee mode, the sending wallet also needs spendable DGB to pay the transaction fee; DigiDollar cannot pay that fee. Paymaster mode funds the DGB fee through the provider.\n"
                 "The amount is a whole number of cents unless amount_unit says otherwise: 10000 is $100.00.\n"
                 "With amount_unit=\"dollars\" the amount is dollars with at most two decimals: 100.00 is $100.00.\n"
                 "An amount written with a decimal point and no amount_unit is refused, because 10000.00 could mean\n"
@@ -2862,6 +2871,16 @@ RPCHelpMan redeemdigidollar()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "Position not found");
             }
 
+            if (!foundPosition.is_active) {
+                if (HasPendingDigiDollarRedeem(*pwallet, positionId)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Position already has a pending redemption");
+                }
+                if (dd_wallet->GetDDTransactionConfirmations(positionId) > 0) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Position already redeemed");
+                }
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Position is not active");
+            }
+
             if (!dd_wallet->RefreshPositionMetadataFromMintTx(positionId)) {
                 throw JSONRPCError(RPC_WALLET_ERROR,
                     "Cannot verify DigiDollar mint metadata for this position. "
@@ -2929,10 +2948,13 @@ RPCHelpMan redeemdigidollar()
 
             // Check if redeemable
             int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
-            if (foundPosition.unlock_height > currentHeight) {
+            const int tipHeight = pwallet->GetLastBlockHeight();
+            // nLockTime names the last invalid block, so the tip must reach
+            // the unlock height before this redemption can enter the mempool.
+            if (foundPosition.unlock_height > tipHeight) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                     strprintf("Position locked until block %d (current: %d, remaining: %d blocks)",
-                              foundPosition.unlock_height, currentHeight, foundPosition.unlock_height - currentHeight));
+                              foundPosition.unlock_height, tipHeight, foundPosition.unlock_height - tipHeight));
             }
 
             // EXACT-AMOUNT REDEMPTION ENFORCEMENT: Must redeem full vault amount
@@ -4389,6 +4411,9 @@ static RPCHelpMan estimatecollateral()
                     RPCResult::Type::OBJ, "", "",
                     {
                         NextBlockHealthResult(),
+                        MintVolatilityResult("mint_volatility"),
+                        {RPCResult::Type::BOOL, "minting_restricted", "Whether oracle, health, or volatility rules restrict the estimated mint; wallet and fee requirements also apply"},
+                        {RPCResult::Type::STR, "minting_restricted_reason", "Mint restriction reason, or none"},
                         {RPCResult::Type::STR_AMOUNT, "required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "minimum_required_dgb", "Minimum consensus DGB collateral amount"},
                         {RPCResult::Type::STR_AMOUNT, "wallet_collateral_dgb", "DGB collateral the wallet mint builder will lock, including safety margin"},
@@ -4533,6 +4558,12 @@ static RPCHelpMan estimatecollateral()
             result.pushKV("system_health", systemHealth);
             result.pushKV("health_tier", healthTier.status);
             result.pushKV("next_block_health", NextBlockHealthJSON(EnsureAnyChainman(request.context), systemHealth, -1, oraclePriceMicroUSD, &candidate));
+            const UniValue mintVolatility = GetMintVolatilityRPC(EnsureAnyChainman(request.context), oraclePriceMicroUSD, &candidate);
+            const std::string mintingRestrictedReason = systemHealth < 100 ? "err_active" :
+                mintVolatility.find_value("rejection_reason").get_str();
+            result.pushKV("mint_volatility", mintVolatility);
+            result.pushKV("minting_restricted", mintingRestrictedReason != "none");
+            result.pushKV("minting_restricted_reason", mintingRestrictedReason);
             // Fix: ddAmount is in cents, so USD value = ddAmount / 100.0
             // Previously this path treated cents as satoshis, producing a
             // value ~100,000x too small (e.g., $0.001 instead of $100).
@@ -4644,7 +4675,7 @@ RPCHelpMan getredemptioninfo()
                     strprintf("Position %s not found in wallet", positionIdStr));
             }
 
-            int currentHeight = candidateHealth.active ? candidateHealth.height : pwallet->GetLastBlockHeight();
+            int currentHeight = pwallet->GetLastBlockHeight();
             int blocksRemaining = std::max(0, static_cast<int>(foundPosition.unlock_height - currentHeight));
             const int confirmations = dd_wallet->GetDDTransactionConfirmations(positionId);
             const bool walletPrivateKeysDisabled = pwallet->IsWalletFlagSet(wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS);

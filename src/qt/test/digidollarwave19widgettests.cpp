@@ -842,65 +842,65 @@ void DigiDollarWave19WidgetTests::transactionsWidgetPreservesUserSortAcrossRefre
         tx.abandoned = false;
         dd_wallet->AddMockTransaction(tx);
     };
-    // Use dates whose localized display strings have a different lexical and
-    // chronological order. This catches regressions where the Date column
-    // sorts "Aug" before "Jul" instead of comparing Unix timestamps.
-    const int64_t jul_30_2144 =
-        QDateTime::fromString(QStringLiteral("2026-07-30T21:44:00Z"), Qt::ISODate).toSecsSinceEpoch();
-    const int64_t aug_02_0031 =
-        QDateTime::fromString(QStringLiteral("2026-08-02T00:31:00Z"), Qt::ISODate).toSecsSinceEpoch();
-    const int64_t aug_02_0102 =
-        QDateTime::fromString(QStringLiteral("2026-08-02T01:02:00Z"), Qt::ISODate).toSecsSinceEpoch();
-    const int64_t aug_02_2330 =
-        QDateTime::fromString(QStringLiteral("2026-08-02T23:30:00Z"), Qt::ISODate).toSecsSinceEpoch();
-    pushTx("e111111111111111111111111111111111111111111111111111111111111111", 300, true, "mint", jul_30_2144);
-    pushTx("e222222222222222222222222222222222222222222222222222222222222222", 100, false, "send", aug_02_0031);
-    pushTx("e333333333333333333333333333333333333333333333333333333333333333", 200, true, "receive", aug_02_0102);
-    pushTx("e444444444444444444444444444444444444444444444444444444444444444", 400, true, "receive", aug_02_2330);
+    // Cross month and year boundaries. Text order is different from time order.
+    pushTx("e111111111111111111111111111111111111111111111111111111111111111", 1000, true, "mint", 1704110400);
+    pushTx("e222222222222222222222222222222222222222222222222222222222222222", 2000, false, "send", 1706788800);
+    pushTx("e333333333333333333333333333333333333333333333333333333333333333", 200, true, "receive", 1735732800);
 
     Wave19MiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
     WalletContext& context = *m_node.walletLoader().context();
     AddWallet(context, wallet);
 
-    DigiDollarTransactionsWidget transactionsWidget;
-    transactionsWidget.setWalletModel(mini_gui.walletModel.get());
-    transactionsWidget.setClientModel(mini_gui.clientModel.get());
-    transactionsWidget.show();
-    transactionsWidget.updateView();
-    QCoreApplication::processEvents();
+    // Finish unloading the wallet even when an assertion fails.
+    const auto check_sort_order = [&] {
+        DigiDollarTransactionsWidget transactionsWidget;
+        transactionsWidget.setWalletModel(mini_gui.walletModel.get());
+        transactionsWidget.setClientModel(mini_gui.clientModel.get());
+        transactionsWidget.show();
+        transactionsWidget.updateView();
+        QCoreApplication::processEvents();
 
-    QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
-    QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 4);
-    QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
-    QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::DescendingOrder);
+        QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
+        QVERIFY(table != nullptr);
+        QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 3, 5000);
+        QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
+        QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::DescendingOrder);
 
-    auto timestampAt = [&](int row) {
-        return table->item(row, 0)->data(Qt::UserRole).toLongLong();
+        const auto dates = [&] {
+            QList<qint64> values;
+            for (int row = 0; row < table->rowCount(); ++row) {
+                values.append(table->item(row, 0)->data(Qt::UserRole).toLongLong());
+            }
+            return values;
+        };
+        const auto amounts = [&] {
+            QList<qint64> values;
+            for (int row = 0; row < table->rowCount(); ++row) {
+                values.append(table->item(row, 2)->data(Qt::UserRole).toLongLong());
+            }
+            return values;
+        };
+        QCOMPARE(dates(), (QList<qint64>{1735732800, 1706788800, 1704110400}));
+        table->sortByColumn(0, Qt::AscendingOrder);
+        QCOMPARE(dates(), (QList<qint64>{1704110400, 1706788800, 1735732800}));
+
+        table->sortByColumn(2, Qt::AscendingOrder);
+        QCoreApplication::processEvents();
+        QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 2);
+        QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
+        QCOMPARE(amounts(), (QList<qint64>{-2000, 200, 1000}));
+
+        transactionsWidget.updateView();
+        QCoreApplication::processEvents();
+        QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 3, 5000);
+        QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 2);
+        QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
+        QCOMPARE(amounts(), (QList<qint64>{-2000, 200, 1000}));
+        table->sortByColumn(2, Qt::DescendingOrder);
+        QCOMPARE(amounts(), (QList<qint64>{1000, 200, -2000}));
     };
-    QCOMPARE(timestampAt(0), aug_02_2330);
-    QCOMPARE(timestampAt(1), aug_02_0102);
-    QCOMPARE(timestampAt(2), aug_02_0031);
-    QCOMPARE(timestampAt(3), jul_30_2144);
-
-    table->sortByColumn(0, Qt::AscendingOrder);
-    QCoreApplication::processEvents();
-    QCOMPARE(timestampAt(0), jul_30_2144);
-    QCOMPARE(timestampAt(1), aug_02_0031);
-    QCOMPARE(timestampAt(2), aug_02_0102);
-    QCOMPARE(timestampAt(3), aug_02_2330);
-
-    table->sortByColumn(2, Qt::AscendingOrder);
-    QCoreApplication::processEvents();
-    QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 2);
-    QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
-
-    transactionsWidget.updateView();
-    QCoreApplication::processEvents();
-    QCOMPARE(table->rowCount(), 4);
-    QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 2);
-    QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
+    check_sort_order();
 
     RemoveWallet(context, wallet, std::nullopt);
 }

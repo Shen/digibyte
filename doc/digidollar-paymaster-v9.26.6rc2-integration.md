@@ -9,7 +9,37 @@ new public RPC was added refers to that earlier refactoring. This package adds
 no payment endpoint, agent budget, wire field, wallet flag or record format.
 Current package verification does not renew earlier release acceptance.
 
-## Scope and base
+## Upstream reconciliation on 2026-09-24
+
+The integration now includes all 23 upstream commits through
+`d96d58545a4683057cfc24dc903353a64fe71698` from
+`DigiByte-Core/digibyte:release/v9.26.6rc2`. The merge starts from the fork's
+`49f7faa7d8` documentation commit, with client implementation `a4f17f6315`.
+The earlier base and refactoring evidence below are historical.
+
+Upstream remains authoritative. Its header-work and PoW screening, Dandelion
+inventory/shutdown fixes, redemption boundaries, mint availability and expired
+mint accounting are retained. The fork uses upstream's shared numeric Qt sorter,
+regional date rendering, plain CSV amounts, control layouts and theme fixes.
+Paymaster controls and reservation displays remain integrated with those changes.
+
+The fork's asynchronous history path carries upstream's `expired_mint` state
+through serialization and the overview; the upstream regression assertions are
+retained with waits for asynchronous widget population. The ordinary-send RPC
+help retains the upstream DGB-fee explanation and distinguishes provider-funded
+Paymaster mode. No additional budget mechanism, consensus rule, Paymaster wire
+field or persistent record format is introduced. The interfaces support a
+possible x402 extension; its implementation is not committed.
+
+Upstream release notes remain in [RELEASE_v9.26.6.md](../RELEASE_v9.26.6.md).
+The fork's client changes are documented in the [integration contract](digidollar-paymaster-integration.md).
+
+Merge verification and operator acceptance commands are recorded in the
+[build and test runbook](digidollar-paymaster-testing.md#upstream-merge-regressions).
+This source merge does not renew release acceptance, independent review or the
+real Tor release gate.
+
+## Original integration scope and base
 
 This integration adapts Paymaster to upstream commit
 `998140ec6ba951ceaea40b22ddcdc89e8fa7154e`, starting from Paymaster commit

@@ -1338,6 +1338,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/qt/walletmodel.cpp/h
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
   operations so wallet unlock contexts are not retained across network waits.
+- `SerializeDigiDollarHistory()` preserves wallet status, including `expired_mint`,
+  across the asynchronous history bridge; both overview and transaction history
+  render that upstream status.
 
 ### src/qt/digidollarreceivewidget.cpp/h
 - `DigiDollarReceiveWidget` → generate/display DD receive addresses

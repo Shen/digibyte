@@ -510,6 +510,10 @@ position as `expired_mint`, and `listdigidollartxs` shows `wallet_state` as
 `abandoned_mint`. One pushed out by a conflicting transaction shows as
 `conflicted_mint`.
 
+The Qt overview and transaction history display `Expired mint`, including when
+history is loaded asynchronously. Expired local mint outputs are excluded from
+the pending DD balance; the retained records still allow reorg recovery.
+
 The owner key, the transaction and the position record are all kept. If a reorg
 or a late block does confirm the mint after all, the position becomes active
 again and its outputs are locked again as usual. A mint still sitting in the

@@ -19,6 +19,7 @@
 #include <headerssync.h>
 #include <index/blockfilterindex.h>
 #include <kernel/mempool_entry.h>
+#include <limitedmap.h>
 #include <logging.h>
 #include <kernel/chain.h>
 #include <merkleblock.h>
@@ -61,6 +62,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -106,6 +108,8 @@ static constexpr int32_t MAX_PEER_TX_REQUEST_IN_FLIGHT = 100;
  *  rate (by our own policy, see INVENTORY_BROADCAST_PER_SECOND) for several minutes, while not receiving
  *  the actual transaction (from any peer) in response to requests for them. */
 static constexpr int32_t MAX_PEER_TX_ANNOUNCEMENTS = 5000;
+/** Maximum exact Dandelion hashes remembered per peer, counting both hash forms. */
+static constexpr size_t MAX_DANDELION_INVENTORY_KNOWN = 50'000;
 /** How long to delay requesting transactions via txids, if we have wtxid-relaying peers */
 static constexpr auto TXID_RELAY_DELAY{2s};
 /** How long to delay requesting transactions from non-preferred peers */
@@ -313,12 +317,21 @@ struct Peer {
         std::atomic<CAmount> m_fee_filter_received{0};
 
         // Dandelion++ fields
-        /** Set of Dandelion transaction hashes that we know this peer has seen. */
-        std::set<uint256> setDandelionInventoryKnown GUARDED_BY(m_tx_inventory_mutex);
+        /** Exact recent history: membership also permits stem transaction requests. */
+        limitedmap<uint256, uint64_t> m_dandelion_inventory_known GUARDED_BY(m_tx_inventory_mutex){MAX_DANDELION_INVENTORY_KNOWN};
+        uint64_t m_dandelion_inventory_sequence GUARDED_BY(m_tx_inventory_mutex){0};
         /** Vector of Dandelion transaction hashes to send to this peer. */
         std::vector<uint256> vInventoryDandelionTxToSend GUARDED_BY(m_tx_inventory_mutex);
         /** Set of other inventory items (like Dandelion transactions) to send to this peer. */
         std::set<CInv> setInventoryTxToSendOther GUARDED_BY(m_tx_inventory_mutex);
+
+        bool AddDandelionInventoryKnown(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(m_tx_inventory_mutex)
+        {
+            if (m_dandelion_inventory_known.count(hash)) return false;
+            // Only distinct entries advance the order; evict the oldest first.
+            m_dandelion_inventory_known.insert({hash, ++m_dandelion_inventory_sequence});
+            return true;
+        }
     };
 
     /* Initializes a TxRelay struct for this peer. Can be called at most once for a peer. */
@@ -644,6 +657,8 @@ private:
     bool CheckHeadersPoW(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams, Peer& peer);
     /** Calculate an anti-DoS work threshold for headers chains */
     arith_uint256 GetAntiDoSWorkThreshold();
+    /** Screen one block's work before contextual header validation. */
+    bool HasSufficientBlockWork(const CBlockHeader& header, CBlockIndex& previous);
     /** Deal with state tracking and headers sync for peers that send the
      * occasional non-connecting header (this can happen due to BIP 130 headers
      * announcements for blocks interacting with the 2hr (MAX_FUTURE_BLOCK_TIME) rule). */
@@ -1873,7 +1888,7 @@ bool PeerManagerImpl::PushDandelionInventory(CNode* pnode, const CInv& inv)
     // Check BOTH the Dandelion known set and the regular bloom filter to prevent
     // re-queuing transactions we've already sent. The Dandelion known set tracks
     // txids/wtxids of Dandelion TXs we've sent; the bloom filter tracks regular TXs.
-    if (tx_relay->setDandelionInventoryKnown.count(inv.hash) == 0 &&
+    if (tx_relay->m_dandelion_inventory_known.count(inv.hash) == 0 &&
         !tx_relay->m_tx_inventory_known_filter.contains(inv.hash)) {
         // For Dandelion transactions, use the proper vector
         if (inv.IsDandelionMsg()) {
@@ -2866,7 +2881,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
             }
 
             // If not embargoed, proceed with normal "send the tx" if we actually have it
-            if (txinfo.tx && tx_relay->setDandelionInventoryKnown.count(inv.hash) != 0) {
+            if (txinfo.tx && tx_relay->m_dandelion_inventory_known.count(inv.hash) != 0) {
                 LogPrintf("ProcessGetData: Sending Dandelion transaction %s to peer=%d (witness=%s)\n", 
                          inv.hash.ToString(), pfrom.GetId(), (inv.type & MSG_WITNESS_FLAG) ? "true" : "false");
                 m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::DANDELIONTX, *txinfo.tx));
@@ -2875,7 +2890,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                 LogPrintf("ProcessGetData: Dandelion transaction %s not found for peer=%d (have_tx=%s, is_known=%s)\n", 
                          inv.hash.ToString(), pfrom.GetId(), 
                          txinfo.tx ? "true" : "false",
-                         tx_relay->setDandelionInventoryKnown.count(inv.hash) ? "true" : "false");
+                         tx_relay->m_dandelion_inventory_known.count(inv.hash) ? "true" : "false");
                 vNotFound.push_back(inv);
             }
             continue;
@@ -2885,7 +2900,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         bool push = false;
         
         // Check if we should serve from stempool for non-Dandelion peers
-        if (!peer.fSupportsDandelion.load() && !m_connman.isDandelionInbound(&pfrom) && tx_relay->setDandelionInventoryKnown.count(inv.hash)) {
+        if (!peer.fSupportsDandelion.load() && !m_connman.isDandelionInbound(&pfrom) && tx_relay->m_dandelion_inventory_known.count(inv.hash)) {
             // For regular TX messages from stempool, create GenTxid based on witness flag
             auto txinfo = m_stempool.info(inv.IsMsgWtx() ? GenTxid::Wtxid(inv.hash) : GenTxid::Txid(inv.hash));
             if (txinfo.tx) {
@@ -2989,6 +3004,17 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
         near_chaintip_work = tip->GetChainWork() - std::min<arith_uint256>(144*GetBlockProof(*tip), tip->GetChainWork());
     }
     return std::max(near_chaintip_work, m_chainman.MinimumChainWork());
+}
+
+bool PeerManagerImpl::HasSufficientBlockWork(const CBlockHeader& header, CBlockIndex& previous)
+{
+    if (previous.nHeight == std::numeric_limits<int>::max()) return false;
+    CBlockIndex index(header);
+    index.pprev = &previous;
+    index.nHeight = previous.nHeight + 1;
+    // Geometric work uses only active algorithms. Check the work threshold
+    // before contextual validation looks up a retired algorithm's history.
+    return previous.GetChainWork() + GetBlockProof(index) >= GetAntiDoSWorkThreshold();
 }
 
 /**
@@ -3130,7 +3156,13 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
 bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlockIndex* chain_start_header, std::vector<CBlockHeader>& headers)
 {
     // Calculate the total work on this chain.
-    arith_uint256 total_work = chain_start_header->GetChainWork() + CalculateHeadersWork(headers);
+    const auto headers_work = CalculateHeadersWork(headers, *chain_start_header);
+    if (!headers_work) {
+        LogPrint(BCLog::NET, "Ignoring headers with invalid work from peer=%d\n", pfrom.GetId());
+        headers.clear();
+        return true;
+    }
+    arith_uint256 total_work = chain_start_header->GetChainWork() + *headers_work;
 
     // Our dynamic anti-DoS threshold (minimum work required on a headers chain
     // before we'll store it)
@@ -4727,8 +4759,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // after its handshake, so this runs on every connection.
                     const bool is_dandelion_inbound = m_connman.isDandelionInbound(&pfrom);
                     LOCK(tx_relay->m_tx_inventory_mutex);
-                    auto result = tx_relay->setDandelionInventoryKnown.insert(inv.hash);
-                    const bool fAlreadyHave = !result.second;
+                    const bool fAlreadyHave = !tx_relay->AddDandelionInventoryKnown(inv.hash);
                     LogPrint(BCLog::DANDELION, "ProcessMessage INV: Got dandelion inv: %s  %s peer=%d\n", inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
                     if ((!fAlreadyHave && !m_chainman.IsInitialBlockDownload() &&
                         is_dandelion_inbound) || (inv.hash == DANDELION_DISCOVERYHASH)) {
@@ -5208,20 +5239,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         CBlockHeaderAndShortTxIDs cmpctblock;
         vRecv >> cmpctblock;
 
+        if (!CheckHeadersPoW({cmpctblock.header}, m_chainparams.GetConsensus(), *peer)) return;
+
         bool received_new_header = false;
         const auto blockhash = cmpctblock.header.GetHash();
 
         {
         LOCK(cs_main);
 
-        const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
+        CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
         if (!prev_block) {
             // Doesn't connect (or is genesis), instead of DoSing in AcceptBlockHeader, request deeper headers
             if (!m_chainman.IsInitialBlockDownload()) {
                 MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer);
             }
             return;
-        } else if (prev_block->GetChainWork() + CalculateHeadersWork({cmpctblock.header}) < GetAntiDoSWorkThreshold()) {
+        } else if (!HasSufficientBlockWork(cmpctblock.header, *prev_block)) {
             // If we get a low-work header in a compact block, we can ignore it.
             LogPrint(BCLog::NET, "Ignoring low-work compact block from peer %d\n", pfrom.GetId());
             return;
@@ -5242,7 +5275,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         if (received_new_header) {
-            LogPrintfCategory(BCLog::NET, "Saw new cmpctblock header hash=%s peer=%d\n",
+            LogPrint(BCLog::NET, "Saw new cmpctblock header hash=%s peer=%d\n",
                 blockhash.ToString(), pfrom.GetId());
         }
 
@@ -5516,7 +5549,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         LogPrint(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
-        const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
+        if (!CheckHeadersPoW({pblock->GetBlockHeader()}, m_chainparams.GetConsensus(), *peer)) {
+            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
+            return;
+        }
+
+        CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
 
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,
@@ -5536,15 +5574,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // need it even when it's not a candidate for a new best tip.
             forceProcessing = IsBlockRequested(hash);
             RemoveBlockRequest(hash, pfrom.GetId());
+
+            // Ignore unknown, unrequested low-work blocks before contextual
+            // validation. Known headers and requested blocks still proceed.
+            if (prev_block) {
+                min_pow_checked = HasSufficientBlockWork(pblock->GetBlockHeader(), *prev_block);
+                if (!min_pow_checked && !forceProcessing && !m_chainman.m_blockman.LookupBlockIndex(hash)) {
+                    LogPrint(BCLog::NET, "Ignoring low-work block from peer %d\n", pfrom.GetId());
+                    return;
+                }
+            }
+
             // mapBlockSource is only used for punishing peers and setting
             // which peers send us compact blocks, so the race between here and
             // cs_main in ProcessNewBlock is fine.
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
-
-            // Check work on this block against our anti-dos thresholds.
-            if (prev_block && prev_block->GetChainWork() + CalculateHeadersWork({pblock->GetBlockHeader()}) >= GetAntiDoSWorkThreshold()) {
-                min_pow_checked = true;
-            }
         }
         ProcessBlock(pfrom, pblock, forceProcessing, min_pow_checked);
         return;
@@ -7697,9 +7741,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // PushDandelionInventory rejects re-queuing regardless of which
                         // hash form is used. This prevents the infinite relay loop where
                         // the txid was queued but only the wtxid was marked as known.
-                        tx_relay->setDandelionInventoryKnown.insert(hash);        // txid
+                        // Refresh sent aliases so one cannot evict the other at capacity.
+                        tx_relay->m_dandelion_inventory_known.erase(hash);
+                        tx_relay->AddDandelionInventoryKnown(hash);        // txid
                         if (known_hash != hash) {
-                            tx_relay->setDandelionInventoryKnown.insert(known_hash);  // wtxid
+                            tx_relay->m_dandelion_inventory_known.erase(known_hash);
+                            tx_relay->AddDandelionInventoryKnown(known_hash);  // wtxid
                         }
                         
                         if (!peer->fSupportsDandelion.load() && hash != DANDELION_DISCOVERYHASH) {
