@@ -1,5 +1,13 @@
 # Paymaster workflow and edge-case review
 
+**Historical findings and dated remediation evidence.** The current source is
+`a4f17f6315`; the findings below retain their original review context and line
+references. The September 20 combined operator run is recorded under local
+corrections; initial statements that runtime execution was pending apply to the
+initial review, not that later run. Current commands and outstanding acceptance
+are in the [runbook](digidollar-paymaster-testing.md) and
+[release gate](digidollar-paymaster-release-gate.md).
+
 Review date: 2026-09-20. Base commit:
 `354b711f92524cfab57bc163fca2384d20b8e90e`, branch
 `integration/paymaster-v9.26.6rc2`, including the uncommitted automatic pool-setup
@@ -31,7 +39,8 @@ this review. No production source was edited during this review.
 
 The following fixes and regression sources were added after the review below.
 The findings retain their original audit wording and line references; they are
-not descriptions of the corrected working tree. Runtime acceptance is pending.
+not descriptions of the corrected working tree. The later combined runtime
+result is recorded below; broader release acceptance remains open.
 
 | Finding | Correction | Regression added or extended |
 |---|---|---|

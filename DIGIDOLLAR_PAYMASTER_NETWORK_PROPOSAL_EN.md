@@ -1,7 +1,7 @@
 # DigiDollar Paymaster design specification
 
-**Source:** `feature/digidollar-paymaster-v1` at `bd270044c1`.
-**Reconciled:** 2026-09-11. **Feature milestone:** V1. **Wire protocol:** V5.
+**Source:** `integration/paymaster-v9.26.6rc2` at `a4f17f6315`.
+**Reconciled:** 2026-09-23. **Feature milestone:** V1. **Wire protocol:** V5.
 
 This document replaces the earlier concept draft with the design implemented
 in the inspected branch. The filename is retained for existing references and
@@ -47,8 +47,8 @@ wallet-funded DGB fees.
 | Atomic wallet state | Sessions, attempts, reservations, authorizations and exact commits survive lost messages/restarts without fresh authority. |
 | Separate authority and chain observation | A final commit, mempool acceptance, confirmation and reorganization have distinct meanings. |
 | Shared RPC/Qt authority | The GUI uses the same wallet checks, snapshots and allowed actions. |
-| Finite local budgets | Client fees, provider losses, concurrent reservations and maintenance spending are bounded explicitly. |
-| Current-only experimental formats | Old Paymaster protocol/record versions fail closed without implicit migration or downgrade. |
+| Finite fee and provider limits | Client service fees, provider losses, concurrent reservations and maintenance spending are bounded explicitly; recipient spending is not an agent budget. |
+| Explicit compatibility boundaries | Wire V5 and most Paymaster records require their current versions. The maintenance journal alone supports V3 reads alongside V4; old records gain no new setup authority. |
 
 These are Paymaster design decisions. The broader branch also changes DCA,
 ERR and volatility source to use portable 128-bit arithmetic. Review their
@@ -132,6 +132,21 @@ encryption. Eligible completed detail is compacted after the safety depth into
 idempotency tombstones. Ambiguous, unconfirmed or unreadable authority is not
 automatically erased.
 
+The [RPC integration contract](doc/digidollar-paymaster-integration.md) adds a
+read-only `getpaymasterclientinfo` query and separate recipient/recovery chain
+observations. `final` marks a terminal session; `status="success"` requires
+validated local recipient confirmation. Missing or pruned details never become a
+receipt. A reorg may remove a previously observed success. Terminal send retries
+verify the existing canonical order; after pruning they require the saved input
+set, while identity-only status queries remain available.
+
+The existing rolling-day client service-fee limit includes every open reservation,
+regardless of age, plus spent fees within the window. It does not cap recipient
+payments. The interfaces support a possible x402 extension without committing
+to its implementation. No x402 adapter, agent budget or delayed post-signature
+execution is part of this feature. Finite pool setup and recurring maintenance have separate
+consent; see [pool setup](doc/digidollar-paymaster-pool-setup.md).
+
 ## 6. V1 acceptance criteria
 
 These requirements preserve the IDs in the
@@ -166,7 +181,7 @@ test being present does not establish a current release pass.
 | 24 | One recipient is accepted per session; every DD output, including carrier and recovery returns, respects the 100-to-10,000,000-cent bounds. |
 | 25 | Client/provider readiness requires unpruned operation, synchronized txindex and complete creating-transaction data. Existing validators need no Paymaster feature; only upgraded peers relay discovery. |
 | 26 | Signed result authority is monotonic; final commitment binds exact raw bytes. Related wallet records, indexes and reservation/consumption transitions commit atomically. |
-| 27 | Mempool/stempool is not confirmation; cancellation remains pending until confirmed. RPC/Qt share authoritative session, phase, broadcast and confirmation state; local chain reconciliation handles reorgs. |
+| 27 | Mempool/stempool and terminal state are not payment success. RPC/Qt report success only for a validated locally confirmed recipient payment; recovery, conflict, reorg and unavailable/pruned evidence must not produce false success. |
 | 28 | Wallet locking pauses the same session without fallback. Provider policy enforces a positive absolute DGB fee ceiling and finite safety limits for active funding models. |
 
 ## 7. Hardening and changes from the initial design
@@ -180,7 +195,7 @@ These map to H1-H8 in the release gate and
 The earlier concept's broader post-signature fallback is superseded by the
 implemented pre-user-PSBT boundary. Current functionality also includes pool
 successor reuse, paid maintenance, provider finance/backup workflows, exact
-outflow and current-only persistence. The current source definitions, linked
+outflow and explicit persistence-version checks. The current source definitions, linked
 from the implementation reference, define message bounds, record schemas,
 RPC parameters and allowed transitions. No obsolete wire schema or implicit
 migration is specified here.

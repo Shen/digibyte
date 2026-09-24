@@ -1,7 +1,7 @@
 # DigiDollar Paymaster hardening plan and review requirements
 
-**Source:** `bd270044c1`, `feature/digidollar-paymaster-v1`.
-**Reconciled:** 2026-09-11. **Status:** controls implemented in this branch;
+**Source:** `a4f17f6315`, `integration/paymaster-v9.26.6rc2`.
+**Reconciled:** 2026-09-23. **Status:** controls implemented in this branch;
 independent review and release acceptance remain open.
 
 This English plan replaces the July hardening notes and outdated compatibility
@@ -72,7 +72,10 @@ against the trusted PSBT, with mempool preflight when applicable.
 
 Late negative results cannot replace a final commit or release its authority.
 Local chain reconciliation separately rolls confirmation, finance and pool
-availability back on reorg. Mempool/stempool is not confirmation.
+availability back on reorg. Mempool/stempool is not confirmation. Shared RPC/Qt
+outcomes require validated recipient artifacts and a positive local confirmation
+depth. Recovery confirmation, a terminal state, a known txid or a pruned tombstone
+cannot substitute for that evidence. The payment view itself is read-only.
 
 **Review:** invalid witnesses, same txid/different witness, conflicts, late
 results, every atomic write/commit failure, restart around wallet insertion and
@@ -91,8 +94,10 @@ monotonic accounting time. Network-group and pseudonymous recipient buckets
 limit repeated demand without raw IPs as persistent rate-limit keys.
 
 Client policy bounds per-transfer/rolling-day service fees; RPC cannot raise
-wallet limits. Fee reservations survive concurrency/restart. A valid all-zero
-configuration disables an unused provider model; missing or partial limits do
+wallet limits. Fee reservations survive concurrency/restart and count even
+when older than 24 hours; only spent fees age out of the daily window, and released fees do not
+count. These limits do not cap recipient spending or implement agent budgets.
+A valid all-zero configuration disables an unused provider model; missing or partial limits do
 not mean unlimited service. Paid maintenance has separate finite budgets and
 explicit approval. Pool principal is distinct from profit.
 
@@ -161,7 +166,10 @@ July broad-matrix and August compatibility runs remain dated evidence. Repeat
 affected surfaces after source/build/dependency changes with exact revision and
 binary identity retained.
 
-Current review must include preview-bound pool operations/withdrawals,
+Current review must include the read-only client capability/payment view,
+terminal canonical-order retries, unavailable pruned evidence, fee reservations
+older than 24 hours, and frozen session/tombstone format fixtures. Also include
+preview-bound pool operations/withdrawals,
 successor provenance/pending capacity, maintenance budgets, finance rollback,
 authoritative GUI snapshots and current-only record decode errors. Ordinary
 coin selection must protect Paymaster reservations and provider pools even
@@ -177,8 +185,9 @@ capability secrets are removed before request persistence.
 
 Retention compacts eligible completed records after the safety depth while
 preserving idempotency and unresolved authority. There is no destructive reset
-or implicit record-format migration. Ordinary old-wallet compatibility is a
-separate question from older experimental Paymaster records.
+or general record-format migration. The V4 maintenance journal explicitly accepts
+V3 records without giving them finite-setup authority; other unsupported versions
+fail closed. Ordinary old-wallet compatibility is a separate question from older experimental Paymaster records.
 
 A provider can censor/delay, double-promise resources to isolated clients,
 consume allowed sponsorship budgets or later broadcast already authorized

@@ -1,7 +1,7 @@
 # Paymaster integration with DigiByte v9.26.6rc2
 
 The later [client integration package](digidollar-paymaster-integration.md)
-is based on `46add7e4d3`. It adds a read-only capability RPC and transient
+was committed as `a4f17f6315` on top of `46add7e4d3`. It adds a read-only capability RPC and transient
 payment/recovery observations, corrects terminal-success and service-fee-window
 semantics, and binds terminal send retries to the existing canonical hash.
 The separation work described below remains historical; its statement that no
@@ -332,56 +332,21 @@ checks lacked the required historical binary; they remain unverified.
 
 ## Operator build and runtime gates
 
-Run from the repository root in a Visual Studio developer PowerShell with the
-v143 x64 toolchain, Python, the existing static Qt 5.15.10 build and installed
-vcpkg dependencies. Set `QTBASEDIR` to the static Qt installation and
-`PAYMASTER_VCPKG_INSTALLED` to the directory containing `x64-windows-static`.
-The full build and runtime matrix are intentionally delegated to the operator.
+Use the current [build and test runbook](digidollar-paymaster-testing.md) for
+Windows/MSVC and Linux/WSL commands. It specifies the Qt/vcpkg configuration,
+runner prerequisites, binary paths, isolated regtest use and exit-code checks.
+Record the exact source, local changes and binary hashes. A build does not run
+the tests, and an incremental build is not the clean release-build gate.
 
-The currently installed workspace dependencies are available at the following
-paths; no package installation is required for this refactor:
+The earlier verification sections are dated integration evidence. The subsequent
+[finite setup](digidollar-paymaster-pool-setup.md) and workflow corrections have
+a passing selected September 20 WSL matrix recorded in the
+[edge-case review](digidollar-paymaster-edge-case-review.md). The September 23
+[client integration package](digidollar-paymaster-integration.md) adds further
+changes; its targeted unit/syntax checks do not renew earlier full runtime results.
 
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-$env:QTBASEDIR = 'D:\Qt51510\install'
-$env:PAYMASTER_VCPKG_INSTALLED = 'D:\Digibyte\digibyte-fork\build_msvc\vcpkg_installed\x64-windows-static\'
-python build_msvc/msvc-autogen.py
-& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' build_msvc/digibyte.sln -m:1 -verbosity:minimal -p:Configuration=Release -p:Platform=x64 -p:QtBaseDir="$env:QTBASEDIR" -p:VcpkgInstalledDir="$env:PAYMASTER_VCPKG_INSTALLED" -p:VcpkgManifestInstall=false
-$LASTEXITCODE
-```
-
-Expect a full build to take tens of minutes or longer. Success means exit zero
-and fresh daemon, CLI, unit-test and Qt-test binaries. Do not run the following
-against binaries left over from the earlier branch.
-
-```powershell
-.\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_*,walletload_tests,digidollar_amount_tests,digidollar_txbuilder_change_tests,digidollar_wallet_lock_safety_tests,digidollar_mint_cleanup_tests' --report_level=short
-$LASTEXITCODE
-$env:PYTHONUTF8 = '1'
-python test/functional/test_runner.py -j1 wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_failover.py wallet_paymaster_reorg.py wallet_paymaster_offer_selection.py digidollar_rpc_amount_units.py
-$LASTEXITCODE
-$env:QT_QPA_PLATFORM = 'windows'
-$env:QT_FORCE_STDERR_LOGGING = '1'
-Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
-$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests,DigiDollarWidgetTests,DigiDollarMintRecordTests,DDTransactionRecordTests,DDTransactionTableTests,RPCNestedTests'
-.\build_msvc\x64\Release\test_digibyte-qt.exe
-$LASTEXITCODE
-Remove-Item Env:DIGIBYTE_QT_TEST_SUITE
-```
-
-Expect minutes to tens of minutes for this focused runtime matrix. Success means
-all selected tests pass without unexpected skips. Before release, also run the
-broader consensus/wallet regression and Thaw Day matrix, lock-order/debug checks,
-Linux arithmetic parity, and mixed-node interoperability with the official
-v9.26.6rc2 daemon. Real Tor deployment and independent review remain in the
-[Paymaster release gate](digidollar-paymaster-release-gate.md).
-
-The local integration commit records source reconciliation; the runtime gates
-above remain incomplete and are required before release approval.
-Follow CONTRIBUTING.md for upstream review and the signed merge workflow. The
-two pre-existing untracked operator documents are not part of this integration.
-
-The subsequent finite automatic setup change is documented separately in
-[automatic pool setup](digidollar-paymaster-pool-setup.md). It requires a fresh
-build and the new Dandelion regression; the earlier integration test results
-do not establish runtime acceptance for that change.
+Before release, complete the affected unit, functional and Qt checks plus the
+broader consensus/wallet and Thaw Day matrix, lock-order/debug checks, Linux
+arithmetic parity, mixed-node compatibility, real Tor and independent review.
+The [release gate](digidollar-paymaster-release-gate.md) records their status.
+Follow CONTRIBUTING.md for upstream review and the signed merge workflow.

@@ -23,7 +23,13 @@ verification status of this branch, start with
 **[DigiDollar Paymaster: developer starting point](PAYMASTER.md)**.
 The feature allows a separate provider to fund the DGB miner fee for an
 ordinary DigiDollar transfer. The linked release gate distinguishes dated
-test evidence from outstanding release acceptance.
+test evidence from outstanding release acceptance. The current integration
+branch targets v9.26.6rc2 and provides the
+[version 1 client RPC contract](doc/digidollar-paymaster-integration.md). Its
+interfaces support a possible x402 extension without committing to its
+implementation. No x402 adapter or agent-wide spending budget is included. See the
+[operator guide](doc/digidollar-paymaster.md) and
+[build/test runbook](doc/digidollar-paymaster-testing.md).
 
 # Development is now occurring on the DigiByte-Core repo
 

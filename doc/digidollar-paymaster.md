@@ -5,8 +5,8 @@ selected provider contributes the DGB inputs needed for the miner fee. The
 result is an ordinary `DD_TX_TRANSFER`; Paymasters have no consensus privilege
 and existing validators need no Paymaster configuration.
 
-**Documentation baseline:** source commit `bd270044c1` on
-`feature/digidollar-paymaster-v1`, reviewed 2026-09-11. This is the operator and
+**Documentation baseline:** source commit `a4f17f6315` on
+`integration/paymaster-v9.26.6rc2`, reviewed 2026-09-23. This is the operator and
 RPC guide. Developers should start with [PAYMASTER.md](../PAYMASTER.md) and the
 [implementation reference](digidollar-paymaster-implementation.md).
 
@@ -27,8 +27,9 @@ authorization, exact retries and the read-only payment/recovery view.
 `status="success"` and `payment_confirmed=true` require validated local recipient
 confirmation; recovery is `canceled`, and mempool submission remains `pending`.
 Missing/pruned evidence cannot prove payment. Open service-fee reservations
-continue to count against the existing daily limit after 24 hours. This adds no
-agent-wide budget and does not enable x402.
+continue to count against the existing daily limit after 24 hours. The interfaces
+support a possible x402 extension without committing to its implementation.
+The package includes neither an x402 adapter nor an agent-wide budget.
 
 ## Privacy and safety model
 
@@ -164,7 +165,10 @@ getpaymasterclientsafetystatus
 Both limits must be positive. The effective per-transfer maximum is the minimum
 of the wallet policy, the request's `maximum_paymaster_fee_cents`, and the
 signed offer. Daily usage and active fee reservations are durable across
-restart and use a monotonic accounting-time high-water mark.
+restart and use a monotonic accounting-time high-water mark. All open
+reservations count regardless of age. Only spent fees outside the rolling
+24-hour window stop counting; released fees do not count. This policy limits
+service fees, not recipient amounts or total agent spending.
 
 - `fee_mode=dgb` always uses direct DGB funding.
 - `fee_mode=paymaster` requires a Paymaster.
@@ -219,7 +223,8 @@ session state and allowed actions; a prepared or authorized request is not yet
 a confirmed payment. The examples are RPC-console notation; JSON-RPC clients
 should pass structured parameters and shell users must quote the JSON for
 their shell. Integer `amount` values are cents; values containing a decimal
-point are interpreted as DD dollars by this RPC.
+point require explicit `amount_unit="dollars"`; decimals without a unit are
+rejected. With `amount_unit="cents"`, the amount must be an integer.
 
 ### Exact total outflow and emptying a DD wallet
 
@@ -269,6 +274,7 @@ amount.
 Useful client inspection and recovery RPCs:
 
 ```text
+getpaymasterclientinfo
 listpaymasters
 getpaymasteroffers
 getdigidollarsendsession
@@ -289,6 +295,42 @@ After the user signature, timeout never releases the reserved inputs. An
 ambiguous session must be checked again, retried with its exact provider and
 artifacts, or recovered with `cancel_to_self`. A cancellation is not final when
 merely accepted to the mempool; it becomes final only after confirmation.
+
+### Readiness, payment status and response loss
+
+`getpaymasterclientinfo` reads local support and readiness without reservations,
+signatures, provider communication or finance reconciliation. `supported=true`
+is different from `ready=true`: a locked wallet, unsynchronized index or missing
+client fee policy can prevent authorization. Readiness does not promise funds,
+an available provider, or the additional high-privacy prerequisites.
+
+Use `getdigidollarsendsession {"request_id":"<saved UUID>"}` for a read-only
+snapshot. `resolvepaymastersession` with `refresh` may also persist already
+received provider equivocation evidence; it does not create a payment signature
+or reservation. Preparation can reserve funds, contact the provider and sign
+input-control proofs, so it is not a read-only query.
+
+| Result | Operator interpretation |
+| --- | --- |
+| `status="pending"` | No confirmed recipient success or other conclusive outcome; inspect actions and observations. |
+| `status="success"`, `payment_confirmed=true` | Exact validated recipient payment observed with positive local confirmation depth. |
+| `status="canceled"` | Safe cancellation or confirmed recovery; the recipient was not paid by that recovery. |
+| `status="failed"` / `"conflicted"` | Inspect the failure/conflict and allowed actions; do not create a new request automatically. |
+| `final=true` | Terminal persisted session state only; this is not a payment receipt. |
+
+The optional `payment_view` separates `payment` and `recovery`, including the
+observed tip, known transaction IDs, recipient output and confirmation data when
+available. Reorgs can reverse a success. After eligible session pruning, a txid
+and terminal state may remain but validated details are unavailable; even a
+confirmed tombstone can report `payment_confirmed=false` and `status="pending"`.
+
+Save the request ID, complete order, returned commitment, session ID and original
+`reserved_user_inputs` before relying on recovery after response loss. Retry the
+same order and ID. After pruning, send replay requires the saved ordered input
+set as `selected_inputs`; otherwise it returns
+`PAYMASTER_SESSION_DETAILS_UNAVAILABLE`. A pruned sweep must be inspected through
+the status RPC because sweeps disallow explicit inputs. Consult the
+[client contract](digidollar-paymaster-integration.md) for exact fields and errors.
 
 ## Capacity and signing firewalls
 
@@ -381,7 +423,10 @@ policy. Qt reads the existing `getpaymasterclientsafetystatus` result and can
 configure the same policy directly from the send page; this does not expose or
 weaken the backend limits. A running or ambiguous collaborative transfer is
 shown separately from fee selection so retry, fallback, and same-input recovery
-remain visible without presenting them as ordinary fee settings.
+remain visible without presenting them as ordinary fee settings. Submitted or
+mempool payments stay pending until validated recipient confirmation. The success
+amount is the recipient amount, excluding the service fee; recovery is displayed
+separately.
 
 Qt treats Core as authoritative for both the durable session snapshot and its
 allowed recovery actions. It never treats the generic `final` field alone as a
@@ -551,8 +596,10 @@ The provider lifecycle is deliberately staged:
 8. Keep the recommended automatic runtime, or while stopped use
    `setpaymasterruntimesettings` to select manual expert operation and/or opt in
    to autostart. Paymaster settings must use the current persisted format;
-   older development records are not migrated and must be replaced together
-   with the development Paymaster data before provider operation can continue.
+   unsupported older development records are not implicitly migrated. Preserve
+   the full wallet and resolve compatibility before operating it; do not delete
+   individual records. The maintenance journal explicitly accepts V3 alongside
+   V4 without giving old records new setup authority.
 9. Inspect `getpaymasterinfo`, `getpaymasterpoolinfo`,
    `getpaymastersafetystatus`, `getpaymasterliquiditystatus`, and
    `getpaymasterfinancestatus`, review the effective finite budgets, and
@@ -756,8 +803,10 @@ liquidity, waits for confirmation, and only then resumes announcements and new
 requests. Already authorized submissions can still be completed safely. A
 locked wallet, insufficient DGB, disabled automatic replenishment, or exhausted
 maintenance budget pauses new work without consuming queued requests. A
-stopped provider and a provider in manual mode never create paid maintenance
-transactions automatically.
+stopped provider and a provider in manual mode never create recurring paid
+replenishment automatically. An explicitly approved finite setup is different:
+the wallet scheduler can continue it while service is stopped or manual, provided
+the provider setting is enabled and the remaining prerequisites pass.
 
 Existing providers receive suggested targets of at least three admission and
 one operational DGB slot, plus corresponding carrier targets when `USER_PAID`
@@ -916,7 +965,8 @@ getpaymastersafetystatus
 getpaymasterliquiditystatus
 getpaymasterclientsafetystatus
 listpaymasters
-getdigidollarsendsession <request_id>
+getpaymasterclientinfo
+getdigidollarsendsession {"request_id":"<saved UUID>"}
 listdigidollarsendsessions
 listpaymasterreservations
 ```
@@ -927,7 +977,9 @@ verbose RPC and network logging and rejects known recipients, request/session
 identifiers, descriptors, capabilities, PSBTs, recovery transactions, and key
 material in either node's `debug.log`. Session responses expose authoritative
 `session_state`, `pending_phase`, `final`, `broadcast_state`, and
-`confirmation_state` fields.
+`confirmation_state` fields. For recipient success use the shared `status`,
+`payment_confirmed` and `payment_view` fields described above, not a provider
+result or terminal session flag alone.
 
 SOCKS authentication values used for stream isolation are never logged.
 Connections opened for high-privacy Paymaster operation also redact the target

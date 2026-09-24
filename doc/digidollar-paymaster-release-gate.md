@@ -7,8 +7,8 @@ adds focused fee, payment-observation, RPC and Qt regressions. Its targeted loca
 checks do not replace the clean build, functional reruns, independent review or
 real-Tor release gates below.
 
-**Status review:** 2026-09-11, source commit `bd270044c1` on
-`feature/digidollar-paymaster-v1`. See the [developer starting point](../PAYMASTER.md)
+**Status review:** 2026-09-23, source commit `a4f17f6315` on
+`integration/paymaster-v9.26.6rc2`. See the [developer starting point](../PAYMASTER.md)
 and [implementation reference](digidollar-paymaster-implementation.md).
 
 This matrix maps the 28 acceptance criteria in
@@ -21,10 +21,10 @@ test run.
 > the inspected branch. The recorded broad local matrix belongs to the
 > 2026-07-30 candidate; additional functional and official-v9.26.5 compatibility
 > results were recorded on 2026-08-08 and 2026-08-09. Later source changes mean
-> those results must not be presented as a fresh complete pass of `bd270044c1`.
+> those results must not be presented as a fresh complete pass of `a4f17f6315`.
 > A release revision, affected-surface reruns, real-Tor deployment testing and
-> independent review still need to be resolved. The 2026-09-11 documentation
-> update does not run or renew the executable test matrix.
+> independent review still need to be resolved. A documentation update does
+> not run or renew the executable test matrix.
 
 Status meanings:
 
@@ -75,6 +75,20 @@ snapshot records only superseded pre-hardening states.
 | 26 | Covered | Signed monotonic `PMRESULT` and one commit key/raw transaction are tested; deterministic failure at each atomic provider-commit write and at commit proves complete rollback of the commit, sponsorship, pool, attempt, and session records. | Final focused unit run. |
 | 27 | Covered | Store/RPC tests distinguish mempool from confirmation and expose the shared state/finality fields; Qt renders those fields. | Final RPC and Qt regression run. |
 | 28 | Covered | Locked-wallet tests pause the same session without fallback, and provider policy requires a positive absolute DGB network-fee cap. | Final focused and functional run. |
+
+## Current integration evidence (2026-09-23)
+
+| Scope | Recorded evidence | Remaining limit |
+| --- | --- | --- |
+| September 20 setup/workflow corrections | The operator's combined WSL run passed Paymaster unit tests, all 46 then-selected Paymaster Qt cases and nine functional scenarios, exit codes 0/0/0; log `paymaster-retest-20260920-201621.log`. | This is the dated candidate described in the [workflow review](digidollar-paymaster-edge-case-review.md), not a pass of later client-integration changes. |
+| Client integration in `a4f17f6315` | Six targeted unit tests passed 144 assertions using rebuilt affected objects linked with existing unchanged libraries; 13 affected C++ translation units passed MSVC syntax checks, three Python files passed parsing, and the diff check passed. | Not a clean application build. Expanded functional/Qt runtime checks, complete release matrix, independent review and real Tor remain open. |
+| Documentation reconciliation | Active design, RPC/operator, build/test and navigation documents checked against `a4f17f6315`. | Documentation/static checks only; no executable test or new audit result. |
+
+The [client contract](digidollar-paymaster-integration.md#versioning-and-validation)
+records the targeted test breakdown. The shared
+[build and test runbook](digidollar-paymaster-testing.md) replaces duplicated
+current command recipes. Historical commands/results below remain attached to
+their original candidates; they must not be combined into a synthetic head pass.
 
 ## Revision and evidence requirements
 
@@ -335,7 +349,9 @@ saved transactions after restart or rejection. V4 journal validation and explici
 legacy adoption add verification obligations. The registered
 `wallet_paymaster_pool_setup.py` regression and affected unit suites must pass
 on freshly rebuilt binaries before live recovery. Prior green results do not
-cover this change; runtime acceptance is pending operator execution.
+cover this change. The subsequent September 20 combined operator run recorded
+passing selected setup/workflow checks; see the current evidence table above.
+A release-head rerun is still required.
 
 ### Workflow edge-case review (2026-09-20)
 
@@ -344,6 +360,6 @@ records five source-level findings and a cross-workflow regression matrix.
 It includes AUTO session-read failure, the setup wizard/RPC contract, recurring
 Dandelion funding, setup conflict recovery and retirement accounting. These
 findings now have local code corrections and targeted regression sources, as
-listed in the review's remediation section. Runtime validation on freshly built
-binaries remains open. This does not renew prior runtime results or approve the
-pending automatic-setup changes.
+listed in the review's remediation section. Its September 20 combined WSL run
+passed the selected matrix. The wider G01-G14 scenarios and later integration
+changes still require their own evidence; that pass is not release approval.

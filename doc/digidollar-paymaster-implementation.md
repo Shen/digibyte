@@ -1,7 +1,7 @@
 # DigiDollar Paymaster implementation reference
 
-**Source baseline:** `feature/digidollar-paymaster-v1` at `bd270044c1`.
-**Documentation review:** 2026-09-11. **Wire protocol:** V5.
+**Source baseline:** `integration/paymaster-v9.26.6rc2` at `a4f17f6315`.
+**Documentation review:** 2026-09-23. **Wire protocol:** V5.
 
 This reference describes the inspected implementation and the invariants a
 reviewer should check. It is not a new implementation proposal or a claim that
@@ -189,7 +189,10 @@ See [psbt.cpp](../src/paymaster/psbt.cpp),
 Repeating the same request resumes its session; conflicting reuse is rejected.
 A session owns its user inputs and can contain separate provider attempts.
 An attempt binds one provider, quote, capacity snapshot, and transaction
-template. A retry reuses exact persisted artifacts.
+template. A retry reuses exact persisted artifacts. Terminal high-level retries validate
+the same canonical order hash. After detail pruning, send replay needs the saved
+original input set; status reads do not. A pruned sweep uses status reads because
+explicit selected inputs are not allowed for sweeps.
 
 | State / phase | Meaning for the caller |
 |---|---|
@@ -200,7 +203,7 @@ template. A retry reuses exact persisted artifacts.
 | `PROVIDER_SIGNED_KNOWN`, `PENDING_NETWORK` | Provider signing/final commit is known, but network delivery or observation is incomplete. |
 | `STEMPOOL`, `MEMPOOL` | Transaction observed in a relay pool, not a confirmed payment. |
 | `CANCEL_MEMPOOL` | Recovery transaction is in the mempool; cancellation is still pending. |
-| `CONFIRMED`, `CANCELED_SAFE` | Chain-confirmed payment or safe cancellation; chain reconciliation still handles reorganization. |
+| `CONFIRMED`, `CANCELED_SAFE` | Persisted confirmed-payment or safe-cancellation state. The separate local payment view decides current recipient success, including after reorg or pruning. |
 | `FAILED`, `CONFLICTED` | Inspect the recorded reason and Core-derived allowed actions; do not infer that arbitrary inputs are free. |
 
 These are explanatory groups, not a complete transition table. The exact
@@ -234,8 +237,10 @@ restore pending finance/pool state. This distinction is tested by
 `PaymasterStore` persists sessions, attempts, reservations, manifests, signed
 PSBTs, final transactions, budget ledgers, recovery and replay evidence in the
 wallet database. Related writes use atomic batches; missing or unreadable
-authority cannot be synthesized from a remote message. Records require their
-exact current versions. Older experimental Paymaster records fail closed;
+authority cannot be synthesized from a remote message. Most records require their
+exact current versions. The explicit exception is the V4 maintenance journal:
+V3 remains readable without new finite-setup authority. Other unsupported
+experimental Paymaster records fail closed;
 ordinary v9.26.5 wallet compatibility does not imply migration of old Paymaster
 state.
 
@@ -297,6 +302,7 @@ explains why these still require separate equivalence review.
 | Wallet state and atomic commits | [paymasterstore.h](../src/wallet/paymasterstore.h), [paymasterstore_client.cpp](../src/wallet/paymasterstore_client.cpp), [paymasterstore_provider.cpp](../src/wallet/paymasterstore_provider.cpp), [paymasterstore_finalization.cpp](../src/wallet/paymasterstore_finalization.cpp) |
 | Wallet record codecs | [paymasterdb.cpp](../src/wallet/paymasterdb.cpp), existing `WalletBatch` declarations and transaction semantics |
 | Send RPC integration | [paymaster_send.cpp](../src/wallet/rpc/paymaster_send.cpp), existing amount units, options and durable-session ordering |
+| Client capability and payment views | [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp), shared RPC schema/serialization in [paymaster.cpp](../src/wallet/rpc/paymaster.cpp), transient observation/status derivation in [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
 | Recovery, reconciliation and pruning | [recovery.cpp](../src/paymaster/recovery.cpp), [paymasterstore_recovery.cpp](../src/wallet/paymasterstore_recovery.cpp), [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
 | Provider policies, budgets and liquidity | [provider.cpp](../src/paymaster/provider.cpp), [paymasterprovider.cpp](../src/wallet/paymasterprovider.cpp), [paymaster_provider.cpp](../src/wallet/rpc/paymaster_provider.cpp) |
 | Request/submit/result handlers and runtime | [paymaster_processing.cpp](../src/wallet/rpc/paymaster_processing.cpp), [paymaster_runtime.cpp](../src/wallet/rpc/paymaster_runtime.cpp), [paymaster_integration.cpp](../src/wallet/rpc/paymaster_integration.cpp) |
@@ -313,7 +319,7 @@ interfaces and do not bypass Core authorization.
 
 | Caller | Principal RPCs |
 |---|---|
-| Client | `getpaymasteroffers`, `requestpaymasterquote`, `walletprocesspaymasterpsbt`, `submitpaymasterdigidollar`, `getdigidollarsendsession`, `listdigidollarsendsessions`, `resolvepaymastersession` |
+| Client | `getpaymasterclientinfo`, `getpaymasteroffers`, `requestpaymasterquote`, `walletprocesspaymasterpsbt`, `submitpaymasterdigidollar`, `getdigidollarsendsession`, `listdigidollarsendsessions`, `resolvepaymastersession` |
 | Fee safety | `setpaymasterclientsafetypolicy`, `getpaymasterclientsafetystatus`, `setpaymastersafetypolicy`, `getpaymastersafetystatus` |
 | Provider setup/runtime | `createpaymasteridentity`, `setpaymasterpolicy`, `setpaymasterenabled`, `setpaymasterruntimesettings`, `startpaymaster`, `stoppaymaster`, `getpaymasterinfo` |
 | Liquidity/finance | `preparepaymasterpool`, `rebalancepaymasterpool`, `setpaymasterliquiditypolicy`, `getpaymasterliquiditystatus`, `withdrawpaymastercarrier`, `getpaymasterfinancestatus`, `acknowledgepaymasterproviderbackup` |
@@ -413,7 +419,10 @@ The existing wallet tick continues approved work even with provider autostart
 disabled. Recurring maintenance consent remains separate. See the
 [operator and persistence reference](digidollar-paymaster-pool-setup.md) for the
 new optional fields, explicit legacy adoption and verification commands.
-Executable regression results remain pending a fresh operator build.
+The September 20 operator run recorded passing selected setup/Paymaster runtime
+checks; see the dated [workflow review](digidollar-paymaster-edge-case-review.md).
+Those binaries predate the client integration package and do not verify the
+current head. Use the [build and test runbook](digidollar-paymaster-testing.md).
 
 ### Workflow edge-case corrections (2026-09-20)
 

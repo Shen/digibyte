@@ -1,7 +1,7 @@
 # DigiDollar Paymaster implementation plan and delivery status
 
-**Reviewed:** 2026-09-11. **Source:** `bd270044c1`,
-`feature/digidollar-paymaster-v1`. **Status:** implemented in the branch;
+**Reviewed:** 2026-09-23. **Source:** `a4f17f6315`,
+`integration/paymaster-v9.26.6rc2`. **Status:** implemented in the branch;
 release acceptance remains open.
 
 This plan describes delivered work packages and remaining acceptance work. It
@@ -22,7 +22,10 @@ explicit fee authorization, durable idempotency and recovery after signing.
 Current scope includes user-paid fees, public/restricted sponsorship, discovery,
 automatic/manual provider operation, finite budgets, liquidity maintenance,
 finance reporting, recovery, RPC and Qt. Paymaster mint/redeem sponsorship and
-multi-recipient sessions are not implemented.
+multi-recipient sessions are not implemented. The interfaces support a possible
+x402 extension; implementing one is not a planned work package. No x402 adapter
+or agent-wide recipient spending budget is included. Existing fee/provider/maintenance limits
+are retained; external clients use the existing `senddigidollar` flow.
 
 ## 2. Delivered work packages
 
@@ -41,6 +44,8 @@ mean independently audited or freshly verified on a release binary.
 | Lifecycle | Automatic/manual service, optional autostart, successor reuse, paid target maintenance and preview-bound withdrawals. | Restart without duplicate work, pending targets, policy races and maintenance budgets. |
 | Finance/retention | DD income/DGB cost ledger, principal separation, reorg reconciliation, backup acknowledgement and tombstones. | No duplicate accounting, rollback/reconfirmation and unresolved-authority retention. |
 | RPC/Qt | Shared Core authority, snapshots/allowed actions, asynchronous UI and guided setup. | Stale-response rejection, fee/recovery confirmation and lock/unlock behavior. |
+| Client integration | RPC contract v1, capability/readiness query, exact canonical retries, validated recipient/recovery observations and corrected daily fee reservations. | No false success, read-only inspection, pruning/reorg behavior and zero-DGB external-client flow. |
+| Finite setup | Restartable, explicitly approved pool setup in the existing V4 maintenance journal; V3 remains readable without new authority. | Confirmed funding, exact saved transactions, disabled/locked waiting, lost response, cancellation and conflict reversal. |
 | Build/tests | Automake/MSVC, arithmetic portability, unit/wallet/Qt/functional coverage and sanitizer/fuzz workflows. | Selected-revision builds, regression and compatibility evidence. |
 
 The implementation reference and
@@ -111,13 +116,21 @@ outdated. August evidence covers specific wallet, validator, relay and upgrade
 scenarios. A selected release still requires suitable reruns after affected
 changes. The release gate retains details and outstanding requirements.
 
+Later evidence is recorded separately: the September 20 combined WSL run passed
+the selected Paymaster unit, 46 Qt and nine functional scenarios. The September 23
+client integration package has six targeted unit tests / 144 assertions plus
+C++ syntax and Python parse checks; its expanded functional and Qt runtime tests
+remain open. Neither result is a clean full release pass of `a4f17f6315`.
+See the [release gate](doc/digidollar-paymaster-release-gate.md) for attribution
+and the [runbook](doc/digidollar-paymaster-testing.md) for current commands.
+
 ## 5. Remaining acceptance work
 
 1. Select the exact release source and binaries. Record toolchain/configuration,
    binary identity, commands, exit codes and retained output.
 2. Re-run affected unit/wallet, functional and Qt surfaces after later changes.
    Repeat the multi-provider/failover/reorg group on the release build and
-   include lifecycle, exact-outflow and current-only persistence behavior.
+   include lifecycle, exact-outflow and explicit persistence-version behavior.
 3. Complete the agreed platform, arithmetic-equivalence and compatibility
    regression matrix; repeat sanitizer/fuzz checks after relevant changes.
 4. Test high privacy with real Tor/onion transport, stream isolation,

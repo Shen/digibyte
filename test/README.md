@@ -16,6 +16,13 @@ interfaces.
 The util tests are run as part of `make check` target. The fuzz tests, functional
 tests and lint scripts can be run as explained in the sections below.
 
+# Paymaster verification
+
+Use the [Paymaster build and test runbook](/doc/digidollar-paymaster-testing.md)
+for the current Windows and Linux/WSL focused matrix. The
+[release gate](/doc/digidollar-paymaster-release-gate.md) separates dated results
+from current acceptance, including compatibility, real Tor and independent review.
+
 # Running tests locally
 
 Before tests can be run locally, DigiByte Core must be built.  See the [building instructions](/doc#building) for help.

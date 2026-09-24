@@ -1,5 +1,8 @@
 # Automatic finite Paymaster pool setup
 
+Current behavior reviewed at `a4f17f6315` on `integration/paymaster-v9.26.6rc2`,
+2026-09-23. Dated test evidence is separated from current acceptance below.
+
 `preparepaymasterpool` authorizes a finite setup, independently of recurring
 liquidity maintenance and provider service startup. Its default call remains a
 read-only preview. Execution persists the exact output scripts before either
@@ -153,11 +156,12 @@ request binding and diagnostic fields. Older binaries cannot interpret V4
 records; do not downgrade a wallet after this build writes such records. There is no second
 journal, transaction-byte copy, service thread or RPC endpoint.
 
-Run from the root of an already configured Linux checkout containing these
-changes, with wallet, SQLite and tests enabled. The prepared WSL runner still
-pins commit `354b711f92`; that older snapshot does **not** contain this fix.
-After these changes are committed, update its pinned revision before using it
-for this acceptance run. Do not run stale binaries against the new tests.
+Run from the root of an already configured Linux checkout containing the
+selected revision, with wallet, SQLite and tests enabled. Check any helper
+script's pinned revision before using it; the original `354b711f92` snapshot
+predates the setup corrections. Do not run stale binaries against new tests.
+The [shared runbook](digidollar-paymaster-testing.md) supplies Windows and
+Linux/WSL commands for the full focused matrix.
 
 Build first (typically tens of minutes; the focused tests take minutes):
 
@@ -192,6 +196,14 @@ Local verification on 2026-09-20: targeted MSVC syntax checks passed for the
 changed C++ translation units and the wallet database codec; the Qt check used
 the installed compatible MSVC 14.43 toolset. Python AST checks passed for all
 seven affected scripts, the new test imports through `--help`, and
-`git diff --check` passed. No newly rebuilt executable tests have run. The
+`git diff --check` passed. No newly rebuilt executable tests had run at that
+initial check. The
 optional Python flake8 check was not run because that module is not installed
 in the current Windows Python environment.
+
+That paragraph records the initial syntax-only check. Later on September 20,
+the combined operator WSL run passed the selected Paymaster unit tests, 46 Qt
+cases and nine functional scenarios; see the
+[workflow review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).
+This supersedes the initial absence of runtime evidence for that candidate,
+but does not verify the later client integration package or close release gates.

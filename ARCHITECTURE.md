@@ -20,11 +20,14 @@ The additive `getpaymasterclientinfo` RPC reports local integration support and
 readiness. Transient payment/recovery observations in `PaymasterStore` feed one
 shared RPC/Qt outcome derivation; only validated, locally confirmed recipient
 payments count as success. There is no agent spending budget or new wallet
-record. See the [client integration contract](doc/digidollar-paymaster-integration.md). See the
+record. Open client service-fee reservations continue to count beyond 24 hours;
+only spent fees age out of the rolling daily window. See the
+[client integration contract](doc/digidollar-paymaster-integration.md) and the
 [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
 and pending verification.
 
-For the Paymaster implementation at `bd270044c1`, see the
+For the Paymaster implementation at `a4f17f6315` on
+`integration/paymaster-v9.26.6rc2` (reviewed 2026-09-23), see the
 [developer starting point](PAYMASTER.md) and
 [implementation reference](doc/digidollar-paymaster-implementation.md).
 It adds collaborative DD transfer construction, wallet authorization and
@@ -1007,6 +1010,7 @@ Authentication Methods:
 | `setmockoracleprice` / `getmockoracleprice` / `simulatepricevolatility` / `enablemockoracle` | `rpc/digidollar.cpp` | Regtest-only oracle helpers |
 | `listpaymasters` | `rpc/digidollar.cpp` | List locally verified, unexpired announcements |
 | `getpaymasteroffers` / `requestpaymasterquote` | `wallet/rpc/paymaster_discovery.cpp` | Select offers and advance a persistent client session |
+| `getpaymasterclientinfo` | `wallet/rpc/paymaster_client.cpp` | Read RPC contract version, network/genesis, amount bounds, modes and local authorization readiness without payment side effects |
 | `getdigidollarsendsession` / `resolvepaymastersession` | `wallet/rpc/paymaster_client.cpp` | Inspect, retry, fall back, or recover a session safely |
 | `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster_provider.cpp` | Configure a wallet-scoped provider and its isolated pools |
 | `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster_provider.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
@@ -1274,11 +1278,11 @@ finite-budget maintenance only when configured targets remain missing
   recovery uses exact-provider retry or a same-input `cancel_to_self` spend
   funded by a distinct Capacity-validated recovery provider when the client
   has no DGB.
-- Paymaster is current-only: wire requests and responses must use protocol V5,
-  and every intent, quote, manifest, recovery object, session, attempt, safety
-  ledger, pool entry, and maintenance record must use its exact current
-  persisted version. There is no automatic migration or executable legacy
-  fallback. An unsupported Paymaster record stops only the affected Paymaster
+- Paymaster wire requests and responses require V5. Intents, quotes, manifests,
+  recovery objects, sessions, attempts, safety ledgers and pool entries require
+  their current persisted versions. The maintenance journal explicitly accepts
+  V3 and V4; a V3 record gains no finite-setup authority. This limited read
+  compatibility is not general migration or executable legacy-wire fallback. An unsupported Paymaster record stops only the affected Paymaster
   operation and is never erased or rewritten implicitly.
 - The signed Capacity proof is verified against identity, BIP86 control proofs
   and live chainstate before the client discloses its intent, DD outpoints, or

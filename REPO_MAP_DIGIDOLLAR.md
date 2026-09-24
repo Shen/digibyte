@@ -9,8 +9,12 @@ and the [current implementation reference](doc/digidollar-paymaster-implementati
 then use the [design specification](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
 and [implementation plan](DIGIDOLLAR_PAYMASTER_PLAN.md).
 The 28 acceptance criteria and additional hardening checks map to dated evidence
-in the [release gate](doc/digidollar-paymaster-release-gate.md).
-Paymaster navigation was reconciled against `bd270044c1` on 2026-09-11; the
+in the [release gate](doc/digidollar-paymaster-release-gate.md). The
+[client contract](doc/digidollar-paymaster-integration.md) and
+[build/test runbook](doc/digidollar-paymaster-testing.md) describe external-client
+use and current operator verification commands.
+Paymaster navigation was reconciled against `a4f17f6315` on
+`integration/paymaster-v9.26.6rc2` on 2026-09-23; the
 earlier inventory date above does not represent a new whole-repository audit.
 
 ---
@@ -765,6 +769,9 @@ or chain parameters.
   for an actual Paymaster path.
 
 ### src/wallet/rpc/paymaster*.{h,cpp}
+- `paymaster.cpp` shares `PaymasterPaymentViewResult` and
+  `AddSessionPaymentStatus` for session-shaped RPC responses; observed recipient
+  confirmation is separate from final state and recovery.
 - `paymaster.cpp` and `paymaster_internal.h` contain private serialization,
   validation, readiness, accounting, and exact-final helpers shared across the
   domain translation units; `paymaster.h` remains the public registration and

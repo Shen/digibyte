@@ -168,14 +168,35 @@ digibyte-cli senddigidollar "DDcustomerAddress..." 25000
 }
 ```
 
-### Critical: You Need DGB for Fees
+### Direct withdrawals need wallet DGB for fees
 
-Every DD send requires DGB to pay the miner fee (minimum 0.1 DGB). **Always maintain a DGB balance in your hot wallet.** If you run out of DGB, DD withdrawals will fail.
+Every DD send requires DGB to pay the miner fee (minimum 0.1 DGB). The direct
+withdrawal command above funds that fee from the hot wallet and fails when its
+DGB fee inputs are insufficient. Maintain DGB funding for that existing workflow.
 
 **Check your DGB fee balance:**
 ```bash
 digibyte-cli getbalance
 ```
+
+### Optional Paymaster integration
+
+This development branch also supports one-recipient provider-funded transfers
+through `senddigidollar` with explicit `amount_unit="cents"` and
+`options.fee_mode="paymaster"`. It is a two-step prepare/accept workflow, not a
+drop-in replacement for the direct withdrawal command or batch withdrawals.
+Use `getpaymasterclientinfo` for local support/readiness and the
+[client contract](doc/digidollar-paymaster-integration.md) for exact parameters,
+side effects, fee limits, recovery, confirmation and pruning behavior.
+
+Persist one request ID and the complete order before preparation. A withdrawal
+amount denotes `payment_cents`; the service fee is additional by default. Retain
+the accepted commitment and reserved inputs, resume the same request after
+response loss, and distinguish confirmed recipient payment from recovery or a
+terminal session. Apply the exchange's own confirmation/reorg policy; one local
+confirmation is the RPC's success threshold, not an exchange settlement policy.
+Existing service-fee limits do not implement customer or agent spending budgets.
+See the [release gate](doc/digidollar-paymaster-release-gate.md) before deployment.
 
 ### Withdrawal Limits
 
@@ -314,7 +335,7 @@ For exchange deposits and withdrawals, prefer the wallet RPCs unless you are del
 | **Generate deposit address** | `getdigidollaraddress` | One per customer |
 | **Check deposit balance** | `getdigidollarbalance "addr" 6` | Use minconf |
 | **Detect deposits** | `listdigidollartxs 100 0 "" "receive"` | Poll regularly |
-| **Process withdrawal** | `senddigidollar "addr" <cents>` | Need DGB for fees |
+| **Process withdrawal** | `senddigidollar "addr" <cents>` | Direct path needs wallet DGB; optional single-recipient Paymaster flow requires preparation and explicit acceptance |
 | **Batch withdrawals** | `sendmanydigidollar "" {"addr":<cents>,...}` | One DD transaction, one DGB fee input set |
 | **Inspect DD UTXOs** | `listdigidollarunspent` / `listdigidollarutxos` | Hot-wallet inventory and selected-input withdrawals |
 | **Check DGB fee balance** | `getbalance` | Keep funded! |

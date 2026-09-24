@@ -32,6 +32,12 @@ Please report problems using the issue tracker at GitHub:
 Changes since RC1
 =================
 
+### Paymaster additions on the integration branch
+
+The following Paymaster changes describe `integration/paymaster-v9.26.6rc2`
+through `a4f17f6315`; they are not a claim that the upstream RC2 artifacts
+include this feature. Release acceptance remains open.
+
 Paymaster integrations can query wallet-local support and readiness through
 `getpaymasterclientinfo`. Session responses provide separate read-only recipient
 payment and recovery observations. Paymaster `senddigidollar` reports success
@@ -43,10 +49,18 @@ pruning, send replay requires the original input set or returns an explicit
 unavailable-details error. Status inspection remains available.
 
 The existing daily service-fee limit now counts open reservations regardless of
-age. This package adds no agent budget, x402 support, payment RPC, persistent
-record format, wallet feature flag, or Paymaster wire/consensus change. See the
+age. The interfaces support a possible x402 extension without committing to its
+implementation. This package adds no x402 adapter, agent budget, payment RPC,
+persistent record format, wallet feature flag, or Paymaster wire/consensus change. See the
 [client integration contract](digidollar-paymaster-integration.md) for units,
 side effects, retry behavior, versioning and remaining validation gates.
+
+Finite pool setup separately uses maintenance journal V4, retaining explicit
+V3 read compatibility without new setup authority. Do not confuse that earlier
+change with the client package's unchanged session/tombstone formats. Current
+verification commands are in the [build/test runbook](digidollar-paymaster-testing.md).
+
+### Upstream RC2 changes
 
 **Block validation no longer reads the wallet's script table.** The node keeps
 an in-memory table that the wallet and the transaction builder fill in with the

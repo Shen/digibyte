@@ -251,13 +251,39 @@ digibyte-cli senddigidollar "DDrecipientAddress..." 5000 "Payment for services"
 
 ### Important Notes
 
-- Transfers require **DD UTXOs** (for the value) AND **DGB UTXOs** (for the miner fee)
+- Direct wallet-funded transfers require **DD UTXOs** (for the value) AND
+  **DGB UTXOs** (for the miner fee). The optional Paymaster path supplies the
+  DGB from a separate provider; see the integration section below.
 - Minimum fee: **0.1 DGB** for transfer builders; mint and redeem builders enforce DGB fee floors in their txbuilder paths
 - DigiByte uses **DGB/kB** for fee rates (not DGB/vB). The default DD fee rate is 35,000,000 sat/kB (≈0.35 DGB/kB), which yields ≈0.1 DGB on a typical ~300-vB tx
 - Maximum single transfer: **$100,000** (10,000,000 cents)
 - DD change is automatically returned to your wallet
 - Transfers are **confirmed-only**: a DD UTXO must have at least one confirmation before it can be spent in a subsequent transfer or redeem. Consensus refuses to resolve DD amounts from `MEMPOOL_HEIGHT` inputs for transfer/redeem, and the wallet no longer chains unconfirmed DigiDollar outputs (commit `0b4959f563`). Plan throughput around the 15-second block time, or batch with `sendmanydigidollar`.
 - Advanced wallet coin control can pass `selected_inputs` matching `listdigidollarunspent` rows. The deprecated `fee_rate` argument on send/redeem RPCs is ignored by the fixed DD fee policy.
+
+### Optional Paymaster-funded transfers
+
+On this integration branch, the existing `senddigidollar` RPC accepts a seventh
+`options` argument after `amount_unit`. Use explicit `amount_unit="cents"` and
+`options.fee_mode="paymaster"` for external clients. `getpaymasterclientinfo`
+reports local support/readiness. Configure the existing finite client service-fee
+policy, prepare an order with a durable `request_id`, review its exact fee split,
+then repeat the same order with the accepted `authorization_commitment`.
+Preparation may reserve and communicate; signing leads to automatic submission.
+
+`payment_cents` is the recipient amount, `service_fee_cents` is additional by
+default, and `user_total_cents` is their sum. Paymaster `status="success"` requires
+validated local recipient confirmation; the direct-DGB response shown above
+retains its existing send/broadcast meaning. Inspect the same session after a
+lost response; do not allocate a replacement request ID. Recovery and pruned
+observations are separate from recipient success.
+
+These interfaces support a possible x402 extension, without implementing the
+x402 protocol or committing to an adapter. This does not add Paymaster batching
+to `sendmanydigidollar`, mint/redeem sponsorship or a total agent spending limit. The
+[client contract](doc/digidollar-paymaster-integration.md) defines side effects,
+retry/pruning behavior and status fields; the
+[operator guide](doc/digidollar-paymaster.md) covers configuration and Qt.
 
 ### Which fee settings DigiDollar transactions actually use
 
@@ -271,7 +297,7 @@ failure. What the code does use:
 | Path | Fee rate | Where |
 |------|----------|-------|
 | `mintdigidollar` | 0.35 DGB/kB (`MIN_DD_FEE_RATE` = 35,000,000 sat/kB); the optional `fee_rate` argument is floored to it | `src/rpc/digidollar.cpp` (`MIN_DD_FEE_RATE`, the `fee_rate` floor) |
-| `senddigidollar`, `sendmanydigidollar`, Qt Send $DD | 0.35 DGB/kB, fixed (`MIN_DD_TRANSFER_FEE_RATE`); the `fee_rate` argument is ignored | `src/wallet/digidollarwallet.cpp` (`TransferDigiDollarMany`, `PreflightDDTransferCapacity`) |
+| Direct-DGB `senddigidollar`, `sendmanydigidollar`, direct-DGB Qt Send $DD | 0.35 DGB/kB, fixed (`MIN_DD_TRANSFER_FEE_RATE`); the `fee_rate` argument is ignored | `src/wallet/digidollarwallet.cpp` (`TransferDigiDollarMany`, `PreflightDDTransferCapacity`) |
 | `redeemdigidollar`, Qt Redeem (which calls the RPC) | 0.35 DGB/kB, fixed (`MIN_DD_FEE_RATE`); the `fee_rate` argument is ignored | `src/rpc/digidollar.cpp` (`redeemdigidollar`), `src/qt/walletmodel.cpp` (`executeRpc("redeemdigidollar")`) |
 | Qt Mint | requests 500,000 sat/kB, but the builder's floor below applies | `src/qt/walletmodel.cpp` (`params.feeRate = 500000`) |
 
@@ -706,7 +732,7 @@ Registered in `GetWalletRPCCommands()` at `src/wallet/rpc/wallet.cpp`:
 | `listdigidollaraddresses [include_watchonly] [min_balance] [include_empty] [amount_unit]` | List DD addresses; empty generated addresses are hidden unless `include_empty=true`; `min_balance` follows the amount-unit contract |
 | `getdigidollarbalance [addr] [minconf] [include_watchonly]` | Get DD balance (`confirmed`, `unconfirmed`, `total`) |
 | `mintdigidollar <cents> <tier> [fee_rate]` | Mint DD by locking DGB collateral; amount is integer cents |
-| `senddigidollar <addr> <amount> [comment] [fee_rate_ignored] [selected_inputs] [amount_unit]` | Send DD to a DD address; integer cents by default, `amount_unit` = `cents` or `dollars`, a decimal without a unit is rejected |
+| `senddigidollar <addr> <amount> [comment] [fee_rate_ignored] [selected_inputs] [amount_unit] [options]` | Send DD to a DD address; integer cents by default, `amount_unit` = `cents` or `dollars`, a decimal without a unit is rejected |
 | `sendmanydigidollar "" <amounts_obj> [comment] [selected_inputs] [amount_unit]` | Send DD to multiple DD addresses in one tx; one `amount_unit` for all recipients |
 | `listdigidollartxs [count] [skip] [addr] [category]` | List DD transaction history; categories include `mint`, `send`, `receive`, `redeem`, `redeem_change` |
 | `listdigidollarunspent [minconf] [maxconf] [addresses] [include_unsafe]` | List DD UTXOs with `spendable` and `safe` flags |

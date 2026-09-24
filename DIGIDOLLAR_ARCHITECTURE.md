@@ -18,7 +18,8 @@ The v9.26.6rc2 integration keeps the provider panel in
 [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
 and pending verification.
 
-For the Paymaster implementation at `bd270044c1`, see the
+For the Paymaster implementation at `a4f17f6315` on
+`integration/paymaster-v9.26.6rc2` (reviewed 2026-09-23), see the
 [developer starting point](PAYMASTER.md) and
 [implementation reference](doc/digidollar-paymaster-implementation.md).
 It adds collaborative DD transfer construction, wallet authorization and

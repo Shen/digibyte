@@ -1,8 +1,11 @@
 # Paymaster client integration contract (version 1)
 
 This contract prepares existing Paymaster interfaces for external clients. It
-is implemented on top of `46add7e4d3` on `integration/paymaster-v9.26.6rc2`.
-It does not implement x402, an agent-wide spending budget, another send RPC,
+was committed as `a4f17f6315`, on top of `46add7e4d3`, on
+`integration/paymaster-v9.26.6rc2`. Documentation was reviewed on 2026-09-23.
+Its interfaces support a possible x402 extension, without committing to its
+implementation. It does not include an x402 adapter, an agent-wide spending
+budget, another send RPC,
 or deferred execution after signing. No consensus, Paymaster wire encoding,
 wallet record encoding, or wallet feature flag is introduced by this package.
 
@@ -52,7 +55,9 @@ funding and the existing exact-total/sweep options keep their own behavior.
 feature enablement, unpruned operation, txindex and synchronization, v2 transport,
 DD activation, wallet lock/key availability, and the existing client fee policy
 and ledger. Readiness does not promise provider availability, liquidity, sufficient
-wallet funds, or the additional Tor prerequisites of high privacy. A locked
+wallet funds, or the additional Tor prerequisites of high privacy. This is a
+general local check, not an exhaustive eligibility check for every wallet/signing
+mode; the operation still validates its own prerequisites. A locked
 wallet can still be inspected and can perform the existing unsigned preparation
 steps that do not require input-control proofs.
 
@@ -72,7 +77,8 @@ snapshot; retry the query.
    provider. With an unlocked wallet it may sign an input-control proof. It does
    not authorize a new collaborative payment signature. It is not a read-only
    preview; `getpaymasteroffers` is the existing local offer preview.
-3. Continue preparation until `authorization_required=true` and the exact
+3. `prepare_only=true` and `authorization_commitment` are mutually exclusive.
+   Continue preparation until `authorization_required=true` and the exact
    `authorization_commitment` and fee split are available. Review recipient,
    provider, funding model, amount, service fee, total, expiry and commitment.
 4. Remove `prepare_only` and repeat the order with the explicitly accepted
@@ -115,6 +121,28 @@ identity-only status reads still work, but a send replay without the saved
 original ordered input set to verify a replay, or use the status RPC. The
 existing sweep option forbids explicitly selected inputs; inspect a pruned sweep
 with the status RPC. Neither case creates another payment or reconstructs proof.
+
+### RPC effects and response shapes
+
+| RPC | Use and possible effects |
+| --- | --- |
+| `getpaymasterclientinfo` | Read capabilities and local readiness; no synchronization wait, reservation, signature, provider traffic or finance reconciliation. |
+| `getpaymasteroffers` | Inspect locally known eligible offers; not an authorization or reservation guarantee. |
+| `senddigidollar` in Paymaster mode | Prepare, explicitly authorize, advance or resume the same durable order; may reserve, communicate, sign and submit according to the authorization stage. |
+| `getdigidollarsendsession` | Read one wallet-scoped session by an object containing `request_id` or `session_id`; no new payment operation. |
+| `listdigidollarsendsessions` | Read a bounded session page; follow its cursor and use `active_only=false` when completed sessions are needed. |
+| `resolvepaymastersession` | Read/advance the existing action envelope; `refresh` can persist received equivocation evidence, other allowed actions can mutate or communicate. |
+
+The high-level Paymaster result and session-shaped responses include `status`,
+`final`, `payment_confirmed` and, when context is available, `payment_view`.
+This is not a promise that every low-level quote/PSBT/submit RPC returns that
+shape. Use the high-level entry point plus session inspection for integrations;
+consult `help <method>` from the same build for each low-level schema.
+
+RPC access uses the existing node authentication and authorization model. A
+wallet URL selects context, not a separate security tenant. Do not expose spending
+credentials to an external resource server or facilitator; see the repository's
+[RPC interface guidance](JSON-RPC-interface.md#security).
 
 ## Payment status and local observations
 
@@ -184,13 +212,16 @@ that sum; released entries do not count. The existing accounting high-water time
 prevents clock rollback from reopening a spent window. This is service-fee
 protection, not a limit on recipient payments or a total agent spending budget.
 
-## Future x402 adapter boundary
+## Interface support for a possible x402 extension
+
+The specifications below were checked on 2026-09-23. They are external, evolving
+documents; any x402 adapter would need to review them at its own pinned revision.
 
 The [x402 v2 core specification](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md)
 places client budget management outside its scope and specifies read-only
 verification. A reserving Paymaster preparation must not implement `/verify`.
 
-A later adapter for the [exact scheme](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact.md)
+An optional adapter for the [exact scheme](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact.md)
 using a payment already submitted by this wallet needs invoice/requirements
 binding, atomic single use of the payment, and a confirmation/reorg policy in the
 adapter or facilitator. A txid, amount and recipient alone do not enforce single
@@ -199,6 +230,13 @@ a separate network-specific design. This is an integration boundary, not a claim
 that these RPCs are already x402 compatible. No speculative `invoice_id`, x402
 hash, or adapter state is added to payment manifests. The 100-cent recipient
 minimum remains a boundary for external services.
+
+Under the cited `exact` specification, client-submitted proofs use `upfront`
+settlement before resource execution. Any such binding would also need to define proof
+age/retention, non-exact-amount handling and failure disposition. Until its
+finality condition is met, settlement must not consume the proof or deliver the
+resource. These requirements describe the supported extension boundary, not a
+planned adapter or implemented wallet features.
 
 ## Versioning and validation
 
@@ -231,24 +269,9 @@ passed 83, and the frozen-format test passed 14: six tests / 144 assertions.
 This is focused evidence, not a clean complete application build. The expanded
 functional and Qt runtime scenarios have not been executed for this package.
 
-Full builds and release acceptance remain operator work. In
-`D:\Digibyte\digibyte-fork`, with the dependencies and Qt configuration from
-[build_msvc/README.md](../build_msvc/README.md), the installed VS toolchain can be
-used as follows (build: several minutes or longer; functional group: potentially
-many minutes; timing depends on the machine):
-
-```powershell
-& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' build_msvc\digibyte.sln /p:Configuration=Release /p:Platform=x64 /p:VcpkgManifestInstall=false /m:2 /v:minimal
-.\src\test_digibyte.exe --run_test=paymaster_provider_tests,paymaster_wallet_store_tests --log_level=test_suite
-$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
-.\src\test_digibyte-qt.exe
-Remove-Item Env:DIGIBYTE_QT_TEST_SUITE
-python test\functional\test_runner.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_lifecycle.py wallet_paymaster_reorg.py wallet_paymaster_failover.py --jobs=1
-```
-
-Use an interactive desktop for the Qt suite as required by the existing Windows
-test guidance. Success means exit code zero, no Boost/Qt failures, all selected
-functional tests passing (including `-rpcdoccheck`), and no regression in existing
-release checks. Do not infer current-code test success from an older executable.
-Independent review and a real Tor run remain open release gates; see the
+Full builds and release acceptance remain operator work. The shared
+[build and test runbook](digidollar-paymaster-testing.md) provides the Windows
+and Linux/WSL commands, prerequisites, expected runtime and success criteria.
+It includes the current Qt/vcpkg paths instead of relying on implicit defaults.
+Independent review and real Tor remain open in the
 [release gate](digidollar-paymaster-release-gate.md).
