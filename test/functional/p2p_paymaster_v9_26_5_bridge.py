@@ -2,9 +2,11 @@
 # Copyright (c) 2026 The DigiByte Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test a v9.26.5-only bridge between current Paymaster peers.
+"""Reference defaults to v9.26.5; --reference-release=v9.26.6rc2 adds RC2.
 
-The initial topology is current provider <-> official v9.26.5 <-> current
+Test an official non-Paymaster bridge between current Paymaster peers.
+
+The initial topology is current provider <-> official reference <-> current
 client, with no direct current-current connection. Ordinary DGB and DigiDollar
 transactions must relay through and be mined by the old node, while Paymaster
 gossip must stop there and the client must fail closed. Adding a direct link
@@ -13,7 +15,6 @@ selection without changing the old node.
 """
 
 from io import BytesIO
-import os
 from pathlib import Path
 
 from test_framework.paymaster import (
@@ -22,14 +23,20 @@ from test_framework.paymaster import (
     paymaster_node_args,
     provider_safety_policy,
 )
-from test_framework.test_framework import DigiByteTestFramework, SkipTest
+from test_framework.paymaster_reference import (
+    add_reference_options,
+    assert_reference,
+    assert_reference_rules,
+    configure_reference,
+    locate_reference,
+)
+from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
 )
 
 
-V9_26_5_CLIENT_VERSION = 92605
 ORACLE_PRICE_MICRO_USD = 500_000
 OLD_NODE_ARGS = [
     "-capturemessages=1",
@@ -69,43 +76,17 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         ]
         self.wallet_names = []
 
-        self.v9_binary_env = None
-        self.v9_binary_override = None
-        for variable in ("V9_26_5_DIGIBYTED", "PRE_PAYMASTER_DIGIBYTED"):
-            if value := os.getenv(variable):
-                self.v9_binary_env = variable
-                self.v9_binary_override = value
-                break
+        configure_reference(self)
         self.v9_binary = None
 
     def add_options(self, parser):
+        add_reference_options(parser)
         self.add_wallet_options(parser, legacy=False)
-
-    def _locate_v9_binary(self):
-        if self.v9_binary_override:
-            return Path(self.v9_binary_override).expanduser()
-        exeext = self.config["environment"]["EXEEXT"]
-        return Path(
-            self.options.previous_releases_path,
-            "v9.26.5",
-            "bin",
-            f"digibyted{exeext}",
-        )
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
-        binary = self._locate_v9_binary()
-        if not binary.is_file():
-            if self.v9_binary_env:
-                raise AssertionError(
-                    f"{self.v9_binary_env} does not name a file: {binary}")
-            raise SkipTest(
-                "DigiByte Core v9.26.5 is required at "
-                f"{binary}. Set V9_26_5_DIGIBYTED or install the previous "
-                "release under the functional-test releases directory."
-            )
-        self.v9_binary = str(binary)
+        self.v9_binary = locate_reference(self)
 
     def setup_nodes(self):
         assert self.v9_binary is not None
@@ -136,10 +117,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
 
     def run_test(self):
         provider_node, old_node, client_node = self.nodes
-        assert_equal(
-            old_node.getnetworkinfo()["version"], V9_26_5_CLIENT_VERSION)
-        assert_raises_rpc_error(
-            -32601, "Method not found", old_node.getpaymasterinfo)
+        assert_reference(self, old_node)
 
         self.log.info("Create wallets on the current endpoints and old bridge")
         provider_node.createwallet(
@@ -165,7 +143,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         recipient = client_node.get_wallet_rpc("bridge-recipient")
         provider_cli = provider_node.cli("-rpcwallet=bridge-provider")
 
-        self.log.info("Relay and confirm ordinary DGB through v9.26.5")
+        self.log.info(f"Relay and confirm ordinary DGB through {self.options.reference_release}")
         self.generatetoaddress(
             provider_node, 110,
             provider.getnewaddress(address_type="bech32m"))
@@ -180,7 +158,7 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         assert dgb_txid in old_node.getblock(dgb_block)["tx"]
         assert_equal(relay_wallet.getbalance(), 5)
 
-        self.log.info("Relay minting and an ordinary DD transfer through v9.26.5")
+        self.log.info(f"Relay minting and an ordinary DD transfer through {self.options.reference_release}")
         for node in self.nodes:
             node.setmockoracleprice(ORACLE_PRICE_MICRO_USD)
         mint = provider.mintdigidollar(5_000, 0)
@@ -297,6 +275,8 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         assert_equal(
             client.getpaymasterclientsafetystatus()["active_reservations"],
             0)
+
+        assert_reference_rules(self)
 
 
 if __name__ == "__main__":

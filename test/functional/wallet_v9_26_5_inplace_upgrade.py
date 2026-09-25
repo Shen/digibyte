@@ -2,28 +2,34 @@
 # Copyright (c) 2026 The DigiByte Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test an in-place official-v9.26.5 to current datadir upgrade.
+"""Reference defaults to v9.26.5; --reference-release=v9.26.6rc2 adds RC2.
+
+Test an in-place official-reference to current datadir upgrade.
 
 The historical daemon creates encrypted descriptor wallets, active DigiDollar
 positions, and disconnected unconfirmed DGB/DD transfers. It shuts down cleanly
 and the current daemon starts on the exact same datadir. A wallet-disabled
 first start proves that mempool persistence is independent of wallet
 rebroadcast; a normal second start verifies wallet state and signing. The test
-then confirms both pending transfers and redeems a position created by v9.26.5.
+then confirms both pending transfers and redeems a position created by the reference release.
 """
 
 from decimal import Decimal
-import os
-from pathlib import Path
 
-from test_framework.test_framework import DigiByteTestFramework, SkipTest
+from test_framework.paymaster_reference import (
+    add_reference_options,
+    assert_reference,
+    assert_reference_rules,
+    configure_reference,
+    locate_reference,
+)
+from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
 )
 
 
-V9_26_5_CLIENT_VERSION = 92605
 ORACLE_PRICE_MICRO_USD = 500_000
 WALLET_PASSPHRASE = "v9.26.5-current-in-place"
 SOURCE_WALLET = "v9_inplace_source"
@@ -49,43 +55,17 @@ class V9_26_5InplaceUpgradeTest(DigiByteTestFramework):
         self.extra_args = [COMMON_ARGS.copy(), COMMON_ARGS.copy()]
         self.wallet_names = []
 
-        self.v9_binary_env = None
-        self.v9_binary_override = None
-        for variable in ("V9_26_5_DIGIBYTED", "PRE_PAYMASTER_DIGIBYTED"):
-            if value := os.getenv(variable):
-                self.v9_binary_env = variable
-                self.v9_binary_override = value
-                break
+        configure_reference(self)
         self.v9_binary = None
 
     def add_options(self, parser):
+        add_reference_options(parser)
         self.add_wallet_options(parser, legacy=False)
-
-    def _locate_v9_binary(self):
-        if self.v9_binary_override:
-            return Path(self.v9_binary_override).expanduser()
-        exeext = self.config["environment"]["EXEEXT"]
-        return Path(
-            self.options.previous_releases_path,
-            "v9.26.5",
-            "bin",
-            f"digibyted{exeext}",
-        )
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
-        binary = self._locate_v9_binary()
-        if not binary.is_file():
-            if self.v9_binary_env:
-                raise AssertionError(
-                    f"{self.v9_binary_env} does not name a file: {binary}")
-            raise SkipTest(
-                "DigiByte Core v9.26.5 is required at "
-                f"{binary}. Set V9_26_5_DIGIBYTED or install the previous "
-                "release under the functional-test releases directory."
-            )
-        self.v9_binary = str(binary)
+        self.v9_binary = locate_reference(self)
 
     def setup_nodes(self):
         assert self.v9_binary is not None
@@ -170,11 +150,9 @@ class V9_26_5InplaceUpgradeTest(DigiByteTestFramework):
 
     def run_test(self):
         old, peer_node = self.nodes
-        old_network = old.getnetworkinfo()
-        assert_equal(old_network["version"], V9_26_5_CLIENT_VERSION)
-        assert "9.26.5" in old_network["subversion"]
+        assert_reference(self, old)
 
-        self.log.info("Create v9.26.5 wallets and two active DD positions")
+        self.log.info(f"Create {self.options.reference_release} wallets and two active DD positions")
         old.createwallet(
             wallet_name=SOURCE_WALLET, descriptors=True,
             load_on_startup=True)
@@ -240,14 +218,14 @@ class V9_26_5InplaceUpgradeTest(DigiByteTestFramework):
             for txid in pending_txids
         }
 
-        self.log.info("Stop v9.26.5 and switch the same TestNode/datadir binary")
+        self.log.info(f"Stop {self.options.reference_release} and switch the same TestNode/datadir binary")
         self.stop_node(0)
         old.binary = self.options.digibyted
         old.args[0] = self.options.digibyted
         old.version = None
 
         self.log.info("Load chainstate, blocks, txindex and mempool without wallets")
-        self.start_node(0, COMMON_ARGS + ["-disablewallet"])
+        self.start_node(0, self.extra_args[0] + ["-disablewallet"])
         upgraded = self.nodes[0]
         assert "getpaymasterinfo" in upgraded.help("getpaymasterinfo")
         assert_raises_rpc_error(
@@ -311,7 +289,7 @@ class V9_26_5InplaceUpgradeTest(DigiByteTestFramework):
         assert_equal(len(confirmed_dd_rows), 1)
         assert_equal(confirmed_dd_rows[0].get("wallet_state"), "confirmed")
 
-        self.log.info("Redeem a v9.26.5 position with the upgraded wallet")
+        self.log.info(f"Redeem a {self.options.reference_release} position with the upgraded wallet")
         position = next(
             row for row in active.listdigidollarpositions(False)
             if row["position_id"] == positions[0]
@@ -348,6 +326,8 @@ class V9_26_5InplaceUpgradeTest(DigiByteTestFramework):
             if row["position_id"] == positions[0]
         )
         assert_equal(final_position["status"], "redeemed")
+
+        assert_reference_rules(self)
 
 
 if __name__ == "__main__":

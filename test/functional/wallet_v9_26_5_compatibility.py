@@ -2,12 +2,14 @@
 # Copyright (c) 2026 The DigiByte Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test direct wallet-file compatibility with official DigiByte Core v9.26.5.
+"""Reference defaults to v9.26.5; --reference-release=v9.26.6rc2 adds RC2.
 
-The test creates and uses an encrypted wallet with the v9.26.5 daemon, copies
+Test direct wallet-file compatibility with the selected official release.
+
+The test creates and uses an encrypted wallet with the reference daemon, copies
 the unloaded wallet directory to the current daemon, and verifies that wallet
 state and signing remain usable without an explicit wallet upgrade. It then
-copies the current wallet back to v9.26.5 to catch an incompatible automatic
+copies the current wallet back to the reference release to catch an incompatible automatic
 format or wallet-flag change.
 
 The descriptor variant additionally covers an active DigiDollar position,
@@ -18,15 +20,19 @@ directions for descriptor wallets. The opposite version confirms each transfer.
 """
 
 from decimal import Decimal
-import os
-from pathlib import Path
 import shutil
 
-from test_framework.test_framework import DigiByteTestFramework, SkipTest
+from test_framework.paymaster_reference import (
+    add_reference_options,
+    assert_reference,
+    assert_reference_rules,
+    configure_reference,
+    locate_reference,
+)
+from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
-V9_26_5_CLIENT_VERSION = 92605
 ORACLE_PRICE_MICRO_USD = 500000
 FUNDING_AMOUNT_DGB = Decimal("10000")
 PRE_UPGRADE_SEND_DGB = Decimal("3")
@@ -56,6 +62,7 @@ COMMON_ARGS = [
 
 class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
     def add_options(self, parser):
+        add_reference_options(parser)
         self.add_wallet_options(parser)
 
     def set_test_params(self):
@@ -65,14 +72,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         # This test creates named wallets explicitly on each binary.
         self.wallet_names = []
 
-        self.v9_binary_env = None
-        self.v9_binary_override = None
-        for variable in ("V9_26_5_DIGIBYTED", "PRE_PAYMASTER_DIGIBYTED"):
-            if value := os.getenv(variable):
-                self.v9_binary_env = variable
-                self.v9_binary_override = value
-                break
-
+        configure_reference(self)
         self.v9_binary = None
         self.position_id = None
         self.tracked_addresses = []
@@ -83,32 +83,9 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         self.peer_dd_txids = []
         self.expected_active_dd_balance = None
 
-    def _locate_v9_binary(self):
-        if self.v9_binary_override:
-            return Path(self.v9_binary_override).expanduser()
-        exeext = self.config["environment"]["EXEEXT"]
-        return Path(
-            self.options.previous_releases_path,
-            "v9.26.5",
-            "bin",
-            f"digibyted{exeext}",
-        )
-
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
-        binary = self._locate_v9_binary()
-        if not binary.is_file():
-            if self.v9_binary_env:
-                raise AssertionError(
-                    f"{self.v9_binary_env} does not name a file: {binary}"
-                )
-            raise SkipTest(
-                "DigiByte Core v9.26.5 is required at "
-                f"{binary}. Build it with "
-                "test/get_previous_releases.py -d v9.26.5 or set "
-                "V9_26_5_DIGIBYTED."
-            )
-        self.v9_binary = str(binary)
+        self.v9_binary = locate_reference(self)
 
     def setup_nodes(self):
         assert self.v9_binary is not None
@@ -127,14 +104,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         self.start_nodes()
 
     def _assert_official_v9_binary(self, node):
-        network_info = node.getnetworkinfo()
-        assert_equal(network_info["version"], V9_26_5_CLIENT_VERSION)
-        assert "9.26.5" in network_info["subversion"]
-        assert_raises_rpc_error(
-            -32601,
-            "Method not found",
-            node.getpaymasterinfo,
-        )
+        assert_reference(self, node)
 
     def _copy_wallet(self, source_node, source_name, target_node, target_name):
         source = source_node.wallets_path / source_name
@@ -329,7 +299,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         self._assert_official_v9_binary(old)
 
         wallet_type = "descriptor/SQLite" if self.options.descriptors else "legacy/BDB"
-        self.log.info("Create an active encrypted %s wallet with v9.26.5", wallet_type)
+        self.log.info(f"Create an active encrypted %s wallet with {self.options.reference_release}", wallet_type)
         old.createwallet(
             wallet_name=SOURCE_WALLET,
             descriptors=self.options.descriptors,
@@ -359,7 +329,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         self.generatetoaddress(old, 1, source.getnewaddress())
         self.tracked_txids.extend([funding_txid, outgoing_txid])
 
-        self.log.info("Send DGB directly between v9.26.5 and current wallets")
+        self.log.info(f"Send DGB directly between {self.options.reference_release} and current wallets")
         current.createwallet(
             wallet_name=PEER_WALLET,
             descriptors=self.options.descriptors,
@@ -409,7 +379,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
             self.tracked_dd_txids.append(mint["txid"])
             self.generatetoaddress(old, 1, source.getnewaddress())
 
-            self.log.info("Send DD directly between v9.26.5 and current wallets")
+            self.log.info(f"Send DD directly between {self.options.reference_release} and current wallets")
             self._refresh_oracle_quotes()
             peer_dd_address = peer.getdigidollaraddress()
             assert_equal(active.validateddaddress(peer_dd_address)["isvalid"], True)
@@ -466,7 +436,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         old.syncwithvalidationinterfacequeue()
         v9_state = self._state(active)
 
-        self.log.info("Load the raw v9.26.5 wallet directory with the current daemon")
+        self.log.info(f"Load the raw {self.options.reference_release} wallet directory with the current daemon")
         old.unloadwallet(ACTIVE_WALLET, False)
         self.stop_node(0)
         self._copy_wallet(old, ACTIVE_WALLET, current, ACTIVE_WALLET)
@@ -555,7 +525,7 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         peer = current.get_wallet_rpc(PEER_WALLET)
         assert_equal(self._peer_state(peer), peer_state)
 
-        self.log.info("Round-trip the current wallet directory back to v9.26.5")
+        self.log.info(f"Round-trip the current wallet directory back to {self.options.reference_release}")
         current.unloadwallet(ACTIVE_WALLET, False)
         self._copy_wallet(current, ACTIVE_WALLET, old, ROUNDTRIP_WALLET)
         self.start_node(0)
@@ -569,9 +539,11 @@ class V9_26_5WalletCompatibilityTest(DigiByteTestFramework):
         assert_equal(roundtrip.getwalletinfo()["unlocked_until"], 0)
 
         self.log.info(
-            "Official v9.26.5 and the current daemon preserved the %s wallet",
+            f"Official {self.options.reference_release} and the current daemon preserved the %s wallet",
             wallet_type,
         )
+
+        assert_reference_rules(self)
 
 
 if __name__ == "__main__":

@@ -86,9 +86,8 @@ remain authoritative; this runbook does not change them.
 
 ## Windows runtime checks
 
-After a successful build, run from the repository root in PowerShell. The MSVC
-projects copy application/test executables to `src`; use those freshly copied
-files consistently. An interactive desktop is required for the Windows Qt run.
+After a successful build, run from the repository root in PowerShell. The node and CLI are copied to `src`; the Qt test executable is under
+`build_msvc/x64/Release`. Use freshly built files consistently. An interactive desktop is required for the Windows Qt run.
 
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'
@@ -100,7 +99,7 @@ $env:QT_FORCE_STDERR_LOGGING = '1'
 Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
 $env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
 try {
-    .\src\test_digibyte-qt.exe
+    .\build_msvc\x64\Release\test_digibyte-qt.exe
     if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
 } finally {
     Remove-Item Env:DIGIBYTE_QT_TEST_SUITE -ErrorAction SilentlyContinue
@@ -110,7 +109,7 @@ $env:PYTHONUTF8 = '1'
 python test/functional/test_runner.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional tests failed' }
 
-Get-FileHash .\src\digibyted.exe, .\src\digibyte-cli.exe, .\src\test_digibyte.exe, .\src\test_digibyte-qt.exe -Algorithm SHA256
+Get-FileHash .\src\digibyted.exe, .\src\digibyte-cli.exe, .\src\test_digibyte.exe, .\build_msvc\x64\Release\test_digibyte-qt.exe -Algorithm SHA256
 ```
 
 ## Linux / WSL runtime checks
@@ -162,7 +161,7 @@ Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAct
 try {
     foreach ($suite in @('DigiDollarWidgetTests', 'DigiDollarWave19WidgetTests', 'WalletTests')) {
         $env:DIGIBYTE_QT_TEST_SUITE = $suite
-        .\src\test_digibyte-qt.exe
+        .\build_msvc\x64\Release\test_digibyte-qt.exe
         if ($LASTEXITCODE -ne 0) { throw "Qt regression failed: $suite" }
     }
 } finally {
@@ -177,6 +176,92 @@ if ($LASTEXITCODE -ne 0) { throw 'Upstream functional regressions failed' }
 On Linux/WSL use the executable paths and Qt platform from the preceding Linux
 section with the same suite and script selections. The complete build, runtime
 matrix, independent review and real Tor check remain operator release gates.
+
+## Official reference-release compatibility matrix
+
+The historical script names are retained for existing commands. Each accepts
+`--reference-release=v9.26.5` (the default) or `--reference-release=v9.26.6rc2`.
+RC2 additionally supports `--thaw-day`, enabling the same Thaw Day height of 1
+on every test node, including wallet-disabled upgrade startup and restarts.
+The final deployment RPC assertions verify that the selected rules are active
+(or remain inactive in the ordinary RC2 variant). This checks operation under
+the activated rules; it is not an activation-boundary or exhaustive consensus test.
+
+| Scenario | v9.26.5 | RC2, default rules | RC2, Thaw Day active |
+| --- | --- | --- | --- |
+| Non-Paymaster bridge: DGB/DD relay and confirmation, gossip isolation, direct-link discovery | Yes | Yes | Yes |
+| Raw wallet-file round trip and bidirectional DGB transfers, legacy BDB | Yes | Yes | Yes |
+| Raw wallet-file round trip, DD positions/history and bidirectional DGB/DD transfers, descriptors | Yes | Yes | Yes |
+| Same-datadir descriptor upgrade, pending transactions, wallet-disabled mempool load, redemption and restart | Yes | Yes | Yes |
+
+All twelve variants are registered in `test_runner.py`. The v9.26.5 checks retain
+their original scope; they do not establish compatibility with activated Thaw Day.
+The reference daemons must not expose Paymaster RPCs. Tests check `-version`
+(including `rc2`), numeric RPC version and P2P subversion. RPC subversion alone
+omits the RC suffix and cannot identify the RC2 artifact.
+
+Use official, separately extracted executables, not a Paymaster-disabled copy of
+the fork. The local Windows setup contains node and CLI binaries under
+`test/previous_releases/<tag>/bin`; these are ignored by Git. The installers were
+not executed. Their SHA-256 hashes match the official release assets:
+
+- v9.26.5: `880cdd2cc3cabcc838aea6045647d7fd4ac4ca95be25fd808c939641386b9325`
+- v9.26.6rc2: `48f2aacd0102ff811357312a4d0204bd62e392c88fab28673a65e451fda458a5`
+
+Each local release directory also has a `provenance.json` with the download URL,
+installer hash and extracted executable hashes. Other platforms require their
+own verified official packages.
+
+Run the complete matrix from the repository root in PowerShell. This explicitly
+overrides any stale placeholder environment values. Allow several minutes or
+longer; every selected variant must pass, with no skipped reference release.
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+$env:PYTHONUTF8 = '1'
+$env:PREVIOUS_RELEASES_DIR = "$PWD\test\previous_releases"
+$env:V9_26_5_DIGIBYTED = "$env:PREVIOUS_RELEASES_DIR\v9.26.5\bin\digibyted.exe"
+$env:V9_26_6RC2_DIGIBYTED = "$env:PREVIOUS_RELEASES_DIR\v9.26.6rc2\bin\digibyted.exe"
+foreach ($binary in @($env:V9_26_5_DIGIBYTED, $env:V9_26_6RC2_DIGIBYTED)) {
+    if (!(Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Missing reference: $binary" }
+}
+python -u test/functional/test_runner.py p2p_paymaster_v9_26_5_bridge.py wallet_v9_26_5_compatibility.py wallet_v9_26_5_inplace_upgrade.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Reference compatibility matrix failed' }
+```
+
+For a single diagnostic variant, invoke its script directly, for example:
+
+```powershell
+python -u test/functional/wallet_v9_26_5_inplace_upgrade.py --descriptors --reference-release=v9.26.6rc2 --thaw-day
+if ($LASTEXITCODE -ne 0) { throw 'RC2 upgrade regression failed' }
+```
+
+Local targeted validation on 2026-09-24 used the existing Windows build from
+merge `00e35df825` with the working-tree test changes. Passed: RC2 bridge (45 s),
+RC2 same-datadir upgrade (33 s), and RC2 descriptor wallet round trip (about 40 s),
+all with Thaw Day active; the default v9.26.5 legacy/BDB round trip also passed
+(about 30 s). The registered two-test run passed all 18 framework unit tests.
+Python syntax, twelve unique runner registrations, documentation links,
+PowerShell example parsing and `git diff --check` passed. `flake8` is not
+installed in this Python environment.
+
+On 2026-09-25 the operator supplied the complete Windows runner output for
+`test_runner_₿_🏃_20260925_044259`: all twelve registered compatibility
+variants passed without skips or failures, together with all 18 framework unit
+tests. Accumulated test duration was 500 seconds; total runtime was 503 seconds.
+This validates the matrix above with the working-tree test changes on the
+`00e35df825` build baseline. It does not renew the separate full Paymaster,
+sanitizer/fuzz, real-Tor or independent-review release gates.
+
+The corrected `wallet_paymaster_rpc.py --descriptors` also passed locally on
+2026-09-24 (41 seconds plus 18 framework unit tests). Its fixes give concurrent
+RPC workers independent HTTP connections, deliver the manual provider's result
+before confirming the payment, and reload the actual submitting wallet.
+
+These scenarios transfer ordinary DGB/DD and exercise Paymaster discovery
+boundaries. Wallet round trips do not certify downgrading a wallet after it has
+created Paymaster records. The complete Paymaster lifecycle, security, Tor and
+upstream consensus matrices remain separate acceptance requirements.
 
 ## What the focused matrix must establish
 

@@ -30,6 +30,7 @@ from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
+    get_rpc_proxy,
     str_to_b64str,
     try_rpc,
 )
@@ -297,9 +298,13 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(dollars_retry["request_id"], second_request_id)
         assert_equal(dollars_retry["requested_amount_cents"], 200)
         assert_equal(dollars_retry["session_id"], second_pending["session_id"])
-        # Independent HTTP clients exercise concurrent idempotent resumes.
+        # get_wallet_rpc() shares the node's HTTP connection, which cannot
+        # carry simultaneous requests. Give each worker its own connection.
         def same_order(_):
-            rpc = self.nodes[1].get_wallet_rpc("client")
+            node = self.nodes[1]
+            rpc = get_rpc_proxy(
+                node.url + "/wallet/client", node.index,
+                timeout=node.rpc_timeout, coveragedir=self.options.coveragedir)
             return rpc.senddigidollar(recipient, 200, "", 0, None, "cents", second_options)
         with ThreadPoolExecutor(max_workers=2) as pool:
             repeats = list(pool.map(same_order, range(2)))
@@ -562,6 +567,20 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             after_commit.provider_budget["user_paid"]
             ["reserved_network_fee_satoshis"])
 
+        # Direct submission commits the transaction but does not deliver a
+        # PMRESULT to the client. Drive the manual provider's queued PMSUBMIT
+        # through the same durable commit before confirming its spent inputs.
+        def deliver_submit_result():
+            response = provider.processpaymastersubmits()
+            if not response["processed"] or response["request_id"] != submit_request_id:
+                return False
+            assert_equal(response["queued"], True)
+            assert_equal(response["commit"]["txid"], commit["txid"])
+            return True
+
+        self.wait_until(deliver_submit_result)
+        self.wait_until(lambda: send().get("txid") == commit["txid"])
+
         self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
         self.sync_blocks()
         self.wait_until(
@@ -582,9 +601,9 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(proof["recipient"]["amount_cents"], 500)
         assert_equal(proof["confirmations"], 1)
         assert_equal(client.getbalance(), 0)
-        self.nodes[1].unloadwallet("client")
-        self.nodes[1].loadwallet("client")
-        client = self.nodes[1].get_wallet_rpc("client")
+        self.nodes[1].unloadwallet("submit_client")
+        self.nodes[1].loadwallet("submit_client")
+        client = self.nodes[1].get_wallet_rpc("submit_client")
         harness.client = client
         self.wait_until(lambda: client.getpaymasterclientinfo()["ready"])
         recovered_receipt = client.getdigidollarsendsession({"request_id": submit_request_id})

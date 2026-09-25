@@ -39,6 +39,19 @@ Merge verification and operator acceptance commands are recorded in the
 This source merge does not renew release acceptance, independent review or the
 real Tor release gate.
 
+## Reference compatibility coverage added on 2026-09-24
+
+The three historical v9.26.5 compatibility scripts now accept a pinned RC2
+reference as well. The runner registers twelve variants covering the bridge,
+legacy/descriptor wallet round trips, and same-datadir upgrade against v9.26.5,
+RC2 with default rules, and RC2 with Thaw Day active. Explicit binary version
+and absent-Paymaster checks prevent substituting this fork as the reference.
+The [test runbook](digidollar-paymaster-testing.md#official-reference-release-compatibility-matrix)
+records setup, scope, operator commands and validation. The operator reported
+all twelve variants and 18 framework unit tests passing on 2026-09-25, with
+503 seconds total runtime. This adds test coverage without changing wallet,
+consensus or Paymaster implementation; the separate release gates remain open.
+
 ## Original integration scope and base
 
 This integration adapts Paymaster to upstream commit
