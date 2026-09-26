@@ -57,6 +57,20 @@ class PaymasterReadinessTest(DigiByteTestFramework):
         self.sync_blocks()
 
         provider_id = "00" * 32
+        # INT-01: capability inspection must remain available when payment
+        # RPCs are gated. "supported" is not an assertion of current readiness.
+        def assert_client_blocked(wallet, expected_error):
+            before = wallet.listpaymasterreservations()
+            info = wallet.getpaymasterclientinfo()
+            assert info["supported"] is True
+            assert info["ready"] is False
+            assert expected_error in info["readiness_errors"]
+            assert wallet.listpaymasterreservations() == before
+
+        for wallet, error in zip(wallets, (
+                "PAYMASTER_DISABLED", "PAYMASTER_REQUIRES_TXINDEX",
+                "PAYMASTER_REQUIRES_PRUNE_0")):
+            assert_client_blocked(wallet, error)
         self.log.info("Reject client operation when Paymaster support is disabled")
         assert_raises_rpc_error(
             -1,
@@ -108,11 +122,16 @@ class PaymasterReadinessTest(DigiByteTestFramework):
 
         def restart_client(extra_args):
             self.restart_node(0, extra_args=safe_client_args + extra_args)
-            self.connect_nodes(0, 1)
+            # This negative RPC case intentionally disables v2. Even when the
+            # test runner selects --v2transport, its ordinary sync connection
+            # must not request a transport that this node has just disabled.
+            self.connect_nodes(0, 1, peer_advertises_v2=(
+                False if "-v2transport=0" in extra_args else None))
 
         self.log.info("Reject standard Paymaster operation without BIP324")
         restart_client(["-v2transport=0"])
         wallet = self.nodes[0].get_wallet_rpc("readiness")
+        assert_client_blocked(wallet, "PAYMASTER_REQUIRES_V2_TRANSPORT")
         assert_raises_rpc_error(
             -1,
             "PAYMASTER_REQUIRES_V2_TRANSPORT",

@@ -294,6 +294,38 @@ class PaymasterFunctionalHarness:
         assert_equal(capacity_seen, True)
         return options, quote, send
 
+    def deliver_committed_result(self, request_id, txid):
+        """Deliver the signed wire result of an already locally committed PSBT.
+
+        submitpaymasterdigidollar alone does not queue PMRESULT. The original
+        authorized send has already queued PMSUBMIT; process that same request,
+        verify the exact cached commit, then consume the result exactly once.
+        No new client send/signature, replacement payment, or mining here.
+        """
+        def provider_result():
+            result = self.provider.processpaymastersubmits()
+            if not result.get("processed", False):
+                return False
+            assert_equal(result["queued"], True)
+            assert_equal(result["request_id"], request_id)
+            assert_equal(result["txid"], txid)
+            return True
+
+        self.test.wait_until(provider_result, timeout=60)
+        received = {}
+
+        def client_result():
+            result = self.client.processpaymasterresult(request_id)
+            if not result.get("processed", False):
+                return False
+            assert_equal(result["txid"], txid)
+            assert_equal(result["session_state"], "MEMPOOL")
+            received.update(result)
+            return True
+
+        self.test.wait_until(client_result, timeout=60)
+        return received
+
     def authorize_quote(self, options, send):
         """Perform the mandatory second client authorization and return its PSBT."""
         deadline = time.monotonic() + 60

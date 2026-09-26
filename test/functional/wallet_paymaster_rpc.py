@@ -31,6 +31,7 @@ from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
     get_rpc_proxy,
+    rpc_url,
     str_to_b64str,
     try_rpc,
 )
@@ -65,7 +66,10 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
     def check_rpc_access(self, provider, client, recipient_wallet):
         self.log.info("HTTP authentication and method whitelists protect Paymaster RPCs")
-        url = urlsplit(self.nodes[0].url)
+        node = self.nodes[0]
+        # --usecli deliberately leaves node.url unset. Authentication and real
+        # JSON-RPC batches still require HTTP, with the same fixture endpoint.
+        url = urlsplit(node.url or rpc_url(node.datadir_path, node.index, node.chain, node.rpchost))
         path = "/wallet/" + quote("provider", safe="")
 
         def request(payload, credentials):
@@ -169,8 +173,22 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client_info["amount_unit"], "cents")
         assert_equal(client_info["minimum_payment_cents"], 100)
         assert_equal(client_info["maximum_payment_cents"], 10_000_000)
+        # INT-02: the new RPC is a full public contract, not merely a ready bit.
+        assert_equal(client_info["maximum_user_total_cents"], 10_000_000)
+        assert_equal(set(client_info["fee_modes"]), {"dgb", "auto", "paymaster"})
+        assert_equal(client_info["funding_models"], ["user_paid", "sponsored"])
+        assert_equal(client_info["sponsorship_scopes"], ["public", "restricted"])
         assert_equal(client_info["supported"], True)
         self.wait_until(lambda: client.getpaymasterclientinfo()["ready"])
+        assert_equal(client.getpaymasterclientinfo()["readiness_errors"], [])
+        assert "getpaymasterclientinfo" in client.help("getpaymasterclientinfo")
+        assert_raises_rpc_error(-8, "Unknown named parameter",
+                               client.getpaymasterclientinfo, unexpected_argument=0)
+        for extra in (0, {}):
+            assert_raises_rpc_error(-1, "getpaymasterclientinfo",
+                                   client.getpaymasterclientinfo, extra)
+        missing = self.nodes[1].get_wallet_rpc("missing_integration_wallet")
+        assert_raises_rpc_error(-18, "", missing.getpaymasterclientinfo)
         assert_equal(client.listpaymasterreservations(), reservations)
         assert_snapshot_equal(before_info, value_snapshot(
             self.nodes[0], provider, client, recipient_wallet))
@@ -184,6 +202,30 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(locked.listpaymasterreservations(), [])
         assert_equal(locked.listdigidollarsendsessions()["count"], 0)
         self.nodes[1].unloadwallet("locked_info")
+        assert_raises_rpc_error(-18, "", locked.getpaymasterclientinfo)
+
+        # INT-03: ready does not promise spendable funds or a provider offer.
+        self.nodes[1].createwallet(wallet_name="empty_info", descriptors=True)
+        empty = self.nodes[1].get_wallet_rpc("empty_info")
+        empty.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 100,
+        })
+        self.wait_until(lambda: empty.getpaymasterclientinfo()["ready"])
+        assert_equal(empty.getbalance(), 0)
+        assert_equal(empty.getdigidollarbalance()["total"], 0)
+        assert_equal(empty.listpaymasterreservations(), [])
+        assert_equal(empty.listdigidollarsendsessions()["count"], 0)
+        self.nodes[1].unloadwallet("empty_info")
+        self.nodes[1].createwallet(wallet_name="watch_info", descriptors=True,
+                                  disable_private_keys=True, blank=True)
+        watch = self.nodes[1].get_wallet_rpc("watch_info")
+        watch_info = watch.getpaymasterclientinfo()
+        assert_equal(watch_info["supported"], True)
+        assert_equal(watch_info["ready"], False)
+        assert "PAYMASTER_PRIVATE_KEYS_REQUIRED" in watch_info["readiness_errors"]
+        assert_equal(watch.listpaymasterreservations(), [])
+        self.nodes[1].unloadwallet("watch_info")
 
         started = provider.startpaymaster()
         assert_equal(started["running"], True)
@@ -298,13 +340,16 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(dollars_retry["request_id"], second_request_id)
         assert_equal(dollars_retry["requested_amount_cents"], 200)
         assert_equal(dollars_retry["session_id"], second_pending["session_id"])
-        # get_wallet_rpc() shares the node's HTTP connection, which cannot
-        # carry simultaneous requests. Give each worker its own connection.
+        # Independent HTTP clients exercise concurrent idempotent resumes.
         def same_order(_):
             node = self.nodes[1]
-            rpc = get_rpc_proxy(
-                node.url + "/wallet/client", node.index,
-                timeout=node.rpc_timeout, coveragedir=self.options.coveragedir)
+            if node.use_cli:
+                rpc = node.get_wallet_rpc("client")
+            else:
+                # get_wallet_rpc creates a URL wrapper but shares the parent's
+                # HTTPConnection. Each worker needs a genuinely new proxy.
+                rpc = get_rpc_proxy(node.url + "/wallet/client", node.index,
+                                    timeout=node.rpc_timeout, coveragedir=node.coverage_dir)
             return rpc.senddigidollar(recipient, 200, "", 0, None, "cents", second_options)
         with ThreadPoolExecutor(max_workers=2) as pool:
             repeats = list(pool.map(same_order, range(2)))
@@ -567,19 +612,36 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             after_commit.provider_budget["user_paid"]
             ["reserved_network_fee_satoshis"])
 
-        # Direct submission commits the transaction but does not deliver a
-        # PMRESULT to the client. Drive the manual provider's queued PMSUBMIT
-        # through the same durable commit before confirming its spent inputs.
-        def deliver_submit_result():
-            response = provider.processpaymastersubmits()
-            if not response["processed"] or response["request_id"] != submit_request_id:
-                return False
-            assert_equal(response["queued"], True)
-            assert_equal(response["commit"]["txid"], commit["txid"])
-            return True
+        # INT-04: accepted into the mempool is not recipient settlement. Read
+        # the same local observation through all documented session views.
+        lookup = {"request_id": submit_request_id}
 
-        self.wait_until(deliver_submit_result)
+        def assert_session_views(expected_status, confirmed):
+            session = client.getdigidollarsendsession(lookup)
+            listed = [entry for entry in client.listdigidollarsendsessions(
+                {"active_only": False})["sessions"]
+                if entry["request_id"] == submit_request_id]
+            assert_equal(len(listed), 1)
+            refreshed = client.resolvepaymastersession(lookup, "refresh")["session"]
+            for view in (session, listed[0], refreshed, send()):
+                assert_equal(view["status"], expected_status)
+                assert_equal(view["payment_confirmed"], confirmed)
+                assert_equal(view["payment_view"], session["payment_view"])
+            return session
+
+        self.sync_mempools()
+        # The local submit RPC above commits a transaction, but does not send
+        # PMRESULT. Drain the already authorized wire submit and consume its
+        # signed result before checking high-level session views. Do not ask
+        # send() to progress against stale pre-commit capacity in this gap.
+        harness.deliver_committed_result(submit_request_id, commit["txid"])
         self.wait_until(lambda: send().get("txid") == commit["txid"])
+        pending = assert_session_views("pending", False)
+        observation = pending["payment_view"]["payment"]
+        assert_equal(observation["observation_available"], True)
+        assert_equal(observation["confirmations"], 0)
+        assert_equal(observation["in_mempool"], True)
+        assert "block_hash" not in observation
 
         self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
         self.sync_blocks()
@@ -600,7 +662,50 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(proof["txid"], commit["txid"])
         assert_equal(proof["recipient"]["amount_cents"], 500)
         assert_equal(proof["confirmations"], 1)
+        # INT-05: bind the receipt to the recipient output, not same-value
+        # change or the provider service fee; verify the observed local tip.
+        assert_equal(proof["recipient"]["vout"], 0)
+        decoded = provider.decoderawtransaction(provider.gettransaction(commit["txid"])["hex"])
+        assert_equal(proof["recipient"]["script_pub_key"], decoded["vout"][0]["scriptPubKey"]["hex"])
+        assert_equal(proof["block_hash"], self.nodes[1].getbestblockhash())
+        assert_equal(paid["payment_view"]["observed_tip_height"], self.nodes[1].getblockcount())
+        assert_equal(paid["payment_view"]["observed_tip_hash"], self.nodes[1].getbestblockhash())
+        assert_session_views("success", True)
+
+        # INT-06: terminal status does not waive canonical order validation.
+        # Valid but different options must conflict, not start another payment.
+        original_inputs = paid["reserved_user_inputs"]
+        assert original_inputs
+        before_retries = value_snapshot(self.nodes[0], provider, client, recipient_wallet)
+        sessions_before = client.listdigidollarsendsessions({"active_only": False})["count"]
+        txcount_before = client.getwalletinfo()["txcount"]
+        mutations = (
+            (501, None, {}),
+            (500, [{"txid": "01" * 32, "vout": 0}], {}),
+            (500, None, {"privacy": "high"}),
+            (500, None, {"selection": "privacy_weighted"}),
+            (500, None, {"maximum_provider_attempts": 2}),
+            (500, None, {"fee_mode": "auto"}),
+            (500, None, {"subtract_paymaster_fee_from_amount": True}),
+        )
+        for amount, inputs, changes in mutations:
+            assert_raises_rpc_error(
+                -4, "PAYMASTER_REQUEST_ID_CONFLICT", client.senddigidollar,
+                recipient, amount, "", 0, inputs, "cents", dict(options, **changes))
+        # Explicit saved inputs and equivalent dollars/cents are the SAME order.
+        for replay in (
+                client.senddigidollar(recipient, 500, "", 0, original_inputs, "cents", options),
+                client.senddigidollar(address=recipient, amount=Decimal("5.00"),
+                                     amount_unit="dollars", options=options)):
+            assert_equal(replay["session_id"], paid["session_id"])
+            assert_equal(replay["txid"], commit["txid"])
+            assert_equal(replay["status"], "success")
+        assert_equal(client.listdigidollarsendsessions({"active_only": False})["count"], sessions_before)
+        assert_equal(client.getwalletinfo()["txcount"], txcount_before)
+        assert_snapshot_equal(before_retries, value_snapshot(
+            self.nodes[0], provider, client, recipient_wallet))
         assert_equal(client.getbalance(), 0)
+        # INT-07: this payment belongs to submit_client, not the earlier client.
         self.nodes[1].unloadwallet("submit_client")
         self.nodes[1].loadwallet("submit_client")
         client = self.nodes[1].get_wallet_rpc("submit_client")
