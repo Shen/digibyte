@@ -98,7 +98,9 @@ class DigiDollarStatsReorderedMintTest(DigiByteTestFramework):
         change_txid = node.sendrawtransaction(signed_change["hex"], maxfeerate=0)
         change_block = node.generate(1)[0]
         assert change_txid in node.getblock(change_block)["tx"]
-        assert_equal(node.gettxout(reordered_txid, 0), None)
+        # digibyte-cli renders a JSON null as empty stdout. Its test wrapper
+        # consequently returns "", whereas the HTTP proxy returns None.
+        assert_equal(node.gettxout(reordered_txid, 0), "" if self.options.usecli else None)
 
         unlock_height = node.getredemptioninfo(reordered_txid)["unlock_height"]
         self.generate(node, unlock_height - node.getblockcount())
