@@ -14,10 +14,11 @@ from test_framework.paymaster import (
     confirm_pool_preparation,
     default_liquidity_policy,
     paymaster_node_args,
+    paymaster_port,
     provider_safety_policy,
 )
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal, p2p_port
+from test_framework.util import assert_equal
 
 
 class PaymasterOfferSelectionTest(DigiByteTestFramework):
@@ -169,11 +170,11 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         expensive_start = expensive.startpaymaster()
         assert_equal(cheap_start["running"], True)
         assert_equal(cheap_start["ready"], True)
-        assert_equal(cheap_start["endpoint"], f"127.0.0.1:{p2p_port(0)}")
+        assert_equal(cheap_start["endpoint"], f"127.0.0.1:{paymaster_port(0)}")
         assert_equal(expensive_start["running"], True)
         assert_equal(expensive_start["ready"], True)
         assert_equal(
-            expensive_start["endpoint"], f"127.0.0.1:{p2p_port(1)}")
+            expensive_start["endpoint"], f"127.0.0.1:{paymaster_port(1)}")
 
         provider_ids = {
             cheap_identity["provider_id"],
@@ -198,7 +199,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             ["Cheap Independent Provider", "Expensive Independent Provider"])
         assert_equal(
             [offer["endpoint"] for offer in offers],
-            [f"127.0.0.1:{p2p_port(0)}", f"127.0.0.1:{p2p_port(1)}"])
+            [f"127.0.0.1:{paymaster_port(0)}", f"127.0.0.1:{paymaster_port(1)}"])
         assert_equal(
             [offer["fee_rate_bps"] for offer in offers], [50, 200])
         assert_equal(

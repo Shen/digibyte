@@ -30,6 +30,7 @@
 #include <key.h>
 #include <key_io.h>
 #include <logging.h>
+#include <net.h>
 #include <node/context.h>
 #include <node/chainstate.h>
 #include <validation.h>
@@ -102,7 +103,8 @@ namespace wallet {
 CWallet::CWallet(interfaces::Chain* chain, const std::string& name, std::unique_ptr<WalletDatabase> database)
     : m_chain(chain),
       m_name(name),
-      m_database(std::move(database))
+      m_database(std::move(database)),
+      m_paymaster_transport_owner(GetRandHash())
 {
 }
 
@@ -188,6 +190,9 @@ bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet
     std::string name = wallet->GetName();
 
     if (context.paymaster) context.paymaster->StopProvider(name);
+    if (auto* node = chain.context(); node && node->connman) {
+        node->connman->CancelPaymasterWallet(wallet->m_paymaster_transport_owner.GetHex());
+    }
 
     // Unregister with the validation interface which also drops shared pointers.
     wallet->m_chain_notifications_handler.reset();

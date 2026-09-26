@@ -97,6 +97,23 @@ uint256 GetDirectReplayKey(const DirectPayload& payload)
     return hasher.GetSHA256();
 }
 
+bool IsDirectRequestPayload(const DirectPayload& payload)
+{
+    return std::holds_alternative<PaymasterCapacityRequest>(payload) ||
+           std::holds_alternative<PaymasterQuoteRequest>(payload) ||
+           std::holds_alternative<PaymasterSubmit>(payload) ||
+           std::holds_alternative<AlternativeRecoveryRequest>(payload) ||
+           std::holds_alternative<AlternativeRecoverySubmit>(payload);
+}
+
+DirectAdmissionClass OutboundAdmission(const DirectPayload& payload)
+{
+    if (!IsDirectRequestPayload(payload)) return DirectAdmissionClass::REQUEST;
+    return std::holds_alternative<AlternativeRecoveryRequest>(payload) ||
+                   std::holds_alternative<AlternativeRecoverySubmit>(payload)
+        ? DirectAdmissionClass::RECOVERY : DirectAdmissionClass::RESPONSE;
+}
+
 PaymasterId GetDirectProviderId(const DirectPayload& payload)
 {
     return std::visit([](const auto& message) -> PaymasterId {
@@ -382,9 +399,11 @@ int64_t Manager::PruneRateWindows(int64_t now)
     const int64_t effective_now{std::max(now, m_rate_high_water)};
     m_rate_high_water = effective_now;
     const int64_t cutoff{effective_now > PAYMASTER_RATE_WINDOW_SECONDS ? effective_now - PAYMASTER_RATE_WINDOW_SECONDS : 0};
-    PruneRateWindow(m_direct_transport_events, cutoff);
-    PruneRateMap(m_direct_peer_events, cutoff);
-    PruneRateMap(m_direct_netgroup_events, cutoff);
+    for (auto& rates : m_direct_rates) {
+        PruneRateWindow(rates.transport_events, cutoff);
+        PruneRateMap(rates.peer_events, cutoff);
+        PruneRateMap(rates.netgroup_events, cutoff);
+    }
     PruneRateWindow(m_announcement_transport_events, cutoff);
     PruneRateMap(m_announcement_peer_events, cutoff);
     PruneRateMap(m_announcement_netgroup_events, cutoff);
@@ -393,20 +412,22 @@ int64_t Manager::PruneRateWindows(int64_t now)
     return effective_now;
 }
 
-bool Manager::AdmitDirectTransport(int64_t peer_id, uint64_t keyed_netgroup, int64_t now)
+bool Manager::AdmitDirectTransport(int64_t peer_id, uint64_t keyed_netgroup, int64_t now,
+                                    DirectAdmissionClass admission)
 {
     if (!Enabled() || peer_id < 0 || now <= 0) return false;
     LOCK(m_rate_mutex);
     if (!Enabled()) return false;
     const int64_t admitted_at{PruneRateWindows(now)};
-    if (m_direct_transport_events.size() >= MAX_DIRECT_TRANSPORT_MESSAGES_GLOBAL ||
-        RateWindowSize(m_direct_peer_events, peer_id) >= MAX_DIRECT_TRANSPORT_MESSAGES_PER_PEER ||
-        RateWindowSize(m_direct_netgroup_events, keyed_netgroup) >= MAX_DIRECT_TRANSPORT_MESSAGES_PER_NETGROUP) {
+    auto& rates = m_direct_rates.at(static_cast<size_t>(admission));
+    if (rates.transport_events.size() >= DIRECT_CLASS_TRANSPORT.at(static_cast<size_t>(admission)) ||
+        RateWindowSize(rates.peer_events, peer_id) >= MAX_DIRECT_TRANSPORT_MESSAGES_PER_PEER ||
+        RateWindowSize(rates.netgroup_events, keyed_netgroup) >= MAX_DIRECT_TRANSPORT_MESSAGES_PER_NETGROUP) {
         return false;
     }
-    m_direct_transport_events.push_back(admitted_at);
-    m_direct_peer_events[peer_id].push_back(admitted_at);
-    m_direct_netgroup_events[keyed_netgroup].push_back(admitted_at);
+    rates.transport_events.push_back(admitted_at);
+    rates.peer_events[peer_id].push_back(admitted_at);
+    rates.netgroup_events[keyed_netgroup].push_back(admitted_at);
     return true;
 }
 
@@ -461,7 +482,7 @@ bool Manager::AdmitProviderQuoteRequest(const PaymasterId& provider_id,
 bool Manager::AdmitDirectPayload(int64_t peer_id,
                                  std::optional<uint64_t> keyed_netgroup,
                                  const DirectPayload& payload,
-                                 int64_t now)
+                                 int64_t now, DirectAdmissionClass admission)
 {
     const PaymasterId provider_id{GetDirectProviderId(payload)};
     const uint256 session_key{GetDirectSessionKey(payload)};
@@ -469,6 +490,7 @@ bool Manager::AdmitDirectPayload(int64_t peer_id,
     LOCK(m_rate_mutex);
     const int64_t admitted_at{PruneRateWindows(now)};
 
+    auto& rates = m_direct_rates.at(static_cast<size_t>(admission));
     const auto capacity_units = [](size_t capacity) {
         return SaturatingMultiply(static_cast<uint64_t>(capacity),
                                   DIRECT_TOKEN_BUCKET_PERIOD_SECONDS);
@@ -544,20 +566,20 @@ bool Manager::AdmitDirectPayload(int64_t peer_id,
     bool provider_created{false};
     bool session_created{false};
     TokenBucket* const peer_bucket = access_bucket(
-        m_direct_peer_buckets, peer_id, MAX_DIRECT_PAYLOAD_MESSAGES_PER_PEER,
+        rates.peer_buckets, peer_id, MAX_DIRECT_PAYLOAD_MESSAGES_PER_PEER,
         MAX_DIRECT_PEER_TOKEN_BUCKETS, peer_created);
     TokenBucket* const netgroup_bucket = access_bucket(
-        m_direct_netgroup_buckets, netgroup_key, MAX_DIRECT_PAYLOAD_MESSAGES_PER_NETGROUP,
+        rates.netgroup_buckets, netgroup_key, MAX_DIRECT_PAYLOAD_MESSAGES_PER_NETGROUP,
         MAX_DIRECT_NETGROUP_TOKEN_BUCKETS, netgroup_created);
     TokenBucket* provider_bucket{nullptr};
     if (!provider_id.IsNull()) {
         provider_bucket = access_bucket(
-            m_direct_provider_buckets, provider_id,
+            rates.provider_buckets, provider_id,
             MAX_DIRECT_MESSAGES_PER_PROVIDER_PER_WINDOW,
             MAX_DIRECT_PROVIDER_TOKEN_BUCKETS, provider_created);
     }
     TokenBucket* const session_bucket = access_bucket(
-        m_direct_session_buckets, session_key,
+        rates.session_buckets, session_key,
         MAX_DIRECT_MESSAGES_PER_SESSION_PER_WINDOW,
         MAX_DIRECT_SESSION_TOKEN_BUCKETS, session_created);
 
@@ -567,10 +589,10 @@ bool Manager::AdmitDirectPayload(int64_t peer_id,
         netgroup_bucket->available_units < one_token ||
         (provider_bucket && provider_bucket->available_units < one_token) ||
         session_bucket->available_units < one_token) {
-        if (peer_created) m_direct_peer_buckets.erase(peer_id);
-        if (netgroup_created) m_direct_netgroup_buckets.erase(netgroup_key);
-        if (provider_created) m_direct_provider_buckets.erase(provider_id);
-        if (session_created) m_direct_session_buckets.erase(session_key);
+        if (peer_created) rates.peer_buckets.erase(peer_id);
+        if (netgroup_created) rates.netgroup_buckets.erase(netgroup_key);
+        if (provider_created) rates.provider_buckets.erase(provider_id);
+        if (session_created) rates.session_buckets.erase(session_key);
         return false;
     }
 
@@ -585,13 +607,7 @@ void Manager::ClearRateLimits()
 {
     LOCK(m_rate_mutex);
     m_rate_high_water = 0;
-    m_direct_transport_events.clear();
-    m_direct_peer_events.clear();
-    m_direct_netgroup_events.clear();
-    m_direct_peer_buckets.clear();
-    m_direct_netgroup_buckets.clear();
-    m_direct_provider_buckets.clear();
-    m_direct_session_buckets.clear();
+    m_direct_rates = {};
     m_announcement_transport_events.clear();
     m_announcement_peer_events.clear();
     m_announcement_netgroup_events.clear();
@@ -730,7 +746,8 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                                         DirectPayload payload,
                                                         int64_t now,
                                                         std::optional<uint64_t> keyed_netgroup,
-                                                        std::vector<unsigned char> canonical_netgroup)
+                                                        std::vector<unsigned char> canonical_netgroup,
+                                                        DirectAdmissionClass admission)
 {
     if (!Enabled() || peer_id < 0 || message_id.IsNull() || serialized_size == 0 ||
         serialized_size > MAX_DIRECT_MESSAGE_BYTES || now <= 0) {
@@ -769,7 +786,13 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
     size_t netgroup_bytes{0};
     size_t session_messages{0};
     size_t session_bytes{0};
+    size_t class_messages{0}, class_bytes{0}, provider_messages{0};
+    const PaymasterId provider_id = GetDirectProviderId(payload);
     for (const DirectMessage& queued : m_direct_messages) {
+        if (queued.admission != admission) continue;
+        ++class_messages;
+        class_bytes += queued.serialized_size;
+        provider_messages += !provider_id.IsNull() && GetDirectProviderId(queued.payload) == provider_id;
         if (queued.peer_id == peer_id) {
             ++peer_messages;
             peer_bytes += queued.serialized_size;
@@ -783,8 +806,12 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
             session_bytes += queued.serialized_size;
         }
     }
+    const size_t class_index = static_cast<size_t>(admission);
     if (m_direct_messages.size() >= MAX_DIRECT_INBOX_MESSAGES ||
-        serialized_size > MAX_DIRECT_INBOX_BYTES - m_direct_bytes) {
+        serialized_size > MAX_DIRECT_INBOX_BYTES - m_direct_bytes ||
+        class_messages >= DIRECT_CLASS_MESSAGES.at(class_index) ||
+        serialized_size > DIRECT_CLASS_BYTES.at(class_index) - class_bytes ||
+        (admission == DirectAdmissionClass::REQUEST && provider_messages >= MAX_DIRECT_MESSAGES_PER_PROVIDER)) {
         return DirectEnqueueResult::FULL;
     }
     if (peer_messages >= MAX_DIRECT_INBOX_MESSAGES_PER_PEER ||
@@ -800,7 +827,7 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
     // durable handlers are idempotent, but signature/UTXO validation and wallet
     // database lookups are not free; allowing either to bypass these buckets
     // would let reconnecting peers amplify one protocol slot indefinitely.
-    if (!AdmitDirectPayload(peer_id, keyed_netgroup, payload, now)) {
+    if (!AdmitDirectPayload(peer_id, keyed_netgroup, payload, now, admission)) {
         return DirectEnqueueResult::RATE_LIMITED;
     }
     if (m_next_direct_sequence == std::numeric_limits<uint64_t>::max()) {
@@ -824,7 +851,7 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                               serialized_size, std::move(payload),
                                               keyed_netgroup,
                                               std::move(canonical_netgroup),
-                                              queue_sequence});
+                                              queue_sequence, admission});
     if (conflicting_replay) return DirectEnqueueResult::CONFLICT;
     return exact_replay ? DirectEnqueueResult::DUPLICATE : DirectEnqueueResult::ACCEPTED;
 }
@@ -1209,6 +1236,57 @@ std::vector<DirectMessage> Manager::TakeRecoveryResults(
         });
 }
 
+void Manager::PruneExpectedResponses(int64_t now)
+{
+    for (auto it = m_expected_responses.begin(); it != m_expected_responses.end();) {
+        if (it->second <= now) it = m_expected_responses.erase(it);
+        else ++it;
+    }
+}
+
+bool Manager::CanReceiveDirectMessage(int64_t peer_id, const DirectPayload& payload,
+                                      DirectAdmissionClass admission, int64_t now)
+{
+    if (!Enabled() || peer_id < 0 || now <= 0) return false;
+    if (admission == DirectAdmissionClass::REQUEST) {
+        if (!IsDirectRequestPayload(payload)) return false;
+        const PaymasterId provider = GetDirectProviderId(payload);
+        if (provider.IsNull()) return false;
+        LOCK(m_provider_mutex);
+        // DRAIN_ONLY and MANUAL remain running routes. Stop/unload intentionally
+        // stops network work; persisted recovery resumes after provider start.
+        return Enabled() && std::any_of(m_running_providers.begin(), m_running_providers.end(),
+            [&](const auto& entry) { return entry.second == provider; });
+    }
+    if (IsDirectRequestPayload(payload)) return false;
+    const bool recovery = std::holds_alternative<AlternativeRecoveryResponse>(payload) ||
+                          std::holds_alternative<AlternativeRecoveryResultMessage>(payload);
+    if (recovery != (admission == DirectAdmissionClass::RECOVERY)) return false;
+    LOCK(m_direct_mutex);
+    PruneExpectedResponses(now);
+    return m_expected_responses.count({peer_id, GetDirectSessionKey(payload), payload.index()}) != 0;
+}
+
+DirectEnqueueResult Manager::EnqueueNetworkDirectMessage(
+    int64_t peer_id, const uint256& message_id, size_t serialized_size,
+    DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
+    std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission)
+{
+    if (!CanReceiveDirectMessage(peer_id, payload, admission, now)) return DirectEnqueueResult::INVALID;
+    return EnqueueDirectMessageResult(peer_id, message_id, serialized_size,
+        std::move(payload), now, keyed_netgroup, std::move(canonical_netgroup), admission);
+}
+
+void Manager::ForgetDirectPeer(int64_t peer_id)
+{
+    LOCK(m_direct_mutex);
+    for (auto it = m_expected_responses.begin(); it != m_expected_responses.end();) {
+        if (std::get<0>(it->first) == peer_id) it = m_expected_responses.erase(it);
+        else ++it;
+    }
+    // Queued signed evidence and reconnect rate history intentionally survive.
+}
+
 bool Manager::QueueOutboundDirectMessage(int64_t peer_id,
                                          const uint256& message_id,
                                          size_t serialized_size,
@@ -1220,6 +1298,7 @@ bool Manager::QueueOutboundDirectMessage(int64_t peer_id,
     LOCK(m_direct_mutex);
     if (!Enabled()) return false;
     PruneOutboundMessages(now);
+    PruneExpectedResponses(now);
     for (auto it = m_outbound_direct_messages.begin(); it != m_outbound_direct_messages.end();) {
         const bool superseded = it->message_id == message_id && it->peer_id != peer_id;
         if (superseded) {
@@ -1238,7 +1317,13 @@ bool Manager::QueueOutboundDirectMessage(int64_t peer_id,
     if (m_recent_outbound_direct_ids.count(outbound_key) != 0) return true;
     size_t peer_messages{0};
     size_t peer_bytes{0};
+    size_t class_messages{0}, class_bytes{0};
+    const auto admission = OutboundAdmission(payload);
     for (const OutboundDirectMessage& queued : m_outbound_direct_messages) {
+        if (OutboundAdmission(queued.payload) == admission) {
+            ++class_messages;
+            class_bytes += queued.serialized_size;
+        }
         if (queued.peer_id == peer_id) {
             ++peer_messages;
             peer_bytes += queued.serialized_size;
@@ -1247,9 +1332,18 @@ bool Manager::QueueOutboundDirectMessage(int64_t peer_id,
     if (m_outbound_direct_ids.count(outbound_key) != 0 ||
         m_outbound_direct_messages.size() >= MAX_DIRECT_INBOX_MESSAGES ||
         serialized_size > MAX_DIRECT_INBOX_BYTES - m_outbound_direct_bytes ||
+        class_messages >= DIRECT_CLASS_MESSAGES.at(static_cast<size_t>(admission)) ||
+        serialized_size > DIRECT_CLASS_BYTES.at(static_cast<size_t>(admission)) - class_bytes ||
         peer_messages >= MAX_DIRECT_INBOX_MESSAGES_PER_PEER ||
         serialized_size > MAX_DIRECT_INBOX_BYTES_PER_PEER - peer_bytes) {
         return false;
+    }
+    if (IsDirectRequestPayload(payload)) {
+        // Each request variant is immediately followed by its reply variant.
+        const ExpectedResponseKey expected{peer_id, GetDirectSessionKey(payload), payload.index() + 1};
+        if (m_expected_responses.count(expected) == 0 &&
+            m_expected_responses.size() >= MAX_EXPECTED_DIRECT_RESPONSES) return false;
+        m_expected_responses[expected] = SaturatingAddSeconds(now, 120);
     }
     m_outbound_direct_ids.insert(outbound_key);
     m_outbound_direct_bytes += serialized_size;
@@ -1318,6 +1412,7 @@ void Manager::ClearDirectMessages()
     {
         LOCK(m_direct_mutex);
         m_direct_messages.clear();
+        m_expected_responses.clear();
         m_direct_replays.clear();
         m_leased_direct_ids.clear();
         m_direct_bytes = 0;

@@ -9,6 +9,7 @@
 
 #include <logging.h>
 #include <netaddress.h>
+#include <net.h>
 #include <paymaster/manager.h>
 #include <paymaster/validation.h>
 #include <rpc/util.h>
@@ -30,6 +31,13 @@
 namespace wallet::paymaster_rpc::internal {
 
 using FinalTransactionPresence = ExactFinalTransactionPresence;
+
+DigiDollar::Paymaster::DirectKey PaymentChannelKey(
+    const CWallet& wallet, const DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::PaymasterId& provider);
+UniValue PaymasterTransportToJSON(const CConnman& connman,
+    std::optional<DigiDollar::Paymaster::DirectState> state = std::nullopt);
+const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state);
 
 inline constexpr const char* INTERNAL_PAYMASTER_SERVICE_METHOD{
     "__paymaster_automatic_service"};

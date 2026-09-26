@@ -1,5 +1,12 @@
 # DigiDollar Paymaster V1 release gate
 
+2026-09-26 working-tree update: [Direct connection capacity](digidollar-paymaster-connection-capacity.md)
+documents the default one-channel client queue, required provider Direct
+bind, additive status, connection-start limits, routed request admission and
+protected reply/recovery quotas. Targeted DoS tests pass; fresh daemon,
+payment-flow and Tor/load verification is still required. Wire, consensus
+and journal formats are unchanged; historical results do not validate this patch.
+
 The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
 recorded in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md).
 The subsequent [client integration contract](digidollar-paymaster-integration.md)
@@ -70,7 +77,7 @@ snapshot records only superseded pre-hardening states.
 | 21 | Covered | Recovery tests cover recheck, exact retry, same-input fallback/self-return, durable locks, and confirmation-dependent cancellation finality. The functional failover test pins both safe pre-signature fallback and rejection after a user PSBT exists. | Crash-specific variants remain under 22 and 23. |
 | 22 | Covered | Every provider-commit write and the commit operation have deterministic rollback injection; a reopened post-commit snapshot contains the exact raw transaction, bindings, pool state, sponsorship state, and `PENDING_NETWORK` subphase used by retry/broadcast recovery. | Final focused and functional rerun. |
 | 23 | Covered | Every user-authorization write and the commit operation have deterministic rollback injection; a reopened successful snapshot contains the exact persisted user-signed PSBT hash, attempt, authorization, and `USER_SIGNATURE_SENT` subphase without another variant. | Final focused and functional rerun. |
-| 24 | Covered | Request parsing, analysis, builder, and boundary tests enforce one recipient and the 100–10,000,000-cent bounds on every DD output. The `paymaster_wire_envelopes` target completed 100,000 ASan/UBSan/libFuzzer runs after its timestamp-overflow finding was fixed and replayed successfully. | Final focused unit run. |
+| 24 | Covered | Request parsing, analysis, builder, and boundary tests enforce one recipient and the 100â€“10,000,000-cent bounds on every DD output. The `paymaster_wire_envelopes` target completed 100,000 ASan/UBSan/libFuzzer runs after its timestamp-overflow finding was fixed and replayed successfully. | Final focused unit run. |
 | 25 | Covered | Readiness tests enforce unpruned, txindex-complete client/provider operation. The official-v9.26.5 leaf scenario proves old-node validation of the ordinary final transaction. On 2026-08-09 `p2p_paymaster_v9_26_5_bridge.py` additionally passed ordinary DGB/DD relay across an old-only bridge while Paymaster discovery failed closed until a direct current link existed. | Satisfied by the official v9.26.5 leaf and bridge runs. |
 | 26 | Covered | Signed monotonic `PMRESULT` and one commit key/raw transaction are tested; deterministic failure at each atomic provider-commit write and at commit proves complete rollback of the commit, sponsorship, pool, attempt, and session records. | Final focused unit run. |
 | 27 | Covered | Store/RPC tests distinguish mempool from confirmation and expose the shared state/finality fields; Qt renders those fields. | Final RPC and Qt regression run. |
@@ -120,7 +127,7 @@ manifest.
 | H5 | Candidate pass | `ClientSafetyPolicy` durably limits service fee per transfer and rolling day; the effective cap is the minimum of wallet policy, RPC limit, and signed offer. | Per-transfer/daily boundary, concurrent reservation, policy change, restart, exact retry, rejection without policy, and RPC/Qt parity tests. |
 | H6 | Candidate pass | Semantic replay keys are independent of peer ID; exact retries are idempotent and conflicting content is rejected. The first valid signed Capacity/quote claim is staged evidence-only before ACK/deep validation, with persisted-authority failures kept distinct from invalid remote artifacts. Generation-bound RAII leases protect inbox ownership across the database boundary. Critical replay state persists. Token buckets cover peer/netgroup/provider/session, work is fairly queued, cheap announcement/rate checks precede crypto, TTL math saturates, and signed equivocation evidence locally blocks the provider. | Cross-peer/reconnect/restart replay, DB-write failure and retry, lease overlap/ABA, exact request/session binding, queue fairness, netgroup/announcement flood, expiry race, sequential and simultaneous conflicting Capacity/quote, persistent block, and timestamp/amount boundary fuzz tests. |
 | H7 | Candidate pass | `resolvepaymastersession ... cancel_to_self` can use a distinct `USER_PAID` provider that passes Capacity V5. The recovery manifest permits only the original user inputs, fresh wallet-owned DD returns, a locally capped recovery fee, and recovery-provider DGB inputs. | End-to-end recovery without client DGB, same-provider rejection, privacy inheritance, malicious outputs/fees, ambiguous original broadcast race, restart, exact retry, and confirmation-dependent release tests. |
-| H8 | Candidate pass | Stateful fuzz targets cover Capacity → Intent → Quote → Submit → Result → Recovery; focused wallet/P2P tests cover manifests, budgets, replay, and finality. On 2026-07-30 the exact synchronized candidate was rebuilt with Clang ASan/UBSan/libFuzzer, all saved artifacts/corpora replayed successfully, and both fresh targets completed 100,000 runs. | Repeat this matrix after any affected source, build, or dependency change. |
+| H8 | Candidate pass | Stateful fuzz targets cover Capacity â†’ Intent â†’ Quote â†’ Submit â†’ Result â†’ Recovery; focused wallet/P2P tests cover manifests, budgets, replay, and finality. On 2026-07-30 the exact synchronized candidate was rebuilt with Clang ASan/UBSan/libFuzzer, all saved artifacts/corpora replayed successfully, and both fresh targets completed 100,000 runs. | Repeat this matrix after any affected source, build, or dependency change. |
 
 ## Recorded candidate verification (2026-07-30 through 2026-08-09)
 
@@ -151,17 +158,17 @@ passing local and WSL evidence, but still requires the listed release-build
 rerun. Steps 7 and 9 remain open. Completed steps must be repeated after any
 affected source, build, or dependency change.
 
-1. **Dated candidate evidence — final review:** The final Paymaster security
+1. **Dated candidate evidence â€” final review:** The final Paymaster security
    diff was reviewed for consensus isolation, protocol V5/no-downgrade,
    manifest call-site completeness, atomic wallet writes, finite limits, and
    absence of raw IP/payment material in persistent rate/accounting keys. No
    obvious release-blocking counterparty theft path was found; this does not
    replace the independent review in step 9.
-2. **Dated candidate evidence — MSVC:** Build `test_digibyte`, `digibyted`, and `digibyte-cli` with MSVC in Debug and
+2. **Dated candidate evidence â€” MSVC:** Build `test_digibyte`, `digibyted`, and `digibyte-cli` with MSVC in Debug and
    Release. Run the complete focused Paymaster unit/wallet suites in both
    configurations, including malicious-counterparty, expiry, replay,
    last-budget/slot, crash, restart, and final-witness regressions.
-3. **Dated local evidence — functional:** Run
+3. **Dated local evidence â€” functional:** Run
    `wallet_paymaster_provider.py`, `wallet_paymaster_offer_selection.py`,
    `wallet_paymaster_failover.py`, `wallet_paymaster_reorg.py`, and
    `wallet_paymaster_readiness.py` with
@@ -177,7 +184,7 @@ affected source, build, or dependency change.
    registered local current-build `test_runner.py` run including all 17
    framework unit tests; repeat it on the release build before closing this
    step.
-4. **Dated candidate evidence — official
+4. **Dated candidate evidence â€” official
    v9.26.5/current compatibility:** On
    2026-08-08 both registered variants of
    `wallet_v9_26_5_compatibility.py` passed against the official v9.26.5 Linux
@@ -199,23 +206,23 @@ affected source, build, or dependency change.
    `wallet_v9_26_5_inplace_upgrade.py --descriptors` adds the unchanged-datadir
    pending-state/redeem path and also passed against the official daemon on
    2026-08-09.
-5. **Dated candidate evidence — Qt 5.15.10:** Build and run the complete native Qt 5.15.10 suite, including client/provider
+5. **Dated candidate evidence â€” Qt 5.15.10:** Build and run the complete native Qt 5.15.10 suite, including client/provider
    safety-policy RPC parity, authorization confirmation, warning persistence,
    recovery, and authoritative finality rendering.
-6. **Dated candidate evidence — WSL2:** The exact synchronized candidate was
+6. **Dated candidate evidence â€” WSL2:** The exact synchronized candidate was
    rebuilt in WSL2/Ubuntu with Clang/libFuzzer plus ASan/UBSan. Saved artifacts
    and both corpora replayed successfully; fresh `paymaster_wire_envelopes` and
-   stateful Capacity → Recovery campaigns each completed 100,000 runs with
+   stateful Capacity â†’ Recovery campaigns each completed 100,000 runs with
    clean exit codes.
-7. **Open — real Tor deployment:** Exercise high-privacy mode against a real Tor proxy and onion service,
+7. **Open â€” real Tor deployment:** Exercise high-privacy mode against a real Tor proxy and onion service,
    including stream isolation, `-logips=0`, capture rejection, one-attempt
    enforcement, and no clearnet/v1 fallback.
-8. **Dated candidate evidence — broad local regressions:** The complete MSVC
+8. **Dated candidate evidence â€” broad local regressions:** The complete MSVC
    Debug and Release core suites each passed 3,605/3,605, and the complete
    native Qt suite passed all eight registered suites. Platform- or
    configuration-specific release matrices beyond these local surfaces remain
    separate release-review responsibilities.
-9. **Open — independent review:** Have the counterparty model, manifest and
+9. **Open â€” independent review:** Have the counterparty model, manifest and
    budget invariants, and race/crash behavior assessed independently. Until
    this is completed or explicitly dispositioned by release review, the
    implementation must not be described as formally proven or independently
@@ -363,3 +370,21 @@ findings now have local code corrections and targeted regression sources, as
 listed in the review's remediation section. Its September 20 combined WSL run
 passed the selected matrix. The wider G01-G14 scenarios and later integration
 changes still require their own evidence; that pass is not release approval.
+
+### Capacity patch DoS hardening (2026-09-26)
+
+The three initial availability findings now have
+[source fixes and targeted regressions](digidollar-paymaster-connection-capacity.md#implemented-dos-fixes-2026-09-26):
+bounded starts/group occupancy, replacement of old unadmitted handshakes,
+dedicated-listener-only promotion after routed work, isolated quotas, locally
+bound reply admission and rejection of unserved provider requests. Outbox
+reserves also protect local payment/recovery work.
+
+The implementation includes the three test-only commits pulled through
+`913daff217`. Fresh isolated transport/manager tests pass **22 cases / 3,328
+assertions**. Seven existing manager boundary cases also pass in an isolated
+harness (**731 assertions**); targeted C++ syntax/type and Python compilation
+checks pass. These supersede the earlier status of unimplemented mitigations. Fresh
+integrated unit, socket, wallet and sustained relay/Tor load evidence remains
+required for release approval. The initial reproductions remain in the review
+for traceability; passing local unit tests is not a complete DDoS guarantee.

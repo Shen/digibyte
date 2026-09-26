@@ -446,6 +446,13 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
         }
     }
 
+    // Direct endpoints are already parsed numeric/onion services. A shared
+    // monotonic deadline prevents a slow SOCKS peer renewing each read step.
+    const std::optional<std::chrono::steady_clock::time_point> direct_deadline =
+        conn_type == ConnectionType::PAYMASTER
+            ? std::make_optional(std::chrono::steady_clock::now() + std::chrono::milliseconds{DigiDollar::Paymaster::DIRECT_HANDSHAKE_MS})
+            : std::nullopt;
+    const int connect_timeout = direct_deadline ? std::min(nConnectTimeout, 10'000) : nConnectTimeout;
     // Connect
     bool connected = false;
     std::unique_ptr<Sock> sock;
@@ -493,18 +500,18 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
                 return nullptr;
             }
             connected = ConnectThroughProxy(proxy, addrConnect.ToStringAddr(), addrConnect.GetPort(),
-                                            *sock, nConnectTimeout, proxyConnectionFailed,
-                                            proxy_log_policy, proxy_auth_policy);
+                                            *sock, connect_timeout, proxyConnectionFailed,
+                                            proxy_log_policy, proxy_auth_policy, direct_deadline);
         } else {
             // no proxy needed (none set for target network)
             sock = CreateSock(addrConnect);
             if (!sock) {
                 return nullptr;
             }
-            connected = ConnectSocketDirectly(addrConnect, *sock, nConnectTimeout,
+            connected = ConnectSocketDirectly(addrConnect, *sock, connect_timeout,
                                               conn_type == ConnectionType::MANUAL);
         }
-        if (!proxyConnectionFailed) {
+        if (!proxyConnectionFailed && conn_type != ConnectionType::PAYMASTER) {
             // If a connection to the node was attempted, and failure (if any) is not caused by a problem connecting to
             // the proxy, mark this as an attempt.
             addrman.Attempt(addrConnect, fCountFailure);
@@ -518,8 +525,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
         uint16_t port{default_port};
         SplitHostPort(std::string(pszDest), port, host);
         bool proxyConnectionFailed;
-        connected = ConnectThroughProxy(proxy, host, port, *sock, nConnectTimeout,
-                                        proxyConnectionFailed, proxy_log_policy, proxy_auth_policy);
+        connected = ConnectThroughProxy(proxy, host, port, *sock, connect_timeout,
+                                        proxyConnectionFailed, proxy_log_policy, proxy_auth_policy, direct_deadline);
     }
     if (!connected) {
         return nullptr;
@@ -653,6 +660,10 @@ bool CNode::ReceiveMsgBytes(Span<const uint8_t> msg_bytes, bool& complete)
     LOCK(cs_vRecv);
     m_last_recv = std::chrono::duration_cast<std::chrono::seconds>(time);
     nRecvBytes += msg_bytes.size();
+    if (IsPaymasterDirectConn()) {
+        const uint64_t limit = m_paymaster_negotiated ? 8 * 1024 * 1024 : 16 * 1024;
+        if (nRecvBytes > limit || !m_direct_receive_rate.Consume(msg_bytes.size(), DigiDollar::Paymaster::DirectNow())) return false;
+    }
     while (msg_bytes.size() > 0) {
         // absorb network data
         if (!m_transport->ReceivedBytes(msg_bytes)) {
@@ -1672,7 +1683,7 @@ bool CConnman::AttemptToEvictConnection()
 
         LOCK(m_nodes_mutex);
         for (const CNode* node : m_nodes) {
-            if (node->fDisconnect)
+            if (node->fDisconnect || node->IsPaymasterDirectConn())
                 continue;
             NodeEvictionCandidate candidate{
                 .id = node->GetId(),
@@ -1733,16 +1744,51 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     NetPermissionFlags permission_flags = NetPermissionFlags::None;
     hListenSocket.AddSocketPermissionFlags(permission_flags);
 
-    CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr);
+    CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr, hListenSocket.paymaster, hListenSocket.onion);
 }
 
 void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                             NetPermissionFlags permission_flags,
                                             const CAddress& addr_bind,
-                                            const CAddress& addr)
+                                            const CAddress& addr, bool paymaster, bool onion)
 {
+    using namespace DigiDollar::Paymaster;
+    const bool inbound_onion = onion || std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
+    const std::optional<uint64_t> direct_group = inbound_onion ? std::nullopt : std::make_optional(CalculateKeyedNetGroup(addr));
+    std::shared_ptr<DirectPermits::Permit> admission;
+    if (paymaster) {
+        const int64_t now = DirectNow();
+        if (!m_direct_listener_ready || !m_direct_admission.Admit(direct_group, now)) return;
+        admission = m_direct_permits.Acquire(DirectPermits::Kind::HANDSHAKE, direct_group);
+        if (!admission) {
+            if (m_direct_permits.AtGroupLimit(direct_group)) return;
+            // Give new arrivals a chance under slow-handshake saturation.
+            // Promotion uses the same lock; a socket already doing admitted
+            // application work can never lose its permit through this path.
+            LOCK(m_nodes_mutex);
+            CNode* oldest{nullptr};
+            for (CNode* node : m_nodes) {
+                if (!node->m_paymaster_listener || node->m_direct_admitted ||
+                    node->fDisconnect || now - node->m_direct_connected < DIRECT_ADMISSION_GRACE_MS) continue;
+                if (!oldest || node->m_direct_connected < oldest->m_direct_connected) oldest = node;
+            }
+            if (oldest) {
+                oldest->fDisconnect = true;
+                // The poll snapshot may still retain a shared Sock. Close its
+                // descriptor before returning capacity, not merely our pointer.
+                {
+                    LOCK(oldest->m_sock_mutex);
+                    if (oldest->m_sock) oldest->m_sock->Reset();
+                }
+                oldest->CloseSocketDisconnect();
+                if (oldest->m_paymaster_admission) oldest->m_paymaster_admission->Release();
+                admission = m_direct_permits.Acquire(DirectPermits::Kind::HANDSHAKE, direct_group);
+            }
+        }
+        if (!admission) return;
+    }
     int nInbound = 0;
-    int nMaxInbound = nMaxConnections - m_max_outbound;
+    const int nMaxInbound = m_direct_budget.ordinary_inbound;
 
     AddWhitelistPermissionFlags(permission_flags, addr);
     if (NetPermissions::HasFlag(permission_flags, NetPermissionFlags::Implicit)) {
@@ -1756,7 +1802,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->IsInboundConn()) nInbound++;
+            if (pnode->IsInboundConn() && !pnode->IsPaymasterDirectConn()) nInbound++;
         }
     }
 
@@ -1794,7 +1840,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         return;
     }
 
-    if (nInbound >= nMaxInbound)
+    if (!paymaster && nInbound >= nMaxInbound)
     {
         if (!AttemptToEvictConnection()) {
             // No connection to evict, disconnect the new connection
@@ -1811,7 +1857,6 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         nodeServices = static_cast<ServiceFlags>(nodeServices | NODE_BLOOM);
     }
 
-    const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
     // The V2Transport transparently falls back to V1 behavior when an incoming V1 connection is
     // detected, so use it whenever we signal NODE_P2P_V2.
     const bool use_v2transport(nodeServices & NODE_P2P_V2);
@@ -1830,18 +1875,20 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                  .prefer_evict = discouraged,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
+                                 .paymaster_listener = paymaster,
                              });
+    pnode->m_paymaster_admission = std::move(admission);
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, nodeServices);
 
-    LogPrint(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
+    if (!paymaster) LogPrint(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
 
     {
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
         
-        // Dandelion: new inbound connection
-        if (gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION)) {
+        // Direct listeners never enter ordinary transaction routing.
+        if (!paymaster && gArgs.GetBoolArg("-dandelion", DEFAULT_DANDELION)) {
             vDandelionInbound.push_back(pnode);
             CNode* pto = SelectFromDandelionDestinations();
             if (pto) {
@@ -1881,23 +1928,8 @@ bool CConnman::AddConnection(const std::string& address,
     case ConnectionType::FEELER:
         break;
     case ConnectionType::PAYMASTER:
-        max_connections = 1;
-        // Direct Paymaster sessions never negotiate or retry with plaintext V1.
-        if (!(GetLocalServices() & NODE_P2P_V2)) return false;
-        // Mainnet direct messages can contain capabilities and partially signed
-        // transactions and must never enter the message-capture directory.
-        if (m_params.GetChainType() == ChainType::MAIN &&
-            gArgs.GetBoolArg("-capturemessages", false)) return false;
-        if (paymaster_high_privacy) {
-            if (fLogIPs) return false;
-            const auto endpoints{Lookup(address, GetDefaultPort(address), /*fAllowLookup=*/false, 1)};
-            Proxy onion_proxy;
-            if (endpoints.size() != 1 || !endpoints.front().IsTor() ||
-                !GetProxy(NET_ONION, onion_proxy) || !onion_proxy.randomize_credentials) {
-                return false;
-            }
-        }
-        break;
+        // Direct channels require a wallet/operation owner and their own permit.
+        return false;
     } // no default case, so the compiler can warn about missing cases
 
     // Count existing connections
@@ -1917,6 +1949,66 @@ bool CConnman::AddConnection(const std::string& address,
                                                  : ProxyLogPolicy::NORMAL,
                           paymaster_high_privacy ? ProxyAuthPolicy::REQUIRE_AUTH
                                                  : ProxyAuthPolicy::ALLOW_NOAUTH);
+    return true;
+}
+
+DigiDollar::Paymaster::DirectResult CConnman::RequestPaymasterConnection(
+    const DigiDollar::Paymaster::DirectKey& key, const CService& endpoint, bool high_privacy)
+{
+    using namespace DigiDollar::Paymaster;
+    if (!m_direct_budget.outbound) return {DirectState::DISABLED, {}};
+    if (!fNetworkActive) return {DirectState::NETWORK_INACTIVE, {}};
+    if (!endpoint.IsValid()) return {DirectState::CONNECT_FAILED, {}};
+    if (!(GetLocalServices() & NODE_P2P_V2) ||
+        (m_params.GetChainType() == ChainType::MAIN && gArgs.GetBoolArg("-capturemessages", false))) {
+        return {DirectState::PRIVACY_REJECTED, {}};
+    }
+    if (high_privacy) {
+        Proxy proxy;
+        if (fLogIPs || !endpoint.IsTor() || !GetProxy(NET_ONION, proxy) ||
+            !proxy.randomize_credentials) return {DirectState::PRIVACY_REJECTED, {}};
+    }
+    auto result = m_direct_queue.Request(key, endpoint.ToStringAddrPort(), high_privacy, DirectNow());
+    if (result.lease && !result.lease->canceled) {
+        ForNode(result.lease->peer_id, [&](CNode* peer) {
+            if (peer->m_paymaster_lease == result.lease && peer->m_paymaster_negotiated &&
+                peer->m_transport->GetInfo().transport_type == TransportProtocolType::V2) {
+                result.lease->state = DirectState::READY;
+                result.state = DirectState::READY;
+            }
+            return true;
+        });
+    }
+    return result;
+}
+
+void CConnman::ThreadOpenPaymasterConnections()
+{
+    using namespace DigiDollar::Paymaster;
+    while (!interruptNet) {
+        auto lease = m_direct_queue.Claim(m_direct_permits, DirectNow());
+        if (!lease) {
+            if (!interruptNet.sleep_for(std::chrono::milliseconds{100})) return;
+            continue;
+        }
+        OpenNetworkConnection(CAddress{}, false, {}, lease->endpoint.c_str(),
+                              ConnectionType::PAYMASTER, true,
+                              ProxyLogPolicy::REDACT_DESTINATION,
+                              lease->high_privacy ? ProxyAuthPolicy::REQUIRE_AUTH : ProxyAuthPolicy::ALLOW_NOAUTH,
+                              lease);
+        if (lease->peer_id < 0) m_direct_queue.Finish(lease, DirectState::CONNECT_FAILED);
+    }
+}
+
+bool CConnman::PromotePaymasterConnection(CNode& node)
+{
+    using namespace DigiDollar::Paymaster;
+    LOCK(m_nodes_mutex);
+    if (!m_direct_listener_ready || node.fDisconnect ||
+        !node.m_paymaster_listener || !node.m_paymaster_admission) return false;
+    if (node.m_direct_admitted) return true;
+    if (!node.m_paymaster_admission->Promote()) return false;
+    node.m_direct_admitted = true;
     return true;
 }
 
@@ -1969,6 +2061,8 @@ void CConnman::DisconnectNodes()
 
                 // close socket and cleanup
                 pnode->CloseSocketDisconnect();
+                m_direct_queue.Finish(pnode->m_paymaster_lease, DigiDollar::Paymaster::DirectState::FAILED);
+                pnode->m_paymaster_lease.reset();
 
                 // update connection count by network
                 if (pnode->IsManualOrFullOutboundConn()) --m_network_conn_counts[pnode->addr.GetNetwork()];
@@ -2026,6 +2120,20 @@ bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds
 
 bool CConnman::InactivityCheck(const CNode& node) const
 {
+    if (node.IsPaymasterDirectConn()) {
+        using namespace DigiDollar::Paymaster;
+        const int64_t now = DirectNow();
+        if (node.m_paymaster_lease && node.m_paymaster_lease->canceled) return true;
+        if (now - node.m_direct_connected >= DIRECT_LIFETIME_MS) return true;
+        const int64_t negotiated = node.m_direct_negotiated_at;
+        if (node.IsInboundConn() && !node.m_direct_admitted && negotiated != 0 &&
+            now - negotiated >= DIRECT_FIRST_REQUEST_MS) return true;
+        const int64_t started = node.m_paymaster_lease ? node.m_paymaster_lease->started : node.m_direct_connected;
+        if ((!node.fSuccessfullyConnected || !node.m_paymaster_negotiated) &&
+            now - started >= DIRECT_HANDSHAKE_MS) return true;
+        if (now - node.m_direct_progress >= DIRECT_IDLE_MS) return true;
+        return false;
+    }
     // Tests that see disconnects after using mocktime can start nodes with a
     // large timeout. For example, -peertimeout=999999999.
     const auto now{GetTime<std::chrono::seconds>()};
@@ -2918,7 +3026,8 @@ void CConnman::ThreadOpenAddedConnections()
 void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure,
                                      CSemaphoreGrant&& grant_outbound, const char* pszDest,
                                      ConnectionType conn_type, bool use_v2transport,
-                                     ProxyLogPolicy proxy_log_policy, ProxyAuthPolicy proxy_auth_policy)
+                                     ProxyLogPolicy proxy_log_policy, ProxyAuthPolicy proxy_auth_policy,
+                                     std::shared_ptr<DigiDollar::Paymaster::DirectLease> direct_lease)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -2946,6 +3055,17 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     if (!pnode)
         return;
     pnode->grantOutbound = std::move(grant_outbound);
+    if (conn_type == ConnectionType::PAYMASTER) {
+        if (!direct_lease || direct_lease->canceled || interruptNet ||
+            DigiDollar::Paymaster::DirectNow() - direct_lease->started >= DigiDollar::Paymaster::DIRECT_HANDSHAKE_MS) {
+            pnode->CloseSocketDisconnect();
+            delete pnode;
+            return;
+        }
+        direct_lease->peer_id = pnode->GetId();
+        direct_lease->state = DigiDollar::Paymaster::DirectState::HANDSHAKING;
+        pnode->m_paymaster_lease = std::move(direct_lease);
+    }
 
     m_msgproc->InitializeNode(*pnode, nLocalServices);
     bool should_send_dandelion_discovery = false;
@@ -3060,7 +3180,7 @@ void CConnman::ThreadI2PAcceptIncoming()
     }
 }
 
-bool CConnman::BindListenPort(const CService& addrBind, bilingual_str& strError, NetPermissionFlags permissions)
+bool CConnman::BindListenPort(const CService& addrBind, bilingual_str& strError, NetPermissionFlags permissions, bool paymaster, bool onion)
 {
     int nOne = 1;
 
@@ -3126,6 +3246,8 @@ bool CConnman::BindListenPort(const CService& addrBind, bilingual_str& strError,
     }
 
     vhListenSocket.emplace_back(std::move(sock), permissions);
+    vhListenSocket.back().paymaster = paymaster;
+    vhListenSocket.back().onion = onion;
     return true;
 }
 
@@ -3268,7 +3390,6 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
 {
     AssertLockNotHeld(m_total_bytes_sent_mutex);
     Init(connOptions);
-
     if (fListen && !InitBinds(connOptions)) {
         if (m_client_interface) {
             m_client_interface->ThreadSafeMessageBox(
@@ -3276,6 +3397,18 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
                 "", CClientUIInterface::MSG_ERROR);
         }
         return false;
+    }
+    m_direct_listener_ready = false;
+    if (m_direct_budget.inbound && (nLocalServices & NODE_P2P_V2)) {
+        bool ready{true};
+        for (const auto& [endpoint, onion] : connOptions.paymaster_binds) {
+            bilingual_str error;
+            if (!BindListenPort(endpoint, error, NetPermissionFlags::None, true, onion)) {
+                LogPrintf("Paymaster direct listener unavailable: %s\n", error.original);
+                ready = false;
+            }
+        }
+        m_direct_listener_ready = ready && !connOptions.paymaster_binds.empty();
     }
 
     Proxy i2p_sam;
@@ -3350,6 +3483,10 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
             [this, connect = connOptions.m_specified_outgoing] { ThreadOpenConnections(connect); });
     }
 
+    for (int i = 0; i < m_direct_budget.outbound; ++i) {
+        m_direct_workers.emplace_back(&util::TraceThread, "pmdirect", [this] { ThreadOpenPaymasterConnections(); });
+    }
+
     // Process messages
     threadMessageHandler = std::thread(&util::TraceThread, "msghand", [this] { ThreadMessageHandler(); });
 
@@ -3393,6 +3530,7 @@ void CConnman::Interrupt()
     }
     condMsgProc.notify_all();
 
+    m_direct_queue.Stop();
     interruptNet();
     InterruptSocks5(true);
 
@@ -3411,6 +3549,8 @@ void CConnman::Interrupt()
 
 void CConnman::StopThreads()
 {
+    for (auto& worker : m_direct_workers) if (worker.joinable()) worker.join();
+    m_direct_workers.clear();
     if (threadI2PAcceptIncoming.joinable()) {
         threadI2PAcceptIncoming.join();
     }
@@ -3790,6 +3930,7 @@ CNode::CNode(NodeId idIn,
       m_recv_flood_size{node_opts.recv_flood_size},
       m_i2p_sam_session{std::move(node_opts.i2p_sam_session)}
 {
+    m_paymaster_listener = node_opts.paymaster_listener;
     if (inbound_onion) assert(conn_type_in == ConnectionType::INBOUND);
 
     for (const std::string &msg : getAllNetMessageTypes())
@@ -3821,7 +3962,7 @@ void CNode::MarkReceivedMsgsForProcessing()
     LOCK(m_msg_process_queue_mutex);
     m_msg_process_queue.splice(m_msg_process_queue.end(), vRecvMsg);
     m_msg_process_queue_size += nSizeAdded;
-    fPauseRecv = m_msg_process_queue_size > m_recv_flood_size;
+    fPauseRecv = m_msg_process_queue_size > (IsPaymasterDirectConn() ? std::min(m_recv_flood_size, size_t{2 * 1024 * 1024}) : m_recv_flood_size);
 }
 
 std::optional<std::pair<CNetMessage, bool>> CNode::PollMessage()
@@ -3833,7 +3974,7 @@ std::optional<std::pair<CNetMessage, bool>> CNode::PollMessage()
     // Just take one message
     msgs.splice(msgs.begin(), m_msg_process_queue, m_msg_process_queue.begin());
     m_msg_process_queue_size -= msgs.front().m_raw_message_size;
-    fPauseRecv = m_msg_process_queue_size > m_recv_flood_size;
+    fPauseRecv = m_msg_process_queue_size > (IsPaymasterDirectConn() ? std::min(m_recv_flood_size, size_t{2 * 1024 * 1024}) : m_recv_flood_size);
 
     return std::make_pair(std::move(msgs.front()), !m_msg_process_queue.empty());
 }
@@ -3909,6 +4050,12 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
         const auto& [to_send, more, _msg_type] =
             pnode->m_transport->GetBytesToSend(/*have_next_message=*/true);
         const bool queue_was_empty{to_send.empty() && pnode->vSendMsg.empty()};
+
+        if (pnode->IsPaymasterDirectConn() &&
+            pnode->m_send_memusage + pnode->m_transport->GetSendMemoryUsage() + msg.GetMemoryUsage() > 2 * 1024 * 1024) {
+            pnode->fDisconnect = true;
+            return;
+        }
 
         // Update memory usage of send buffer.
         pnode->m_send_memusage += msg.GetMemoryUsage();

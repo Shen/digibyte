@@ -1,5 +1,16 @@
 # REPO_MAP_DIGIDOLLAR.md — DigiDollar, Oracle, and Paymaster Subsystems v9.26.5
 
+The 2026-09-26 Direct-capacity patch is documented in
+[Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
+one outgoing channel by default (up to four), a dedicated bounded provider
+listener, fair wallet-scoped queueing, connection-start limits, routed inbox
+admission and protected reply/recovery quotas. Core ownership lives in
+`src/paymaster/transport.h`, `src/paymaster/manager.{h,cpp}`, `src/net.{h,cpp}`
+and `src/netbase.{h,cpp}`. Focused tests are
+`src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
+and `test/functional/p2p_paymaster_connection_capacity.py`.
+Migration and pending runtime checks are documented in the capacity guide.
+
 *Last updated: 2026-08-08 (v9.26.5 / `feature/digidollar-paymaster-v1`)*
 
 This is the granular file index for DigiDollar, Oracle, and Paymaster source code.

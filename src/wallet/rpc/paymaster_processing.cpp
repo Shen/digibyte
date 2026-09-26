@@ -196,6 +196,9 @@ RPCHelpMan processpaymasterresult()
                 accepted_result = message->result;
                 const bool final = message->result.final_transaction.has_value();
                 if (final) {
+                    if (const auto* node = wallet->chain().context(); node && node->connman) {
+                        node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, attempt.provider_id));
+                    }
                     const CMutableTransaction& transaction = *message->result.final_transaction;
                     const CTransaction exact_final{transaction};
                     const auto fail_after_final_store =

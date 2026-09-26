@@ -2632,6 +2632,15 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
                  snapshot.confirmation_state.isEmpty()
                      ? DigiDollarSendWidget::tr("unknown") : snapshot.confirmation_state);
     }
+    const UniValue& transport_state = result.find_value("transport").find_value("state");
+    if (transport_state.isStr() && !IsTerminalPaymasterState(snapshot.state)) {
+        const std::string& state = transport_state.get_str();
+        if (state == "waiting_capacity") {
+            status = DigiDollarSendWidget::tr("Waiting for a free payment connection");
+        } else if (state == "connecting" || state == "handshaking") {
+            status = DigiDollarSendWidget::tr("Connecting to the selected provider");
+        }
+    }
     m_paymasterStateValue->setText(status);
     m_paymasterIdentityValue->setText(snapshot.provider_id.isEmpty()
         ? DigiDollarSendWidget::tr("Provider not selected yet")

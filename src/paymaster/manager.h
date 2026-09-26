@@ -12,6 +12,7 @@
 #include <paymaster/wire.h>
 #include <sync.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -20,30 +21,40 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace DigiDollar::Paymaster {
 
-static constexpr size_t MAX_DIRECT_INBOX_MESSAGES{8};
-static constexpr size_t MAX_DIRECT_INBOX_BYTES{2 * 1024 * 1024};
-static constexpr size_t MAX_DIRECT_INBOX_MESSAGES_PER_PEER{MAX_DIRECT_INBOX_MESSAGES / 2};
-static constexpr size_t MAX_DIRECT_INBOX_BYTES_PER_PEER{MAX_DIRECT_INBOX_BYTES / 2};
-static constexpr size_t MAX_DIRECT_INBOX_MESSAGES_PER_NETGROUP{MAX_DIRECT_INBOX_MESSAGES / 2};
-static constexpr size_t MAX_DIRECT_INBOX_BYTES_PER_NETGROUP{MAX_DIRECT_INBOX_BYTES / 2};
+static constexpr size_t MAX_DIRECT_INBOX_MESSAGES{40};
+static constexpr size_t MAX_DIRECT_INBOX_BYTES{20 * 1024 * 1024};
+enum class DirectAdmissionClass : uint8_t { REQUEST, RESPONSE, RECOVERY };
+static constexpr std::array<size_t, 3> DIRECT_CLASS_MESSAGES{24, 8, 8};
+static constexpr std::array<size_t, 3> DIRECT_CLASS_BYTES{12 * 1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024};
+static constexpr std::array<size_t, 3> DIRECT_CLASS_TRANSPORT{128, 96, 32};
+static constexpr size_t MAX_DIRECT_MESSAGES_PER_PROVIDER{8};
+static constexpr size_t MAX_EXPECTED_DIRECT_RESPONSES{128};
+static_assert(DIRECT_CLASS_MESSAGES[0] + DIRECT_CLASS_MESSAGES[1] + DIRECT_CLASS_MESSAGES[2] == MAX_DIRECT_INBOX_MESSAGES);
+static_assert(DIRECT_CLASS_BYTES[0] + DIRECT_CLASS_BYTES[1] + DIRECT_CLASS_BYTES[2] == MAX_DIRECT_INBOX_BYTES);
+static constexpr size_t MAX_DIRECT_INBOX_MESSAGES_PER_PEER{4};
+static constexpr size_t MAX_DIRECT_INBOX_BYTES_PER_PEER{1024 * 1024};
+static constexpr size_t MAX_DIRECT_INBOX_MESSAGES_PER_NETGROUP{4};
+static constexpr size_t MAX_DIRECT_INBOX_BYTES_PER_NETGROUP{1024 * 1024};
 static constexpr size_t MAX_DIRECT_INBOX_MESSAGES_PER_SESSION{2};
 static constexpr size_t MAX_DIRECT_INBOX_BYTES_PER_SESSION{MAX_DIRECT_MESSAGE_BYTES};
 static constexpr size_t MAX_DIRECT_REPLAY_ENTRIES{1024};
 static constexpr int64_t DIRECT_REPLAY_TTL_SECONDS{10 * 60};
 static constexpr int64_t PAYMASTER_RATE_WINDOW_SECONDS{60};
 // One Paymaster transfer legitimately spans Capacity, quote, submit and result
-// artifacts, including idempotent retries. Let one authenticated direct peer
-// use the already bounded netgroup allowance without forcing a reconnect in
-// the middle of a short burst; aggregate netgroup/global exposure is unchanged.
+// artifacts, including idempotent retries. Let one negotiated direct peer
+// use the bounded netgroup allowance without forcing a reconnect in the
+// middle of a short burst. Class reserves sum to the same global ceiling.
 static constexpr size_t MAX_DIRECT_TRANSPORT_MESSAGES_PER_PEER{32};
 static constexpr size_t MAX_DIRECT_TRANSPORT_MESSAGES_PER_NETGROUP{32};
 static constexpr size_t MAX_DIRECT_TRANSPORT_MESSAGES_GLOBAL{256};
+static_assert(DIRECT_CLASS_TRANSPORT[0] + DIRECT_CLASS_TRANSPORT[1] + DIRECT_CLASS_TRANSPORT[2] == MAX_DIRECT_TRANSPORT_MESSAGES_GLOBAL);
 // Decoded artifacts still pass a smoother, stricter peer bucket after the
 // cheap wire-level window. Keep this independent from reconnect policy.
 static constexpr size_t MAX_DIRECT_PAYLOAD_MESSAGES_PER_PEER{16};
@@ -146,6 +157,7 @@ struct DirectMessage {
     /** Monotonic queue incarnation. This prevents an old RAII scope from
      * releasing a newly enqueued exact replay with the same content hash. */
     uint64_t queue_sequence{0};
+    DirectAdmissionClass admission{DirectAdmissionClass::REQUEST};
 };
 
 struct OutboundDirectMessage {
@@ -212,7 +224,18 @@ public:
      * cryptographically validating a direct message. keyed_netgroup is the
      * process-local CNode netgroup identifier, never a raw or persisted IP.
      */
-    bool AdmitDirectTransport(int64_t peer_id, uint64_t keyed_netgroup, int64_t now);
+    bool AdmitDirectTransport(int64_t peer_id, uint64_t keyed_netgroup, int64_t now,
+                              DirectAdmissionClass admission = DirectAdmissionClass::REQUEST);
+    /** Network-only routing gate: requests must target a running (including
+     * draining/manual) provider; responses must match a locally queued request
+     * on this exact socket, session, provider and protocol phase. */
+    bool CanReceiveDirectMessage(int64_t peer_id, const DirectPayload& payload,
+                                 DirectAdmissionClass admission, int64_t now);
+    void ForgetDirectPeer(int64_t peer_id);
+    DirectEnqueueResult EnqueueNetworkDirectMessage(
+        int64_t peer_id, const uint256& message_id, size_t serialized_size,
+        DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
+        std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission);
     /** Apply discovery flood limits before announcement signature and UTXO
      * validation. Provider admission is split out because its identity is only
      * available after the bounded message has been decoded.
@@ -227,8 +250,10 @@ public:
                                    uint32_t maximum_per_minute,
                                    int64_t now);
 
-    /** Enqueue an already shape-validated direct message. Secrets remain only
-     * in this small in-memory queue and are never written or logged here.
+    /** Low-level queue primitive for already routed, shape-validated work.
+     * Network callers must use EnqueueNetworkDirectMessage so a peer cannot
+     * choose its own reply reserve or an unserved provider. Secrets remain
+     * only in memory and are never logged here.
      */
     bool EnqueueDirectMessage(int64_t peer_id,
                               const uint256& message_id,
@@ -251,7 +276,8 @@ public:
                                                    DirectPayload payload,
                                                    int64_t now,
                                                    std::optional<uint64_t> keyed_netgroup = std::nullopt,
-                                                   std::vector<unsigned char> canonical_netgroup = {});
+                                                   std::vector<unsigned char> canonical_netgroup = {},
+                                                   DirectAdmissionClass admission = DirectAdmissionClass::REQUEST);
     std::vector<DirectMessage> TakeDirectMessages(size_t maximum);
     /** Remove only capacity requests addressed to one provider identity. */
     std::vector<DirectMessage> TakeCapacityRequests(const PaymasterId& provider_id,
@@ -434,7 +460,8 @@ private:
     bool AdmitDirectPayload(int64_t peer_id,
                             std::optional<uint64_t> keyed_netgroup,
                             const DirectPayload& payload,
-                            int64_t now);
+                            int64_t now, DirectAdmissionClass admission);
+    void PruneExpectedResponses(int64_t now) EXCLUSIVE_LOCKS_REQUIRED(m_direct_mutex);
     int64_t PruneRateWindows(int64_t now) EXCLUSIVE_LOCKS_REQUIRED(m_rate_mutex);
     void ClearRateLimits();
 
@@ -462,17 +489,22 @@ private:
     size_t m_outbound_direct_bytes GUARDED_BY(m_direct_mutex){0};
     mutable Mutex m_rate_mutex;
     int64_t m_rate_high_water GUARDED_BY(m_rate_mutex){0};
-    RateWindow m_direct_transport_events GUARDED_BY(m_rate_mutex);
-    std::map<int64_t, RateWindow> m_direct_peer_events GUARDED_BY(m_rate_mutex);
-    std::map<uint64_t, RateWindow> m_direct_netgroup_events GUARDED_BY(m_rate_mutex);
-    // Decoded-message buckets are distinct from the cheap pre-deserialization
-    // transport windows. They bind semantic provider/session identity, and
-    // every payload admitted for delivery is charged, including an exact replay
-    // after the prior copy has been consumed.
-    std::map<int64_t, TokenBucket> m_direct_peer_buckets GUARDED_BY(m_rate_mutex);
-    std::map<uint64_t, TokenBucket> m_direct_netgroup_buckets GUARDED_BY(m_rate_mutex);
-    std::map<PaymasterId, TokenBucket> m_direct_provider_buckets GUARDED_BY(m_rate_mutex);
-    std::map<uint256, TokenBucket> m_direct_session_buckets GUARDED_BY(m_rate_mutex);
+    // Partition raw and decoded quotas together, including provider/session
+    // buckets, so incoming requests cannot poison reply admission.
+    struct DirectRates {
+        RateWindow transport_events;
+        std::map<int64_t, RateWindow> peer_events;
+        std::map<uint64_t, RateWindow> netgroup_events;
+        std::map<int64_t, TokenBucket> peer_buckets;
+        std::map<uint64_t, TokenBucket> netgroup_buckets;
+        std::map<PaymasterId, TokenBucket> provider_buckets;
+        std::map<uint256, TokenBucket> session_buckets;
+    };
+    std::array<DirectRates, 3> m_direct_rates GUARDED_BY(m_rate_mutex);
+    // Only local requests create reply bindings. Peer finalization removes
+    // these transient bindings without discarding queued signed evidence.
+    using ExpectedResponseKey = std::tuple<int64_t, uint256, size_t>;
+    std::map<ExpectedResponseKey, int64_t> m_expected_responses GUARDED_BY(m_direct_mutex);
     RateWindow m_announcement_transport_events GUARDED_BY(m_rate_mutex);
     std::map<int64_t, RateWindow> m_announcement_peer_events GUARDED_BY(m_rate_mutex);
     std::map<uint64_t, RateWindow> m_announcement_netgroup_events GUARDED_BY(m_rate_mutex);

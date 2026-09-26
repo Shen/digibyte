@@ -171,6 +171,7 @@ DIGIBYTE_CORE_H = \
   paymaster/reservation.h \
   paymaster/directory.h \
   paymaster/manager.h \
+  paymaster/transport.h \
   paymaster/psbt.h \
   paymaster/recovery.h \
   paymaster/provider.h \

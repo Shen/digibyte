@@ -3252,6 +3252,7 @@ RPCHelpMan getpaymasterinfo()
                                                                                                                                                     {RPCResult::Type::NUM, "maximum_network_fee_dgb_satoshis", "Absolute provider network-fee cap"},
                                                                                                                                                     {RPCResult::Type::STR_HEX, "policy_hash", "Canonical provider policy hash"},
                                                                                                                                                 }},
+                                                                        PaymasterTransportResult(),
                                                                         {RPCResult::Type::ARR, "readiness_errors", "Outstanding readiness gates", {{RPCResult::Type::STR, "", "Stable readiness error"}}},
                                                                     }},
         RPCExamples{HelpExampleCli("getpaymasterinfo", "")},
@@ -3411,6 +3412,9 @@ RPCHelpMan getpaymasterinfo()
                 result.pushKV("announcement_sequence", announcement_sequence);
             }
             if (readiness.have_policy) result.pushKV("policy", ProviderPolicyToJSON(readiness.policy));
+            if (const auto* transport_node = wallet->chain().context(); transport_node && transport_node->connman) {
+                result.pushKV("transport", PaymasterTransportToJSON(*transport_node->connman));
+            }
             result.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
             return result;
         },

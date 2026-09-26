@@ -226,6 +226,7 @@ RPCHelpMan requestpaymasterquote()
                                                                                                          {"provider_identity_key", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Required x-only provider identity for a restricted offer"},
                                                                                                          {"restricted_service_descriptor", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Canonical provider-signed restricted descriptor"},
                                                                                                          {"sponsorship_capability", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "One-payment sponsor capability; never persist or place in shell history"},
+                                                                                                         {"retry_transport", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Explicitly retry a failed local connection; never extends a signed request or changes its inputs"},
                                                                                                          {"selected_inputs", RPCArg::Type::ARR, RPCArg::Optional::NO, "Exact USER_DD input set", {{"input", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "", {{"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Input transaction"}, {"vout", RPCArg::Type::NUM, RPCArg::Optional::NO, "Output index"}}}}},
                                                                                                      }},
         },
@@ -267,6 +268,7 @@ RPCHelpMan requestpaymasterquote()
                                                                                             {RPCResult::Type::NUM_TIME, "expires_at", /*optional=*/true, "Intent expiration; omitted for a terminal tombstone"},
                                                                                             {RPCResult::Type::BOOL, "queued", /*optional=*/true, "Whether the request is queued to a connected v2 peer"},
                                                                                             {RPCResult::Type::BOOL, "connection_pending", /*optional=*/true, "Whether a short-lived connection was requested"},
+                                                                                            PaymasterTransportResult(),
                                                                                             {RPCResult::Type::BOOL, "capacity_pending", /*optional=*/true, "Whether only the privacy-preserving capacity handshake is pending"},
                                                                                             {RPCResult::Type::STR_HEX, "capacity_snapshot_id", /*optional=*/true, "Fully validated provider capacity snapshot"},
                                                                                             {RPCResult::Type::STR_HEX, "quote_id", /*optional=*/true, "Validated provider quote"},
@@ -307,6 +309,7 @@ RPCHelpMan requestpaymasterquote()
                              {"provider_identity_key", UniValueType(UniValue::VSTR)},
                              {"restricted_service_descriptor", UniValueType(UniValue::VSTR)},
                              {"sponsorship_capability", UniValueType(UniValue::VSTR)},
+                             {"retry_transport", UniValueType(UniValue::VBOOL)},
                              {"selected_inputs", UniValueType(UniValue::VARR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const PaymasterId provider_id = ParseHashV(request.params[0], "provider_id");
@@ -646,7 +649,33 @@ RPCHelpMan requestpaymasterquote()
                     break;
                 }
             }
+            if (options.find_value("retry_transport").isTrue()) {
+                if (const auto* node = wallet->chain().context(); node && node->connman) {
+                    node->connman->RetryPaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
+                }
+            }
+            std::shared_ptr<DirectLease> reservation_lease;
             if (!resume_attempt) {
+                auto* transport_node = wallet->chain().context();
+                if (!transport_node || !transport_node->connman) throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context unavailable");
+                const auto transport = transport_node->connman->RequestPaymasterConnection(
+                    PaymentChannelKey(*wallet, session, provider_id), candidate.endpoint, privacy == PrivacyProfile::HIGH);
+                if (transport.state != DirectState::READY || !transport.lease) {
+                    if (!transport.Pending()) throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
+                    UniValue result = SessionToJSON(session);
+                    result.pushKV("provider_id", provider_id.GetHex());
+                    result.pushKV("offer_id", candidate.terms.offer_id.GetHex());
+                    result.pushKV("policy_hash", candidate.terms.policy_hash.GetHex());
+                    result.pushKV("payment_cents", candidate.payment.value);
+                    result.pushKV("service_fee_cents", candidate.service_fee.value);
+                    result.pushKV("user_total_cents", candidate.user_total.value);
+                    result.pushKV("transport", PaymasterTransportToJSON(*transport_node->connman, transport.state));
+                    result.pushKV("queued", false);
+                    result.pushKV("connection_pending", true);
+                    result.pushKV("capacity_pending", true);
+                    return result;
+                }
+                reservation_lease = transport.lease;
                 if (session.attempt_ids.size() >= static_cast<size_t>(maximum_attempts)) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        "PAYMASTER_MAXIMUM_PROVIDER_ATTEMPTS_REACHED");
@@ -785,6 +814,10 @@ RPCHelpMan requestpaymasterquote()
                 }
             }
 
+            if (capacity_request.expires_at <= now && attempt.capacity_snapshot.snapshot_id.IsNull()) {
+                node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CAPACITY_REQUEST_EXPIRED");
+            }
             PaymasterCapacityProof capacity_proof;
             bool capacity_ready = !attempt.capacity_snapshot.snapshot_id.IsNull();
             if (!capacity_ready) {
@@ -904,19 +937,13 @@ RPCHelpMan requestpaymasterquote()
                 throw JSONRPCError(RPC_WALLET_ERROR, error);
             }
             if (!capacity_ready) {
-                NodeId peer_id{-1};
-                node->connman->ForEachNode([&](CNode* peer) {
-                    if (peer_id == -1 && peer->IsPaymasterConn() &&
-                        peer->addr == candidate.endpoint) {
-                        peer_id = peer->GetId();
-                    }
-                });
+                const auto transport = node->connman->RequestPaymasterConnection(
+                    PaymentChannelKey(*wallet, session, provider_id), candidate.endpoint, privacy == PrivacyProfile::HIGH);
+                const NodeId peer_id = transport.lease && transport.state == DirectState::READY ? transport.lease->peer_id.load() : -1;
                 bool capacity_queued{false};
-                bool capacity_connection_pending{false};
+                bool capacity_connection_pending{transport.Pending()};
                 if (peer_id == -1) {
-                    capacity_connection_pending = node->connman->AddConnection(
-                        candidate.endpoint.ToStringAddrPort(), ConnectionType::PAYMASTER,
-                        /*paymaster_high_privacy=*/privacy == PrivacyProfile::HIGH);
+                    if (!capacity_connection_pending) throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
                 } else {
                     const uint256 message_id = Hash(attempt.capacity_request);
                     capacity_queued =
@@ -944,6 +971,7 @@ RPCHelpMan requestpaymasterquote()
                 result.pushKV("service_fee_cents", candidate.service_fee.value);
                 result.pushKV("user_total_cents", candidate.user_total.value);
                 result.pushKV("expires_at", intent.expires_at);
+                result.pushKV("transport", PaymasterTransportToJSON(*node->connman, transport.state));
                 result.pushKV("queued", capacity_queued);
                 result.pushKV("connection_pending", capacity_connection_pending);
                 result.pushKV("capacity_pending", true);
@@ -1175,6 +1203,7 @@ RPCHelpMan requestpaymasterquote()
                         throw JSONRPCError(RPC_WALLET_ERROR, error);
                     }
                     quote_received = true;
+                    node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
                     if (!DrainClientAttemptEquivocations(
                             *context.paymaster, store, session, attempt,
                             error)) {
@@ -1189,15 +1218,12 @@ RPCHelpMan requestpaymasterquote()
 
                 NodeId peer_id{-1};
                 if (!quote_received && attempt.state == AttemptState::CANDIDATE) {
-                    node->connman->ForEachNode([&](CNode* peer) {
-                        if (peer_id == -1 && peer->IsPaymasterConn() && peer->addr == candidate.endpoint) {
-                            peer_id = peer->GetId();
-                        }
-                    });
+                    const auto transport = node->connman->RequestPaymasterConnection(
+                        PaymentChannelKey(*wallet, session, provider_id), candidate.endpoint, privacy == PrivacyProfile::HIGH);
+                    peer_id = transport.lease && transport.state == DirectState::READY ? transport.lease->peer_id.load() : -1;
                     if (peer_id == -1) {
-                        connection_pending = node->connman->AddConnection(
-                            candidate.endpoint.ToStringAddrPort(), ConnectionType::PAYMASTER,
-                            /*paymaster_high_privacy=*/privacy == PrivacyProfile::HIGH);
+                        connection_pending = transport.Pending();
+                        if (!connection_pending) throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
                     } else {
                         const uint256 message_id = Hash(request_bytes);
                         queued = context.paymaster->HasOutboundDirectMessage(peer_id, message_id) ||

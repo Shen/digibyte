@@ -1338,7 +1338,8 @@ BOOST_AUTO_TEST_CASE(manager_prunes_expired_unconsumed_inbound_messages)
     PaymasterCapacityRequest request;
     request.funding_model = FundingModel::SPONSORED;
     request.provider_id = uint256S("5700");
-    for (size_t index{0}; index < MAX_DIRECT_INBOX_MESSAGES; ++index) {
+    for (size_t index{0}; index < DIRECT_CLASS_MESSAGES[0]; ++index) {
+        request.provider_id = uint256S(strprintf("%064x", 0x5700 + index / MAX_DIRECT_MESSAGES_PER_PROVIDER));
         uint256 id;
         id.begin()[0] = static_cast<unsigned char>(index + 1);
         request.request_id = id.GetHex();
@@ -1351,7 +1352,7 @@ BOOST_AUTO_TEST_CASE(manager_prunes_expired_unconsumed_inbound_messages)
                       DirectEnqueueResult::ACCEPTED);
     }
     BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(),
-                        MAX_DIRECT_INBOX_MESSAGES);
+                        DIRECT_CLASS_MESSAGES[0]);
 
     const uint256 fresh_id{uint256S("57ff")};
     request.request_id = fresh_id.GetHex();
@@ -1958,13 +1959,13 @@ BOOST_AUTO_TEST_CASE(manager_rejects_inbox_count_and_byte_overflow)
                     1, uint256S("f0"), 1, DirectPayload{request}, 100000) ==
                 DirectEnqueueResult::FULL);
     for (size_t i = MAX_DIRECT_INBOX_MESSAGES_PER_PEER;
-         i < MAX_DIRECT_INBOX_MESSAGES; ++i) {
+         i < DIRECT_CLASS_MESSAGES[0]; ++i) {
         uint256 id;
         id.begin()[0] = static_cast<unsigned char>(i + 1);
         request.request_id = id.GetHex();
         request.session_id = id;
         request.client_nonce = id;
-        BOOST_REQUIRE(manager.EnqueueDirectMessage(2, id, 1,
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(1 + i / MAX_DIRECT_INBOX_MESSAGES_PER_PEER, id, 1,
                                                    DirectPayload{request}, 100000));
     }
     request.request_id = uint256S("ff").GetHex();
@@ -1988,6 +1989,20 @@ BOOST_AUTO_TEST_CASE(manager_rejects_inbox_count_and_byte_overflow)
     request.session_id = uint256S("fc");
     request.client_nonce = uint256S("fc");
     BOOST_CHECK(!manager.EnqueueDirectMessage(1, uint256S("fc"), 1,
+                                              DirectPayload{request}, 100000));
+    for (size_t i = 2; i < DIRECT_CLASS_BYTES[0] / MAX_DIRECT_MESSAGE_BYTES; ++i) {
+        uint256 id;
+        id.begin()[0] = static_cast<unsigned char>(i + 1);
+        request.request_id = id.GetHex();
+        request.session_id = id;
+        request.client_nonce = id;
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(i + 1, id, MAX_DIRECT_MESSAGE_BYTES,
+                                                   DirectPayload{request}, 100000));
+    }
+    request.request_id = uint256S("ee").GetHex();
+    request.session_id = uint256S("ee");
+    request.client_nonce = uint256S("ee");
+    BOOST_CHECK(!manager.EnqueueDirectMessage(100, uint256S("ee"), 1,
                                               DirectPayload{request}, 100000));
 }
 
@@ -2511,11 +2526,11 @@ BOOST_AUTO_TEST_CASE(manager_outbox_is_peer_scoped_bounded_and_expires)
     BOOST_CHECK(!manager.QueueOutboundDirectMessage(11, uint256S("f0"), 1,
                                                     DirectPayload{request}, 101000));
     for (size_t i = MAX_DIRECT_INBOX_MESSAGES_PER_PEER;
-         i < MAX_DIRECT_INBOX_MESSAGES; ++i) {
+         i < DIRECT_CLASS_MESSAGES[1]; ++i) {
         uint256 id;
         id.begin()[0] = static_cast<unsigned char>(i + 1);
         BOOST_REQUIRE(manager.QueueOutboundDirectMessage(
-            12, id, 1, DirectPayload{request}, 101000));
+            11 + i / MAX_DIRECT_INBOX_MESSAGES_PER_PEER, id, 1, DirectPayload{request}, 101000));
     }
     BOOST_CHECK(!manager.QueueOutboundDirectMessage(13, uint256S("ff"), 1,
                                                     DirectPayload{request}, 101000));

@@ -1964,6 +1964,7 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
     NodeId nodeid = node.GetId();
+    if (m_opts.paymaster) m_opts.paymaster->ForgetDirectPeer(nodeid);
     int misbehavior{0};
     {
     LOCK(cs_main);
@@ -3867,6 +3868,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 {
     AssertLockHeld(g_msgproc_mutex);
 
+    if (pfrom.IsPaymasterDirectConn() &&
+        !pfrom.m_direct_message_rate.Consume(1, DigiDollar::Paymaster::DirectNow())) {
+        pfrom.fDisconnect = true;
+        return;
+    }
     const bool paymaster_private_transport{
         pfrom.IsPaymasterDirectConn() ||
         NetMsgType::IsPaymasterDirectMessage(msg_type)};
@@ -4197,6 +4203,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                        tx_relay->m_next_inv_send_time == 0s));
         }
 
+        if (pfrom.IsPaymasterDirectConn() &&
+            (pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+             (pfrom.m_paymaster_listener && !pfrom.m_paymaster_direct))) {
+            pfrom.fDisconnect = true;
+            return;
+        }
         pfrom.fSuccessfullyConnected = true;
         if (!paymaster_direct) {
             LogPrintf("DEBUG: VERACK processing completed successfully for peer=%d\n", pfrom.GetId());
@@ -4257,24 +4269,30 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             !m_opts.paymaster || !m_opts.paymaster->Enabled() ||
             !IsPaymasterP2PActive(m_chainman)) return;
         if ((capabilities & ~DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) return;
+        if (peer->m_paymaster_negotiated) return; // Never renew negotiation deadlines.
+        if (pfrom.m_paymaster_listener &&
+            (capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) == 0) {
+            pfrom.fDisconnect = true;
+            return;
+        }
         if ((capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) {
             // Only the accepting half can be reclassified. An ordinary
             // outbound peer cannot turn an existing relay connection into a
             // direct paymaster channel by advertising this capability.
             if (!pfrom.IsInboundConn()) return;
-            if (pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+            if (!pfrom.m_paymaster_listener ||
+                pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
                 (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages)) {
                 pfrom.fDisconnect = true;
                 return;
             }
+            // Capability bits are not admission authority. Keep the handshake
+            // permit until a bounded, locally routed application request.
             pfrom.MarkAsPaymasterDirect();
-            // The socket entered as an ordinary inbound peer before its
-            // authenticated transport role was known. Remove any Dandelion
-            // bookkeeping created during accept so it cannot participate in
-            // transaction routing after reclassification.
-            m_connman.RemoveDandelionPeer(&pfrom);
         }
         peer->m_paymaster_negotiated = true;
+        pfrom.m_direct_negotiated_at = DigiDollar::Paymaster::DirectNow();
+        pfrom.m_paymaster_negotiated = true;
         if (!pfrom.IsPaymasterDirectConn()) {
             m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPMASTERS, uint16_t{16}));
         }
@@ -4375,21 +4393,35 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // check. Do not reject it in a connection-local raw-message cache:
         // exact retries must reach semantic idempotency on both the same and a
         // replacement direct connection.
-        const uint256 message_id{Hash(msg_type, vRecv)};
+        using DigiDollar::Paymaster::DirectAdmissionClass;
+        const auto& lease = pfrom.m_paymaster_lease;
+        if (!pfrom.IsInboundConn() && (!lease || lease->canceled)) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        const DirectAdmissionClass admission = pfrom.IsInboundConn()
+            ? DirectAdmissionClass::REQUEST
+            : (lease->key.recovery ? DirectAdmissionClass::RECOVERY : DirectAdmissionClass::RESPONSE);
 
         const uint256 genesis_hash{m_chainparams.GenesisBlock().GetHash()};
         const int64_t now{GetTime()};
         const std::vector<unsigned char> canonical_netgroup =
             m_connman.GetCanonicalNetGroup(pfrom.addr);
+        // An onion forwarding socket does not reveal a client IP. Keep the
+        // durable financial bucket unchanged, but use per-socket transport
+        // fairness under the existing hard global limits.
+        const uint64_t direct_group = pfrom.m_inbound_onion
+            ? uint64_t(pfrom.GetId()) : pfrom.nKeyedNetGroup;
         if (canonical_netgroup.empty()) {
             pfrom.fDisconnect = true;
             return;
         }
         if (!m_opts.paymaster->AdmitDirectTransport(
-                pfrom.GetId(), pfrom.nKeyedNetGroup, now)) {
+                pfrom.GetId(), direct_group, now, admission)) {
             pfrom.fDisconnect = true;
             return;
         }
+        const uint256 message_id{Hash(msg_type, vRecv)};
         const size_t serialized_size{vRecv.size()};
         std::string error;
         bool valid{false};
@@ -4463,9 +4495,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             pfrom.fDisconnect = true;
             return;
         }
-        const auto enqueue_result = m_opts.paymaster->EnqueueDirectMessageResult(
+        if (!m_opts.paymaster->CanReceiveDirectMessage(pfrom.GetId(), *direct_payload, admission, now) ||
+            (pfrom.IsInboundConn() && !m_connman.PromotePaymasterConnection(pfrom))) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        const auto enqueue_result = m_opts.paymaster->EnqueueNetworkDirectMessage(
             pfrom.GetId(), message_id, serialized_size, std::move(*direct_payload), now,
-            pfrom.nKeyedNetGroup, canonical_netgroup);
+            direct_group, canonical_netgroup, admission);
+        if (enqueue_result == DigiDollar::Paymaster::DirectEnqueueResult::ACCEPTED) {
+            pfrom.m_direct_progress = DigiDollar::Paymaster::DirectNow();
+        }
         if (!DigiDollar::Paymaster::IsBenignDirectEnqueueResult(enqueue_result)) {
             if (enqueue_result == DigiDollar::Paymaster::DirectEnqueueResult::CONFLICT) {
                 Misbehaving(*peer, 100, "conflicting paymaster direct-message replay");

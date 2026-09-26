@@ -336,8 +336,15 @@ static std::string Socks5ErrorString(uint8_t err)
 }
 
 bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
-            const Sock& sock, ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy)
+            const Sock& sock, ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy,
+            std::optional<std::chrono::steady_clock::time_point> deadline)
 {
+    const auto receive_timeout = [&] {
+        if (!deadline) return g_socks5_recv_timeout;
+        return std::max(std::chrono::milliseconds{0}, std::min(g_socks5_recv_timeout,
+            std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now())));
+    };
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) return false;
     IntrRecvError recvr;
     const bool require_auth{auth_policy == ProxyAuthPolicy::REQUIRE_AUTH};
     if (require_auth && !auth) return error("Proxy isolation requires authentication credentials");
@@ -366,7 +373,7 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
         return error("Error sending to proxy");
     }
     uint8_t pchRet1[2];
-    if (InterruptibleRecv(pchRet1, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
+    if (InterruptibleRecv(pchRet1, 2, receive_timeout(), sock) != IntrRecvError::OK) {
         if (redact_destination) {
             LogPrintf("Socks5() connection to private destination failed: proxy response timeout or other failure\n");
         } else {
@@ -395,7 +402,7 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
         // stream-isolation tokens. Their values must never enter debug.log.
         LogPrint(BCLog::PROXY, "SOCKS5 sending proxy authentication\n");
         uint8_t pchRetA[2];
-        if (InterruptibleRecv(pchRetA, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
+        if (InterruptibleRecv(pchRetA, 2, receive_timeout(), sock) != IntrRecvError::OK) {
             return error("Error reading proxy authentication response");
         }
         if (pchRetA[0] != 0x01 || pchRetA[1] != 0x00) {
@@ -423,7 +430,7 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
         return error("Error sending to proxy");
     }
     uint8_t pchRet2[4];
-    if ((recvr = InterruptibleRecv(pchRet2, 4, g_socks5_recv_timeout, sock)) != IntrRecvError::OK) {
+    if ((recvr = InterruptibleRecv(pchRet2, 4, receive_timeout(), sock)) != IntrRecvError::OK) {
         if (recvr == IntrRecvError::Timeout) {
             /* If a timeout happens here, this effectively means we timed out while connecting
              * to the remote node. This is very common for Tor, so do not print an
@@ -453,16 +460,16 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     uint8_t pchRet3[256];
     switch (pchRet2[3])
     {
-        case SOCKS5Atyp::IPV4: recvr = InterruptibleRecv(pchRet3, 4, g_socks5_recv_timeout, sock); break;
-        case SOCKS5Atyp::IPV6: recvr = InterruptibleRecv(pchRet3, 16, g_socks5_recv_timeout, sock); break;
+        case SOCKS5Atyp::IPV4: recvr = InterruptibleRecv(pchRet3, 4, receive_timeout(), sock); break;
+        case SOCKS5Atyp::IPV6: recvr = InterruptibleRecv(pchRet3, 16, receive_timeout(), sock); break;
         case SOCKS5Atyp::DOMAINNAME:
         {
-            recvr = InterruptibleRecv(pchRet3, 1, g_socks5_recv_timeout, sock);
+            recvr = InterruptibleRecv(pchRet3, 1, receive_timeout(), sock);
             if (recvr != IntrRecvError::OK) {
                 return error("Error reading from proxy");
             }
             int nRecv = pchRet3[0];
-            recvr = InterruptibleRecv(pchRet3, nRecv, g_socks5_recv_timeout, sock);
+            recvr = InterruptibleRecv(pchRet3, nRecv, receive_timeout(), sock);
             break;
         }
         default: return error("Error: malformed proxy response");
@@ -470,7 +477,7 @@ bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* a
     if (recvr != IntrRecvError::OK) {
         return error("Error reading from proxy");
     }
-    if (InterruptibleRecv(pchRet3, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
+    if (InterruptibleRecv(pchRet3, 2, receive_timeout(), sock) != IntrRecvError::OK) {
         return error("Error reading from proxy");
     }
     if (redact_destination) {
@@ -655,8 +662,14 @@ bool IsProxy(const CNetAddr &addr) {
 
 bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
                          const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
-                         ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy)
+                         ProxyLogPolicy log_policy, ProxyAuthPolicy auth_policy,
+                         std::optional<std::chrono::steady_clock::time_point> deadline)
 {
+    if (deadline) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) return false;
+        nTimeout = static_cast<int>(std::min<int64_t>(nTimeout, remaining));
+    }
     if (auth_policy == ProxyAuthPolicy::REQUIRE_AUTH && !proxy.randomize_credentials) {
         return error("Proxy isolation requires randomized authentication credentials");
     }
@@ -677,11 +690,11 @@ bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_
             static std::atomic_int counter(0);
             random_auth.username = random_auth.password = strprintf("%i", counter++);
         }
-        if (!Socks5(strDest, port, &random_auth, sock, log_policy, auth_policy)) {
+        if (!Socks5(strDest, port, &random_auth, sock, log_policy, auth_policy, deadline)) {
             return false;
         }
     } else {
-        if (!Socks5(strDest, port, nullptr, sock, log_policy, auth_policy)) {
+        if (!Socks5(strDest, port, nullptr, sock, log_policy, auth_policy, deadline)) {
             return false;
         }
     }

@@ -727,6 +727,9 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-ddthawdayheight=<n>", "Set the block height at which the DigiDollar Thaw Day rules take effect (regtest only; on any other network this option is a startup error, so keep it under a [regtest] section of the config file). Default: not scheduled.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-paymaster", "Enable DigiDollar Paymaster discovery, relay, and client support (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymastermaxoutbound=<n>", "Reserved outgoing Direct channels (default: 1, range: 0..4); included in maxconnections", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymastermaxinbound=<n>", "Maximum active provider Direct channels (default: 16, range: 0..16); requires paymasterbind", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymasterbind=<ip:port>[=onion]", "Bind a dedicated v2 Direct listener; repeat for additional addresses. Append =onion for a Tor forwarding target. Uses a shared bounded admission budget.", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-addpaymaster=<ip>", "Add a DigiDollar Paymaster endpoint for local validation; this bypasses discovery only", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-paymasterendpoint=<ip:port>", "Public P2P endpoint announced by an explicitly enabled Paymaster provider (loopback is allowed only on regtest)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
 
@@ -1157,7 +1160,13 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     // Make sure enough file descriptors are available
-    int nBind = std::max(nUserBind, size_t(1));
+    for (const auto& [option, maximum] : std::vector<std::pair<std::string, int>>{
+             {"-paymastermaxoutbound", DigiDollar::Paymaster::MAX_DIRECT_OUTBOUND},
+             {"-paymastermaxinbound", DigiDollar::Paymaster::MAX_DIRECT_INBOUND}}) {
+        const int64_t value = args.GetIntArg(option, 0);
+        if (value < 0 || value > maximum) return InitError(Untranslated(option + " is outside the supported range"));
+    }
+    int nBind = std::max(nUserBind, size_t(1)) + (args.GetBoolArg("-paymaster", true) ? args.GetArgs("-paymasterbind").size() : 0);
     nUserMaxConnections = args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
     nMaxConnections = std::max(nUserMaxConnections, 0);
 
@@ -2156,6 +2165,24 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.m_max_outbound_block_relay = std::min(MAX_BLOCK_RELAY_ONLY_CONNECTIONS, connOptions.nMaxConnections-connOptions.m_max_outbound_full_relay);
     connOptions.nMaxAddnode = MAX_ADDNODE_CONNECTIONS;
     connOptions.nMaxFeeler = MAX_FEELER_CONNECTIONS;
+    if (args.GetBoolArg("-paymaster", true)) {
+        connOptions.paymaster_outbound = (nLocalServices & NODE_P2P_V2)
+            ? args.GetIntArg("-paymastermaxoutbound", DigiDollar::Paymaster::DEFAULT_DIRECT_OUTBOUND) : 0;
+        connOptions.paymaster_inbound = args.GetIntArg("-paymastermaxinbound", DigiDollar::Paymaster::MAX_DIRECT_INBOUND);
+        for (std::string bind : args.GetArgs("-paymasterbind")) {
+            const bool onion = bind.size() >= 6 && bind.substr(bind.size() - 6) == "=onion";
+            if (onion) bind.resize(bind.size() - 6);
+            const CService endpoint = LookupNumeric(bind, 0);
+            if (!endpoint.IsValid() || endpoint.GetPort() == 0) {
+                return InitError(Untranslated("Invalid -paymasterbind: expected numeric IP and explicit nonzero port"));
+            }
+            if (std::any_of(connOptions.paymaster_binds.begin(), connOptions.paymaster_binds.end(),
+                            [&](const auto& existing) { return existing.first == endpoint; })) {
+                return InitError(Untranslated("Duplicate -paymasterbind endpoint"));
+            }
+            connOptions.paymaster_binds.emplace_back(endpoint, onion);
+        }
+    }
     connOptions.uiInterface = &uiInterface;
     connOptions.m_banman = node.banman.get();
     connOptions.m_msgproc = node.peerman.get();

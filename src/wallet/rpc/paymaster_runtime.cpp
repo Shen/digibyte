@@ -89,6 +89,7 @@ RPCHelpMan startpaymaster()
                                                                            {RPCResult::Type::NUM, "expired_commits", "Deprecated compatibility field; durable signatures are never released merely because a local retry time elapsed"},
                                                                            {RPCResult::Type::ARR, "recovery_errors", "Stable per-transaction recovery failures", {{RPCResult::Type::STR, "", "Recovery failure"}}},
                                                                            {RPCResult::Type::ARR, "readiness_errors", "Stable reasons preventing start", {{RPCResult::Type::STR, "", "Readiness error"}}},
+                                                                           PaymasterTransportResult(),
                                                                        }},
         RPCExamples{HelpExampleCli("startpaymaster", "")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
@@ -286,6 +287,9 @@ RPCHelpMan startpaymaster()
             result.pushKV("expired_commits", 0);
             result.pushKV("recovery_errors", std::move(recovery_errors));
             result.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
+            if (const auto* node = wallet->chain().context(); node && node->connman) {
+                result.pushKV("transport", PaymasterTransportToJSON(*node->connman));
+            }
             return result;
         },
     };

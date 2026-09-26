@@ -552,6 +552,7 @@ RPCHelpMan getpaymasterclientinfo()
             {RPCResult::Type::ARR, "fee_modes", "Supported senddigidollar fee modes", {{RPCResult::Type::STR, "", "Mode"}}},
             {RPCResult::Type::ARR, "funding_models", "Supported Paymaster funding models", {{RPCResult::Type::STR, "", "Model"}}},
             {RPCResult::Type::ARR, "sponsorship_scopes", "Supported sponsorship scopes", {{RPCResult::Type::STR, "", "Scope"}}},
+            PaymasterTransportResult(),
             {RPCResult::Type::BOOL, "supported", "This binary implements the client integration contract"},
             {RPCResult::Type::BOOL, "ready", "Local prerequisites for authorization currently met"},
             {RPCResult::Type::ARR, "readiness_errors", "Local blockers; preparation and session reads may still work", {{RPCResult::Type::STR, "", "Stable error identifier"}}},
@@ -594,6 +595,10 @@ RPCHelpMan getpaymasterclientinfo()
                 return array;
             };
             UniValue result{UniValue::VOBJ};
+            if (node && node->connman) {
+                result.pushKV("transport", PaymasterTransportToJSON(*node->connman));
+                if (!node->connman->GetPaymasterBudget().outbound) errors.push_back("PAYMASTER_NO_LOCAL_DIRECT_CAPACITY");
+            }
             result.pushKV("integration_version", 1);
             result.pushKV("network", ChainTypeToString(Params().GetChainType()));
             result.pushKV("genesis_hash", Params().GenesisBlock().GetHash().GetHex());
@@ -1322,6 +1327,8 @@ UniValue ResolveAlternativePaymasterRecovery(
     }
 
     if (recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+        node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
+            "recovery:" + recovery.recovery_id.GetHex(), true});
         AlternativeRecoveryParameters parameters;
         AlternativeRecoveryTemplate trusted;
         PartiallySignedTransaction unsigned_psbt;
@@ -1504,6 +1511,9 @@ UniValue ResolveAlternativePaymasterRecovery(
                     recovery, final_recovery, error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, error);
             }
+
+            node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
+                "recovery:" + recovery.recovery_id.GetHex(), true});
 
             // The final commit above performs database work and spends the
             // client fee reservation. Rebuild every authority from the exact
@@ -1720,6 +1730,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                                                         {"recovery_offer_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional exact USER_PAID recovery offer"},
                                                                                                                         {"maximum_recovery_service_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Local recovery service-fee ceiling"},
                                                                                                                         {"prepare_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Stop after validating and persisting the exact authorization commitment"},
+                                                                                                                        {"retry_transport", RPCArg::Type::BOOL, RPCArg::Default{false}, "Explicitly retry failed recovery transport without renewing financial authority"},
                                                                                                                         {"recovery_authorization_commitment", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact commitment required before signing user inputs"},
                                                                                                                     }},
         },
@@ -1809,6 +1820,7 @@ RPCHelpMan resolvepaymastersession()
                              {"recovery_offer_id", UniValueType(UniValue::VSTR)},
                              {"maximum_recovery_service_fee_cents", UniValueType(UniValue::VNUM)},
                              {"prepare_only", UniValueType(UniValue::VBOOL)},
+                             {"retry_transport", UniValueType(UniValue::VBOOL)},
                              {"recovery_authorization_commitment", UniValueType(UniValue::VSTR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
 
@@ -1864,6 +1876,9 @@ RPCHelpMan resolvepaymastersession()
                         RPC_WALLET_ERROR,
                         error.empty() ? "PAYMASTER_UNSIGNED_ABANDON_FAILED" : error);
                 }
+                if (const auto* node = wallet->chain().context(); node && node->connman) {
+                    node->connman->CancelPaymasterOperation(wallet->m_paymaster_transport_owner.GetHex(), session.session_id.GetHex() + ":");
+                }
                 return ClientSessionSnapshotToJSON(store, session, action);
             }
 
@@ -1884,6 +1899,14 @@ RPCHelpMan resolvepaymastersession()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster attempt not found");
             }
             if (action == "cancel_to_self") {
+                if (options.find_value("retry_transport").isTrue()) {
+                    DigiDollar::Paymaster::AlternativeRecoveryRecord recovery;
+                    if (const auto* node = wallet->chain().context(); node && node->connman &&
+                        store.GetAlternativeRecovery(session.request_id, recovery)) {
+                        node->connman->RetryPaymasterConnection({wallet->m_paymaster_transport_owner.GetHex(),
+                            "recovery:" + recovery.recovery_id.GetHex(), true});
+                    }
+                }
                 return ResolveAlternativePaymasterRecovery(
                     context, *wallet, store, session, attempt, options);
             }
@@ -1895,6 +1918,9 @@ RPCHelpMan resolvepaymastersession()
                     !store.GetAttempt(attempt_id, attempt)) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        error.empty() ? "PAYMASTER_FALLBACK_FAILED" : error);
+                }
+                if (const auto* node = wallet->chain().context(); node && node->connman) {
+                    node->connman->CancelPaymasterOperation(wallet->m_paymaster_transport_owner.GetHex(), session.session_id.GetHex() + ":");
                 }
                 return ClientSessionSnapshotToJSON(store, session, action);
             }
@@ -1975,6 +2001,9 @@ RPCHelpMan resolvepaymastersession()
             if (!attempt.user_signed_psbt.empty()) {
                 PaymasterSubmitQueueState queue_state;
                 if (action == "retry_same") {
+                    if (const auto* node = wallet->chain().context(); node && node->connman) {
+                        node->connman->RetryPaymasterConnection(PaymentChannelKey(*wallet, session, attempt.provider_id));
+                    }
                     std::string error;
                     if (!QueuePersistedPaymasterSubmit(context, *wallet, session, attempt,
                                                        GetTime(), queue_state, error)) {

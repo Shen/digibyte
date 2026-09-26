@@ -1,5 +1,11 @@
 # DigiDollar Paymaster Network
 
+The current working-tree [capacity and DoS hardening](digidollar-paymaster-connection-capacity.md)
+adds connection-start/group limits, routed request admission and reserved
+budgets for locally expected payment/recovery replies. Shared clearnet groups
+are limited to four Direct connections. Slow, unadmitted handshakes can be
+replaced under load; financial authorizations and stored operations are unchanged.
+
 The Paymaster Network lets a wallet pay confirmed DigiDollar (DD) while a
 selected provider contributes the DGB inputs needed for the miner fee. The
 result is an ordinary `DD_TX_TRANSFER`; Paymasters have no consensus privilege
@@ -125,8 +131,14 @@ still confirms the exact provider, model, recipient amount, and service fee
 before its wallet signs. Optional provider autostart is a separate opt-in and
 defaults to off. A provider wallet must be a descriptor wallet with local
 private keys; legacy, watch-only, and external-signer wallets are not eligible.
-`-paymasterendpoint=<host:port>` sets the announced endpoint. Loopback endpoints
-are accepted only on regtest.
+`-paymasterendpoint=<host:port>` sets the announced endpoint. Providers also
+require `-paymasterbind=<numeric-ip:port>[=onion]` on a separate Direct port and
+sufficient effective connection capacity. Loopback announcements are accepted
+only on regtest. Client capacity defaults to one outgoing channel per node,
+configurable with `-paymastermaxoutbound=0..4`. See the
+[capacity and migration guide](digidollar-paymaster-connection-capacity.md)
+before updating provider configuration; listener readiness does not verify
+public/Tor reachability.
 
 ## Client use
 

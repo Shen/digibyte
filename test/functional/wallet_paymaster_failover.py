@@ -259,6 +259,9 @@ class PaymasterFailoverTest(DigiByteTestFramework):
                 recipient_address, 1_000, "", 0, None, "cents", fallback_options)
 
         first_attempt = fallback_send()
+        assert_equal(first_attempt["reserved_user_inputs"], [])
+        assert_equal(first_attempt["provider_attempts"], 0)
+        self.wait_until(lambda: bool(fallback_send()["reserved_user_inputs"]))
         assert_equal(
             first_attempt["provider_id"], cheap_identity["provider_id"])
         lookup = {"request_id": fallback_request}

@@ -12,7 +12,14 @@ lifecycle, and end-to-end tests without hiding protocol progress from them.
 from dataclasses import dataclass
 import time
 
-from test_framework.util import assert_equal, p2p_port
+from test_framework.util import MAX_NODES, assert_equal, p2p_port
+
+
+def paymaster_port(node_index):
+    # Paymaster fixtures use at most four daemons. Reserve upper-index P2P
+    # ports from the runner's existing per-test allocation for Direct binds.
+    assert 0 <= node_index < MAX_NODES // 2
+    return p2p_port(MAX_NODES - 1 - node_index)
 
 
 def paymaster_node_args(provider_node=None):
@@ -34,7 +41,8 @@ def paymaster_node_args(provider_node=None):
         "-proxyrandomize=1",
     ]
     if provider_node is not None:
-        args.append(f"-paymasterendpoint=127.0.0.1:{p2p_port(provider_node)}")
+        endpoint = f"127.0.0.1:{paymaster_port(provider_node)}"
+        args.extend([f"-paymasterbind={endpoint}", f"-paymasterendpoint={endpoint}"])
     return args
 
 

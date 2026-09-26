@@ -14,8 +14,10 @@
 #include <serialize.h>
 #include <util/sock.h>
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdint.h>
 #include <string>
 #include <type_traits>
@@ -288,12 +290,14 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
  *                    fresh randomized credentials for stream isolation. The
  *                    proxy must still be configured to isolate by credentials.
  *
+ * @param deadline Optional monotonic deadline shared by TCP connect and all SOCKS reads.
  * @returns Whether or not the operation succeeded.
  */
 bool ConnectThroughProxy(const Proxy& proxy, const std::string& strDest, uint16_t port,
                          const Sock& sock, int nTimeout, bool& outProxyConnectionFailed,
                          ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL,
-                         ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH);
+                         ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH,
+                         std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt);
 
 /** Set the SOCKS receive interrupt flag and return its previous value. */
 bool InterruptSocks5(bool interrupt);
@@ -321,7 +325,8 @@ bool InterruptSocks5(bool interrupt);
  */
 bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth,
             const Sock& socket, ProxyLogPolicy log_policy = ProxyLogPolicy::NORMAL,
-            ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH);
+            ProxyAuthPolicy auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH,
+                         std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt);
 
 /**
  * Determine if a port is "bad" from the perspective of attempting to connect

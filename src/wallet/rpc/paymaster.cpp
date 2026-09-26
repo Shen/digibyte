@@ -70,6 +70,68 @@
 
 namespace wallet {
 
+namespace paymaster_rpc::internal {
+
+DigiDollar::Paymaster::DirectKey PaymentChannelKey(
+    const CWallet& wallet, const DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::PaymasterId& provider)
+{
+    return {wallet.m_paymaster_transport_owner.GetHex(),
+            session.session_id.GetHex() + ":" + provider.GetHex(), false};
+}
+
+const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state)
+{
+    using DigiDollar::Paymaster::DirectState;
+    switch (state) {
+    case DirectState::DISABLED: return "PAYMASTER_NO_LOCAL_DIRECT_CAPACITY";
+    case DirectState::FULL: return "PAYMASTER_DIRECT_QUEUE_FULL";
+    case DirectState::EXPIRED: return "PAYMASTER_DIRECT_WAIT_EXPIRED";
+    case DirectState::CANCELED: return "PAYMASTER_DIRECT_CANCELED";
+    case DirectState::NETWORK_INACTIVE: return "PAYMASTER_NETWORK_INACTIVE";
+    case DirectState::PRIVACY_REJECTED: return "PAYMASTER_DIRECT_PRIVACY_REJECTED";
+    case DirectState::CONNECT_FAILED: return "PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE";
+    default: return "PAYMASTER_DIRECT_CONNECTION_FAILED";
+    }
+}
+
+UniValue PaymasterTransportToJSON(const CConnman& connman,
+    std::optional<DigiDollar::Paymaster::DirectState> state)
+{
+    const auto& budget = connman.GetPaymasterBudget();
+    const auto used = connman.GetPaymasterUsage();
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("state", state ? DigiDollar::Paymaster::DirectStateName(*state) : budget.outbound ? "available" : "disabled");
+    result.pushKV("outbound_limit", budget.outbound);
+    result.pushKV("inbound_limit", budget.inbound);
+    result.pushKV("handshake_limit", budget.handshakes);
+    result.pushKV("outbound_in_use", used.outgoing);
+    result.pushKV("inbound_in_use", used.incoming);
+    result.pushKV("handshakes_in_use", used.handshakes);
+    result.pushKV("queued", uint64_t(connman.GetPaymasterQueueSize()));
+    result.pushKV("listener_ready", connman.PaymasterListenerReady());
+    result.pushKV("external_reachability", "unknown");
+    return result;
+}
+
+} // namespace paymaster_rpc::internal
+
+RPCResult PaymasterTransportResult()
+{
+    return {RPCResult::Type::OBJ, "transport", /*optional=*/true, "Local transport only; no financial or external reachability guarantee", {
+        {RPCResult::Type::STR, "state", "available, disabled, waiting_capacity, connecting, handshaking, direct_ready, queue_full, expired, failed, canceled, network_inactive, privacy_rejected, or connect_failed"},
+        {RPCResult::Type::NUM, "outbound_limit", "Effective reserved client channels"},
+        {RPCResult::Type::NUM, "inbound_limit", "Effective active provider channels"},
+        {RPCResult::Type::NUM, "handshake_limit", "Effective provider handshake reserve"},
+        {RPCResult::Type::NUM, "outbound_in_use", "Client leases, including in-flight connections"},
+        {RPCResult::Type::NUM, "inbound_in_use", "Active provider channels"},
+        {RPCResult::Type::NUM, "handshakes_in_use", "Unclassified Direct sockets"},
+        {RPCResult::Type::NUM, "queued", "Local transport requests waiting for capacity"},
+        {RPCResult::Type::BOOL, "listener_ready", "All configured Direct binds succeeded"},
+        {RPCResult::Type::STR, "external_reachability", "unknown; no external reachability test is performed"},
+    }};
+}
+
 RPCResult PaymasterPaymentViewResult()
 {
     const auto transaction = [](const char* key, bool recipient) {
@@ -373,6 +435,10 @@ bool CheckPaymasterClientReadiness(CWallet& wallet, WalletContext& context,
         return false;
     }
 
+    if (node->connman->GetPaymasterBudget().outbound == 0) {
+        error = "PAYMASTER_NO_LOCAL_DIRECT_CAPACITY";
+        return false;
+    }
     wallet.BlockUntilSyncedToCurrentChain();
     if (!g_txindex || !g_txindex->BlockUntilSyncedToCurrentChain()) {
         error = "PAYMASTER_REQUIRES_READY_TXINDEX";
@@ -689,6 +755,10 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     if (!node || !node->connman ||
         !(node->connman->GetLocalServices() & NODE_P2P_V2)) {
         result.errors.push_back("PAYMASTER_REQUIRES_V2_TRANSPORT");
+    }
+    if (node && node->connman) {
+        if (node->connman->GetPaymasterBudget().inbound == 0) result.errors.push_back("PAYMASTER_NO_LOCAL_INBOUND_CAPACITY");
+        if (!node->connman->PaymasterListenerReady()) result.errors.push_back("PAYMASTER_DIRECT_LISTENER_NOT_READY");
     }
     if (!context.args || !context.args->IsArgSet("-paymasterendpoint")) {
         result.errors.push_back("PAYMASTER_PROVIDER_ENDPOINT_NOT_CONFIGURED");
@@ -3685,20 +3755,17 @@ bool QueueRecoveryMessage(WalletContext& context,
         error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
         return false;
     }
-    NodeId peer_id{-1};
-    node->connman->ForEachNode([&](CNode* peer) {
-        if (peer_id == -1 && peer->IsPaymasterConn() &&
-            peer->addr == endpoint) {
-            peer_id = peer->GetId();
-        }
-    });
-    if (peer_id == -1) {
-        state.connection_pending = node->connman->AddConnection(
-            endpoint.ToStringAddrPort(), ConnectionType::PAYMASTER,
-            /*paymaster_high_privacy=*/
-            recovery.privacy_profile == PrivacyProfile::HIGH);
-        return true;
+    const DirectKey channel{wallet.m_paymaster_transport_owner.GetHex(),
+                            "recovery:" + recovery.recovery_id.GetHex(), true};
+    const auto transport = node->connman->RequestPaymasterConnection(
+        channel, endpoint, recovery.privacy_profile == PrivacyProfile::HIGH);
+    state.connection_pending = transport.Pending();
+    if (transport.state != DirectState::READY || !transport.lease) {
+        if (state.connection_pending) return true;
+        error = PaymasterTransportError(transport.state);
+        return false;
     }
+    const NodeId peer_id = transport.lease->peer_id;
     const std::vector<unsigned char> encoded =
         SerializeRecoveryMessage(message);
     const uint256 message_id{Hash(encoded)};
@@ -4038,18 +4105,16 @@ bool QueuePersistedPaymasterSubmit(
         error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
         return false;
     }
-    NodeId peer_id{-1};
-    node->connman->ForEachNode([&](CNode* peer) {
-        if (peer_id == -1 && peer->IsPaymasterConn() && peer->addr == endpoint) {
-            peer_id = peer->GetId();
-        }
-    });
-    if (peer_id == -1) {
-        state.connection_pending = node->connman->AddConnection(
-            endpoint.ToStringAddrPort(), ConnectionType::PAYMASTER,
-            /*paymaster_high_privacy=*/attempt.privacy_profile == PrivacyProfile::HIGH);
-        return true;
+    const auto transport = node->connman->RequestPaymasterConnection(
+        PaymentChannelKey(wallet, session, attempt.provider_id), endpoint,
+        attempt.privacy_profile == PrivacyProfile::HIGH);
+    state.connection_pending = transport.Pending();
+    if (transport.state != DirectState::READY || !transport.lease) {
+        if (state.connection_pending) return true;
+        error = PaymasterTransportError(transport.state);
+        return false;
     }
+    const NodeId peer_id = transport.lease->peer_id;
 
     const std::vector<unsigned char> submit_bytes = SerializeSubmit(submit);
     const uint256 message_id = Hash(submit_bytes);

@@ -1,5 +1,16 @@
 # DigiDollar Paymaster: developer starting point
 
+The 2026-09-26 Direct-capacity patch is documented in
+[Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
+one outgoing channel by default (up to four), a dedicated bounded provider
+listener, fair wallet-scoped queueing, connection-start limits, routed inbox
+admission and protected reply/recovery quotas. Core ownership lives in
+`src/paymaster/transport.h`, `src/paymaster/manager.{h,cpp}`, `src/net.{h,cpp}`
+and `src/netbase.{h,cpp}`. Focused tests are
+`src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
+and `test/functional/p2p_paymaster_connection_capacity.py`.
+Migration and pending runtime checks are documented in the capacity guide.
+
 The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
 recorded in the [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md).
 

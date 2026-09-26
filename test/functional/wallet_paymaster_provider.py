@@ -20,12 +20,11 @@ import time
 from test_framework.address import base58_to_byte
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import ser_string, ser_uint256
-from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, provider_safety_policy
+from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, paymaster_port, provider_safety_policy
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
-    p2p_port,
 )
 
 
@@ -256,7 +255,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         started = wallet.startpaymaster()
         assert_equal(started["ready"], True)
         assert_equal(started["running"], True)
-        assert_equal(started["endpoint"], f"127.0.0.1:{p2p_port(0)}")
+        assert_equal(started["endpoint"], f"127.0.0.1:{paymaster_port(0)}")
         assert_equal(started["announcement_sequence"], 1)
         assert_equal(wallet.getpaymasterinfo()["announcement_sequence"], 1)
         changed_while_running = policy.copy()

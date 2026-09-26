@@ -250,8 +250,14 @@ void RunPaymasterProviderServices(WalletContext& context)
     // Each wallet owns independent identity, liquidity, and ledgers. Iterating
     // loaded wallets here must not merge provider state merely because several
     // wallets share one node-level Paymaster transport manager.
-    for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
-        RunPaymasterProviderServiceCycle(context, *wallet);
+    const auto wallets = GetWallets(context);
+    if (wallets.empty()) return;
+    // Each cycle processes at most one request and one submit. Bound the
+    // node-wide scheduled work to four messages per tick, rotating wallets.
+    const size_t count = std::min(size_t{2}, wallets.size());
+    for (size_t i = 0; i < count; ++i) {
+        context.paymaster_service_cursor %= wallets.size();
+        RunPaymasterProviderServiceCycle(context, *wallets[context.paymaster_service_cursor++]);
     }
 }
 

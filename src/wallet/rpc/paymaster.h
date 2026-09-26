@@ -73,6 +73,7 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                                         const std::vector<COutPoint>* preset_inputs);
 /** Shared additive RPC schema, independent of wire and wallet record versions. */
 RPCResult PaymasterPaymentViewResult();
+RPCResult PaymasterTransportResult();
 RPCHelpMan getpaymasterclientinfo();
 RPCHelpMan getdigidollarsendsession();
 RPCHelpMan listdigidollarsendsessions();

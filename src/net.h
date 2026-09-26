@@ -19,6 +19,7 @@
 #include <netbase.h>
 #include <netgroup.h>
 #include <node/connection_types.h>
+#include <paymaster/transport.h>
 #include <policy/feerate.h>
 #include <protocol.h>
 #include <random.h>
@@ -694,6 +695,7 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    bool paymaster_listener = false;
 };
 
 /** Information about a peer */
@@ -759,6 +761,16 @@ public:
     // next time DisconnectNodes() runs
     std::atomic_bool fDisconnect{false};
     CSemaphoreGrant grantOutbound;
+    std::shared_ptr<DigiDollar::Paymaster::DirectLease> m_paymaster_lease;
+    std::shared_ptr<DigiDollar::Paymaster::DirectPermits::Permit> m_paymaster_admission;
+    bool m_paymaster_listener{false}; // Set before publishing the CNode.
+    std::atomic_bool m_paymaster_negotiated{false};
+    std::atomic_bool m_direct_admitted{false};
+    std::atomic<int64_t> m_direct_negotiated_at{0};
+    DigiDollar::Paymaster::DirectRateBucket m_direct_receive_rate{2 * 1024 * 1024, 8'000}; // cs_vRecv
+    DigiDollar::Paymaster::DirectRateBucket m_direct_message_rate{64, 8'000}; // message thread
+    const int64_t m_direct_connected{DigiDollar::Paymaster::DirectNow()};
+    std::atomic<int64_t> m_direct_progress{m_direct_connected};
     std::atomic<int> nRefCount{0};
 
     const uint64_t nKeyedNetGroup;
@@ -768,7 +780,8 @@ public:
     /** Whether this peer needs to be sent a Dandelion discovery message */
     std::atomic_bool m_send_dandelion_discovery{false};
 
-    /** The accepting half was authenticated as an isolated Paymaster socket. */
+    /** The accepting half negotiated an isolated Paymaster transport role.
+     * Negotiation is not client authentication or application admission. */
     std::atomic_bool m_paymaster_direct{false};
 
     const ConnectionType m_conn_type;
@@ -850,7 +863,7 @@ public:
     }
 
     bool IsPaymasterDirectConn() const {
-        return IsPaymasterConn() || m_paymaster_direct;
+        return IsPaymasterConn() || m_paymaster_direct || m_paymaster_listener;
     }
 
     void MarkAsPaymasterDirect() {
@@ -1117,6 +1130,9 @@ public:
         std::vector<NetWhitebindPermissions> vWhiteBinds;
         std::vector<CService> vBinds;
         std::vector<CService> onion_binds;
+        std::vector<std::pair<CService, bool>> paymaster_binds;
+        int paymaster_outbound{0};
+        int paymaster_inbound{0};
         /// True if the user did not specify -bind= or -whitebind= and thus
         /// we should bind on `0.0.0.0` (IPv4) and `::` (IPv6).
         bool bind_on_any;
@@ -1138,6 +1154,10 @@ public:
         nMaxAddnode = connOptions.nMaxAddnode;
         nMaxFeeler = connOptions.nMaxFeeler;
         m_max_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + nMaxFeeler;
+        m_direct_budget = DigiDollar::Paymaster::DirectBudget::Calculate(
+            nMaxConnections, m_max_outbound, connOptions.paymaster_outbound,
+            connOptions.paymaster_inbound, !connOptions.paymaster_binds.empty());
+        m_direct_permits.Configure(m_direct_budget);
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
         m_msgproc = connOptions.m_msgproc;
@@ -1183,7 +1203,8 @@ public:
                                CSemaphoreGrant&& grant_outbound, const char* strDest,
                                ConnectionType conn_type, bool use_v2transport,
                                ProxyLogPolicy proxy_log_policy,
-                               ProxyAuthPolicy proxy_auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+                               ProxyAuthPolicy proxy_auth_policy = ProxyAuthPolicy::ALLOW_NOAUTH,
+                               std::shared_ptr<DigiDollar::Paymaster::DirectLease> direct_lease = {}) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
 
     // alias for thread safety annotations only, not defined
@@ -1267,6 +1288,18 @@ public:
                        ConnectionType conn_type,
                        bool paymaster_high_privacy = false) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
 
+    DigiDollar::Paymaster::DirectResult RequestPaymasterConnection(
+        const DigiDollar::Paymaster::DirectKey& key, const CService& endpoint, bool high_privacy);
+    void ReleasePaymasterConnection(const DigiDollar::Paymaster::DirectKey& key) { m_direct_queue.Release(key); }
+    void RetryPaymasterConnection(const DigiDollar::Paymaster::DirectKey& key) { m_direct_queue.Retry(key); }
+    void CancelPaymasterOperation(const std::string& owner, const std::string& prefix) { m_direct_queue.CancelOperation(owner, prefix); }
+    void CancelPaymasterWallet(const std::string& owner) { m_direct_queue.CancelOwner(owner); }
+    bool PromotePaymasterConnection(CNode& node);
+    const DigiDollar::Paymaster::DirectBudget& GetPaymasterBudget() const { return m_direct_budget; }
+    DigiDollar::Paymaster::DirectPermits::Usage GetPaymasterUsage() const { return m_direct_permits.GetUsage(); }
+    size_t GetPaymasterQueueSize() const { return m_direct_queue.Size(); }
+    bool PaymasterListenerReady() const { return m_direct_listener_ready; }
+
     size_t GetNodeCount(ConnectionDirection) const;
     uint32_t GetMappedAS(const CNetAddr& addr) const;
     /** Return the process-independent network group for an address. The
@@ -1321,6 +1354,8 @@ private:
     struct ListenSocket {
     public:
         std::shared_ptr<Sock> sock;
+        bool paymaster{false};
+        bool onion{false};
         inline void AddSocketPermissionFlags(NetPermissionFlags& flags) const { NetPermissions::AddFlag(flags, m_permissions); }
         ListenSocket(std::shared_ptr<Sock> sock_, NetPermissionFlags permissions_)
             : sock{sock_}, m_permissions{permissions_}
@@ -1335,7 +1370,7 @@ private:
     //! in case of no limit, it will always return 0
     std::chrono::seconds GetMaxOutboundTimeLeftInCycle_() const EXCLUSIVE_LOCKS_REQUIRED(m_total_bytes_sent_mutex);
 
-    bool BindListenPort(const CService& bindAddr, bilingual_str& strError, NetPermissionFlags permissions);
+    bool BindListenPort(const CService& bindAddr, bilingual_str& strError, NetPermissionFlags permissions, bool paymaster = false, bool onion = false);
     bool Bind(const CService& addr, unsigned int flags, NetPermissionFlags permissions);
     bool InitBinds(const Options& options);
 
@@ -1346,6 +1381,7 @@ private:
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
     void ThreadI2PAcceptIncoming();
     void AcceptConnection(const ListenSocket& hListenSocket);
+    void ThreadOpenPaymasterConnections();
 
     /**
      * Create a `CNode` object from a socket that has just been accepted and add the node to
@@ -1358,7 +1394,7 @@ private:
     void CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                       NetPermissionFlags permission_flags,
                                       const CAddress& addr_bind,
-                                      const CAddress& addr);
+                                      const CAddress& addr, bool paymaster = false, bool onion = false);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
     void NotifyNumConnectionsChanged();
@@ -1538,6 +1574,12 @@ private:
 
     std::unique_ptr<CSemaphore> semOutbound;
     std::unique_ptr<CSemaphore> semAddnode;
+    DigiDollar::Paymaster::DirectBudget m_direct_budget;
+    DigiDollar::Paymaster::DirectPermits m_direct_permits;
+    DigiDollar::Paymaster::DirectAdmission m_direct_admission;
+    DigiDollar::Paymaster::DirectQueue m_direct_queue;
+    bool m_direct_listener_ready{false};
+    std::vector<std::thread> m_direct_workers;
     int nMaxConnections;
 
     // How many full-relay (tx, block, addr) outbound peers we want

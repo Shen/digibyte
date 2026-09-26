@@ -798,7 +798,7 @@ PeerManagerImpl (Message Processing)
 | MANUAL | -addnode connections | 8 |
 | INBOUND | Peer-initiated | Up to 125 total |
 | FEELER | Quality testing | 1 |
-| PAYMASTER | Short-lived isolated Paymaster session | At most 1 in high-privacy mode |
+| PAYMASTER | Short-lived isolated Paymaster session | 1 outgoing by default, configurable 0–4 per node |
 
 ### 9.3 Dandelion++ Privacy
 
@@ -1231,6 +1231,17 @@ This avoids rescanning the entire UTXO set for every health check. The ERR syste
 **Result:** All nodes see identical network statistics, updated incrementally per block.
 
 ### 12.7 Paymaster Network (non-consensus)
+
+Direct transport has separate node-wide RAII budgets: one outgoing channel by
+default (configurable up to four), up to sixteen active incoming channels and
+eight dedicated-listener handshakes. The bounded queue isolates wallet-load
+generations and operations. Starts and clearnet group occupancy are limited
+before v2 setup. Only a routed request promotes a dedicated-listener socket;
+old unadmitted handshakes can be replaced under pressure. Incoming work,
+locally expected replies and recovery replies have separate bounded quotas.
+Financial journals retain ownership across socket failure.
+See [capacity and migration](doc/digidollar-paymaster-connection-capacity.md)
+for total connection/FD budgets, source map and verification limits.
 
 **Specification:** [`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
 **Key files:** `src/paymaster/`, `src/wallet/paymaster*.{cpp,h}`,

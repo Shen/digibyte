@@ -563,6 +563,7 @@ public:
     /** Get a name for this wallet for logging/debugging purposes.
      */
     const std::string& GetName() const { return m_name; }
+    const uint256 m_paymaster_transport_owner; // New random generation on every load.
 
     typedef std::map<unsigned int, CMasterKey> MasterKeyMap;
     MasterKeyMap mapMasterKeys;

@@ -2318,6 +2318,7 @@ RPCHelpMan senddigidollar()
                         {RPCResult::Type::STR, "status", "success/pending/failed/canceled/conflicted; Paymaster success requires local recipient confirmation; direct sends report broadcast success"},
                         {RPCResult::Type::BOOL, "payment_confirmed", /*optional=*/true, "Paymaster recipient payment validated and locally confirmed"},
                         wallet::PaymasterPaymentViewResult(),
+                        wallet::PaymasterTransportResult(),
                         {RPCResult::Type::STR_AMOUNT, "fee_paid", /*optional=*/true, "Transaction fee paid in DGB"},
                         {RPCResult::Type::NUM, "inputs_used", /*optional=*/true, "Number of DD inputs consumed"},
                         {RPCResult::Type::NUM, "change_amount", /*optional=*/true, "DD change amount in cents"},

@@ -1,5 +1,12 @@
 # Paymaster build and test runbook
 
+2026-09-26 working-tree update: [Direct connection capacity](digidollar-paymaster-connection-capacity.md)
+documents the default one-channel client queue, required provider Direct
+bind, additive status, connection-start limits, routed request admission and
+protected reply/recovery quotas. Targeted DoS tests pass; fresh daemon,
+payment-flow and Tor/load verification is still required. Wire, consensus
+and journal formats are unchanged; historical results do not validate this patch.
+
 Reviewed against `a4f17f6315` on `integration/paymaster-v9.26.6rc2`, 2026-09-23.
 This runbook describes operator commands, not a newly completed build or test
 run. The [release gate](digidollar-paymaster-release-gate.md) owns acceptance;

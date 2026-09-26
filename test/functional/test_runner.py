@@ -358,6 +358,7 @@ BASE_SCRIPTS = [
     'wallet_digidollar_backup.py',
     'wallet_digidollar_descriptors.py --descriptors',
     'p2p_paymaster.py',
+    'p2p_paymaster_connection_capacity.py --descriptors',
     'wallet_paymaster_lifecycle.py --descriptors',
     'wallet_paymaster_readiness.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors',

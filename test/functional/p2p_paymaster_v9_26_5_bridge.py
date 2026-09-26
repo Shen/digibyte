@@ -260,9 +260,16 @@ class PaymasterV9BridgeTest(DigiByteTestFramework):
         direct_request_id = "550e8400-e29b-41d4-a716-446655442302"
         direct_options = dict(isolated_options)
         direct_options["request_id"] = direct_request_id
-        pending = client.senddigidollar(
-            recipient.getdigidollaraddress(), 1_000, "", 0, None,
-            "cents", direct_options)
+        direct_recipient = recipient.getdigidollaraddress()
+
+        def prepare_direct():
+            return client.senddigidollar(
+                direct_recipient, 1_000, "", 0, None, "cents", direct_options)
+
+        pending = prepare_direct()
+        assert_equal(pending["reserved_user_inputs"], [])
+        self.wait_until(lambda: bool(prepare_direct()["reserved_user_inputs"]))
+        pending = prepare_direct()
         assert_equal(pending["provider_id"], provider_id)
         assert_equal(pending["status"], "pending")
         direct_inputs = pending["reserved_user_inputs"]

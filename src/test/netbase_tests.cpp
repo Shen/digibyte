@@ -220,6 +220,23 @@ BOOST_AUTO_TEST_CASE(socks5_required_auth_uses_fresh_isolation_tokens)
     BOOST_CHECK(disabled.writes.empty());
 }
 
+BOOST_AUTO_TEST_CASE(socks5_expired_deadline_prevents_writes)
+{
+    Socks5InterruptGuard interrupt_guard{/*interrupt=*/false};
+    const ProxyCredentials credentials{"username", "password"};
+    RecordingSocks5Sock expired{Socks5Response(/*authenticate=*/true)};
+    BOOST_CHECK(!Socks5("private-test.onion", 12033, &credentials, expired,
+                        ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH,
+                        std::chrono::steady_clock::now()));
+    BOOST_CHECK(expired.writes.empty());
+
+    RecordingSocks5Sock ready{Socks5Response(/*authenticate=*/true)};
+    BOOST_CHECK(Socks5("private-test.onion", 12033, &credentials, ready,
+                       ProxyLogPolicy::REDACT_DESTINATION, ProxyAuthPolicy::REQUIRE_AUTH,
+                       std::chrono::steady_clock::now() + 1s));
+    BOOST_REQUIRE_EQUAL(ready.writes.size(), 3);
+}
+
 static CSubNet ResolveSubNet(const std::string& subnet)
 {
     CSubNet ret;

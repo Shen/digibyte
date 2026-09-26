@@ -227,6 +227,8 @@ DIGIBYTE_TESTS =\
   test/paymaster_reputation_tests.cpp \
   test/paymaster_sponsorship_tests.cpp \
   test/paymaster_wire_tests.cpp \
+  test/paymaster_transport_tests.cpp \
+  test/paymaster_admission_tests.cpp \
   test/digidollar_validation_tests.cpp \
   test/digidollar_txindex_tests.cpp \
   test/digidollar_volatility_tests.cpp \

@@ -1,5 +1,16 @@
 # REPO_MAP.md — DigiByte Core v9.26.2
 
+The 2026-09-26 Direct-capacity patch is documented in
+[Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
+one outgoing channel by default (up to four), a dedicated bounded provider
+listener, fair wallet-scoped queueing, connection-start limits, routed inbox
+admission and protected reply/recovery quotas. Core ownership lives in
+`src/paymaster/transport.h`, `src/paymaster/manager.{h,cpp}`, `src/net.{h,cpp}`
+and `src/netbase.{h,cpp}`. Focused tests are
+`src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
+and `test/functional/p2p_paymaster_connection_capacity.py`.
+Migration and pending runtime checks are documented in the capacity guide.
+
 *Last validated: 2026-05-20 against `feature/digidollar-v1`*
 
 > This map covers **core DigiByte C++ code only**. DigiDollar subsystem (`src/digidollar/`, `src/oracle/`, `src/rpc/digidollar*`, `src/consensus/{dca,err,volatility,digidollar*}.{cpp,h}`, `src/index/digidollarstatsindex.{cpp,h}`, DD wallet code, DD Qt widgets) is documented in `REPO_MAP_DIGIDOLLAR.md`. Third-party libs (leveldb, secp256k1, crc32c, minisketch, univalue) and the `depends/` directory are excluded.

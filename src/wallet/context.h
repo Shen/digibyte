@@ -39,6 +39,8 @@ struct WalletContext {
     // Non-owning access to node transport queues. Durable Paymaster authority
     // remains in each wallet database and is accessed through PaymasterStore.
     DigiDollar::Paymaster::Manager* paymaster{nullptr};
+    // Accessed only by the single scheduled provider-service callback.
+    size_t paymaster_service_cursor{0};
     // It is unsafe to lock this after locking a CWallet::cs_wallet mutex because
     // this could introduce inconsistent lock ordering and cause deadlocks.
     Mutex wallets_mutex;
