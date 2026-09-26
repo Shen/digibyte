@@ -217,7 +217,8 @@
       <ErrorText>There was an error executing the libdigibyte_qt translation file generation task.</ErrorText>
     </PropertyGroup>
     <Exec Command="echo Performing libdigibyte_qt translation file generation task." />
-    <Exec Command="$(QtToolsDir)\lrelease.exe &quot;%(TranslationFiles.Identity)&quot; -qm ..\..\src\qt\locale\%(Filename).qm" />
+    <!-- Translation source text can resemble MSBuild diagnostics; use lrelease exit status. -->
+    <Exec IgnoreStandardErrorWarningFormat="true" Command="&quot;$(QtToolsDir)\lrelease.exe&quot; &quot;%(TranslationFiles.Identity)&quot; -qm ..\..\src\qt\locale\%(Filename).qm" />
   </Target>
 
   <Target Name="resource" Inputs="@(ResourceTemplates);@(ResourceFiles)" Outputs="@(ResourceTemplates->'$(GeneratedFilesOutDir)\rcc\qrc_%(Filename).cpp')" DependsOnTargets="translation">

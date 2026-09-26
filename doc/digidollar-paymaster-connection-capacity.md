@@ -483,3 +483,24 @@ Then run the existing Qt, compatibility/bridge and release matrix. Success means
 all expected cases executed, no required skips and exit 0. Retain source diff,
 config, executable hashes and logs. Deployment and Tor routing changes remain
 separate operator work.
+
+### Operator validation after the MSVC fix (2026-09-26)
+
+The operator built `7075ca046a` with the accompanying lrelease Exec correction
+in the capacity worktree: Windows Release build exit **0**, empty error log.
+MSBuild no longer parses translation source text such as `Error: %1` as a
+compiler diagnostic; lrelease nonzero exit codes still fail the task. A short
+isolated check verified both the Welsh catalog success and missing-input failure.
+
+The fresh integrated `paymaster_*,netbase_tests` run passed **283 cases / 10,755
+assertions**, exit **0**. The other 3,742 cases were excluded by the selection.
+`p2p_paymaster_connection_capacity.py --descriptors` passed in **22 seconds**,
+exit **0**, along with all **18** test-framework unit tests. The first socket
+run completed its checks but failed runner acceptance due to CP1252 logging of
+the Unicode temporary path; the successful rerun used `PYTHONUTF8=1` and
+`PYTHONIOENCODING=utf-8`, inherited by child Python processes.
+
+This updates the earlier integrated-build/unit/socket NOT_RUN status. Broader
+wallet/integration, interactive Qt, real Tor, sustained load and the remaining
+release matrix still require separate evidence. No full clean rebuild or
+complete-suite pass is claimed.
