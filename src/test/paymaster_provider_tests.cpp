@@ -2199,4 +2199,68 @@ BOOST_AUTO_TEST_CASE(pool_preparation_preserves_finite_fee_and_asset_boundaries)
     BOOST_CHECK(empty.records.empty());
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_journal_255_256_257_record_boundary)
+{
+    // G11: exercise the actual format bound, not a synthetic vector limit.
+    ProviderMaintenanceLedger ledger;
+    std::string error;
+    for (uint32_t index{1}; index <= 257; ++index) {
+        auto record = MaintenanceRecord(uint256S(strprintf("%064x", index)),
+                                        uint256S("aa"), index, 100);
+        record.created_at = record.updated_at = 1000;
+        ledger.records.push_back(record);
+        if (index >= 255) {
+            BOOST_CHECK_EQUAL(ValidateProviderMaintenanceLedger(ledger, error), index <= 256);
+        }
+    }
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+    // An invalid append must not be mistaken for authority to discard an old
+    // open operation. Validation itself is read-only.
+    BOOST_CHECK_EQUAL(ledger.records.size(), 257U);
+    BOOST_CHECK(ledger.records.front().operation_id == uint256::ONE);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_mixed_v3_v4_and_truncated_records)
+{
+    // G12: legacy recurring work cannot acquire V4 one-shot setup authority.
+    auto legacy = MaintenanceRecord(uint256S("a1"), uint256S("a2"), 1, 100);
+    legacy.version = 3;
+    legacy.created_at = legacy.updated_at = 1000;
+    auto current = MaintenanceRecord(uint256S("b1"), uint256S("b2"), 2, 100);
+    current.created_at = current.updated_at = 1001;
+    current.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    current.preparation_authorization = uint256S("b3");
+    current.preparation_request = uint256S("b4");
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {legacy, current};
+    std::string error;
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(ledger, error));
+    CDataStream stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    stream << ledger;
+    const auto span = MakeUCharSpan(stream);
+    const std::vector<unsigned char> bytes{span.begin(), span.end()};
+    ProviderMaintenanceLedger decoded;
+    stream >> decoded;
+    BOOST_REQUIRE(stream.empty());
+    BOOST_REQUIRE(ValidateProviderMaintenanceLedger(decoded, error));
+    BOOST_REQUIRE_EQUAL(decoded.records.size(), 2U);
+    BOOST_CHECK_EQUAL(decoded.records[0].version, 3);
+    BOOST_CHECK(decoded.records[0].preparation_authorization.IsNull());
+    BOOST_CHECK(!decoded.records[0].IsPreparation());
+    BOOST_CHECK(decoded.records[1].preparation_authorization == current.preparation_authorization);
+    // Every prefix is genuinely truncated; none may silently become a valid
+    // empty/partial ledger. Decode into fresh storage for each attempt.
+    for (size_t length{0}; length < bytes.size(); ++length) {
+        const std::vector<unsigned char> prefix{bytes.begin(), bytes.begin() + length};
+        CDataStream truncated{prefix, SER_NETWORK, ::PROTOCOL_VERSION};
+        ProviderMaintenanceLedger partial;
+        BOOST_CHECK_THROW(truncated >> partial, std::ios_base::failure);
+    }
+    decoded.records[1].version = ProviderMaintenanceRecord::CURRENT_VERSION + 1;
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
+    decoded = ledger;
+    decoded.records[0].kind = ProviderMaintenanceKind::PREPARE_DGB;
+    BOOST_CHECK(!ValidateProviderMaintenanceLedger(decoded, error));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
