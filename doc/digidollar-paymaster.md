@@ -132,7 +132,9 @@ still confirms the exact provider, model, recipient amount, and service fee
 before its wallet signs. Optional provider autostart is a separate opt-in and
 defaults to off. A provider wallet must be a descriptor wallet with local
 private keys; legacy, watch-only, and external-signer wallets are not eligible.
-`-paymasterendpoint=<host:port>` sets the announced endpoint. Providers also
+`-paymasterendpoint=<address:port>` sets the announced endpoint: use a public
+numeric IP or a valid onion address, with an explicit port. Ordinary DNS
+hostnames are not resolved by provider readiness. Providers also
 require `-paymasterbind=<numeric-ip:port>[=onion]` on a separate Direct port and
 sufficient effective connection capacity. Loopback announcements are accepted
 only on regtest. Client capacity defaults to one outgoing channel per node,
@@ -462,6 +464,28 @@ before enabling an action.
 
 ## Provider setup
 
+Before wallet setup, configure the node's dedicated Direct listener using the
+[provider configuration examples](digidollar-paymaster-connection-capacity.md#provider-configuration-and-migration).
+The common node requirements above are also mandatory. Keep the Direct port
+separate from ordinary P2P and RPC, configure firewall/NAT or Tor forwarding,
+and restart the node after changing startup options. The Qt wizard configures
+wallet settings; it does not create the listener or configure Tor.
+
+With the default one outgoing channel and 16 provider channels, the effective
+`maxconnections` must be at least 45; the examples use 125 to leave more ordinary
+inbound capacity. System file-descriptor limits can lower the effective budget.
+A configured endpoint alone is insufficient. After restart, the provider
+wallet's `getpaymasterinfo.transport` should report `outbound_limit=1`,
+`inbound_limit=16`, `handshake_limit=8`, and `listener_ready=true` for this
+configuration. `external_reachability="unknown"` is expected: verify the
+announced route from a separate client. Inspect `readiness_errors` for remaining
+wallet, policy, synchronization or pool prerequisites before starting service.
+
+The following wallet steps are available through Qt and the documented RPCs.
+For CLI calls, select the intended provider wallet with `-rpcwallet=<wallet>`;
+in Qt, select that wallet before opening the operator controls. There is no
+supported `digibyte-cli -paymastersetup` option.
+
 In Qt, the provider-only **Paymaster Network** tab is hidden by default. Enable
 **Show Paymaster operator controls** under **Settings → Options → Wallet →
 Expert** to configure or operate a provider. This display preference does not
@@ -639,8 +663,15 @@ The provider lifecycle is deliberately staged:
    automatic servicing is active with `PAYMASTER_AUTOMATIC_SERVICE_ACTIVE`.
    Both paths can sign only provider-owned inputs for an exact transaction that
    passes the existing provider authorization manifest and safety policy.
-10. Use `stoppaymaster` before planned maintenance or changing operation mode.
-   Configuration and durable commits remain in the wallet database.
+10. For a persistent service stop, first save
+    `setpaymasterruntimesettings {"autostart":false}`, then call `stoppaymaster`
+    and verify `running=false` in `getpaymasterinfo`. A bare `stoppaymaster`
+    can be undone by saved autostart. Configuration and durable commits remain
+    in the wallet database. Stopping service alone does not pause an approved
+    finite pool setup; use `setpaymasterenabled false` if new setup signing must
+    also pause. Already signed transactions may still be rebroadcast. After
+    maintenance, explicitly re-enable/start as needed and restore autostart only
+    if desired.
 
 `getpaymasterinfo` includes `settings_present` so an identity-only wallet can
 be distinguished from a deliberately disabled persisted provider

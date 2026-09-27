@@ -1,7 +1,8 @@
 # Automatic finite Paymaster pool setup
 
-Current behavior reviewed at `a4f17f6315` on `integration/paymaster-v9.26.6rc2`,
-2026-09-23. Dated test evidence is separated from current acceptance below.
+Setup prerequisites reviewed against `1789c803be` on
+`integration/paymaster-v9.26.6rc2`, 2026-09-27. Dated pool-setup test evidence
+is separated from current acceptance below.
 
 `preparepaymasterpool` authorizes a finite setup, independently of recurring
 liquidity maintenance and provider service startup. Its default call remains a
@@ -9,6 +10,25 @@ read-only preview. Execution persists the exact output scripts before either
 transaction is created. The existing wallet stores signed transactions; the
 existing maintenance ledger stores their pool purpose, fee ceiling, request
 binding, policy/identity/network binding, and progress.
+
+## Prerequisites and scope
+
+This procedure prepares wallet liquidity; it does not configure an incoming
+Direct listener or start provider service. Follow the
+[provider setup](digidollar-paymaster.md#provider-setup) for the eligible wallet,
+identity, operating policy, finite safety limits and enabled state. Use the
+same provider wallet for every call (`digibyte-cli -rpcwallet=<wallet>`).
+Fund it with sufficient confirmed DGB and, for USER_PAID, confirmed DD; the
+preview reports the required principal and fee ceiling.
+
+Before serving clients, configure the
+[dedicated Direct listener and connection budget](digidollar-paymaster-connection-capacity.md#provider-configuration-and-migration)
+and restart the node. With default 1 outgoing / 16 provider channels, the
+effective `maxconnections` must be at least 45. A finished pool does not resolve
+missing listener, endpoint or transport capacity. Check `getpaymasterinfo`
+readiness separately and start explicitly unless autostart was deliberately
+enabled. A stopped service with `autostart=false` can still complete an already
+approved finite setup as described below.
 
 ## Preview, authorize, observe
 

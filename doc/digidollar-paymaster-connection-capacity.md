@@ -135,32 +135,94 @@ and the planned reserve remains conservative until restart.
 
 ## Provider configuration and migration
 
-Existing client prerequisites still apply, including v2, index/archive and
-privacy checks. Clients need no new setting to use the default one channel.
-
-Providers now require an explicit dedicated bind and public announcement
-endpoint. Choose a port separate from ordinary P2P:
+Clients and providers need the common settings below in `digibyte.conf` and
+must wait for chain/wallet synchronization, an active DigiDollar deployment and
+a fully synchronized transaction index. Clients need no dedicated incoming bind
+to use the default one outgoing Direct channel.
 
 ```ini
+digidollar=1
 paymaster=1
+prune=0
+txindex=1
 v2transport=1
 maxconnections=125
 paymastermaxoutbound=1
-paymastermaxinbound=16
+```
+
+Providers additionally need `paymastermaxinbound=16` (the default), an explicit
+dedicated bind and an announced Direct endpoint. These startup settings require
+a node restart. With default ordinary outbound targets, one Direct outgoing
+channel, 16 active provider channels and eight handshake slots, at least **45
+effective connections** are required; four outgoing channels require at least
+48. If the complete provider reserve does not fit, it is disabled rather than
+partially allocated. Check the effective RPC limits after any startup reduction
+by the operating system. All provider wallets on a node share this reserve.
+
+Choose exactly one of the following endpoint examples, adapting the addresses
+and port to your deployment. Port 12033 is an example, not a network default;
+it must differ from your ordinary P2P and RPC ports. `paymasterbind` and
+`paymasterendpoint` are network-specific options: put them in the active
+network section, such as `[main]` or `[test]` (testnet26), when using a shared
+configuration file, or supply them as command-line options for that network.
+Replace every placeholder before starting.
+
+For an operator-managed Tor service, use:
+
+```ini
 paymasterbind=127.0.0.1:12033=onion
 paymasterendpoint=YOUR_V3_SERVICE.onion:12033
 ```
 
-Replace the placeholder with the actual operator-owned onion service. Configure
-Tor to forward its port 12033 to 127.0.0.1:12033. The new bind does not create or
-reconfigure Tor services. For clearnet, bind the intended local interface and
-announce its reachable address/port. Numeric bind addresses and explicit nonzero
-ports are required. Multiple binds share one admission pool.
+In the matching onion service's `torrc` block, beneath its `HiddenServiceDir`,
+add the dedicated forwarding rule:
 
-`getpaymasterinfo` and `startpaymaster` report missing capacity or listener
-readiness. `listener_ready=true` proves local binds only;
-`external_reachability` stays `unknown`. Verify firewall/Tor forwarding
-separately. Ordinary gossip continues over ordinary P2P.
+```text
+HiddenServicePort 12033 127.0.0.1:12033
+```
+
+Use the actual onion hostname from that service for `YOUR_V3_SERVICE.onion`.
+Reload/restart Tor through your normal service-management procedure. The bind
+option neither creates a Tor service nor adds a port to Core's automatically
+managed ordinary P2P onion service. Keep any existing ordinary P2P forwarding
+rule separate. The `=onion` suffix identifies a trusted Tor forwarding target:
+keep it on loopback (or an equivalently protected local interface), never on an
+unrestricted public listener. Forwarded sockets share global admission limits;
+the local forwarding address does not identify an individual remote client.
+
+For clearnet, use a local interface and its externally reachable numeric IP:
+
+```ini
+paymasterbind=LOCAL_INTERFACE_IP:12033
+paymasterendpoint=PUBLIC_IP:12033
+```
+
+Replace both placeholders with actual numeric addresses; IPv6 endpoints use
+`[address]:port`. Configure firewall/NAT to forward the announced TCP port to
+the dedicated bind. The public and local port may differ if the forwarding
+rule matches. An ordinary DNS hostname is not resolved by provider readiness.
+Loopback announcements are allowed only on regtest. Bind addresses must be
+numeric and use an explicit nonzero port. Multiple binds share one admission
+pool; any failed bind prevents listener readiness.
+
+After restart, inspect `getpaymasterinfo` for the intended wallet:
+
+| Check | Expected for the defaults above / corrective action |
+|---|---|
+| `transport.outbound_limit` | `1`; outgoing capacity is shared by client wallets. |
+| `transport.inbound_limit` / `transport.handshake_limit` | `16` / `8`; zero inbound capacity prevents provider operation. |
+| `transport.listener_ready` | `true`; otherwise check port conflicts, bind addresses, v2 and capacity. |
+| `transport.external_reachability` | `unknown`; independently verify the advertised route from another client. |
+| `readiness_errors` | Resolve every remaining prerequisite before accepting new work. |
+
+`PAYMASTER_NO_LOCAL_INBOUND_CAPACITY` indicates no effective provider reserve;
+`PAYMASTER_DIRECT_LISTENER_NOT_READY` indicates no ready dedicated listener.
+Missing or invalid announcements report `PAYMASTER_PROVIDER_ENDPOINT_NOT_CONFIGURED`
+or `PAYMASTER_PROVIDER_ENDPOINT_UNROUTABLE`. `startpaymaster` also reports
+readiness failures. A local bind or an empty transport queue alone does not
+prove external reachability or full provider readiness. Ordinary gossip
+continues over ordinary P2P. Complete the wallet-scoped
+[provider setup](digidollar-paymaster.md#provider-setup) before serving clients.
 
 Providers without `paymasterbind` fail readiness after upgrading. Inspect open
 signed sessions, drain and shut down normally before migration. Keep the old
