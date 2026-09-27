@@ -113,7 +113,7 @@ BOOST_AUTO_TEST_CASE(reply_reserve_requires_exact_locally_queued_peer_session_pr
     BOOST_CHECK(!manager.CanReceiveDirectMessage(11, response, DirectAdmissionClass::RESPONSE, NOW));
     BOOST_CHECK(!manager.CanReceiveDirectMessage(10, Reply(Request(2)), DirectAdmissionClass::RESPONSE, NOW));
     BOOST_CHECK(!manager.CanReceiveDirectMessage(10, Reply(Request(1, 101)), DirectAdmissionClass::RESPONSE, NOW));
-    BOOST_CHECK(!manager.CanReceiveDirectMessage(10, response, DirectAdmissionClass::RECOVERY, NOW));
+    BOOST_CHECK(manager.CanReceiveDirectMessage(10, response, DirectAdmissionClass::RECOVERY, NOW));
     PaymasterResultMessage wrong_phase;
     wrong_phase.request_id = request.request_id;
     wrong_phase.session_id = request.session_id;
@@ -287,8 +287,29 @@ BOOST_AUTO_TEST_CASE(all_five_wire_request_phases_register_only_their_matching_r
         const int64_t peer = i + 1;
         BOOST_REQUIRE(manager.QueueOutboundDirectMessage(peer, Id(peer), 100, phases[i].first, NOW));
         BOOST_CHECK(manager.CanReceiveDirectMessage(peer, phases[i].second, admission, NOW));
+        if (i != 0) {
+            const auto wrong_class = admission == DirectAdmissionClass::RECOVERY
+                ? DirectAdmissionClass::RESPONSE : DirectAdmissionClass::RECOVERY;
+            BOOST_CHECK(!manager.CanReceiveDirectMessage(peer, phases[i].second, wrong_class, NOW));
+        }
         BOOST_CHECK(!manager.CanReceiveDirectMessage(peer + 100, phases[i].second, admission, NOW));
     }
+}
+
+BOOST_AUTO_TEST_CASE(recovery_capacity_proof_requires_local_request_binding)
+{
+    Manager manager{true};
+    const auto request = Request(1);
+    const auto proof = Reply(request);
+    BOOST_CHECK(!manager.CanReceiveDirectMessage(1, proof, DirectAdmissionClass::RECOVERY, NOW));
+    BOOST_REQUIRE(manager.QueueCapacityRequest(1, Id(1), 100, request, NOW));
+    BOOST_CHECK(manager.CanReceiveDirectMessage(1, proof, DirectAdmissionClass::RECOVERY, NOW));
+    BOOST_CHECK(!manager.CanReceiveDirectMessage(2, proof, DirectAdmissionClass::RECOVERY, NOW));
+    BOOST_CHECK(!manager.CanReceiveDirectMessage(1, Reply(Request(2)), DirectAdmissionClass::RECOVERY, NOW));
+    BOOST_CHECK(!manager.CanReceiveDirectMessage(1, proof, DirectAdmissionClass::REQUEST, NOW));
+    BOOST_CHECK(Receive(manager, 1, 100, proof, DirectAdmissionClass::RECOVERY) == DirectEnqueueResult::ACCEPTED);
+    manager.ForgetDirectPeer(1);
+    BOOST_CHECK(!manager.CanReceiveDirectMessage(1, proof, DirectAdmissionClass::RECOVERY, NOW));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -56,6 +56,7 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
                           {"restricted_service_descriptor", UniValueType(UniValue::VSTR)},
                           {"sponsorship_capability", UniValueType(UniValue::VSTR)},
                           {"prepare_only", UniValueType(UniValue::VBOOL)},
+                          {"retry_transport", UniValueType(UniValue::VBOOL)},
                           {"authorization_commitment", UniValueType(UniValue::VSTR)},
                           {"subtract_paymaster_fee_from_amount", UniValueType(UniValue::VBOOL)},
                           {"send_all_spendable_dd", UniValueType(UniValue::VBOOL)}},
@@ -71,7 +72,7 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
              restricted_key_supplied || restricted_descriptor_supplied ||
              restricted_capability_supplied || prepare_only_supplied ||
              authorization_commitment_supplied || subtract_fee_supplied ||
-             send_all_supplied)) {
+             send_all_supplied || !send_options.find_value("retry_transport").isNull())) {
             throw JSONRPCError(RPC_INVALID_PARAMETER,
                 "fee_mode dgb does not accept Paymaster authorization or selection fields");
         }

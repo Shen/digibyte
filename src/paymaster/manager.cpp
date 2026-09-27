@@ -1261,7 +1261,11 @@ bool Manager::CanReceiveDirectMessage(int64_t peer_id, const DirectPayload& payl
     if (IsDirectRequestPayload(payload)) return false;
     const bool recovery = std::holds_alternative<AlternativeRecoveryResponse>(payload) ||
                           std::holds_alternative<AlternativeRecoveryResultMessage>(payload);
-    if (recovery != (admission == DirectAdmissionClass::RECOVERY)) return false;
+    // Capacity is the shared first phase of payment and recovery. The caller
+    // selects the reply budget from the local channel lease; the peer/session
+    // registration below must still match the exact locally queued request.
+    if (!std::holds_alternative<PaymasterCapacityProof>(payload) &&
+        recovery != (admission == DirectAdmissionClass::RECOVERY)) return false;
     LOCK(m_direct_mutex);
     PruneExpectedResponses(now);
     return m_expected_responses.count({peer_id, GetDirectSessionKey(payload), payload.index()}) != 0;

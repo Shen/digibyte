@@ -2302,6 +2302,7 @@ RPCHelpMan senddigidollar()
                              {"provider_identity_key", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Restricted sponsorship provider x-only identity"},
                              {"restricted_service_descriptor", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Canonical provider-signed restricted descriptor"},
                              {"sponsorship_capability", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Secret one-payment capability; use authenticated RPC, never shell history"},
+                             {"retry_transport", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Explicitly retry failed Paymaster transport without changing the payment or renewing authorization"},
                              {"prepare_only", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Compatibility hint to prepare and return the exact Paymaster authorization; every call without authorization_commitment is prepare-only"},
                             {"authorization_commitment", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact commitment returned by a prior preparation call; mandatory before any new USER signature"},
                             {"subtract_paymaster_fee_from_amount", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Treat amount as the exact total DD outflow when a Paymaster is used; the recipient receives amount minus the exact service fee"},

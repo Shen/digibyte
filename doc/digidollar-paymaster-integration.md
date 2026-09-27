@@ -16,6 +16,16 @@ budget, another send RPC,
 or deferred execution after signing. No consensus, Paymaster wire encoding,
 wallet record encoding, or wallet feature flag is introduced by this package.
 
+## Explicit transport retry
+
+`senddigidollar` accepts the optional boolean `retry_transport` in its Paymaster
+options, as does `requestpaymasterquote`. Set it only for an explicit retry of
+a failed connection, keeping the same request ID, payment options and (when
+already accepted) authorization commitment. It resets local transport failure
+state without extending signed deadlines, changing inputs or granting signing
+authority. It is rejected with `fee_mode=dgb`. Recovery uses the same option on
+`resolvepaymastersession(..., "cancel_to_self", options)`.
+
 ## Entry point and units
 
 Use the wallet endpoint `/wallet/<wallet-name>` and authenticated local RPC.

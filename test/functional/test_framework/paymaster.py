@@ -300,6 +300,9 @@ class PaymasterFunctionalHarness:
         if not quote:
             raise AssertionError("manual Paymaster quote was not produced")
         assert_equal(capacity_seen, True)
+        # Receive/persist the quote and release the Direct lease before handing
+        # control back to tests that start another session on the same node.
+        self.test.wait_until(lambda: send().get("authorization_required", False))
         return options, quote, send
 
     def deliver_committed_result(self, request_id, txid):

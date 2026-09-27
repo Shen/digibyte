@@ -504,3 +504,102 @@ This updates the earlier integrated-build/unit/socket NOT_RUN status. Broader
 wallet/integration, interactive Qt, real Tor, sustained load and the remaining
 release matrix still require separate evidence. No full clean rebuild or
 complete-suite pass is claimed.
+
+### Follow-up from the functional matrix (2026-09-27)
+
+The operator's eight-test run on the September 26 build passed P2P, readiness,
+offer selection, lifecycle and reorg; provider recovery, failover and RPC
+failed. The previous unit/socket successes do not cover these failures.
+
+The recovery path retained the original unanswered payment lease while queuing
+its distinct recovery lease. With one outgoing slot this could expire the
+recovery wait. After validating/persisting the recovery record and checking
+capacity equivocations, the resolver now releases only that original transport
+key. Signed artifacts and financial reservations remain intact. The provider
+regression additionally asserts preservation of the original reserved inputs.
+
+The manual-provider test helpers now consume the signed quote at the client
+before starting a competing session; producing the quote alone does not free
+the channel. Failover/RPC fixtures explicitly drive the Capacity exchange
+before expecting input reservations. The fallback test also checks automatic
+channel release without manually disconnecting the old socket.
+
+A new daemon build and the provider recovery regression are still required for
+the C++ fix; tests against the previous binary cannot validate that change.
+
+Local targeted verification after these fixture corrections: failover passed in
+51 seconds, RPC passed in 45 seconds (including explicit PMSUBMIT queue wait),
+both with exit 0 on the existing September 26 daemon. Each runner invocation
+also passed all 18 framework unit tests. The edited recovery C++ unit passed
+MSVC `/Zs` with warnings as errors; all four edited Python files compiled and
+`git diff --check` passed. These checks do not replace rebuilding and executing
+the provider recovery case. The shared helper's other consumers also need the
+selected functional matrix rerun after that build.
+
+The subsequent operator provider run (43 s, exit 1) progressed beyond the queue
+stall but failed with `PAYMASTER_DIRECT_CONNECTION_FAILED`. A focused rerun
+with a bounded explicit retry after the source-budget refill reached Capacity
+processing, then exposed another admission bug: `CanReceiveDirectMessage`
+classified every Capacity proof as an ordinary reply, although recovery uses
+the same Capacity wire phase on a RECOVERY lease. Expected Capacity proofs now
+use the budget selected by the local lease while retaining exact peer, provider,
+session and phase registration checks. Other reply types still reject the wrong
+class. The new regression covers unsolicited/mismatched/disconnected peers and
+successful recovery inbox admission. Source/global admission limits are unchanged.
+
+The fixture permits at most two explicit transport retries, spaced by 5.1 s,
+for the exact connection-failed error during the initial recovery Capacity
+queue. Other errors and later phase failures remain test failures. The latest
+manager change still needs a new daemon build and provider end-to-end run.
+
+The updated isolated transport/admission suite, freshly compiled with the
+manager change, passes **23 cases / 3,340 assertions**, exit 0. Python compilation
+and whitespace checks also pass. No updated daemon-backed pass is claimed.
+
+The next operator run (53 s, exit 1) completed alternative recovery and its
+financial assertions, then hit the source start budget in the subsequent
+restricted Sponsored transfer. The general transfer/replay fixture now also
+uses at most two explicit retries per request ID, after 5.1 s refill, only for
+`PAYMASTER_DIRECT_CONNECTION_FAILED` (-34). All payment options, request IDs,
+capabilities and authorization commitments are preserved; other errors propagate.
+The production limits and retry contract remain unchanged.
+
+A timing-dependent rerun reached the same source admission limit at the
+post-authorization recovery reconnect. The fixture now shares one bounded
+retry helper across positive payment and recovery calls (two retries for the
+entire payment request, independently two for the entire recovery operation).
+Negative authorization calls remain direct, with their original assertions.
+Retries preserve the exact options and add only `retry_transport=true` after
+5.1 s. This supersedes the initial-Capacity-only fixture retry described above.
+
+The integrated admission suite on the operator's latest build passes **11 cases /
+871 assertions**, exit 0. The bounded fixture retry also accepts the existing
+signed-submit wrapper's -4 code for the exact same transport-error string
+(pre-quote uses -34); it does not retry other wallet errors.
+
+The subsequent full provider attempt exposed `Unexpected key retry_transport`:
+`senddigidollar` did not expose or forward the retry option already implemented
+by `requestpaymasterquote`. The public boolean validation/help and forwarding
+are now added; the durable-authorization fast path retries only the matching
+local channel after order/commitment validation, before resuming its exact
+PSBT. Direct-DGB mode rejects this Paymaster-only option. RPC regressions cover
+wrong types, DGB rejection and unchanged terminal payment identity/accounting.
+The provider fixture exercises retries before quote and after authorization.
+The operator subsequently reran the selected tests after the requested build:
+`wallet_paymaster_provider.py --descriptors` **PASS (87 s)** and
+`wallet_paymaster_rpc.py --descriptors` **PASS (44 s)**, combined **131 s**,
+runner exit **0**. This validates the provider recovery and subsequent transfer
+flows plus the public retry-option RPC checks on the updated local worktree.
+The operator also reports the remaining seven focused functional tests passing:
+P2P (13 s), connection capacity (22 s), failover (63 s), lifecycle (30 s), offer
+selection (27 s), readiness (24 s), and reorg (25 s). Accumulated duration was
+204 s, wall time 206 s, runner exit 0. Together with provider/RPC above, all nine
+selected functional tests pass on the updated local build, with no reported
+skips. The operator also supplied the latest integrated `paymaster_*,netbase_tests`
+result: **284 cases / 10,767 assertions passed**. The other 3,742 cases were
+excluded by the filter; the subsequent PowerShell exit-code guard did not fail.
+Both functional runner invocations passed all 18 framework unit tests. The
+reported run directories are `test_runner_₿_🏃_20260927_105839` (provider/RPC)
+and `test_runner_₿_🏃_20260927_123346` (remaining seven cases).
+Qt, reference compatibility, real Tor/load and the wider release gates remain
+separate.

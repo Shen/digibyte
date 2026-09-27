@@ -128,6 +128,9 @@ class PaymasterFailoverTest(DigiByteTestFramework):
 
         self.wait_until(quote_ready)
         assert_equal(capacity_seen, True)
+        # Consume the signed quote locally before another wallet needs the
+        # node's single channel. Merely producing it at the provider is not enough.
+        self.wait_until(lambda: send().get("authorization_required", False))
         return options, quote, send
 
     def authorize(self, provider, options, send):
@@ -261,7 +264,18 @@ class PaymasterFailoverTest(DigiByteTestFramework):
         first_attempt = fallback_send()
         assert_equal(first_attempt["reserved_user_inputs"], [])
         assert_equal(first_attempt["provider_attempts"], 0)
-        self.wait_until(lambda: bool(fallback_send()["reserved_user_inputs"]))
+
+        def fallback_inputs_reserved():
+            candidate = fallback_send()
+            if candidate["reserved_user_inputs"]:
+                return True
+            response = cheap.processpaymasterrequests()
+            if response["processed"]:
+                assert_equal(response["message_type"], "capacity")
+                assert_equal(response["queued"], True)
+            return False
+
+        self.wait_until(fallback_inputs_reserved)
         assert_equal(
             first_attempt["provider_id"], cheap_identity["provider_id"])
         lookup = {"request_id": fallback_request}
@@ -285,15 +299,7 @@ class PaymasterFailoverTest(DigiByteTestFramework):
             abandoned_attempt["session"]["reserved_user_inputs"],
             original_inputs)
 
-        # The node intentionally keeps one short-lived authenticated direct
-        # channel at a time. Close the failed provider's channel so the next
-        # sequential attempt can authenticate the standby endpoint.
-        direct_peers = [
-            peer for peer in client_node.getpeerinfo()
-            if peer["connection_type"] == "paymaster"
-        ]
-        assert_equal(len(direct_peers), 1)
-        client_node.disconnectnode(nodeid=direct_peers[0]["id"])
+        # Fallback itself releases the old operation's transport lease.
         self.wait_until(lambda: not any(
             peer["connection_type"] == "paymaster"
             for peer in client_node.getpeerinfo()

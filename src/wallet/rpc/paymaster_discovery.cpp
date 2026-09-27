@@ -1474,6 +1474,12 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                 return resume;
             }
 
+            if (options.find_value("retry_transport").isTrue()) {
+                if (const auto* node = wallet->chain().context(); node && node->connman) {
+                    node->connman->RetryPaymasterConnection(
+                        PaymentChannelKey(*wallet, durable_session, durable_attempt.provider_id));
+                }
+            }
             nested.params = UniValue{UniValue::VARR};
             nested.params.push_back(EncodeBase64(durable_attempt.unsigned_psbt));
             nested.params.push_back(
@@ -1791,6 +1797,9 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
     intent.pushKV("selection", selection_name);
     intent.pushKV("maximum_provider_attempts", maximum_attempts);
     intent.pushKV("offer_id", selected->terms.offer_id.GetHex());
+    if (options.find_value("retry_transport").isTrue()) {
+        intent.pushKV("retry_transport", true);
+    }
     if (restricted) {
         intent.pushKV("provider_identity_key", options.find_value("provider_identity_key"));
         intent.pushKV("restricted_service_descriptor",

@@ -999,6 +999,12 @@ UniValue ResolveAlternativePaymasterRecovery(
         throw JSONRPCError(RPC_WALLET_ERROR, error);
     }
 
+    // Recovery is now durable and bound to this original attempt. Its separate
+    // channel must not wait behind the original submit's unanswered lease when
+    // the node has only one outgoing slot. Keep signed artifacts/reservations.
+    node->connman->ReleasePaymasterConnection(
+        PaymentChannelKey(wallet, session, original_attempt.provider_id));
+
     const auto make_result = [&](const AlternativeRecoveryRecord& record,
                                  const RecoveryQueueState& queue,
                                  std::optional<bool> broadcast = std::nullopt,

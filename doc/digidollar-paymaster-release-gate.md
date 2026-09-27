@@ -409,3 +409,26 @@ This updates the earlier integrated-build/unit/socket NOT_RUN status. Broader
 wallet/integration, interactive Qt, real Tor, sustained load and the remaining
 release matrix still require separate evidence. No full clean rebuild or
 complete-suite pass is claimed.
+
+### Functional-matrix follow-up (2026-09-27)
+
+The operator reported five of eight selected functional tests passing; provider
+recovery, failover and RPC failed. See the
+[capacity follow-up](digidollar-paymaster-connection-capacity.md#follow-up-from-the-functional-matrix-2026-09-27).
+Recovery transport release and asynchronous test-fixture corrections are under
+validation. The September 26 passing build/unit/socket results remain scoped to
+that earlier code; they do not establish a passing full Paymaster matrix.
+
+The recovery Capacity admission fix passes the integrated admission subset
+(11 cases / 871 assertions). Provider runs now complete recovery but exposed
+missing `senddigidollar` retry-option plumbing in later transfers. After that
+source fix and bounded fixture retries, the operator reports provider **PASS
+(87 s)** and RPC **PASS (44 s)**, runner exit **0**, combined **131 s**.
+The remaining seven focused functional tests also pass: P2P, connection
+capacity, failover, lifecycle, offer selection, readiness and reorg (204 s
+accumulated / 206 s wall time, exit 0). All nine selected functional tests are
+therefore green across these two operator runs. The latest integrated
+`paymaster_*,netbase_tests` selection also passes **284 cases / 10,767 assertions**;
+3,742 other cases were excluded by the filter. Both functional runner invocations
+passed all 18 framework unit tests. Qt, compatibility and Tor/load gates remain
+open; this completes the selected regression group, not the release matrix.

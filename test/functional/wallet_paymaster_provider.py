@@ -18,6 +18,7 @@ import struct
 import time
 
 from test_framework.address import base58_to_byte
+from test_framework.authproxy import JSONRPCException
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import ser_string, ser_uint256
 from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, paymaster_port, provider_safety_policy
@@ -605,6 +606,35 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         observed_paymaster_psbts = []
         provider_wallets = {identity["provider_id"]: wallet}
 
+        transport_retries = {}
+
+        def with_transport_retry(call, options, operation_id):
+            # Several consecutive payments share localhost's start-rate bucket.
+            # Model explicit user retries after refill, keeping the same payment
+            # identity and authority. Never turn protocol/financial errors into retries.
+            call_options = dict(options)
+            while True:
+                try:
+                    return call(call_options)
+                except JSONRPCException as error:
+                    retries = transport_retries.get(operation_id, 0)
+                    # Pre-quote transport errors use -34; the signed-submit
+                    # wrapper reports the same transport failure as -4.
+                    if (error.error["code"] not in (-34, -4) or
+                            error.error["message"] != "PAYMASTER_DIRECT_CONNECTION_FAILED" or
+                            retries >= 2):
+                        raise
+                    transport_retries[operation_id] = retries + 1
+                    self.log.info("Retry Direct transport after source-budget refill")
+                    time.sleep(5.1)
+                    call_options["retry_transport"] = True
+
+        def send_with_transport_retry(transfer_client, destination, amount, options):
+            return with_transport_retry(
+                lambda retry_options: transfer_client.senddigidollar(
+                    destination, amount, "", 0, None, "cents", retry_options),
+                options, options["request_id"])
+
         def complete_paymaster_transfer(request_id, amount_cents, fee_cap_cents,
                                         extra_options=None,
                                         stop_after_authorization=False,
@@ -631,8 +661,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
             def resume_client_send():
                 nonlocal client_result
-                response = transfer_client.senddigidollar(
-                    transfer_recipient, amount_cents, "", 0, None, "cents", options)
+                response = send_with_transport_retry(
+                    transfer_client, transfer_recipient, amount_cents, options)
                 # Any exact retry can consume the one unread signed result,
                 # including the policy-change check below. Later retries return
                 # durable session status, not another processed=True event.
@@ -1701,8 +1731,20 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "prepare_only": True,
         }
 
-        initial_recovery = client.resolvepaymastersession(
-            recovery_lookup, "cancel_to_self", prepare_recovery_options)
+        def resolve_recovery(options):
+            return with_transport_retry(
+                lambda retry_options: client.resolvepaymastersession(
+                    recovery_lookup, "cancel_to_self", retry_options),
+                options, "recovery:" + recovery_request_id)
+
+        original_inputs = client.getdigidollarsendsession(
+            recovery_lookup)["reserved_user_inputs"]
+        assert original_inputs
+        initial_recovery = resolve_recovery(prepare_recovery_options)
+        # Switching transport to recovery must retain the original financial
+        # reservation even though the unanswered payment channel is released.
+        assert_equal(client.getdigidollarsendsession(
+            recovery_lookup)["reserved_user_inputs"], original_inputs)
         assert_equal(initial_recovery["artifact"], "alternative_recovery")
         assert "refresh" in initial_recovery["allowed_actions"]
         assert "cancel_to_self" in initial_recovery["allowed_actions"]
@@ -1717,8 +1759,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         # Until a signed Capacity-v5 proof is received, exact retries expose no
         # user outpoint or return script to the recovery provider.
-        self.wait_until(lambda: client.resolvepaymastersession(
-            recovery_lookup, "cancel_to_self",
+        self.wait_until(lambda: resolve_recovery(
             prepare_recovery_options).get("queued", False))
         capacity_reply = {}
 
@@ -1729,8 +1770,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             # connection after applying its per-peer window; the production
             # client retries the same idempotent Capacity request on the
             # replacement connection as well.
-            client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", prepare_recovery_options)
+            resolve_recovery(prepare_recovery_options)
             capacity_reply = shadow.processpaymasterrequests()
             return capacity_reply.get("processed", False)
 
@@ -1743,8 +1783,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def queue_recovery_request():
             nonlocal disclosed_request
-            disclosed_request = client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", prepare_recovery_options)
+            disclosed_request = resolve_recovery(prepare_recovery_options)
             return (disclosed_request["recovery"]["phase"] ==
                     "request_ready" and disclosed_request.get("queued", False))
 
@@ -1756,8 +1795,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def process_recovery_request():
             nonlocal recovery_quote
-            client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", prepare_recovery_options)
+            resolve_recovery(prepare_recovery_options)
             recovery_quote = shadow.processpaymasterrequests()
             if not recovery_quote.get("processed", False):
                 return False
@@ -1776,8 +1814,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def receive_recovery_quote():
             nonlocal prepared_recovery
-            prepared_recovery = client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", prepare_recovery_options)
+            prepared_recovery = resolve_recovery(prepare_recovery_options)
             return (prepared_recovery["recovery"]["phase"] ==
                     "response_validated")
 
@@ -1822,8 +1859,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(restarted_summary["artifact"], "alternative_recovery")
         assert_equal(restarted_summary["requires_attention"], True)
         assert "cancel_to_self" in restarted_summary["allowed_actions"]
-        restarted_prepared = client.resolvepaymastersession(
-            recovery_lookup, "cancel_to_self", prepare_recovery_options)
+        restarted_prepared = resolve_recovery(prepare_recovery_options)
         assert_equal(restarted_prepared["recovery"]["authorization_commitment"],
                      recovery_commitment)
         assert_equal(restarted_prepared["recovery"]["authorization_accepted"],
@@ -1838,8 +1874,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def authorize_recovery():
             nonlocal authorized_recovery
-            authorized_recovery = client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", authorize_options)
+            authorized_recovery = resolve_recovery(authorize_options)
             return (authorized_recovery["recovery"]["phase"] ==
                     "user_signed" and authorized_recovery.get("queued", False))
 
@@ -1851,8 +1886,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "maximum_service_fee_per_transaction_cents": 0,
             "maximum_service_fee_per_day_cents": 0,
         })
-        resumed_authorized_recovery = client.resolvepaymastersession(
-            recovery_lookup, "cancel_to_self", authorize_options)
+        resumed_authorized_recovery = resolve_recovery(authorize_options)
         assert_equal(resumed_authorized_recovery["recovery"][
             "authorization_commitment"], recovery_commitment)
         assert_equal(resumed_authorized_recovery["recovery"][
@@ -1864,8 +1898,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def process_recovery_submit():
             nonlocal recovery_commit
-            client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", authorize_options)
+            resolve_recovery(authorize_options)
             recovery_commit = shadow.processpaymastersubmits()
             return (recovery_commit.get("processed", False) and
                     recovery_commit.get("message_type") == "recovery_submit")
@@ -1878,8 +1911,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
         def receive_recovery_result():
             nonlocal completed_recovery
-            completed_recovery = client.resolvepaymastersession(
-                recovery_lookup, "cancel_to_self", authorize_options)
+            completed_recovery = resolve_recovery(authorize_options)
             return (completed_recovery["recovery"]["phase"] ==
                     "final_committed")
 
@@ -2063,8 +2095,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         replay_options.update(restricted_options)
 
         def replay_client_send():
-            return client.senddigidollar(
-                recipient, restricted_amount, "", 0, None, "cents", replay_options)
+            return send_with_transport_retry(
+                client, recipient, restricted_amount, replay_options)
 
         replay_request = replay_client_send()
         assert_equal(replay_request["status"], "pending")

@@ -251,6 +251,14 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
         self.log.info("Reject malformed inputs at the remaining public RPC boundaries")
         assert_raises_rpc_error(
+            -3, "retry_transport", client.senddigidollar,
+            recipient, 100, "", 0, None, "cents",
+            {"fee_mode": "paymaster", "retry_transport": "yes"})
+        assert_raises_rpc_error(
+            -8, "fee_mode dgb does not accept", client.senddigidollar,
+            recipient, 100, "", 0, None, "cents",
+            {"fee_mode": "dgb", "retry_transport": True})
+        assert_raises_rpc_error(
             -8, "", client.requestpaymasterquote, "00", {})
         assert_raises_rpc_error(
             -8, "", client.resolvepaymastersession,
@@ -322,8 +330,23 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         second_request_id = "550e8400-e29b-41d4-a716-446655441000"
         second_options = dict(first_options)
         second_options["request_id"] = second_request_id
-        second_pending = client.senddigidollar(
-            recipient, 200, "", 0, None, "cents", second_options)
+        second_pending = {}
+
+        def second_inputs_reserved():
+            nonlocal second_pending
+            second_pending = client.senddigidollar(
+                recipient, 200, "", 0, None, "cents", second_options)
+            if second_pending["reserved_user_inputs"]:
+                return True
+            response = provider.processpaymasterrequests()
+            if response["processed"]:
+                assert_equal(response["message_type"], "capacity")
+                assert_equal(response["queued"], True)
+            return False
+
+        # Drive Capacity only: this session must reserve client inputs but not
+        # consume another provider pool slot by requesting a signed quote.
+        self.wait_until(second_inputs_reserved)
         assert_equal(second_pending["request_id"], second_request_id)
         second_snapshot = client.resolvepaymastersession(
             {"request_id": second_request_id}, "refresh")
@@ -545,6 +568,10 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(resumed["session_id"], authorization["session_id"])
         assert_equal(resumed["status"], "pending")
         assert_equal(resumed["payment_confirmed"], False)
+        # Authorization persists the PSBT before a replacement Direct channel
+        # is ready. Queue PMSUBMIT before exercising local provider commit;
+        # otherwise there is no wire request for deliver_committed_result.
+        self.wait_until(lambda: send().get("queued", False))
         psbt = authorization["psbt"]
 
         authorized_snapshot = client.resolvepaymastersession(
@@ -694,6 +721,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
                 recipient, amount, "", 0, inputs, "cents", dict(options, **changes))
         # Explicit saved inputs and equivalent dollars/cents are the SAME order.
         for replay in (
+                client.senddigidollar(recipient, 500, "", 0, original_inputs, "cents",
+                                     dict(options, retry_transport=True)),
                 client.senddigidollar(recipient, 500, "", 0, original_inputs, "cents", options),
                 client.senddigidollar(address=recipient, amount=Decimal("5.00"),
                                      amount_unit="dollars", options=options)):
