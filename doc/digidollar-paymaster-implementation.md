@@ -1,14 +1,16 @@
 # DigiDollar Paymaster implementation reference
 
-2026-09-26 working-tree update: [Direct connection capacity](digidollar-paymaster-connection-capacity.md)
-documents the default one-channel client queue, required provider Direct
-bind, additive status, connection-start limits, routed request admission and
-protected reply/recovery quotas. Targeted DoS tests pass; fresh daemon,
-payment-flow and Tor/load verification is still required. Wire, consensus
-and journal formats are unchanged; historical results do not validate this patch.
+2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
+[Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
+includes the default single-channel queue, dedicated provider listener,
+DoS admission limits, recovery fixes and explicit transport retry. The updated
+Windows build passed 284 selected unit tests (10,767 assertions) and all nine
+focused functional tests. Qt, reference compatibility, real Tor/load and the
+wider release matrix remain open. Wire, consensus and journal formats are unchanged.
 
-**Source baseline:** `integration/paymaster-v9.26.6rc2` at `a4f17f6315`.
-**Documentation review:** 2026-09-23. **Wire protocol:** V5.
+**Source baseline:** `integration/paymaster-v9.26.6rc2` at `1789c803be`.
+**Transport/retry documentation refresh:** 2026-09-27; earlier full reference
+review: 2026-09-23. **Wire protocol:** V5.
 
 This reference describes the inspected implementation and the invariants a
 reviewer should check. It is not a new implementation proposal or a claim that

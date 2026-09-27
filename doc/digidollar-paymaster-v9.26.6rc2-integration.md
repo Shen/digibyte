@@ -1,5 +1,12 @@
 # Paymaster integration with DigiByte v9.26.6rc2
 
+Current transport/retry source: `1789c803be`, 2026-09-27. The
+[capacity guide](digidollar-paymaster-connection-capacity.md#current-verification-status)
+records the implemented one-channel queue, DoS admission controls, recovery
+fixes, 284 passing selected unit tests and nine passing functional tests.
+The dated merge/build investigations below remain historical; Qt, reference
+compatibility, Tor/load and the wider final-release gates are still separate.
+
 The later [client integration package](digidollar-paymaster-integration.md)
 was committed as `a4f17f6315` on top of `46add7e4d3`. It adds a read-only capability RPC and transient
 payment/recovery observations, corrects terminal-success and service-fee-window

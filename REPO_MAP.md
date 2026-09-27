@@ -1,6 +1,7 @@
 # REPO_MAP.md — DigiByte Core v9.26.2
 
-The 2026-09-26 Direct-capacity patch is documented in
+The Direct-capacity implementation, including the 2026-09-27 recovery/retry
+fixes in `1789c803be`, is documented in
 [Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
 one outgoing channel by default (up to four), a dedicated bounded provider
 listener, fair wallet-scoped queueing, connection-start limits, routed inbox
@@ -9,7 +10,10 @@ admission and protected reply/recovery quotas. Core ownership lives in
 and `src/netbase.{h,cpp}`. Focused tests are
 `src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
 and `test/functional/p2p_paymaster_connection_capacity.py`.
-Migration and pending runtime checks are documented in the capacity guide.
+Migration, current passing checks and remaining release gates are documented
+in the capacity guide. Recovery releases the original payment lease; expected
+Capacity proofs are accepted on payment and recovery channels. `senddigidollar`
+forwards explicit `retry_transport` requests without changing financial authority.
 
 *Last validated: 2026-05-20 against `feature/digidollar-v1`*
 

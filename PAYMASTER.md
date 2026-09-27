@@ -1,6 +1,7 @@
 # DigiDollar Paymaster: developer starting point
 
-The 2026-09-26 Direct-capacity patch is documented in
+The Direct-capacity implementation, including the 2026-09-27 recovery/retry
+fixes in `1789c803be`, is documented in
 [Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
 one outgoing channel by default (up to four), a dedicated bounded provider
 listener, fair wallet-scoped queueing, connection-start limits, routed inbox
@@ -9,7 +10,10 @@ admission and protected reply/recovery quotas. Core ownership lives in
 and `src/netbase.{h,cpp}`. Focused tests are
 `src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
 and `test/functional/p2p_paymaster_connection_capacity.py`.
-Migration and pending runtime checks are documented in the capacity guide.
+Migration, current passing checks and remaining release gates are documented
+in the capacity guide. Recovery releases the original payment lease; expected
+Capacity proofs are accepted on payment and recovery channels. `senddigidollar`
+forwards explicit `retry_transport` requests without changing financial authority.
 
 The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
 recorded in the [integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md).
@@ -22,8 +26,9 @@ rules. A provider may sponsor the fee or charge an explicitly authorized DD
 service fee.
 
 This is the entry point for reviewing `integration/paymaster-v9.26.6rc2`.
-Documentation was reconciled on **2026-09-23** against source commit
-**`a4f17f6315`**. The original feature-branch baseline was `bd270044c1`;
+The Paymaster transport, retry and verification documentation was refreshed on
+**2026-09-27** against source commit **`1789c803be`**; the earlier client-contract
+review used `a4f17f6315`. The original feature-branch baseline was `bd270044c1`;
 its dated review and test evidence is retained separately. The feature is
 implemented in this branch; release approval,
 an independent review, and a real Tor deployment check remain outstanding in

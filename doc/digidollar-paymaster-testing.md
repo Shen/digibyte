@@ -1,15 +1,16 @@
 # Paymaster build and test runbook
 
-2026-09-26 working-tree update: [Direct connection capacity](digidollar-paymaster-connection-capacity.md)
-documents the default one-channel client queue, required provider Direct
-bind, additive status, connection-start limits, routed request admission and
-protected reply/recovery quotas. Targeted DoS tests pass; fresh daemon,
-payment-flow and Tor/load verification is still required. Wire, consensus
-and journal formats are unchanged; historical results do not validate this patch.
+2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
+[Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
+includes the default single-channel queue, dedicated provider listener,
+DoS admission limits, recovery fixes and explicit transport retry. The updated
+Windows build passed 284 selected unit tests (10,767 assertions) and all nine
+focused functional tests. Qt, reference compatibility, real Tor/load and the
+wider release matrix remain open. Wire, consensus and journal formats are unchanged.
 
-Reviewed against `a4f17f6315` on `integration/paymaster-v9.26.6rc2`, 2026-09-23.
-This runbook describes operator commands, not a newly completed build or test
-run. The [release gate](digidollar-paymaster-release-gate.md) owns acceptance;
+Updated for `1789c803be` on `integration/paymaster-v9.26.6rc2`, 2026-09-27.
+The dated results above cover the selected regression group. Commands below
+also include broader checks whose final-source results are still outstanding. The [release gate](digidollar-paymaster-release-gate.md) owns acceptance;
 [PAYMASTER.md](../PAYMASTER.md) indexes the design and operating documentation.
 
 ## Before running
@@ -93,12 +94,18 @@ remain authoritative; this runbook does not change them.
 
 ## Windows runtime checks
 
+The commands below include the broader pool-setup and amount-unit tests as well
+as Qt; those are not covered by the September 27 nine-test pass. Keep their
+results separate. The [capacity guide](digidollar-paymaster-connection-capacity.md#next-operator-checks)
+contains the exact selected group that passed. Python UTF-8 settings are
+required for the Unicode runner paths on this Windows installation.
+
 After a successful build, run from the repository root in PowerShell. The node and CLI are copied to `src`; the Qt test executable is under
 `build_msvc/x64/Release`. Use freshly built files consistently. An interactive desktop is required for the Windows Qt run.
 
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'
-.\src\test_digibyte.exe '--run_test=paymaster_*' --report_level=short
+.\src\test_digibyte.exe '--run_test=paymaster_*,netbase_tests' --report_level=short
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 
 $env:QT_QPA_PLATFORM = 'windows'
@@ -113,7 +120,8 @@ try {
 }
 
 $env:PYTHONUTF8 = '1'
-python test/functional/test_runner.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
+$env:PYTHONIOENCODING = 'utf-8'
+python test/functional/test_runner.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional tests failed' }
 
 Get-FileHash .\src\digibyted.exe, .\src\digibyte-cli.exe, .\src\test_digibyte.exe, .\build_msvc\x64\Release\test_digibyte-qt.exe -Algorithm SHA256
@@ -129,9 +137,9 @@ helper script or copied executable does not select the current source.
 ```bash
 set -e
 make -j2 -C src digibyted digibyte-cli test/test_digibyte qt/test/test_digibyte-qt
-./src/test/test_digibyte --run_test='paymaster_*' --report_level=short
+./src/test/test_digibyte --run_test='paymaster_*,netbase_tests' --report_level=short
 env -u DIGIBYTE_QT_TEST_FUNCTION -u DIGIBYTE_QT_TEST_OUTPUT QT_QPA_PLATFORM=offscreen DIGIBYTE_QT_TEST_SUITE=PaymasterWidgetTests ./src/qt/test/test_digibyte-qt
-python3 test/functional/test_runner.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
+python3 test/functional/test_runner.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
 sha256sum src/digibyted src/digibyte-cli src/test/test_digibyte src/qt/test/test_digibyte-qt
 ```
 
@@ -176,6 +184,7 @@ try {
 }
 
 $env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 python test/functional/test_runner.py p2p_block_pow_order.py p2p_compactblock_logging.py p2p_dandelion_inventory.py p2p_headers_chainwork.py p2p_unrequested_blocks.py feature_block.py digidollar_estimate_mint_restrictions.py digidollar_redemption_closed_position.py digidollar_redemption_unlock_boundary.py digidollar_rpc_quote_readiness.py digidollar_stats_reordered_mint.py wallet_digidollar_transfer_ancestor_reorg.py -j1
 if ($LASTEXITCODE -ne 0) { throw 'Upstream functional regressions failed' }
 ```
@@ -226,6 +235,7 @@ longer; every selected variant must pass, with no skipped reference release.
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'
 $env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $env:PREVIOUS_RELEASES_DIR = "$PWD\test\previous_releases"
 $env:V9_26_5_DIGIBYTED = "$env:PREVIOUS_RELEASES_DIR\v9.26.5\bin\digibyted.exe"
 $env:V9_26_6RC2_DIGIBYTED = "$env:PREVIOUS_RELEASES_DIR\v9.26.6rc2\bin\digibyted.exe"

@@ -8,6 +8,14 @@
 
 ## Paymaster architecture in this branch
 
+Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
+releases the original payment lease after durable preparation so the separate
+recovery lease can use the default single outgoing slot. Expected Capacity
+proofs use the reply budget selected by the local payment/recovery lease, with
+exact request binding retained. `senddigidollar` forwards explicit transport
+retries, including the authorized-submit path, without renewing financial
+authority. See [current verification](doc/digidollar-paymaster-connection-capacity.md#current-verification-status).
+
 The v9.26.6rc2 integration keeps the provider panel in
 `src/qt/paymasterwidget.cpp`, behind a small embedding interface. The concrete
 `PaymasterSendWidget` owns fee selection and client-session presentation while

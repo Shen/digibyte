@@ -1,6 +1,6 @@
 # DigiDollar Paymaster Network
 
-The current working-tree [capacity and DoS hardening](digidollar-paymaster-connection-capacity.md)
+The implemented [capacity and DoS hardening](digidollar-paymaster-connection-capacity.md)
 adds connection-start/group limits, routed request admission and reserved
 budgets for locally expected payment/recovery replies. Shared clearnet groups
 are limited to four Direct connections. Slow, unadmitted handshakes can be
@@ -11,8 +11,9 @@ selected provider contributes the DGB inputs needed for the miner fee. The
 result is an ordinary `DD_TX_TRANSFER`; Paymasters have no consensus privilege
 and existing validators need no Paymaster configuration.
 
-**Documentation baseline:** source commit `a4f17f6315` on
-`integration/paymaster-v9.26.6rc2`, reviewed 2026-09-23. This is the operator and
+**Documentation baseline:** source commit `1789c803be` on
+`integration/paymaster-v9.26.6rc2`; transport/retry refreshed 2026-09-27,
+following the original 2026-09-23 guide review. This is the operator and
 RPC guide. Developers should start with [PAYMASTER.md](../PAYMASTER.md) and the
 [implementation reference](digidollar-paymaster-implementation.md).
 
@@ -141,6 +142,17 @@ before updating provider configuration; listener readiness does not verify
 public/Tor reachability.
 
 ## Client use
+
+A failed Direct connection stays failed during ordinary polling. To retry,
+repeat the same `senddigidollar` payment options with `retry_transport: true`;
+keep the request ID and any accepted authorization commitment unchanged.
+`requestpaymasterquote` accepts the same field in its intent object. Alternative
+recovery accepts it in `resolvepaymastersession` options with `cancel_to_self`.
+Do not set it on every status poll or use it with `fee_mode=dgb`. It renews no
+signed expiry and changes no inputs, fee caps or signing authority. Shared
+clearnet groups have a burst of four connection starts and refill one start
+per five seconds; a delayed explicit retry may be needed under contention.
+
 
 Existing five-argument `senddigidollar` calls are unchanged and continue to use
 the wallet's own DGB. Paymaster use is selected by the optional seventh `options`
