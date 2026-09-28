@@ -1313,12 +1313,12 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   persists a safety bridge when required, then the operating, final safety,
   and liquidity policies, rechecks the live pool, and creates only
   still-missing outputs after a separate funding confirmation. Runtime,
-  autostart, and requested enablement are restored last. Completed steps remain
+  autostart off, and requested enablement are saved last. Completed steps remain
   idempotently resumable after an error, while closing before Apply writes
   nothing. The completion page states that no additional Save actions are
   required and returns to an automatically refreshed Overview while new
-  liquidity confirms. Fresh setup defaults to autostart off; a deliberately
-  selected enabled/autostart combination may start later when readiness passes.
+  liquidity confirms. Setup now always saves autostart off; a deliberately
+  chosen first start and later autostart setting are separate operator actions.
   Qt's Stop action first disables saved autostart when necessary, and disabling
   the provider configuration persistently stops the runtime.
 
@@ -1800,3 +1800,27 @@ Current oracle/MuSig2 fuzz source inventory:
 - `test/functional/wallet_paymaster_pool_setup.py`: Dandelion, restart, funding,
   fee, cancellation, legacy adoption, recurring refill and conflicting-reorg
   regressions; registered once in the runner.
+
+### Shared Paymaster operator workflow (feature candidate)
+
+- `src/paymaster/setup.{h,cpp}`: shared profiles, prerequisite repair suggestions,
+  ordered setup, context/reply/saved-state checks, exact pool preview validation
+  and read-only budget presentation for both UI adapters.
+- `src/digibyte-cli.cpp`: interactive `-paymastersetup`, explicit wallet selection,
+  local no-echo unlock, operational actions, `-paymasterstatus` and `-watch`.
+- `src/qt/paymasterwidget.cpp`: common setup adapter, operator overview, node
+  configuration review, persistent pause/resume, timed unlock and report import.
+- `src/wallet/rpc/paymaster_provider.cpp`: `getpaymasteroperatorinfo` aggregates
+  current readiness without journal reconciliation; `paymaster.cpp` and
+  `paymaster_internal.h` expose the nonpersistent readiness variant.
+- `src/wallet/paymasterprovider.{h,cpp}` and `wallet/rpc/paymaster_runtime.cpp`:
+  atomic persistent pause under the existing provider work guard.
+- `src/rpc/paymaster.cpp`, `rpc/register.h`, `rpc/client.cpp`: node-config RPCs
+  and bounded v2/Paymaster endpoint diagnostics; no arbitrary write path.
+- `src/net.h`: ordinary outbound target getter for prerequisite suggestions.
+- `src/test/paymaster_setup_tests.cpp`,
+  `src/wallet/test/paymaster_wallet_identity_tests.cpp`,
+  `src/qt/test/paymasterwidgettests.cpp`,
+  `test/functional/wallet_paymaster_operator.py`: focused workflow checks.
+- `doc/digidollar-paymaster-operator.md`: CLI/Qt operation, config boundaries,
+  exact commands and acceptance still requiring fresh binaries/real nodes.

@@ -300,14 +300,25 @@ RPCHelpMan stoppaymaster()
     return RPCHelpMan{
         "stoppaymaster",
         "Stop the ephemeral Paymaster provider runtime for this wallet. Durable recovery records are retained. "
-        "A saved autostart setting may start it again later; disable autostart or the provider configuration when the stop must persist.\n",
-        {},
+        "Without options a saved autostart setting may start it again later. Use {\"persistent\":true,\"pause_setup\":true} for the normal persistent pause: disable autostart and provider configuration under the provider work guard before stopping. Existing reservations and signed transactions remain recoverable and can still confirm.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Persistent pause options", {
+                                                                                                   {"persistent", RPCArg::Type::BOOL, RPCArg::Default{false}, "Disable saved autostart before stopping"},
+                                                                                                   {"pause_setup", RPCArg::Type::BOOL, RPCArg::Default{false}, "Also disable provider configuration and new pool preparation signatures; requires persistent"},
+                                                                                               }}},
         RPCResult{RPCResult::Type::OBJ, "", "Provider runtime result", {{RPCResult::Type::BOOL, "running", "Always false after a successful stop"}}},
         RPCExamples{HelpExampleCli("stoppaymaster", "")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            bool persistent{false}, pause_setup{false};
+            if (!request.params[0].isNull()) {
+                const UniValue& options = request.params[0].get_obj();
+                RPCTypeCheckObj(options, {{"persistent", UniValueType(UniValue::VBOOL)}, {"pause_setup", UniValueType(UniValue::VBOOL)}}, true, true);
+                if (!options.find_value("persistent").isNull()) persistent = options.find_value("persistent").get_bool();
+                if (!options.find_value("pause_setup").isNull()) pause_setup = options.find_value("pause_setup").get_bool();
+                if (pause_setup && !persistent) throw JSONRPCError(RPC_INVALID_PARAMETER, "pause_setup requires persistent=true");
+            }
             ProviderIdentityRecord identity;
             std::optional<ProviderWorkGuard> stop_guard;
             if (context.paymaster && context.paymaster->Enabled() &&
@@ -319,6 +330,10 @@ RPCHelpMan stoppaymaster()
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        "PAYMASTER_PROVIDER_BUSY");
                 }
+            }
+            if (persistent) {
+                std::string error;
+                if (!PausePaymasterProvider(*wallet, pause_setup, GetTime(), error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
             }
             if (context.paymaster) {
                 context.paymaster->StopProvider(wallet->GetName());

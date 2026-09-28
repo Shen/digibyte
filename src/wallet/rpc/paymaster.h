@@ -101,6 +101,7 @@ RPCHelpMan withdrawpaymastercarrier();
 RPCHelpMan preparepaymasterpool();
 RPCHelpMan rebalancepaymasterpool();
 RPCHelpMan getpaymasterinfo();
+RPCHelpMan getpaymasteroperatorinfo();
 RPCHelpMan getpaymasterpoolinfo();
 RPCHelpMan listpaymasterreservations();
 RPCHelpMan cancelpaymasterquote();

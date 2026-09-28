@@ -222,6 +222,7 @@ DIGIBYTE_TESTS =\
   test/paymaster_directory_tests.cpp \
   test/paymaster_psbt_tests.cpp \
   test/paymaster_recovery_tests.cpp \
+  test/paymaster_setup_tests.cpp \
   test/paymaster_provider_tests.cpp \
   test/paymaster_protocol_tests.cpp \
   test/paymaster_reputation_tests.cpp \

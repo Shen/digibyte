@@ -169,7 +169,7 @@ bool CreatePaymasterIdentity(CWallet& wallet,
 bool GetPaymasterProviderBackupStatus(const CWallet& wallet,
                                       ProviderBackupStatus& status,
                                       int64_t now,
-                                      std::string& error)
+                                      std::string& error, bool persist)
 {
     error.clear();
     LOCK(wallet.cs_wallet);
@@ -197,7 +197,7 @@ bool GetPaymasterProviderBackupStatus(const CWallet& wallet,
     status.provider_id = identity.provider_id;
     status.identity_created_at = identity.created_at;
     status.reminder_updated_at = std::max(identity.created_at, now);
-    if (!batch.WritePaymasterBackupStatus(status, false)) {
+    if (persist && !batch.WritePaymasterBackupStatus(status, false)) {
         error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
         return false;
     }

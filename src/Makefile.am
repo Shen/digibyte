@@ -167,6 +167,7 @@ DIGIBYTE_CORE_H = \
   digidollar/validation.h \
   paymaster/txbuilder.h \
   paymaster/client.h \
+  paymaster/setup.h \
   paymaster/types.h \
   paymaster/reservation.h \
   paymaster/directory.h \
@@ -494,6 +495,7 @@ libdigibyte_node_a_SOURCES = \
   rpc/mempool.cpp \
   rpc/mining.cpp \
   rpc/net.cpp \
+  rpc/paymaster.cpp \
   rpc/node.cpp \
   rpc/output_script.cpp \
   rpc/rawtransaction.cpp \
@@ -803,6 +805,7 @@ libdigibyte_common_a_SOURCES = \
   digidollar/validation.cpp \
   paymaster/txbuilder.cpp \
   paymaster/client.cpp \
+  paymaster/setup.cpp \
   paymaster/types.cpp \
   paymaster/reservation.cpp \
   paymaster/directory.cpp \

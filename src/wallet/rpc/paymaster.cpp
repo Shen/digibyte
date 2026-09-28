@@ -508,7 +508,7 @@ bool CheckPaymasterPrivacyReadiness(DigiDollar::Paymaster::PrivacyProfile privac
 
 bool RefreshPoolConfirmationHeights(CWallet& wallet,
                                     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
-                                    std::string& error)
+                                    std::string& error, bool persist)
 {
     using namespace DigiDollar::Paymaster;
     error.clear();
@@ -602,7 +602,7 @@ bool RefreshPoolConfirmationHeights(CWallet& wallet,
             changed = true;
         }
     }
-    if (changed && !batch.WritePaymasterProviderPool(entries)) {
+    if (persist && changed && !batch.WritePaymasterProviderPool(entries)) {
         error = "PAYMASTER_POOL_CONFIRMATION_UPDATE_FAILED";
         return false;
     }
@@ -610,10 +610,10 @@ bool RefreshPoolConfirmationHeights(CWallet& wallet,
 }
 
 ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
-                                       bool wait_for_sync)
+                                       bool wait_for_sync, bool reconcile)
 {
     ProviderReadiness result;
-    {
+    if (reconcile) {
         PaymasterStore store{wallet};
         size_t recovered_successors{0};
         std::string reconciliation_error;
@@ -671,7 +671,7 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
         tip_height = wallet.GetLastBlockHeight();
     }
     std::string refresh_error;
-    if (!RefreshPoolConfirmationHeights(wallet, result.pool_entries, refresh_error)) {
+    if (!RefreshPoolConfirmationHeights(wallet, result.pool_entries, refresh_error, reconcile)) {
         result.errors.push_back(refresh_error);
     }
     if (result.have_policy && result.have_pool) {

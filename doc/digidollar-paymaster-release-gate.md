@@ -1,5 +1,24 @@
 # DigiDollar Paymaster V1 release gate
 
+**Operator-workflow feature candidate (2026-09-27):**
+`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
+[shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). On September 28,
+the operator reported Windows build exit 0. Nine of twelve functional tests
+passed initially; after three test-fixture corrections, the focused operator,
+pool-setup and lifecycle rerun passed (55 s accumulated, 56 s runtime, exit 0).
+All twelve selected functional tests have therefore passed across these two
+runs. A subsequent Qt run reported 45 passes and two failures; corrections now
+pass both focused test functions (including both setup rows) with newly built
+Qt binaries, and the operator subsequently reported the full Paymaster Qt group
+passing, exit 0. The 297-case unit selection exposed an uninitialized chain tip
+in the new read-only fixture; after correction its isolated test passes all
+11 assertions. The operator then reported exit 0 for the complete selected
+unit rerun. Build, the selected unit group, Paymaster Qt and all twelve selected
+functional tests are therefore green across the recorded runs. Real-Tor and
+24-hour acceptance remain open. See the
+[validation details](digidollar-paymaster-operator.md#verification-and-acceptance).
+The dated RC2 results below cover the earlier code only.
+
 2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
 [Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
 includes the default single-channel queue, dedicated provider listener,

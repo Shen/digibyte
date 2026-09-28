@@ -59,7 +59,9 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
 
     def stem_peer(self):
         node = self.nodes[0]
-        peer = node.add_outbound_p2p_connection(P2PInterface(), p2p_idx=0)
+        # Index 0 uses the same upper-range port as this node's Direct listener.
+        # This fixture has only one daemon, so index 1 is free across restarts.
+        peer = node.add_outbound_p2p_connection(P2PInterface(), p2p_idx=1)
         # DigiByte marks a peer as stem-capable when it requests the discovery
         # inventory. The inert peer never fluffs transactions back to the node.
         peer.send_and_ping(msg_getdata([CInv(5, (1 << 256) - 1)]))

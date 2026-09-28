@@ -1296,6 +1296,39 @@ bool SetPaymasterProviderEnabled(CWallet& wallet, bool enabled, int64_t now, std
     return true;
 }
 
+bool PausePaymasterProvider(CWallet& wallet, bool pause_setup, int64_t now, std::string& error)
+{
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderSettings settings;
+    if (!batch.ReadPaymasterSettings(settings)) {
+        error = batch.HasPaymasterSettings() ? "PAYMASTER_INVALID_PROVIDER_SETTINGS" : "PAYMASTER_PROVIDER_SETTINGS_NOT_FOUND";
+        return false;
+    }
+    if (now <= 0) {
+        error = "PAYMASTER_INVALID_TIME";
+        return false;
+    }
+    const bool changed = settings.autostart || (pause_setup && settings.enabled);
+    settings.autostart = false;
+    if (pause_setup) settings.enabled = false;
+    settings.updated_at = now;
+    ProviderIdentityRecord identity;
+    const bool have_identity = batch.ReadPaymasterIdentity(identity);
+    if (!batch.TxnBegin()) {
+        error = "PAYMASTER_DATABASE_BEGIN";
+        return false;
+    }
+    if (!batch.WritePaymasterSettings(settings) ||
+        (changed && have_identity && !WriteProviderBackupReminder(batch, identity, now, error))) return Abort(batch, error);
+    if (!batch.TxnCommit()) {
+        error = "PAYMASTER_DATABASE_COMMIT";
+        return false;
+    }
+    return true;
+}
+
 bool SetPaymasterProviderRuntimeSettings(CWallet& wallet,
                                          ProviderOperationMode operation_mode,
                                          bool autostart,

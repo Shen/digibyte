@@ -1295,6 +1295,7 @@ public:
     void CancelPaymasterOperation(const std::string& owner, const std::string& prefix) { m_direct_queue.CancelOperation(owner, prefix); }
     void CancelPaymasterWallet(const std::string& owner) { m_direct_queue.CancelOwner(owner); }
     bool PromotePaymasterConnection(CNode& node);
+    int GetOrdinaryOutboundTarget() const { return m_max_outbound; }
     const DigiDollar::Paymaster::DirectBudget& GetPaymasterBudget() const { return m_direct_budget; }
     DigiDollar::Paymaster::DirectPermits::Usage GetPaymasterUsage() const { return m_direct_permits.GetUsage(); }
     size_t GetPaymasterQueueSize() const { return m_direct_queue.Size(); }

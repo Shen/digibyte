@@ -126,6 +126,9 @@ bool SetPaymasterProviderEnabled(CWallet& wallet,
 /** Persist provider runtime behavior. Runtime mode changes are policy-neutral:
  * callers are responsible for requiring a stopped provider before changing
  * the mode. Autostart never stores or obtains a wallet passphrase. */
+/** Persist a stop under the caller-held provider-work guard. */
+bool PausePaymasterProvider(CWallet& wallet, bool pause_setup, int64_t now, std::string& error);
+
 bool SetPaymasterProviderRuntimeSettings(
     CWallet& wallet,
     DigiDollar::Paymaster::ProviderOperationMode operation_mode,

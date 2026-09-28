@@ -29,6 +29,9 @@ public:
  */
 static const CRPCConvertParam vRPCConvertParams[] =
 {
+    { "stoppaymaster", 0, "options" },
+    { "preparepaymasternodeconfig", 0, "settings" },
+    { "applypaymasternodeconfig", 0, "plan" },
     { "setmocktime", 0, "timestamp" },
     { "mockscheduler", 0, "delta_time" },
     { "utxoupdatepsbt", 1, "descriptors" },

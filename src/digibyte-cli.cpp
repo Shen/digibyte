@@ -43,7 +43,12 @@
 
 #include <event2/buffer.h>
 #include <event2/keyvalq_struct.h>
+#include <paymaster/setup.h>
+#include <set>
+#include <support/cleanse.h>
 #include <support/events.h>
+#include <thread>
+#include <util/moneystr.h>
 
 // The server returns time values from a mockable system clock, but it is not
 // trivial to get the mocked time from the server, nor is it needed for now, so
@@ -88,6 +93,9 @@ static void SetupCliArgs(ArgsManager& argsman)
                              "RPC generatetoaddress nblocks and maxtries arguments. Example: digibyte-cli -generate 4 1000",
                              DEFAULT_NBLOCKS, DEFAULT_MAX_TRIES),
                    ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-paymastersetup", "Guided provider setup; requires a terminal and explicit wallet selection", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-paymasterstatus", "Readable status for the explicitly selected provider wallet", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-watch", "Refresh -paymasterstatus every ten seconds; stop with Ctrl+C", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-addrinfo", "Get the number of addresses known to the node, per network and total, after filtering for quality and recency. The total number of addresses known to the node may be higher.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-getinfo", "Get general information from the remote server. Note that unlike server-side RPC calls, the output of -getinfo is the result of multiple non-atomic requests. Some entries in the output may represent results from different states (e.g. wallet balance may be as of a different block from the chain state reported)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-netinfo", "Get network peer connection information from the remote server. An optional integer argument from 0 to 4 can be passed for different peers listings (default: 0). Pass \"help\" for detailed help documentation.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1117,6 +1125,324 @@ static void SetGenerateToAddressArgs(const std::string& address, std::vector<std
     args.emplace(args.begin() + 1, address);
 }
 
+namespace {
+using namespace DigiDollar::Paymaster;
+UniValue OperatorCall(const std::string& method, const UniValue& params, const std::optional<std::string>& wallet)
+{
+    std::vector<std::string> arguments;
+    for (const auto& value : params.getValues())
+        arguments.push_back(value.isStr() ? value.get_str() : value.write());
+    DefaultRequestHandler handler;
+    UniValue reply;
+    try {
+        reply = ConnectAndCallRPC(&handler, method, arguments, wallet);
+    } catch (...) {
+        for (auto& arg : arguments)
+            if (!arg.empty()) memory_cleanse(arg.data(), arg.size());
+        throw;
+    }
+    for (auto& arg : arguments)
+        if (!arg.empty()) memory_cleanse(arg.data(), arg.size());
+    if (!reply.find_value("error").isNull()) throw std::runtime_error(reply.find_value("error").find_value("message").get_str());
+    return reply.find_value("result");
+}
+UniValue OperatorParams(std::initializer_list<UniValue> values)
+{
+    UniValue result{UniValue::VARR};
+    for (const auto& value : values)
+        result.push_back(value);
+    return result;
+}
+std::string OperatorPrompt(const std::string& label, const std::string& current = {})
+{
+    std::cout << label << (current.empty() ? "" : " [" + current + "]") << ": " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) throw std::runtime_error("Setup cancelled. Earlier confirmed steps remain saved.");
+    return line.empty() ? current : line;
+}
+bool OperatorConfirm(const std::string& label)
+{
+    return OperatorPrompt(label + " (type yes to approve)", "no") == "yes";
+}
+std::string OperatorSecret(const std::string& label)
+{
+    const auto host = gArgs.GetArg("-rpcconnect", DEFAULT_RPCCONNECT);
+    if (host != "127.0.0.1" && host != "::1" && host != "[::1]") throw std::runtime_error("Interactive wallet secrets require numeric loopback RPC or a separately configured local tunnel.");
+    NO_STDIN_ECHO();
+    std::cout << label << ": " << std::flush;
+    std::string value;
+    if (!std::getline(std::cin, value)) throw std::runtime_error("Passphrase entry cancelled");
+    std::cout << '\n';
+    return value;
+}
+int64_t OperatorNumber(const std::string& label, int64_t current, bool dgb = false)
+{
+    const auto input = OperatorPrompt(label, dgb ? FormatMoney(current) : std::to_string(current));
+    int64_t value;
+    if (!(dgb ? ParseFixedPoint(input, 8, &value) : ParseInt64(input, &value)) || value < 0) throw std::runtime_error("A nonnegative exact amount is required; restart setup to correct it.");
+    return value;
+}
+void OperatorEditNumbers(UniValue& policy, const std::set<std::string>& skip = {})
+{
+    const auto keys = policy.getKeys();
+    for (const auto& key : keys) {
+        if (skip.count(key) || !policy.find_value(key).isNum()) continue;
+        const bool dgb = key.find("satoshis") != std::string::npos;
+        policy.pushKV(key, OperatorNumber(key + (dgb ? " (DGB)" : " (integer; DD amounts in cents)"), policy.find_value(key).getInt<int64_t>(), dgb));
+    }
+}
+void OperatorUnlock(const std::string& wallet, int64_t seconds)
+{
+    if (seconds < 60 || seconds > 86400) throw std::runtime_error("Choose an unlock duration between 60 and 86400 seconds");
+    auto pass = OperatorSecret("Wallet passphrase (wallet-wide unlock; never saved)");
+    auto params = OperatorParams({UniValue{pass}, UniValue{seconds}});
+    try {
+        OperatorCall("walletpassphrase", params, wallet);
+    } catch (...) {
+        memory_cleanse(pass.data(), pass.size());
+        throw;
+    }
+    memory_cleanse(pass.data(), pass.size());
+}
+int PaymasterCli(bool setup)
+{
+    if (gArgs.GetBoolArg("-named", false) || gArgs.GetBoolArg("-stdin", false) || gArgs.GetBoolArg("-stdinwalletpassphrase", false)) throw std::runtime_error("Paymaster interactive modes cannot be combined with -named/-stdin/-stdinwalletpassphrase");
+    if (setup && !StdinTerminal()) throw std::runtime_error("-paymastersetup requires an interactive terminal; use explicit RPCs for automation");
+    const auto empty = UniValue{UniValue::VARR};
+    std::string wallet = gArgs.GetArg("-rpcwallet", "");
+    if (!gArgs.IsArgSet("-rpcwallet") && !setup) throw std::runtime_error("Select the wallet explicitly with -rpcwallet");
+    if (!gArgs.IsArgSet("-rpcwallet")) {
+        const auto wallets = OperatorCall("listwallets", empty, {});
+        std::cout << "Loaded wallets: " << wallets.write() << '\n';
+        wallet = OperatorPrompt("Provider wallet name (enter a new name to create one)");
+        if (wallet.empty()) throw std::runtime_error("An explicit non-empty wallet name is required");
+        bool exists{false};
+        for (const auto& item : wallets.getValues())
+            exists |= item.get_str() == wallet;
+        if (!exists) {
+            if (!OperatorConfirm("Create a new encrypted descriptor wallet named " + wallet + "?")) return EXIT_FAILURE;
+            auto pass = OperatorSecret("New wallet passphrase");
+            auto repeat = OperatorSecret("Repeat new wallet passphrase");
+            if (pass.empty() || pass != repeat) {
+                memory_cleanse(pass.data(), pass.size());
+                memory_cleanse(repeat.data(), repeat.size());
+                throw std::runtime_error("Passphrases must match and must not be empty");
+            }
+            memory_cleanse(repeat.data(), repeat.size());
+            try {
+                OperatorCall("createwallet", OperatorParams({UniValue{wallet}, UniValue{false}, UniValue{false}, UniValue{pass}, UniValue{false}, UniValue{true}, UniValue{true}}), {});
+            } catch (...) {
+                memory_cleanse(pass.data(), pass.size());
+                throw;
+            }
+            memory_cleanse(pass.data(), pass.size());
+        }
+    }
+    auto snapshot = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
+    std::cout << "RPC node: " << gArgs.GetArg("-rpcconnect", DEFAULT_RPCCONNECT) << " (configured RPC port)\n"
+              << OperatorSummary(snapshot);
+    if (!setup) {
+        while (gArgs.GetBoolArg("-watch", false)) {
+            std::this_thread::sleep_for(std::chrono::seconds{10});
+            const auto current = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
+            CheckSetupContext(snapshot, current);
+            std::cout << "\n"
+                      << OperatorSummary(current) << std::flush;
+        }
+        return EXIT_SUCCESS;
+    }
+    CheckSetupContext(snapshot, snapshot);
+    if (!OperatorConfirm("Use this node, network and provider wallet?")) return EXIT_FAILURE;
+    if (snapshot.find_value("provider").find_value("settings_present").isTrue()) {
+        const auto action = OperatorPrompt("Action: setup, pause, resume, unlock, backup", "setup");
+        if (action != "setup") {
+            if (action == "pause") {
+                if (!OperatorConfirm("Persistently pause provider and new pool signatures? Signed transactions can still confirm.")) return EXIT_FAILURE;
+                UniValue options{UniValue::VOBJ};
+                options.pushKV("persistent", true);
+                options.pushKV("pause_setup", true);
+                OperatorCall("stoppaymaster", OperatorParams({options}), wallet);
+            } else if (action == "resume" || action == "unlock") {
+                if (snapshot.find_value("provider").find_value("wallet_locked").isTrue())
+                    OperatorUnlock(wallet, OperatorNumber("Wallet-wide unlock duration (seconds)", 3600));
+                else
+                    std::cout << "Existing unlock duration remains unchanged.\n";
+                if (action == "resume") {
+                    if (!OperatorConfirm("Enable and start within the saved budgets?")) return EXIT_FAILURE;
+                    OperatorCall("setpaymasterenabled", OperatorParams({UniValue{true}}), wallet);
+                    std::cout << OperatorCall("startpaymaster", empty, wallet).write(2) << '\n';
+                }
+            } else if (action == "backup")
+                OperatorCall("backupwallet", OperatorParams({UniValue{OperatorPrompt("Full-wallet backup destination on the node")}}), wallet);
+            else
+                throw std::runtime_error("Unknown operator action");
+            std::cout << OperatorSummary(OperatorCall("getpaymasteroperatorinfo", empty, wallet));
+            return EXIT_SUCCESS;
+        }
+    }
+    if (OperatorConfirm("Prepare node connection configuration? (requires an explicit restart)")) {
+        UniValue settings{UniValue::VOBJ};
+        const auto route = OperatorPrompt("Route: onion or clearnet", "onion");
+        if (route != "onion" && route != "clearnet") throw std::runtime_error("Choose onion or clearnet");
+        const auto bind = OperatorPrompt("Dedicated numeric bind IP:port", route == "onion" ? "127.0.0.1:12033" : "");
+        UniValue binds{UniValue::VARR};
+        binds.push_back(bind + (route == "onion" ? "=onion" : ""));
+        settings.pushKV("paymasterbind", binds);
+        settings.pushKV("paymasterendpoint", OperatorPrompt("Public numeric IP:port or onion:port", snapshot.find_value("provider").find_value("endpoint").isStr() ? snapshot.find_value("provider").find_value("endpoint").get_str() : ""));
+        if (OperatorConfirm("Repair missing prerequisites? Suitable saved values stay unchanged; new defaults are maxconnections=125, Direct out=1/in=16.")) {
+            const auto defaults = SetupNodePrerequisites(snapshot);
+            for (const auto& key : defaults.getKeys())
+                settings.pushKV(key, defaults.find_value(key));
+        }
+        const auto preview = OperatorCall("preparepaymasternodeconfig", OperatorParams({settings}), {});
+        std::cout << preview.write(2) << '\n';
+        if (route == "onion") std::cout << "Tor: beneath your service's HiddenServiceDir add HiddenServicePort <announced-port> " << bind << ". Reload Tor yourself. No service is created here.\n";
+        if (OperatorConfirm("Back up and apply these node settings?")) {
+            UniValue plan{UniValue::VOBJ};
+            plan.pushKV("plan_id", preview.find_value("plan_id"));
+            plan.pushKV("settings", preview.find_value("settings"));
+            std::cout << OperatorCall("applypaymasternodeconfig", OperatorParams({plan}), {}).write(2) << "\nRestart the node explicitly, verify routing, then run -paymastersetup again.\n";
+            return EXIT_SUCCESS;
+        }
+    }
+    SetupChoices choices;
+    auto provider = snapshot.find_value("provider");
+    choices.operation_mode = OperatorPrompt("Processing mode: automatic or manual", provider.find_value("operation_mode").get_str());
+    if (choices.operation_mode != "automatic" && choices.operation_mode != "manual") throw std::runtime_error("Choose automatic or manual processing");
+    choices.enabled = provider.find_value("settings_present").isTrue() ? provider.find_value("enabled").get_bool() : true;
+    if (OperatorConfirm("Change saved provider enablement? (setup itself never starts operation)")) choices.enabled = OperatorConfirm("Enable provider configuration at the end?");
+    choices.display_name = provider.find_value("display_name").isStr() ? provider.find_value("display_name").get_str() : OperatorPrompt("Public provider name");
+    choices.policy = SetupDefaultPolicy();
+    if (provider.find_value("policy").isObject())
+        for (const auto& key : choices.policy.getKeys())
+            choices.policy.pushKV(key, provider.find_value("policy").find_value(key));
+    std::cout << "Current offer: " << choices.policy.write(2) << '\n';
+    if (OperatorConfirm("Change the offer?")) {
+        auto mode = OperatorPrompt("Model: user_paid, sponsored, both, restricted", "user_paid");
+        if (mode != "user_paid" && mode != "sponsored" && mode != "both" && mode != "restricted") throw std::runtime_error("Unknown model");
+        UniValue models{UniValue::VARR};
+        if (mode != "user_paid") models.push_back("sponsored");
+        if (mode == "user_paid" || mode == "both") models.push_back("user_paid");
+        choices.policy.pushKV("funding_models", models);
+        choices.policy.pushKV("sponsorship_scope", mode == "restricted" ? "restricted" : "public");
+        const bool sponsored_only = mode == "sponsored" || mode == "restricted";
+        if (sponsored_only) choices.policy.pushKV("fee_rate_bps", 0);
+        OperatorEditNumbers(choices.policy, sponsored_only ? std::set<std::string>{"fee_rate_bps"} : std::set<std::string>{});
+    }
+    bool paid{false}, sponsored{false};
+    for (const auto& model : choices.policy.find_value("funding_models").getValues()) {
+        paid |= model.get_str() == "user_paid";
+        sponsored |= model.get_str() == "sponsored";
+    }
+    choices.safety = SetupDefaultSafety(choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>(), paid, sponsored, choices.policy.find_value("sponsorship_scope").get_str() == "restricted");
+    const auto old_safety = snapshot.find_value("safety").find_value("policy");
+    if (old_safety.isObject())
+        for (const auto& key : choices.safety.getKeys())
+            choices.safety.pushKV(key, old_safety.find_value(key));
+    std::cout << "Finite safety policy: " << choices.safety.write(2) << '\n';
+    if (OperatorConfirm("Edit safety limits?")) {
+        for (const auto& mode : {"user_paid", "public_sponsored", "restricted_sponsored"}) {
+            UniValue limits = choices.safety.find_value(mode);
+            std::cout << mode << '\n';
+            OperatorEditNumbers(limits);
+            choices.safety.pushKV(mode, limits);
+        }
+        OperatorEditNumbers(choices.safety);
+    }
+    choices.liquidity = SetupDefaultLiquidity(paid);
+    const auto old_liquidity = provider.find_value("liquidity");
+    if (old_liquidity.find_value("policy_configured").isTrue())
+        for (const auto& key : choices.liquidity.getKeys())
+            choices.liquidity.pushKV(key, old_liquidity.find_value("policy").find_value(key));
+    std::cout << "Pool targets and recurring maintenance limits: " << choices.liquidity.write(2) << '\n';
+    if (OperatorConfirm("Edit pool targets and maintenance fee ceilings?")) OperatorEditNumbers(choices.liquidity);
+    const bool maintenance = OperatorConfirm("Approve automatic paid refill within the displayed positive transaction/hour/day limits? (zero disables, never unlimited)");
+    choices.liquidity.pushKV("automatic_replenishment", maintenance);
+    choices.liquidity.pushKV("paid_maintenance_approved", maintenance);
+    if (maintenance)
+        for (const auto& key : {"maximum_maintenance_fee_per_transaction_satoshis", "maximum_maintenance_fee_per_hour_satoshis", "maximum_maintenance_fee_per_day_satoshis"})
+            if (choices.liquidity.find_value(key).getInt<int64_t>() <= 0) throw std::runtime_error("Choose positive finite maintenance limits before approving refill");
+    choices.pool.pushKV("admission_dgb_slots", choices.liquidity.find_value("target_admission_dgb"));
+    choices.pool.pushKV("operational_dgb_slots", choices.liquidity.find_value("target_operational_dgb"));
+    choices.pool.pushKV("admission_carrier_slots", choices.liquidity.find_value("target_admission_carriers"));
+    choices.pool.pushKV("operational_carrier_slots", choices.liquidity.find_value("target_operational_carriers"));
+    choices.pool.pushKV("execute", false);
+    choices.pool.pushKV("maximum_fee_satoshis", OperatorNumber("Maximum one-time setup fee per transaction (DGB)", SetupFundingFee(snapshot), true));
+    const auto steps = BuildSetupPlan(snapshot, choices);
+    std::cout << "Review: " << wallet << " on " << snapshot.find_value("network").get_str() << ". Existing provider will be paused. Identity and funds remain wallet-owned.\n"
+              << choices.policy.write(2) << '\n'
+              << choices.safety.write(2) << '\n'
+              << choices.liquidity.write(2) << "\nPool principal remains your capital. Funding needs a separate exact preview approval. Autostart stays off.\n";
+    if (!OperatorConfirm("Apply this provider configuration?")) return EXIT_FAILURE;
+    for (const auto& step : steps) {
+        const auto current = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
+        CheckSetupContext(snapshot, current);
+        bool relock{false};
+        try {
+            if (step.method == "preparepaymasterpool") {
+                const auto preview = OperatorCall(step.method, step.params, wallet);
+                if (!SetupPoolNeeded(preview)) {
+                    std::cout << "Pool targets are already covered; no additional funding approval.\n";
+                    continue;
+                }
+                std::cout << "Bound pool capital: " << OperatorAmount(preview.find_value("total_output_satoshis").getInt<int64_t>()) << " DGB and " << preview.find_value("total_carrier_cents").write() << " DD cents. Maximum total one-time fees: " << OperatorAmount(preview.find_value("maximum_total_fee_satoshis").getInt<int64_t>()) << " DGB.\nExact funding preview: " << preview.write(2) << '\n';
+                if (!OperatorConfirm("Authorize exactly this finite setup? Already accepted work keeps its existing authority.")) throw std::runtime_error("Funding not approved. Provider remains safely paused; saved policy changes are retained.");
+                auto options = step.params[0];
+                options.pushKV("plan_id", preview.find_value("plan_id"));
+                options.pushKV("execute", true);
+                if (current.find_value("provider").find_value("wallet_locked").isTrue()) {
+                    OperatorUnlock(wallet, 300);
+                    relock = true;
+                }
+                const auto result = OperatorCall(step.method, OperatorParams({options}), wallet);
+                if (!result.find_value("accepted").isTrue() || result.find_value("plan_id").write() != preview.find_value("plan_id").write()) throw std::runtime_error("Core did not confirm the exact funding approval");
+                std::cout << "Funding accepted; confirmation and readiness are separate.\n";
+            } else {
+                if (step.unlock && current.find_value("provider").find_value("wallet_locked").isTrue()) {
+                    OperatorUnlock(wallet, 300);
+                    relock = true;
+                }
+                const auto result = OperatorCall(step.method, step.params, wallet);
+                CheckSetupReply(step, result);
+                if (step.method == "createpaymasteridentity") {
+                    auto bound_provider = snapshot.find_value("provider");
+                    bound_provider.pushKV("provider_id", result.find_value("provider_id"));
+                    snapshot.pushKV("provider", bound_provider);
+                }
+            }
+            if (relock) OperatorCall("walletlock", empty, wallet);
+        } catch (...) {
+            if (relock) {
+                try {
+                    OperatorCall("walletlock", empty, wallet);
+                } catch (...) {
+                }
+            }
+            throw;
+        }
+        const auto after = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
+        CheckSetupContext(snapshot, after);
+        CheckSetupSaved(step, after);
+        snapshot = after;
+        std::cout << "Saved: " << step.method << '\n';
+    }
+    std::cout << OperatorSummary(snapshot);
+    if (OperatorConfirm("Create a full-wallet backup now? (path is on the node host)")) OperatorCall("backupwallet", OperatorParams({UniValue{OperatorPrompt("Backup destination")}}), wallet);
+    std::cout << "From your independent node run: checkpaymasterendpoint <this-provider-endpoint>. A transport check does not verify payments.\n";
+    if (OperatorConfirm("Explicitly start provider operation now?")) {
+        if (snapshot.find_value("provider").find_value("wallet_locked").isTrue()) OperatorUnlock(wallet, OperatorNumber("Wallet-wide operating unlock duration (seconds)", 3600));
+        std::cout << OperatorCall("startpaymaster", empty, wallet).write(2) << '\n';
+        if (OperatorConfirm("Enable provider autostart? After node restart a locked wallet still waits for manual unlock.")) {
+            UniValue runtime{UniValue::VOBJ};
+            runtime.pushKV("autostart", true);
+            OperatorCall("setpaymasterruntimesettings", OperatorParams({runtime}), wallet);
+        }
+    }
+    std::cout << OperatorSummary(OperatorCall("getpaymasteroperatorinfo", empty, wallet));
+    return EXIT_SUCCESS;
+}
+} // namespace
+
 static int CommandLineRPC(int argc, char *argv[])
 {
     std::string strPrint;
@@ -1143,6 +1469,13 @@ static int CommandLineRPC(int argc, char *argv[])
             gArgs.ForceSetArg("-rpcpassword", rpcPass);
         }
         std::vector<std::string> args = std::vector<std::string>(&argv[1], &argv[argc]);
+        const bool paymaster_setup = gArgs.GetBoolArg("-paymastersetup", false);
+        const bool paymaster_status = gArgs.GetBoolArg("-paymasterstatus", false);
+        if (paymaster_setup || paymaster_status) {
+            if (!args.empty() || (paymaster_setup && paymaster_status) || gArgs.IsArgSet("-getinfo") || gArgs.IsArgSet("-netinfo") || gArgs.IsArgSet("-generate") || gArgs.IsArgSet("-addrinfo") || (paymaster_setup && gArgs.GetBoolArg("-watch", false))) throw std::runtime_error("Choose exactly one Paymaster mode, without another command");
+            return PaymasterCli(paymaster_setup);
+        }
+        if (gArgs.GetBoolArg("-watch", false)) throw std::runtime_error("-watch requires -paymasterstatus");
         if (gArgs.GetBoolArg("-stdinwalletpassphrase", false)) {
             NO_STDIN_ECHO();
             std::string walletPass;

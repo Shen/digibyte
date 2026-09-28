@@ -2508,8 +2508,10 @@ void PaymasterWidgetTests::paymasterClientConfirmationRequiresObservation()
         throw std::runtime_error("unexpected payment mutation during observation");
     });
     form.setWalletModel(mini_gui.walletModel.get());
+    const QString recipient = QString::fromStdString(
+        snapshot.find_value("session").find_value("to_address").get_str());
     client->setPaymasterSessionForTesting(QStringLiteral("MEMPOOL"), QStringLiteral("final_transaction"),
-        true, QStringLiteral("recipient"), 3.25, QStringLiteral("MEMPOOL"));
+        true, recipient, 3.25, QStringLiteral("MEMPOOL"));
     dialogs.clear();
     calls.clear();
     QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterSessionState", Qt::DirectConnection));
@@ -4232,7 +4234,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 command == "rebalancepaymasterpool") {
                 ++mutation_rpc_calls;
             }
-            if (command == "getpaymasterinfo") {
+            if (command == "getpaymasterinfo" || command == "getpaymasteroperatorinfo") {
                 UniValue result{UniValue::VOBJ};
                 result.pushKV("wallet_eligible", true);
                 result.pushKV("settings_present", rpc_settings_present);
@@ -4242,7 +4244,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 result.pushKV("running", rpc_running);
                 result.pushKV("ready", rpc_ready);
                 result.pushKV("wallet_locked", false);
-                result.pushKV("pool_ready", false);
+                result.pushKV("pool_ready", !missing_funding);
                 result.pushKV("operation_mode", rpc_operation_mode);
                 if (malformed_provider_snapshot) {
                     result.pushKV("autostart", "not-a-boolean");
@@ -4267,6 +4269,21 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 result.pushKV("readiness_errors", UniValue{UniValue::VARR});
                 if (advertised_policy.isObject()) {
                     result.pushKV("policy", advertised_policy);
+                }
+                if (command == "getpaymasteroperatorinfo") {
+                    UniValue aggregate{UniValue::VOBJ}, safety{UniValue::VOBJ};
+                    aggregate.pushKV("schema_version", 1);
+                    aggregate.pushKV("network", "regtest");
+                    aggregate.pushKV("wallet", "qt-paymaster-guided-retry");
+                    aggregate.pushKV("wallet_generation", "fixture-load");
+                    UniValue liquidity{UniValue::VOBJ};
+                    liquidity.pushKV("policy", liquidity_policy.isObject() ? liquidity_policy : suggested_liquidity_policy());
+                    result.pushKV("liquidity", liquidity);
+                    aggregate.pushKV("provider", result);
+                    safety.pushKV("configured", safety_policy.isObject());
+                    if (safety_policy.isObject()) safety.pushKV("policy", safety_policy);
+                    aggregate.pushKV("safety", safety);
+                    return aggregate;
                 }
                 return result;
             }
@@ -4338,6 +4355,16 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
             if (command == "getpaymasterclientsafetystatus") {
                 UniValue result{UniValue::VOBJ};
                 result.pushKV("configured", false);
+                return result;
+            }
+            if (command == "stoppaymaster") {
+                if (!params[0].find_value("persistent").isTrue() || !params[0].find_value("pause_setup").isTrue()) throw std::runtime_error("Expected persistent setup pause");
+                setup_write_order.push_back(QString::fromStdString(command));
+                rpc_enabled = false;
+                rpc_autostart = false;
+                rpc_running = false;
+                UniValue result{UniValue::VOBJ};
+                result.pushKV("running", false);
                 return result;
             }
             if (command == "setpaymasterpolicy") {
@@ -4548,6 +4575,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     bool durable_phase_is_close_only{false};
     bool retry_feedback_visible{false};
     bool retry_completed{false};
+    bool funding_confirmation_seen{false};
+    QString completion_text;
     QTimer::singleShot(0, [&] {
         auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
         if (!wizard || wizard->objectName() != QLatin1String("PaymasterSetupWizard")) {
@@ -4764,18 +4793,20 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         retry_feedback_visible = !retry->isEnabled() &&
             result->text().contains(QStringLiteral("Retrying"));
         if (missing_funding) {
-            QTimer::singleShot(0, [] {
-                if (auto* message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
-                    message->done(QMessageBox::Yes);
-                }
+            QTimer::singleShot(0, [&funding_confirmation_seen] {
+                auto* message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                QVERIFY(message != nullptr);
+                QCOMPARE(message->windowTitle(), QStringLiteral("Confirm exact pool funding"));
+                QAbstractButton* yes = message->button(QMessageBox::Yes);
+                QVERIFY(yes != nullptr);
+                funding_confirmation_seen = true;
+                // The question reads clickedButton(); done(Yes) does not approve it.
+                yes->click();
             });
         }
         QCoreApplication::processEvents();
+        completion_text = result->text();
         retry_completed = progress_page->isComplete() && !retry->isVisible();
-        if (missing_funding) {
-            retry_completed = retry_completed && result->text().contains(
-                QStringLiteral("waiting for execution or blockchain confirmations"));
-        }
         wizard->reject();
     });
     guided_setup->click();
@@ -4793,7 +4824,11 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QVERIFY(first_failure_visible);
     QVERIFY(durable_phase_is_close_only);
     QVERIFY(retry_feedback_visible);
-    QVERIFY(retry_completed);
+    QVERIFY2(retry_completed, qPrintable(completion_text));
+    QCOMPARE(funding_confirmation_seen, deferred_funding);
+    QVERIFY(completion_text.contains(QStringLiteral("Configuration saved")));
+    QVERIFY(completion_text.contains(QStringLiteral("provider remains stopped")));
+    QCOMPARE(completion_text.contains(QStringLiteral("Waiting for approved pool preparation or blockchain confirmations")), deferred_funding);
     QCOMPARE(operating_policy_attempts, 1);
     QCOMPARE(safety_attempts, 2);
     QCOMPARE(enabled_requests, QList<bool>{true});
@@ -5075,16 +5110,16 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QVERIFY(disabled_target_retained);
     QCOMPARE(operating_policy_attempts, 2);
     QCOMPARE(safety_attempts, 4);
-    QCOMPARE(enabled_requests, QList<bool>({true, false, false}));
+    QCOMPARE(enabled_requests, QList<bool>({true, false}));
     QCOMPARE(setup_write_order, QStringList({
-        QStringLiteral("setpaymasterenabled"),
-        QStringLiteral("setpaymastersafetypolicy"),
-        QStringLiteral("setpaymasterpolicy"),
-        QStringLiteral("setpaymastersafetypolicy"),
-        QStringLiteral("setpaymasterliquiditypolicy"),
-        QStringLiteral("setpaymasterruntimesettings"),
-        QStringLiteral("setpaymasterenabled"),
-    }));
+                                    QStringLiteral("stoppaymaster"),
+                                    QStringLiteral("setpaymastersafetypolicy"),
+                                    QStringLiteral("setpaymasterpolicy"),
+                                    QStringLiteral("setpaymastersafetypolicy"),
+                                    QStringLiteral("setpaymasterliquiditypolicy"),
+                                    QStringLiteral("setpaymasterruntimesettings"),
+                                    QStringLiteral("setpaymasterenabled"),
+                                }));
     QCOMPARE(advertised_policy.find_value("sponsorship_scope").get_str(),
              std::string{"restricted"});
     QCOMPARE(advertised_policy.find_value("fee_rate_bps").getInt<int>(), 0);

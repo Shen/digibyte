@@ -210,10 +210,10 @@ bool CheckPaymasterPrivacyReadiness(
 bool RefreshPoolConfirmationHeights(
     CWallet& wallet,
     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
-    std::string& error);
+    std::string& error, bool persist = true);
 ProviderReadiness GetProviderReadiness(CWallet& wallet,
                                        WalletContext& context,
-                                       bool wait_for_sync = true);
+                                       bool wait_for_sync = true, bool reconcile = true);
 UniValue ReadinessErrorsToJSON(const std::vector<std::string>& errors);
 bool HasPendingPoolPreparation(CWallet& wallet);
 RPCResult PoolPreparationResult();

@@ -464,12 +464,16 @@ before enabling an action.
 
 ## Provider setup
 
+The feature branch adds the [guided Qt/CLI operator workflow](digidollar-paymaster-operator.md),
+including configuration preview/apply, status, pause, unlock and external checks.
+Its fresh runtime acceptance is still open; the RC2 results above are historical.
+
 Before wallet setup, configure the node's dedicated Direct listener using the
 [provider configuration examples](digidollar-paymaster-connection-capacity.md#provider-configuration-and-migration).
 The common node requirements above are also mandatory. Keep the Direct port
 separate from ordinary P2P and RPC, configure firewall/NAT or Tor forwarding,
-and restart the node after changing startup options. The Qt wizard configures
-wallet settings; it does not create the listener or configure Tor.
+and restart the node after changing startup options. The node-side configuration flow previews and saves listener settings with a backup.
+The listener becomes active only after an explicit restart. Tor remains operator-managed.
 
 With the default one outgoing channel and 16 provider channels, the effective
 `maxconnections` must be at least 45; the examples use 125 to leave more ordinary
@@ -483,8 +487,8 @@ wallet, policy, synchronization or pool prerequisites before starting service.
 
 The following wallet steps are available through Qt and the documented RPCs.
 For CLI calls, select the intended provider wallet with `-rpcwallet=<wallet>`;
-in Qt, select that wallet before opening the operator controls. There is no
-supported `digibyte-cli -paymastersetup` option.
+in Qt, select that wallet before opening the operator controls. Use `digibyte-cli -paymastersetup` for interactive setup and operational actions,
+and `-rpcwallet=<wallet> -paymasterstatus [-watch]` for the overview.
 
 In Qt, the provider-only **Paymaster Network** tab is hidden by default. Enable
 **Show Paymaster operator controls** under **Settings → Options → Wallet →
@@ -520,7 +524,7 @@ safety bridge when an operating-policy transition requires one, saves the new
 operating and final safety policies, saves liquidity targets and finite
 maintenance limits, and rechecks the pool. Only still-missing outputs are
 created, and only after a second confirmation of the exact current funding
-plan. Runtime mode, autostart, and the requested enabled state are persisted
+plan. Runtime mode, autostart off, and the requested enabled state are persisted
 last. Existing identity and pool outputs are retained. Completed write steps
 remain durable and retryable after a later failure; closing before the final
 Apply confirmation writes nothing. The completion page confirms that no
@@ -528,10 +532,9 @@ additional Save buttons are required.
 
 A fresh guided setup defaults to the recommended `automatic` operation mode,
 `autostart=false`, and an enabled provider configuration. Reopening the
-assistant preserves existing runtime, autostart, and enabled choices. Therefore
-an explicitly selected enabled/autostart combination may start after setup when
-all readiness gates pass; otherwise starting remains an explicit Overview
-action. Disabling a provider configuration always prevents a saved autostart
+assistant preserves existing runtime and enabled choices, but deliberately turns
+autostart off as part of the confirmed setup. Starting remains a separate explicit
+Overview/CLI action. Autostart can be enabled after the first explicit start. Disabling a provider configuration always prevents a saved autostart
 preference from bringing it online. Paid automatic maintenance is separately
 disclosed and approved because it may create DGB-fee transactions. The
 assistant remains available from Overview for later review.
@@ -572,7 +575,11 @@ Provider runtime preferences are persisted in the provider wallet:
   `PAYMASTER_PROVIDER_BUSY` instead of falsely reporting success while another
   wallet-local provider operation owns the transition. It remains an ephemeral
   stop when autostart is saved as enabled.
-- The Qt **Stop** action is persistent: when autostart is enabled it first
+- Normal Qt **Pause operation** and the CLI pause action call
+  `stoppaymaster {"persistent":true,"pause_setup":true}`. This atomically saves
+  autostart off and provider disabled under the existing work guard before the
+  runtime stop, including a pause of new background setup signatures.
+- The older expert Qt **Stop** action is persistent: when autostart is enabled it first
   saves `autostart=false` and only then stops the runtime. The separate
   **Disable provider configuration** action persists `enabled=false` and also
   stops the runtime, so neither scheduler polling nor a wallet reload can undo

@@ -1,5 +1,11 @@
 # DigiDollar Paymaster: developer starting point
 
+**Operator-workflow feature candidate (2026-09-27):**
+`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
+[shared Qt/CLI setup and operation](doc/digidollar-paymaster-operator.md). Its new-source
+build, Qt/functional reruns and real-Tor/24-hour acceptance remain open.
+The dated RC2 results below do not cover these changes.
+
 The Direct-capacity implementation, including the 2026-09-27 recovery/retry
 fixes in `1789c803be`, is documented in
 [Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):

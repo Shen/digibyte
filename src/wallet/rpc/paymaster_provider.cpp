@@ -29,12 +29,14 @@
 #include <paymaster/manager.h>
 #include <paymaster/protocol.h>
 #include <paymaster/reservation.h>
+#include <paymaster/setup.h>
 #include <paymaster/validation.h>
 #include <random.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
 #include <streams.h>
+#include <util/chaintype.h>
 #include <version.h>
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
@@ -3416,6 +3418,165 @@ RPCHelpMan getpaymasterinfo()
                 result.pushKV("transport", PaymasterTransportToJSON(*transport_node->connman));
             }
             result.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
+            return result;
+        },
+    };
+}
+
+RPCHelpMan getpaymasteroperatorinfo()
+{
+    return RPCHelpMan{
+        "getpaymasteroperatorinfo",
+        "Read-only provider setup and operations snapshot. Does not reconcile, spend, sign, probe endpoints or start service. Node/chain readiness can change after the snapshot.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "Operator snapshot", {
+                                                                     {RPCResult::Type::NUM, "schema_version", "Operator schema version"},
+                                                                     {RPCResult::Type::STR, "network", "Active network"},
+                                                                     {RPCResult::Type::STR, "wallet", "Explicitly selected wallet"},
+                                                                     {RPCResult::Type::STR_HEX, "wallet_generation", "Ephemeral wallet load identity; changes on reload"},
+                                                                     {RPCResult::Type::NUM_TIME, "observed_at", "Observation time"},
+                                                                     {RPCResult::Type::NUM_TIME, "unlocked_until", "Wallet relock time, zero when not timed"},
+                                                                     {RPCResult::Type::BOOL, "encrypted", "Wallet uses key encryption"},
+                                                                     {RPCResult::Type::OBJ, "provider", "Provider configuration and local readiness", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymasterinfo; no finance history scan"}}},
+                                                                     {RPCResult::Type::OBJ, "node_settings", "Effective startup values, including ordinary_outbound_target; OS-limited capacity is reported separately in provider.transport", {{RPCResult::Type::ELISION, "", "Allowed Paymaster node options"}}},
+                                                                     {RPCResult::Type::OBJ, "safety", "Finite policies and budget accounting", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymastersafetystatus; no expiry mutation"}}},
+                                                                     {RPCResult::Type::ARR, "diagnostics", "Ordered causes and action identifiers", {{RPCResult::Type::OBJ, "", "Diagnostic", {
+                                                                                                                                                                                                  {RPCResult::Type::STR, "code", "Stable code"},
+                                                                                                                                                                                                  {RPCResult::Type::STR, "state", "ready, waiting, action_required, error or unknown"},
+                                                                                                                                                                                                  {RPCResult::Type::STR, "severity", "info, warning or error"},
+                                                                                                                                                                                                  {RPCResult::Type::STR, "area", "Affected operator area"},
+                                                                                                                                                                                                  {RPCResult::Type::STR, "action", "Suggested action; never automatic authority"},
+                                                                                                                                                                                              }}}},
+                                                                 }},
+        RPCExamples{HelpExampleCli("getpaymasteroperatorinfo", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            auto& context = EnsureWalletContext(request.context);
+            auto wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            const auto readiness = GetProviderReadiness(*wallet, context, /*wait_for_sync=*/false, /*reconcile=*/false);
+            const int64_t now = GetTime();
+            LOCK(wallet->cs_wallet);
+            UniValue result{UniValue::VOBJ}, provider{UniValue::VOBJ}, safety{UniValue::VOBJ};
+            const bool running = readiness.have_identity && context.paymaster && context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
+            std::string state = "stopped";
+            if (running) {
+                const auto service = context.paymaster->GetProviderServiceStatus(wallet->GetName());
+                state = ProviderServiceStateName(service.state);
+                if (!service.last_error.empty()) provider.pushKV("last_service_error", service.last_error);
+            } else if (readiness.settings.enabled && readiness.settings.autostart)
+                state = wallet->IsLocked() ? "waiting_for_unlock" : "waiting_for_readiness";
+            provider.pushKV("settings_present", readiness.have_settings);
+            provider.pushKV("enabled", readiness.settings.enabled);
+            provider.pushKV("running", running);
+            provider.pushKV("operation_mode", ProviderOperationModeName(readiness.settings.operation_mode));
+            provider.pushKV("autostart", readiness.settings.autostart);
+            provider.pushKV("service_state", state);
+            provider.pushKV("wallet_eligible", readiness.wallet_eligible);
+            provider.pushKV("wallet_locked", wallet->IsLocked());
+            provider.pushKV("ready", readiness.ready);
+            provider.pushKV("pool_ready", readiness.pool_ready);
+            provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
+            auto liquidity = ProviderLiquidityStatusToJSON(readiness, now);
+            for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
+                auto counts = liquidity.find_value(key);
+                size_t reserved{0};
+                for (const auto& entry : readiness.pool_entries) {
+                    const bool admission = std::string{key}.find("admission") == 0;
+                    const bool carrier = std::string{key}.find("carriers") != std::string::npos;
+                    if (entry.state == PoolEntryState::RESERVED && (entry.purpose == PoolPurpose::ADMISSION) == admission && (entry.asset == PoolAsset::DD_CARRIER) == carrier) ++reserved;
+                }
+                counts.pushKV("reserved", reserved);
+                liquidity.pushKV(key, counts);
+            }
+            bool exhausted{false};
+            if (liquidity.find_value("policy").find_value("paid_maintenance_approved").isTrue()) {
+                for (const auto& period : {std::string{"hour"}, std::string{"day"}})
+                    exhausted |= OperatorRemaining(liquidity.find_value("policy").find_value("maximum_maintenance_fee_per_" + period + "_satoshis").getInt<int64_t>(), liquidity.find_value("maintenance_fee_spent_last_" + period + "_satoshis").getInt<int64_t>(), liquidity.find_value("maintenance_fee_reserved_satoshis").getInt<int64_t>()) == 0;
+            }
+            provider.pushKV("maintenance_budget_exhausted", exhausted);
+            provider.pushKV("liquidity", liquidity);
+            UniValue prerequisites{UniValue::VOBJ};
+            prerequisites.pushKV("chain_height", wallet->chain().getHeight().value_or(-1));
+            prerequisites.pushKV("txindex_enabled", context.args && context.args->GetBoolArg("-txindex", false));
+            if (g_txindex) {
+                const auto index = g_txindex->GetSummary();
+                prerequisites.pushKV("txindex_synced", index.synced);
+                prerequisites.pushKV("txindex_height", index.best_block_height);
+            }
+            provider.pushKV("prerequisites", prerequisites);
+            if (readiness.have_policy) provider.pushKV("policy", ProviderPolicyToJSON(readiness.policy));
+            if (readiness.endpoint.IsValid()) provider.pushKV("endpoint", readiness.endpoint.ToStringAddrPort());
+            if (const auto* node = wallet->chain().context(); node && node->connman) provider.pushKV("transport", PaymasterTransportToJSON(*node->connman));
+            if (readiness.have_identity) {
+                provider.pushKV("provider_id", readiness.identity.provider_id.GetHex());
+                provider.pushKV("display_name", readiness.identity.display_name);
+                ProviderBackupStatus backup;
+                std::string error;
+                if (!GetPaymasterProviderBackupStatus(*wallet, backup, now, error, /*persist=*/false)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+                UniValue status{UniValue::VOBJ};
+                status.pushKV("required", ProviderBackupRequired(backup));
+                status.pushKV("last_successful_backup_at", backup.last_successful_backup_at);
+                status.pushKV("external_backup_acknowledged_at", backup.external_backup_acknowledged_at);
+                provider.pushKV("backup_status", status);
+            }
+            ProviderQueueStatus queue;
+            if (readiness.have_identity && context.paymaster) queue = context.paymaster->GetProviderQueueStatus(readiness.identity.provider_id);
+            UniValue work{UniValue::VOBJ};
+            work.pushKV("waiting_requests", uint64_t(queue.waiting_requests));
+            work.pushKV("waiting_submits", uint64_t(queue.waiting_submits));
+            provider.pushKV("service_queue", work);
+            UniValue preparation{UniValue::VARR};
+            for (const auto& record : readiness.maintenance_ledger.records) {
+                if (!record.IsPreparation() || record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
+                UniValue item{UniValue::VOBJ};
+                item.pushKV("plan_id", record.plan_id.GetHex());
+                item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
+                item.pushKV("state", record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.transaction_id.IsNull() ? "pending_creation" :
+                                                                                                                                      "pending_confirmation");
+                item.pushKV("error", record.preparation_error);
+                if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
+                preparation.push_back(item);
+            }
+            provider.pushKV("preparation", preparation);
+            safety.pushKV("configured", readiness.have_safety_policy && readiness.have_budget_ledger);
+            if (readiness.have_safety_policy) safety.pushKV("policy", ProviderSafetyPolicyToJSON(readiness.safety_policy));
+            if (readiness.have_safety_policy && readiness.have_budget_ledger) {
+                safety.pushKV("user_paid", ProviderSafetyClassStatusToJSON(readiness.budget_ledger, readiness.safety_policy, FundingModel::USER_PAID, SponsorshipScope::PUBLIC, now));
+                safety.pushKV("public_sponsored", ProviderSafetyClassStatusToJSON(readiness.budget_ledger, readiness.safety_policy, FundingModel::SPONSORED, SponsorshipScope::PUBLIC, now));
+                safety.pushKV("restricted_sponsored", ProviderSafetyClassStatusToJSON(readiness.budget_ledger, readiness.safety_policy, FundingModel::SPONSORED, SponsorshipScope::RESTRICTED, now));
+            }
+            UniValue budget_errors{UniValue::VARR};
+            if (readiness.have_policy && readiness.have_safety_policy && readiness.have_budget_ledger) {
+                const auto collect = [&](const char* name) { for (const auto& error : safety.find_value(name).find_value("errors").getValues()) budget_errors.push_back(error); };
+                if (PolicyAllowsFundingModel(readiness.policy, FundingModel::USER_PAID)) collect("user_paid");
+                if (PolicyAllowsFundingModel(readiness.policy, FundingModel::SPONSORED)) collect(readiness.policy.sponsorship_scope == SponsorshipScope::PUBLIC ? "public_sponsored" : "restricted_sponsored");
+            }
+            provider.pushKV("budget_errors", budget_errors);
+            UniValue startup{UniValue::VOBJ};
+            if (context.args) {
+                for (const auto& key : {"digidollar", "paymaster", "txindex", "v2transport"})
+                    startup.pushKV(key, int(context.args->GetBoolArg("-" + std::string{key}, std::string{key} == "paymaster")));
+                startup.pushKV("prune", context.args->GetIntArg("-prune", 0));
+                startup.pushKV("maxconnections", context.args->GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS));
+                startup.pushKV("paymastermaxoutbound", context.args->GetIntArg("-paymastermaxoutbound", DEFAULT_DIRECT_OUTBOUND));
+                startup.pushKV("paymastermaxinbound", context.args->GetIntArg("-paymastermaxinbound", MAX_DIRECT_INBOUND));
+                UniValue binds{UniValue::VARR};
+                for (const auto& bind : context.args->GetArgs("-paymasterbind"))
+                    binds.push_back(bind);
+                startup.pushKV("paymasterbind", binds);
+                if (const auto* node = wallet->chain().context(); node && node->connman) startup.pushKV("ordinary_outbound_target", node->connman->GetOrdinaryOutboundTarget());
+            }
+            result.pushKV("node_settings", startup);
+            result.pushKV("schema_version", 1);
+            result.pushKV("network", ChainTypeToString(Params().GetChainType()));
+            result.pushKV("wallet", wallet->GetName());
+            result.pushKV("wallet_generation", wallet->m_paymaster_transport_owner.GetHex());
+            result.pushKV("observed_at", now);
+            result.pushKV("unlocked_until", wallet->nRelockTime);
+            result.pushKV("encrypted", wallet->IsCrypted());
+            result.pushKV("diagnostics", OperatorDiagnostics(provider, wallet->nRelockTime, now));
+            result.pushKV("provider", provider);
+            result.pushKV("safety", safety);
             return result;
         },
     };

@@ -1,5 +1,11 @@
 # DigiDollar Paymaster implementation reference
 
+**Operator-workflow feature candidate (2026-09-27):**
+`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
+[shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). Its new-source
+build, Qt/functional reruns and real-Tor/24-hour acceptance remain open.
+The dated RC2 results below do not cover these changes.
+
 2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
 [Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
 includes the default single-channel queue, dedicated provider listener,

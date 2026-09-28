@@ -106,10 +106,30 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         assert_equal(provider.startpaymaster()["running"], True)
 
         completed = {}
+        transport_retried = False
 
         def automatic_submit_completed():
-            nonlocal completed
-            completed = resume_send()
+            nonlocal completed, transport_retried
+            try:
+                completed = resume_send()
+            except JSONRPCException as error:
+                # The client may have connected while the provider was down.
+                # Terminal transport failures need an explicit retry, not more
+                # polling. Retry once, preserving the signed payment authority.
+                if (transport_retried or error.error.get("code") != -4 or
+                        error.error.get("message") not in (
+                            "PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE",
+                            "PAYMASTER_DIRECT_CONNECTION_FAILED")):
+                    raise
+                transport_retried = True
+                persisted = client.getdigidollarsendsession({"request_id": request_id})
+                assert_equal(persisted["session_id"], signed_session["session_id"])
+                assert_equal(persisted["reserved_user_inputs"], signed_session["reserved_user_inputs"])
+                options["retry_transport"] = True
+                try:
+                    completed = resume_send()
+                finally:
+                    options.pop("retry_transport")
             return (completed.get("processed", False) and
                     completed.get("session_state") == "MEMPOOL")
 

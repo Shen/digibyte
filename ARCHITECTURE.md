@@ -1715,3 +1715,19 @@ Finite Paymaster pool setup now uses the existing wallet maintenance journal and
 saved before transaction creation; confirmed-input funding avoids stempool-only
 change dependencies. See [automatic pool setup](doc/digidollar-paymaster-pool-setup.md)
 for fee authorization, V3/V4 persistence compatibility, and legacy adoption.
+
+## Paymaster operator workflow (feature candidate, 2026-09-27)
+
+On `feature/paymaster-operator-workflow` from RC2 `1a08828ca1`,
+`paymaster/setup.{h,cpp}` owns UI-independent finite profiles, ordered setup,
+context/reply/persisted-state checks and status budget arithmetic. CLI and Qt
+use this common plan through their existing RPC adapters. Core alone owns
+validation, signatures, reservations and existing journal persistence.
+`getpaymasteroperatorinfo` uses a non-reconciling, non-blocking readiness view;
+existing callers retain normal reconciliation. `stoppaymaster` can atomically
+persist autostart off and enabled false under ProviderWorkGuard before stopping.
+The node owns allowlisted active-config preview/backup/atomic apply, and a
+bounded Direct diagnostic using existing fresh-work quotas. External reports
+are historical operator evidence and confer no payment or identity assurance.
+There is no consensus, wire-protocol or wallet-format change. See the
+[operator guide and open acceptance](doc/digidollar-paymaster-operator.md).

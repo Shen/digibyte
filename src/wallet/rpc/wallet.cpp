@@ -1000,6 +1000,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"digidollar", &getpaymasterfinancestatus},
         {"digidollar", &acknowledgepaymasterproviderbackup},
         {"digidollar", &getpaymasterinfo},
+        {"digidollar", &getpaymasteroperatorinfo},
         {"digidollar", &getpaymasterpoolinfo},
         {"digidollar", &listpaymasterreservations},
         {"digidollar", &cancelpaymasterquote},

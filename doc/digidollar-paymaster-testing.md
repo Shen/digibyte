@@ -1,5 +1,24 @@
 # Paymaster build and test runbook
 
+**Operator-workflow feature candidate (2026-09-27):**
+`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
+[shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). On September 28,
+the operator reported Windows build exit 0. Nine of twelve functional tests
+passed initially; after three test-fixture corrections, the focused operator,
+pool-setup and lifecycle rerun passed (55 s accumulated, 56 s runtime, exit 0).
+All twelve selected functional tests have therefore passed across these two
+runs. A subsequent Qt run reported 45 passes and two failures; corrections now
+pass both focused test functions (including both setup rows) with newly built
+Qt binaries, and the operator subsequently reported the full Paymaster Qt group
+passing, exit 0. The 297-case unit selection exposed an uninitialized chain tip
+in the new read-only fixture; after correction its isolated test passes all
+11 assertions. The operator then reported exit 0 for the complete selected
+unit rerun. Build, the selected unit group, Paymaster Qt and all twelve selected
+functional tests are therefore green across the recorded runs. Real-Tor and
+24-hour acceptance remain open. See the
+[validation details](digidollar-paymaster-operator.md#verification-and-acceptance).
+The dated RC2 results below cover the earlier code only.
+
 2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
 [Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
 includes the default single-channel queue, dedicated provider listener,
@@ -121,7 +140,7 @@ try {
 
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-python test/functional/test_runner.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
+python test/functional/test_runner.py wallet_paymaster_operator.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional tests failed' }
 
 Get-FileHash .\src\digibyted.exe, .\src\digibyte-cli.exe, .\src\test_digibyte.exe, .\build_msvc\x64\Release\test_digibyte-qt.exe -Algorithm SHA256
@@ -139,7 +158,7 @@ set -e
 make -j2 -C src digibyted digibyte-cli test/test_digibyte qt/test/test_digibyte-qt
 ./src/test/test_digibyte --run_test='paymaster_*,netbase_tests' --report_level=short
 env -u DIGIBYTE_QT_TEST_FUNCTION -u DIGIBYTE_QT_TEST_OUTPUT QT_QPA_PLATFORM=offscreen DIGIBYTE_QT_TEST_SUITE=PaymasterWidgetTests ./src/qt/test/test_digibyte-qt
-python3 test/functional/test_runner.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
+python3 test/functional/test_runner.py wallet_paymaster_operator.py p2p_paymaster_connection_capacity.py p2p_paymaster.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py digidollar_rpc_amount_units.py -j1
 sha256sum src/digibyted src/digibyte-cli src/test/test_digibyte src/qt/test/test_digibyte-qt
 ```
 

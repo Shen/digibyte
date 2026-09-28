@@ -34,12 +34,13 @@ bool GetPaymasterIdentityKey(CWallet& wallet,
                              std::string& error);
 
 /** Return the provider-wallet backup reminder, creating a conservative
- * reminder for pre-feature identities that do not have metadata yet. */
+ * reminder for pre-feature identities that do not have metadata yet.
+ * persist=false returns that reminder without writing missing metadata. */
 bool GetPaymasterProviderBackupStatus(
     const CWallet& wallet,
     DigiDollar::Paymaster::ProviderBackupStatus& status,
     int64_t now,
-    std::string& error);
+    std::string& error, bool persist = true);
 
 /** Record a successful full-wallet backup without retaining its path. */
 bool MarkPaymasterProviderBackupCompleted(const CWallet& wallet,

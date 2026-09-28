@@ -13,6 +13,7 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <util/time.h>
+#include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
@@ -183,6 +184,39 @@ BOOST_AUTO_TEST_CASE(legacy_wallet_is_rejected)
     std::string error;
     BOOST_CHECK(!CreatePaymasterIdentity(m_wallet, "Provider", 100, identity, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_REQUIRES_DESCRIPTOR_WALLET");
+}
+
+BOOST_AUTO_TEST_CASE(persistent_pause_preserves_policy_and_disables_all_new_provider_work)
+{
+    ProviderSettings original;
+    original.enabled = true;
+    original.autostart = true;
+    original.operation_mode = ProviderOperationMode::MANUAL;
+    original.policy_hash = uint256S("1234");
+    original.updated_at = 100;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterSettings(original));
+    }
+    std::string error;
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!PausePaymasterProvider(m_wallet, true, 0, error));
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    BOOST_REQUIRE(PausePaymasterProvider(m_wallet, false, 101, error));
+    ProviderSettings paused;
+    BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, paused));
+    BOOST_CHECK(paused.enabled);
+    BOOST_CHECK(!paused.autostart);
+    BOOST_CHECK(paused.policy_hash == original.policy_hash);
+    BOOST_REQUIRE(PausePaymasterProvider(m_wallet, true, 102, error));
+    BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, paused));
+    BOOST_CHECK(!paused.enabled);
+    BOOST_CHECK(!paused.autostart);
+    BOOST_CHECK(paused.operation_mode == original.operation_mode);
+    BOOST_CHECK(paused.policy_hash == original.policy_hash);
+    BOOST_REQUIRE(PausePaymasterProvider(m_wallet, true, 103, error));
+    BOOST_REQUIRE(GetPaymasterProviderSettings(m_wallet, paused));
+    BOOST_CHECK(!paused.enabled && !paused.autostart);
 }
 
 BOOST_AUTO_TEST_CASE(provider_runtime_settings_are_current_only_and_fail_closed)
@@ -1303,6 +1337,48 @@ BOOST_AUTO_TEST_CASE(retirement_finance_recovers_wallet_commit_after_write_failu
     BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(finance));
     BOOST_CHECK_EQUAL(finance.events.size(), 1U);
     BOOST_CHECK_EQUAL(reopened.mapWallet.size(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(operator_readiness_and_legacy_backup_do_not_write)
+{
+    // WalletTestingSetup loads the mock DB without attaching/scanning the wallet.
+    // Model the processed chain tip required by a loaded wallet's status RPC.
+    const auto height = m_node.chain->getHeight();
+    BOOST_REQUIRE(height.has_value());
+    const uint256 tip = m_node.chain->getBlockHash(*height);
+    std::string error;
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(*height, tip);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+        ProviderIdentityRecord identity;
+        BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Read-only operator", 1000, identity, error));
+        BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Erase(DBKeys::PAYMASTER_BACKUP_STATUS));
+        ProviderPoolEntry entry;
+        entry.outpoint = COutPoint{uint256S("abcd"), 0};
+        entry.purpose = PoolPurpose::ADMISSION;
+        entry.asset = PoolAsset::DGB;
+        entry.script_pub_key = identity.identity_script;
+        entry.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        entry.confirmation_height = 1;
+        entry.updated_at = 1000;
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterProviderPool({entry}));
+    }
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    const auto updates = m_wallet.GetDatabase().nUpdateCounter.load();
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    const auto readiness = paymaster_rpc::internal::GetProviderReadiness(m_wallet, context, false, false);
+    BOOST_REQUIRE_EQUAL(readiness.pool_entries.size(), 1U);
+    BOOST_CHECK_EQUAL(readiness.pool_entries[0].confirmation_height, 0);
+    ProviderBackupStatus backup;
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(m_wallet, backup, 2000, error, false));
+    BOOST_CHECK(ProviderBackupRequired(backup));
+    BOOST_CHECK(!WalletBatch{m_wallet.GetDatabase()}.HasPaymasterBackupStatus());
+    BOOST_CHECK_EQUAL(m_wallet.GetDatabase().nUpdateCounter.load(), updates);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
