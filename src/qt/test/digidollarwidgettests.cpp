@@ -3686,11 +3686,10 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(paymasterTabs != nullptr);
     const QStringList expectedPaymasterTabs{
         QStringLiteral("Overview"),
-        QStringLiteral("Offer"),
-        QStringLiteral("Spending limits"),
-        QStringLiteral("Liquidity"),
-        QStringLiteral("Finances"),
-        QStringLiteral("Operations"),
+        QStringLiteral("Activity"),
+        QStringLiteral("Operating capital"),
+        QStringLiteral("Income && costs"),
+        QStringLiteral("Settings"),
     };
     QCOMPARE(paymasterTabs->count(), expectedPaymasterTabs.size());
     for (int i = 0; i < expectedPaymasterTabs.size(); ++i) {
@@ -3704,6 +3703,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         tab.findChild<QScrollArea*>("paymasterOverviewPage");
     QWidget* overviewContents =
         tab.findChild<QWidget*>("paymasterOverviewContents");
+    auto* settingsTabs = tab.findChild<QTabWidget*>("paymasterSettingsTabs");
+    QVERIFY(settingsTabs != nullptr);
+    QCOMPARE(settingsTabs->count(), 3);
     QWidget* configurationPage = tab.findChild<QWidget*>("paymasterConfigurationPage");
     QWidget* safetyPage = tab.findChild<QWidget*>("paymasterSafetyPolicyPage");
     QWidget* liquidityPage = tab.findChild<QWidget*>("paymasterLiquidityPage");
@@ -3781,10 +3783,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
                  QStringLiteral("statusCard"));
         QVERIFY(card->minimumHeight() >= 140);
     }
-    // Five cards occupy at least three rows in the normal two-column layout.
-    // The dashboard must publish that height so the following maintenance card
-    // cannot be painted on top of the final row.
-    QVERIFY(overviewDashboard->minimumHeight() >= (3 * 140) + (2 * 12));
+    // Three summary cards publish enough height for the two-column layout.
+    QVERIFY(overviewDashboard->minimumHeight() >= (2 * 140) + 12);
     QVERIFY(userPaidOfferCard != nullptr);
     QVERIFY(sponsoredOfferCard != nullptr);
     QCOMPARE(userPaidOfferCard->property("paymasterRole").toString(),
@@ -3809,7 +3809,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QCOMPARE(liquiditySettings->text(), QStringLiteral("Change liquidity settings"));
     const QList<QWidget*> pageColumns =
         tab.findChildren<QWidget*>("paymasterPageColumn");
-    QCOMPARE(pageColumns.size(), 6);
+    QCOMPARE(pageColumns.size(), 7);
     for (QWidget* column : pageColumns) {
         QCOMPARE(column->maximumWidth(), 1100);
     }
@@ -3817,8 +3817,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(advancedLiquidity->isHidden());
     QVERIFY(!setupChoice->isHidden());
     QVERIFY(configuredOverview->isHidden());
-    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(configurationPage)));
-    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(safetyPage)));
+    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(settingsTabs)));
+    QCOMPARE(settingsTabs->indexOf(configurationPage), 0);
+    QCOMPARE(settingsTabs->indexOf(safetyPage), 1);
     QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(liquidityPage)));
     QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(financesPage)));
     QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(activityPage)));
@@ -3916,38 +3917,39 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
                     !maintenanceApproval->isChecked();
             }
             setupWizardHasVisibleContent = introduction && requirementsScroll && requirements &&
-                providerWallet && providerWalletStatus && walletRecommendation &&
-                walletConsequence && walletScope && walletConfirmation && chooseWallet &&
-                userPaid && safetyProfile && setupNetworkFee && maintenanceApproval &&
-                review && nextActions &&
-                liquidityPreview && progressPage && progressResult &&
-                setupRetry && firstProgressStep && transitionProgressStep &&
-                liquidityProgressStep &&
-                runtimeProgressStep &&
-                requirementsScroll->widgetResizable() &&
-                requirementsScroll->horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff &&
-                introduction->wordWrap() && requirements->wordWrap() &&
-                introduction->text().contains(QStringLiteral("saves the identity")) &&
-                providerWallet->text().contains(QStringLiteral("No wallet selected")) &&
-                providerWalletStatus->text().contains(QStringLiteral("No wallet is selected")) &&
-                walletRecommendation->text().contains(QStringLiteral("dedicated provider wallet")) &&
-                walletConsequence->text().contains(QStringLiteral("does not create another wallet")) &&
-                walletConsequence->text().contains(QStringLiteral("shown as reserved")) &&
-                walletScope->text().contains(QStringLiteral("cannot switch wallets")) &&
-                !walletConfirmation->isChecked() &&
-                !walletConfirmation->isEnabled() &&
-                !setupWizard->button(QWizard::NextButton)->isEnabled() &&
-                safetyProfile->currentData().toString() == QLatin1String("recommended") &&
-                setupWizardUsesRecommendedNetworkFee &&
-                !maintenanceApproval->isChecked() &&
-                requirements->text().contains(QStringLiteral("txindex=1")) &&
-                requirements->text().contains(QStringLiteral("BIP324")) &&
-                nextActions->text().contains(QStringLiteral("Runtime, autostart and the requested enabled state")) &&
-                progressResult->text().contains(QStringLiteral("not started")) &&
-                firstProgressStep->text().contains(QStringLiteral("Pending")) &&
-                transitionProgressStep->text().contains(QStringLiteral("safety transition")) &&
-                liquidityProgressStep->text().contains(QStringLiteral("automatic liquidity policy")) &&
-                runtimeProgressStep->text().contains(QStringLiteral("runtime settings"));
+                                           providerWallet && providerWalletStatus && walletRecommendation &&
+                                           walletConsequence && walletScope && walletConfirmation && chooseWallet &&
+                                           userPaid && safetyProfile && setupNetworkFee && maintenanceApproval &&
+                                           review && nextActions &&
+                                           liquidityPreview && progressPage && progressResult &&
+                                           setupRetry && firstProgressStep && transitionProgressStep &&
+                                           liquidityProgressStep &&
+                                           runtimeProgressStep &&
+                                           requirementsScroll->widgetResizable() &&
+                                           requirementsScroll->horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff &&
+                                           introduction->wordWrap() && requirements->wordWrap() &&
+                                           introduction->text().contains(QStringLiteral("saves the identity")) &&
+                                           providerWallet->text().contains(QStringLiteral("No wallet selected")) &&
+                                           providerWalletStatus->text().contains(QStringLiteral("No wallet is selected")) &&
+                                           walletRecommendation->text().contains(QStringLiteral("dedicated provider wallet")) &&
+                                           walletConsequence->text().contains(QStringLiteral("does not create another wallet")) &&
+                                           walletConsequence->text().contains(QStringLiteral("shown as reserved")) &&
+                                           walletScope->text().contains(QStringLiteral("cannot switch wallets")) &&
+                                           !walletConfirmation->isChecked() &&
+                                           !walletConfirmation->isEnabled() &&
+                                           !setupWizard->button(QWizard::NextButton)->isEnabled() &&
+                                           safetyProfile->currentData().toString() == QLatin1String("recommended") &&
+                                           setupWizardUsesRecommendedNetworkFee &&
+                                           !maintenanceApproval->isChecked() &&
+                                           requirements->text().contains(QStringLiteral("txindex=1")) &&
+                                           requirements->text().contains(QStringLiteral("BIP324")) &&
+                                           nextActions->text().contains(QStringLiteral("Runtime and the requested enabled state are saved last")) &&
+                                           nextActions->text().contains(QStringLiteral("Autostart remains off until an explicit start")) &&
+                                           progressResult->text().contains(QStringLiteral("not started")) &&
+                                           firstProgressStep->text().contains(QStringLiteral("Pending")) &&
+                                           transitionProgressStep->text().contains(QStringLiteral("safety transition")) &&
+                                           liquidityProgressStep->text().contains(QStringLiteral("automatic liquidity policy")) &&
+                                           runtimeProgressStep->text().contains(QStringLiteral("runtime settings"));
             setupWizard->reject();
             break;
         }
@@ -3987,8 +3989,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         // remaining widget contracts still run in the headless suite.
         setupChoice->hide();
         configuredOverview->show();
-        paymasterTabs->setTabEnabled(paymasterTabs->indexOf(configurationPage), true);
-        paymasterTabs->setTabEnabled(paymasterTabs->indexOf(safetyPage), true);
+        paymasterTabs->setTabEnabled(paymasterTabs->indexOf(settingsTabs), true);
         paymasterTabs->setTabEnabled(paymasterTabs->indexOf(liquidityPage), true);
         QPushButton* runtime_toggle = tab.findChild<QPushButton*>(
             "paymasterRuntimeSettingsToggle");
@@ -3997,8 +3998,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     }
     QVERIFY(setupChoice->isHidden());
     QVERIFY(!configuredOverview->isHidden());
-    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(configurationPage)));
-    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(safetyPage)));
+    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(settingsTabs)));
+    QVERIFY(settingsTabs->isTabEnabled(settingsTabs->indexOf(configurationPage)));
+    QVERIFY(settingsTabs->isTabEnabled(settingsTabs->indexOf(safetyPage)));
     QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(liquidityPage)));
     QLabel* configurationIntroduction =
         tab.findChild<QLabel*>("paymasterConfigurationIntroduction");
@@ -4288,7 +4290,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(!subtractPaymasterFee->isChecked());
     QVERIFY(feeExplanation->text().contains(QStringLiteral("first tries")));
     QVERIFY(feeSummary->text().contains(QStringLiteral("Paymaster only if needed")));
-    QVERIFY(feeSummary->text().contains(QStringLiteral("1.00 $DD (100 cents)")));
+    QVERIFY(feeSummary->text().contains(QStringLiteral("1.00 $DD")));
     QLineEdit* sendAmount = sendPage->findChild<QLineEdit*>("amountEdit");
     DigiDollarSendWidget* sendForm =
         qobject_cast<DigiDollarSendWidget*>(sendPage->widget());
@@ -4468,8 +4470,10 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(focusAddress->isReadOnly());
     QVERIFY(focusAmount->isReadOnly());
     QCOMPARE(sessionPrimary->text(), QStringLiteral("Try another Paymaster"));
-    QVERIFY(sessionNextStep->text().contains(QStringLiteral("protected")) ||
-            sessionNextStep->text().contains(QStringLiteral("Preparing")));
+    // A restored request has no live continuation; its next action is a
+    // read-only status check rather than automatic preparation.
+    QVERIFY(sessionNextStep->text().contains(QStringLiteral("Preparation is paused")));
+    QVERIFY(sessionNextStep->text().contains(QStringLiteral("Check the current status")));
     QVERIFY(sessionMore->isChecked() == false);
     QVERIFY(sessionTechnical->isChecked() == false);
     QVERIFY(sessionAbandon != nullptr);

@@ -136,6 +136,39 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         add("PAYMASTER_STATUS_INCOMPLETE", "unknown", "service", "refresh");
         return result;
     }
+    // A finite setup can wait while a provider is already running. Its durable
+    // step diagnostic is more useful than the generic missing-slot symptom.
+    bool preparation_pending{false};
+    const auto& preparation = provider.find_value("preparation");
+    if (preparation.isArray()) {
+        for (const auto& step : preparation.getValues()) {
+            const auto& state = step.find_value("state");
+            const auto& error = step.find_value("error");
+            if (state.isStr() && (state.get_str() == "complete" || state.get_str() == "cancelled")) continue;
+            preparation_pending = true;
+            if (!state.isStr() || !error.isStr() ||
+                (state.get_str() != "pending_creation" && state.get_str() != "pending_confirmation" && state.get_str() != "conflict")) {
+                add("PAYMASTER_POOL_PREPARATION_STATUS_UNKNOWN", "error", "liquidity", "inspect_error");
+                continue;
+            }
+            const std::string code = error.get_str().substr(0, error.get_str().find(':'));
+            if (state.get_str() == "conflict")
+                add("PAYMASTER_POOL_TRANSACTION_CONFLICT", "error", "liquidity", "inspect_error");
+            else if (code == "PAYMASTER_WALLET_LOCKED")
+                add(code, "action_required", "wallet", "unlock");
+            else if (code == "PAYMASTER_PROVIDER_DISABLED")
+                add(code, "action_required", "service", "enable");
+            else if (code == "PAYMASTER_POOL_WAITING_CONFIRMATION" || (code.empty() && state.get_str() == "pending_confirmation"))
+                add("PAYMASTER_POOL_WAITING_CONFIRMATION", "waiting", "liquidity", "wait");
+            else if (code == "PAYMASTER_POOL_WAITING_DGB" || code == "PAYMASTER_POOL_WAITING_FUNDS" ||
+                     code == "PAYMASTER_POOL_FEE_LIMIT" || code == "PAYMASTER_POOL_POLICY_CHANGED")
+                add(code, "action_required", "liquidity", "review_liquidity");
+            else if (code.empty())
+                add("PAYMASTER_POOL_PREPARATION_PENDING", "waiting", "liquidity", "wait");
+            else
+                add(code, "error", "liquidity", "inspect_error");
+        }
+    }
     for (const auto& error : errors.getValues()) {
         const std::string code = error.get_str();
         if (code == "PAYMASTER_WALLET_LOCKED")
@@ -164,8 +197,14 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
     if (unlocked_until > now && unlocked_until - now <= 300) add("PAYMASTER_WALLET_LOCKING_SOON", "action_required", "wallet", "review_unlock");
     if (provider.find_value("backup_status").find_value("required").isTrue()) add("PAYMASTER_BACKUP_REQUIRED", "action_required", "backup", "backup_wallet");
     const auto& service_error = provider.find_value("last_service_error");
-    if (service_error.isStr() && !service_error.get_str().empty()) add(service_error.get_str(), "error", "service", "inspect_error");
-    if (errors.empty()) add("PAYMASTER_LOCAL_READY", "ready", "service", provider.find_value("running").isTrue() ? "none" : "start");
+    if (service_error.isStr() && !service_error.get_str().empty()) {
+        if (service_error.get_str() == "PAYMASTER_POOL_PREPARATION_PENDING") {
+            if (!preparation_pending) add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
+        } else {
+            add(service_error.get_str(), "error", "service", "inspect_error");
+        }
+    }
+    if (errors.empty() && !preparation_pending) add("PAYMASTER_LOCAL_READY", "ready", "service", provider.find_value("running").isTrue() ? "none" : "start");
     add("PAYMASTER_EXTERNAL_REACHABILITY_UNKNOWN", "unknown", "connection", "check_external");
     auto items = result.getValues();
     const auto priority = [](const UniValue& item) {
@@ -370,7 +409,7 @@ std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoic
     steps.push_back(pool);
     UniValue runtime{UniValue::VOBJ};
     runtime.pushKV("operation_mode", choices.operation_mode);
-    runtime.pushKV("autostart", false);
+    runtime.pushKV("autostart", provider.find_value("autostart").isTrue());
     add("setpaymasterruntimesettings", runtime, runtime);
     UniValue enabled{UniValue::VOBJ};
     enabled.pushKV("enabled", choices.enabled);

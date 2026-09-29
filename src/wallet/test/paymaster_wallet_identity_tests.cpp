@@ -1209,6 +1209,62 @@ BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_recor
 }
 
 
+BOOST_AUTO_TEST_CASE(obsolete_refill_release_recovers_transactions_first)
+{
+    ScopedPaymasterMockTime clock{2000};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderMaintenanceLedger ledger;
+    for (int index = 1; index <= 4; ++index) {
+        ProviderMaintenanceRecord record;
+        record.operation_id = uint256S(std::to_string(index));
+        record.plan_id = uint256S(std::to_string(index + 10));
+        record.kind = index == 2 ? ProviderMaintenanceKind::REPLENISH_CARRIER :
+                      index == 3 ? ProviderMaintenanceKind::PREPARE_DGB : ProviderMaintenanceKind::REPLENISH_DGB;
+        if (record.IsPreparation()) {
+            record.preparation_authorization = uint256S("a1");
+            record.preparation_request = uint256S("a2");
+        }
+        record.maximum_fee = DGBSatoshis{2000};
+        record.created_at = record.updated_at = 1000;
+        ProviderMaintenanceOutput output;
+        output.purpose = PoolPurpose::ADMISSION;
+        output.asset = index == 2 ? PoolAsset::DD_CARRIER : PoolAsset::DGB;
+        const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "obsolete refill test");
+        BOOST_REQUIRE(destination);
+        output.script_pub_key = GetScriptForDestination(*destination);
+        output.dgb_value = DGBSatoshis{index == 2 ? 0 : MIN_ADMISSION_DGB_SATOSHIS};
+        output.carrier_value = DDCents{index == 2 ? 100 : 0};
+        record.outputs = {output};
+        ledger.records.push_back(record);
+    }
+    // Emulate commit succeeding but its reply/txid journal write being lost.
+    CMutableTransaction committed;
+    committed.vin.emplace_back(COutPoint{uint256S("b1"), 0});
+    committed.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, ledger.records[3].outputs[0].script_pub_key);
+    const auto tx = MakeTransactionRef(committed);
+    BOOST_REQUIRE(m_wallet.AddToWallet(tx, TxStateInactive{}));
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(paymaster_rpc::internal::ReleaseSatisfiedProviderReplenishment(m_wallet, true, false, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records[0].state == ProviderMaintenanceState::RELEASED);
+    BOOST_CHECK(ledger.records[1].state == ProviderMaintenanceState::PLANNED); // Carrier targets still missing.
+    BOOST_CHECK(ledger.records[2].state == ProviderMaintenanceState::PLANNED); // Explicit setup is untouched.
+    BOOST_CHECK(ledger.records[3].state == ProviderMaintenanceState::BROADCAST);
+    BOOST_CHECK(ledger.records[3].transaction_id == tx->GetHash());
+    for (int retry = 0; retry < 2; ++retry) {
+        BOOST_REQUIRE_MESSAGE(paymaster_rpc::internal::ReleaseSatisfiedProviderReplenishment(m_wallet, true, true, error), error);
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_CHECK(ledger.records[1].state == ProviderMaintenanceState::RELEASED);
+        BOOST_CHECK(ledger.records[2].state == ProviderMaintenanceState::PLANNED);
+        BOOST_CHECK(ledger.records[3].state == ProviderMaintenanceState::BROADCAST);
+    }
+    BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(pool_setup_reconciles_conflict_reversal_atomically)
 {
     ScopedPaymasterMockTime clock{2000};

@@ -1095,6 +1095,8 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
     }
 
     int64_t reserved_fee{0};
+    int64_t planned_fee{0};
+    int64_t broadcast_fee{0};
     int64_t spent_hour{0};
     int64_t spent_day{0};
     if (readiness.have_maintenance_ledger) {
@@ -1103,11 +1105,13 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
             if (record.IsPreparation()) continue;
             if (record.state == ProviderMaintenanceState::PLANNED) {
                 checked_add(reserved_fee, record.maximum_fee.value);
+                checked_add(planned_fee, record.maximum_fee.value);
             } else if (record.state ==
                        ProviderMaintenanceState::BROADCAST) {
                 // A live transaction remains economic exposure until it is
                 // confirmed or fails, irrespective of its wall-clock age.
                 checked_add(reserved_fee, record.actual_fee.value);
+                checked_add(broadcast_fee, record.actual_fee.value);
             } else if (record.state ==
                        ProviderMaintenanceState::CONFIRMED) {
                 if (record.updated_at >= now - 60 * 60) {
@@ -1135,6 +1139,8 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
     result.pushKV("operational_carriers", LiquiditySlotCountsToJSON(
         operational_carriers, policy.target_operational_carriers));
     result.pushKV("maintenance_fee_reserved_satoshis", reserved_fee);
+    result.pushKV("maintenance_fee_planned_satoshis", planned_fee);
+    result.pushKV("maintenance_fee_broadcast_satoshis", broadcast_fee);
     result.pushKV("maintenance_fee_spent_last_hour_satoshis", spent_hour);
     result.pushKV("maintenance_fee_spent_last_day_satoshis", spent_day);
     result.pushKV("carrier_base_cents", carrier_base);
@@ -1722,6 +1728,39 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     }
     if (!batch.TxnCommit()) {
         error = "PAYMASTER_DATABASE_COMMIT";
+        return false;
+    }
+    return true;
+}
+
+bool ReleaseSatisfiedProviderReplenishment(CWallet& wallet, bool dgb_satisfied,
+                                          bool carriers_satisfied, std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    error.clear();
+    if (!dgb_satisfied && !carriers_satisfied) return true;
+    LOCK(wallet.cs_wallet);
+    // A PLANNED record can still have a wallet transaction after a lost reply.
+    size_t recovered{0};
+    if (!ReconcileProviderMaintenance(wallet, recovered, error)) return false;
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderMaintenanceLedger ledger;
+    const auto status = batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+        return false;
+    }
+    bool changed{false};
+    for (const auto& record : ledger.records) {
+        const bool unneeded = (dgb_satisfied && record.kind == ProviderMaintenanceKind::REPLENISH_DGB) ||
+                              (carriers_satisfied && record.kind == ProviderMaintenanceKind::REPLENISH_CARRIER);
+        if (!unneeded || record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull()) continue;
+        if (!ReleaseProviderMaintenanceBudget(ledger, record.operation_id, GetTime(), error)) return false;
+        changed = true;
+    }
+    if (changed && !batch.WritePaymasterMaintenanceLedger(ledger)) {
+        error = "PAYMASTER_DATABASE_WRITE";
         return false;
     }
     return true;
@@ -5176,6 +5215,8 @@ std::vector<RPCResult> ProviderLiquidityStatusResults()
         {RPCResult::Type::OBJ, "operational_carriers", "Operational DigiDollar carrier status",
          ProviderLiquiditySlotResults()},
         {RPCResult::Type::NUM, "maintenance_fee_reserved_satoshis", "Maintenance fee exposed by planned or broadcast transactions"},
+        {RPCResult::Type::NUM, "maintenance_fee_planned_satoshis", "Fee budget reserved before a transaction exists"},
+        {RPCResult::Type::NUM, "maintenance_fee_broadcast_satoshis", "Actual fees of saved unconfirmed transactions"},
         {RPCResult::Type::NUM, "maintenance_fee_spent_last_hour_satoshis", "Confirmed maintenance fees in the rolling hour"},
         {RPCResult::Type::NUM, "maintenance_fee_spent_last_day_satoshis", "Confirmed maintenance fees in the rolling day"},
         {RPCResult::Type::NUM, "carrier_base_cents", "DigiDollar base value retained in available carriers"},

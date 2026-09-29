@@ -1850,6 +1850,12 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
                                   "client-quote-expiry",
                                   std::move(expiry_database)};
     PaymasterStore expiry_store{expiry_wallet};
+    {
+        LOCK(expiry_wallet.cs_wallet);
+        // Copying the database does not recreate the running wallet's locks.
+        expiry_wallet.LockCoin(user_input);
+        BOOST_REQUIRE(expiry_wallet.IsLockedCoin(user_input));
+    }
     auto& expiry_mock = GetMockableDatabase(expiry_wallet);
     const MockableData before_expiry = expiry_mock.m_records;
     size_t expired_quotes{0};
@@ -1860,6 +1866,19 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     expiry_mock.ClearFailureInjection();
     BOOST_CHECK(expiry_mock.m_records == before_expiry);
     BOOST_CHECK_EQUAL(expired_quotes, 0U);
+    {
+        LOCK(expiry_wallet.cs_wallet);
+        BOOST_CHECK(expiry_wallet.IsLockedCoin(user_input));
+    }
+    expiry_mock.FailCommit();
+    BOOST_CHECK(!expiry_store.ExpireProviderQuotes(121, expired_quotes, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+    expiry_mock.ClearFailureInjection();
+    BOOST_CHECK(expiry_mock.m_records == before_expiry);
+    {
+        LOCK(expiry_wallet.cs_wallet);
+        BOOST_CHECK(expiry_wallet.IsLockedCoin(user_input));
+    }
     BOOST_REQUIRE_MESSAGE(expiry_store.ExpireProviderQuotes(
                               121, expired_quotes, error),
                           error);
@@ -1873,6 +1892,16 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     BOOST_CHECK(expired_attempt.state == AttemptState::QUOTE_EXPIRED);
     BOOST_CHECK(expired_session.state == SessionState::FAILED);
     BOOST_CHECK(!IsPaymasterInputReserved(expiry_wallet, user_input));
+    {
+        LOCK(expiry_wallet.cs_wallet);
+        BOOST_CHECK(!expiry_wallet.IsLockedCoin(user_input));
+    }
+    PaymentSession next_session;
+    constexpr auto next_request = "550e8400-e29b-41d4-a716-446655440005";
+    BOOST_REQUIRE(expiry_store.CreateOrJoinSession(next_request, uint256S("1234"), FeeMode::PAYMASTER,
+        122, next_session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(expiry_store.ReserveInputs(next_request, {{user_input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 122, error), error);
     ClientFeeLedger expired_fee_ledger;
     {
         LOCK(expiry_wallet.cs_wallet);

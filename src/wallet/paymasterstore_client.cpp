@@ -300,6 +300,37 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    // AbandonUnsignedClientSession preserves historical input bindings after
+    // atomically releasing them. A later request may legitimately reserve the
+    // same unspent inputs. Prove the old request is unsigned and terminal before
+    // treating another validated owner's reservation as unrelated history.
+    const auto released_unsigned_session = [&] {
+        if (session.state != SessionState::FAILED || session.pending_phase != PendingPhase::NONE ||
+            !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) return false;
+        SelfRecoveryRecord self_recovery;
+        uint256 alternative_recovery_id;
+        if (batch.ReadPaymasterRecoveryWithStatus(session.request_id, self_recovery) != DatabaseReadStatus::NOT_FOUND ||
+            batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(session.request_id, alternative_recovery_id) != DatabaseReadStatus::NOT_FOUND) return false;
+        for (const uint256& attempt_id : session.attempt_ids) {
+            ProviderAttempt attempt;
+            if (batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt) != DatabaseReadStatus::FOUND ||
+                attempt.attempt_id != attempt_id || attempt.session_id != session.session_id ||
+                (attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED &&
+                 attempt.state != AttemptState::REJECTED && attempt.state != AttemptState::QUOTE_EXPIRED) ||
+                !attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+                !attempt.final_txid.IsNull() || attempt.provider_signed_at != 0 ||
+                !attempt.provider_signed_result.empty()) return false;
+            if (!attempt.commit_key.IsNull()) {
+                UserAuthorizationRecord authorization;
+                ProviderCommitRecord commit;
+                if (batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization) != DatabaseReadStatus::NOT_FOUND ||
+                    batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit) != DatabaseReadStatus::NOT_FOUND) return false;
+            }
+        }
+        return true;
+    };
+    bool release_checked{false};
+    bool released_unsigned{false};
     for (const COutPoint& outpoint : session.user_inputs) {
         InputReservation reservation;
         const DatabaseReadStatus status =
@@ -309,14 +340,29 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
             error = "PAYMASTER_RESERVATION_DATABASE_READ";
             return false;
         }
-        if (reservation.request_id != session.request_id ||
-            reservation.session_id != session.session_id ||
-            reservation.outpoint != outpoint ||
-            reservation.role != ReservationRole::USER_DD) {
+        if (reservation.outpoint != outpoint || reservation.role != ReservationRole::USER_DD) {
             error = "PAYMASTER_RESERVATION_SESSION_CONFLICT";
             return false;
         }
-        has_live_reservations = true;
+        if (reservation.request_id == session.request_id && reservation.session_id == session.session_id) {
+            has_live_reservations = true;
+            continue;
+        }
+        if (!release_checked) {
+            release_checked = true;
+            released_unsigned = released_unsigned_session();
+        }
+        PaymentSession owner;
+        std::string indexed_owner;
+        if (!released_unsigned || reservation.request_id == session.request_id || reservation.session_id == session.session_id ||
+            batch.ReadPaymasterSessionWithStatus(reservation.request_id, owner) != DatabaseReadStatus::FOUND ||
+            owner.provider_side || owner.request_id != reservation.request_id || owner.session_id != reservation.session_id ||
+            IsTerminal(owner.state) || std::find(owner.user_inputs.begin(), owner.user_inputs.end(), outpoint) == owner.user_inputs.end() ||
+            batch.ReadPaymasterSessionIdWithStatus(owner.session_id, indexed_owner) != DatabaseReadStatus::FOUND || indexed_owner != owner.request_id) {
+            error = "PAYMASTER_RESERVATION_SESSION_CONFLICT";
+            return false;
+        }
+        // Read-only: do not erase, unlock or reassign the current owner's input.
     }
     return true;
 }

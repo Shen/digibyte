@@ -1372,7 +1372,8 @@ int PaymasterCli(bool setup)
     std::cout << "Review: " << wallet << " on " << snapshot.find_value("network").get_str() << ". Existing provider will be paused. Identity and funds remain wallet-owned.\n"
               << choices.policy.write(2) << '\n'
               << choices.safety.write(2) << '\n'
-              << choices.liquidity.write(2) << "\nPool principal remains your capital. Funding needs a separate exact preview approval. Autostart stays off.\n";
+              << choices.liquidity.write(2) << "\nPool principal remains your capital. Funding needs a separate exact preview approval. Saved autostart is retained: "
+              << (snapshot.find_value("provider").find_value("autostart").isTrue() ? "on" : "off") << ".\n";
     if (!OperatorConfirm("Apply this provider configuration?")) return EXIT_FAILURE;
     for (const auto& step : steps) {
         const auto current = OperatorCall("getpaymasteroperatorinfo", empty, wallet);

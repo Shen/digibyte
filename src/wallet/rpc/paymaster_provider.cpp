@@ -50,6 +50,7 @@
 
 #include <univalue.h>
 #include <util/overflow.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
@@ -849,11 +850,7 @@ RPCHelpMan withdrawpaymastercarrier()
                 plan.expires_at = SaturatingAddSeconds(now, 10 * 60);
 
                 if (mode == CarrierWithdrawalMode::RELEASE_SLOT) {
-                    if (provider_is_running()) {
-                        throw JSONRPCError(
-                            RPC_WALLET_ERROR,
-                            "PAYMASTER_PROVIDER_MUST_BE_STOPPED");
-                    }
+
                     const UniValue& txid_value = options.find_value("txid");
                     const UniValue& vout_value = options.find_value("vout");
                     if (txid_value.isNull() || vout_value.isNull()) {
@@ -1631,6 +1628,26 @@ bool PreparationInputsConfirmed(CWallet& wallet, const CTransaction& tx)
     });
 }
 
+std::string PreparationFeeLimit(const char* phase, CAmount fee, CAmount limit)
+{
+    return strprintf("PAYMASTER_POOL_FEE_LIMIT: %s fee %s DGB exceeds approved setup limit %s DGB",
+                     phase, FormatMoney(fee), FormatMoney(limit));
+}
+
+void AddPreparationDiagnostic(UniValue& item, const ProviderMaintenanceRecord& record)
+{
+    const std::string error = record.state == ProviderMaintenanceState::CONFIRMED ? "" : record.preparation_error;
+    const auto separator = error.find(':');
+    // Keep the existing stable fee-limit token in error. Optional diagnostic
+    // text carries amounts/phase without changing the journal format or caps.
+    if (error.rfind("PAYMASTER_POOL_FEE_", 0) == 0 && separator != std::string::npos) {
+        item.pushKV("error", error.substr(0, separator));
+        item.pushKV("diagnostic", error.substr(separator + 2));
+    } else {
+        item.pushKV("error", error);
+    }
+}
+
 std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record)
 {
     LOCK(wallet.cs_wallet);
@@ -1646,7 +1663,8 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         if (wallet.GetTxDepthInMainChain(wtx) > 0) return {};
         if (wtx.InMempool() || !PreparationInputsConfirmed(wallet, *wtx.tx)) return "PAYMASTER_POOL_WAITING_CONFIRMATION";
         const auto fee = GetProviderFinanceTransactionFee(wallet, wtx.tx);
-        if (!fee || fee->value > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        if (!fee) return "PAYMASTER_POOL_FEE_INVALID";
+        if (fee->value > record.maximum_fee.value) return PreparationFeeLimit("saved", fee->value, record.maximum_fee.value);
         std::string error;
         // Retry only the exact transaction already saved by CommitTransaction.
         if (!wallet.chain().broadcastTransaction(wtx.tx, std::min(record.maximum_fee.value, wallet.m_default_max_tx_fee), true, error)) {
@@ -1668,7 +1686,7 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         control.m_min_depth = 1;
         auto created = CreateTransaction(wallet, recipients, -1, control, true);
         if (!created) return "PAYMASTER_POOL_WAITING_DGB: " + util::ErrorString(created).original;
-        if (created->fee > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        if (created->fee > record.maximum_fee.value) return PreparationFeeLimit("signed", created->fee, record.maximum_fee.value);
         std::string error;
         if (!wallet.CommitTransaction(created->tx, {}, {}, &error)) return "PAYMASTER_POOL_TRANSACTION_REJECTED: " + error;
     } else {
@@ -1683,10 +1701,13 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         DDTransferPlan plan;
         std::string error;
         if (!dd_wallet->PlanDigiDollarTransfer(recipients, plan, error)) return "PAYMASTER_POOL_WAITING_FUNDS: " + error;
-        if (plan.estimated_fee <= 0 || plan.estimated_fee > record.maximum_fee.value) return "PAYMASTER_POOL_FEE_LIMIT";
+        if (plan.estimated_fee <= 0) return "PAYMASTER_POOL_FEE_INVALID";
+        if (plan.estimated_fee > record.maximum_fee.value) return PreparationFeeLimit("estimated", plan.estimated_fee, record.maximum_fee.value);
         CMutableTransaction inputs;
-        for (const auto& input : plan.dd_utxos) inputs.vin.emplace_back(input);
-        for (const auto& input : plan.fee_utxos) inputs.vin.emplace_back(input);
+        for (const auto& input : plan.dd_utxos)
+            inputs.vin.emplace_back(input);
+        for (const auto& input : plan.fee_utxos)
+            inputs.vin.emplace_back(input);
         if (!PreparationInputsConfirmed(wallet, CTransaction{inputs})) return "PAYMASTER_POOL_WAITING_CONFIRMATION";
         CMutableTransaction transaction;
         if (!dd_wallet->BuildDigiDollarTransfer(plan, transaction, error)) {
@@ -1694,8 +1715,11 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         }
         const CTransactionRef tx = MakeTransactionRef(std::move(transaction));
         const auto fee = GetProviderFinanceTransactionFee(wallet, tx);
-        if (!fee || fee->value <= 0 || fee->value > record.maximum_fee.value || fee->value > plan.estimated_fee) {
-            return "PAYMASTER_POOL_FEE_LIMIT";
+        if (!fee || fee->value <= 0) return "PAYMASTER_POOL_FEE_INVALID";
+        if (fee->value > record.maximum_fee.value) return PreparationFeeLimit("signed", fee->value, record.maximum_fee.value);
+        if (fee->value > plan.estimated_fee) {
+            return strprintf("PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED: signed fee %s DGB exceeds planned fee %s DGB; approved setup limit %s DGB",
+                             FormatMoney(fee->value), FormatMoney(plan.estimated_fee), FormatMoney(record.maximum_fee.value));
         }
         // Check the exact signed fee before commit. Use the wallet primitive
         // directly: a rejected pool transaction must remain recoverable, not
@@ -1759,6 +1783,7 @@ RPCResult paymaster_rpc::internal::PoolPreparationResult()
             {RPCResult::Type::STR, "asset", "dgb or dd_carrier"},
             {RPCResult::Type::STR, "state", "pending_creation, pending_confirmation, complete, conflict or cancelled"},
             {RPCResult::Type::STR, "error", "Last execution diagnostic; empty when complete"},
+            {RPCResult::Type::STR, "diagnostic", true, "Fee-check phase and amounts when available"},
             {RPCResult::Type::NUM, "maximum_fee_satoshis", "Approved maximum transaction fee"},
             {RPCResult::Type::NUM, "actual_fee_satoshis", "Saved transaction fee, zero before construction"},
             {RPCResult::Type::STR_HEX, "txid", true, "Existing transaction; never replaced by a retry"},
@@ -1780,7 +1805,7 @@ UniValue paymaster_rpc::internal::PoolPreparationToJSON(CWallet& wallet)
         item.pushKV("operation_id", record.operation_id.GetHex());
         item.pushKV("asset", record.kind == ProviderMaintenanceKind::PREPARE_DGB ? "dgb" : "dd_carrier");
         item.pushKV("state", record.state == ProviderMaintenanceState::CONFIRMED ? "complete" : record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.state == ProviderMaintenanceState::RELEASED ? "cancelled" : record.transaction_id.IsNull() ? "pending_creation" : "pending_confirmation");
-        item.pushKV("error", record.state == ProviderMaintenanceState::CONFIRMED ? "" : record.preparation_error);
+        AddPreparationDiagnostic(item, record);
         item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
         item.pushKV("actual_fee_satoshis", record.actual_fee.value);
         if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
@@ -1837,6 +1862,7 @@ RPCHelpMan preparepaymasterpool()
                                                                                                                     {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Persist the reviewed finite setup and automatically continue it when funding is confirmed"},
                                                                                                                     {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
                 {"cancel", RPCArg::Type::BOOL, RPCArg::Default{false}, "With execute and the original plan_id, cancel only steps with no saved transaction; signed transactions remain tracked"},
+                {"preview_policy", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Read-only estimate with a proposed policy; cannot be executed", {}, RPCArgOptions{.skip_type_check = true}},
                 {"maximum_fee_satoshis", RPCArg::Type::NUM, RPCArg::Default{20000000}, "Maximum fee per setup transaction; at most one DGB and one DD transaction are authorized"},
                 {"recover_dgb_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Explicitly adopt an existing wallet DGB transaction; never discover it from labels"},
                 {"recover_dgb_outputs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Exact outputs of the recovery transaction", {
@@ -1855,6 +1881,7 @@ RPCHelpMan preparepaymasterpool()
                 {RPCResult::Type::NUM, "maximum_fee_satoshis", "Maximum approved fee per transaction"},
                 {RPCResult::Type::NUM, "maximum_total_fee_satoshis", "Maximum approved fees for the new setup steps"},
                 {RPCResult::Type::STR_HEX, "plan_id", "Plan bound to the policy, targets, current deficits, and output values"},
+                {RPCResult::Type::BOOL, "preview_only", "Proposed-policy estimate; not executable"},
                                                                                            {RPCResult::Type::NUM, "admission_dgb_slots", "Admission DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "operational_dgb_slots", "Operational DGB outputs"},
                                                                                            {RPCResult::Type::NUM, "admission_carrier_slots", "Admission DD carriers"},
@@ -1919,6 +1946,7 @@ RPCHelpMan preparepaymasterpool()
                              {"plan_id", UniValueType(UniValue::VSTR)},
                              {"cancel", UniValueType(UniValue::VBOOL)},
                              {"maximum_fee_satoshis", UniValueType(UniValue::VNUM)},
+                             {"preview_policy", UniValueType(UniValue::VOBJ)},
                              {"recover_dgb_txid", UniValueType(UniValue::VSTR)},
                              {"recover_dgb_outputs", UniValueType(UniValue::VARR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
@@ -1938,8 +1966,14 @@ RPCHelpMan preparepaymasterpool()
             if (fee_limit <= 0 || !MoneyRange(fee_limit) || fee_limit > MAX_MONEY / 2) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_POOL_INVALID_FEE_LIMIT");
             }
+            const bool proposed_policy = !options.find_value("preview_policy").isNull();
+            if (proposed_policy && (execute || !options.find_value("plan_id").isNull() || options.find_value("cancel").isTrue())) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_SETUP_PREVIEW_ONLY");
+            }
             ProviderPolicy policy;
-            if (!GetPaymasterProviderPolicy(*wallet, policy)) {
+            if (proposed_policy) {
+                policy = ParseProviderPolicy(options.find_value("preview_policy"));
+            } else if (!GetPaymasterProviderPolicy(*wallet, policy)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POLICY_NOT_FOUND");
             }
             const bool user_paid = PolicyAllowsFundingModel(policy, FundingModel::USER_PAID);
@@ -1960,7 +1994,7 @@ RPCHelpMan preparepaymasterpool()
                 }
             }
             if (!existing.empty() &&
-                !RefreshPoolConfirmationHeights(*wallet, existing, refresh_error)) {
+                !RefreshPoolConfirmationHeights(*wallet, existing, refresh_error, /*persist=*/execute)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, refresh_error);
             }
             constexpr int64_t admission_value{MIN_ADMISSION_DGB_SATOSHIS};
@@ -2018,7 +2052,7 @@ RPCHelpMan preparepaymasterpool()
             LOCK(wallet->cs_wallet);
             auto ledger = ReadPreparationLedger(*wallet);
             const uint256 authorization = PoolPreparationAuthorization(*wallet);
-            if (authorization.IsNull()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_IDENTITY_NOT_FOUND");
+            if (authorization.IsNull() && !proposed_policy) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_IDENTITY_NOT_FOUND");
             const bool pending = std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
                 return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
                        record.state != ProviderMaintenanceState::RELEASED;
@@ -2117,6 +2151,7 @@ RPCHelpMan preparepaymasterpool()
             }
             plan_hasher << fee_limit << authorization << recovery_outputs;
             if (recovery_tx) plan_hasher << recovery_tx->GetWitnessHash();
+            if (proposed_policy) plan_hasher << std::string{"setup preview only"};
             // A lost execute response must be recoverable by another preview.
             // Reuse only an outstanding plan with the same request and current
             // authorization; changed targets/policy never inherit its approval.
@@ -2125,10 +2160,11 @@ RPCHelpMan preparepaymasterpool()
                        record.state != ProviderMaintenanceState::RELEASED &&
                        record.preparation_request == request_hash && record.preparation_authorization == authorization;
             });
-            const bool resume_preview = !execute && pending_match != ledger.records.end();
+            const bool resume_preview = !execute && !proposed_policy && pending_match != ledger.records.end();
             const uint256 plan_id = resume_preview ? pending_match->plan_id : plan_hasher.GetSHA256();
             UniValue result{UniValue::VOBJ};
             result.pushKV("plan_id", plan_id.GetHex());
+            result.pushKV("preview_only", proposed_policy);
             result.pushKV("admission_dgb_slots", admission);
             result.pushKV("operational_dgb_slots", operational);
             result.pushKV("admission_carrier_slots", admission_carriers);
@@ -3463,11 +3499,12 @@ RPCHelpMan getpaymasteroperatorinfo()
                 const auto service = context.paymaster->GetProviderServiceStatus(wallet->GetName());
                 state = ProviderServiceStateName(service.state);
                 if (!service.last_error.empty()) provider.pushKV("last_service_error", service.last_error);
-            } else if (readiness.settings.enabled && readiness.settings.autostart)
+            } else if (readiness.settings.enabled && (readiness.settings.autostart || (context.paymaster && context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id))))
                 state = wallet->IsLocked() ? "waiting_for_unlock" : "waiting_for_readiness";
             provider.pushKV("settings_present", readiness.have_settings);
             provider.pushKV("enabled", readiness.settings.enabled);
             provider.pushKV("running", running);
+            provider.pushKV("start_requested", context.paymaster && context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id));
             provider.pushKV("operation_mode", ProviderOperationModeName(readiness.settings.operation_mode));
             provider.pushKV("autostart", readiness.settings.autostart);
             provider.pushKV("service_state", state);
@@ -3475,6 +3512,16 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("wallet_locked", wallet->IsLocked());
             provider.pushKV("ready", readiness.ready);
             provider.pushKV("pool_ready", readiness.pool_ready);
+            UniValue pool_summary{UniValue::VOBJ};
+            pool_summary.pushKV("entries", uint64_t(readiness.pool_entries.size()));
+            pool_summary.pushKV("reserved", uint64_t(std::count_if(readiness.pool_entries.begin(), readiness.pool_entries.end(),
+                [](const auto& entry) { return entry.state == PoolEntryState::RESERVED || entry.state == PoolEntryState::PENDING_SUCCESSOR || entry.state == PoolEntryState::COMMITTED; })));
+            pool_summary.pushKV("admission_dgb", uint64_t(readiness.pool.admission_dgb));
+            pool_summary.pushKV("operational_dgb", uint64_t(readiness.pool.operational_dgb));
+            pool_summary.pushKV("admission_carriers", uint64_t(readiness.pool.admission_carriers));
+            pool_summary.pushKV("operational_carriers", uint64_t(readiness.pool.operational_carriers));
+            pool_summary.pushKV("complete_operational_slots", uint64_t(readiness.pool.complete_operational_slots));
+            provider.pushKV("pool", pool_summary);
             provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
             auto liquidity = ProviderLiquidityStatusToJSON(readiness, now);
             for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
@@ -3515,6 +3562,7 @@ RPCHelpMan getpaymasteroperatorinfo()
                 if (!GetPaymasterProviderBackupStatus(*wallet, backup, now, error, /*persist=*/false)) throw JSONRPCError(RPC_WALLET_ERROR, error);
                 UniValue status{UniValue::VOBJ};
                 status.pushKV("required", ProviderBackupRequired(backup));
+                status.pushKV("reminder_updated_at", backup.reminder_updated_at);
                 status.pushKV("last_successful_backup_at", backup.last_successful_backup_at);
                 status.pushKV("external_backup_acknowledged_at", backup.external_backup_acknowledged_at);
                 provider.pushKV("backup_status", status);
@@ -3526,18 +3574,34 @@ RPCHelpMan getpaymasteroperatorinfo()
             work.pushKV("waiting_submits", uint64_t(queue.waiting_submits));
             provider.pushKV("service_queue", work);
             UniValue preparation{UniValue::VARR};
+            UniValue active_operations{UniValue::VARR};
             for (const auto& record : readiness.maintenance_ledger.records) {
-                if (!record.IsPreparation() || record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
+                if (record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
                 UniValue item{UniValue::VOBJ};
                 item.pushKV("plan_id", record.plan_id.GetHex());
+                item.pushKV("operation_id", record.operation_id.GetHex());
+                item.pushKV("asset", record.kind == ProviderMaintenanceKind::REPLENISH_DGB || record.kind == ProviderMaintenanceKind::PREPARE_DGB ? "dgb" : "dd_carrier");
+                item.pushKV("kind", record.IsPreparation() ? "preparation" : record.kind == ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ? "withdrawal" : "maintenance");
+                item.pushKV("created_at", record.created_at);
+                item.pushKV("updated_at", record.updated_at);
+                item.pushKV("actual_fee_satoshis", record.actual_fee.value);
+                int confirmations{0};
+                if (!record.transaction_id.IsNull()) {
+                    const auto tx = wallet->mapWallet.find(record.transaction_id);
+                    if (tx != wallet->mapWallet.end()) confirmations = std::max(0, wallet->GetTxDepthInMainChain(tx->second));
+                }
+                item.pushKV("confirmations", confirmations);
+                item.pushKV("required_confirmations", 1);
                 item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
                 item.pushKV("state", record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.transaction_id.IsNull() ? "pending_creation" :
                                                                                                                                       "pending_confirmation");
-                item.pushKV("error", record.preparation_error);
+                AddPreparationDiagnostic(item, record);
                 if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
-                preparation.push_back(item);
+                if (record.IsPreparation()) preparation.push_back(item);
+                active_operations.push_back(std::move(item));
             }
             provider.pushKV("preparation", preparation);
+            provider.pushKV("active_operations", active_operations);
             safety.pushKV("configured", readiness.have_safety_policy && readiness.have_budget_ledger);
             if (readiness.have_safety_policy) safety.pushKV("policy", ProviderSafetyPolicyToJSON(readiness.safety_policy));
             if (readiness.have_safety_policy && readiness.have_budget_ledger) {

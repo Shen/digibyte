@@ -997,7 +997,10 @@ or chain parameters.
   fail-closed record validation, canonical artifact decoding, Capacity binding,
   and atomic helper boundaries; `paymasterstore.h` remains the public store API.
 - `paymasterstore_client.cpp` owns client sessions, reservations, Capacity
-  snapshots, intent state, and safe fallback transitions.
+  snapshots, intent state, and safe fallback transitions. Its read-only live
+  reservation query recognizes a proven unsigned failed session's historical
+  inputs when a different active client session is the validated current owner;
+  it never releases that owner's reservation or coin lock.
 - `paymasterstore_provider.cpp` owns provider quote admission, authorization,
   expiry, capacity lifecycle, and quote-equivocation state.
 - `paymasterstore_finalization.cpp` owns user authorization, provider commits,
@@ -1252,13 +1255,29 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and can be enabled independently in the Qt wallet options.
 
 ### src/qt/paymasterwidget.cpp/h
+- Settings and guided setup include a local recipient-amount fee example using
+  `ComputePaymasterFee`; the effective percentage reflects Core cent rounding.
+  Changing the example never edits provider policy or budgets.
+- Delayed startup reads keep the overview in an explicit reading state with
+  indeterminate activity, the current check and elapsed loading time until
+  the full RPC chain finishes. The local display timer adds no RPC polling. Existing saved settings can then be started
+  without reopening setup. An asynchronous test adapter exercises intermediate
+  callbacks, errors and wallet-generation invalidation.
+- Navigation: Operation, Activity & finances, Settings.
+  Settings nests Offer, Spending limits, Automation & reserves, and Connection & wallet. The single
+  overview hero translates the current operator snapshot into a next action;
+  unknown/stale data cannot expose a start action. Technical details, reserve
+  counts, additional safety limits and secondary finance views are disclosures.
+  The selected finance summary is invalidated on period changes and failures;
+  privacy and wallet changes clear the operator presentation. See
+  `doc/design/paymaster-operator-ux.md` and its standalone HTML preview.
 - `DigiDollarPaymasterWidget` exposes the small embedding interface used by the
   DigiDollar tab; `CreatePaymasterWidget` constructs the private implementation.
 - The Paymaster console provides setup, identity/policy/pool controls,
   start/stop, readiness, reservations, warnings, and recovery actions. Its
   wallet-scoped first-visit gate offers a recommended guided path or an
-  explicitly acknowledged expert path. Configuration, Safety limits, and
-  Liquidity remain locked until a path completes, while Activity and recovery
+  explicitly acknowledged expert path. Settings, Operating capital, and
+  Income & costs remain locked until a path completes, while Activity and recovery
   remains reachable to avoid hiding durable work. Existing Core provider state
   automatically bypasses the first-visit gate.
   Its
@@ -1312,15 +1331,17 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   an existing enabled provider, reuses or creates the provider identity,
   persists a safety bridge when required, then the operating, final safety,
   and liquidity policies, rechecks the live pool, and creates only
-  still-missing outputs after a separate funding confirmation. Runtime,
-  autostart off, and requested enablement are saved last. Completed steps remain
+  still-missing outputs within the combined review; a changed funding scope
+  needs renewed approval. Runtime, saved autostart and requested enablement are saved last. Completed steps remain
   idempotently resumable after an error, while closing before Apply writes
   nothing. The completion page states that no additional Save actions are
   required and returns to an automatically refreshed Overview while new
-  liquidity confirms. Setup now always saves autostart off; a deliberately
-  chosen first start and later autostart setting are separate operator actions.
-  Qt's Stop action first disables saved autostart when necessary, and disabling
-  the provider configuration persistently stops the runtime.
+  liquidity confirms. Setup preserves saved autostart; an optional one-time
+  start waits for readiness without changing that setting.
+  Operation owns the Start provider / Resume provider and Pause provider
+  controls. Pause disables provider/autostart and new pool signatures in one
+  persistent Core operation; technical details have no alternate runtime or
+  enable/disable controls. The argumentless temporary stop remains RPC-only.
 
 ### src/qt/digidollaroverviewwidget.cpp/h
 - `DigiDollarOverviewWidget` → DD balance overview and system health display.
@@ -1343,13 +1364,71 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   limited presentation hooks for field locking, privacy, messages and completion.
   The form does not retain a second copy of the Paymaster session state.
 
+### src/qt/paymasteramount.h
+- `PaymasterAmountSpinBox` presents DD while preserving integer-cent signals and
+  values; locale decimals are parsed exactly, excess precision/grouping rejected.
+- `PaymasterEffectivePercent` formats a bounded, informational fee/recipient
+  percentage with integer arithmetic, without modifying payment authority.
+
 ### src/qt/paymastersendwidget.cpp/h
+- [Flow audit](doc/design/paymaster-flow-audit.md): explicit fallback/resume,
+  complete session-list loading with progress, concrete errors, explicit retry
+  feedback and privacy masking, plus lost-first-reply reconciliation,
+  immutable live request parameters and wallet-bound modal/unlock completion.
+  Regression tests include a real Core RPC/store unsigned-cancellation round trip
+  and asynchronous alternative-recovery preparation/approval/completion.
 - `PaymasterSendWidget` owns DGB/Automatic/Paymaster fee choices, offer and safety
   controls, persistent-session presentation, polling, exact-offer confirmation,
   retries and recovery. It reuses `WalletModel::executeRpcAsync` and the existing
   confirmation guards; Core remains authoritative for spending and persistence.
 - Wallet-generation guards and Qt lifetime guards discard stale callbacks.
   Existing translation context, object names and two-stage authorization remain.
+- The ordinary Send view exposes offer-check progress, completion timestamps,
+  empty/error/stale states and a contextual refresh button. It reads the local
+  directory on explicit request and every ten seconds while the compose view is
+  visible and idle. Background failures remain inline; a local expiry timer
+  invalidates old previews. List-update and announcement-expiry labels explicitly
+  distinguish the 600-second cache lifetime from connection checks. Endpoint/proxy
+  and secure-connection errors have specific explanations and retain protected
+  session refresh. Network discovery and preparation remain separate.
+  A prominent public-offer headline/checkmark and rotating pending-check symbol
+  distinguish outcomes from secondary timing and preparation text. The animation
+  pauses while hidden or in privacy mode, stops on completion or wallet changes,
+  and never sends RPCs. The checkmark confirms discovery, not transport,
+  fee-limit or privacy eligibility. New explicit-Paymaster requests require a
+  current nonempty preview; invalidation immediately disables preparation.
+  Automatic without cached spendable DGB uses the same gate and Prepare payment;
+  with own DGB it offers Send payment and retains direct-spend confirmation.
+  Own DGB stays disabled at zero cached spendable DGB, even with an offer.
+  Balance notifications refresh the action and hints. Prepare payment freezes
+  Paymaster funding in the immutable request; existing sessions retain their
+  separate actions. Exact fee-input sufficiency remains a Core decision.
+  Preparation rechecks Core state; exact-offer approval remains mandatory.
+  Monetary labels show DD without repeating integer-cent values. The editable
+  client ceiling uses DD with a read-only percentage comparison. Offer rows and
+  exact approval show the actual fee's effective recipient-based percentage;
+  fee deduction waits for the exact recipient amount. Absolute budgets persist.
+- Cancel in exact-offer review uses fresh Core capabilities and unsigned
+  cancellation before releasing compose focus, retaining recipient and amount.
+  Malformed review and stale wallet dialogs never imply cancellation. A countdown
+  uses the exact offer expiry and blocks late approval; expiry and live-send
+  errors check Core capabilities before at most one unsigned cancellation.
+  Read-back resolves lost replies; a persistent inline notice explains closure
+  or protected recovery without duplicate error modals. Session-database read
+  failures explain the protected state inline and reconcile read-only.
+- Explicit Paymaster mode starts through Prepare payment, without an initial
+  confirmation modal. Automatic with own DGB retains direct-spend confirmation. The
+  queued-quote part of AWAITING_USER_SIGNATURE continues automatically and
+  cannot claim an exact offer is ready. RPC failures trigger a read-only state
+  refresh so a safely closed unsigned request can release the form.
+- Live sends retain the exact RPC arguments only in memory to finish pending
+  connection/quote phases; post-approval continuation additionally requires the
+  same authorization commitment and an authoritative signed artifact. Two-minute
+  bounds, stop/error/wallet-change cleanup and read-only restored sessions prevent
+  the timer from creating a fresh payment or resuming a recovered authorization.
+- Authoritative unsigned closure releases form focus after cancellation, even
+  without a persisted recipient. Read-only refresh handles a lost cancellation
+  reply; missing or contradictory proof cannot enable a new transfer.
 - Paymaster-specific test transports and snapshot injection belong to this child.
 
 ### src/qt/walletmodel.cpp/h
@@ -1569,7 +1648,7 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records |
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs and signing only the requested collaborative input role |
-| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records |
+| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, and malicious client/provider persistence failures |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries |
@@ -1585,7 +1664,7 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `digidollarwidgettests.cpp/h` | Qt widget unit tests for DD UI components |
 | `digidollarwave19widgettests.cpp/h` | Wave 19 Qt unit/signal-slot pins for the release-critical DD UX surface (mint tier dropdown, etc.) |
-| `paymasterwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
+| `paymasterwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, responsive Connection & wallet layout in both themes, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
 | `digidollarmintrecordtests.cpp/h` | A mint started from the wallet window saves its record before the transaction is sent, and does not send at all if the wallet cannot save it |
 
 The original Qt suite retains DD behavior and boundary integration tests;
@@ -1791,6 +1870,9 @@ Current oracle/MuSig2 fuzz source inventory:
   setup approvals and explicit legacy mappings; `RunPaymasterPoolPreparation`
   continues exact steps independently of service startup; disabled providers
   can accept explicit approval while execution waits for enablement.
+  Fee-check errors distinguish invalid calculations and exceeded planner
+  estimates from approval ceilings; the stable fee-limit token retains an
+  optional diagnostic with phase and amounts in pool/operator JSON.
 - `src/paymaster/provider.{h,cpp}`: V4 maintenance records add setup request and
   authorization bindings while retaining V3 readability and recurring budgets.
 - `src/wallet/rpc/paymaster.cpp`: shared maintenance reconciliation recovers
@@ -1806,6 +1888,14 @@ Current oracle/MuSig2 fuzz source inventory:
 - `src/paymaster/setup.{h,cpp}`: shared profiles, prerequisite repair suggestions,
   ordered setup, context/reply/saved-state checks, exact pool preview validation
   and read-only budget presentation for both UI adapters.
+  Operator diagnostics classify active finite-preparation step reasons before
+  generic missing-slot symptoms, preserving unknown/conflict failures.
+- `src/qt/paymasterwidget.cpp`: live finite-preparation diagnostics, explicit
+  cancellation of a wholly uncreated plan, and an editable finite setup fee
+  bound to the reviewed preview; no automatic increase or replacement.
+- `src/qt/test/paymasterwidgettests.cpp`: actual shared diagnostic-to-Qt coverage
+  for fee/funding/confirmation/policy/unknown waits, cancellation confirmation,
+  privacy, wallet switching and a concurrent saved-transaction result.
 - `src/digibyte-cli.cpp`: interactive `-paymastersetup`, explicit wallet selection,
   local no-echo unlock, operational actions, `-paymasterstatus` and `-watch`.
 - `src/qt/paymasterwidget.cpp`: common setup adapter, operator overview, node
@@ -1824,3 +1914,27 @@ Current oracle/MuSig2 fuzz source inventory:
   `test/functional/wallet_paymaster_operator.py`: focused workflow checks.
 - `doc/digidollar-paymaster-operator.md`: CLI/Qt operation, config boundaries,
   exact commands and acceptance still requiring fresh binaries/real nodes.
+
+## Guided provider operation controller
+
+- `src/qt/paymasteroperation.h`: presentation phases, old-wallet reply rejection,
+  current Core operation observations and exact integer funding-approval bounds.
+- `src/qt/paymasterwidget.cpp`: three destinations, guided task RPC adapter,
+  aggregate status polling and DGB inputs.
+- `src/paymaster/manager.{h,cpp}` and `src/wallet/rpc/paymaster_runtime.cpp`:
+  volatile start-when-ready intent, consumed on start and cleared by stop/unload.
+- `src/wallet/rpc/paymaster_provider.cpp`: proposed-policy preparation preview,
+  active operation/confirmation projection and read-only release preview.
+- `src/qt/test/paymasterwidgettests.cpp`, `src/test/paymaster_setup_tests.cpp`,
+  `test/functional/wallet_paymaster_operator.py` and
+  `test/functional/wallet_paymaster_pool_setup.py`: guided approvals, lost replies,
+  wallet/privacy invalidation, preserved autostart and Core journal contracts.
+
+### Fulfilled reserve targets and obsolete refill plans
+
+- `src/wallet/rpc/paymaster.cpp`: `ReleaseSatisfiedProviderReplenishment` first
+  recovers wallet transactions, then releases obsolete unsigned recurring jobs.
+- `src/wallet/rpc/paymaster_runtime.cpp`: invokes cleanup under the provider work
+  guard using confirmed current liquidity targets.
+- `src/wallet/test/paymaster_wallet_identity_tests.cpp`: obsolete refill cleanup,
+  retained setup approvals, lost transaction replies and repeated cleanup.

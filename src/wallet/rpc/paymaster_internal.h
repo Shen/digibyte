@@ -188,6 +188,10 @@ std::string WalletEndpointURI(const std::string& wallet_name);
 bool ReconcileProviderMaintenance(CWallet& wallet,
                                   size_t& recovered,
                                   std::string& error);
+/** Caller holds the provider work guard. Flags describe confirmed current targets.
+ * Recover any committed transaction before releasing obsolete unsigned refill jobs. */
+bool ReleaseSatisfiedProviderReplenishment(CWallet& wallet, bool dgb_satisfied,
+                                          bool carriers_satisfied, std::string& error);
 bool ReconcileProviderFinances(CWallet& wallet,
                                size_t& changed_events,
                                std::string& error);

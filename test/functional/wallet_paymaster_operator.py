@@ -41,15 +41,54 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert any(item["code"] == "PAYMASTER_EXTERNAL_REACHABILITY_UNKNOWN" for item in status["diagnostics"])
 
         self.log.info("Persistent pause survives reload and preserves identity and policy")
-        identity = wallet.createpaymasteridentity("Operator")
         policy = {
             "funding_models": ["sponsored"], "sponsorship_scope": "public",
             "fee_rate_bps": 0, "min_amount_cents": 100, "max_amount_cents": 100000,
             "quote_ttl": 60, "maximum_network_fee_dgb_satoshis": 20000000,
         }
+        self.log.info("A proposed-policy setup preview writes no identity, settings, pool or transaction")
+        targets = {"admission_dgb_slots": 3, "operational_dgb_slots": 1,
+                   "admission_carrier_slots": 0, "operational_carrier_slots": 0,
+                   "maximum_fee_satoshis": 20_000_000}
+        mempool_before = node.getrawmempool()
+        preview = wallet.preparepaymasterpool(dict(targets, preview_policy=policy))
+        assert_equal(preview["preview_only"], True)
+        assert_equal(preview["accepted"], False)
+        assert_equal(preview["total_carrier_cents"], 0)
+        assert_equal(preview["maximum_total_fee_satoshis"], 20_000_000)
+        unchanged = wallet.getpaymasteroperatorinfo()["provider"]
+        assert_equal(unchanged["settings_present"], False)
+        assert "provider_id" not in unchanged
+        assert_equal(unchanged["active_operations"], [])
+        assert_equal(node.getrawmempool(), mempool_before)
+        assert_raises_rpc_error(-8, "PAYMASTER_SETUP_PREVIEW_ONLY", wallet.preparepaymasterpool,
+                                dict(targets, preview_policy=policy, execute=True, plan_id=preview["plan_id"]))
+        identity = wallet.createpaymasteridentity("Operator")
         wallet.setpaymasterpolicy(policy)
         wallet.setpaymastersafetypolicy(provider_safety_policy(["sponsored"]))
         wallet.setpaymasterenabled(True)
+        wallet.setpaymasterruntimesettings({"autostart": False})
+        self.log.info("One-shot start waits without changing autostart and is cleared by pause and unload")
+        waiting = wallet.startpaymaster({"wait_for_readiness": True})
+        assert_equal(waiting["running"], False)
+        assert_equal(waiting["start_requested"], True)
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], True)
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["autostart"], False)
+        wallet.stoppaymaster()
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], False)
+        wallet.startpaymaster({"wait_for_readiness": True})
+        node.unloadwallet("operator")
+        node.loadwallet("operator")
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], False)
+        wallet.startpaymaster({"wait_for_readiness": True})
+        self.restart_node(0)
+        node = self.nodes[0]
+        # Wallet loading is independent of provider autostart and one-shot start requests.
+        if "operator" not in node.listwallets():
+            node.loadwallet("operator")
+        wallet = node.get_wallet_rpc("operator")
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], False)
+        assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["autostart"], False)
         wallet.setpaymasterruntimesettings({"autostart": True})
         assert_raises_rpc_error(-8, "requires persistent", wallet.stoppaymaster, {"pause_setup": True})
         assert_equal(wallet.stoppaymaster({"persistent": True, "pause_setup": True})["running"], False)

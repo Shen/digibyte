@@ -212,6 +212,7 @@ public:
             ClearDirectMessages();
             LOCK(m_provider_mutex);
             m_running_providers.clear();
+            m_requested_provider_starts.clear();
             m_provider_work.clear();
             m_provider_service_status.clear();
         }
@@ -412,6 +413,10 @@ public:
     bool CompleteProviderStart(const std::string& wallet_name,
                                const PaymasterId& provider_id);
     void StopProvider(const std::string& wallet_name);
+    /** One-shot intent for this wallet load; requires a work guard and never
+     * changes persistent autostart or financial authority. */
+    bool RequestProviderStart(const std::string& wallet_name, const PaymasterId& provider_id);
+    bool HasRequestedProviderStart(const std::string& wallet_name, const PaymasterId& provider_id) const;
     bool IsProviderRunning(const std::string& wallet_name,
                            const PaymasterId& provider_id) const;
     size_t RunningProviderCount() const;
@@ -512,6 +517,7 @@ private:
     std::map<std::pair<PaymasterId, uint64_t>, RateWindow> m_provider_quote_netgroup_events GUARDED_BY(m_rate_mutex);
     mutable Mutex m_provider_mutex;
     std::map<std::string, PaymasterId> m_running_providers GUARDED_BY(m_provider_mutex);
+    std::map<std::string, PaymasterId> m_requested_provider_starts GUARDED_BY(m_provider_mutex);
     /** Provider work ownership is bound to both wallet and identity. A caller
      * holding a wallet slot must not complete a start for another provider. */
     std::map<std::string, PaymasterId> m_provider_work GUARDED_BY(m_provider_mutex);

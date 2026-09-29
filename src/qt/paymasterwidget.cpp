@@ -4,6 +4,8 @@
 
 #include <paymaster/setup.h>
 #include <qt/paymasterwidget.h>
+#include <qt/paymasteroperation.h>
+#include <qt/paymasteramount.h>
 
 #include <qt/digidollaroverviewwidget.h>
 #include <qt/digidollarreceivewidget.h>
@@ -29,6 +31,7 @@
 #include <QFileDialog>
 #include <QFont>
 #include <QFormLayout>
+#include <QElapsedTimer>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -38,10 +41,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QList>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
@@ -110,6 +115,69 @@ QString PaymasterSetupModeSettingsKey(const WalletModel* model)
     return QStringLiteral("Paymaster/Wallet/%1/SetupMode")
         .arg(QString::fromLatin1(wallet_id));
 }
+
+/** Read-only fee calculation: the example amount is never saved to policy. */
+class PaymasterFeeExample final : public QWidget
+{
+    Q_DECLARE_TR_FUNCTIONS(PaymasterFeeExample)
+
+public:
+    explicit PaymasterFeeExample(QWidget* parent) : QWidget(parent)
+    {
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        auto* row = new QHBoxLayout();
+        auto* label = new QLabel(tr("Example recipient amount:"), this);
+        m_amount = new PaymasterAmountSpinBox(this);
+        m_amount->setObjectName("paymasterFeeExampleAmount");
+        m_amount->setMinimum(100);
+        m_amount->setValue(200);
+        m_amount->setAccessibleName(label->text());
+        label->setBuddy(m_amount);
+        row->addWidget(label);
+        row->addWidget(m_amount, 1);
+        layout->addLayout(row);
+        m_result = new QLabel(this);
+        m_result->setObjectName("paymasterFeeExampleResult");
+        m_result->setTextFormat(Qt::PlainText);
+        m_result->setWordWrap(true);
+        m_result->setToolTip(tr("Example only; this does not change your payment range or budgets. Core rounds the service fee up to a whole DD cent, so the effective percentage can exceed the advertised rate for small payments."));
+        layout->addWidget(m_result);
+        connect(m_amount, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateResult(); });
+    }
+
+    void setFeeRate(int basis_points, bool user_paid)
+    {
+        m_basis_points = basis_points;
+        m_user_paid = user_paid;
+        updateResult();
+    }
+
+private:
+    void updateResult()
+    {
+        m_amount->setEnabled(m_user_paid);
+        if (!m_user_paid) {
+            m_result->setText(tr("User-paid pricing is inactive. Sponsored transfers charge no DD service fee."));
+            return;
+        }
+        const auto fee = DigiDollar::Paymaster::ComputePaymasterFee(
+            DigiDollar::Paymaster::DDCents{m_amount->value()}, m_basis_points);
+        if (!fee) {
+            m_result->setText(tr("No valid fee for this example. Check the rate (0.10% steps) and the maximum total amount."));
+            return;
+        }
+        m_result->setText(tr("Service fee: %1 DD · effective ≈ %2% · total: %3 DD")
+                              .arg(QString::fromStdString(DigiDollar::FormatDDAmountDollars(fee->value)),
+                                   PaymasterEffectivePercent(fee->value, m_amount->value()),
+                                   QString::fromStdString(DigiDollar::FormatDDAmountDollars(m_amount->value() + fee->value))));
+    }
+
+    PaymasterAmountSpinBox* m_amount;
+    QLabel* m_result;
+    int m_basis_points{0};
+    bool m_user_paid{false};
+};
 
 class NoWheelSpinBox final : public QSpinBox
 {
@@ -320,9 +388,9 @@ QWidget* CreatePaymasterPageColumn(QWidget* page, QVBoxLayout*& layout)
     layout = new QVBoxLayout(column);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(14);
-    shell->addStretch(1);
-    shell->addWidget(column, 8);
-    shell->addStretch(1);
+    shell->addStretch(0);
+    shell->addWidget(column, 1);
+    shell->addStretch(0);
     return column;
 }
 
@@ -392,8 +460,8 @@ QFrame* CreatePaymasterStatusCard(QWidget* parent, const QString& title,
 class PaymasterResponsiveCards final : public QWidget
 {
 public:
-    explicit PaymasterResponsiveCards(QWidget* parent = nullptr)
-        : QWidget(parent), m_layout(new QGridLayout(this))
+    explicit PaymasterResponsiveCards(QWidget* parent = nullptr, int max_columns = 2)
+        : QWidget(parent), m_layout(new QGridLayout(this)), m_max_columns(max_columns)
     {
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
         m_layout->setContentsMargins(0, 0, 0, 0);
@@ -417,13 +485,14 @@ protected:
 private:
     void relayout()
     {
-        const int columns = width() > 0 && width() < 760 ? 1 : 2;
+        const int columns = m_max_columns == 3 && width() >= 990 ? 3 : width() > 0 && width() < 760 ? 1 :
+                                                                                                      2;
         for (QWidget* card : m_cards) m_layout->removeWidget(card);
         for (int index = 0; index < m_cards.size(); ++index) {
             m_layout->addWidget(m_cards.at(index), index / columns,
                                 index % columns);
         }
-        for (int column = 0; column < 2; ++column) {
+        for (int column = 0; column < m_max_columns; ++column) {
             m_layout->setColumnStretch(column, column < columns ? 1 : 0);
         }
 
@@ -441,6 +510,7 @@ private:
 
     QGridLayout* const m_layout;
     QList<QWidget*> m_cards;
+    const int m_max_columns;
 };
 
 bool UseDarkPaymasterWizardTheme(const WalletModel* model, const QWidget* widget)
@@ -1547,6 +1617,7 @@ public:
 
         m_tabs = new QTabWidget(this);
         m_tabs->setObjectName("paymasterOperatorTabs");
+        m_tabs->tabBar()->setElideMode(Qt::ElideNone);
         outer->addWidget(m_tabs);
 
         auto* overview_scroll = new QScrollArea(m_tabs);
@@ -1557,34 +1628,151 @@ public:
         QVBoxLayout* overview_layout{nullptr};
         auto* overview_column = CreatePaymasterPageColumn(overview, overview_layout);
 
-        auto* operator_group = new QGroupBox(tr("Provider operation"), overview);
-        auto* operator_layout = new QVBoxLayout(operator_group);
-        m_operator_summary = new QLabel(tr("Reading current provider status…"), operator_group);
+        m_operator_card = new QGroupBox(tr("Operation at a glance"), overview);
+        m_operator_card->setObjectName("paymasterOperatorCard");
+        m_operator_card->setProperty("paymasterRole", QStringLiteral("heroCard"));
+        auto* operator_layout = new QVBoxLayout(m_operator_card);
+        m_operator_headline = new QLabel(tr("Reading current status…"), m_operator_card);
+        m_operator_headline->setObjectName("paymasterOperatorHeadline");
+        m_operator_headline->setProperty("paymasterRole", QStringLiteral("cardHeading"));
+        m_operator_hint = new QLabel(tr("Wait for the selected wallet's current status before starting operation."), m_operator_card);
+        m_operator_hint->setObjectName("paymasterOperatorHint");
+        m_operator_connection = new QLabel(m_operator_card);
+        m_operator_connection->setObjectName("paymasterOperatorConnection");
+        m_operator_wallet = new QLabel(m_operator_card);
+        m_operator_wallet->setObjectName("paymasterOperatorWallet");
+        for (auto* label : {m_operator_headline, m_operator_hint, m_operator_connection, m_operator_wallet}) {
+            label->setWordWrap(true);
+            label->setTextFormat(Qt::PlainText);
+            operator_layout->addWidget(label);
+        }
+        m_operator_loading = new QWidget(m_operator_card);
+        m_operator_loading->setObjectName("paymasterOperatorLoading");
+        auto* loading_layout = new QVBoxLayout(m_operator_loading);
+        loading_layout->setContentsMargins(0, 0, 0, 0);
+        loading_layout->setSpacing(6);
+        m_operator_progress = new QProgressBar(m_operator_loading);
+        m_operator_progress->setObjectName("paymasterOperatorProgress");
+        m_operator_progress->setRange(0, 0); // Busy indicator; RPCs have no time estimate.
+        m_operator_progress->setTextVisible(false);
+        m_operator_progress->setFixedHeight(10);
+        m_operator_progress->setAccessibleName(tr("Loading provider status"));
+        m_operator_progress->setToolTip(tr("The current check is still pending. Remaining time is not known."));
+        m_operator_loading_step = new QLabel(m_operator_loading);
+        m_operator_loading_step->setObjectName("paymasterOperatorLoadingStep");
+        m_operator_loading_step->setTextFormat(Qt::PlainText);
+        m_operator_loading_step->setWordWrap(true);
+        m_operator_loading_step->setProperty("paymasterRole", QStringLiteral("mutedText"));
+        loading_layout->addWidget(m_operator_progress);
+        loading_layout->addWidget(m_operator_loading_step);
+        operator_layout->insertWidget(2, m_operator_loading);
+        m_operator_loading->hide();
+        m_operator_progress_timer = new QTimer(this);
+        m_operator_progress_timer->setObjectName("paymasterOperatorProgressTimer");
+        m_operator_progress_timer->setInterval(1000);
+        connect(m_operator_progress_timer, &QTimer::timeout, this, [this] { updateOperatorProgress(); });
+        auto* operator_actions = new QHBoxLayout;
+        m_operator_action = new QPushButton(tr("Refresh status"), m_operator_card);
+        m_operator_action->setObjectName("paymasterOperatorNextAction");
+        m_operator_action->setProperty("paymasterRole", QStringLiteral("primaryAction"));
+        m_operator_pause = new QPushButton(tr("Pause provider…"), m_operator_card);
+        m_operator_pause->setObjectName("paymasterOperatorPause");
+        m_operator_pause->setToolTip(tr("Pause persistently, including autostart and new pool signatures. Already signed transactions can still confirm."));
+        m_operator_pause->hide();
+        operator_actions->addWidget(m_operator_action);
+        operator_actions->addWidget(m_operator_pause);
+        operator_actions->addStretch();
+        operator_layout->addLayout(operator_actions);
+        overview_layout->addWidget(m_operator_card);
+        m_task_card = new QGroupBox(tr("Current task"), overview_column);
+        m_task_card->setObjectName("paymasterCurrentTask");
+        m_task_card->setProperty("paymasterRole", QStringLiteral("card"));
+        auto* task_layout = new QVBoxLayout(m_task_card);
+        m_task_status = new QLabel(m_task_card);
+        m_task_status->setObjectName("paymasterTaskStatus");
+        m_task_status->setWordWrap(true);
+        m_task_status->setTextFormat(Qt::PlainText);
+        m_task_progress = new QProgressBar(m_task_card);
+        m_task_progress->setObjectName("paymasterTaskProgress");
+        m_task_progress->setRange(0, 0);
+        m_task_progress->setTextVisible(false);
+        task_layout->addWidget(m_task_status);
+        task_layout->addWidget(m_task_progress);
+        m_task_continue = new QPushButton(tr("Continue task…"), m_task_card);
+        m_task_continue->setObjectName("paymasterContinueTask");
+        task_layout->addWidget(m_task_continue, 0, Qt::AlignLeft);
+        connect(m_task_continue, &QPushButton::clicked, this, [this] {
+            if (m_operation.error.contains(QLatin1String("WALLET_LOCKED"))) unlockOperatorWallet();
+            else if (m_operation.error.contains(QLatin1String("FEE_LIMIT"))) {
+                showOperatorPage(m_liquidity_page);
+                if (m_liquidity_advanced_toggle) m_liquidity_advanced_toggle->setChecked(true);
+                m_preparation_fee->setFocus();
+            } else if (m_operation.error.contains(QLatin1String("PROVIDER_DISABLED"))) {
+                const auto generation = m_wallet_generation;
+                setRpcBusyState(true);
+                const auto answer = askPlainTextQuestion(this, tr("Resume approved task"),
+                    tr("Enable the saved provider configuration so Core can continue this approved task within its existing limits? The saved autostart choice remains unchanged."));
+                if (generation != m_wallet_generation) return;
+                setRpcBusyState(false);
+                if (answer != QMessageBox::Yes || m_privacy) return;
+                UniValue params{UniValue::VARR}; params.push_back(true);
+                call("setpaymasterenabled", params, false, nullptr, [this](const UniValue&) { refreshStatus(); },
+                    false, [this](const QString& error) { failGuidedTask(error); });
+            } else refreshStatus();
+        });
+        overview_layout->addWidget(m_task_card);
+        m_task_card->hide();
+        auto* task_actions = new QHBoxLayout();
+        m_restore_task = new QPushButton(tr("Restore reserves…"), overview_column);
+        m_restore_task->setObjectName("paymasterRestoreTask");
+        m_withdraw_task = new QPushButton(tr("Withdraw earnings…"), overview_column);
+        m_withdraw_task->setObjectName("paymasterWithdrawTask");
+        m_release_task = new QPushButton(tr("Release operating capital…"), overview_column);
+        m_release_task->setObjectName("paymasterReleaseTask");
+        for (auto* button : {m_restore_task, m_withdraw_task, m_release_task}) {
+            button->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
+            task_actions->addWidget(button);
+        }
+        overview_layout->addLayout(task_actions);
+        connect(m_restore_task, &QPushButton::clicked, this, [this] { beginGuidedTask("preparepaymasterpool"); });
+        connect(m_withdraw_task, &QPushButton::clicked, this, [this] { beginGuidedTask("all_excess"); });
+        connect(m_release_task, &QPushButton::clicked, this, [this] { beginGuidedTask("release_slot"); });
+
+        connect(m_operator_action, &QPushButton::clicked, this, [this] { performOperatorNextAction(); });
+        connect(m_operator_pause, &QPushButton::clicked, this, [this] { if (!m_privacy) pauseOperator(); });
+
+        // Node and wallet controls belong together, away from the daily overview.
+        auto* connection_scroll = new QScrollArea;
+        connection_scroll->setObjectName("paymasterConnectionPage");
+        connection_scroll->setWidgetResizable(true);
+        auto* connection = new QWidget(connection_scroll);
+        connection->setObjectName("paymasterConnectionContents");
+        QVBoxLayout* connection_layout{nullptr};
+        auto* connection_column = CreatePaymasterPageColumn(connection, connection_layout);
+        AddPaymasterPageHeading(connection_layout, connection_column, tr("Connection & wallet"),
+                                tr("Check how clients reach this provider, manage wallet access and protect its backup."), QStringLiteral("paymasterConnection"));
+        auto* connection_help = new QLabel(tr("Local readiness, external reachability and a confirmed payment are separate checks. An imported report describes a past observation from your own second node."), connection_column);
+        connection_help->setWordWrap(true);
+        connection_layout->addWidget(connection_help);
+        auto* configure_node = new QPushButton(tr("Review node connection…"), connection_column);
+        auto* unlock_operation = new QPushButton(tr("Unlock wallet for operation…"), connection_column);
+        auto* import_check = new QPushButton(tr("Import external check…"), connection_column);
+        configure_node->setToolTip(tr("Review listener, endpoint and configuration changes before saving. Saved node changes require an explicit restart."));
+        unlock_operation->setToolTip(tr("Unlock applies to the whole wallet for the duration you choose. It is not renewed automatically."));
+        import_check->setToolTip(tr("Run checkpaymasterendpoint on your independent node, then import its report. No payment or identity verification is implied."));
+        for (auto* button : {configure_node, unlock_operation, import_check})
+            connection_layout->addWidget(button, 0, Qt::AlignLeft);
+        connect(configure_node, &QPushButton::clicked, this, [this] { configureOperatorNode(); });
+        connect(unlock_operation, &QPushButton::clicked, this, [this] { unlockOperatorWallet(); });
+        connect(import_check, &QPushButton::clicked, this, [this] { importOperatorCheck(); });
+        m_connection_page = connection_scroll;
+
+        m_operator_summary = new QLabel(tr("Reading current provider status…"), overview);
         m_operator_summary->setObjectName("paymasterOperatorSummary");
         m_operator_summary->setWordWrap(true);
         m_operator_summary->setTextFormat(Qt::PlainText);
-        operator_layout->addWidget(m_operator_summary);
-        auto* operator_actions = new QHBoxLayout;
-        auto* configure_node = new QPushButton(tr("Node connection…"), operator_group);
-        auto* unlock_operation = new QPushButton(tr("Unlock for operation…"), operator_group);
-        auto* pause_operation = new QPushButton(tr("Pause operation"), operator_group);
-        auto* resume_operation = new QPushButton(tr("Resume operation…"), operator_group);
-        auto* import_check = new QPushButton(tr("External check…"), operator_group);
-        for (auto* button : {configure_node, unlock_operation, pause_operation, resume_operation, import_check})
-            operator_actions->addWidget(button);
-        operator_layout->addLayout(operator_actions);
-        overview_layout->addWidget(operator_group);
-        connect(configure_node, &QPushButton::clicked, this, [this] { configureOperatorNode(); });
-        connect(unlock_operation, &QPushButton::clicked, this, [this] { unlockOperatorWallet(); });
-        connect(pause_operation, &QPushButton::clicked, this, [this] { pauseOperator(); });
-        connect(resume_operation, &QPushButton::clicked, this, [this] { resumeOperator(); });
-        connect(import_check, &QPushButton::clicked, this, [this] { importOperatorCheck(); });
-        auto* operator_timer = new QTimer(this);
-        operator_timer->setInterval(10000);
-        connect(operator_timer, &QTimer::timeout, this, [this] {
-            if (isVisible() && m_model && !m_busy && !m_setup_wizard_active && !m_privacy) refreshOperatorStatus();
-        });
-        operator_timer->start();
+        m_operator_summary->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+
 
         m_setup_choice = new QGroupBox(tr("Set up this Paymaster wallet"), overview);
         m_setup_choice->setObjectName("paymasterSetupChoice");
@@ -1653,7 +1841,7 @@ public:
         m_reopen_wizard->setObjectName("paymasterSetupWizard");
         m_reopen_wizard->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
         introduction_layout->addWidget(m_reopen_wizard, 0, Qt::AlignLeft);
-        configured_layout->addWidget(introduction);
+        connection_layout->addWidget(introduction);
 
         m_overview_backup_notice = new QGroupBox(
             tr("Protect this provider identity"), overview_column);
@@ -1695,10 +1883,10 @@ public:
         overview_backup_actions->addStretch();
         overview_backup_layout->addLayout(overview_backup_actions);
         m_overview_backup_notice->hide();
-        configured_layout->addWidget(m_overview_backup_notice);
+        connection_layout->addWidget(m_overview_backup_notice);
 
         m_external_prerequisites_card = new QGroupBox(
-            tr("External prerequisites"), overview_column);
+            tr("Local prerequisites"), overview_column);
         m_external_prerequisites_card->setObjectName("paymasterOverviewNextStep");
         m_external_prerequisites_card->setProperty(
             "paymasterRole", QStringLiteral("nextStepCard"));
@@ -1769,9 +1957,10 @@ public:
         m_external_oracle_note->setProperty("paymasterRole", QStringLiteral("mutedText"));
         m_external_oracle_note->setWordWrap(true);
         readiness_layout->addWidget(m_external_oracle_note);
-        configured_layout->addWidget(m_external_prerequisites_card);
+        AddPaymasterDisclosure(connection_layout, connection_column, m_external_prerequisites_card,
+                               tr("Show local prerequisites"), tr("Hide local prerequisites"), QStringLiteral("paymasterPrerequisitesToggle"));
 
-        auto* dashboard = new PaymasterResponsiveCards(overview_column);
+        auto* dashboard = new PaymasterResponsiveCards(overview_column, 3);
         dashboard->setObjectName("paymasterOverviewDashboard");
         auto* offer_card = CreatePaymasterStatusCard(
             dashboard, tr("Offer"), m_overview_offer_status,
@@ -1781,8 +1970,51 @@ public:
             dashboard, tr("Spending limits"), m_overview_safety_status,
             m_overview_safety_action);
         safety_card->setObjectName("paymasterOverviewSafetyCard");
+        m_overview_budget_details = new QWidget(safety_card);
+        m_overview_budget_details->setObjectName("paymasterOverviewBudgetDetails");
+        auto* budget_layout = new QVBoxLayout(m_overview_budget_details);
+        budget_layout->setContentsMargins(0, 0, 0, 0);
+        budget_layout->setSpacing(14);
+        auto* period = new QLabel(tr("Rolling 24 hours · DGB"), m_overview_budget_details);
+        period->setWordWrap(true);
+        period->setProperty("paymasterRole", QStringLiteral("mutedText"));
+        budget_layout->addWidget(period);
+        for (const auto& name : {"user_paid", "public_sponsored", "restricted_sponsored", "refill"}) {
+            auto* section = new QWidget(m_overview_budget_details);
+            section->setObjectName(QStringLiteral("paymasterBudget_") + name);
+            auto* rows = new QGridLayout(section);
+            rows->setContentsMargins(0, 0, 0, 0);
+            rows->setHorizontalSpacing(12);
+            rows->setVerticalSpacing(4);
+            rows->setColumnStretch(0, 1);
+            const QString title = std::string(name) == "user_paid" ? tr("Customer payments") :
+                std::string(name) == "public_sponsored" ? tr("Public sponsorship") :
+                std::string(name) == "restricted_sponsored" ? tr("Restricted sponsorship") : tr("Reserve maintenance");
+            auto* heading = new QLabel(title, section);
+            heading->setWordWrap(true);
+            QFont heading_font = heading->font();
+            heading_font.setBold(true);
+            heading->setFont(heading_font);
+            rows->addWidget(heading, 0, 0, 1, 2);
+            int row{1};
+            for (const auto& field : {"day_spent", "day_limit", "reserved"}) {
+                auto* caption = new QLabel(std::string(field) == "day_spent" ? tr("Spent") :
+                    std::string(field) == "day_limit" ? tr("Limit") : tr("Reserved budget"), section);
+                caption->setWordWrap(true);
+                caption->setProperty("paymasterRole", QStringLiteral("mutedText"));
+                auto* amount = new QLabel(section);
+                amount->setObjectName(QStringLiteral("paymasterBudget_") + name + QLatin1Char('_') + field);
+                amount->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                rows->addWidget(caption, row, 0);
+                rows->addWidget(amount, row++, 1);
+            }
+            budget_layout->addWidget(section);
+            section->hide();
+        }
+        qobject_cast<QVBoxLayout*>(safety_card->layout())->insertWidget(2, m_overview_budget_details);
+        m_overview_budget_details->hide();
         auto* liquidity_card = CreatePaymasterStatusCard(
-            dashboard, tr("Liquidity"), m_overview_liquidity_status,
+            dashboard, tr("Operating capital"), m_overview_liquidity_status,
             m_overview_liquidity_action);
         liquidity_card->setObjectName("paymasterOverviewLiquidityCard");
         auto* operation_card = CreatePaymasterStatusCard(
@@ -1790,7 +2022,7 @@ public:
             m_overview_operation_action);
         operation_card->setObjectName("paymasterOverviewOperationCard");
         auto* finance_card = CreatePaymasterStatusCard(
-            dashboard, tr("Finances"), m_overview_finance_status,
+            dashboard, tr("Income & costs"), m_overview_finance_status,
             m_overview_finance_action);
         finance_card->setObjectName("paymasterOverviewFinanceCard");
         m_overview_liquidity_status->setObjectName(
@@ -1801,11 +2033,14 @@ public:
             "paymasterOverviewLiquidityAction");
         m_overview_operation_action->setObjectName(
             "paymasterOverviewOperationAction");
-        dashboard->addCard(offer_card);
-        dashboard->addCard(safety_card);
+        offer_card->hide();
         dashboard->addCard(liquidity_card);
+        dashboard->addCard(safety_card);
         dashboard->addCard(finance_card);
-        dashboard->addCard(operation_card);
+        operation_card->hide();
+        liquidity_card->setToolTip(tr("Prepared funds remain in your wallet. Preparing outputs can incur a network fee; that fee is shown separately in the approval."));
+        safety_card->setToolTip(tr("Limits constrain DGB costs. Each payment model and paid refill have separate budgets; reserved amounts are already committed."));
+        finance_card->setToolTip(tr("Recorded DD income and DGB costs are different currencies. Operating capital is not an expense."));
         configured_layout->addWidget(dashboard);
 
         m_liquidity_maintenance_card = new QGroupBox(
@@ -1853,7 +2088,7 @@ public:
         maintenance_layout->addWidget(m_liquidity_maintenance_cost);
         maintenance_layout->addWidget(m_approve_liquidity_maintenance,
                                       0, Qt::AlignLeft);
-        configured_layout->addWidget(m_liquidity_maintenance_card);
+        // Detailed maintenance guidance appears with operating capital below.
 
         auto* details_toggle = new QPushButton(tr("Show technical details"), overview);
         details_toggle->setObjectName("paymasterTechnicalDetailsToggle");
@@ -1873,31 +2108,25 @@ public:
         m_readiness->setReadOnly(true);
         m_readiness->setMaximumHeight(130);
         m_readiness->setPlaceholderText(tr("No technical readiness information available"));
+        details_layout->addWidget(m_operator_summary);
+        details_layout->addWidget(offer_card);
+        details_layout->addWidget(operation_card);
+        offer_card->show();
+        operation_card->show();
         details_layout->addWidget(m_identity);
         details_layout->addWidget(m_pool);
         details_layout->addWidget(m_readiness);
         details->setVisible(false);
         configured_layout->addWidget(details);
 
-        auto* runtime_buttons = new QHBoxLayout();
-        auto* refresh = new QPushButton(tr("Refresh"), overview);
+        auto* refresh = new QPushButton(tr("Refresh diagnostics"), details);
         refresh->setObjectName("paymasterOverviewRefresh");
-        m_start = new QPushButton(tr("Start provider"), overview);
-        m_start->setObjectName("paymasterStartProvider");
-        m_stop = new QPushButton(tr("Stop provider"), overview);
-        m_stop->setObjectName("paymasterStopProvider");
-        m_start->setProperty("paymasterRole", QStringLiteral("primaryAction"));
-        m_stop->setProperty("paymasterRole", QStringLiteral("dangerAction"));
-        runtime_buttons->addWidget(refresh);
-        runtime_buttons->addStretch();
-        runtime_buttons->addWidget(m_start);
-        runtime_buttons->addWidget(m_stop);
-        configured_layout->addLayout(runtime_buttons);
+        details_layout->addWidget(refresh, 0, Qt::AlignLeft);
         configured_layout->addStretch();
         overview_layout->addWidget(m_setup_content);
         overview_scroll->setWidget(overview);
         ConfigureScrollArea(overview_scroll, overview);
-        m_tabs->addTab(overview_scroll, tr("Overview"));
+        m_tabs->addTab(overview_scroll, tr("Operation"));
 
         auto* configuration_scroll = new QScrollArea(m_tabs);
         configuration_scroll->setObjectName("paymasterConfigurationPage");
@@ -1947,7 +2176,12 @@ public:
         m_offer_identity_id->setAccessibleName(tr("Full provider identity"));
         identity_form->addRow(identity_help);
         identity_form->addRow(tr("Status:"), m_offer_identity_status);
-        identity_form->addRow(tr("Provider ID:"), m_offer_identity_id);
+        auto* identity_details = new QWidget(identity_group);
+        auto* identity_details_layout = new QVBoxLayout(identity_details);
+        identity_details_layout->setContentsMargins(0, 0, 0, 0);
+        AddPaymasterDisclosure(identity_details_layout, identity_details, m_offer_identity_id,
+                               tr("Show provider ID"), tr("Hide provider ID"), QStringLiteral("paymasterIdentityDetailsToggle"));
+        identity_form->addRow(identity_details);
         identity_form->addRow(tr("Display name:"), m_display_name);
         identity_form->addRow(create_identity);
         configuration_layout->addWidget(identity_group);
@@ -2050,18 +2284,30 @@ public:
         m_funding_model_status->setObjectName("paymasterFundingModelExplanation");
         m_funding_model_status->setWordWrap(true);
         policy_form->addRow(QString(), m_funding_model_status);
-        policy_form->addRow(tr("Who may use sponsorship:"), m_scope);
+        m_sponsorship_label = new QLabel(tr("Who may use sponsorship:"), policy_group);
+        m_sponsorship_label->setBuddy(m_scope);
+        policy_form->addRow(m_sponsorship_label, m_scope);
         policy_form->addRow(tr("User-paid service fee:"), m_fee_bps);
+        m_fee_example = new PaymasterFeeExample(policy_group);
+        policy_form->addRow(m_fee_example);
         policy_form->addRow(tr("Smallest payment:"), m_min_amount);
         policy_form->addRow(tr("Largest payment:"), m_max_amount);
-        policy_form->addRow(tr("Quote validity:"), m_quote_ttl);
-        policy_form->addRow(tr("Network-fee ceiling per transfer:"), m_network_fee);
+        auto* offer_details_container = new QWidget(policy_group);
+        auto* offer_details_layout = new QVBoxLayout(offer_details_container);
+        offer_details_layout->setContentsMargins(0, 0, 0, 0);
+        auto* offer_details = new QWidget(offer_details_container);
+        auto* offer_details_form = new QFormLayout(offer_details);
+        offer_details_form->addRow(tr("Quote validity:"), m_quote_ttl);
+        offer_details_form->addRow(tr("Network-fee ceiling per transfer:"), m_network_fee);
         auto* limits_help = new QLabel(tr(
             "The payment range filters requests before a quote is created. Quote validity limits how long resources remain offered to one client. The network-fee ceiling is the absolute per-transfer guard; guided safety profiles keep their per-transfer value aligned with it and limit repeated requests through aggregate budgets and counters."), policy_group);
         limits_help->setObjectName("paymasterPolicyLimitsExplanation");
         limits_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
         limits_help->setWordWrap(true);
-        policy_form->addRow(QString(), limits_help);
+        offer_details_form->addRow(limits_help);
+        AddPaymasterDisclosure(offer_details_layout, offer_details_container, offer_details,
+                               tr("Quote duration and network-fee ceiling"), tr("Hide technical offer limits"), QStringLiteral("paymasterOfferDetailsToggle"));
+        policy_form->addRow(offer_details_container);
         m_policy_summary = new QLabel(policy_group);
         m_policy_summary->setObjectName("paymasterPolicySummary");
         m_policy_summary->setProperty("paymasterRole", QStringLiteral("summaryText"));
@@ -2070,9 +2316,6 @@ public:
         m_save_policy = new QPushButton(tr("Save policy"), policy_group);
         m_save_policy->setObjectName("savePaymasterPolicy");
         m_save_policy->setProperty("paymasterRole", QStringLiteral("primaryAction"));
-        m_enable = new QPushButton(tr("Enable provider configuration"), policy_group);
-        m_enable->setObjectName("paymasterEnableProvider");
-        m_enable->setProperty("paymasterRole", QStringLiteral("primaryAction"));
         m_restore_policy_defaults = new QPushButton(
             tr("Restore recommended defaults"), policy_group);
         m_restore_policy_defaults->setObjectName("paymasterRestorePolicyDefaults");
@@ -2083,20 +2326,19 @@ public:
         policy_buttons->addWidget(m_restore_policy_defaults);
         policy_buttons->addStretch();
         policy_buttons->addWidget(m_save_policy);
-        policy_buttons->addWidget(m_enable);
         policy_form->addRow(policy_buttons);
         m_enable_status = new QLabel(
             tr("Provider configuration is currently disabled for this wallet."),
             policy_group);
         m_enable_status->setObjectName("paymasterEnableStatus");
         m_enable_status->setWordWrap(true);
-        policy_form->addRow(QString(), m_enable_status);
+        details_layout->addWidget(m_enable_status);
         configuration_layout->addWidget(policy_group);
         configuration_layout->addStretch();
         configuration_scroll->setWidget(configuration);
         ConfigureScrollArea(configuration_scroll, configuration);
         m_configuration_page = configuration_scroll;
-        m_tabs->addTab(configuration_scroll, tr("Offer"));
+        // Offer is grouped with the other settings after all pages exist.
 
         auto* safety_scroll = new QScrollArea(m_tabs);
         safety_scroll->setObjectName("paymasterSafetyPolicyPage");
@@ -2252,7 +2494,7 @@ public:
         safety_scroll->setWidget(safety);
         ConfigureScrollArea(safety_scroll, safety);
         m_safety_page = safety_scroll;
-        m_tabs->addTab(safety_scroll, tr("Spending limits"));
+        // Spending limits are a settings subpage.
 
         auto* liquidity_scroll = new QScrollArea(m_tabs);
         liquidity_scroll->setObjectName("paymasterLiquidityPage");
@@ -2262,9 +2504,22 @@ public:
         QVBoxLayout* liquidity_layout{nullptr};
         auto* liquidity_column = CreatePaymasterPageColumn(liquidity, liquidity_layout);
         AddPaymasterPageHeading(
-            liquidity_layout, liquidity_column, tr("Provider liquidity"),
+            liquidity_layout, liquidity_column, tr("Operating capital"),
             tr("These wallet-owned reserves let clients verify this provider and let Core pay the network fee without selecting ordinary wallet funds for every request."),
             QStringLiteral("paymasterLiquidity"));
+
+        m_pool_preparation_status = new QLabel(liquidity_column);
+        m_pool_preparation_status->setObjectName("paymasterPoolPreparationStatus");
+        m_pool_preparation_status->setTextFormat(Qt::PlainText);
+        m_pool_preparation_status->setWordWrap(true);
+        m_pool_preparation_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        m_pool_preparation_status->hide();
+        liquidity_layout->addWidget(m_pool_preparation_status);
+        m_cancel_preparation = new QPushButton(tr("Cancel uncreated pool preparation…"), liquidity_column);
+        m_cancel_preparation->setObjectName("paymasterCancelPoolPreparation");
+        m_cancel_preparation->hide();
+        task_layout->addWidget(m_cancel_preparation);
+        connect(m_cancel_preparation, &QPushButton::clicked, this, [this] { cancelPoolPreparation(); });
 
         auto* capacity_cards = new PaymasterResponsiveCards(liquidity_column);
         capacity_cards->setObjectName("paymasterLiquidityCapacityCards");
@@ -2287,7 +2542,10 @@ public:
         carrier_capacity_card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
         capacity_cards->addCard(dgb_capacity_card);
         capacity_cards->addCard(carrier_capacity_card);
-        liquidity_layout->addWidget(capacity_cards);
+        auto* capacity_details = new QWidget(liquidity_column);
+        auto* capacity_details_layout = new QVBoxLayout(capacity_details);
+        capacity_details_layout->setContentsMargins(0, 0, 0, 0);
+        capacity_details_layout->addWidget(capacity_cards);
 
         auto* capacity_explanation = new QLabel(tr(
             "Why two counts? Before making an offer, Core proves to a client that this provider has dedicated funds. Separate payment capacity is then kept ready for accepted transfers. “Ready” is available now; “target” is the amount Core maintains. These funds always remain under this wallet's control."),
@@ -2295,9 +2553,11 @@ public:
         capacity_explanation->setObjectName("paymasterLiquidityCapacityExplanation");
         capacity_explanation->setProperty("paymasterRole", QStringLiteral("mutedText"));
         capacity_explanation->setWordWrap(true);
-        liquidity_layout->addWidget(capacity_explanation);
+        capacity_details_layout->addWidget(capacity_explanation);
+        AddPaymasterDisclosure(liquidity_layout, liquidity_column, capacity_details,
+                               tr("View reserve counts and targets"), tr("Hide reserve counts and targets"), QStringLiteral("paymasterCapacityDetailsToggle"));
         auto* liquidity_steps = new QLabel(tr(
-            "First-time setup: 1. Restore or choose target slot counts. 2. Preview pool preparation; no funds move during a preview. 3. Review the exact DGB and DD amounts below. 4. Execute the reviewed preparation. 5. Wait for the new outputs to confirm, then check Overview for readiness."), liquidity);
+            "First-time setup: 1. Restore or choose target slot counts. 2. Preview pool preparation; no funds move during a preview. 3. Review the exact DGB and DD amounts below. 4. Execute the reviewed preparation. 5. Wait for the new outputs to confirm, then check Operation for readiness."), liquidity);
         liquidity_steps->setObjectName("paymasterLiquiditySetupSteps");
         liquidity_steps->setWordWrap(true);
         liquidity_layout->addWidget(liquidity_steps);
@@ -2326,16 +2586,16 @@ public:
             automatic_maintenance);
         m_paid_maintenance_approved->setObjectName(
             "paymasterPaidMaintenanceApproved");
-        m_maintenance_fee_per_transaction = integerField(
-            automatic_maintenance, 10000000);
+        m_maintenance_fee_per_transaction = new DgbAmountLineEdit(0, automatic_maintenance);
+        m_maintenance_fee_per_transaction->setSatoshis(10000000);
         m_maintenance_fee_per_transaction->setObjectName(
             "paymasterMaintenanceFeePerTransaction");
-        m_maintenance_fee_per_hour = integerField(
-            automatic_maintenance, 50000000);
+        m_maintenance_fee_per_hour = new DgbAmountLineEdit(0, automatic_maintenance);
+        m_maintenance_fee_per_hour->setSatoshis(50000000);
         m_maintenance_fee_per_hour->setObjectName(
             "paymasterMaintenanceFeePerHour");
-        m_maintenance_fee_per_day = integerField(
-            automatic_maintenance, 200000000);
+        m_maintenance_fee_per_day = new DgbAmountLineEdit(0, automatic_maintenance);
+        m_maintenance_fee_per_day->setSatoshis(200000000);
         m_maintenance_fee_per_day->setObjectName(
             "paymasterMaintenanceFeePerDay");
         m_liquidity_policy_status = new QLabel(tr(
@@ -2358,13 +2618,13 @@ public:
         maintenance_limits_form->setContentsMargins(0, 6, 0, 0);
         maintenance_limits_form->addRow(m_paid_maintenance_approved);
         maintenance_limits_form->addRow(
-            tr("Maximum fee per transaction (satoshis):"),
+            tr("Maximum fee per transaction (DGB):"),
             m_maintenance_fee_per_transaction);
         maintenance_limits_form->addRow(
-            tr("Maximum fees per rolling hour (satoshis):"),
+            tr("Maximum fees per rolling hour (DGB):"),
             m_maintenance_fee_per_hour);
         maintenance_limits_form->addRow(
-            tr("Maximum fees per rolling day (satoshis):"),
+            tr("Maximum fees per rolling day (DGB):"),
             m_maintenance_fee_per_day);
         maintenance_limits_panel->setVisible(false);
         automatic_maintenance_layout->addRow(m_maintenance_limits_toggle);
@@ -2545,6 +2805,16 @@ public:
             "Preparation is additive: existing live pool entries count toward the targets, so only missing outputs are proposed. Always preview the current targets before executing."), preparation);
         preparation_help->setWordWrap(true);
         preparation_layout->addWidget(preparation_help);
+        auto* preparation_fee_form = new QFormLayout();
+        m_preparation_fee = new DgbAmountLineEdit(20000000, preparation);
+        m_preparation_fee->setObjectName("paymasterPoolPreparationFee");
+        preparation_fee_form->addRow(tr("Maximum fee per setup transaction (DGB):"), m_preparation_fee);
+        preparation_layout->addLayout(preparation_fee_form);
+        connect(m_preparation_fee, &QLineEdit::textChanged, this, [this] {
+            m_prepare_preview_target.clear();
+            m_prepare_plan_id.clear();
+            updateLiquidityDisplay();
+        });
         m_prepare_preview = new QPushButton(tr("Preview pool preparation"), liquidity);
         auto* prepare_preview = m_prepare_preview;
         m_prepare_execute = new QPushButton(tr("Execute reviewed preparation…"), liquidity);
@@ -2617,7 +2887,8 @@ public:
         liquidity_scroll->setWidget(liquidity);
         ConfigureScrollArea(liquidity_scroll, liquidity);
         m_liquidity_page = liquidity_scroll;
-        m_tabs->addTab(liquidity_scroll, tr("Liquidity"));
+        liquidity_layout->insertWidget(1, m_liquidity_maintenance_card);
+        m_tabs->addTab(liquidity_scroll, tr("Operating capital"));
 
         auto* finance_scroll = new QScrollArea(m_tabs);
         finance_scroll->setObjectName("paymasterFinancesPage");
@@ -2627,7 +2898,7 @@ public:
         QVBoxLayout* finance_layout{nullptr};
         auto* finance_column = CreatePaymasterPageColumn(finance, finance_layout);
         AddPaymasterPageHeading(
-            finance_layout, finance_column, tr("Provider finances"),
+            finance_layout, finance_column, tr("Income & costs"),
             tr("Track DigiDollar service-fee income, DigiByte operating costs and wallet-owned pool capital without treating reserved liquidity as an expense."),
             QStringLiteral("paymasterFinances"));
 
@@ -2637,8 +2908,8 @@ public:
             "paymasterRole", QStringLiteral("card"));
         auto* finance_toolbar_layout = new QHBoxLayout(finance_toolbar);
         auto* finance_period_help = new QLabel(tr(
-            "The four summary cards use one consistent wallet snapshot. The selected period controls the detailed booking list and CSV export."),
-            finance_toolbar);
+                                                   "Choose the period for income, costs, bookings and CSV export. Operating capital remains separate from expenses."),
+                                               finance_toolbar);
         finance_period_help->setWordWrap(true);
         finance_toolbar_layout->addWidget(finance_period_help, 1);
         m_finance_period_select = new NoWheelComboBox(finance_toolbar);
@@ -2715,10 +2986,16 @@ public:
             card_layout->addStretch();
             finance_period_cards->addCard(card);
         }
-        finance_layout->addWidget(finance_period_cards);
+        m_finance_selected_summary = new QLabel(tr("Choose a period to load recorded income and costs."), finance_column);
+        m_finance_selected_summary->setObjectName("paymasterFinanceSelectedSummary");
+        m_finance_selected_summary->setWordWrap(true);
+        m_finance_selected_summary->setProperty("paymasterRole", QStringLiteral("statusText"));
+        finance_layout->addWidget(m_finance_selected_summary);
+        AddPaymasterDisclosure(finance_layout, finance_column, finance_period_cards,
+                               tr("Compare reporting periods"), tr("Hide period comparison"), QStringLiteral("paymasterFinanceCompareToggle"));
 
         auto* finance_result_group = new QGroupBox(
-            tr("Current-price result estimate"), finance_column);
+            tr("Optional valuation at the current price"), finance_column);
         finance_result_group->setProperty(
             "paymasterRole", QStringLiteral("card"));
         auto* finance_result_layout = new QVBoxLayout(finance_result_group);
@@ -2741,7 +3018,8 @@ public:
         finance_result_layout->addWidget(m_finance_result_estimate);
         finance_result_layout->addWidget(m_finance_model_breakdown);
         finance_result_layout->addWidget(finance_valuation_note);
-        finance_layout->addWidget(finance_result_group);
+        AddPaymasterDisclosure(finance_layout, finance_column, finance_result_group,
+                               tr("View current-price estimate"), tr("Hide current-price estimate"), QStringLiteral("paymasterFinanceValuationToggle"));
 
         auto* finance_pool_group = new QGroupBox(
             tr("Wallet-owned pool capital"), finance_column);
@@ -2769,43 +3047,8 @@ public:
         finance_pool_layout->addWidget(m_finance_pool_dgb);
         finance_pool_layout->addWidget(m_finance_pool_carrier);
         finance_pool_layout->addWidget(m_finance_pending_maintenance);
-        finance_layout->addWidget(finance_pool_group);
-
-        m_finance_backup_notice = new QGroupBox(
-            tr("Provider-wallet backup recommended"), finance_column);
-        m_finance_backup_notice->setObjectName("paymasterFinanceBackupNotice");
-        m_finance_backup_notice->setProperty(
-            "paymasterRole", QStringLiteral("notice"));
-        m_finance_backup_notice->setProperty(
-            "statusKind", QStringLiteral("waiting"));
-        auto* finance_backup_layout = new QVBoxLayout(m_finance_backup_notice);
-        m_finance_backup_text = new QLabel(m_finance_backup_notice);
-        m_finance_backup_text->setWordWrap(true);
-        m_finance_backup_provider_id = new QLabel(m_finance_backup_notice);
-        m_finance_backup_provider_id->setObjectName(
-            "paymasterFinanceBackupProviderId");
-        m_finance_backup_provider_id->setWordWrap(true);
-        m_finance_backup_provider_id->setTextInteractionFlags(
-            Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
-        auto* finance_backup_actions = new QHBoxLayout();
-        m_finance_backup_now = new QPushButton(
-            tr("Back up provider wallet now…"), m_finance_backup_notice);
-        m_finance_backup_now->setObjectName("paymasterFinanceBackupNow");
-        m_finance_backup_now->setProperty(
-            "paymasterRole", QStringLiteral("primaryAction"));
-        m_finance_backup_external = new QPushButton(
-            tr("Acknowledge another full-wallet backup…"),
-            m_finance_backup_notice);
-        m_finance_backup_external->setObjectName(
-            "paymasterFinanceExternalBackup");
-        finance_backup_actions->addWidget(m_finance_backup_now);
-        finance_backup_actions->addWidget(m_finance_backup_external);
-        finance_backup_actions->addStretch();
-        finance_backup_layout->addWidget(m_finance_backup_text);
-        finance_backup_layout->addWidget(m_finance_backup_provider_id);
-        finance_backup_layout->addLayout(finance_backup_actions);
-        m_finance_backup_notice->hide();
-        finance_layout->addWidget(m_finance_backup_notice);
+        AddPaymasterDisclosure(finance_layout, finance_column, finance_pool_group,
+                               tr("View capital breakdown"), tr("Hide capital breakdown"), QStringLiteral("paymasterFinanceCapitalToggle"));
 
         auto* finance_actions_group = new QGroupBox(
             tr("Pool finance actions"), finance_column);
@@ -2837,7 +3080,8 @@ public:
         finance_actions_layout->addWidget(m_finance_release_carrier, 1, 1);
         finance_actions_layout->addWidget(m_finance_review_dgb, 2, 0);
         finance_actions_layout->addWidget(m_finance_add_liquidity, 2, 1);
-        finance_layout->addWidget(finance_actions_group);
+        AddPaymasterDisclosure(finance_layout, finance_column, finance_actions_group,
+                               tr("Withdraw fees or manage capital…"), tr("Hide capital actions"), QStringLiteral("paymasterFinanceActionsToggle"));
 
         auto* finance_details = new QWidget(finance_column);
         finance_details->setObjectName("paymasterFinanceDetailsPanel");
@@ -2864,7 +3108,9 @@ public:
         m_finance_daily_totals->setAlternatingRowColors(true);
         m_finance_daily_totals->verticalHeader()->hide();
         m_finance_daily_totals->horizontalHeader()->setSectionResizeMode(
-            QHeaderView::Stretch);
+            QHeaderView::ResizeToContents);
+        m_finance_daily_totals->horizontalHeader()->setStretchLastSection(true);
+        m_finance_daily_totals->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_finance_daily_totals->setMinimumHeight(180);
         auto* finance_bookings_title = new QLabel(
             tr("Bookings"), finance_details);
@@ -2879,6 +3125,7 @@ public:
         m_finance_events->setSelectionBehavior(QAbstractItemView::SelectRows);
         m_finance_events->setAlternatingRowColors(true);
         m_finance_events->verticalHeader()->hide();
+        m_finance_events->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         m_finance_events->horizontalHeader()->setSectionResizeMode(
             QHeaderView::ResizeToContents);
         m_finance_events->horizontalHeader()->setStretchLastSection(true);
@@ -2917,7 +3164,7 @@ public:
         finance_scroll->setWidget(finance);
         ConfigureScrollArea(finance_scroll, finance);
         m_finance_page = finance_scroll;
-        m_tabs->addTab(finance_scroll, tr("Finances"));
+        m_tabs->addTab(finance_scroll, tr("Income && costs"));
 
         auto* activity_scroll = new QScrollArea(m_tabs);
         activity_scroll->setObjectName("paymasterActivityPage");
@@ -2927,7 +3174,7 @@ public:
         QVBoxLayout* activity_layout{nullptr};
         auto* activity_column = CreatePaymasterPageColumn(activity, activity_layout);
         AddPaymasterPageHeading(
-            activity_layout, activity_column, tr("Provider operation"),
+            activity_layout, activity_column, tr("Activity and recovery"),
             tr("Monitor the automatic provider service, queued work and any durable reservations that require attention."),
             QStringLiteral("paymasterActivity"));
 
@@ -2958,17 +3205,17 @@ public:
         m_activity_runtime_status->setFont(activity_status_font);
         activity_intro_layout->addWidget(m_activity_runtime_status);
         m_operation_primary = new QPushButton(
-            tr("Check provider status"), activity_intro_group);
+            tr("Open operation overview"), activity_intro_group);
         m_operation_primary->setObjectName("paymasterOperationPrimaryAction");
         m_operation_primary->setProperty(
-            "paymasterRole", QStringLiteral("primaryAction"));
+            "paymasterRole", QStringLiteral("secondaryAction"));
         activity_intro_layout->addWidget(m_operation_primary, 0, Qt::AlignLeft);
         m_runtime_settings_toggle = new QPushButton(
             tr("Show advanced provider runtime settings"), activity_intro_group);
         m_runtime_settings_toggle->setObjectName("paymasterRuntimeSettingsToggle");
         m_runtime_settings_toggle->setCheckable(true);
         m_runtime_settings_toggle->setFlat(true);
-        activity_intro_layout->addWidget(m_runtime_settings_toggle, 0, Qt::AlignLeft);
+        connection_layout->addWidget(m_runtime_settings_toggle, 0, Qt::AlignLeft);
         activity_layout->addWidget(activity_intro_group);
 
         m_runtime_settings_panel = new QGroupBox(
@@ -3008,8 +3255,8 @@ public:
         m_runtime_settings_result->setObjectName("paymasterRuntimeSettingsResult");
         m_runtime_settings_result->setWordWrap(true);
         runtime_settings_form->addRow(m_runtime_settings_result);
-        activity_layout->addWidget(m_runtime_settings_panel);
-        // The Operations page itself is still hidden while it is built. Force
+        connection_layout->addWidget(m_runtime_settings_panel);
+        // The settings page itself is still hidden while it is built. Force
         // an explicit show/hide transition so Qt remembers that this expert
         // panel must remain collapsed when the page is shown later.
         m_runtime_settings_panel->show();
@@ -3126,7 +3373,28 @@ public:
         activity_scroll->setWidget(activity);
         ConfigureScrollArea(activity_scroll, activity);
         m_activity_page = activity_scroll;
-        m_tabs->addTab(activity_scroll, tr("Operations"));
+        m_tabs->insertTab(1, activity_scroll, tr("Activity"));
+        for (QWidget* page : {m_activity_page, m_finance_page, m_liquidity_page})
+            m_tabs->removeTab(m_tabs->indexOf(page));
+        m_history_tabs = new QTabWidget(m_tabs);
+        m_history_tabs->setObjectName("paymasterHistoryTabs");
+        m_history_tabs->addTab(m_activity_page, tr("Activity"));
+        m_history_tabs->addTab(m_finance_page, tr("Income && costs"));
+        m_tabs->addTab(m_history_tabs, tr("Activity && finances"));
+        m_settings_tabs = new QTabWidget(m_tabs);
+        m_settings_tabs->setObjectName("paymasterSettingsTabs");
+        m_settings_tabs->addTab(configuration_scroll, tr("Offer"));
+        m_settings_tabs->addTab(safety_scroll, tr("Spending limits"));
+        m_settings_tabs->addTab(liquidity_scroll, tr("Automation && reserves"));
+        m_settings_tabs->addTab(connection_scroll, tr("Connection && wallet"));
+        connection_layout->addStretch();
+        connection_scroll->setWidget(connection);
+        ConfigureScrollArea(connection_scroll, connection);
+        m_tabs->addTab(m_settings_tabs, tr("Settings"));
+        m_tabs->setTabText(0, tr("Operation"));
+        connect(m_history_tabs, &QTabWidget::currentChanged, this, [this](int) {
+            if (isOperatorPage(m_finance_page) && hasRpcTransport() && !m_busy) refreshFinanceStatus();
+        });
 
         connect(refresh, &QPushButton::clicked, this, [this] { refreshStatus(); });
         connect(m_guided_setup, &QPushButton::clicked, this, [this] {
@@ -3149,7 +3417,7 @@ public:
                     QMessageBox::Yes | QMessageBox::Cancel,
                     QMessageBox::Cancel) == QMessageBox::Yes) {
                 setSetupMode(PaymasterSetupMode::EXPERT);
-                m_tabs->setCurrentWidget(m_configuration_page);
+                showOperatorPage(m_configuration_page);
             }
         });
         connect(details_toggle, &QPushButton::toggled, this,
@@ -3188,43 +3456,13 @@ public:
         });
         connect(m_save_runtime_settings, &QPushButton::clicked, this,
                 [this] { saveRuntimeSettings(); });
-        connect(m_start, &QPushButton::clicked, this, [this] {
-            if (!requirePrivacyOffForSensitiveAction(
-                    tr("Starting the Paymaster provider"))) {
-                return;
-            }
-            if (!hasCompleteMutationSnapshots()) {
-                m_status->setText(tr(
-                    "Provider start was not attempted because a complete current provider, safety and liquidity snapshot is unavailable."));
-                updateProviderButtons();
-                return;
-            }
-            if (askPlainTextQuestion(
-                    this, tr("Start Paymaster provider"),
-                    providerStartConfirmationText()) != QMessageBox::Yes) {
-                return;
-            }
-            call("startpaymaster", {}, false, nullptr,
-                 [this](const UniValue& result) {
-                     presentProviderStartResult(result);
-                     refreshStatus();
-                  });
-        });
-        connect(m_stop, &QPushButton::clicked, this,
-                [this] { stopProvider(); });
         connect(m_operation_primary, &QPushButton::clicked, this, [this] {
-            if (m_core_running) {
-                m_stop->click();
-            } else if (m_start->isEnabled()) {
-                m_start->click();
-            } else {
-                refreshStatus();
-            }
+            m_tabs->setCurrentIndex(0);
         });
         connect(m_overview_offer_action, &QPushButton::clicked, this,
-                [this] { m_tabs->setCurrentWidget(m_configuration_page); });
+                [this] { showOperatorPage(m_configuration_page); });
         connect(m_overview_safety_action, &QPushButton::clicked, this,
-                [this] { m_tabs->setCurrentWidget(m_safety_page); });
+                [this] { showOperatorPage(m_safety_page); });
         connect(m_overview_liquidity_action, &QPushButton::clicked, this,
                 [this] {
                     if (maintenanceFeeLimitExceeded()) {
@@ -3239,12 +3477,12 @@ public:
                     // This label is an action, not a navigation shortcut. If
                     // the bounded refill is already approved and the provider
                     // is stopped, start the provider through the same guarded
-                    // confirmation path as the primary Overview button.
+                    // confirmation path as the primary Operation button.
                     if (shouldStartAndRestoreLiquidity()) {
-                        m_start->click();
+                        startProvider();
                         return;
                     }
-                    m_tabs->setCurrentWidget(m_liquidity_page);
+                    showOperatorPage(m_liquidity_page);
                     if (!m_liquidity_targets_satisfy_provider_policy &&
                         m_liquidity_advanced_toggle) {
                         m_liquidity_advanced_toggle->setChecked(true);
@@ -3255,7 +3493,7 @@ public:
                     if (maintenanceFeeLimitExceeded()) {
                         reviewMaintenanceFeeLimit();
                     } else if (!m_liquidity_targets_satisfy_provider_policy) {
-                        m_tabs->setCurrentWidget(m_liquidity_page);
+                        showOperatorPage(m_liquidity_page);
                         if (m_liquidity_advanced_toggle) {
                             m_liquidity_advanced_toggle->setChecked(true);
                         }
@@ -3266,30 +3504,26 @@ public:
                                QLatin1String("waiting_for_maintenance_approval")) {
                         approveSuggestedLiquidityMaintenance();
                     } else if (shouldStartAndRestoreLiquidity()) {
-                        m_start->click();
+                        showOperatorPage(m_liquidity_page);
                     } else {
-                        m_tabs->setCurrentWidget(m_activity_page);
+                        showOperatorPage(m_activity_page);
                     }
                 });
         connect(m_overview_finance_action, &QPushButton::clicked, this,
                 [this] {
-                    m_tabs->setCurrentWidget(m_finance_page);
+                    showOperatorPage(m_finance_page);
                     if (!m_busy) refreshFinanceStatus();
                 });
         connect(m_overview_backup_now, &QPushButton::clicked, this,
                 [this] { requestProviderBackup(); });
         connect(m_overview_backup_external, &QPushButton::clicked, this,
                 [this] { acknowledgeExternalBackup(); });
-        connect(m_finance_backup_now, &QPushButton::clicked, this,
-                [this] { requestProviderBackup(); });
-        connect(m_finance_backup_external, &QPushButton::clicked, this,
-                [this] { acknowledgeExternalBackup(); });
         connect(m_finance_refresh, &QPushButton::clicked, this,
                 [this] { refreshFinanceStatus(); });
         connect(m_finance_period_select,
                 qOverload<int>(&QComboBox::currentIndexChanged), this,
                 [this] {
-                    if (m_tabs->currentWidget() == m_finance_page && !m_busy) {
+                    if (isOperatorPage(m_finance_page) && !m_busy) {
                         refreshFinanceStatus();
                     }
                 });
@@ -3300,15 +3534,15 @@ public:
         connect(m_finance_next_page, &QPushButton::clicked, this,
                 [this] { showNextFinancePage(); });
         connect(m_finance_withdraw_fees, &QPushButton::clicked, this,
-                [this] { openLiquidityFinanceControl(m_preview_carrier_excess); });
+                [this] { beginGuidedTask("all_excess"); });
         connect(m_finance_release_carrier, &QPushButton::clicked, this,
-                [this] { openLiquidityFinanceControl(m_preview_carrier_release); });
+                [this] { beginGuidedTask("release_slot"); });
         connect(m_finance_review_dgb, &QPushButton::clicked, this,
                 [this] { openLiquidityFinanceControl(m_rebalance_preview); });
         connect(m_finance_add_liquidity, &QPushButton::clicked, this,
-                [this] { openLiquidityFinanceControl(m_prepare_preview); });
+                [this] { beginGuidedTask("preparepaymasterpool"); });
         connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
-            if (m_tabs->currentWidget() == m_finance_page &&
+            if (isOperatorPage(m_finance_page) &&
                 hasRpcTransport() && !m_busy) {
                 refreshFinanceStatus();
             }
@@ -3338,7 +3572,6 @@ public:
                 this, [this] { restoreQuoteSafetyDefaults(); });
         connect(restore_client_defaults, &QPushButton::clicked,
                 this, [this] { restoreClientSafetyDefaults(); });
-        connect(m_enable, &QPushButton::clicked, this, [this] { enableProvider(); });
         connect(m_approve_liquidity_maintenance, &QPushButton::clicked,
                 this, [this] {
                     if (maintenanceFeeLimitExceeded()) {
@@ -3490,16 +3723,11 @@ public:
         m_setup_status_timer = new QTimer(this);
         m_setup_status_timer->setInterval(10000);
         connect(m_setup_status_timer, &QTimer::timeout, this, [this] {
-            const bool maintenance_wait =
-                m_maintenance_state == QLatin1String("replenishing_liquidity") ||
-                m_maintenance_state ==
-                    QLatin1String("waiting_for_liquidity_confirmation");
-            if ((m_setup_waiting_for_confirmations || maintenance_wait ||
-                 hasPassiveExternalWait()) &&
-                m_model && !m_busy && !m_setup_wizard_active) {
-                refreshStatus();
-            }
+            if (isVisible() && hasRpcTransport() && !m_busy && !m_setup_wizard_active && !m_privacy)
+                refreshOperatorStatus();
         });
+        m_setup_status_timer->start();
+
     }
 
     /**
@@ -3519,6 +3747,7 @@ public:
         m_operator_snapshot = UniValue{};
         m_operator_report = UniValue{};
         m_operator_summary->setText(tr("Reading the selected wallet's operator status…"));
+        resetOperatorPresentation();
         m_setup_wizard_active = false;
         if (m_setup_status_timer) m_setup_status_timer->stop();
         if (m_setup_wizard) {
@@ -3530,12 +3759,17 @@ public:
             m_setup_wizard.clear();
         }
         ++m_wallet_generation;
+        m_operation.reset(m_wallet_generation);
+        m_guided_task.clear();
+        if (m_task_card) m_task_card->hide();
         m_pending_handler_calls.clear();
         m_rpc_handler_depth = 0;
         m_active_rpc_handler_token = 0;
         m_next_rpc_handler_token = 0;
         m_model = model;
         m_busy = false;
+        m_active_rpc_command.clear();
+        updateOperatorProgress();
         m_setup_mode = loadSetupMode();
         applyRecommendedPolicyDefaults(/*mark_dirty=*/false);
         restoreLiquidityDefaults(/*announce=*/false);
@@ -3595,6 +3829,7 @@ public:
         updateIdentityLabels();
         m_backup_required = false;
         m_finance_last_result = UniValue{UniValue::VOBJ};
+        m_finance_selected_summary->setText(tr("Load the selected reporting period to view income and costs."));
         m_finance_pages.clear();
         m_finance_page_index = -1;
         m_finance_loaded = false;
@@ -3613,6 +3848,11 @@ public:
         m_finance_model_breakdown->clear();
         m_activity_output->clear();
         m_liquidity_output->clear();
+        m_pool_preparation = UniValue{};
+        m_pool_preparation_status->clear();
+        m_pool_preparation_status->hide();
+        m_cancel_preparation->hide();
+        m_preparation_fee->setSatoshis(20000000);
         m_activity_action_result->setText(
             tr("No manual operation has been run for this wallet."));
         m_activity_summary->setText(
@@ -3686,7 +3926,18 @@ public:
     {
         if (m_privacy == privacy) return;
         m_privacy = privacy;
+        if (privacy) {
+            m_operation.reset(m_wallet_generation);
+            m_guided_task.clear();
+            if (m_task_card) m_task_card->hide();
+        }
         m_operator_summary->setVisible(!privacy);
+        m_operator_card->setVisible(!privacy);
+        showOperatorBusyState();
+        if (privacy) {
+            resetOperatorPresentation();
+            m_finance_selected_summary->setText(tr("Financial summary hidden by privacy mode"));
+        }
         if (privacy) {
             m_operator_snapshot = UniValue{};
             m_operator_report = UniValue{};
@@ -3719,6 +3970,12 @@ public:
         m_finance_events->setVisible(!privacy);
         m_activity_output->setVisible(!privacy);
         m_liquidity_output->setVisible(!privacy);
+        if (privacy) {
+            m_pool_preparation = UniValue{};
+            m_pool_preparation_status->clear();
+            m_pool_preparation_status->hide();
+            m_cancel_preparation->hide();
+        }
         m_display_name->setEchoMode(
             privacy ? QLineEdit::Password : QLineEdit::Normal);
         setSensitivePagePrivacy(privacy);
@@ -3774,13 +4031,20 @@ public:
         if (!privacy && hasRpcTransport() && !m_busy) refreshStatus();
     }
 
-    void refreshStatus() override
+    void showEvent(QShowEvent* event) override
     {
-        // Retain the last authoritative snapshot while the asynchronous RPCs
-        // are in flight. Temporarily forcing ready=false made every passive
-        // ten-second refresh switch buttons and cards to an error-looking
-        // state before immediately restoring the same result.
-        call("getpaymasterinfo", {}, false, nullptr, [this](const UniValue& result) {
+        DigiDollarPaymasterWidget::showEvent(event);
+        if (m_model && !m_busy && !m_setup_wizard_active && !m_privacy)
+            QTimer::singleShot(0, this, [this] { if (m_model && !m_busy && !m_privacy) refreshStatus(); });
+    }
+
+    void refreshStatus()
+    {
+        refreshOperatorStatus();
+    }
+
+    void applyProviderInfo(const UniValue& result)
+    {
             const UniValue& policy = result.find_value("policy");
             const UniValue& pool = result.find_value("pool");
             if (!IsCompleteProviderInfoSnapshot(result)) {
@@ -3791,6 +4055,7 @@ public:
                 return;
             }
             m_provider_info_snapshot_available = true;
+            m_status_age.restart();
             const UniValue& settings_present =
                 result.find_value("settings_present");
             m_provider_settings_present = settings_present.isBool() &&
@@ -3840,7 +4105,7 @@ public:
             m_enable_status->setText(enabled
                 ? m_autostart_enabled
                     ? tr("Provider configuration is enabled and saved in this wallet. Autostart may bring it online whenever all readiness requirements pass.")
-                    : tr("Provider configuration is enabled and saved in this wallet. Autostart is disabled, so it remains offline until you start it from Overview.")
+                    : tr("Provider configuration is enabled and saved in this wallet. Autostart is disabled. This does not stop an already started provider.")
                 : tr("Provider configuration is currently disabled for this wallet."));
             if (m_service_state == QLatin1String("active")) {
                 m_status->setText(tr("Automatic provider operation active — eligible requests and validated payments are processed by Core within the saved limits."));
@@ -3849,7 +4114,7 @@ public:
             } else if (m_service_state == QLatin1String("waiting_for_unlock")) {
                 m_status->setText(tr("Provider paused — unlock this wallet to resume automatic processing. No queued message is consumed while locked."));
             } else if (m_service_state == QLatin1String("waiting_for_readiness")) {
-                m_status->setText(tr("Provider autostart is waiting for the remaining readiness requirements."));
+                m_status->setText(tr("Provider processing is waiting for the remaining readiness requirements."));
             } else if (m_service_state == QLatin1String("waiting_for_maintenance_approval")) {
                 m_status->setText(tr("Provider started safely but is waiting for your one-time approval of finite paid liquidity-maintenance limits."));
             } else if (m_service_state == QLatin1String("replenishing_liquidity")) {
@@ -3863,7 +4128,7 @@ public:
             } else if (running) {
                 m_status->setText(tr("Provider running — this wallet is currently available to eligible DigiDollar clients."));
             } else if (ready) {
-                m_status->setText(tr("Setup complete — review the settings, then start the provider when you are ready."));
+                m_status->setText(tr("Setup complete — start from Operation using the saved settings."));
             } else {
                 m_status->setText(tr("Setup incomplete — no provider service is currently running."));
             }
@@ -3889,13 +4154,13 @@ public:
                     m_overview_finance_status,
                     maskNumericText(
                         tr("%1 DD service fees · %2 DGB costs · %3 successful transfer(s)")
-                            .arg(ddAmount(income), dgbAmount(cost))
+                            .arg(ddAmount(income), compactDgbAmount(cost))
                             .arg(transfers)),
                     QStringLiteral("ready"));
             } else if (m_core_has_identity) {
                 setStatusLabel(
                     m_overview_finance_status,
-                    tr("Waiting · finance ledger has not been initialized yet"),
+                    tr("Open finances to load income and costs"),
                     QStringLiteral("waiting"));
             } else {
                 setStatusLabel(
@@ -3991,18 +4256,20 @@ public:
             }
             updateProviderButtons();
             updateAutomaticRefreshTimer();
-            refreshOracleStatus();
-            refreshLiquidityStatus();
-        }, false, [this](const QString& error) {
-            m_provider_info_snapshot_available = false;
-            m_status->setText(
-                tr("Provider status unavailable: %1").arg(error));
-            updateProviderButtons();
-        });
+    }
+
+
+    void setOperatorStatusForTesting(const UniValue& status) override
+    {
+        m_operator_snapshot = status;
+        m_operation.observe(status, m_wallet_generation, QDateTime::currentSecsSinceEpoch());
+        renderCurrentTask();
+        renderOperatorPresentation(status);
     }
 
     void setReadinessStatusForTesting(const UniValue& status) override
     {
+        m_status_age.restart();
         m_provider_info_snapshot_available = true;
         const UniValue& settings_present =
             status.find_value("settings_present");
@@ -4123,6 +4390,7 @@ public:
     void setMutationSnapshotsAvailableForTesting(
         bool provider_info, bool provider_safety, bool liquidity) override
     {
+        m_status_age.restart();
         // Workflow tests use intentionally narrow fixtures. Keep production's
         // fail-closed decoder path intact while allowing those tests to state
         // explicitly which authoritative snapshots are assumed available.
@@ -4145,6 +4413,11 @@ public:
         RpcExecutor executor) override
     {
         m_rpc_executor_for_testing = std::move(executor);
+    }
+
+    void setAsyncRpcExecutorForTesting(AsyncRpcExecutor executor) override
+    {
+        m_async_rpc_executor_for_testing = std::move(executor);
     }
 
     void setFinanceExportFilenameForTesting(QString filename) override
@@ -4256,7 +4529,7 @@ private:
     {
         const QList<QWidget*> pages{
             m_configuration_page, m_safety_page, m_liquidity_page,
-            m_finance_page, m_activity_page};
+            m_finance_page, m_activity_page, m_connection_page};
         for (QWidget* page : pages) {
             if (!page) continue;
             QList<QWidget*> controls{page};
@@ -4376,7 +4649,7 @@ private:
                 this, tr("Paymaster provider not started"),
                 !m_liquidity_targets_satisfy_provider_policy
                     ? tr("The saved liquidity targets cannot satisfy the active offer. A user-paid provider needs at least three admission DigiDollar carriers and one operational DigiDollar carrier. Review and save the liquidity targets before starting the provider.")
-                    : tr("The provider is not running because one or more readiness requirements are still unmet. Refresh the Overview for the next safe action."));
+                    : tr("The provider is not running because one or more readiness requirements are still unmet. Refresh the Operation for the next safe action."));
             return;
         }
 
@@ -4408,7 +4681,7 @@ private:
 
         // A pending start is normal background progress, not a result the
         // operator must acknowledge. A modal message box runs a nested event
-        // loop, so the periodic refresh can make the Overview ready while the
+        // loop, so the periodic refresh can make the Operation ready while the
         // old "startup pending" text remains in front of it. Keep progress in
         // the live status area instead; the caller immediately refreshes the
         // authoritative Core state after this short transitional message.
@@ -4418,13 +4691,13 @@ private:
 
     bool hasRpcTransport() const
     {
-        return m_model || static_cast<bool>(m_rpc_executor_for_testing);
+        return m_model || static_cast<bool>(m_rpc_executor_for_testing) || static_cast<bool>(m_async_rpc_executor_for_testing);
     }
 
     bool hasCompleteMutationSnapshots() const
     {
-        return m_provider_info_snapshot_available &&
-            m_provider_safety_snapshot_available &&
+        return m_status_age.isValid() && m_status_age.elapsed() <= 30000 &&
+            m_provider_info_snapshot_available && m_provider_safety_snapshot_available &&
             m_liquidity_snapshot_available;
     }
 
@@ -4482,7 +4755,7 @@ private:
 
     bool shouldStartAndRestoreLiquidity() const
     {
-        return !m_core_running && m_start && m_start->isEnabled() &&
+        return canStartProvider() &&
                !hasPassiveExternalWait() &&
                m_liquidity_targets_satisfy_provider_policy &&
                m_maintenance_state ==
@@ -4500,17 +4773,16 @@ private:
     void updateAutomaticRefreshTimer()
     {
         if (!m_setup_status_timer) return;
-        const bool maintenance_wait =
-            m_setup_waiting_for_confirmations ||
+        const bool pending = m_operation.phase == PaymasterOperationController::Phase::Waiting ||
+            (m_operation.phase == PaymasterOperationController::Phase::Blocked && m_operation.observed_work) ||
+            m_setup_waiting_for_confirmations || hasPassiveExternalWait() ||
             m_maintenance_state == QLatin1String("replenishing_liquidity") ||
-            m_maintenance_state ==
-                QLatin1String("waiting_for_liquidity_confirmation");
-        if (m_model && !m_busy && !m_setup_wizard_active &&
-            (maintenance_wait || hasPassiveExternalWait())) {
+            m_maintenance_state == QLatin1String("waiting_for_liquidity_confirmation");
+        m_setup_status_timer->setInterval(pending ? 2000 : 10000);
+        if (hasRpcTransport() && !m_setup_wizard_active && !m_privacy && !m_operation.busy())
             m_setup_status_timer->start();
-        } else {
+        else
             m_setup_status_timer->stop();
-        }
     }
 
     void updateProviderHeaderStatus()
@@ -4554,7 +4826,7 @@ private:
         } else if (m_core_running) {
             m_status->setText(tr("Provider running — this wallet is currently available to eligible DigiDollar clients."));
         } else if (m_core_ready) {
-            m_status->setText(tr("Provider fully configured — review the saved limits, then start it when you are ready."));
+            m_status->setText(tr("Provider settings are saved. Use Start provider in Operation when you are ready; repeating setup is optional."));
         } else {
             m_status->setText(tr("Setup incomplete — no provider service is currently running."));
         }
@@ -4712,12 +4984,23 @@ private:
 
     static QString dgbAmount(qint64 satoshis)
     {
-        return QString::number(satoshis / 100000000.0, 'f', 8);
+        return (satoshis < 0 ? QStringLiteral("-") : QString{}) +
+               QStringLiteral("%1.%2").arg(std::abs(satoshis / COIN)).arg(std::abs(satoshis % COIN), 8, 10, QLatin1Char('0'));
+    }
+
+    static QString compactDgbAmount(qint64 satoshis)
+    {
+        QString value = dgbAmount(satoshis);
+        while (value.endsWith(QLatin1Char('0')))
+            value.chop(1);
+        if (value.endsWith(QLatin1Char('.'))) value.chop(1);
+        return value;
     }
 
     static QString ddAmount(qint64 cents)
     {
-        return QString::number(cents / 100.0, 'f', 2);
+        return (cents < 0 ? QStringLiteral("-") : QString{}) +
+               QStringLiteral("%1.%2").arg(std::abs(cents / 100)).arg(std::abs(cents % 100), 2, 10, QLatin1Char('0'));
     }
 
     static qint64 financeNumber(const UniValue& object, const char* name)
@@ -4760,16 +5043,10 @@ private:
         m_backup_required = required;
         m_provider_id = provider_id;
         const bool visible = required && !provider_id.isEmpty();
-        const QString explanation = tr(
-            "Back up this complete provider wallet now. The provider identity key, "
-            "configuration, pool state and finance ledger are stored in the wallet. "
-            "A seed-only or descriptor-only export is not a complete Paymaster backup. "
-            "Keep the wallet backup offline and confidential. This reminder does not "
-            "prevent you from starting the provider.");
         const QString identity = tr("Provider ID: %1").arg(
             visibleProviderId(provider_id));
         if (m_overview_backup_notice) {
-            m_overview_backup_notice->setVisible(visible);
+            m_overview_backup_notice->setVisible(!provider_id.isEmpty());
             m_overview_backup_provider_id->setText(identity);
             m_overview_backup_provider_id->setTextInteractionFlags(
                 m_privacy ? Qt::NoTextInteraction
@@ -4777,17 +5054,6 @@ private:
                                 Qt::TextSelectableByMouse);
             m_overview_backup_now->setEnabled(!m_privacy && !m_busy);
             m_overview_backup_external->setEnabled(!m_privacy && !m_busy);
-        }
-        if (m_finance_backup_notice) {
-            m_finance_backup_notice->setVisible(visible);
-            m_finance_backup_text->setText(explanation);
-            m_finance_backup_provider_id->setText(identity);
-            m_finance_backup_provider_id->setTextInteractionFlags(
-                m_privacy ? Qt::NoTextInteraction
-                          : Qt::TextSelectableByKeyboard |
-                                Qt::TextSelectableByMouse);
-            m_finance_backup_now->setEnabled(!m_privacy && !m_busy);
-            m_finance_backup_external->setEnabled(!m_privacy && !m_busy);
         }
         // The setup wizard is a child of this widget while it is open. Hide
         // its completion reminder as soon as the ordinary WalletView backup
@@ -4889,6 +5155,7 @@ private:
 
     void requestSelectedFinanceStatus()
     {
+        m_finance_selected_summary->setText(tr("Loading the selected reporting period…"));
         const QString requested_period =
             m_finance_period_select->currentData().toString();
         if (!m_finance_pages.empty()) {
@@ -5106,6 +5373,7 @@ private:
     {
         setFinanceLoading(false, /*exporting=*/false);
         m_finance_history_status->setText(message);
+        m_finance_selected_summary->setText(message);
     }
 
     void renderFinancePage(int index)
@@ -5142,6 +5410,10 @@ private:
         const qint64 income = financeNumber(result, "service_fee_income_cents");
         const qint64 cost = financeNumber(result, "dgb_operating_cost_satoshis");
         const qint64 transfers = financeNumber(result, "successful_transfers");
+        m_finance_selected_summary->setText(m_privacy ? tr("Financial summary hidden by privacy mode") :
+                                                        tr("%1\nService-fee income: %2 DD\nOperating costs: %3 DGB\nSuccessful transfers: %4")
+                                                            .arg(m_finance_period_select->currentText(), ddAmount(income), compactDgbAmount(cost))
+                                                            .arg(transfers));
         const qint64 average = financeNumber(result, "average_service_fee_cents");
         const UniValue& estimate = result.find_value("estimated_result_usd");
         const UniValue& oracle = result.find_value("oracle_price_micro_usd");
@@ -5251,9 +5523,9 @@ private:
                 }};
                 for (int column = 0;
                      column < static_cast<int>(cells.size()); ++column) {
-                    m_finance_daily_totals->setItem(
-                        row, column,
-                        new QTableWidgetItem(cells.at(column)));
+                    auto* item = new QTableWidgetItem(cells.at(column));
+                    item->setTextAlignment((column == 0 ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignVCenter);
+                    m_finance_daily_totals->setItem(row, column, item);
                 }
                 ++row;
             }
@@ -5272,15 +5544,17 @@ private:
                     : QString{};
                 const std::array<QString, 6> cells{{
                     QDateTime::fromSecsSinceEpoch(created_at, Qt::UTC)
-                        .toString(Qt::ISODate),
+                        .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
                     financeEventKind(kind), financeEventState(state),
                     ddAmount(financeNumber(event, "dd_income_cents")),
                     dgbAmount(financeNumber(event, "dgb_cost_satoshis")),
                     financeFundingModel(event),
                 }};
                 for (int column = 0; column < static_cast<int>(cells.size()); ++column) {
-                    m_finance_events->setItem(
-                        row, column, new QTableWidgetItem(cells.at(column)));
+                    auto* item = new QTableWidgetItem(cells.at(column));
+                    item->setTextAlignment((column == 3 || column == 4 ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter);
+                    item->setToolTip(cells.at(column));
+                    m_finance_events->setItem(row, column, item);
                 }
                 ++row;
             }
@@ -5519,7 +5793,7 @@ private:
 
     void openLiquidityFinanceControl(QWidget* control)
     {
-        m_tabs->setCurrentWidget(m_liquidity_page);
+        showOperatorPage(m_liquidity_page);
         if (m_liquidity_advanced_toggle &&
             !m_liquidity_advanced_toggle->isChecked()) {
             m_liquidity_advanced_toggle->setChecked(true);
@@ -5534,7 +5808,7 @@ private:
 
     void reviewMaintenanceFeeLimit()
     {
-        m_tabs->setCurrentWidget(m_liquidity_page);
+        showOperatorPage(m_liquidity_page);
         if (m_liquidity_advanced_toggle) {
             m_liquidity_advanced_toggle->setChecked(true);
         }
@@ -5562,13 +5836,9 @@ private:
         values.operational_dgb = m_operational_dgb->value();
         values.admission_carriers = m_admission_carriers->value();
         values.operational_carriers = m_operational_carriers->value();
-        values.fee_per_transaction =
-            m_maintenance_fee_per_transaction->text().toLongLong(
-                &ok_transaction);
-        values.fee_per_hour =
-            m_maintenance_fee_per_hour->text().toLongLong(&ok_hour);
-        values.fee_per_day =
-            m_maintenance_fee_per_day->text().toLongLong(&ok_day);
+        ok_transaction = m_maintenance_fee_per_transaction->satoshis(values.fee_per_transaction);
+        ok_hour = m_maintenance_fee_per_hour->satoshis(values.fee_per_hour);
+        ok_day = m_maintenance_fee_per_day->satoshis(values.fee_per_day);
         return ok_transaction && ok_hour && ok_day;
     }
 
@@ -5687,12 +5957,9 @@ private:
         load_spin(m_operational_dgb, "target_operational_dgb");
         load_spin(m_admission_carriers, "target_admission_carriers");
         load_spin(m_operational_carriers, "target_operational_carriers");
-        const auto load_amount = [&policy](QLineEdit* control,
-                                           const char* name) {
+        const auto load_amount = [&policy](DgbAmountLineEdit* control, const char* name) {
             const UniValue& value = policy.find_value(name);
-            if (value.isNum()) {
-                control->setText(QString::number(value.getInt<qint64>()));
-            }
+            if (value.isNum()) control->setSatoshis(value.getInt<qint64>());
         };
         load_amount(m_maintenance_fee_per_transaction,
                     "maximum_maintenance_fee_per_transaction_satoshis");
@@ -5817,7 +6084,7 @@ private:
                 : tr("Liquidity maintenance review was not started because another wallet operation is still running."));
             return;
         }
-        m_tabs->setCurrentWidget(m_liquidity_page);
+        showOperatorPage(m_liquidity_page);
         if (!m_liquidity_targets_satisfy_provider_policy) {
             // Restore only the visible minimums here. The operator must still
             // review and save the policy explicitly; this button never creates
@@ -5910,7 +6177,7 @@ private:
         };
         m_liquidity_slot_status->setText(slot_lines.join('\n'));
         // The liquidity RPC is the authoritative source for the current
-        // ready/pending/missing breakdown. Keep the Overview counters in the
+        // ready/pending/missing breakdown. Keep the Operation counters in the
         // same snapshot so an out-of-order getpaymasterinfo reply cannot make
         // one card report a missing slot while another treats the target as
         // satisfied. Pending outputs intentionally do not count as ready.
@@ -6039,7 +6306,7 @@ private:
         setStatusLabel(m_liquidity_maintenance_state, state_text,
                        status_kind);
         // Re-polishing an unchanged card on every poll caused the complete
-        // Overview layout to flash even though no user-visible state changed.
+        // Operation layout to flash even though no user-visible state changed.
         setStatusKind(m_liquidity_maintenance_card, status_kind);
         m_liquidity_maintenance_next_step->setText(next_step);
         QString maintenance_cost;
@@ -6055,8 +6322,9 @@ private:
                                   : tr("not approved"));
             if (reserved > 0) {
                 maintenance_cost += tr(
-                    " Pending maintenance transactions currently expose %1 DGB in network fees; confirmed costs appear in Finances.")
-                                        .arg(dgbAmount(reserved));
+                    " Reserved fee budget: %1 DGB. Fees of unconfirmed transactions: %2 DGB.")
+                                        .arg(dgbAmount(poolNumber(result, "maintenance_fee_planned_satoshis")),
+                                             dgbAmount(poolNumber(result, "maintenance_fee_broadcast_satoshis")));
             }
             if (spent_hour > 0 || spent_day > 0) {
                 maintenance_cost += tr(
@@ -6077,7 +6345,7 @@ private:
             (missing > 0 && !approved) || maintenanceFeeLimitExceeded());
         // Keep polling for either liquidity confirmation or an external node
         // gate. A successful liquidity refresh must not accidentally stop the
-        // synchronization poll used by the Overview page.
+        // synchronization poll used by the Operation page.
         updateAutomaticRefreshTimer();
 
         m_liquidity_budget_status->setText(tr(
@@ -6130,6 +6398,8 @@ private:
     void applyLiquidityPoolEntries(const UniValue& result,
                                    bool refresh_safety)
     {
+        m_pool_preparation = IsCompleteProviderPoolInfo(result) ? result.find_value("preparation") : UniValue{};
+        updatePoolPreparationStatus();
         const QString previous = m_release_carrier_select->currentData().toString();
         m_release_carrier_select->blockSignals(true);
         m_release_carrier_select->clear();
@@ -6223,6 +6493,10 @@ private:
                  applyLiquidityPoolEntries(result, /*refresh_safety=*/true);
              }, false,
              [this](const QString& error) {
+                 m_pool_preparation = UniValue{};
+                 updatePoolPreparationStatus();
+                 m_pool_preparation_status->setText(tr("Pool preparation status unavailable: %1").arg(error));
+                 m_pool_preparation_status->setVisible(!m_privacy);
                  m_release_carrier_select->clear();
                  m_preview_carrier_release->setEnabled(false);
                  m_liquidity_recycling_status->setText(tr(
@@ -6448,28 +6722,28 @@ private:
         updateSetupAccess();
         const bool expert = mode == PaymasterSetupMode::EXPERT;
         if (m_liquidity_advanced_toggle) {
-            m_liquidity_advanced_toggle->setChecked(expert);
+            m_liquidity_advanced_toggle->setChecked(false);
         }
         if (m_runtime_settings_toggle) {
-            m_runtime_settings_toggle->setChecked(expert);
+            m_runtime_settings_toggle->setChecked(false);
         }
         if (m_runtime_settings_panel) {
             // Visibility is part of the selected setup mode, not merely a
             // side effect of a toggled signal. Qt may suppress that signal
             // when the button already has the requested state while its
             // stacked parent was hidden.
-            m_runtime_settings_panel->setVisible(expert);
+            m_runtime_settings_panel->setVisible(false);
         }
     }
 
     void updateSetupAccess()
     {
         const bool unlocked = m_setup_mode != PaymasterSetupMode::UNDECIDED;
+        m_operator_card->setVisible(unlocked && !m_privacy);
         if (m_setup_choice) m_setup_choice->setVisible(!unlocked);
         if (m_setup_content) m_setup_content->setVisible(unlocked);
         if (!m_tabs) return;
-        for (QWidget* page : {m_configuration_page, m_safety_page,
-                              m_liquidity_page, m_finance_page}) {
+        for (QWidget* page : {static_cast<QWidget*>(m_settings_tabs), m_liquidity_page, m_finance_page}) {
             const int index = m_tabs->indexOf(page);
             if (index >= 0) {
                 m_tabs->setTabEnabled(index, unlocked && !m_privacy);
@@ -6481,7 +6755,7 @@ private:
         }
         // Recovery and durable reservation inspection must never be hidden by
         // a local onboarding preference.
-        const int activity_index = m_tabs->indexOf(m_activity_page);
+        const int activity_index = m_tabs->indexOf(m_history_tabs);
         if (activity_index >= 0) {
             m_tabs->setTabEnabled(activity_index, !m_privacy);
             m_tabs->setTabToolTip(activity_index, m_privacy
@@ -6661,7 +6935,10 @@ private:
     void updatePolicyDisplay()
     {
         const bool user_paid = m_user_paid->isChecked();
+        if (m_fee_example) m_fee_example->setFeeRate(m_fee_bps->value(), user_paid);
         const bool sponsored = m_sponsored->isChecked();
+        m_scope->setVisible(sponsored);
+        m_sponsorship_label->setVisible(sponsored);
         const bool restricted = sponsored &&
                                 m_scope->currentData().toString() == QLatin1String("restricted");
         // A complete but future/out-of-range Core policy is deliberately
@@ -6717,27 +6994,29 @@ private:
         if (error == QLatin1String("PAYMASTER_PROVIDER_NOT_ENABLED"))
             return tr("The provider configuration has not been enabled yet.");
         if (error == QLatin1String("PAYMASTER_IDENTITY_NOT_FOUND"))
-            return tr("Create the provider identity in the Configuration tab.");
+            return tr("Create the provider identity under Settings → Offer.");
         if (error == QLatin1String("PAYMASTER_POLICY_NOT_FOUND"))
-            return tr("Choose and save an operating policy in the Configuration tab.");
+            return tr("Choose and save an operating policy under Settings → Offer.");
         if (error == QLatin1String("PAYMASTER_SAFETY_POLICY_NOT_FOUND") ||
             error == QLatin1String("PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND"))
-            return tr("Review and save finite spending and rate limits in the Safety limits tab.");
+            return tr("Review and save finite spending and rate limits under Settings → Spending limits.");
+        if (error == QLatin1String("PAYMASTER_POOL_PREPARATION_PENDING"))
+            return tr("An approved pool preparation is still pending. Review its current step and diagnostic under Operating capital.");
         if (error == QLatin1String("PAYMASTER_POOLS_NOT_PREPARED"))
-            return tr("Preview and prepare the required wallet liquidity in the Liquidity tab.");
+            return tr("Preview and prepare the required wallet liquidity under Operating capital.");
         if (error == QLatin1String("PAYMASTER_ADMISSION_DGB_MISSING") ||
             error == QLatin1String("PAYMASTER_ADMISSION_CARRIERS_MISSING") ||
             error == QLatin1String("PAYMASTER_OPERATIONAL_SLOT_MISSING"))
             return tr("The saved targets are correct, but the wallet does not yet contain every confirmed pool output. Restore the missing liquidity; no target update is required.");
         if (error == QLatin1String("PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED") ||
             error == QLatin1String("PAYMASTER_LIQUIDITY_POLICY_NOT_FOUND"))
-            return tr("Review and explicitly approve finite automatic liquidity-maintenance limits in the Liquidity tab.");
+            return tr("Review and explicitly approve finite automatic liquidity-maintenance limits under Operating capital.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"))
             return tr("Wait for the automatically prepared replacement liquidity to confirm.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE"))
-            return tr("The saved liquidity targets cannot support the active user-paid offer. Review Liquidity and save at least three carrier outputs for capacity checks and one carrier output for payments.");
+            return tr("The saved liquidity targets cannot support the active user-paid offer. Review Automation & reserves and save at least three carrier outputs for capacity checks and one carrier output for payments.");
         if (error == QLatin1String("PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"))
-            return tr("The finite automatic-maintenance budget is exhausted. Wait for the rolling limit to recover or review the saved limits in the Liquidity tab.");
+            return tr("The finite automatic-maintenance budget is exhausted. Wait for the rolling limit to recover or review the saved limits under Operating capital.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED"))
             return tr("Automatic replenishment could not create or resume a safe maintenance transaction. Review the detailed liquidity status before retrying.");
         if (error == QLatin1String("PAYMASTER_WALLET_LOCKED"))
@@ -6812,7 +7091,7 @@ private:
         }
         if (ready) {
             setStatusLabel(m_next_step,
-                           tr("All external prerequisites are ready"),
+                           tr("All local prerequisites are ready"),
                            QStringLiteral("ready"));
             m_readiness_summary->setText(tr(
                 "All requirements are satisfied and all setup settings are saved. No additional Save action is required. Start the provider only when you are ready for it to accept client requests within the displayed safety limits."));
@@ -6835,7 +7114,7 @@ private:
         if (providerConfigurationComplete() && liquidity_attention) {
             setStatusLabel(
                 m_next_step,
-                tr("All external prerequisites are ready"),
+                tr("All local prerequisites are ready"),
                 QStringLiteral("ready"));
             m_readiness_summary->setText(tr(
                 "Blockchain synchronization, transaction indexing, transaction broadcast and DigiDollar activation are ready. The remaining wallet-liquidity action is shown separately below."));
@@ -6953,11 +7232,20 @@ private:
         controls.completed_per_hour->setToolTip(tr("Maximum completed transfers in any rolling hour."));
         controls.completed_per_day->setToolTip(tr("Maximum completed transfers in any rolling 24 hours."));
         form->addRow(tr("Maximum per transfer (DGB):"), controls.per_transaction);
-        form->addRow(tr("Maximum reserved at once (DGB):"), controls.reserved);
+
         form->addRow(tr("Maximum per rolling hour (DGB):"), controls.per_hour);
         form->addRow(tr("Maximum per rolling day (DGB):"), controls.per_day);
-        form->addRow(tr("Completed transfers per rolling hour:"), controls.completed_per_hour);
-        form->addRow(tr("Completed transfers per rolling day:"), controls.completed_per_day);
+        auto* advanced_container = new QWidget(page);
+        auto* advanced_layout = new QVBoxLayout(advanced_container);
+        advanced_layout->setContentsMargins(0, 0, 0, 0);
+        auto* advanced = new QWidget(advanced_container);
+        auto* advanced_form = new QFormLayout(advanced);
+        advanced_form->addRow(tr("Maximum reserved at once (DGB):"), controls.reserved);
+        advanced_form->addRow(tr("Completed transfers per rolling hour:"), controls.completed_per_hour);
+        advanced_form->addRow(tr("Completed transfers per rolling day:"), controls.completed_per_day);
+        AddPaymasterDisclosure(advanced_layout, advanced_container, advanced,
+                               tr("Reservation and transaction-count limits"), tr("Hide additional limits"), object_prefix + QStringLiteral("AdvancedToggle"));
+        form->addRow(advanced_container);
         controls.mode = new QLabel(page);
         controls.mode->setObjectName(object_prefix + QStringLiteral("Mode"));
         controls.mode->setWordWrap(true);
@@ -7339,12 +7627,12 @@ private:
              (!m_liquidity_targets_satisfy_provider_policy &&
               m_last_service_error ==
                   QLatin1String("PAYMASTER_OPERATIONAL_SLOT_MISSING")))) {
-            return tr("Automatic start is waiting because the saved user-paid liquidity targets do not include an operational DigiDollar carrier. Review Liquidity, save a target of at least one payment carrier and prepare the missing output.");
+            return tr("Automatic start is waiting because the saved user-paid liquidity targets do not include an operational DigiDollar carrier. Review Automation & reserves, save a target of at least one payment carrier and prepare the missing output.");
         }
         if (m_service_state == QLatin1String("replenishing_liquidity") &&
             maintenanceFeeLimitExceeded()) {
             return tr(
-                "Automatic refill is paused because its estimated network fee exceeds the saved per-transaction maintenance limit. No transaction was created and no DGB was spent. Review the refill cost limit in Liquidity before retrying.");
+                "Automatic refill is paused because its estimated network fee exceeds the saved per-transaction maintenance limit. No transaction was created and no DGB was spent. Review the refill cost limit under Automation & reserves before retrying.");
         }
         const QString error_suffix = m_last_service_error.isEmpty()
             ? QString{}
@@ -7366,7 +7654,7 @@ private:
             return tr("Automatic operation paused while the wallet is locked. Queued messages remain untouched and processing resumes after unlock.") + queue_suffix + error_suffix;
         }
         if (m_service_state == QLatin1String("waiting_for_readiness")) {
-            return tr("Autostart is enabled, but Core is waiting for provider readiness. Review Overview for the next required action.") + error_suffix;
+            return tr("Core is waiting for provider readiness. Review Operation for the next required action.") + error_suffix;
         }
         if (m_service_state == QLatin1String("waiting_for_maintenance_approval")) {
             return tr("Automatic operation is paused until finite paid liquidity-maintenance limits are explicitly approved. No maintenance transaction is created before approval.") + queue_suffix + error_suffix;
@@ -7390,7 +7678,7 @@ private:
             }
             return m_autostart_enabled
                 ? tr("Provider stopped. Autostart is enabled and will start it when the wallet and readiness requirements permit.")
-                : tr("Provider stopped — start it on Overview after completing setup. Automatic processing begins only after that conscious start.");
+                : tr("Provider stopped — start it on Operation after completing setup. Automatic processing begins only after that conscious start.");
         }
         if (m_core_locked) {
             return tr("Provider paused while the wallet is locked. No queued message is consumed.");
@@ -7413,8 +7701,8 @@ private:
         const bool requested_autostart = m_autostart->isChecked();
         if (m_core_running && selected_mode != m_operation_mode) {
             QMessageBox::warning(
-                this, tr("Stop provider before changing mode"),
-                tr("Stop the provider from Overview before switching between automatic and manual operation. Autostart may still be changed while it is running."));
+                this, tr("Pause provider before changing mode"),
+                tr("Pause the provider from Operation before switching between automatic and manual operation. Autostart may still be changed while it is running."));
             return;
         }
         UniValue settings{UniValue::VOBJ};
@@ -7460,12 +7748,8 @@ private:
              });
     }
 
-    void updateProviderButtons()
+    bool repairableLiquidityGap() const
     {
-        const bool complete_snapshots = hasCompleteMutationSnapshots();
-        const bool safety_ready = complete_snapshots &&
-            providerSafetyAllowsSelectedModels();
-        const bool manual_mode = m_operation_mode == QLatin1String("manual");
         // Starting into maintenance is safe only when the saved policy can
         // actually restore every slot required by the active offer. In
         // particular, an intentionally released zero carrier target must not
@@ -7475,91 +7759,29 @@ private:
             m_liquidity_targets_satisfy_provider_policy &&
             m_automatic_replenishment->isChecked() &&
             m_paid_maintenance_approved->isChecked();
-        const bool repairable_liquidity_gap =
-            !m_readiness_errors.isEmpty() && !manual_mode &&
-            automatic_liquidity_can_restore &&
-            std::all_of(m_readiness_errors.cbegin(), m_readiness_errors.cend(),
-                        [](const QString& error) {
-                            return error == QLatin1String("PAYMASTER_ADMISSION_DGB_MISSING") ||
-                                   error == QLatin1String("PAYMASTER_ADMISSION_CARRIERS_MISSING") ||
-                                   error == QLatin1String("PAYMASTER_OPERATIONAL_SLOT_MISSING");
-                        });
-        const bool can_start = m_core_ready || repairable_liquidity_gap;
-        if (m_enable) {
-            m_enable->setText(m_core_enabled
-                ? tr("Disable provider configuration")
-                : tr("Enable provider configuration"));
-            m_enable->setEnabled(complete_snapshots && !m_busy &&
-                (m_core_enabled || safety_ready));
-            m_enable->setToolTip(m_core_enabled
-                ? tr("Persistently disable this provider configuration and stop its runtime")
-                : safety_ready
-                ? tr("Enable the provider using the persisted finite safety limits")
-                : tr("Save a complete finite safety policy for every selected funding model first"));
-        }
-        if (m_start) {
-            m_start->setText(repairable_liquidity_gap && !m_core_running
-                ? tr("Start and restore liquidity")
-                : m_core_ready && !m_core_running
-                    ? tr("Start provider now")
-                    : tr("Start provider"));
-            m_start->setEnabled(complete_snapshots && !m_busy &&
-                                m_core_eligible && m_core_enabled && can_start &&
-                                !m_core_running && !m_core_locked && safety_ready &&
-                                !m_policy_dirty && !m_provider_safety_dirty &&
-                                !m_runtime_settings_dirty &&
-                                !m_liquidity_policy_dirty);
-            if (m_policy_dirty || m_provider_safety_dirty ||
-                m_runtime_settings_dirty) {
-                m_start->setToolTip(tr(
-                    "Save or discard the pending provider setting changes before starting. The start confirmation must show the persisted effective limits."));
-            } else if (m_readiness_errors.contains(QStringLiteral(
-                           "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE")) ||
-                       (!m_liquidity_targets_satisfy_provider_policy &&
-                        m_readiness_errors.contains(QStringLiteral(
-                            "PAYMASTER_OPERATIONAL_SLOT_MISSING")))) {
-                m_start->setToolTip(tr(
-                    "The saved user-paid liquidity targets cannot make this provider ready. Review Liquidity and save at least three carrier targets for capacity checks and one carrier target for payments."));
-            } else if (!repairable_liquidity_gap &&
-                       std::any_of(
-                           m_readiness_errors.cbegin(),
-                           m_readiness_errors.cend(),
+        return !m_readiness_errors.isEmpty() && m_operation_mode != QLatin1String("manual") &&
+               automatic_liquidity_can_restore &&
+               std::all_of(m_readiness_errors.cbegin(), m_readiness_errors.cend(),
                            [](const QString& error) {
-                               return error == QLatin1String(
-                                          "PAYMASTER_ADMISSION_DGB_MISSING") ||
-                                      error == QLatin1String(
-                                          "PAYMASTER_ADMISSION_CARRIERS_MISSING") ||
-                                      error == QLatin1String(
-                                          "PAYMASTER_OPERATIONAL_SLOT_MISSING");
-                           })) {
-                m_start->setToolTip(tr(
-                    "Liquidity is missing, but automatic restoration is not fully configured and approved. Review the Liquidity page before starting."));
-            } else if (m_readiness_errors.contains(
-                           QStringLiteral("PAYMASTER_NODE_NOT_READY"))) {
-                m_start->setToolTip(tr(
-                    "Provider start is waiting for blockchain synchronization and transaction broadcast readiness. No provider setting needs changing."));
-            } else if (m_readiness_errors.contains(
-                           QStringLiteral("PAYMASTER_REQUIRES_READY_TXINDEX"))) {
-                m_start->setToolTip(tr(
-                    "Provider start is waiting for the transaction index to finish synchronizing."));
-            } else if (m_readiness_errors.contains(
-                           QStringLiteral("PAYMASTER_DIGIDOLLAR_NOT_ACTIVE"))) {
-                m_start->setToolTip(tr(
-                    "Provider start is waiting for DigiDollar activation on this chain."));
-            } else {
-                m_start->setToolTip(tr(
-                    "Review the persisted effective budgets, then consciously start this provider runtime."));
-            }
-        }
-        if (m_stop) {
-            m_stop->setText(m_autostart_enabled
-                ? tr("Stop and disable autostart")
-                : tr("Stop provider"));
-            m_stop->setToolTip(m_autostart_enabled
-                ? tr("Persistently disable autostart, then stop the current provider runtime so it cannot restart on the next scheduler check.")
-                : tr("Stop the current provider runtime."));
-            m_stop->setEnabled(m_core_running && !m_busy);
-        }
+                               return error == QLatin1String("PAYMASTER_ADMISSION_DGB_MISSING") ||
+                                      error == QLatin1String("PAYMASTER_ADMISSION_CARRIERS_MISSING") ||
+                                      error == QLatin1String("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+                           });
+    }
+
+    bool canStartProvider() const
+    {
+        return hasCompleteMutationSnapshots() && !m_busy && m_core_eligible &&
+               m_core_enabled && (m_core_ready || repairableLiquidityGap()) &&
+               !m_core_running && !m_core_locked && providerSafetyAllowsSelectedModels() &&
+               !m_policy_dirty && !m_runtime_settings_dirty && !m_liquidity_policy_dirty;
+    }
+
+    void updateProviderButtons()
+    {
+        const bool complete_snapshots = hasCompleteMutationSnapshots();
+        updatePoolPreparationStatus();
+        const bool manual_mode = m_operation_mode == QLatin1String("manual");
         if (m_request_processing_group) {
             m_request_processing_group->setVisible(manual_mode);
         }
@@ -7610,18 +7832,8 @@ private:
             }
         }
         if (m_operation_primary) {
-            if (m_core_running) {
-                m_operation_primary->setText(m_autostart_enabled
-                    ? tr("Stop and disable autostart")
-                    : tr("Stop provider"));
-                m_operation_primary->setEnabled(!m_busy);
-            } else if (m_start && m_start->isEnabled()) {
-                m_operation_primary->setText(m_start->text());
-                m_operation_primary->setEnabled(!m_busy);
-            } else {
-                m_operation_primary->setText(tr("Refresh provider status"));
-                m_operation_primary->setEnabled(m_model && !m_busy);
-            }
+            m_operation_primary->setText(tr("Open operation overview"));
+            m_operation_primary->setEnabled(!m_privacy && !m_busy);
         }
         updateOperatorDashboard();
     }
@@ -7812,7 +8024,7 @@ private:
                     tr("Review refill cost limit"));
             } else if (refill_waiting_for_start) {
                 m_overview_operation_action->setText(
-                    tr("Start and restore liquidity"));
+                    tr("Review liquidity"));
             } else {
                 m_overview_operation_action->setText(tr("Review operation"));
             }
@@ -7854,6 +8066,310 @@ private:
                        carrier_capacity_text,
                        carrier_capacity_ready ? QStringLiteral("ready")
                                               : QStringLiteral("action"));
+        updatePoolPreparationStatus();
+    }
+
+    bool isOperatorPage(QWidget* page) const
+    {
+        return m_tabs->currentWidget() == page ||
+            (m_tabs->currentWidget() == m_history_tabs && m_history_tabs->currentWidget() == page) ||
+            (m_tabs->currentWidget() == m_settings_tabs && m_settings_tabs->currentWidget() == page);
+    }
+
+    void showOperatorPage(QWidget* page)
+    {
+        if (m_settings_tabs->indexOf(page) >= 0) {
+            m_tabs->setCurrentWidget(m_settings_tabs);
+            m_settings_tabs->setCurrentWidget(page);
+        } else if (m_history_tabs->indexOf(page) >= 0) {
+            m_tabs->setCurrentWidget(m_history_tabs);
+            m_history_tabs->setCurrentWidget(page);
+        } else {
+            m_tabs->setCurrentWidget(page);
+        }
+    }
+
+    bool isCurrentOperatorRefresh() const
+    {
+        return m_active_rpc_command == "getpaymasteroperatorinfo" &&
+               !m_operator_snapshot.isNull() &&
+               !m_operation.stale(QDateTime::currentSecsSinceEpoch());
+    }
+
+    void updateOperatorProgress()
+    {
+        const bool reading = m_busy && m_active_rpc_command.rfind("get", 0) == 0 && !isCurrentOperatorRefresh();
+        if (!reading) m_operator_read_elapsed.invalidate();
+        if (!reading || m_privacy) {
+            m_operator_progress_timer->stop();
+            m_operator_loading->hide();
+            m_operator_loading_step->clear();
+            m_operator_progress->setAccessibleDescription({});
+            return;
+        }
+        if (!m_operator_read_elapsed.isValid()) m_operator_read_elapsed.start();
+        QString step = tr("Reading wallet data…");
+        if (m_active_rpc_command == "getpaymasterinfo")
+            step = tr("Reading provider settings…");
+        else if (m_active_rpc_command == "getpaymasterliquiditystatus")
+            step = tr("Reading operating capital…");
+        else if (m_active_rpc_command == "getpaymasteroperatorinfo")
+            step = tr("Reading service and wallet status…");
+        else if (m_active_rpc_command == "getpaymasterpoolinfo")
+            step = tr("Reading prepared reserves…");
+        else if (m_active_rpc_command == "getpaymastersafetystatus")
+            step = tr("Reading provider spending limits…");
+        else if (m_active_rpc_command == "getpaymasterclientsafetystatus")
+            step = tr("Reading client fee limits…");
+        const qint64 seconds = m_operator_read_elapsed.elapsed() / 1000;
+        const QString text = tr("%1 (%2 s elapsed)").arg(step).arg(seconds);
+        m_operator_loading_step->setText(text);
+        m_operator_progress->setAccessibleDescription(text);
+        m_operator_loading->show();
+        if (!m_operator_progress_timer->isActive()) m_operator_progress_timer->start();
+    }
+
+    void showOperatorBusyState()
+    {
+        updateOperatorProgress();
+        // Polling keeps a recent, validated status in place; initial reads and
+        // stale/error recovery still show loading. RPC mutation guards remain active.
+        if (!m_busy || m_privacy || isCurrentOperatorRefresh()) return;
+        const bool reading = m_active_rpc_command.rfind("get", 0) == 0;
+        m_operator_headline->setText(reading ? tr("Reading provider status…") : tr("Wallet operation in progress…"));
+        m_operator_hint->setText(reading ? tr("Saved settings and wallet status are being loaded. Controls become available automatically when the checks finish; you do not need to repeat setup.") : tr("Complete any open confirmation and wait for the current wallet operation to finish."));
+        m_operator_action->setText(tr("Please wait…"));
+        m_operator_action->setToolTip(m_operator_hint->text());
+        m_operator_action->setEnabled(false);
+        m_operator_pause->setEnabled(false);
+        setStatusKind(m_operator_card, QStringLiteral("waiting"));
+    }
+
+    void resetOperatorPresentation()
+    {
+        m_overview_budget_details->hide();
+        for (auto* label : m_overview_budget_details->findChildren<QLabel*>()) {
+            if (label->objectName().startsWith(QLatin1String("paymasterBudget_"))) label->clear();
+        }
+        for (auto* section : m_overview_budget_details->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly))
+            if (section->objectName().startsWith(QLatin1String("paymasterBudget_"))) section->hide();
+        m_operator_next_action = QStringLiteral("refresh");
+        m_operator_headline->setText(tr("Current status unavailable"));
+        m_operator_hint->setText(tr("Refresh the selected wallet's status before starting operation."));
+        m_operator_connection->clear();
+        m_operator_wallet->clear();
+        m_operator_action->setText(tr("Refresh status"));
+        m_operator_action->setToolTip(tr("Read current status from the selected wallet."));
+        m_operator_next_area.clear();
+        m_operator_headline->setAccessibleDescription(QString());
+        m_operator_action->setEnabled(!m_privacy && hasRpcTransport() && !m_busy);
+        m_operator_pause->hide();
+        setStatusKind(m_operator_card, QStringLiteral("waiting"));
+        showOperatorBusyState();
+    }
+
+    void renderOperatorPresentation(const UniValue& snapshot)
+    {
+        resetOperatorPresentation();
+        if (m_privacy) return;
+        const auto& provider = snapshot.find_value("provider");
+        const auto& diagnostics = snapshot.find_value("diagnostics");
+        const auto& service = provider.find_value("service_state");
+        if (!snapshot.find_value("schema_version").isNum() || snapshot.find_value("schema_version").getInt<int>() != 1 ||
+            !provider.find_value("running").isBool() || !provider.find_value("ready").isBool() ||
+            !provider.find_value("wallet_locked").isBool() || !service.isStr() || !diagnostics.isArray() || diagnostics.empty()) return;
+        const QString state = QString::fromStdString(service.get_str());
+        const QStringList states{QStringLiteral("stopped"), QStringLiteral("active"), QStringLiteral("manual"),
+                                 QStringLiteral("waiting_for_unlock"), QStringLiteral("waiting_for_readiness"),
+                                 QStringLiteral("waiting_for_maintenance_approval"), QStringLiteral("replenishing_liquidity"),
+                                 QStringLiteral("waiting_for_liquidity_confirmation"), QStringLiteral("drain_only"), QStringLiteral("error")};
+        if (!states.contains(state)) return;
+        const bool running = provider.find_value("running").get_bool();
+        const bool ready = provider.find_value("ready").get_bool();
+        const auto& unlock_deadline = snapshot.find_value("unlocked_until");
+        const bool expired = unlock_deadline.isNum() && unlock_deadline.getInt<int64_t>() > 0 &&
+                             unlock_deadline.getInt<int64_t>() <= QDateTime::currentSecsSinceEpoch();
+        const bool locked = provider.find_value("wallet_locked").get_bool() || expired;
+        if ((state == QLatin1String("stopped") && running) ||
+            ((state == QLatin1String("active") || state == QLatin1String("manual")) && !running)) return;
+        QString action;
+        QString area;
+        for (const auto& item : diagnostics.getValues()) {
+            if (!item.find_value("code").isStr() || !item.find_value("state").isStr() ||
+                !item.find_value("action").isStr() || !item.find_value("area").isStr()) return;
+            const QString code = QString::fromStdString(item.find_value("code").get_str());
+            const QString diagnostic_state = QString::fromStdString(item.find_value("state").get_str());
+            const QString next = QString::fromStdString(item.find_value("action").get_str());
+            const QStringList diagnostic_states{QStringLiteral("ready"), QStringLiteral("waiting"), QStringLiteral("action_required"), QStringLiteral("error"), QStringLiteral("unknown")};
+            const QStringList diagnostic_actions{QStringLiteral("none"), QStringLiteral("start"), QStringLiteral("enable"), QStringLiteral("unlock"), QStringLiteral("review_unlock"), QStringLiteral("wait"), QStringLiteral("setup"), QStringLiteral("review_liquidity"), QStringLiteral("review_budget"), QStringLiteral("backup_wallet"), QStringLiteral("configure_node"), QStringLiteral("check_external"), QStringLiteral("inspect_error")};
+            if (!diagnostic_states.contains(diagnostic_state) || !diagnostic_actions.contains(next) ||
+                ((next == QLatin1String("start") || next == QLatin1String("none")) && code != QLatin1String("PAYMASTER_LOCAL_READY"))) return;
+            // A new/unknown success or status code must never become a start permission.
+            if ((diagnostic_state == QLatin1String("ready") && code != QLatin1String("PAYMASTER_LOCAL_READY")) ||
+                (diagnostic_state == QLatin1String("unknown") && code != QLatin1String("PAYMASTER_EXTERNAL_REACHABILITY_UNKNOWN")) ||
+                diagnostic_state == QLatin1String("error") || next == QLatin1String("inspect_error")) {
+                action = QStringLiteral("inspect_error");
+                break;
+            }
+            if (action.isEmpty() && next != QLatin1String("none") && next != QLatin1String("check_external")) {
+                action = next;
+                area = code.contains(QLatin1String("MAINTENANCE")) ? QStringLiteral("liquidity") : QString::fromStdString(item.find_value("area").get_str());
+            }
+        }
+        if (action.isEmpty()) action = ready && !running ? QStringLiteral("start") : QStringLiteral("activity");
+        if (locked && action != QLatin1String("inspect_error")) action = QStringLiteral("unlock");
+        if ((action == QLatin1String("start") && (!ready || running)) ||
+            (action == QLatin1String("activity") && (!ready || state == QLatin1String("error")))) action = QStringLiteral("inspect_error");
+        QString headline;
+        QString hint;
+        QString button;
+        QString kind = QStringLiteral("waiting");
+        if (action == QLatin1String("start") || action == QLatin1String("enable")) {
+            headline = ready ? tr("Ready to start") : tr("Operation is paused");
+            hint = tr("Start using the saved settings. You do not need to repeat setup; existing spending limits remain in force.");
+            button = ready ? tr("Start provider…") : tr("Resume provider…");
+        } else if (action == QLatin1String("unlock") || action == QLatin1String("review_unlock")) {
+            headline = locked ? tr("Waiting for wallet unlock") : tr("Wallet will lock soon");
+            hint = tr("Choose how long to unlock this wallet. Access applies to the whole wallet and is not extended automatically.");
+            button = tr("Unlock wallet…");
+        } else if (action == QLatin1String("wait")) {
+            headline = area == QLatin1String("liquidity") ? tr("Waiting for confirmations") : tr("Waiting for the node");
+            hint = tr("Synchronization or confirmations are still pending. Review progress; no new approval is needed to wait.");
+            button = tr("View progress");
+        } else if (action == QLatin1String("review_liquidity")) {
+            headline = tr("Operating capital needs attention");
+            hint = tr("Check available and pending reserves. Review a fresh plan before preparing additional funds.");
+            button = tr("Review operating capital");
+        } else if (action == QLatin1String("review_budget")) {
+            headline = tr("Spending limits need attention");
+            hint = tr("Check the affected limit. Rolling budgets recover over time; limits are never raised automatically.");
+            button = tr("Review spending limits");
+        } else if (action == QLatin1String("configure_node")) {
+            headline = tr("Connection needs attention");
+            hint = tr("Review the listener, public endpoint and node prerequisites before starting operation.");
+            button = tr("Review connection");
+        } else if (action == QLatin1String("setup")) {
+            headline = tr("Complete provider setup");
+            hint = tr("The assistant reviews your saved choices and shows the remaining steps.");
+            button = tr("Continue setup…");
+        } else if (action == QLatin1String("backup_wallet")) {
+            headline = running && ready ? tr("Running · backup recommended") : tr("Wallet backup recommended");
+            hint = tr("Create a full-wallet backup to protect the provider identity, configuration and financial records.");
+            button = tr("Review wallet backup…");
+        } else if (action == QLatin1String("activity") && running && ready) {
+            headline = state == QLatin1String("manual") ? tr("Running in manual mode") : tr("Provider is running");
+            hint = state == QLatin1String("manual") ? tr("Review incoming requests in Activity. This mode requires manual processing.") : tr("Requests are processed within your approved limits. Review payments and pending work in Activity.");
+            button = tr("View activity");
+            kind = QStringLiteral("ready");
+        } else {
+            action = QStringLiteral("inspect_error");
+            headline = tr("Status needs review");
+            hint = tr("A problem or an unknown status prevents a reliable readiness assessment. Open the diagnostic details before acting.");
+            button = tr("View diagnostics");
+        }
+        const QString preparation_details = formatPoolPreparation(provider.find_value("preparation"));
+        if (!preparation_details.isEmpty()) {
+            if (area == QLatin1String("liquidity") && action == QLatin1String("wait")) {
+                headline = tr("Pool preparation is pending");
+                hint = preparation_details.section(QLatin1Char('\n'), 0, 0);
+                button = tr("View pool preparation");
+            } else if (area == QLatin1String("liquidity") && action == QLatin1String("review_liquidity")) {
+                headline = tr("Pool preparation needs attention");
+                hint = preparation_details.section(QLatin1Char('\n'), 0, 0);
+                button = tr("Review pool preparation");
+            }
+        }
+        if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
+        m_operator_next_action = action;
+        m_operator_next_area = area;
+        m_operator_headline->setText(headline);
+        m_operator_hint->setText(hint);
+        m_operator_action->setText(button);
+        m_operator_action->setToolTip(hint);
+        m_operator_pause->setVisible(running || provider.find_value("enabled").isTrue() || provider.find_value("autostart").isTrue());
+        m_operator_pause->setEnabled(hasRpcTransport() && !m_busy);
+        setStatusKind(m_operator_card, kind);
+        const auto& listener = provider.find_value("transport").find_value("listener_ready");
+        const QString local = !listener.isBool() ? tr("Local listener: unknown") : listener.isTrue() ? tr("Local listener: ready") :
+                                                                                                       tr("Local listener: unavailable");
+        m_operator_connection->setText(local + tr(" · External reachability: no current measurement"));
+        if (!m_operator_report.isNull()) m_operator_connection->setText(local + tr(" · Imported external observation: %1 (historical)").arg(QDateTime::fromSecsSinceEpoch(m_operator_report.find_value("observed_at").getInt<int64_t>(), Qt::UTC).toString(Qt::ISODate)));
+        QString wallet = locked ? tr("Wallet: locked") : tr("Wallet: unlocked");
+        const auto& until = snapshot.find_value("unlocked_until");
+        if (!locked && until.isNum() && until.getInt<int64_t>() > 0) wallet += tr(" until %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(until.getInt<int64_t>()), QLocale::ShortFormat));
+        const auto& backup = provider.find_value("backup_status").find_value("required");
+        wallet += !backup.isBool() ? tr(" · Backup reminder: unknown") : backup.isTrue() ? tr(" · Full-wallet backup recommended") :
+                                                                                           tr(" · No pending backup reminder");
+        wallet += provider.find_value("autostart").isTrue()
+            ? tr(" · Autostart: on") : tr(" · Autostart: off");
+        m_operator_wallet->setText(wallet);
+        try {
+            QStringList budgets;
+            const UniValue budget_rows = DigiDollar::Paymaster::OperatorBudgets(snapshot);
+            for (const auto& budget : budget_rows.getValues()) {
+                if (!budget.find_value("approved").isTrue()) continue;
+                const auto name = budget.find_value("name").get_str();
+                const auto& policy = provider.find_value("policy");
+                const auto& models = policy.find_value("funding_models");
+                const auto active_model = [&](const char* model) {
+                    return models.isArray() && std::any_of(models.getValues().begin(), models.getValues().end(),
+                                                           [model](const UniValue& value) { return value.isStr() && value.get_str() == model; });
+                };
+                if (name == "user_paid" && !active_model("user_paid")) continue;
+                if (name == "public_sponsored" && (!active_model("sponsored") || !policy.find_value("sponsorship_scope").isStr() || policy.find_value("sponsorship_scope").get_str() != "public")) continue;
+                if (name == "restricted_sponsored" && (!active_model("sponsored") || !policy.find_value("sponsorship_scope").isStr() || policy.find_value("sponsorship_scope").get_str() != "restricted")) continue;
+                auto* section = m_overview_budget_details->findChild<QWidget*>(QStringLiteral("paymasterBudget_") + QString::fromStdString(name));
+                if (!section) continue;
+                for (const auto& field : {"day_spent", "day_limit", "reserved"}) {
+                    auto* amount = section->findChild<QLabel*>(QStringLiteral("paymasterBudget_") + QString::fromStdString(name) + QLatin1Char('_') + field);
+                    amount->setText(compactDgbAmount(budget.find_value(field).getInt<int64_t>()));
+                }
+                section->show();
+                budgets << QString::fromStdString(name);
+            }
+            m_overview_budget_details->setVisible(!budgets.isEmpty());
+            setStatusLabel(m_overview_safety_status, budgets.isEmpty() ? tr("No spending authorization available") :
+                action == QLatin1String("review_budget") ? tr("Review spending limits") : tr("Limits active"),
+                action == QLatin1String("review_budget") || budgets.isEmpty() ? QStringLiteral("action") : QStringLiteral("ready"));
+        } catch (const std::exception&) {
+            setStatusLabel(m_overview_safety_status, tr("Budget status unavailable"), QStringLiteral("waiting"));
+        }
+        showOperatorBusyState();
+    }
+
+    void performOperatorNextAction()
+    {
+        if (m_privacy || m_busy) return;
+        const QString action = m_operator_next_action;
+        if (action == QLatin1String("refresh"))
+            refreshStatus();
+        else if (action == QLatin1String("start") || action == QLatin1String("enable"))
+            resumeOperator();
+        else if (action == QLatin1String("unlock") || action == QLatin1String("review_unlock"))
+            unlockOperatorWallet();
+        else if (action == QLatin1String("backup_wallet")) {
+            showOperatorPage(m_connection_page);
+            m_overview_backup_now->setFocus(Qt::OtherFocusReason);
+            if (auto* scroll = qobject_cast<QScrollArea*>(m_connection_page))
+                scroll->ensureWidgetVisible(m_overview_backup_notice);
+        }
+        else if (action == QLatin1String("setup"))
+            m_reopen_wizard->click();
+        else if (action == QLatin1String("review_budget"))
+            showOperatorPage(m_operator_next_area == QLatin1String("liquidity") ? m_liquidity_page : m_safety_page);
+        else if (action == QLatin1String("review_liquidity")) {
+            if (m_operation.phase == PaymasterOperationController::Phase::Blocked) m_task_continue->click();
+            else if (m_operation.phase == PaymasterOperationController::Phase::Waiting) m_task_card->setFocus();
+            else beginGuidedTask("preparepaymasterpool", !m_core_running);
+        } else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("liquidity"))
+            m_task_card->setFocus();
+        else if (action == QLatin1String("configure_node") || action == QLatin1String("wait")) {
+            showOperatorPage(m_connection_page);
+            if (auto* toggle = findChild<QPushButton*>(QStringLiteral("paymasterPrerequisitesToggle"))) toggle->setChecked(true);
+        } else if (action == QLatin1String("activity"))
+            showOperatorPage(m_activity_page);
+        else if (auto* toggle = findChild<QPushButton*>(QStringLiteral("paymasterTechnicalDetailsToggle")))
+            toggle->setChecked(true);
     }
 
     void refreshOperatorStatus()
@@ -7866,7 +8382,19 @@ private:
                      const auto& provider = snapshot.find_value("provider");
                      if (!snapshot.find_value("schema_version").isNum() || snapshot.find_value("schema_version").getInt<int>() != 1 || !snapshot.find_value("diagnostics").isArray() || !provider.find_value("service_state").isStr()) throw std::runtime_error("PAYMASTER_STATUS_INCOMPLETE");
                      if (!m_operator_snapshot.isNull() && m_operator_snapshot.find_value("wallet_generation").write() != snapshot.find_value("wallet_generation").write()) m_operator_report = UniValue{};
+                     if (!IsCompleteProviderInfoSnapshot(provider)) throw std::runtime_error("PAYMASTER_PROVIDER_STATUS_INCOMPLETE");
                      m_operator_snapshot = snapshot;
+                     applyProviderInfo(provider);
+                     applyProviderSafetyStatus(snapshot.find_value("safety"));
+                     if (!m_provider_safety_snapshot_available) throw std::runtime_error("PAYMASTER_SAFETY_STATUS_INCOMPLETE");
+                     if (!IsCompleteLiquidityStatus(provider.find_value("liquidity")))
+                         throw std::runtime_error("PAYMASTER_LIQUIDITY_STATUS_INCOMPLETE");
+                     applyLiquidityStatus(provider.find_value("liquidity"));
+                     m_pool_preparation = provider.find_value("preparation");
+                     updatePoolPreparationStatus();
+                     m_operation.observe(snapshot, m_wallet_generation, QDateTime::currentSecsSinceEpoch());
+                     renderCurrentTask();
+
                      QStringList lines;
                      lines << tr("Service: %1 — local readiness: %2").arg(QString::fromStdString(provider.find_value("service_state").get_str()), provider.find_value("ready").isTrue() ? tr("ready") : tr("requirements pending"));
                      const auto& transport = provider.find_value("transport");
@@ -7877,6 +8405,8 @@ private:
                          const auto& counts = liquidity.find_value(asset);
                          lines << tr("%1: available %2, reserved %3, pending %4, missing %5").arg(QString::fromUtf8(asset), QString::fromStdString(counts.find_value("ready").write()), QString::fromStdString(counts.find_value("reserved").write()), QString::fromStdString(counts.find_value("pending").write()), QString::fromStdString(counts.find_value("missing").write()));
                      }
+                     const QString preparation_details = formatPoolPreparation(provider.find_value("preparation"));
+                     if (!preparation_details.isEmpty()) lines << preparation_details;
                      const auto budgets = DigiDollar::Paymaster::OperatorBudgets(snapshot);
                      for (const auto& budget : budgets.getValues()) {
                          const auto amount = [&](const char* key) { return QString::fromStdString(DigiDollar::Paymaster::OperatorAmount(budget.find_value(key).getInt<int64_t>())); };
@@ -7892,7 +8422,7 @@ private:
                      for (const auto& item : diagnostics.getValues()) {
                          if (item.find_value("state").get_str() == "ready" && item.find_value("action").get_str() == "none") continue;
                          const auto action = item.find_value("action").get_str();
-                         const QString instruction = action == "configure_node" ? tr("Open Node connection to review startup settings and routing.") : action == "unlock" || action == "review_unlock" ? tr("Review the wallet unlock duration.") : action == "wait" ? tr("Wait for synchronization or confirmation; configuration changes are not required.") : action == "review_liquidity" ? tr("Open Liquidity to inspect funding and confirmations.") : action == "review_budget" ? tr("Review the finite budgets; wait or explicitly approve a change.") : action == "backup_wallet" ? tr("Create a full-wallet backup.") : (action == "enable" || action == "start") ? tr("Use Resume operation after reviewing the saved settings.") : action == "check_external" ? tr("Verify the advertised endpoint from your independent node.") : action == "setup" ? tr("Continue guided setup.") : tr("Inspect the diagnostic; unknown errors are not treated as readiness.");
+                         const QString instruction = action == "configure_node" ? tr("Open Node connection to review startup settings and routing.") : action == "unlock" || action == "review_unlock" ? tr("Review the wallet unlock duration.") : action == "wait" ? tr("Wait for synchronization or confirmation; configuration changes are not required.") : action == "review_liquidity" ? tr("Open Operation to inspect the current task and confirmations.") : action == "review_budget" ? tr("Review the finite budgets; wait or explicitly approve a change.") : action == "backup_wallet" ? tr("Create a full-wallet backup.") : (action == "enable" || action == "start") ? tr("Use Start provider or Resume provider with the saved settings; repeating setup is optional.") : action == "check_external" ? tr("Verify the advertised endpoint from your independent node.") : action == "setup" ? tr("Continue guided setup.") : tr("Inspect the diagnostic; unknown errors are not treated as readiness.");
                          const QString diagnostic = tr("%1: %2").arg(QString::fromStdString(item.find_value("code").get_str()), instruction);
                          if (&item == &diagnostics.getValues().front()) lines.prepend(tr("Next action: %1").arg(diagnostic));
                          else lines << diagnostic;
@@ -7903,7 +8433,26 @@ private:
                      }
                      if (m_operator_restart_required) lines.prepend(tr("Node configuration was saved. Restart explicitly before expecting the new settings to become active."));
                      m_operator_summary->setText(lines.join(QLatin1Char('\n')));
-                 } catch (const std::exception&) { m_operator_summary->setText(tr("Operator status unavailable. Refresh before acting; previous readiness is not current.")); m_operator_snapshot = UniValue{}; } }, false, [this, selected](const QString& error) { if (selected == m_model) { m_operator_snapshot = UniValue{}; m_operator_summary->setText(tr("Operator status unknown: %1").arg(error)); } });
+                     renderOperatorPresentation(snapshot);
+                 } catch (const std::exception&) {
+                     m_status->setText(tr("Provider status is unavailable. Refresh before acting."));
+                     m_operator_summary->setText(tr("Operator status unavailable. Refresh before acting; previous readiness is not current."));
+                     m_operator_snapshot = UniValue{};
+                     m_status_age.invalidate();
+                     m_provider_info_snapshot_available = false;
+                     resetOperatorPresentation();
+                     renderCurrentTask();
+                 }
+             }, false, [this, selected](const QString& error) {
+                 if (selected != m_model) return;
+                 m_operator_snapshot = UniValue{};
+                 m_status_age.invalidate();
+                 m_provider_info_snapshot_available = false;
+                 renderCurrentTask();
+                 m_status->setText(tr("Provider status is unavailable. Refresh before acting."));
+                 m_operator_summary->setText(tr("Operator status unknown: %1").arg(error));
+                 resetOperatorPresentation();
+             });
     }
 
     void configureOperatorNode()
@@ -7991,7 +8540,12 @@ private:
     void pauseOperator()
     {
         if (m_busy || !hasRpcTransport()) return;
-        if (askPlainTextQuestion(this, tr("Pause provider operation"), tr("Persistently disable autostart and provider operation, including new pool preparation signatures? Reservations and signed transactions remain saved; signed transactions can still confirm.")) != QMessageBox::Yes) return;
+        const uint64_t wallet_generation = m_wallet_generation;
+        setRpcBusyState(true);
+        const auto answer = askPlainTextQuestion(this, tr("Pause provider"), tr("Persistently disable autostart and provider operation, including new pool preparation signatures? Reservations and signed transactions remain saved; signed transactions can still confirm."));
+        if (m_wallet_generation != wallet_generation) return;
+        setRpcBusyState(false);
+        if (answer != QMessageBox::Yes || m_privacy || !hasRpcTransport()) return;
         UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
         options.pushKV("persistent", true);
         options.pushKV("pause_setup", true);
@@ -8011,12 +8565,25 @@ private:
     void resumeOperator()
     {
         if (m_busy || !hasRpcTransport()) return;
-        if (askPlainTextQuestion(this, tr("Resume provider operation"), tr("Enable the saved provider configuration and request a start within its existing budgets? Unlock and missing readiness prerequisites remain separate; budgets are not reset.")) != QMessageBox::Yes) return;
+        const uint64_t wallet_generation = m_wallet_generation;
+        setRpcBusyState(true);
+        const auto answer = askPlainTextQuestion(this, m_operator_next_action == QLatin1String("enable") ? tr("Resume provider") : tr("Start provider"), tr("Enable the saved provider configuration and request a start within its existing budgets? Unlock and missing readiness prerequisites remain separate; budgets are not reset."));
+        if (m_wallet_generation != wallet_generation) return;
+        setRpcBusyState(false);
+        if (answer != QMessageBox::Yes || m_privacy || !hasRpcTransport()) return;
         UniValue params{UniValue::VARR};
         params.push_back(true);
         call("setpaymasterenabled", params, false, nullptr, [this](const UniValue& enabled) {
-            if (!enabled.find_value("enabled").isTrue()) return;
-            call("startpaymaster", {}, false, nullptr, [this](const UniValue&) { refreshOperatorStatus(); });
+            if (!enabled.find_value("enabled").isTrue()) {
+                m_operator_snapshot = UniValue{};
+                resetOperatorPresentation();
+                refreshOperatorStatus();
+                return;
+            }
+            call("startpaymaster", [] { UniValue options{UniValue::VOBJ}, params{UniValue::VARR}; options.pushKV("wait_for_readiness", true); params.push_back(options); return params; }(), false, nullptr, [this](const UniValue& result) {
+                presentProviderStartResult(result);
+                refreshOperatorStatus();
+            });
         });
     }
 
@@ -8036,192 +8603,234 @@ private:
         refreshOperatorStatus();
     }
 
-    void stopProvider()
+    // Operating-capital actions retain the guarded start-and-refill path.
+    // The overview is the only place with general start/pause controls.
+    void renderCurrentTask()
     {
-        if (!m_core_running || m_busy) return;
-        const auto stop_runtime = [this] {
-            call("stoppaymaster", {}, false, nullptr,
-                 [this](const UniValue& result) {
-                     const UniValue& running = result.find_value("running");
-                     if (!result.isObject() || !running.isBool() ||
-                         running.get_bool()) {
-                         const QString message = tr(
-                             "Core did not confirm that the provider runtime stopped. The displayed state will be refreshed before another action is allowed.");
-                         if (m_rpc_executor_for_testing) {
-                             m_status->setText(message);
-                         } else {
-                             QMessageBox::warning(
-                                 this, tr("Paymaster provider not stopped"),
-                                 message);
-                         }
-                         refreshStatus();
-                         return;
-                     }
-                     m_core_running = false;
-                     m_service_state = QStringLiteral("stopped");
-                     updateProviderButtons();
-                     refreshStatus();
-                 }, false,
-                 [this](const QString& error) {
-                     showPlainTextWarning(
-                         this, tr("Paymaster provider not stopped"),
-                         tr("The provider could not be stopped.\n\n%1")
-                             .arg(error));
-                     refreshStatus();
-                 });
-        };
-        if (!m_autostart_enabled) {
-            stop_runtime();
-            return;
+        using Phase = PaymasterOperationController::Phase;
+        if (!m_task_card) return;
+        const bool available = !m_privacy && hasRpcTransport() && hasCompleteMutationSnapshots() && !m_busy && !m_operation.busy();
+        m_restore_task->setEnabled(available && m_operation.phase != Phase::Waiting);
+        m_withdraw_task->setEnabled(available && m_carrier_excess_cents > 0 && m_operation.phase != Phase::Waiting);
+        m_release_task->setEnabled(available && m_pool_operational_carriers > 0 && m_operation.phase != Phase::Waiting);
+        m_task_card->setVisible(!m_privacy && m_operation.phase != Phase::Idle);
+        m_task_continue->setVisible(m_operation.phase == Phase::Blocked);
+        m_task_continue->setEnabled(!m_busy && !m_privacy);
+        m_task_continue->setText(m_operation.error.contains(QLatin1String("WALLET_LOCKED")) ? tr("Unlock wallet…") :
+            m_operation.error.contains(QLatin1String("FEE_LIMIT")) ? tr("Review fee limit…") :
+            m_operation.error.contains(QLatin1String("PROVIDER_DISABLED")) ? tr("Resume approved task…") : tr("Check current status"));
+        QString message;
+        switch (m_operation.phase) {
+        case Phase::Checking: message = tr("1/5 · Checking the current wallet and preparing the review…"); break;
+        case Phase::Review: message = tr("2/5 · Review the amounts and limits. Nothing has been authorized yet."); break;
+        case Phase::Executing: message = tr("3/5 · Applying the approved task. Please wait…"); break;
+        case Phase::Waiting:
+            message = m_operation.required_confirmations > 0
+                ? tr("4/5 · Waiting for confirmations: %1/%2. Continuation is automatic.")
+                    .arg(m_operation.completed_confirmations).arg(m_operation.required_confirmations)
+                : m_operation.snapshot.find_value("provider").find_value("start_requested").isTrue()
+                    ? tr("Waiting for provider readiness. The requested start will continue automatically.")
+                    : tr("A saved task has not produced a transaction yet. No confirmation is pending. Core will check whether the task is still needed.");
+            break;
+        case Phase::Complete: message = tr("✓ 5/5 · Task complete."); break;
+        case Phase::Blocked:
+            message = m_operation.error.contains(QLatin1String("FEE_LIMIT"))
+                ? tr("The approved fee limit is insufficient. Review it; no higher fee is authorized automatically.")
+                : m_operation.error.contains(QLatin1String("PROVIDER_DISABLED"))
+                    ? tr("This task is paused. Resume the approved task to allow the remaining steps within the saved limits.")
+                : m_operation.error.contains(QLatin1String("WAITING_FUNDS")) || m_operation.error.contains(QLatin1String("WAITING_DGB"))
+                    ? tr("Waiting for confirmed wallet funding. Core continues automatically when the required funds are available.")
+                    : readinessExplanation(m_operation.error);
+            if (message.isEmpty() || message == m_operation.error) message = tr("The task needs attention. Check the explanation below before retrying.");
+            if (!m_operation.error.startsWith(QLatin1String("PAYMASTER_")))
+                message += QStringLiteral("\n") + m_operation.error;
+            break;
+        case Phase::Idle: break;
         }
-        if (!m_rpc_executor_for_testing &&
-            askPlainTextQuestion(
-                this, tr("Stop Paymaster provider"),
-                tr("Autostart is currently enabled. Stopping only the in-memory runtime would allow it to start again automatically. Disable autostart persistently and then stop the provider?")) !=
-                QMessageBox::Yes) {
-            return;
+        const auto& work = m_operation.snapshot.find_value("provider").find_value("active_operations");
+        const bool withdrawing = work.isArray() && !work.empty() && work[0].find_value("kind").isStr() &&
+            work[0].find_value("kind").get_str() == "withdrawal";
+        const QString title = m_operation.title.isEmpty()
+            ? (withdrawing ? tr("Withdraw earnings") : tr("Maintaining reserves")) : m_operation.title;
+        m_task_status->setText(title + QStringLiteral("\n") + message);
+        m_task_progress->setVisible(m_operation.phase == Phase::Checking || m_operation.phase == Phase::Executing || m_operation.phase == Phase::Waiting);
+        if (m_operation.phase == Phase::Waiting && m_operation.required_confirmations > 0) {
+            m_task_progress->setRange(0, m_operation.required_confirmations);
+            m_task_progress->setValue(m_operation.completed_confirmations);
+        } else {
+            m_task_progress->setRange(0, 0);
         }
-        UniValue settings{UniValue::VOBJ};
-        settings.pushKV("operation_mode", m_operation_mode.toStdString());
-        settings.pushKV("autostart", false);
-        UniValue params{UniValue::VARR};
-        params.push_back(std::move(settings));
-        call("setpaymasterruntimesettings", std::move(params), false, nullptr,
-             [this, stop_runtime](const UniValue& result) {
-                 const UniValue& operation_mode =
-                     result.find_value("operation_mode");
-                 const UniValue& autostart = result.find_value("autostart");
-                 if (!result.isObject() || !operation_mode.isStr() ||
-                     QString::fromStdString(operation_mode.get_str()) !=
-                         m_operation_mode ||
-                     !autostart.isBool() || autostart.get_bool()) {
-                     const QString message = tr(
-                         "Core did not confirm the unchanged operation mode and disabled autostart, so the provider was not stopped.");
-                     if (m_rpc_executor_for_testing) {
-                         m_status->setText(message);
-                     } else {
-                         QMessageBox::warning(
-                             this, tr("Autostart not disabled"), message);
-                     }
-                     refreshStatus();
-                     return;
-                 }
-                 m_autostart_enabled = false;
-                 m_runtime_settings_dirty = false;
-                 m_loading_runtime_settings = true;
-                 m_autostart->setChecked(false);
-                 m_loading_runtime_settings = false;
-                 stop_runtime();
-             }, false,
-             [this](const QString& error) {
-                 showPlainTextWarning(
-                     this, tr("Autostart not disabled"),
-                     tr("Autostart could not be disabled, so the provider was left running rather than being stopped only transiently.\n\n%1")
-                         .arg(error));
-                 refreshStatus();
-             });
+        updateAutomaticRefreshTimer();
     }
 
-    void enableProvider()
+    void failGuidedTask(const QString& error)
     {
+        m_operation.fail(error);
+        m_guided_task.clear();
+        renderCurrentTask();
+        refreshOperatorStatus();
+    }
+
+    void requestReviewedStart()
+    {
+        UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
+        options.pushKV("wait_for_readiness", true);
+        params.push_back(options);
+        call("startpaymaster", params, false, nullptr, [this](const UniValue& result) {
+            if (!result.find_value("running").isTrue() && !result.find_value("start_requested").isTrue()) {
+                failGuidedTask(tr("Core did not accept the provider start. Review the current status."));
+                return;
+            }
+            refreshStatus();
+        }, false, [this](const QString& error) { failGuidedTask(error); });
+    }
+
+    void beginGuidedTask(const QString& task, bool start_after = false)
+    {
+        if (m_privacy || m_busy || !hasRpcTransport()) return;
+        if (task == QLatin1String("release_slot") && m_release_carrier_select->count() == 0) {
+            call("getpaymasterpoolinfo", {}, false, nullptr, [this, task, start_after](const UniValue& pool) {
+                applyLiquidityPoolEntries(pool, false);
+                if (m_release_carrier_select->count() == 0) { failGuidedTask(tr("No confirmed available reserve can be released.")); return; }
+                const auto generation = m_wallet_generation;
+                QTimer::singleShot(0, this, [this, task, start_after, generation] {
+                    if (generation == m_wallet_generation && !m_privacy) beginGuidedTask(task, start_after);
+                });
+            }, false, [this](const QString& error) { failGuidedTask(error); });
+            return;
+        }
+        const QString title = task == QLatin1String("preparepaymasterpool")
+            ? (start_after ? tr("Restore reserves and start provider") : tr("Restore reserves"))
+            : task == QLatin1String("all_excess") ? tr("Withdraw earnings") : tr("Release operating capital");
+        if (!m_operation.begin(title, m_wallet_generation)) return;
+        const auto generation = m_wallet_generation;
+        m_guided_task = task;
+        m_guided_start_after = start_after;
+        m_tabs->setCurrentIndex(0);
+        renderCurrentTask();
         if (!hasCompleteMutationSnapshots()) {
-            m_enable_status->setText(tr(
-                "Provider configuration was not changed because a complete current provider, safety and liquidity snapshot is unavailable."));
+            failGuidedTask(tr("Current wallet information is incomplete. Refresh the status before retrying."));
+            return;
+        }
+        if (task == QLatin1String("release_slot")) {
+            QStringList choices;
+            for (int i = 0; i < m_release_carrier_select->count(); ++i)
+                choices << tr("Reserve %1 · %2").arg(i + 1).arg(m_release_carrier_select->itemText(i).section(QStringLiteral(" —"), 0, 0));
+            bool chosen{false};
+            const QString selected = QInputDialog::getItem(this, title, tr("Choose the available reserve to return to this wallet. The provider will be paused and its saved capacity reduced."), choices, 0, false, &chosen);
+            if (!chosen || m_privacy || generation != m_wallet_generation) {
+                m_operation.reset(m_wallet_generation); m_guided_task.clear(); renderCurrentTask(); return;
+            }
+            m_release_carrier_select->setCurrentIndex(choices.indexOf(selected));
+        }
+        const bool preparation = task == QLatin1String("preparepaymasterpool");
+        UniValue params;
+        try { params = preparation ? poolOptions(false, {}, true) : carrierWithdrawalOptions(task, false); }
+        catch (const std::exception& e) { failGuidedTask(QString::fromUtf8(e.what())); return; }
+        const std::string command = preparation ? "preparepaymasterpool" : "withdrawpaymastercarrier";
+        call(command, params, false, nullptr, [this, generation, task, params, command, preparation](const UniValue& preview) {
+            if (generation != m_wallet_generation || m_privacy || m_guided_task != task) return;
+            const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : IsCompleteCarrierWithdrawalResult(preview, task, false, {});
+            if (!valid || preview.find_value("executed").isTrue() || preview.find_value("accepted").isTrue()) {
+                failGuidedTask(tr("Core did not return a complete current preview. No task was approved.")); return;
+            }
+            m_operation.review(preview);
+            m_guided_review_text = preparation
+                ? tr("Create only the missing reserves.\n\nAdditional capital: %1 DGB and %2 DD.\nMaximum setup fees: %3 DGB total; at most %4 DGB per transaction.\n\nExisting and pending reserves are already included. Core will create the approved reserves and wait for confirmations automatically.")
+                    .arg(dgbAmount(poolNumber(preview, "total_output_satoshis")),
+                         QString::number(poolNumber(preview, "total_carrier_cents") / 100.0, 'f', 2),
+                         dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
+                         dgbAmount(poolNumber(preview, "maximum_fee_satoshis")))
+                : task == QLatin1String("all_excess")
+                    ? tr("Withdraw %1 DD earnings. Keep %2 DD operating capital. Estimated network fee: %3 DGB.")
+                        .arg(QString::number(poolNumber(preview, "withdrawable_excess_cents") / 100.0, 'f', 2), QString::number(poolNumber(preview, "retained_carrier_cents") / 100.0, 'f', 2), dgbAmount(poolNumber(preview, "estimated_network_fee_satoshis")))
+                    : tr("Pause the provider, return the selected reserve to ordinary wallet balance and reduce its saved capacity to %1. Released capital will not be replenished automatically.")
+                        .arg(poolNumber(preview, "operational_carrier_target"));
+            if (m_guided_start_after) m_guided_review_text += tr("\nStart the provider automatically when these reserves are ready, within the saved spending limits. Autostart is unchanged.");
+            else if (preparation && !m_core_enabled) m_guided_review_text += tr("\nEnable the saved provider configuration so Core can finish this task. The saved autostart choice remains in force.");
+            renderCurrentTask();
+            QTimer::singleShot(0, this, [this, generation, params, command, task] {
+                if (generation != m_wallet_generation || m_privacy || m_guided_task != task || m_busy) return;
+                setRpcBusyState(true);
+                const auto answer = askPlainTextQuestion(this, m_operation.title, m_guided_review_text);
+                if (generation != m_wallet_generation) return;
+                setRpcBusyState(false);
+                if (answer != QMessageBox::Yes || m_privacy) {
+                    m_operation.reset(m_wallet_generation); m_guided_task.clear(); renderCurrentTask(); return;
+                }
+                UniValue execution{UniValue::VARR};
+                UniValue options = params[0];
+                options.pushKV("execute", true);
+                options.pushKV("plan_id", m_operation.reviewed.find_value("plan_id"));
+                execution.push_back(options);
+                m_operation.execute();
+                renderCurrentTask();
+                if (task == QLatin1String("release_slot")) {
+                    UniValue stop{UniValue::VOBJ}, stop_params{UniValue::VARR};
+                    stop.pushKV("persistent", true); stop.pushKV("pause_setup", true); stop_params.push_back(stop);
+                    call("stoppaymaster", stop_params, false, nullptr, [this, command, execution](const UniValue& result) {
+                        if (!result.find_value("running").isFalse()) { failGuidedTask(tr("Core did not confirm the pause. No capital was released.")); return; }
+                        executeGuidedTask(command, execution);
+                    }, false, [this](const QString& error) { failGuidedTask(error); });
+                } else {
+                    executeGuidedTask(command, execution);
+                }
+            });
+        }, false, [this](const QString& error) { failGuidedTask(error); });
+    }
+
+    void executeGuidedTask(const std::string& command, const UniValue& params)
+    {
+        const bool preparation = command == "preparepaymasterpool";
+        const QString task = m_guided_task;
+        const UniValue reviewed = m_operation.reviewed;
+        call(command, params, preparation || task == QLatin1String("all_excess"), nullptr,
+            [this, preparation, task, reviewed](const UniValue& result) {
+                const bool valid = preparation ? IsCompletePoolPreparationResult(result) : IsCompleteCarrierWithdrawalResult(result, task, true, QString::fromStdString(reviewed.find_value("plan_id").get_str()));
+                if (!valid || result.find_value("plan_id").write() != reviewed.find_value("plan_id").write() ||
+                    !(preparation ? result.find_value("accepted").isTrue() : result.find_value("executed").isTrue())) {
+                    failGuidedTask(tr("The response did not confirm this exact task. Current saved work will be checked before another attempt.")); return;
+                }
+                m_operation.accepted();
+                if (task == QLatin1String("release_slot")) m_operation.phase = PaymasterOperationController::Phase::Complete;
+                m_activity_output->setPlainText(QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("\n") + m_operation.title + tr("\nCore accepted the reviewed task. Current progress is shown under Operation."));
+                m_guided_task.clear();
+                renderCurrentTask();
+                if (preparation && !m_core_enabled) {
+                    UniValue enable{UniValue::VARR}; enable.push_back(true);
+                    call("setpaymasterenabled", enable, false, nullptr, [this](const UniValue& enabled) {
+                        if (!enabled.find_value("enabled").isTrue()) { failGuidedTask(tr("The task is saved but the provider configuration is still disabled.")); return; }
+                        if (m_guided_start_after) requestReviewedStart(); else refreshStatus();
+                    }, false, [this](const QString& error) { failGuidedTask(error); });
+                } else if (preparation && m_guided_start_after) requestReviewedStart();
+                else refreshStatus();
+            }, false, [this](const QString& error) { failGuidedTask(error); });
+    }
+
+    void startProvider()
+    {
+        if (!canStartProvider()) return;
+        if (!requirePrivacyOffForSensitiveAction(
+                tr("Starting the Paymaster provider"))) {
+            return;
+        }
+        if (!hasCompleteMutationSnapshots()) {
+            m_status->setText(tr(
+                "Provider start was not attempted because a complete current provider, safety and liquidity snapshot is unavailable."));
             updateProviderButtons();
             return;
         }
-        if (m_core_enabled) {
-            if (!m_rpc_executor_for_testing &&
-                askPlainTextQuestion(
-                    this, tr("Disable Paymaster provider"),
-                    tr("Disable this wallet's provider configuration persistently? Core will also stop its current runtime and autostart will no longer bring it online while disabled.")) !=
-                    QMessageBox::Yes) {
-                return;
-            }
-            if (m_busy) return;
-            m_enable_status->setText(
-                tr("Disabling provider configuration…"));
-            UniValue params{UniValue::VARR};
-            params.push_back(false);
-            call("setpaymasterenabled", std::move(params), false, nullptr,
-                 [this](const UniValue& result) {
-                     const UniValue& enabled = result.find_value("enabled");
-                     if (!enabled.isBool() || enabled.get_bool()) {
-                         m_enable_status->setText(tr(
-                             "Provider configuration was not disabled: the wallet returned an unexpected result."));
-                         updateProviderButtons();
-                         return;
-                     }
-                     m_core_enabled = false;
-                     m_core_running = false;
-                     m_provider_settings_present = true;
-                     m_enable_status->setText(tr(
-                         "Provider configuration is disabled and saved in this wallet."));
-                     updateProviderButtons();
-                     refreshStatus();
-                 }, false,
-                 [this](const QString& error) {
-                     m_enable_status->setText(tr(
-                         "Provider configuration could not be disabled: %1")
-                             .arg(error));
-                     updateProviderButtons();
-                 });
+        const uint64_t wallet_generation = m_wallet_generation;
+        if (askPlainTextQuestion(
+                this, tr("Start provider"),
+                providerStartConfirmationText()) != QMessageBox::Yes) {
             return;
         }
-        if (!providerSafetyAllowsSelectedModels()) {
-            m_enable_status->setText(tr(
-                "Provider configuration was not enabled: save a complete finite safety policy first."));
-            QMessageBox::warning(
-                this, tr("Paymaster safety policy required"),
-                tr("The provider cannot be enabled until a complete wallet-local safety policy "
-                   "has been saved. Public sponsorship requires explicit finite non-zero "
-                   "hourly and daily budgets."));
-            return;
-        }
-        if (m_busy) {
-            m_enable_status->setText(tr(
-                "Provider configuration was not enabled because another wallet operation is still running. Please try again."));
-            QMessageBox::information(
-                this, tr("Paymaster operation in progress"),
-                tr("Wait for the current wallet operation to finish, then enable the provider configuration again."));
-            return;
-        }
-        m_enable_status->setText(tr("Enabling provider configuration…"));
-        m_enable->setEnabled(false);
-        UniValue params{UniValue::VARR};
-        params.push_back(true);
-        call("setpaymasterenabled", std::move(params), false, nullptr,
+        if (m_wallet_generation != wallet_generation || m_privacy || !canStartProvider()) return;
+        call("startpaymaster", [] { UniValue options{UniValue::VOBJ}, params{UniValue::VARR}; options.pushKV("wait_for_readiness", true); params.push_back(options); return params; }(), false, nullptr,
              [this](const UniValue& result) {
-                 const UniValue& enabled = result.find_value("enabled");
-                 if (!enabled.isBool() || !enabled.get_bool()) {
-                     m_enable_status->setText(tr(
-                         "Provider configuration was not enabled: the wallet returned an unexpected result."));
-                     QMessageBox::warning(
-                         this, tr("Provider configuration not enabled"),
-                         tr("The wallet did not confirm that provider configuration was enabled."));
-                     updateProviderButtons();
-                     return;
-                 }
-                 m_core_enabled = true;
-                 m_provider_settings_present = true;
-                 m_enable_status->setText(m_autostart_enabled
-                     ? tr("Provider configuration enabled successfully. It is saved in this wallet and may start automatically as soon as every readiness requirement passes.")
-                     : tr("Provider configuration enabled successfully. It is saved in this wallet. Autostart is disabled, so it remains offline until you start it from Overview."));
-                 updateProviderButtons();
-                 QMessageBox::information(
-                     this, tr("Provider configuration enabled"),
-                     m_autostart_enabled
-                         ? tr("Provider configuration was enabled successfully and saved in this wallet. Autostart may bring it online as soon as all readiness checks pass.")
-                         : tr("Provider configuration was enabled successfully and saved in this wallet. Autostart is disabled; start it from Overview after all readiness checks pass."));
+                 presentProviderStartResult(result);
                  refreshStatus();
-             }, false,
-             [this](const QString& error) {
-                 m_enable_status->setText(tr(
-                     "Provider configuration could not be enabled: %1").arg(error));
-                 updateProviderButtons();
-                 showPlainTextWarning(
-                     this, tr("Provider configuration not enabled"),
-                     tr("The provider configuration could not be enabled.\n\n%1").arg(error));
              });
     }
 
@@ -8350,15 +8959,8 @@ private:
         return status;
     }
 
-    void refreshProviderSafetyStatus()
+    void applyProviderSafetyStatus(const UniValue& result)
     {
-        if (!m_client_safety_dirty) {
-            m_client_safety_status->setText(
-                tr("Client safety policy: unavailable (automatic Paymaster transfers unavailable)"));
-        }
-        updateProviderButtons();
-        call("getpaymastersafetystatus", {}, false, nullptr,
-             [this](const UniValue& result) {
                  const UniValue& configured = result.find_value("configured");
                  const UniValue& policy = result.find_value("policy");
                  if (!result.isObject() || !configured.isBool() ||
@@ -8370,7 +8972,6 @@ private:
                      m_provider_safety_status->setText(tr(
                          "Core returned an incomplete provider safety status. Guided setup remains unavailable until a complete refresh succeeds."));
                      updateProviderButtons();
-                     refreshClientSafetyStatus();
                      return;
                  }
                  if (configured.get_bool() &&
@@ -8384,7 +8985,6 @@ private:
                      m_provider_safety_status->setText(tr(
                          "Core returned a complete provider safety policy containing a value that this interface cannot represent exactly. The persisted policy was retained unchanged and all provider-safety mutation is disabled."));
                      updateProviderButtons();
-                     refreshClientSafetyStatus();
                      return;
                  }
                  m_unrepresentable_provider_safety_snapshot =
@@ -8428,6 +9028,18 @@ private:
                  usage.push_back(safetyClassStatus(tr("Restricted sponsored"), result.find_value("restricted_sponsored")));
                  m_provider_safety_usage->setText(usage.join('\n'));
                  updateProviderButtons();
+    }
+
+    void refreshProviderSafetyStatus()
+    {
+        if (!m_client_safety_dirty) {
+            m_client_safety_status->setText(
+                tr("Client safety policy: unavailable (automatic Paymaster transfers unavailable)"));
+        }
+        updateProviderButtons();
+        call("getpaymastersafetystatus", {}, false, nullptr,
+             [this](const UniValue& result) {
+                 applyProviderSafetyStatus(result);
                  refreshClientSafetyStatus();
              }, false, [this](const QString& error) {
                  m_provider_safety_snapshot_available = false;
@@ -8590,6 +9202,11 @@ private:
             .arg(m_operational_carriers->value());
     }
 
+    QString preparationTargetKey() const
+    {
+        return liquidityTargetKey() + QLatin1Char(':') + m_preparation_fee->text();
+    }
+
     void invalidatePoolPreviews()
     {
         m_prepare_preview_target.clear();
@@ -8608,10 +9225,9 @@ private:
         m_operational_dgb->setValue(1);
         m_admission_carriers->setValue(needs_carriers ? 3 : 0);
         m_operational_carriers->setValue(needs_carriers ? 1 : 0);
-        m_maintenance_fee_per_transaction->setText(
-            QString::number(10000000));
-        m_maintenance_fee_per_hour->setText(QString::number(50000000));
-        m_maintenance_fee_per_day->setText(QString::number(200000000));
+        m_maintenance_fee_per_transaction->setSatoshis(10000000);
+        m_maintenance_fee_per_hour->setSatoshis(50000000);
+        m_maintenance_fee_per_day->setSatoshis(200000000);
         m_loading_liquidity_policy = false;
         m_liquidity_policy_dirty = announce;
         invalidatePoolPreviews();
@@ -8698,14 +9314,16 @@ private:
 
         const QString target = liquidityTargetKey();
         const bool preparation_current =
-            m_prepare_preview_target == target && !m_prepare_plan_id.isEmpty();
+            m_prepare_preview_target == preparationTargetKey() && !m_prepare_plan_id.isEmpty();
         const bool retirement_current =
             m_rebalance_preview_target == target && !m_rebalance_plan_id.isEmpty();
         const bool complete_snapshots = hasCompleteMutationSnapshots();
+        qint64 preparation_fee{0};
+        const bool valid_preparation_fee = m_preparation_fee && m_preparation_fee->satoshis(preparation_fee) && preparation_fee > 0 && preparation_fee <= MAX_MONEY / 2;
         if (m_prepare_preview) {
             m_prepare_preview->setEnabled(
                 complete_snapshots && m_liquidity_snapshot_representable &&
-                !m_busy);
+                valid_preparation_fee && !m_busy);
         }
         if (m_rebalance_preview) {
             m_rebalance_preview->setEnabled(
@@ -8715,7 +9333,7 @@ private:
         if (m_prepare_execute) {
             m_prepare_execute->setEnabled(
                 complete_snapshots && m_liquidity_snapshot_representable &&
-                preparation_current && !m_busy);
+                preparation_current && valid_preparation_fee && !m_busy);
         }
         if (m_rebalance_execute) {
             m_rebalance_execute->setEnabled(
@@ -8730,6 +9348,124 @@ private:
             m_liquidity_preview_status->setText(tr(
                 "No reviewed preview matches the current targets. Preview before executing."));
         }
+    }
+
+    QString formatPoolPreparation(const UniValue& records) const
+    {
+        if (m_privacy || records.isNull()) return {};
+        if (!records.isArray()) return tr("Pool preparation status is unavailable. Refresh before acting.");
+        QStringList lines;
+        for (const auto& step : records.getValues()) {
+            const QString state = activityText(step, "state");
+            if (state == QLatin1String("complete") || state == QLatin1String("cancelled")) continue;
+            const QString error = activityText(step, "error");
+            const QString code = error.section(QLatin1Char(':'), 0, 0);
+            const QString asset = activityText(step, "asset");
+            const QString name = asset == QLatin1String("dd_carrier") ? tr("DigiDollar reserve") : asset == QLatin1String("dgb") ? tr("DGB reserve") :
+                                                                                                                                   tr("Pool preparation");
+            QString explanation;
+            if (state == QLatin1String("conflict"))
+                explanation = tr("The saved transaction has a conflict. Inspect it before making another plan; automatic replacement is blocked.");
+            else if (code == QLatin1String("PAYMASTER_POOL_FEE_LIMIT"))
+                explanation = tr("Paused at the fee check. The transaction fee must be valid and within the approved setup limit. Changing recurring refill limits does not change this approval. To review a different limit, cancel the uncreated step, then preview a new plan.");
+            else if (code == QLatin1String("PAYMASTER_POOL_FEE_INVALID") || code == QLatin1String("PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED"))
+                explanation = tr("The fee calculation needs review. Raising the approved setup limit does not resolve this check; no replacement is authorized automatically.");
+            else if (code == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS") || code == QLatin1String("PAYMASTER_POOL_WAITING_DGB"))
+                explanation = tr("Waiting for usable wallet funds. The DigiDollar reserve and its DGB network fee require confirmed funds outside the protected pool.");
+            else if (code == QLatin1String("PAYMASTER_POOL_POLICY_CHANGED"))
+                explanation = tr("The provider policy changed after approval. Cancel uncreated steps and review a new plan for the current policy.");
+            else if (code == QLatin1String("PAYMASTER_WALLET_LOCKED"))
+                explanation = tr("Waiting for wallet unlock before creating the approved transaction.");
+            else if (code == QLatin1String("PAYMASTER_PROVIDER_DISABLED"))
+                explanation = tr("The provider configuration is disabled. Approved preparation can continue when it is enabled; autostart is not required.");
+            else if (code == QLatin1String("PAYMASTER_POOL_WAITING_CONFIRMATION") || (error.isEmpty() && state == QLatin1String("pending_confirmation")))
+                explanation = state == QLatin1String("pending_creation") ? tr("Waiting for funding inputs to confirm before creating the transaction.") : tr("The saved transaction is waiting for confirmation. In Regtest, a new block must be mined. No new approval is needed.");
+            else if (error.isEmpty() && state == QLatin1String("pending_creation"))
+                explanation = tr("Approved and waiting for the next automatic check. Core checks approximately every 30 seconds while the provider configuration is enabled and the wallet and index are synchronized.");
+            else
+                explanation = tr("Preparation needs diagnostic review before continuing.");
+            lines << tr("%1: %2").arg(name, explanation);
+            if (state == QLatin1String("pending_creation")) lines << tr("No transaction has been saved for this step.");
+            qint64 fee{0};
+            if (GetInt64Field(step, "maximum_fee_satoshis", fee) && MoneyRange(fee))
+                lines << tr("Approved setup fee limit: %1 DGB.").arg(dgbAmount(fee));
+            if (!error.isEmpty()) lines << tr("Diagnostic: %1").arg(error);
+            const QString fee_diagnostic = activityText(step, "diagnostic");
+            if (!fee_diagnostic.isEmpty()) lines << fee_diagnostic;
+            if (IsHex256Field(step, "txid")) lines << tr("Transaction: %1").arg(activityText(step, "txid"));
+        }
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString cancellablePreparationPlan() const
+    {
+        if (!m_pool_preparation.isArray()) return {};
+        QString plan;
+        for (const auto& step : m_pool_preparation.getValues()) {
+            const QString state = activityText(step, "state");
+            if (state == QLatin1String("complete") || state == QLatin1String("cancelled")) continue;
+            // Only offer cancellation for one wholly uncreated plan. Core
+            // reconciles again before cancelling; a concurrent saved signature
+            // can never be discarded by this presentation-layer check.
+            if (state != QLatin1String("pending_creation") || !step.find_value("txid").isNull() ||
+                !IsHex256Field(step, "plan_id")) return {};
+            const QString current = activityText(step, "plan_id");
+            if (!plan.isEmpty() && plan != current) return {};
+            plan = current;
+        }
+        return plan;
+    }
+
+    void updatePoolPreparationStatus()
+    {
+        if (!m_pool_preparation_status) return;
+        const QString details = formatPoolPreparation(m_pool_preparation);
+        m_pool_preparation_status->setText(details);
+        m_pool_preparation_status->setVisible(!m_privacy && !details.isEmpty());
+        if (!details.isEmpty()) {
+            setStatusLabel(m_overview_liquidity_status, tr("Approved pool preparation is pending; review its current step."), QStringLiteral("action"));
+            m_overview_liquidity_action->setText(tr("Review pool preparation"));
+            m_liquidity_maintenance_state->setText(tr("Finite pool preparation takes priority over recurring refill"));
+            m_liquidity_maintenance_next_step->setText(details);
+        }
+        const bool cancellable = !m_privacy && !cancellablePreparationPlan().isEmpty();
+        m_cancel_preparation->setVisible(cancellable);
+        m_cancel_preparation->setEnabled(cancellable && hasCompleteMutationSnapshots() && hasRpcTransport() && !m_busy);
+    }
+
+    void cancelPoolPreparation()
+    {
+        if (m_privacy || m_busy || !hasCompleteMutationSnapshots() || !hasRpcTransport()) return;
+        const QString plan = cancellablePreparationPlan();
+        if (plan.isEmpty()) return;
+        const auto generation = m_wallet_generation;
+        if (askPlainTextQuestion(this, tr("Cancel pool preparation"),
+                                 tr("Revoke the uncreated pool preparation below? Core rechecks for saved transactions before cancelling. Existing pool outputs and any saved transaction remain unchanged. A new fee limit requires a fresh preview and approval.\n\n%1")
+                                     .arg(formatPoolPreparation(m_pool_preparation))) != QMessageBox::Yes) return;
+        if (m_privacy || m_busy || generation != m_wallet_generation || plan != cancellablePreparationPlan()) return;
+        UniValue options{UniValue::VOBJ};
+        // The RPC validates target options even for cancellation. Use valid
+        // counts for the displayed funding model; these do not authorize any
+        // creation when cancel=true. Core still binds cancellation to plan_id.
+        options.pushKV("admission_dgb_slots", std::max(3, m_admission_dgb->value()));
+        options.pushKV("operational_dgb_slots", std::max(1, m_operational_dgb->value()));
+        options.pushKV("admission_carrier_slots", m_user_paid->isChecked() ? std::max(3, m_admission_carriers->value()) : 0);
+        options.pushKV("operational_carrier_slots", m_user_paid->isChecked() ? std::max(1, m_operational_carriers->value()) : 0);
+        options.pushKV("execute", true);
+        options.pushKV("cancel", true);
+        options.pushKV("plan_id", plan.toStdString());
+        UniValue params{UniValue::VARR};
+        params.push_back(std::move(options));
+        call("preparepaymasterpool", std::move(params), false, nullptr,
+             [this, plan](const UniValue& result) {
+                 const bool valid = activityText(result, "plan_id") == plan &&
+                                    result.find_value("cancelled").isBool() && result.find_value("preparation").isArray();
+                 m_liquidity_output->setPlainText(valid && result.find_value("cancelled").isTrue() ? tr("Uncreated preparation cancelled. Review the targets and setup fee limit, then preview a new plan. No new preparation has been authorized.") : tr("Cancellation was not confirmed. Refresh the preparation status before another action; a saved transaction may still be pending."));
+                 invalidatePoolPreviews();
+                 m_pool_preparation = valid ? result.find_value("preparation") : UniValue{};
+                 updatePoolPreparationStatus();
+                 refreshStatus();
+             });
     }
 
     static qint64 poolNumber(const UniValue& result, const char* name)
@@ -8750,6 +9486,8 @@ private:
                 : executed
                     ? tr("Preparation executed: the required pool transaction(s) were created. Wait for confirmation before expecting provider readiness.")
                     : tr("Preparation preview only: no wallet funds were moved."));
+            const QString progress = formatPoolPreparation(result.find_value("preparation"));
+            if (!progress.isEmpty()) lines << progress;
             if (result.find_value("maximum_total_fee_satoshis").isNum()) {
                 lines.push_back(tr("Maximum approved setup fees: %1 DGB. Execution authorizes later automatic completion within this limit.")
                     .arg(QString::number(poolNumber(result, "maximum_total_fee_satoshis") / 100000000.0, 'f', 8)));
@@ -8797,13 +9535,18 @@ private:
         return lines.join('\n');
     }
 
-    UniValue poolOptions(bool execute, const QString& plan_id = {}) const
+    UniValue poolOptions(bool execute, const QString& plan_id = {}, bool preparation = false) const
     {
         UniValue options{UniValue::VOBJ};
         options.pushKV("admission_dgb_slots", m_admission_dgb->value());
         options.pushKV("operational_dgb_slots", m_operational_dgb->value());
         options.pushKV("admission_carrier_slots", m_admission_carriers->value());
         options.pushKV("operational_carrier_slots", m_operational_carriers->value());
+        if (preparation) {
+            qint64 fee{0};
+            if (!m_preparation_fee->satoshis(fee) || fee <= 0 || fee > MAX_MONEY / 2) throw std::runtime_error("PAYMASTER_POOL_VALUE_OUT_OF_RANGE");
+            options.pushKV("maximum_fee_satoshis", fee);
+        }
         options.pushKV("execute", execute);
         if (execute && !plan_id.isEmpty()) {
             options.pushKV("plan_id", plan_id.toStdString());
@@ -8826,7 +9569,10 @@ private:
             return;
         }
         const bool preparation = std::string{command} == "preparepaymasterpool";
-        const QString target = liquidityTargetKey();
+        qint64 fee{0};
+        if (preparation && (!m_preparation_fee->satoshis(fee) || fee <= 0 || fee > MAX_MONEY / 2)) return;
+        const QString target = preparation ? preparationTargetKey() : liquidityTargetKey();
+        const auto generation = m_wallet_generation;
         const QString reviewed_target = preparation ? m_prepare_preview_target
                                                     : m_rebalance_preview_target;
         const QString reviewed_plan = preparation ? m_prepare_plan_id
@@ -8844,12 +9590,14 @@ private:
                    "This creates or retires wallet outputs and may pay a network fee.")) != QMessageBox::Yes) {
             return;
         }
-        call(command, poolOptions(execute, reviewed_plan), execute, nullptr,
+        if (m_privacy || m_wallet_generation != generation ||
+            target != (preparation ? preparationTargetKey() : liquidityTargetKey())) return;
+        call(command, poolOptions(execute, reviewed_plan, preparation), execute, nullptr,
              [this, command = std::string{command}, execute, preparation,
-              target, reviewed_plan](
+              target, reviewed_plan, fee](
                  const UniValue& result) {
                  const bool complete = preparation
-                     ? IsCompletePoolPreparationResult(result)
+                     ? IsCompletePoolPreparationResult(result) && poolNumber(result, "maximum_fee_satoshis") == fee
                      : IsCompletePoolRebalanceResult(result);
                  const bool result_executed =
                      result.find_value("executed").isBool() &&
@@ -9109,12 +9857,12 @@ private:
         }
         if (m_core_running) {
             const QString message = tr(
-                "Stop the Paymaster provider before saving an operating-policy change. This prevents new work from being accepted under the previous announcement while the wallet commits the replacement policy.");
+                "Pause the Paymaster provider before saving an operating-policy change. This prevents new work from being accepted under the previous announcement while the wallet commits the replacement policy.");
             if (m_rpc_executor_for_testing) {
                 m_status->setText(message);
             } else {
                 QMessageBox::warning(
-                    this, tr("Stop provider before changing policy"),
+                    this, tr("Pause provider before changing policy"),
                     message);
             }
             return;
@@ -9242,7 +9990,7 @@ private:
                                           "prepares a complete, conservative starting configuration and explains every step. "
                                           "Before anything is saved, the assistant shows the complete plan and a current liquidity estimate. "
                                           "After your confirmation it saves the identity, policy and safety limits and creates only missing pool outputs. "
-                                          "The selected runtime and enabled settings are shown in the final review. Autostart remains off; starting operation is a separate, explicit action."),
+                                          "The selected runtime and enabled settings are shown in the final review. The saved autostart choice is retained; an optional one-time start can be included in the final review."),
                                       intro);
         intro_text->setObjectName("paymasterSetupIntroduction");
         intro_text->setWordWrap(true);
@@ -9514,6 +10262,14 @@ private:
                     : retained_network_fee;
             };
         policy_layout->addRow(tr("User-paid service fee:"), fee);
+        auto* fee_example = new PaymasterFeeExample(policy_page);
+        policy_layout->addRow(fee_example);
+        const auto update_fee_example = [fee_example, fee, wizard_user_paid] {
+            fee_example->setFeeRate(qRound(fee->value() * 100.0), wizard_user_paid->isChecked());
+        };
+        connect(fee, qOverload<double>(&QDoubleSpinBox::valueChanged), fee_example, update_fee_example);
+        connect(wizard_user_paid, &QCheckBox::toggled, fee_example, update_fee_example);
+        update_fee_example();
         policy_layout->addRow(tr("Smallest payment:"), minimum);
         policy_layout->addRow(tr("Largest payment:"), maximum);
         policy_layout->addRow(tr("Quote validity:"), lifetime);
@@ -10011,14 +10767,14 @@ private:
             : operation_mode->findData(QStringLiteral("automatic")));
         operation_mode->setEnabled(!m_core_running);
         operation_mode->setToolTip(m_core_running
-            ? tr("Stop the provider before changing its processing mode.")
+            ? tr("Pause the provider before changing its processing mode.")
             : tr("Automatic is recommended; manual mode is intended for expert diagnosis."));
         auto* autostart = new QCheckBox(
             tr("Start this provider automatically after loading its wallet"), pool_page);
         autostart->setObjectName("paymasterSetupAutostart");
-        autostart->setChecked(false);
+        autostart->setChecked(m_autostart_enabled);
         autostart->setEnabled(false);
-        autostart->setToolTip(tr("Setup keeps autostart off. After the explicit first start, enable autostart from Overview if desired."));
+        autostart->setToolTip(tr("The saved autostart choice is retained. You can change it separately under Settings."));
         // An identity can be created before any ProviderSettings record exists.
         // Treat that identity-only state as a fresh setup so the usable default
         // remains enabled; preserve an explicit disabled state only for an
@@ -10183,7 +10939,7 @@ private:
         review->setTextInteractionFlags(Qt::TextSelectableByKeyboard |
                                         Qt::TextSelectableByMouse);
         auto* next_actions = new QLabel(tr(
-                                            "When you apply this plan, the assistant first places an existing enabled provider safely offline, then creates or reuses the identity, saves the selected operating, safety and automatic-liquidity policies, and asks Core to recheck and create only missing pool outputs. Runtime and the requested enabled state are saved last. Autostart remains off until an explicit start from Overview."),
+                                            "When you apply this plan, the assistant first places an existing enabled provider safely offline, then creates or reuses the identity, saves the selected operating, safety and automatic-liquidity policies, and asks Core to recheck and create only missing pool outputs. Runtime and the requested enabled state are saved last. The saved autostart choice is retained. You can include a one-time start in this review."),
                                         review_page);
         next_actions->setObjectName("paymasterSetupNextActions");
         next_actions->setWordWrap(true);
@@ -10291,7 +11047,7 @@ private:
             if (method == "setpaymastersafetypolicy") return tr("Save finite safety limits");
             if (method == "setpaymasterliquiditypolicy") return tr("Save liquidity targets and refill approval");
             if (method == "preparepaymasterpool") return tr("Review and approve exact pool funding");
-            if (method == "setpaymasterruntimesettings") return tr("Save processing mode with autostart off");
+            if (method == "setpaymasterruntimesettings") return tr("Save processing mode and retain autostart choice");
             if (method == "setpaymasterenabled") return tr("Save provider enablement");
             return tr("Unknown setup step");
         };
@@ -10369,8 +11125,32 @@ private:
         progress_layout->addStretch();
         const int progress_id = wizard.addPage(progress_page);
 
+        auto setup_start_requested = std::make_shared<bool>(false);
+        auto* start_after_setup = new QCheckBox(tr("Start provider when this setup is ready"), review_page);
+        start_after_setup->setObjectName("paymasterSetupStartWhenReady");
+        start_after_setup->setChecked(!have_existing_provider_configuration || m_core_running);
+        start_after_setup->setEnabled(provider_enabled->isChecked());
+        if (!provider_enabled->isChecked()) start_after_setup->setChecked(false);
+        connect(provider_enabled, &QCheckBox::toggled, start_after_setup, [start_after_setup](bool enabled) {
+            start_after_setup->setEnabled(enabled);
+            if (!enabled) start_after_setup->setChecked(false);
+        });
+        review_layout->addWidget(start_after_setup);
+        const auto proposed_policy = [wizard_sponsored, wizard_user_paid, wizard_scope, fee, minimum, maximum, lifetime, network_fee] {
+            UniValue funding{UniValue::VARR}, policy{UniValue::VOBJ};
+            if (wizard_sponsored->isChecked()) funding.push_back("sponsored");
+            if (wizard_user_paid->isChecked()) funding.push_back("user_paid");
+            policy.pushKV("funding_models", funding);
+            policy.pushKV("sponsorship_scope", wizard_scope->currentData().toString().toStdString());
+            policy.pushKV("fee_rate_bps", qRound(fee->value() * 100.0));
+            policy.pushKV("min_amount_cents", minimum->value());
+            policy.pushKV("max_amount_cents", maximum->value());
+            policy.pushKV("quote_ttl", lifetime->value());
+            policy.pushKV("maximum_network_fee_dgb_satoshis", network_fee->value());
+            return policy;
+        };
         auto reviewed_pool = std::make_shared<UniValue>();
-        const auto wizard_pool_options = [admission_dgb, operational_dgb,
+        const auto wizard_pool_options = [this, admission_dgb, operational_dgb,
                                           admission_carriers,
                                           operational_carriers](bool execute) {
             UniValue options{UniValue::VOBJ};
@@ -10379,6 +11159,9 @@ private:
             options.pushKV("admission_carrier_slots", admission_carriers->value());
             options.pushKV("operational_carrier_slots", operational_carriers->value());
             options.pushKV("execute", execute);
+            qint64 fee{0};
+            if (!m_preparation_fee->satoshis(fee) || fee <= 0) throw std::runtime_error("PAYMASTER_POOL_INVALID_FEE_LIMIT");
+            options.pushKV("maximum_fee_satoshis", fee);
             UniValue params{UniValue::VARR};
             params.push_back(std::move(options));
             return params;
@@ -10391,53 +11174,40 @@ private:
             return text;
         };
         auto refresh_preview = std::make_shared<std::function<void()>>();
-        *refresh_preview = [this, review_page, preview_status, preview_details,
-                            preview_retry, reviewed_pool, admission_dgb,
-                            operational_dgb, admission_carriers,
-                            operational_carriers, selected_network_fee,
-                            maintenance_confirmation,
-                            wizard_pool_preview_text] {
-            const int missing_admission_dgb =
-                std::max(0, admission_dgb->value() - m_pool_admission_dgb);
-            const int missing_operational_dgb =
-                std::max(0, operational_dgb->value() - m_pool_operational_dgb);
-            const int missing_admission_carriers =
-                std::max(0, admission_carriers->value() - m_pool_admission_carriers);
-            const int missing_operational_carriers =
-                std::max(0, operational_carriers->value() - m_pool_operational_carriers);
-            const qint64 admission_value =
-                DigiDollar::Paymaster::MIN_ADMISSION_DGB_SATOSHIS;
-            const qint64 operational_value = std::max<qint64>(
-                admission_value, selected_network_fee());
-            UniValue estimate{UniValue::VOBJ};
-            estimate.pushKV("executed", false);
-            estimate.pushKV("missing_admission_dgb_slots", missing_admission_dgb);
-            estimate.pushKV("missing_operational_dgb_slots", missing_operational_dgb);
-            estimate.pushKV("missing_admission_carrier_slots", missing_admission_carriers);
-            estimate.pushKV("missing_operational_carrier_slots", missing_operational_carriers);
-            estimate.pushKV("admission_dgb_satoshis_each", admission_value);
-            estimate.pushKV("operational_dgb_satoshis_each", operational_value);
-            estimate.pushKV("carrier_cents_each", 100);
-            estimate.pushKV("total_output_satoshis",
-                admission_value * missing_admission_dgb +
-                operational_value * missing_operational_dgb);
-            estimate.pushKV("total_carrier_cents",
-                100 * (missing_admission_carriers + missing_operational_carriers));
-            *reviewed_pool = std::move(estimate);
-            preview_status->setText(m_pool_status_loaded
-                ? tr("Funding estimate complete — no funds have moved. Core will recheck all existing and pending pool outputs after saving the policies and before any funding transaction.")
-                : tr("Conservative funding estimate — provider pool status has not loaded yet, so this estimate assumes no existing confirmed outputs. Core will recheck the wallet before any funding transaction."));
-            preview_details->setText(wizard_pool_preview_text(*reviewed_pool) + tr(
-                "\nThe pool transaction network fee is calculated by Core immediately before funding and requires a separate confirmation. Pending wallet-owned pool outputs can only reduce the amount shown here."));
+        *refresh_preview = [this, review_page, preview_status, preview_details, preview_retry,
+                            reviewed_pool, maintenance_confirmation, wizard_pool_options, proposed_policy, wizard_pool_preview_text] {
+            *reviewed_pool = UniValue{};
+            review_page->setComplete(false);
             preview_retry->setVisible(false);
-            review_page->setComplete(
-                maintenance_confirmation->isChecked());
+            preview_status->setText(tr("Checking the proposed configuration and current reserves…"));
+            UniValue params;
+            try {
+                auto options = wizard_pool_options(false)[0];
+                options.pushKV("preview_policy", proposed_policy());
+                params = UniValue{UniValue::VARR};
+                params.push_back(options);
+            } catch (const std::exception& error) { preview_status->setText(QString::fromUtf8(error.what())); preview_retry->show(); return; }
+            call("preparepaymasterpool", params, false, nullptr,
+                [guard = QPointer<QWidget>(review_page), review_page, preview_status, preview_details, preview_retry, reviewed_pool, maintenance_confirmation, wizard_pool_preview_text](const UniValue& result) {
+                    if (!guard) return;
+                    if (!IsCompletePoolPreparationResult(result) || !result.find_value("preview_only").isTrue() || result.find_value("accepted").isTrue()) {
+                        preview_status->setText(QObject::tr("A complete read-only funding review is unavailable. Retry before applying setup."));
+                        preview_retry->show(); return;
+                    }
+                    *reviewed_pool = result;
+                    preview_status->setText(QObject::tr("Review ready. No settings or funds have changed."));
+                    preview_details->setText(wizard_pool_preview_text(result));
+                    review_page->setComplete(maintenance_confirmation->isChecked());
+                }, false, [guard = QPointer<QWidget>(review_page), preview_status, preview_retry](const QString& error) {
+                    if (!guard) return;
+                    preview_status->setText(error); preview_retry->show();
+                });
         };
         connect(preview_retry, &QPushButton::clicked, review_page,
                 [refresh_preview] { (*refresh_preview)(); });
         connect(maintenance_confirmation, &QCheckBox::toggled, review_page,
-                [review_page](bool checked) {
-                    review_page->setComplete(checked);
+                [review_page, reviewed_pool](bool checked) {
+                    review_page->setComplete(checked && !reviewed_pool->isNull());
                 });
 
         connect(&wizard, &QWizard::currentIdChanged, &wizard,
@@ -10520,7 +11290,7 @@ private:
                              dgbAmount(maintenance_per_hour),
                              dgbAmount(maintenance_per_day));
                     maintenance_confirmation->setText(
-                        paid_maintenance_approved->isChecked() ? tr("I approve automatic paid liquidity maintenance for wallet \"%1\" up to %2 DGB per transaction, %3 DGB per rolling hour and %4 DGB per rolling day. This approval alone does not start the provider. Autostart remains off until explicitly enabled after the first start.")
+                        paid_maintenance_approved->isChecked() ? tr("I approve automatic paid liquidity maintenance for wallet \"%1\" up to %2 DGB per transaction, %3 DGB per rolling hour and %4 DGB per rolling day. This approval alone does not start the provider. The saved autostart choice is retained.")
                                                                      .arg(setup_wallet_name,
                                                                           dgbAmount(maintenance_per_transaction),
                                                                           dgbAmount(maintenance_per_hour),
@@ -10537,7 +11307,7 @@ private:
                     (*refresh_preview)();
                 });
 
-        review_page->setValidator([&, reviewed_pool,
+        review_page->setValidator([&, reviewed_pool, setup_start_requested, start_after_setup,
                                    wizard_pool_preview_text] {
             QString validation_error;
             const bool custom_profile = safety_profile->currentData().toString() ==
@@ -10574,13 +11344,15 @@ private:
                                      validation_error);
                 return false;
             }
+            if (reviewed_pool->isNull()) return false;
             QString confirmation = tr(
-                "Apply and save this complete Paymaster setup in wallet \"%1\"?\n\n%2\n\n"
-                "Only missing pool outputs will be created. Before any funds move, Core will recheck the exact missing outputs and ask you to confirm the resulting DGB/DD funding separately. Future paid replenishment is limited by the maintenance ceilings you explicitly approved above.")
+                "Apply the reviewed setup for wallet \"%1\"?\n\n%2\n\n"
+                "This approves only the displayed capital and maximum setup fees, together with the recurring limits selected above. "
+                "Core will continue automatically. Any larger funding requirement needs a new review.")
                 .arg(setup_wallet_name, wizard_pool_preview_text(*reviewed_pool));
-            confirmation += provider_enabled->isChecked() && autostart->isChecked()
-                ? tr("\n\nThe selected enabled/autostart combination may start the provider automatically after the configuration and liquidity steps finish and all readiness gates pass.")
-                : tr("\n\nThis assistant will not start the provider automatically because either the provider configuration is disabled or autostart is off.");
+            confirmation += start_after_setup->isChecked()
+                ? tr("\n\nStart the provider when ready. Keep the saved autostart choice unchanged.")
+                : tr("\n\nNo one-time start is requested. The saved autostart choice remains in force.");
             // The injected RPC transport exists only in widget tests, where
             // native modal message boxes are not reliable on headless Qt
             // platforms. Production always requires the explicit approval.
@@ -10590,6 +11362,7 @@ private:
                     confirmation) != QMessageBox::Yes) {
                 return false;
             }
+            *setup_start_requested = start_after_setup->isChecked();
             setSetupMode(PaymasterSetupMode::GUIDED);
             return true;
         });
@@ -10654,7 +11427,7 @@ private:
                           weak_advance_setup, shared_steps, shared_context,
                           setup_model, setup_wallet_id, display, policy_params,
                           safety_params, liquidity_policy_params, liquidity_preview_params,
-                          operation_mode, provider_enabled] {
+                          operation_mode, provider_enabled, reviewed_pool, setup_start_requested] {
             using namespace DigiDollar::Paymaster;
             if (!setup_model || m_model != setup_model || m_model->getWalletName() != setup_wallet_id) {
                 fail_setup(tr("The selected wallet changed or was unloaded. Reopen setup in the intended wallet."));
@@ -10663,7 +11436,7 @@ private:
             *setup_running = true;
             setup_retry->setVisible(false);
             set_wizard_running(true);
-            call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled](const UniValue& current) {
+            call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled, reviewed_pool, setup_start_requested](const UniValue& current) {
                     try {
                         if (shared_context->isNull()) {
                             SetupChoices choices;
@@ -10693,15 +11466,21 @@ private:
                         *setup_running = false;
                         *setup_completed = true;
                         m_core_enabled = provider_enabled->isChecked();
-                        m_autostart_enabled = false;
-                        m_core_running = false;
+                        m_autostart_enabled = current.find_value("provider").find_value("autostart").isTrue();
+                        m_core_running = current.find_value("provider").find_value("running").isTrue();
                         m_setup_waiting_for_confirmations = !current.find_value("provider").find_value("pool_ready").isTrue();
                         const auto& id = current.find_value("provider").find_value("provider_id");
                         if (id.isStr()) { *setup_provider_id = QString::fromStdString(id.get_str()); setup_backup_id->setText(*setup_provider_id); }
                         setup_backup->setVisible(true);
-                        QString completion_text = tr("Configuration saved. Autostart is off and the provider remains stopped until you explicitly start it. Approved finite pool preparation can continue after unlock; confirmation, external reachability and payment operation are separate checks. Create a full-wallet backup, then inspect Overview.");
+                        QString completion_text = tr("Configuration saved. Core continues the approved task automatically. Current progress remains visible under Operation; no setup steps need to be repeated.");
+                        completion_text += tr("\nThe saved autostart choice is %1.").arg(m_autostart_enabled ? tr("on") : tr("off"));
+                        m_operation.title = tr("Set up provider");
+                        m_operation.generation = m_wallet_generation;
+                        m_operation.accepted();
+                        renderCurrentTask();
+                        if (*setup_start_requested) requestReviewedStart();
                         if (m_setup_waiting_for_confirmations) {
-                            completion_text += QStringLiteral("\n\n") + tr("Waiting for approved pool preparation or blockchain confirmations. Check funding and unlock status in Overview.");
+                            completion_text += QStringLiteral("\n\n") + tr("Waiting for approved pool preparation or blockchain confirmations. Check funding and unlock status under Operation.");
                         }
                         progress_result->setText(completion_text);
                         setup_retry->setVisible(false);
@@ -10717,13 +11496,17 @@ private:
                     };
                     if (step.method == "preparepaymasterpool") {
                         call(step.method, step.params, false, nullptr,
-                            [this, &wizard, step, succeed, fail_setup](const UniValue& preview) {
+                            [this, &wizard, step, succeed, fail_setup, reviewed_pool](const UniValue& preview) {
                                 if (!IsCompletePoolPreparationResult(preview)) { fail_setup(tr("Core returned an incomplete funding preview.")); return; }
                                 try { if (!DigiDollar::Paymaster::SetupPoolNeeded(preview)) { succeed(); return; } }
                                 catch (const std::exception& error) { fail_setup(QString::fromUtf8(error.what())); return; }
-                                if (askPlainTextQuestion(&wizard, tr("Confirm exact pool funding"),
-                                    tr("Authorize only this finite funding plan? Its approval persists across restart; accepted does not mean confirmed.\n\n%1").arg(formatPoolResult("preparepaymasterpool", preview))) != QMessageBox::Yes) {
-                                    fail_setup(tr("Funding was not approved. Earlier settings remain saved and the provider remains paused.")); return;
+                                if (!PaymasterOperationController::fundingWithinApproval(*reviewed_pool, preview)) {
+                                    if (askPlainTextQuestion(&wizard, tr("Funding requirement changed"),
+                                        tr("Review the updated capital and fee limits before continuing.\n\n%1")
+                                            .arg(formatPoolResult("preparepaymasterpool", preview))) != QMessageBox::Yes) {
+                                        fail_setup(tr("The changed funding requirement was not approved. No additional funding was authorized.")); return;
+                                    }
+                                    *reviewed_pool = preview;
                                 }
                                 auto options = step.params[0]; options.pushKV("execute", true); options.pushKV("plan_id", preview.find_value("plan_id"));
                                 UniValue params{UniValue::VARR}; params.push_back(options);
@@ -11039,6 +11822,8 @@ private:
     void setRpcBusyState(bool busy)
     {
         m_busy = busy;
+        m_operator_action->setEnabled(!m_privacy && hasRpcTransport() && !busy);
+        m_operator_pause->setEnabled(!m_privacy && hasRpcTransport() && !busy);
 
         // Stop automatic refresh before an unlock dialog or RPC can enter a
         // nested event loop. Mutation controls remain disabled until every
@@ -11067,6 +11852,9 @@ private:
         updateCarrierWithdrawalButtons();
         updateFinanceControls();
         updateBackupReminder(m_backup_required, m_provider_id);
+        if (!m_operator_snapshot.isNull() && !m_privacy) renderOperatorPresentation(m_operator_snapshot);
+        else resetOperatorPresentation();
+        renderCurrentTask();
     }
 
     void finishRpcCall(uint64_t wallet_generation,
@@ -11121,12 +11909,30 @@ private:
             dispatchRpcCall(std::move(next));
             return;
         }
-        if (m_rpc_handler_depth == 0) setRpcBusyState(false);
+        if (m_rpc_handler_depth == 0) {
+            m_active_rpc_command.clear();
+            setRpcBusyState(false);
+        }
     }
 
     void dispatchRpcCall(PendingRpcCall request)
     {
         const uint64_t wallet_generation = m_wallet_generation;
+        m_active_rpc_command = request.command;
+        showOperatorBusyState();
+
+        if (m_async_rpc_executor_for_testing) {
+            QPointer<PaymasterWidgetImpl> guard{this};
+            m_async_rpc_executor_for_testing(request.command, request.params,
+                                             [guard, wallet_generation, output = request.output,
+                                              handler = std::move(request.handler), show_error = request.show_error,
+                                              error_handler = std::move(request.error_handler)](UniValue result, QString error) mutable {
+                                                 if (!guard) return;
+                                                 guard->finishRpcCall(wallet_generation, output, std::move(handler), show_error,
+                                                                      std::move(error_handler), std::move(result), std::move(error));
+                                             });
+            return;
+        }
 
         // Widget tests use a synchronous executor so each user action and its
         // resulting state can be asserted deterministically. Follow-up calls
@@ -11222,7 +12028,7 @@ private:
                     m_status->setText(error);
                 }
             };
-        if (!m_model && !m_rpc_executor_for_testing) {
+        if (!hasRpcTransport()) {
             report_not_started(tr(
                 "No wallet is selected, so the Paymaster RPC was not started."));
             return;
@@ -11253,6 +12059,7 @@ private:
                 "Another Paymaster wallet operation is still running, so this RPC was not started."));
             return;
         }
+        m_active_rpc_command = request.command;
         setRpcBusyState(true);
         dispatchRpcCall(std::move(request));
     }
@@ -11261,6 +12068,8 @@ private:
     uint64_t m_wallet_generation{0};
     uint64_t m_oracle_request_generation{0};
     RpcExecutor m_rpc_executor_for_testing;
+    AsyncRpcExecutor m_async_rpc_executor_for_testing;
+    std::string m_active_rpc_command;
     bool m_busy{false};
     int m_rpc_handler_depth{0};
     uint64_t m_active_rpc_handler_token{0};
@@ -11277,12 +12086,14 @@ private:
     QWidget* m_safety_page{nullptr};
     QWidget* m_liquidity_page{nullptr};
     QWidget* m_finance_page{nullptr};
+    QLabel* m_finance_selected_summary{nullptr};
     QWidget* m_activity_page{nullptr};
     QPushButton* m_guided_setup{nullptr};
     QPushButton* m_expert_setup{nullptr};
     QPushButton* m_reopen_wizard{nullptr};
     QLabel* m_overview_offer_status{nullptr};
     QLabel* m_overview_safety_status{nullptr};
+    QWidget* m_overview_budget_details{nullptr};
     QLabel* m_overview_liquidity_status{nullptr};
     QLabel* m_overview_operation_status{nullptr};
     QLabel* m_overview_finance_status{nullptr};
@@ -11296,6 +12107,35 @@ private:
     QPushButton* m_overview_backup_now{nullptr};
     QPushButton* m_overview_backup_external{nullptr};
     QLabel* m_wallet;
+    QTabWidget* m_settings_tabs{nullptr};
+    QTabWidget* m_history_tabs{nullptr};
+    QElapsedTimer m_status_age;
+    PaymasterOperationController m_operation;
+    QGroupBox* m_task_card{nullptr};
+    QLabel* m_task_status{nullptr};
+    QProgressBar* m_task_progress{nullptr};
+    QPushButton* m_restore_task{nullptr};
+    QPushButton* m_withdraw_task{nullptr};
+    QPushButton* m_release_task{nullptr};
+    QPushButton* m_task_continue{nullptr};
+    QString m_guided_task;
+    QString m_guided_review_text;
+    bool m_guided_start_after{false};
+    QWidget* m_connection_page{nullptr};
+    QGroupBox* m_operator_card{nullptr};
+    QLabel* m_operator_headline{nullptr};
+    QLabel* m_operator_hint{nullptr};
+    QWidget* m_operator_loading{nullptr};
+    QProgressBar* m_operator_progress{nullptr};
+    QLabel* m_operator_loading_step{nullptr};
+    QTimer* m_operator_progress_timer{nullptr};
+    QElapsedTimer m_operator_read_elapsed;
+    QLabel* m_operator_connection{nullptr};
+    QLabel* m_operator_wallet{nullptr};
+    QPushButton* m_operator_action{nullptr};
+    QPushButton* m_operator_pause{nullptr};
+    QString m_operator_next_action{QStringLiteral("refresh")};
+    QString m_operator_next_area;
     QLabel* m_operator_summary{nullptr};
     UniValue m_operator_snapshot;
     UniValue m_operator_report;
@@ -11316,13 +12156,14 @@ private:
     QLabel* m_external_other_status{nullptr};
     QPlainTextEdit* m_readiness;
     QGroupBox* m_liquidity_maintenance_card{nullptr};
+    QLabel* m_pool_preparation_status{nullptr};
+    QPushButton* m_cancel_preparation{nullptr};
+    DgbAmountLineEdit* m_preparation_fee{nullptr};
+    UniValue m_pool_preparation;
     QLabel* m_liquidity_maintenance_state{nullptr};
     QLabel* m_liquidity_maintenance_next_step{nullptr};
     QLabel* m_liquidity_maintenance_cost{nullptr};
     QPushButton* m_approve_liquidity_maintenance{nullptr};
-    QPushButton* m_start;
-    QPushButton* m_stop;
-    QPushButton* m_enable;
     QLabel* m_enable_status;
     QPushButton* m_create_identity{nullptr};
     QLabel* m_offer_identity_status{nullptr};
@@ -11331,7 +12172,9 @@ private:
     QCheckBox* m_sponsored;
     QCheckBox* m_user_paid;
     QComboBox* m_scope;
+    QLabel* m_sponsorship_label{nullptr};
     QSpinBox* m_fee_bps;
+    PaymasterFeeExample* m_fee_example{nullptr};
     QSpinBox* m_min_amount;
     QSpinBox* m_max_amount;
     QSpinBox* m_quote_ttl;
@@ -11357,9 +12200,9 @@ private:
     QCheckBox* m_automatic_replenishment{nullptr};
     QCheckBox* m_paid_maintenance_approved{nullptr};
     QPushButton* m_maintenance_limits_toggle{nullptr};
-    QLineEdit* m_maintenance_fee_per_transaction{nullptr};
-    QLineEdit* m_maintenance_fee_per_hour{nullptr};
-    QLineEdit* m_maintenance_fee_per_day{nullptr};
+    DgbAmountLineEdit* m_maintenance_fee_per_transaction{nullptr};
+    DgbAmountLineEdit* m_maintenance_fee_per_hour{nullptr};
+    DgbAmountLineEdit* m_maintenance_fee_per_day{nullptr};
     QPushButton* m_save_liquidity_policy_primary{nullptr};
     QPushButton* m_save_liquidity_policy{nullptr};
     QPushButton* m_restore_liquidity_defaults{nullptr};
@@ -11395,11 +12238,6 @@ private:
     QLabel* m_finance_pool_dgb{nullptr};
     QLabel* m_finance_pool_carrier{nullptr};
     QLabel* m_finance_pending_maintenance{nullptr};
-    QGroupBox* m_finance_backup_notice{nullptr};
-    QLabel* m_finance_backup_text{nullptr};
-    QLabel* m_finance_backup_provider_id{nullptr};
-    QPushButton* m_finance_backup_now{nullptr};
-    QPushButton* m_finance_backup_external{nullptr};
     QPushButton* m_finance_withdraw_fees{nullptr};
     QPushButton* m_finance_release_carrier{nullptr};
     QPushButton* m_finance_review_dgb{nullptr};

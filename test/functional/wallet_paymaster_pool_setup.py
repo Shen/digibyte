@@ -131,6 +131,15 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         execute = dict(targets, execute=True, plan_id=preview["plan_id"])
         prepared = provider.preparepaymasterpool(execute)
         assert_equal(prepared["accepted"], True)
+        operator = provider.getpaymasteroperatorinfo()
+        assert operator["provider"]["active_operations"]
+        for operation in operator["provider"]["active_operations"]:
+            assert_equal(operation["plan_id"], preview["plan_id"])
+            assert_equal(operation["required_confirmations"], 1)
+            assert_equal(operation["confirmations"], 0)
+        liquidity = operator["provider"]["liquidity"]
+        assert_equal(liquidity["maintenance_fee_reserved_satoshis"],
+                     liquidity["maintenance_fee_planned_satoshis"] + liquidity["maintenance_fee_broadcast_satoshis"])
         carrier = prepared["dd_txid"]
         assert "dgb_txid" not in prepared
         assert carrier not in node.getrawmempool()

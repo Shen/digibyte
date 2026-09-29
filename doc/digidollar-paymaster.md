@@ -1,5 +1,12 @@
 # DigiDollar Paymaster Network
 
+The current [GUI flow corrections](design/paymaster-flow-audit.md) include
+visible loading/retry states for saved transfers. Wait for this check before
+preparing another payment. A provider fallback and an explicitly started
+alternative recovery now continue their bounded preparation automatically;
+exact payment/recovery approval remains separate. If the first preparation
+reply is lost, Qt checks the existing request before offering further actions.
+
 The implemented [capacity and DoS hardening](digidollar-paymaster-connection-capacity.md)
 adds connection-start/group limits, routed request admission and reserved
 budgets for locally expected payment/recovery replies. Shared clearnet groups
@@ -144,6 +151,102 @@ before updating provider configuration; listener readiness does not verify
 public/Tor reachability.
 
 ## Client use
+
+### Discovery, offer checks and progress in Qt
+
+For explicit **Paymaster** fee funding, enter the recipient and amount, then
+choose **Prepare payment**. This starts provider contact and may temporarily
+reserve the required DigiDollar; it does not authorize a payment signature.
+There is no extra Find offer confirmation. Qt waits for the exact verified
+offer and presents the provider, recipient amount and service fee for explicit
+approval. Automatic with spendable DGB offers Send payment and retains its initial
+transaction confirmation. Without own DGB, it requires a current offer and uses
+the same Prepare payment flow as explicit Paymaster funding.
+
+**Manually clicking Check offers / Refresh offers is optional**: the automatic
+check also updates the offers and enables preparation when it finds a match.
+Neither check starts preparation or opens an authorization prompt.
+
+The node receives provider announcements automatically from its Paymaster-capable
+peers. **Check offers** in the normal Send view reads the latest locally known
+public offers for the entered amount. It does not broadcast a new search,
+contact providers, reserve money or authorize payment. The visible Paymaster or
+Automatic compose view rereads this local directory every ten seconds when an
+amount is valid and no transfer, RPC or privacy masking is active. Hidden views
+do not poll. A late announcement can therefore appear without another click.
+This is not an external reachability measurement and does not guarantee that a
+provider passes the eventual wallet fee/privacy limits. Background errors stay
+inline; they do not open repeated dialogs.
+
+The view distinguishes **not checked**, **checking**, **check complete with
+results**, **check complete without a match**, **stale/expired**, and **failed**.
+A completed check shows its local timestamp. **Check again** is useful after a
+provider starts or the node reconnects if you want an immediate check instead of
+waiting for the next automatic refresh; **Refresh offers** is also available
+after input changes or expiry. Detailed provider rows remain under Advanced Paymaster
+settings. Preparing the payment consults current offers again, so a manual
+preview is optional. Empty results do not mean a search is still running.
+
+During an explicitly started transfer, the session instead explains whether it
+is waiting for a connection slot, establishing transport, verifying an exact
+offer, or awaiting approval. These live preparation steps continue automatically;
+refreshing the offer list is unnecessary and is disabled for that active request.
+**Cancel in the exact-offer approval closes the unsigned request.** Qt first
+refreshes Core's permitted actions, then asks Core to release it without signing.
+Only confirmed safe closure returns to payment settings; recipient and amount
+remain entered. A new preparation uses a new request ID. If the quote already
+expired and Core confirms closure, no second cancellation is needed. A refusal,
+unreadable result or possible signature keeps the protected session visible.
+A lost cancellation reply can be resolved using **Check current status**, then
+**Start a new transfer** once Core confirms closure.
+
+A separately interrupted request has its own status/resume/cancellation actions.
+The technical `AWAITING_USER_SIGNATURE` state alone does not mean a quote has
+arrived: Core can set it while the quote request is still queued. Qt continues
+that live preparation automatically and offers review only when current exact
+details are available. The approval window shows **Time until offer expires**
+from the exact Core-provided expiry, updated locally without extra RPCs. At zero,
+approval closes and Qt checks whether Core permits unsigned cancellation. A late
+approval, including after returning from a delayed dialog, cannot authorize the
+expired offer. Technical commitment details are collapsed by default.
+
+After a live-send error, Qt checks the same saved request before attempting
+unsigned closure. Core must report no signed artifact and explicitly allow
+`abandon_unsigned`; no signed or ambiguous transfer is discarded. The closure is
+sent at most once, and its outcome is read back even if the reply was lost. Once
+Core proves unsigned closure, recipient and amount remain entered and an inline
+notice explains why the attempt ended and that this request no longer reserves
+funds. No new payment is started automatically. If the state cannot be verified,
+the protected transfer remains visible with **Check current status**. A session
+database-read error gets a specific inline explanation and only read-only
+reconciliation; it does not trigger automatic cancellation. Wallet
+changes discard old responses; privacy mode closes an open approval dialog.
+Expired/rejected attempts cannot be reused within that request.
+
+Qt keeps an explicitly started payment moving through asynchronous Direct
+connection and offer preparation. It repeats the same request and parameters;
+this is needed because a status refresh alone does not advance a pending quote.
+The exact provider/fee confirmation is still required before signing. Following
+approval, only the same verified signed request may continue until submission.
+Cancel, error, wallet switch/close, or a two-minute local deadline ends this live
+continuation. Restored sessions do not automatically resume, sign or retry.
+
+If an older GUI leaves a transfer at `CREATED` with no recipient details, inspect
+**More options → Cancel unsigned transfer and release $DD**, confirm that action,
+and prepare the payment again with the updated GUI. Core rechecks that the
+session is unsigned before cancellation. A completed unsigned cancellation
+unlocks the form even if no recipient was ever persisted. If its reply was lost,
+**Check current status** reads Core again and offers **Start a new transfer**
+when Core proves the unsigned request is closed and needs no recovery. This
+neither repeats the cancellation nor creates or signs another payment. An
+incomplete or contradictory snapshot keeps the current request protected.
+Never use unsigned cancellation to replace a signed payment; use its explicit
+recovery actions instead.
+
+For diagnosis, `listpaymasters` checks discovery, `getpaymasteroffers 200`
+checks offers for a 2 DD recipient payment, and `checkpaymasterendpoint` checks
+Direct transport separately. Seeing a provider with these read-only diagnostics
+does not prove that a stuck GUI request has advanced or that a payment succeeded.
 
 A failed Direct connection stays failed during ordinary polling. To retry,
 repeat the same `senddigidollar` payment options with `retry_transport: true`;
@@ -437,6 +540,65 @@ fee, while sponsored offers charge no DD service fee. The exact provider,
 funding model, recipient amount, fee, and authorization commitment are still
 confirmed before signing.
 
+A listed provider is an **announcement**, not a live availability result.
+Signed announcements expire at most **600 seconds (10 minutes)** after creation.
+Stopping a provider does not instantly remove its previously relayed announcement
+from other nodes. The list can therefore still include it until that expiry.
+The ten-second refresh only rereads this local list; it does not ping providers
+and cannot extend an announcement's expiry. **List updated** and **Announcement
+expires** refer to that directory data, not to a successful connection or an
+exact quote. A process exit, proxy failure or connection loss can still prevent
+preparation even with a current announcement.
+
+When the endpoint/proxy cannot be reached, Qt reports **Paymaster provider
+unreachable**; failure to finish a secure connection has its own message. These
+errors do not imply insufficient DD or require higher fees. Use the saved
+transfer's Core-provided retry/cancellation actions; the GUI continues to read
+its state before offering another transfer. No automatic payment retry or
+signature is added by list refresh.
+
+The offer status uses a prominent headline and a large checkmark when public
+offers are found. An animated rotating symbol marks a pending check; empty,
+expired and failed checks have distinct symbols and text. The local check time,
+preparation hint and automatic ten-second refresh notice are secondary. The
+checkmark means public offers were found, not that a provider connection,
+exact quote or payment has been approved. This is a directory snapshot.
+**Prepare payment** is enabled in explicit Paymaster mode only after the
+current check finds a public offer. It stays disabled while checking, after an
+empty or failed check, or when the inputs change or the preview expires. The
+automatic ten-second check can enable it when an offer appears; **Check again**
+also requests a fresh check. Automatic uses **Send payment** when the wallet
+reports spendable DGB. With no spendable DGB it instead uses **Prepare payment**
+and requires a current offer, just like explicit Paymaster mode. Without either
+funding source the button stays disabled. **Own DGB** is disabled without
+spendable DGB even if a provider is listed. Wallet balance changes update the
+button automatically. A positive DGB balance is only a preliminary check: Core
+still verifies suitable fee inputs and the actual fee before sending.
+
+A Prepare payment click in Automatic is bound to Paymaster funding for that
+request, including when DGB arrives later; it does not authorize a direct spend.
+Existing-session actions are unaffected by these compose checks.
+Preparation still uses the latest offers, checks the selected
+fee/privacy requirements and contacts a provider. It can temporarily reserve
+DD, but does not authorize signing. A public offer can still fail those checks;
+the exact provider and fee still require approval before signing. Displayed DD
+amounts use two decimal places without a duplicate cent value; RPC amounts
+remain integer cents. Details of the preview are in the preparation hint's
+tooltip and **Advanced Paymaster settings**.
+
+The client fee ceiling is entered in **DD**, with a read-only percentage of the
+current recipient amount. This ceiling is not the provider's price. Changing
+the recipient amount does not increase the saved ceiling or daily DD budget.
+With fee deduction, the recipient amount is known only with the exact offer;
+the offer shows its DD fee and effective percentage against that recipient
+amount. Offer tables and exact approval use that same comparison.
+
+Provider settings and guided setup keep the percentage tariff and add an
+editable example recipient amount. The example computes the DD fee and total
+with Core's rounding: 0.50% on 2.00 DD costs 0.01 DD; on 1.00 DD it also costs
+0.01 DD (effective 1.00%). The example does not change the payment range,
+configuration or budgets. Sponsored transfers remain free of DD service fees.
+
 In Automatic and Paymaster modes, **Deduct the Paymaster fee from the entered
 amount** makes the entered value the exact total outflow. **Empty wallet with
 Paymaster** uses the confirmed ordinary spendable DD balance and enables that
@@ -460,7 +622,22 @@ successful payment, never combines a refreshed session with an older attempt or
 artifact, and never resumes signing automatically after a wallet or process
 restart. `listdigidollarsendsessions` supplies a bounded wallet-local inbox for
 unfinished or recovery-relevant sessions; Qt refreshes the selected session
-before enabling an action.
+before enabling an action. While loading, an indeterminate progress bar and a
+Loading transfers button make the pending read visible. A failed read keeps
+new Paymaster preparation disabled and shows the concrete error as selectable
+plain text. Explicit retries report repeated failures; startup checks stay
+inline and privacy mode masks diagnostic details.
+
+An unsigned abandoned session retains its historical input list. When a later
+active client session legitimately reserves those same released inputs, the
+read-only inbox/status check distinguishes that new owner from the old history.
+It requires the old session to be FAILED without pending work, signatures,
+commits or recovery evidence, and validates the new reservation's session,
+request, input membership and index. No reservation or lock is changed by this
+inspection. Partial identity matches, unreadable evidence, wrong roles and
+unproven ownership still fail with PAYMASTER_RESERVATION_SESSION_CONFLICT.
+Retrying that error without resolving its cause cannot repair wallet state.
+Do not manually unlock inputs or delete session records to bypass it.
 
 ## Provider setup
 
@@ -523,8 +700,8 @@ offline. It then creates or reuses the identity, writes a temporary compatible
 safety bridge when an operating-policy transition requires one, saves the new
 operating and final safety policies, saves liquidity targets and finite
 maintenance limits, and rechecks the pool. Only still-missing outputs are
-created, and only after a second confirmation of the exact current funding
-plan. Runtime mode, autostart off, and the requested enabled state are persisted
+created within the reviewed capital and fee bounds. Qt requests renewed approval
+only if that scope changes. Runtime mode, saved autostart and enabled state are persisted
 last. Existing identity and pool outputs are retained. Completed write steps
 remain durable and retryable after a later failure; closing before the final
 Apply confirmation writes nothing. The completion page confirms that no
@@ -532,9 +709,8 @@ additional Save buttons are required.
 
 A fresh guided setup defaults to the recommended `automatic` operation mode,
 `autostart=false`, and an enabled provider configuration. Reopening the
-assistant preserves existing runtime and enabled choices, but deliberately turns
-autostart off as part of the confirmed setup. Starting remains a separate explicit
-Overview/CLI action. Autostart can be enabled after the first explicit start. Disabling a provider configuration always prevents a saved autostart
+assistant preserves existing runtime, autostart and enabled choices. Qt can include
+a one-time start-when-ready in the final review. That choice does not change autostart. Disabling a provider configuration always prevents a saved autostart
 preference from bringing it online. Paid automatic maintenance is separately
 disclosed and approved because it may create DGB-fee transactions. The
 assistant remains available from Overview for later review.
@@ -575,7 +751,7 @@ Provider runtime preferences are persisted in the provider wallet:
   `PAYMASTER_PROVIDER_BUSY` instead of falsely reporting success while another
   wallet-local provider operation owns the transition. It remains an ephemeral
   stop when autostart is saved as enabled.
-- Normal Qt **Pause operation** and the CLI pause action call
+- Normal Qt **Pause provider** and the CLI pause action call
   `stoppaymaster {"persistent":true,"pause_setup":true}`. This atomically saves
   autostart off and provider disabled under the existing work guard before the
   runtime stop, including a pause of new background setup signatures.
@@ -954,8 +1130,11 @@ provider, and session, with fair queuing between sessions. Cheap size, replay,
 announcement, and rate checks run before expensive signature or chainstate
 validation. Capacity, submit, capability, and result replay state that affects
 safety is persisted. Expired unsigned quotes/capacity reservations are released
-atomically; a user- or provider-signed authorization is never unlocked merely
-because its original TTL elapsed.
+atomically. Client coin locks in the running wallet are released only after
+the matching durable reservation and persistent lock removals commit, allowing
+a new unsigned request to select those inputs without reloading the wallet.
+A failed write or commit retains the locks. A user- or provider-signed
+authorization is never unlocked merely because its original TTL elapsed.
 
 Generation-bound, reference-counted RAII leases protect inbox messages across
 the persistence decision. TTL pruning and both generic and specific dequeue
@@ -1074,3 +1253,24 @@ ceiling is 0.2 DGB per setup transaction, at most two transactions per command.
 See [automatic pool setup](digidollar-paymaster-pool-setup.md) for waiting states,
 unsigned cancellation, fee changes, and recovery of a previously saved but
 unregistered DGB transaction.
+
+## Guided operator API additions
+
+`getpaymasteroperatorinfo.provider.active_operations` is an additive projection
+of nonfinal maintenance journal records, with kind, plan/operation ID, timestamps,
+state, optional transaction ID, actual/max fees and confirmations/required confirmations.
+A record without a transaction is pending creation, never a confirmation claim.
+Liquidity exposes `maintenance_fee_planned_satoshis` and
+`maintenance_fee_broadcast_satoshis`; their sum retains the existing
+`maintenance_fee_reserved_satoshis` meaning. Confirmed costs remain separate.
+
+`preparepaymasterpool` optionally accepts `preview_policy` using the existing
+provider-policy schema. This preview can precede identity creation, writes no
+settings or preparation authorization and cannot be combined with execute,
+cancel or plan_id. Its calculation is shared with executable preparation.
+
+`startpaymaster` optionally accepts `{"wait_for_readiness":true}` and returns
+`start_requested`. It preserves autostart and all readiness/budget checks. The
+one-time intent ends on successful start, pause, wallet unload or node restart.
+Omitting the option preserves immediate-start behavior. A release-slot preview
+is permitted while running; execution still requires a stopped provider.

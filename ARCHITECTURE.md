@@ -8,6 +8,14 @@
 
 ## Paymaster architecture in this branch
 
+The [Qt flow audit](doc/design/paymaster-flow-audit.md) binds modal approvals and
+unlock continuations to the wallet generation, keeps live request arguments
+stable, and treats session-list failures separately from an empty wallet.
+Unsigned fallback continues only after a fresh Core capability check; a lost
+first reply is reconciled by UUID. Explicitly initiated alternative recovery
+also advances its bound preparation and accepted signature through bounded
+polling; restored sessions remain read-only. These changes add no durable journal.
+
 Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
 releases the original payment lease after durable preparation so the separate
 recovery lease can use the default single outgoing slot. Expected Capacity
@@ -16,10 +24,82 @@ exact request binding retained. `senddigidollar` forwards explicit transport
 retries, including the authorized-submit path, without renewing financial
 authority. See [current verification](doc/digidollar-paymaster-connection-capacity.md#current-verification-status).
 
+The Qt operator presentation uses three destinations: Operation, Activity &
+finances, and Settings. Settings owns Offer, Spending limits, Automation &
+reserves and Connection & wallet. The overview derives a human-readable next
+action from the existing read-only operator snapshot; unknown data cannot grant
+start authority. The serialized RPC lifecycle shows an explicit reading/busy
+state with indeterminate activity, current check and elapsed loading time until
+all queued status callbacks finish, even if an intermediate snapshot already
+reports local readiness. Its display timer makes no additional RPC calls. Disclosures reorganize presentation only.
+Start/resume and persistent pause controls are consolidated at the top of
+Operation; technical details provide diagnostics without alternate runtime
+controls. Core financial policies, persistence, protocol and the shared Qt/CLI
+setup controller remain
+authoritative. See the [operator guide](doc/digidollar-paymaster-operator.md)
+and [UI design contract](doc/design/paymaster-operator-ux.md).
+
 The v9.26.6rc2 integration keeps the provider panel in
 `src/qt/paymasterwidget.cpp`, behind a small embedding interface. The concrete
 `PaymasterSendWidget` owns fee selection and client-session presentation while
 the original send form retains its editable inputs and ordinary transfer path.
+The saved-session inbox exposes loading progress and concrete read failures;
+manual retries report repeated errors, while automatic startup reads stay inline.
+The ownership query distinguishes a proven unsigned FAILED session's historical
+inputs from reservations validated against a later active client owner. It
+changes no reservation, lock or persisted session. Ambiguous authorization,
+recovery and inconsistent owner bindings continue to fail closed.
+The normal Send view distinguishes an explicit read-only check of locally known
+offers from automatic peer discovery and the live payment workflow. The visible
+idle compose view also rereads the local directory every ten seconds, with
+coalescing and stale-input/wallet guards; background failures remain inline.
+Directory reads are timestamped; local expiry invalidates previews without
+network traffic. Signed announcements can outlive a stopped provider until
+600 seconds after creation. Qt distinguishes list updates from live reachability
+and reports endpoint/proxy and secure-connection failures without generic
+balance advice; failures retain the authoritative session-refresh path. The preview separates a prominent public-offer result/checkmark from
+secondary timing and preparation text. A local spinner animates only while the
+pending check is visible and privacy mode is off. It performs no RPC work.
+The checkmark means directory matches were found, without claiming
+fee/privacy/transport eligibility. New requests in explicit Paymaster mode
+require a current, nonempty preview; empty, pending, failed or expired checks
+keep preparation disabled. Own DGB requires a positive cached spendable DGB
+balance. Automatic requires either that balance or a current offer: it labels
+the action Send payment with own DGB, otherwise Prepare payment. The latter
+freezes Paymaster-only funding in the request template and cannot authorize a
+direct spend. Balance notifications update the controls. These compose gates
+do not prove exact fee-input sufficiency or provider reachability; Core checks
+both. Existing-session actions remain independent of the compose gate.
+Monetary labels show DD once, while RPC amounts remain integer cents. The client
+edits its absolute fee ceiling in DD and sees an informational percentage of the
+recipient amount. Provider settings/setup retain the percentage tariff with a
+local DD example computed by Core's integer fee helper, including cent rounding.
+Examples and effective percentages never change authorization or policy.
+Canceling exact-offer approval requests Core-verified unsigned closure
+and returns to the retained compose inputs only after safe closure is proven.
+Malformed review details never count as user cancellation. A complete exact offer
+has a local countdown bound to Core's expiry; expiration disables approval and
+starts a fresh Core capability check for unsigned closure. Live-send errors use
+the same check; session-database read failures retain a specific inline diagnosis
+and only refresh status, without automatic cancellation. Closure is attempted at most once, then read back even after a
+lost response. A signature, missing capability or unverified state retains the
+protected session. A confirmed unsigned closure preserves compose inputs and
+shows its reason inline without chained error dialogs.
+During an explicitly initiated live send, Qt retains the exact RPC parameters
+in memory and advances the same request through asynchronous connection and
+quote preparation, including the queued-quote portion of
+`AWAITING_USER_SIGNATURE`. Explicit Paymaster preparation starts from one named
+button; the directory check cannot itself start a payment. Automatic funding with
+own DGB retains its initial confirmation because it may spend DGB directly. The exact
+fee/signature confirmation remains mandatory.
+After approval, continuation requires the same commitment and a verified signed
+artifact. It ends on error, cancel, wallet change, submission or a two-minute
+local deadline. Restored sessions and subsequent confirmation polling remain
+observation-only; the timer never adds transport retry or recovery authority.
+The client also accepts a recipientless unsigned cancellation when Core proves
+terminal failure without an attempt, artifact, reservation or recovery need.
+A read-only refresh recovers a lost cancellation response and allows a fresh
+form; a generic FAILED state never grants this permission.
 Paymaster record codecs remain `WalletBatch` methods in `wallet/paymasterdb.cpp`;
 `PaymasterStore` still owns atomic state transitions. Free functions in
 `wallet/rpc/paymaster_send.cpp` isolate the existing send RPC integration without
@@ -1326,7 +1406,9 @@ finite-budget maintenance only when configured targets remain missing
   30 seconds, in addition to startup and chain-tip notifications. Expired
   unsigned quotes and Capacity reservations are therefore released through the
   atomic store paths even when no further Paymaster RPC arrives and no block is
-  connected.
+  connected. Client expiry releases the matching in-memory coin locks only
+  after committing removal of the durable reservations and persistent locks;
+  failed writes or commits retain the locks.
 - A successful provider commit registers the exact wallet-owned carrier return
   and sufficiently large DGB change as provenance-bound pending successors.
   Confirmation makes them available; reorg or conflict returns them to a safe
@@ -1715,6 +1797,12 @@ Finite Paymaster pool setup now uses the existing wallet maintenance journal and
 saved before transaction creation; confirmed-input funding avoids stempool-only
 change dependencies. See [automatic pool setup](doc/digidollar-paymaster-pool-setup.md)
 for fee authorization, V3/V4 persistence compatibility, and legacy adoption.
+The shared operator diagnostics also interpret pending finite setup records:
+funding, fee checks, policy changes and confirmation waits are shown separately
+from unknown failures. Qt displays those records and lets the operator explicitly
+cancel a wholly uncreated plan and review a new bounded fee ceiling. Core retains
+all signature, cancellation, fee and persistence authority; presentation changes
+do not modify the journal or transaction construction rules.
 
 ## Paymaster operator workflow (feature candidate, 2026-09-27)
 
@@ -1731,3 +1819,35 @@ bounded Direct diagnostic using existing fresh-work quotas. External reports
 are historical operator evidence and confer no payment or identity assurance.
 There is no consensus, wire-protocol or wallet-format change. See the
 [operator guide and open acceptance](doc/digidollar-paymaster-operator.md).
+
+## Paymaster guided operator tasks
+
+The Qt provider panel has Operation, Activity & finances and Settings.
+Provider-wallet backup controls live only in Settings / Connection & wallet;
+the Operation reminder navigates there, and Finances has no duplicate panel.
+`src/qt/paymasteroperation.h` owns wallet-generation-bound phases, current operation
+observations and approved funding-scope comparisons; the widget renders that
+state and adapts the existing RPC transport. Core maintenance journals remain
+the authority for financial continuation and idempotence. Under the provider
+work guard, the automatic runtime releases obsolete unsigned recurring refill
+plans when confirmed targets are satisfied, after wallet-transaction recovery.
+This does not cancel explicit setup jobs or committed transactions. `getpaymasteroperatorinfo`
+adds active operations, actual confirmation counts and planned/broadcast fee
+reservations; ordinary polling does not load financial history. Visible active
+tasks poll at two seconds, idle status at ten seconds, with one request in flight.
+Background status reads retain the recent validated presentation without showing
+the initial loading panel again. Initial reads and recovery after invalidation
+still show loading; mutations remain guarded during an outstanding RPC.
+
+`preparepaymasterpool` accepts `preview_policy` for a read-only proposed-policy
+preview before identity/configuration creation. It shares the executable funding
+calculation and cannot be executed or combined with a saved plan. Qt compares
+the subsequent executable preview with approved capital, targets and maximum
+fees; expansion requires renewed consent. Existing identities, limits and journals
+remain authoritative.
+
+`startpaymaster({"wait_for_readiness":true})` records a volatile wallet/provider-bound
+intent in Manager. Readiness and existing spending checks still apply. Completion
+consumes it; StopProvider, wallet unload and node shutdown remove it. Saved
+autostart is not changed by this request. Setup retains the pre-existing autostart
+choice and grants no new recurring spending authority without approval.

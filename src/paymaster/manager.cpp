@@ -1638,13 +1638,31 @@ bool Manager::CompleteProviderStart(const std::string& wallet_name,
         !m_running_providers.emplace(wallet_name, provider_id).second) {
         return false;
     }
+    m_requested_provider_starts.erase(wallet_name);
     return true;
+}
+
+bool Manager::RequestProviderStart(const std::string& wallet_name, const PaymasterId& provider_id)
+{
+    LOCK(m_provider_mutex);
+    const auto work = m_provider_work.find(wallet_name);
+    if (!Enabled() || provider_id.IsNull() || work == m_provider_work.end() || work->second != provider_id) return false;
+    m_requested_provider_starts[wallet_name] = provider_id;
+    return true;
+}
+
+bool Manager::HasRequestedProviderStart(const std::string& wallet_name, const PaymasterId& provider_id) const
+{
+    LOCK(m_provider_mutex);
+    const auto requested = m_requested_provider_starts.find(wallet_name);
+    return requested != m_requested_provider_starts.end() && requested->second == provider_id;
 }
 
 void Manager::StopProvider(const std::string& wallet_name)
 {
     LOCK(m_provider_mutex);
     m_running_providers.erase(wallet_name);
+    m_requested_provider_starts.erase(wallet_name);
     m_provider_service_status[wallet_name] =
         ProviderServiceStatus{ProviderServiceState::STOPPED, {}};
 }

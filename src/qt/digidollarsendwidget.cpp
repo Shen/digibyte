@@ -649,6 +649,11 @@ void DigiDollarSendWidget::onSendClicked()
         }
     }
 
+    if (m_paymaster->isBusy() || !m_paymaster->hasFeeFundingCandidate()) {
+        updateSendButton();
+        return;
+    }
+
     // PHASE 7.3: Wallet state validation
     if (!checkWalletState()) {
         return; // Error already displayed by checkWalletState()
@@ -664,8 +669,16 @@ void DigiDollarSendWidget::onSendClicked()
         }
         // The legacy direct path stays synchronous and keeps its unlock only
         // for local transaction creation/signing.
+        if (!m_walletModel || !m_paymaster->hasOwnDgbForFees()) {
+            updateSendButton();
+            return;
+        }
         WalletModel::UnlockContext ctx(m_walletModel->requestUnlock());
         if (!ctx.isValid()) return;
+        if (!m_paymaster->hasOwnDgbForFees()) {
+            updateSendButton();
+            return;
+        }
         executeTransfer(address, amount);
     }
 }
@@ -728,6 +741,7 @@ void DigiDollarSendWidget::updateSendButton()
     // creates the action buttons. Fee-mode updates during that construction
     // phase must not dereference the not-yet-created send button.
     if (!m_sendButton) return;
+    m_sendButton->setText(m_paymaster->preparesPaymasterPayment() ? tr("Prepare payment") : tr("Send payment"));
 
     bool addressValid = validateAddress();
     bool amountValid = validateAmount();
@@ -735,8 +749,9 @@ void DigiDollarSendWidget::updateSendButton()
     const bool paymaster_ready = !m_paymaster->paymasterModeSelected() ||
         (m_paymaster->isReady());
 
+    const bool funding_ready = m_paymaster->hasFeeFundingCandidate();
     m_sendButton->setEnabled(!m_paymaster->isBusy() && addressValid && amountValid &&
-                             balanceValid && paymaster_ready);
+                             balanceValid && paymaster_ready && funding_ready);
     if (m_paymaster->isBusy()) {
         m_sendButton->setToolTip(tr("A Paymaster request is currently being processed"));
     } else if (!addressValid) {
@@ -747,12 +762,22 @@ void DigiDollarSendWidget::updateSendButton()
         m_sendButton->setToolTip(tr(
             "Insufficient spendable DigiDollar: this wallet currently has %1 available. A Paymaster supplies only the DGB network fee, not the DigiDollar being sent.")
             .arg(formatDDAmount(m_availableBalance)));
+    } else if (m_paymaster->paymasterModeSelected() && !m_paymaster->sessionDiscoveryReady()) {
+        m_sendButton->setToolTip(tr("Read the saved Paymaster transfers successfully before preparing another payment."));
     } else if (m_paymaster->paymasterModeSelected() && !paymaster_ready) {
         m_sendButton->setToolTip(m_paymaster->safetyStatusKnown()
             ? tr("Set positive wallet-local Paymaster service-fee limits before sending")
             : tr("Waiting for the wallet's Paymaster service-fee limits"));
+    } else if (!funding_ready) {
+        m_sendButton->setToolTip(!m_paymaster->paymasterModeSelected()
+            ? tr("No spendable DGB for the network fee. Add DGB or select Paymaster funding.")
+            : m_paymaster->paymasterOnlySelected()
+                ? tr("Wait for a current Paymaster offer or check offers again. Preparation becomes available automatically when an offer is found.")
+                : tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically."));
     } else {
-        m_sendButton->setToolTip(tr("Confirm and send this DigiDollar transaction"));
+        m_sendButton->setToolTip(m_paymaster->preparesPaymasterPayment()
+            ? tr("Contact a provider and verify the exact offer. Preparation may temporarily reserve $DD; you approve the provider and fee before signing.")
+            : tr("Confirm and send this DigiDollar transaction"));
     }
 }
 
@@ -911,8 +936,8 @@ void DigiDollarSendWidget::executeTransfer(const QString& address, double amount
     // Close progress dialog
     progress.close();
 
-    // Re-enable UI
-    m_sendButton->setEnabled(true);
+    // Restore the current funding gate instead of unconditionally enabling Send.
+    updateSendButton();
     m_addressEdit->setEnabled(true);
     m_amountEdit->setEnabled(true);
     m_clearButton->setEnabled(true);
@@ -1502,9 +1527,16 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
     if (m_walletModel != model) {
         if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
         ++m_oraclePriceRequestGeneration;
+        if (model) {
+            connect(model, &WalletModel::balanceChanged, this, [this] {
+                m_paymaster->updateFeeDisplay();
+                updateSendButton();
+            });
+        }
     }
     m_walletModel = model;
     m_paymaster->setWalletModel(model);
+    updateSendButton();
 }
 
 DigiDollarSendWidget::PaymentInput DigiDollarSendWidget::paymentInput() const

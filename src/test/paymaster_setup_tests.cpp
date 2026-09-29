@@ -46,7 +46,7 @@ BOOST_AUTO_TEST_CASE(finite_profiles_do_not_authorize_maintenance)
     const auto safety = SetupDefaultSafety(20000000, true, false, false);
     BOOST_CHECK_EQUAL(safety.find_value("public_sponsored").find_value("maximum_network_fee_per_day_satoshis").getInt<int64_t>(), 0);
 }
-BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_never_autostarts)
+BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_preserves_saved_autostart)
 {
     auto snapshot = Snapshot();
     auto provider = snapshot.find_value("provider");
@@ -60,9 +60,11 @@ BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_never_autostarts)
     BOOST_CHECK(plan.front().params[0].find_value("persistent").isTrue());
     BOOST_CHECK(plan.front().params[0].find_value("pause_setup").isTrue());
     BOOST_CHECK_EQUAL(plan.back().method, "setpaymasterenabled");
-    BOOST_CHECK(plan[plan.size() - 2].params[0].find_value("autostart").isFalse());
+    BOOST_CHECK(plan[plan.size() - 2].params[0].find_value("autostart").isTrue());
     for (const auto& step : plan)
         BOOST_CHECK(step.method != "createpaymasteridentity" && step.method != "startpaymaster");
+    const auto fresh = BuildSetupPlan(Snapshot(), Choices());
+    BOOST_CHECK(fresh[fresh.size() - 2].params[0].find_value("autostart").isFalse());
 }
 BOOST_AUTO_TEST_CASE(reload_and_incomplete_state_fail_before_writes)
 {

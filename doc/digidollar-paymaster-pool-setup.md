@@ -115,6 +115,34 @@ An outstanding matching approval keeps its original plan ID and fee total; use
 that ID for the retry. This does not grant a new approval or create another set
 of slots. A changed request or provider policy cannot inherit the old approval.
 
+In Qt, **Operating capital** shows the active finite preparation steps and their
+last diagnostics. A pending setup is distinct from recurring refill; the operator
+overview uses the step diagnostic instead of treating
+`PAYMASTER_POOL_PREPARATION_PENDING` as an unknown service failure.
+`waiting_for_readiness` does not imply that autostart is enabled: it can also
+occur after an explicit provider start.
+
+For `PAYMASTER_POOL_FEE_LIMIT`, inspect the approved setup ceiling and the
+optional `diagnostic` text, which identifies the estimated/signed/saved fee and
+its approved limit. `PAYMASTER_POOL_FEE_INVALID` and
+`PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED` instead require diagnostic review;
+increasing the approved ceiling does not resolve those checks. Older binaries
+used the fee-limit code for all three conditions, so an old fee-limit record
+alone does not prove that a higher ceiling will help. The next execution check
+updates its diagnostic while preserving the approved limit. `pending_creation` with no transaction ID means that no transaction
+has been saved for that step. Changing the recurring refill budget does not
+change a previously approved finite setup.
+
+Qt offers **Cancel uncreated pool preparation…** only when the current pool
+snapshot describes a single wholly uncreated plan. The confirmation revokes that
+plan's unsigned steps through the existing RPC. Core reconciles first and retains
+any transaction saved concurrently. Afterwards, the manual preparation section
+allows reviewing **Maximum fee per setup transaction (DGB)** and a new preview.
+The field starts at 0.20 DGB; editing it neither changes old approvals nor moves
+funds, and invalidates any earlier preview. Execution requires explicit approval
+of the new preview. Unknown diagnostics and saved/conflicted transactions remain
+subject to diagnostic review; no timeout authorizes replacement.
+
 A provider-policy change pauses execution with `PAYMASTER_POOL_POLICY_CHANGED`.
 Unknown versions, unreadable records, ambiguous transaction matches and invalid
 fees fail closed. No signature or reservation is discarded on a timeout.
@@ -227,3 +255,20 @@ cases and nine functional scenarios; see the
 [workflow review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).
 This supersedes the initial absence of runtime evidence for that candidate,
 but does not verify the later client integration package or close release gates.
+
+
+## Guided Qt preparation and current progress
+
+The normal provider Operation page now loads the funding preview inside
+Restore reserves. One review authorizes only missing capital and the displayed
+maximum setup fees; existing and pending reserves are included. An optional
+start-when-ready does not change saved autostart. Manual Preview/Execute
+controls remain under advanced settings.
+
+Initial Qt setup uses the same Core calculation with a read-only
+proposed-policy preview before saving configuration. Its preview-only plan
+cannot execute. A later executable preview must stay within the reviewed
+capital, targets and fee bounds, otherwise Qt requires renewed approval.
+Core journals own all accepted continuation; closing the GUI does not revoke
+it. Pausing stops new signatures, while already saved transactions remain
+visible and can confirm. See the [operator guide](digidollar-paymaster-operator.md#guided-daily-tasks).

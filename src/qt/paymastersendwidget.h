@@ -8,6 +8,9 @@
 #include <qt/paymasterconfirmation.h>
 #include <qt/walletmodel.h>
 
+#include <univalue.h>
+
+#include <QElapsedTimer>
 #include <QWidget>
 #include <QStringList>
 #include <cstdint>
@@ -22,7 +25,10 @@ class QFrame;
 class QGridLayout;
 class QLabel;
 class QPushButton;
+class QHideEvent;
+class QShowEvent;
 class QRadioButton;
+class QProgressBar;
 class QResizeEvent;
 class QSpinBox;
 class QTableWidget;
@@ -43,11 +49,17 @@ public:
     void beginSweep();
     void setPrivacy(bool privacy);
     bool isBusy() const { return m_paymasterBusy; }
-    bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured; }
+    bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured && m_sessionDiscoveryReady; }
+    bool sessionDiscoveryReady() const { return m_sessionDiscoveryReady; }
     bool safetyStatusKnown() const { return m_clientSafetyStatusKnown; }
+    bool hasCurrentPaymasterOffer() const;
+    bool hasOwnDgbForFees() const;
+    bool preparesPaymasterPayment() const;
+    bool hasFeeFundingCandidate() const;
     bool subtractFee() const;
     static bool DescribeBackendError(const QString& reasonFailed, QString& title, QString& message);
     bool paymasterModeSelected() const;
+    bool paymasterOnlySelected() const;
     void invalidatePaymasterOfferPreview();
     void updateFeeDisplay();
     bool showConfirmationDialog(const QString& address, double amount);
@@ -79,6 +91,8 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
     void updateFeeChoiceLayout();
@@ -93,16 +107,24 @@ private:
     void updateClientSafetyDisplay();
     void reportPaymasterOperationNotStarted(
         const QString& reason);
-    void discoverPersistedPaymasterSessions();
+    void discoverPersistedPaymasterSessions(bool user_requested = false);
     Q_SLOT void loadSelectedPersistedPaymasterSession();
     void activatePersistedPaymasterSession(
         const QString& request_id);
+    enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, STALE, FAILED, NEEDS_AMOUNT };
+    void setOfferCheckStatus(OfferCheckState state, const QString& text);
+    void updateOfferCheckControls();
+    void updateOfferCheckIcon();
+    void renderOfferSpinner();
+    Q_SLOT void pollPaymasterOffers();
+    void requestPaymasterOffers(bool background);
+    Q_SLOT void expirePaymasterOfferPreview();
     Q_SLOT void refreshPaymasterOffers();
     UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
     void executePaymasterRpcAsync(
         std::string command, UniValue params, WalletModel::RpcCallback callback);
     void executePaymasterTransfer(
-        const QString& address, CAmount amount_cents, bool allow_unlock);
+        const QString& address, CAmount amount_cents, bool allow_unlock, bool retry_transport = false);
     void handlePaymasterResult(const UniValue& result, const QString& error,
                                const QString& address, CAmount amount_cents);
     bool updatePaymasterSessionView(
@@ -111,8 +133,10 @@ private:
         const UniValue& result);
     PaymasterConfirmationSelection paymasterConfirmationSelection(
         const UniValue& result, const QString& address) const;
-    bool confirmPaymasterSelectionBeforeSigning(
+    enum class OfferReviewResult { ACCEPTED, CANCELED, EXPIRED, BLOCKED };
+    OfferReviewResult confirmPaymasterSelectionBeforeSigning(
         const UniValue& result, const QString& address);
+    bool canContinueActivePaymasterSend() const;
     Q_SLOT void pollPaymasterSession();
     Q_SLOT void refreshPaymasterSessionState();
     void stopPaymasterPolling();
@@ -123,6 +147,10 @@ private:
     Q_SLOT void fallbackPaymasterSession();
     Q_SLOT void recoverPaymasterSessionToSelf();
     Q_SLOT void abandonUnsignedPaymasterSession();
+    void cancelUnsignedPaymasterSession(bool confirm);
+    void clearUnsignedPaymasterSession();
+    void closeUnusablePaymasterOffer(const QString& reason, bool allow_cancel = true);
+    void setPaymasterNotice(const QString& text);
     UniValue buildAlternativePaymasterRecoveryParams() const;
     void executeAlternativePaymasterRecovery(bool allow_unlock);
     PaymasterRecoveryConfirmationSelection paymasterRecoveryConfirmationSelection(
@@ -146,6 +174,8 @@ private:
     WalletModel* m_walletModel{nullptr};
     bool m_privacy{false};
     // Fee section
+    QLabel* m_paymasterNotice{nullptr};
+    QString m_paymasterClosureReason;
     QFrame* m_feeFrame{nullptr};
     QGridLayout* m_feeLayout{nullptr};
     QLabel* m_feeHeading{nullptr};
@@ -172,11 +202,19 @@ private:
     QComboBox* m_privacyCombo{nullptr};
     QComboBox* m_selectionCombo{nullptr};
     QSpinBox* m_feeCapSpin{nullptr};
+    QLabel* m_feeCapPercent{nullptr};
     QSpinBox* m_maxAttemptsSpin{nullptr};
     QPushButton* m_refreshOffersButton{nullptr};
     QLabel* m_offersStatus{nullptr};
+    QLabel* m_offersUpdated{nullptr};
+    QLabel* m_offerCheckHelp{nullptr};
     QTableWidget* m_offersTable{nullptr};
     QFrame* m_persistedPaymasterSessionsFrame{nullptr};
+    QLabel* m_persistedSessionsStatus{nullptr};
+    QLabel* m_sessionDiscoveryError{nullptr};
+    QProgressBar* m_sessionDiscoveryProgress{nullptr};
+    bool m_sessionDiscoveryReady{false};
+    bool m_sessionDiscoveryPending{false};
     QComboBox* m_persistedPaymasterSessions{nullptr};
     QPushButton* m_loadPersistedPaymasterSessionButton{nullptr};
     QFrame* m_clientSafetyFrame{nullptr};
@@ -202,6 +240,10 @@ private:
     QFrame* m_paymasterTechnicalDetails{nullptr};
 
     double m_paymasterInitialAvailableBalance{0.0};
+    UniValue m_paymasterActiveRecoveryParams;
+    QElapsedTimer m_paymasterActiveRecoveryStarted;
+    UniValue m_paymasterSendTemplate;
+    UniValue m_paymasterRestoredOptions{UniValue::VOBJ};
     QString m_paymasterRequestId;
     QString m_paymasterSessionId;
     QString m_paymasterSessionState;
@@ -232,6 +274,8 @@ private:
     qint64 m_paymasterRecoveryMaximumServiceFeeCents{0};
     bool m_paymasterBusy{false};
     bool m_paymasterSessionPersisted{false};
+    bool m_paymasterUnsignedClosed{false};
+    bool m_paymasterOfferReadyForReview{false};
     bool m_paymasterRecoveryActive{false};
     enum class PaymasterPrimaryAction {
         REFRESH,
@@ -260,6 +304,18 @@ private:
     PaymasterAsyncRpcExecutorForTesting m_paymasterAsyncRpcExecutorForTesting;
     PaymasterConfirmationGuard m_paymasterConfirmationGuard;
     PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;
+    // Only the request explicitly started in this wallet view may advance on
+    // the timer. Restored sessions have no continuation or signing authority.
+    UniValue m_paymasterActiveSendParams;
+    QElapsedTimer m_paymasterActiveSendStarted;
+    static constexpr int MAX_PAYMASTER_ACTIVE_SEND_MS{120000};
+    QFrame* m_offerCheckFrame{nullptr};
+    QLabel* m_offerStateIcon{nullptr};
+    QTimer* m_offerIconTimer{nullptr};
+    int m_offerIconFrame{0};
+    QTimer* m_offerExpiryTimer{nullptr};
+    OfferCheckState m_offerCheckState{OfferCheckState::NOT_CHECKED};
+    QString m_paymasterTransportState;
 
 };
 

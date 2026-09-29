@@ -1733,6 +1733,14 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
                     error = "PAYMASTER_DATABASE_COMMIT";
                     return false;
                 }
+                // The database reservation and persistent lock are gone only
+                // after commit. Release the matching process-local lock too,
+                // otherwise the next send fails until the wallet is reloaded.
+                if (!other_live_attempt) {
+                    for (const COutPoint& outpoint : session.user_inputs) {
+                        m_wallet.UnlockCoin(outpoint);
+                    }
+                }
                 ++expired_quotes;
                 break;
             }

@@ -35,9 +35,14 @@ public:
     virtual void setLiquidityPoolForTesting(const UniValue& pool_info) = 0;
     virtual void setLiquidityStatusForTesting(const UniValue& status) = 0;
     virtual void setMutationSnapshotsAvailableForTesting(bool provider_info, bool provider_safety, bool liquidity) = 0;
+    virtual void setOperatorStatusForTesting(const UniValue& status) = 0;
     virtual void setReadinessStatusForTesting(const UniValue& status) = 0;
     virtual void setRpcExecutorForTesting(RpcExecutor executor) = 0;
     virtual void setStartResultForTesting(const UniValue& result) = 0;
+
+    using RpcCallback = std::function<void(UniValue, QString)>;
+    using AsyncRpcExecutor = std::function<void(const std::string&, const UniValue&, RpcCallback)>;
+    virtual void setAsyncRpcExecutorForTesting(AsyncRpcExecutor executor) = 0;
 };
 
 /** The returned panel is owned by its Qt parent. */

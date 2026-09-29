@@ -72,10 +72,13 @@ RPCHelpMan startpaymaster()
         "Start normal Paymaster provider operation after all readiness gates pass. "
         "When safety limits are exhausted, a non-announcing drain-only runtime "
         "is started only if durable quotes or signatures still require exact completion.\n",
-        {},
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Start options", {
+            {"wait_for_readiness", RPCArg::Type::BOOL, RPCArg::Default{false}, "Keep a one-shot start request until ready during this wallet load; does not enable autostart or approve spending"},
+        }}},
         RPCResult{RPCResult::Type::OBJ, "", "Provider runtime result", {
                                                                            {RPCResult::Type::BOOL, "running", "Whether the provider is now online"},
                                                                            {RPCResult::Type::BOOL, "ready", "Whether every readiness gate passed"},
+                                                                           {RPCResult::Type::BOOL, "start_requested", "An explicit start is waiting for readiness"},
                                                                            {RPCResult::Type::BOOL, "drain_only", "Whether only durable existing work may be completed"},
                                                                            {RPCResult::Type::STR, "operation_mode", "automatic or manual"},
                                                                            {RPCResult::Type::BOOL, "autostart", "Whether optional provider autostart is enabled"},
@@ -97,6 +100,12 @@ RPCHelpMan startpaymaster()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            bool wait_for_readiness{false};
+            if (!request.params[0].isNull()) {
+                const auto& options = request.params[0].get_obj();
+                RPCTypeCheckObj(options, {{"wait_for_readiness", UniValueType(UniValue::VBOOL)}}, true, true);
+                wait_for_readiness = options.find_value("wait_for_readiness").isTrue();
+            }
             const bool automatic_autostart =
                 request.strMethod == INTERNAL_PAYMASTER_AUTOSTART_METHOD;
             if (automatic_autostart) {
@@ -133,6 +142,12 @@ RPCHelpMan startpaymaster()
             }
             const ProviderReadiness readiness =
                 GetProviderReadiness(*wallet, context, !automatic_autostart);
+            if (wait_for_readiness) {
+                if (!readiness.have_settings || !readiness.settings.enabled || !readiness.wallet_eligible ||
+                    !start_guard || !context.paymaster->RequestProviderStart(wallet->GetName(), readiness.identity.provider_id)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_START_REQUEST_NOT_ACCEPTED");
+                }
+            }
             bool running{false};
             bool drain_work{false};
             if (!readiness.identity.provider_id.IsNull()) {
@@ -233,6 +248,9 @@ RPCHelpMan startpaymaster()
                 }
             }
             UniValue result{UniValue::VOBJ};
+            const bool start_requested = context.paymaster &&
+                context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id);
+            result.pushKV("start_requested", start_requested);
             result.pushKV("running", running);
             result.pushKV("ready", readiness.ready);
             result.pushKV("drain_only", drain_only && running);
@@ -254,9 +272,9 @@ RPCHelpMan startpaymaster()
                 } else {
                     service_state = ProviderServiceState::ACTIVE;
                 }
-            } else if (readiness.settings.autostart && wallet->IsLocked()) {
+            } else if ((readiness.settings.autostart || start_requested) && wallet->IsLocked()) {
                 service_state = ProviderServiceState::WAITING_FOR_UNLOCK;
-            } else if (readiness.settings.autostart && !readiness.ready) {
+            } else if ((readiness.settings.autostart || start_requested) && !readiness.ready) {
                 service_state = ProviderServiceState::WAITING_FOR_READINESS;
             }
             if (!running && context.paymaster) {
@@ -367,7 +385,7 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     bool running = manager->IsProviderRunning(wallet.GetName(),
                                               identity.provider_id);
     if (!running) {
-        if (!settings.autostart) {
+        if (!settings.autostart && !manager->HasRequestedProviderStart(wallet.GetName(), identity.provider_id)) {
             manager->SetProviderServiceStatus(wallet.GetName(),
                                               ProviderServiceState::STOPPED);
             return;
@@ -506,6 +524,21 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                 operational_dgb.ready >= liquidity_policy.target_operational_dgb &&
                 admission_carriers.ready >= liquidity_policy.target_admission_carriers &&
                 operational_carriers.ready >= liquidity_policy.target_operational_carriers;
+            // A successor or explicit preparation can satisfy a target after
+            // a recurring refill was planned. Close only unsigned obsolete jobs
+            // under this work guard, after recovering any lost transaction reply.
+            std::string cleanup_error;
+            if (liquidity.errors.empty() && !ReleaseSatisfiedProviderReplenishment(
+                    wallet,
+                    admission_dgb.ready >= liquidity_policy.target_admission_dgb &&
+                        operational_dgb.ready >= liquidity_policy.target_operational_dgb,
+                    admission_carriers.ready >= liquidity_policy.target_admission_carriers &&
+                        operational_carriers.ready >= liquidity_policy.target_operational_carriers,
+                    cleanup_error)) {
+                manager->SetProviderServiceStatus(wallet.GetName(), ProviderServiceState::WAITING_FOR_READINESS,
+                                                  StableProviderServiceError(cleanup_error));
+                return;
+            }
             if (!targets_satisfy_provider_policy) {
                 // A zero operational carrier target can be a deliberate result of
                 // release_slot. It is valid to persist, but automatic maintenance

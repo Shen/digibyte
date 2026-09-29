@@ -56,7 +56,7 @@ QT_END_NAMESPACE
  * DigiDollar send widget for sending DD to other addresses.
  * This widget provides functionality to send DigiDollar with proper
  * address validation and fee calculation. Paymaster sends use a two-stage
- * workflow: preparation may discover an offer, but only a second prompt for
+ * workflow: preparation may discover an offer, but only explicit approval of
  * the exact Core-provided commitment can authorize wallet signing.
  */
 class DigiDollarSendWidget : public QWidget

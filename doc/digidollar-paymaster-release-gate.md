@@ -1,5 +1,23 @@
 # DigiDollar Paymaster V1 release gate
 
+The [subsequent Qt flow audit](design/paymaster-flow-audit.md) adds regression
+coverage for fallback, lost replies, discovery failures, modal wallet changes
+and delayed provider-startup status reads.
+Its targeted checks do not close the full-build or real-payment acceptance gates.
+
+**Qt navigation candidate (2026-09-28):** `feature/paymaster-ux-navigation`
+changes operator presentation on top of integrated RC2 `cac8e521e7`. Its
+[design and verification](design/paymaster-operator-ux.md) are separate from the
+older evidence below. A full current-revision build, full Qt regression and
+an interactive walkthrough remain operator gates; no release approval follows
+from the clickable preview. Targeted compilation/linking and twelve selected
+Qt cases passed. Two general dropdown-theme assertions also fail with the
+original RC2 styles; the linked verification records this open baseline issue.
+The subsequent client fixes cover live preparation, offer-check visibility and
+recipientless unsigned cancellation. Their targeted evidence is recorded in
+the same design document; it does not replace a full current-source build or
+the actual two-node regtest payment walkthrough.
+
 **Operator-workflow feature candidate (2026-09-27):**
 `feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
 [shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). On September 28,
@@ -454,3 +472,25 @@ therefore green across these two operator runs. The latest integrated
 3,742 other cases were excluded by the filter. Both functional runner invocations
 passed all 18 framework unit tests. Qt, compatibility and Tor/load gates remain
 open; this completes the selected regression group, not the release matrix.
+
+### Client review-cancellation follow-up (2026-09-28)
+
+The [GUI flow audit](design/paymaster-flow-audit.md#follow-up-leaving-exact-offer-review-and-late-discovery-2026-09-28)
+records safe return to payment settings after explicit cancellation and automatic
+local-directory preview updates. The follow-up passes 53 selected Qt scenarios
+with newly compiled units and a linked GUI/test executable. A full build, the
+complete regression suites and a new operator-run two-node test remain open;
+this evidence does not establish immediate P2P discovery or release readiness.
+
+
+## Guided provider revision (2026-09-29)
+
+Three-area navigation, guided financial tasks, proposed-policy read-only preview
+and volatile start-when-ready are a new candidate. Earlier release-gate passes
+do not cover these changes. Targeted compilation, 63 Qt data cases and 11 shared
+setup unit cases pass locally. The operator reported passing pool, RPC,
+lifecycle and readiness regtests. After correcting wallet loading in its restart
+fixture, the operator regtest passed locally (11 seconds, exit code 0). These
+separate targeted runs do not replace full-build evidence or the complete release
+matrix. Use the commands
+and success criteria in [the current test runbook](digidollar-paymaster-testing.md#guided-provider-tasks-current-acceptance-2026-09-29).
