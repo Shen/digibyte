@@ -26,6 +26,8 @@
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
@@ -1756,9 +1758,10 @@ public:
         connection_layout->addWidget(connection_help);
         auto* configure_node = new QPushButton(tr("Review node connection…"), connection_column);
         auto* unlock_operation = new QPushButton(tr("Unlock wallet for operation…"), connection_column);
+        unlock_operation->setObjectName("paymasterUnlockOperation");
         auto* import_check = new QPushButton(tr("Import external check…"), connection_column);
         configure_node->setToolTip(tr("Review listener, endpoint and configuration changes before saving. Saved node changes require an explicit restart."));
-        unlock_operation->setToolTip(tr("Unlock applies to the whole wallet for the duration you choose. It is not renewed automatically."));
+        unlock_operation->setToolTip(tr("Choose continuous operation until manual lock or restart, or a timed wallet-wide unlock. No passphrase is saved."));
         import_check->setToolTip(tr("Run checkpaymasterendpoint on your independent node, then import its report. No payment or identity verification is implied."));
         for (auto* button : {configure_node, unlock_operation, import_check})
             connection_layout->addWidget(button, 0, Qt::AlignLeft);
@@ -3465,6 +3468,11 @@ public:
                 [this] { showOperatorPage(m_safety_page); });
         connect(m_overview_liquidity_action, &QPushButton::clicked, this,
                 [this] {
+                    if (m_operator_next_action == QLatin1String("wait") &&
+                        (m_operator_next_area == QLatin1String("payments") || m_operator_next_area == QLatin1String("liquidity"))) {
+                        performOperatorNextAction();
+                        return;
+                    }
                     if (maintenanceFeeLimitExceeded()) {
                         reviewMaintenanceFeeLimit();
                         return;
@@ -8230,7 +8238,7 @@ private:
             button = ready ? tr("Start provider…") : tr("Resume provider…");
         } else if (action == QLatin1String("unlock") || action == QLatin1String("review_unlock")) {
             headline = locked ? tr("Waiting for wallet unlock") : tr("Wallet will lock soon");
-            hint = tr("Choose how long to unlock this wallet. Access applies to the whole wallet and is not extended automatically.");
+            hint = tr("Choose continuous operation until manual lock or restart, or a timed unlock. Access applies to the whole wallet; the passphrase is never saved.");
             button = tr("Unlock wallet…");
         } else if (action == QLatin1String("wait")) {
             headline = area == QLatin1String("liquidity") ? tr("Waiting for confirmations") : tr("Waiting for the node");
@@ -8279,6 +8287,33 @@ private:
                 button = tr("Review pool preparation");
             }
         }
+        // A reserved payment slot is not a failed provider or proof of a
+        // broadcast maintenance transaction. Keep all overview text consistent
+        // with the same current snapshot, without weakening error precedence.
+        const auto& service_error = provider.find_value("last_service_error");
+        const bool capacity_wait = action == QLatin1String("wait") && area == QLatin1String("liquidity") &&
+            running && state == QLatin1String("waiting_for_liquidity_confirmation") &&
+            service_error.isStr() && service_error.get_str() == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING" &&
+            preparation_details.isEmpty();
+        if (capacity_wait) {
+            const auto& reserved = provider.find_value("pool").find_value("reserved");
+            const bool payment_in_progress = reserved.isNum() && reserved.getInt<int64_t>() > 0;
+            if (payment_in_progress) {
+                area = QStringLiteral("payments");
+                headline = tr("Payment in progress");
+                hint = tr("Operating capital is reserved for an ongoing payment. Core continues automatically as the payment progresses or the reservation is released. No action is needed here.");
+                button = tr("View payment activity");
+                setStatusLabel(m_overview_liquidity_status, tr("In use · capacity is reserved for a payment"), QStringLiteral("waiting"));
+                m_status->setText(tr("Provider running — payment capacity is temporarily in use."));
+            } else {
+                headline = tr("Waiting for reserve confirmations");
+                hint = tr("Reserve outputs are waiting for blockchain confirmation. Core continues automatically when they are confirmed. No new approval is needed.");
+                button = tr("View progress");
+                setStatusLabel(m_overview_liquidity_status, tr("Waiting · reserves need blockchain confirmation"), QStringLiteral("waiting"));
+                m_status->setText(tr("Provider running — waiting for reserve confirmations."));
+            }
+            m_overview_liquidity_action->setText(tr("View progress"));
+        }
         if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
         m_operator_next_action = action;
         m_operator_next_area = area;
@@ -8296,7 +8331,10 @@ private:
         if (!m_operator_report.isNull()) m_operator_connection->setText(local + tr(" · Imported external observation: %1 (historical)").arg(QDateTime::fromSecsSinceEpoch(m_operator_report.find_value("observed_at").getInt<int64_t>(), Qt::UTC).toString(Qt::ISODate)));
         QString wallet = locked ? tr("Wallet: locked") : tr("Wallet: unlocked");
         const auto& until = snapshot.find_value("unlocked_until");
-        if (!locked && until.isNum() && until.getInt<int64_t>() > 0) wallet += tr(" until %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(until.getInt<int64_t>()), QLocale::ShortFormat));
+        if (!locked && until.isNum() && until.getInt<int64_t>() == -1)
+            wallet += tr(" · Continuous operation until manual lock or node restart");
+        else if (!locked && until.isNum() && until.getInt<int64_t>() > 0)
+            wallet += tr(" until %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(until.getInt<int64_t>()), QLocale::ShortFormat));
         const auto& backup = provider.find_value("backup_status").find_value("required");
         wallet += !backup.isBool() ? tr(" · Backup reminder: unknown") : backup.isTrue() ? tr(" · Full-wallet backup recommended") :
                                                                                            tr(" · No pending backup reminder");
@@ -8361,9 +8399,12 @@ private:
             if (m_operation.phase == PaymasterOperationController::Phase::Blocked) m_task_continue->click();
             else if (m_operation.phase == PaymasterOperationController::Phase::Waiting) m_task_card->setFocus();
             else beginGuidedTask("preparepaymasterpool", !m_core_running);
-        } else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("liquidity"))
-            m_task_card->setFocus();
-        else if (action == QLatin1String("configure_node") || action == QLatin1String("wait")) {
+        } else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("payments"))
+            showOperatorPage(m_activity_page);
+        else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("liquidity")) {
+            if (m_task_card->isHidden()) showOperatorPage(m_liquidity_page);
+            else m_task_card->setFocus();
+        } else if (action == QLatin1String("configure_node") || action == QLatin1String("wait")) {
             showOperatorPage(m_connection_page);
             if (auto* toggle = findChild<QPushButton*>(QStringLiteral("paymasterPrerequisitesToggle"))) toggle->setChecked(true);
         } else if (action == QLatin1String("activity"))
@@ -8512,18 +8553,53 @@ private:
              });
     }
 
-    void unlockOperatorWallet()
+    void unlockOperatorWallet(std::function<void()> on_unlocked = {})
     {
-        if (m_privacy || m_busy || !hasRpcTransport()) return;
+        // The reviewed setup may request operating access from its final RPC
+        // handler. All resulting calls still use the serialized handler queue.
+        if (m_privacy || (m_busy && !(on_unlocked && m_rpc_handler_depth > 0)) || !hasRpcTransport()) return;
         const auto generation = m_wallet_generation;
-        call("getpaymasteroperatorinfo", {}, false, nullptr, [this, generation](const UniValue& current) {
-            if (!current.find_value("provider").find_value("wallet_locked").isTrue()) {
-                showPlainTextWarning(this, tr("Wallet already unlocked"), tr("The current unlock duration is unchanged. Lock the wallet first if you want to choose a new operating unlock."));
+        call("getpaymasteroperatorinfo", {}, false, nullptr, [this, generation, on_unlocked](const UniValue& current) {
+            if (!current.find_value("encrypted").isBool()) return;
+            if (!current.find_value("encrypted").isTrue()) {
+                if (on_unlocked) on_unlocked();
+                else refreshOperatorStatus();
                 return;
             }
+            // Continuing an already approved operating lease needs no second
+            // password. The explicit Unlock action can still replace its mode.
+            if (on_unlocked && !current.find_value("provider").find_value("wallet_locked").isTrue() &&
+                current.find_value("unlocked_until").isNum() && current.find_value("unlocked_until").getInt<int64_t>() == -1) {
+                on_unlocked();
+                return;
+            }
+            QDialog review(this);
+            review.setObjectName("paymasterOperatingUnlockDialog");
+            review.setWindowTitle(tr("Unlock provider wallet"));
+            auto* layout = new QFormLayout(&review);
+            auto* explanation = new QLabel(tr("This unlocks the entire selected wallet. The passphrase is not saved. After a node restart or wallet reload, enter it again. Paymaster spending limits remain unchanged."), &review);
+            explanation->setWordWrap(true);
+            layout->addRow(explanation);
+            auto* mode = new QComboBox(&review);
+            mode->setObjectName("paymasterOperatingUnlockMode");
+            mode->addItem(tr("Continuous operation — until manual lock or node restart"));
+            mode->addItem(tr("Timed unlock"));
+            layout->addRow(tr("Operating access:"), mode);
+            auto* seconds = new QSpinBox(&review);
+            seconds->setObjectName("paymasterOperatingUnlockSeconds");
+            seconds->setRange(60, 86400);
+            seconds->setValue(3600);
+            seconds->setSuffix(tr(" seconds"));
+            seconds->setEnabled(false);
+            connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), &review, [seconds](int index) { seconds->setEnabled(index == 1); });
+            layout->addRow(tr("Duration:"), seconds);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &review);
+            buttons->button(QDialogButtonBox::Ok)->setText(tr("Continue to unlock…"));
+            layout->addRow(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &review, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &review, &QDialog::reject);
+            if (review.exec() != QDialog::Accepted || generation != m_wallet_generation || m_privacy) return;
             bool ok{false};
-            const int seconds = QInputDialog::getInt(this, tr("Operating unlock"), tr("Wallet-wide unlock duration in seconds. No automatic extension; after restart unlock manually."), 3600, 60, 86400, 60, &ok);
-            if (!ok) return;
             QString pass = QInputDialog::getText(this, tr("Unlock provider wallet"), tr("Wallet passphrase (not stored)"), QLineEdit::Password, {}, &ok);
             if (!ok || generation != m_wallet_generation || m_privacy) {
                 pass.fill(QChar{});
@@ -8531,9 +8607,13 @@ private:
             }
             UniValue params{UniValue::VARR};
             params.push_back(pass.toStdString());
-            params.push_back(seconds);
+            params.push_back(mode->currentIndex() == 0 ? 0 : seconds->value());
+            params.push_back(mode->currentIndex() == 0);
             pass.fill(QChar{});
-            call("walletpassphrase", params, false, nullptr, [this](const UniValue&) { refreshOperatorStatus(); });
+            call("walletpassphrase", params, false, nullptr, [this, on_unlocked](const UniValue&) {
+                if (on_unlocked) on_unlocked();
+                else refreshOperatorStatus();
+            });
         });
     }
 
@@ -11478,7 +11558,10 @@ private:
                         m_operation.generation = m_wallet_generation;
                         m_operation.accepted();
                         renderCurrentTask();
-                        if (*setup_start_requested) requestReviewedStart();
+                        if (*setup_start_requested) {
+                            if (current.find_value("encrypted").isTrue()) unlockOperatorWallet([this] { requestReviewedStart(); });
+                            else requestReviewedStart();
+                        }
                         if (m_setup_waiting_for_confirmations) {
                             completion_text += QStringLiteral("\n\n") + tr("Waiting for approved pool preparation or blockchain confirmations. Check funding and unlock status under Operation.");
                         }

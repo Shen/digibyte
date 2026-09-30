@@ -3,6 +3,8 @@
 #include <boost/test/unit_test.hpp>
 #include <paymaster/setup.h>
 #include <stdexcept>
+#include <sstream>
+#include <algorithm>
 
 using namespace DigiDollar::Paymaster;
 namespace {
@@ -45,6 +47,95 @@ BOOST_AUTO_TEST_CASE(finite_profiles_do_not_authorize_maintenance)
     BOOST_CHECK_EQUAL(SetupDefaultLiquidity(false).find_value("target_operational_carriers").getInt<int>(), 0);
     const auto safety = SetupDefaultSafety(20000000, true, false, false);
     BOOST_CHECK_EQUAL(safety.find_value("public_sponsored").find_value("maximum_network_fee_per_day_satoshis").getInt<int64_t>(), 0);
+}
+BOOST_AUTO_TEST_CASE(cli_proposals_support_continuous_operation_without_overwriting_saved_limits)
+{
+    const auto snapshot = Snapshot();
+    const auto defaults = SetupCliDefaults(snapshot);
+    BOOST_CHECK(defaults.enabled);
+    BOOST_REQUIRE(defaults.autostart.has_value());
+    BOOST_CHECK(*defaults.autostart);
+    BOOST_CHECK_EQUAL(defaults.operation_mode, "automatic");
+    BOOST_CHECK(defaults.liquidity.find_value("automatic_replenishment").isTrue());
+    BOOST_CHECK(defaults.liquidity.find_value("paid_maintenance_approved").isTrue());
+    BOOST_CHECK_EQUAL(defaults.pool.find_value("maximum_fee_satoshis").getInt<int64_t>(), 50000000);
+    BOOST_CHECK_EQUAL(defaults.liquidity.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>(), 50000000);
+    BOOST_CHECK(SetupMatches(snapshot, Snapshot())); // A proposal has no side effects.
+    auto saved = snapshot;
+    auto provider = saved.find_value("provider");
+    provider.pushKV("settings_present", true);
+    provider.pushKV("operation_mode", "manual");
+    provider.pushKV("autostart", false);
+    provider.pushKV("enabled", false);
+    auto policy = defaults.policy;
+    policy.pushKV("fee_rate_bps", 120);
+    provider.pushKV("policy", policy);
+    auto liquidity = SetupDefaultLiquidity(true);
+    liquidity.pushKV("maximum_maintenance_fee_per_transaction_satoshis", 1234567);
+    UniValue liquidity_status{UniValue::VOBJ};
+    liquidity_status.pushKV("policy_configured", true);
+    liquidity_status.pushKV("policy", liquidity);
+    provider.pushKV("liquidity", liquidity_status);
+    saved.pushKV("provider", provider);
+    UniValue safety{UniValue::VOBJ};
+    auto limits = defaults.safety;
+    auto paid = limits.find_value("user_paid");
+    paid.pushKV("maximum_network_fee_per_day_satoshis", int64_t{9007199254740993});
+    limits.pushKV("user_paid", paid);
+    safety.pushKV("policy", limits);
+    saved.pushKV("safety", safety);
+    const auto retained = SetupCliDefaults(saved);
+    BOOST_CHECK(!retained.enabled && !*retained.autostart);
+    BOOST_CHECK_EQUAL(retained.operation_mode, "manual");
+    BOOST_CHECK(SetupMatches(retained.policy, policy));
+    BOOST_CHECK(SetupMatches(retained.safety, limits));
+    BOOST_CHECK(SetupMatches(retained.liquidity, liquidity));
+    const auto plan = BuildSetupPlan(snapshot, defaults);
+    BOOST_CHECK(plan[plan.size() - 2].params[0].find_value("autostart").isTrue());
+    auto declined = defaults;
+    declined.autostart = false;
+    const auto without_autostart = BuildSetupPlan(snapshot, declined);
+    BOOST_CHECK(without_autostart[without_autostart.size() - 2].params[0].find_value("autostart").isFalse());
+}
+BOOST_AUTO_TEST_CASE(cli_menus_retry_and_confirmation_never_approves_an_empty_answer)
+{
+    const std::vector<SetupMenuItem> items{{"automatic", "Automatic", "Processes requests without manual queue steps."}, {"manual", "Manual", "Requires explicit queue processing."}};
+    std::ostringstream output;
+    std::istringstream defaults{"?\nbad selection\n\n"};
+    BOOST_CHECK_EQUAL(SetupSelect(defaults, output, "Processing", items, "automatic"), "automatic");
+    BOOST_CHECK(output.str().find("earlier choices are retained") != std::string::npos);
+    std::istringstream number{"2\n"};
+    BOOST_CHECK_EQUAL(SetupSelect(number, output, "Processing", items, "automatic"), "manual");
+    std::istringstream named{" AUTOMATIC \n"};
+    BOOST_CHECK_EQUAL(SetupSelect(named, output, "Processing", items, "manual"), "automatic");
+    std::istringstream blank{"\n"}, typo{"yess\nno\n"}, approve{"yes\n"}, eof;
+    BOOST_CHECK(!SetupConfirm(blank, output, "Apply"));
+    BOOST_CHECK(!SetupConfirm(typo, output, "Apply"));
+    BOOST_CHECK(SetupConfirm(approve, output, "Apply"));
+    BOOST_CHECK_THROW(SetupConfirm(eof, output, "Apply"), std::runtime_error);
+    BOOST_CHECK_THROW(SetupSelect(eof, output, "Processing", items, "automatic"), std::runtime_error);
+}
+BOOST_AUTO_TEST_CASE(cli_currency_and_percentage_inputs_are_exact_and_retry_invalid_values)
+{
+    const auto field = [](const std::string& key) -> SetupField {
+        const auto& fields = SetupFields();
+        return *std::find_if(fields.begin(), fields.end(), [&](const auto& item) { return item.key == key; });
+    };
+    std::ostringstream output;
+    std::istringstream dd{"1.001\n0.99\n1,25\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(dd, output, field("min_amount_cents"), 100), 125);
+    std::istringstream fee{"0.55\n0.60\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(fee, output, field("fee_rate_bps"), 50), 60);
+    std::istringstream dgb{"1e2\n1,000.00\n-1\n0.000000001\n0.00000001\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(dgb, output, field("maximum_fee_satoshis"), 50000000), 1);
+    std::istringstream exact{"90071992.54740993\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(exact, output, field("maximum_fee_satoshis"), 50000000), int64_t{9007199254740993});
+    BOOST_CHECK_EQUAL(SetupFormatNumber(9007199254740993, 8), "90071992.54740993");
+    std::istringstream ttl{"61\n0\n60\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(ttl, output, field("quote_ttl"), 60), 60);
+    std::istringstream slots{"17\n2\n3\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(slots, output, field("target_admission_dgb"), 3), 3);
+    BOOST_CHECK(output.str().find("Please try again") != std::string::npos);
 }
 BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_preserves_saved_autostart)
 {
@@ -148,6 +239,119 @@ BOOST_AUTO_TEST_CASE(unknown_errors_and_disabled_index_are_not_waiting_success)
     BOOST_CHECK_EQUAL(diagnostics[1].find_value("state").get_str(), "error");
     BOOST_CHECK_EQUAL(diagnostics[1].find_value("code").get_str(), "FUTURE_DIAGNOSTIC");
     BOOST_CHECK_EQUAL(diagnostics[2].find_value("action").get_str(), "review_unlock");
+}
+BOOST_AUTO_TEST_CASE(operator_distinguishes_capacity_wait_from_errors)
+{
+    auto provider = Snapshot().find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "waiting_for_liquidity_confirmation");
+    provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    UniValue errors{UniValue::VARR};
+    errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    provider.pushKV("readiness_errors", errors);
+    auto diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "waiting");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "wait");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("severity").get_str(), "info");
+
+    // A known wait must not mask unrelated errors or grant readiness.
+    errors.push_back("PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+    provider.pushKV("readiness_errors", errors);
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    errors = UniValue{UniValue::VARR};
+    errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    provider.pushKV("readiness_errors", errors);
+    provider.pushKV("service_state", "error");
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    provider.pushKV("service_state", "waiting_for_liquidity_confirmation");
+    provider.pushKV("running", false);
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    provider.pushKV("running", true);
+    provider.pushKV("last_service_error", "PAYMASTER_FUTURE_CONFIRMATION_ERROR");
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+
+    for (const auto* reason : {"PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED", "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"}) {
+        provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+        provider.pushKV("last_service_error", reason);
+        provider.pushKV("service_state", "waiting_for_maintenance_approval");
+        diagnostics = OperatorDiagnostics(provider, 0, 100);
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_budget");
+    }
+}
+BOOST_AUTO_TEST_CASE(setup_waits_for_funding_confirmations_and_actual_start)
+{
+    auto snapshot = Snapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("enabled", true);
+    provider.pushKV("service_state", "waiting_for_readiness");
+    UniValue work{UniValue::VARR}, step{UniValue::VOBJ};
+    step.pushKV("state", "pending_creation");
+    step.pushKV("error", "PAYMASTER_POOL_WAITING_FUNDS: insufficient DD");
+    work.push_back(step);
+    provider.pushKV("active_operations", work);
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("diagnostics", UniValue{UniValue::VARR});
+    auto progress = InspectSetupProgress(snapshot, true);
+    BOOST_CHECK(!progress.complete && !progress.blocked);
+    BOOST_CHECK(progress.message.find("incoming") != std::string::npos);
+    // Old journal lock/disable reasons can outlive an explicit unlock/enable
+    // until Core's next pass. They must not terminate the funding monitor.
+    for (const auto* stale : {"PAYMASTER_WALLET_LOCKED", "PAYMASTER_PROVIDER_DISABLED"}) {
+        step.pushKV("error", stale);
+        work = UniValue{UniValue::VARR};
+        work.push_back(step);
+        provider.pushKV("active_operations", work);
+        snapshot.pushKV("provider", provider);
+        progress = InspectSetupProgress(snapshot, true);
+        BOOST_CHECK(!progress.complete && !progress.blocked && !progress.needs_unlock);
+    }
+    provider.pushKV("enabled", false);
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(InspectSetupProgress(snapshot, true).blocked);
+    provider.pushKV("enabled", true);
+    step.pushKV("state", "pending_confirmation");
+    step.pushKV("error", "");
+    step.pushKV("confirmations", 0);
+    step.pushKV("required_confirmations", 1);
+    work = UniValue{UniValue::VARR}; work.push_back(step);
+    provider.pushKV("active_operations", work);
+    snapshot.pushKV("provider", provider);
+    progress = InspectSetupProgress(snapshot, true);
+    BOOST_CHECK(!progress.complete && !progress.blocked);
+    BOOST_CHECK(progress.message.find("0/1") != std::string::npos);
+    step.pushKV("required_confirmations", 0);
+    work = UniValue{UniValue::VARR};
+    work.push_back(step);
+    provider.pushKV("active_operations", work);
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK_THROW(InspectSetupProgress(snapshot, true), std::runtime_error);
+    step.pushKV("required_confirmations", 1);
+    step.pushKV("error", "PAYMASTER_POOL_FEE_LIMIT");
+    work = UniValue{UniValue::VARR}; work.push_back(step);
+    provider.pushKV("active_operations", work);
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(InspectSetupProgress(snapshot, true).blocked);
+    provider.pushKV("active_operations", UniValue{UniValue::VARR});
+    provider.pushKV("ready", true);
+    provider.pushKV("pool_ready", true);
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(!InspectSetupProgress(snapshot, true).complete);
+    BOOST_CHECK(InspectSetupProgress(snapshot, false).complete);
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "active");
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(InspectSetupProgress(snapshot, true).complete);
+    provider.pushKV("wallet_locked", true);
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(InspectSetupProgress(snapshot, true).needs_unlock);
+    BOOST_CHECK(!InspectSetupProgress(snapshot, true).complete);
+    provider.pushKV("service_state", "future_state");
+    snapshot.pushKV("provider", provider);
+    BOOST_CHECK(InspectSetupProgress(snapshot, true).blocked);
 }
 BOOST_AUTO_TEST_CASE(pool_preview_must_be_complete_before_approval)
 {

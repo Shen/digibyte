@@ -1,5 +1,32 @@
 # DigiByte Core v9.26.6 release notes
 
+## Unreleased integration follow-up
+
+Configured Paymaster wallets can explicitly select continuous wallet-wide
+operating unlock until manual lock, wallet unload or node shutdown. GUI and CLI
+setup preselect this choice; timed access remains available. Passwords are never
+stored, encrypted wallets still require manual unlock after restart, and existing
+wallets receive no automatic unlock or additional spending authorization.
+The optional third `walletpassphrase` argument `paymaster_until_shutdown=true`
+requires timeout zero; `unlocked_until=-1` reports this volatile mode.
+
+CLI setup can optionally generate separate DGB/DD receiving addresses and watch
+incoming funding, approved reserve preparation and confirmations. A requested
+one-time start is verified before setup reports completion. Autostart remains
+separate. Ordinary payment-capacity waits now receive a waiting explanation
+instead of an error headline.
+
+The CLI assistant now explains each choice in seven stages, accepts exact DGB,
+DD and percentage inputs, retries invalid input in place and reviews readable
+budgets. New providers propose automatic operation, bounded paid refill and
+autostart; saved settings remain preselected for existing wallets. Explicit-yes
+approval is still required, and encrypted wallets still need manual unlock after
+restart. Repeated unchanged funding status is condensed into a heartbeat.
+
+These working-branch changes are outside the published RC2 change counts and do
+not move a release tag. Verification and remaining operator checks are recorded
+in [the Paymaster test guide](doc/digidollar-paymaster-testing.md).
+
 ## RC2 — second release candidate
 
 RC2 adds the changes below to RC1. The code change list covers source through

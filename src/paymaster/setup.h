@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
+#include <optional>
 #include <string>
 #include <univalue.h>
 #include <vector>
@@ -24,6 +26,14 @@ int64_t SetupFundingFee(const UniValue& snapshot);
 bool SetupMatches(const UniValue& expected, const UniValue& actual);
 UniValue SetupSafetyBridge(const UniValue& previous, const UniValue& target, int64_t previous_fee, int64_t target_fee);
 UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, int64_t now);
+struct SetupProgress {
+    bool complete{false};
+    bool needs_unlock{false};
+    bool blocked{false};
+    std::string message;
+};
+/** Read-only setup completion; balances never substitute for Core readiness. */
+SetupProgress InspectSetupProgress(const UniValue& snapshot, bool require_running);
 std::string OperatorSummary(const UniValue& snapshot);
 std::string OperatorAmount(int64_t satoshis);
 int64_t OperatorRemaining(int64_t limit, int64_t spent, int64_t reserved);
@@ -35,7 +45,26 @@ struct SetupChoices {
     UniValue pool{UniValue::VOBJ};
     std::string operation_mode{"automatic"};
     bool enabled{true};
+    // Empty preserves saved autostart (the GUI contract). CLI reviews a choice.
+    std::optional<bool> autostart;
 };
+/** Proposed CLI defaults only: callers must obtain explicit approval to apply. */
+SetupChoices SetupCliDefaults(const UniValue& snapshot);
+struct SetupMenuItem {
+    std::string value, title, explanation;
+};
+struct SetupField {
+    std::string key, title, explanation, unit;
+    int decimals;
+    int64_t minimum, maximum, increment{1};
+};
+const std::vector<SetupField>& SetupFields();
+std::string SetupFormatNumber(int64_t value, int decimals);
+std::string SetupPrompt(std::istream& input, std::ostream& output, const std::string& label, const std::string& current = {});
+std::string SetupSelect(std::istream& input, std::ostream& output, const std::string& label, const std::vector<SetupMenuItem>& items, const std::string& current);
+bool SetupConfirm(std::istream& input, std::ostream& output, const std::string& label);
+int64_t SetupReadNumber(std::istream& input, std::ostream& output, const SetupField& field, int64_t current);
+
 struct SetupStep {
     std::string method;
     UniValue params{UniValue::VARR};

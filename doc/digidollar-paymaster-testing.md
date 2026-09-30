@@ -747,3 +747,169 @@ corrections: 176 passed, 0 failed, 0 skipped and 0 blacklisted in 430,893 ms.
 The two failures from the prior run are resolved. Other Qt suites were excluded
 by the intentional suite filter; this result does not represent a full-repository
 test run. Rebuilding the application remains a separate step.
+
+### Payment-capacity wait presentation (2026-09-30)
+
+The provider scheduler uses `PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING` while
+payment capacity is reserved as well as while successor reserves await
+confirmation. `OperatorDiagnostics` previously classified this scheduler reason
+as an error, so ordinary payments showed **Status needs review**. The shared
+mapping now treats it as informational only for a running provider in the
+matching service state. Unknown errors still take priority.
+
+Qt distinguishes **Payment in progress** (reserved capacity) from **Waiting for
+reserve confirmations**, with matching header/capital copy and read-only next
+actions. A progress action without a visible task opens the reserves view rather
+than focusing a hidden card. Maintenance approval, budget and target-configuration
+reasons keep actionable diagnoses. No readiness, spending or journal rules change.
+
+Verification: targeted MSVC compilation/linking succeeded; all 12
+`paymaster_setup_tests` cases and 67 assertions passed. The selected Qt groups
+`paymasterOperatorOverviewGuidesAndFailsClosed`, `paymasterPoolPreparationDiagnostics`
+and `paymasterOperatorDelayedStartup` passed (20 cases, plus per-run init/cleanup).
+Coverage includes actual Core diagnostics, reserved capacity, confirmations,
+unknown-error precedence, no unintended mutation, and existing privacy/loading
+checks. `git diff --check` passed. Existing non-fatal stylesheet icon-property
+warnings remain. The running application was not replaced or rebuilt.
+
+Operator follow-up, from `D:\Digibyte\digibyte-fork`, with the existing VS/Qt/vcpkg
+installation: run the Windows incremental Release build in this guide's guided
+provider verification block. Allow several minutes; success is MSBuild exit 0.
+No project regeneration is needed for this change. After restarting the built
+wallet, check a payment through offer review, submission and reserve confirmation.
+A full test-suite run is not claimed for this follow-up.
+
+### Provider operating unlock and CLI funding (2026-09-30)
+
+The optional `walletpassphrase` operating mode is restricted to an eligible
+wallet with a saved provider identity, settings and policy. GUI/CLI operating
+prompts preselect continuous access; the password still needs explicit entry.
+Timed access, manual locking, wallet unload and node restart remain independently
+tested. Existing wallets receive no silent unlock or extra spending authority.
+
+The shared `InspectSetupProgress` monitor distinguishes incoming funding,
+confirmed reserves, blocked fee/policy requirements and actual provider start.
+Old journal lock/disable observations do not override the current wallet state.
+The CLI requests DD balances with `minconf=0` so incoming unconfirmed DD is
+visible while Core continues to require confirmed usable inputs.
+
+Focused coverage:
+
+- `paymaster_setup_tests`: funding/confirmation/start completion, stale journal
+  reasons, disabled providers, malformed confirmation counters and fee limits.
+- Qt `paymasterOperatingUnlock`: default continuous choice, timed access,
+  cancellation, privacy and wallet changes in both review/password dialogs.
+- Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`: the encrypted-start
+  row completes the assistant and verifies operating unlock before the one-shot
+  start request, including the serialized RPC-handler continuation.
+- `wallet_paymaster_operator.py`: ordinary-wallet rejection, CLI boolean
+  conversion, superseded timers, wrong passwords, manual/timed relock, unload
+  and node restart. The restart fixture reconnects its RPC and P2P links.
+- `wallet_paymaster_pool_setup.py`: missing funding, encrypted-wallet waits,
+  confirmed incoming funding, continuous unlock, deferred start, no readiness
+  before reserve confirmation, and running/ready completion without changing
+  autostart or duplicating the approved plan.
+- `wallet_encryption.py`: ordinary legacy and descriptor wallet behavior.
+
+Local verification on 2026-09-30: targeted MSVC compilation/linking passed.
+All 13 `paymaster_setup_tests` cases / 82 assertions passed. The selected Qt operating-unlock,
+guided-setup, overview, pool-diagnostics, delayed-startup and guided-setup-theme
+groups passed 31 cases (43 including per-run init/cleanup), with no
+failures or skips. Existing non-fatal table icon-property QWARNs remain.
+The functional run passed provider operator (19 s), pool setup (16 s), ordinary
+legacy encryption (9 s) and descriptor encryption (9 s), plus 18 framework
+unit tests. After adding the explicit third-argument CLI conversion assertion,
+the operator test passed again (22 s). Python syntax, PowerShell example parsing
+and `git diff --check` passed. These focused checks do not constitute a full
+build, the complete Qt suite, or a real-terminal CLI funding walkthrough.
+
+Full Windows build and the complete Qt suite remain operator checks. From
+`D:\Digibyte\digibyte-fork`, use the existing VS/MSVC 14.43, Qt 5.15.10 and static
+vcpkg installation. No new source-list generation is needed for this change.
+Allow several minutes for the incremental solution build; require exit code 0:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+```
+
+Then run the complete Paymaster Qt suite and focused functional matrix (minutes;
+require no failures/unexpected skips). These commands point at the same newly
+built binaries and create isolated test wallets:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:QT_FORCE_STDERR_LOGGING = '1'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE -ErrorAction SilentlyContinue
+}
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+python test/functional/test_runner.py wallet_paymaster_operator.py wallet_paymaster_pool_setup.py wallet_encryption.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Operating unlock/funding regtests failed' }
+```
+
+Manual terminal acceptance remains separate from the RPC/model tests. In an
+isolated regtest setup, run `digibyte-cli -regtest -rpcwallet=<provider>
+-paymastersetup` in an actual terminal (add the test node's datadir/RPC options).
+Choose `addresses`, approve the desired one-shot start and select continuous
+operating access. Fund the two displayed addresses from a separate test wallet;
+observe partial/unconfirmed balances, then confirm funding and reserve creation.
+Require the same saved plan throughout and a final running/ready status. Repeat
+with `watch`, declined start, a timed unlock that expires while waiting, and a
+fee limit too small to create reserves. Closing the monitor must not create a
+second plan or erase accepted work. After reload/restart the encrypted wallet
+must be locked. No real operator funds are needed for these checks.
+
+### CLI setup guidance and continuous-operation proposals (2026-09-30)
+
+The console now has seven named stages, explained numbered choices, `?` help,
+retryable numeric input and DGB/DD/percentage formatting. New providers propose
+automatic processing, autostart and finite paid-refill budgets; saved selections
+remain intact. GUI setup continues to preserve its saved autostart contract.
+Configuration and exact pool funding each retain explicit review: pressing Enter
+at an approval prompt declines, regardless of the preceding menu selection.
+
+Focused coverage in `paymaster_setup_tests` includes pure new-provider proposals,
+exact preservation of existing limits above double precision, explicit autostart
+selection, invalid menus, blank/EOF confirmations, DD and percentage precision,
+DGB decimal-comma input, rejected exponents/grouped amounts and numeric bounds.
+
+Verification for this CLI follow-up: targeted MSVC compilation/linking passed;
+16 setup unit cases with 115 assertions passed. The Qt guided-setup and operating-
+unlock groups passed 10 cases (14 including init/cleanup), no failures or skips.
+The operator functional test passed in 22 seconds, along with all 18 framework
+unit tests. These checks cover helpers, shared setup and RPC integration; they do
+not substitute for the complete interactive terminal walkthrough.
+
+After the Windows build command in the preceding section, rerun the shared model
+checks from the repository root (seconds; require exit code 0):
+
+```powershell
+.\build_msvc\x64\Release\test_digibyte.exe --run_test=paymaster_setup_tests --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'CLI setup unit tests failed' }
+```
+
+For terminal acceptance, use the isolated regtest instructions above. In addition:
+
+- Follow all seven stages with a new provider; verify the selected continuous-
+  operation proposals and the separate payment/refill/setup ceilings. Empty
+  approval must not apply configuration or pool funding.
+- Enter `?`, an invalid menu number, an invalid DD fraction and a decimal-comma
+  amount. Earlier valid choices must remain intact while the prompt repeats.
+- Review an existing provider with autostart/refill off and customized limits;
+  the saved values must be preselected. The existing-provider menu defaults to
+  read-only status. Restricted sponsorship must stay restricted when editing
+  unrelated offer amounts, including a mixed customer-paid/restricted offer.
+- Verify the funding monitor reports changes immediately and a heartbeat every
+  ten seconds while polling Core every two seconds, without flooding the screen.
+- Distinguish a one-time start request from saved autostart. Continuous operating
+  access still requires manual password entry after a node restart.

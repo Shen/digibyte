@@ -1838,6 +1838,12 @@ tasks poll at two seconds, idle status at ten seconds, with one request in fligh
 Background status reads retain the recent validated presentation without showing
 the initial loading panel again. Initial reads and recovery after invalidation
 still show loading; mutations remain guarded during an outstanding RPC.
+`OperatorDiagnostics` classifies the running scheduler's explicit liquidity
+confirmation wait as informational, not an unknown service error. The Qt
+snapshot distinguishes reserved payment capacity from reserve confirmation
+waits and keeps the header, next action and capital summary consistent.
+Unexpected errors still override these waits; this presentation changes no
+readiness checks, spending limits, reservations or transaction handling.
 
 `preparepaymasterpool` accepts `preview_policy` for a read-only proposed-policy
 preview before identity/configuration creation. It shares the executable funding
@@ -1851,3 +1857,33 @@ intent in Manager. Readiness and existing spending checks still apply. Completio
 consumes it; StopProvider, wallet unload and node shutdown remove it. Saved
 autostart is not changed by this request. Setup retains the pre-existing autostart
 choice and grants no new recurring spending authority without approval.
+
+### Paymaster operating unlock and CLI funding continuation
+
+`walletpassphrase` accepts an optional `paymaster_until_shutdown` boolean
+(default false, requires timeout zero). It validates a configured provider wallet
+before using the volatile `nRelockTime = -1` sentinel; no relock timer is created.
+Old timed callbacks compare their deadline and cannot expire this operating
+lease. Explicit lock, wallet unload and node shutdown still remove the key.
+Ordinary timed unlocks retain their behavior. This is wallet-wide access, not a
+Paymaster-only signing boundary. GUI/CLI operating prompts select continuous
+access by default but require fresh explicit password approval; secrets and
+unlock state are not persisted.
+
+CLI setup optionally generates asset-specific receiving addresses and monitors
+funding through existing balance and operator RPCs. The shared read-only
+`InspectSetupProgress` model checks journal states, real confirmation counts,
+local readiness and an optionally requested actual start. No balance alone
+completes setup. Wallet generation checks bind the monitor and password prompt;
+reconciliation of a lost start reply does not repeat the start mutation.
+
+CLI presentation uses the stream-based `SetupSelect`, `SetupConfirm` and
+`SetupReadNumber` helpers in `paymaster/setup.cpp`. Menus and exact decimal-unit
+conversion are testable without an RPC transport. Field explanations and bounds
+map user DGB/DD/percent input to the existing integer RPC fields. Core validation
+remains authoritative. `SetupCliDefaults` builds proposals for new continuous
+providers and overlays complete saved values for existing wallets; it performs
+no mutations. `SetupChoices::autostart` is optional: the existing GUI leaves it
+empty to retain saved behavior, while CLI applies the explicitly reviewed choice
+through the existing ordered runtime-settings step. Financial confirmation
+remains a separate explicit-yes boundary; empty/default input never approves it.

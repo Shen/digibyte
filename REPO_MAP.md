@@ -228,6 +228,9 @@ forwards explicit `retry_transport` requests without changing financial authorit
 - Standalone utility that loads and validates the blockchain database without full node functionality
 
 ### src/digibyte-cli.cpp
+- Paymaster setup: seven guided stages, explained selections and human currency
+  units, reviewed 24/7 defaults for new providers, preserved saved settings and
+  bounded funding/start monitoring; shared form logic lives in `paymaster/setup`.
 - Command-line RPC client that sends JSON-RPC requests to a running digibyted node
 
 ### src/digibyted.cpp
@@ -1954,6 +1957,10 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 
 ### src/wallet/rpc/*.cpp
 - `addresses.cpp`, `backup.cpp`, `coins.cpp`, `encrypt.cpp`, `signmessage.cpp`, `spend.cpp`, `transactions.cpp`, `util.cpp`, `wallet.cpp` → modular wallet RPC command groups
+- `encrypt.cpp` → `walletpassphrase` retains ordinary timed semantics; its optional
+  Paymaster operating mode requires saved provider configuration and lasts only
+  until manual lock, unload or shutdown. `wallet.cpp` reports `unlocked_until=-1`
+  for this explicitly approved, wallet-wide access.
 - `wallet.cpp::GetWalletRPCCommands()` aggregates all wallet-context RPCs; ⚠️ also registers DigiDollar/oracle wallet commands (see `REPO_MAP_DIGIDOLLAR.md`).
 - Legacy entry points `rpcwallet.cpp` and `rpcdump.cpp` remain in-tree but their content was redistributed across the `rpc/` modular files; treat as transitional scaffolding.
 

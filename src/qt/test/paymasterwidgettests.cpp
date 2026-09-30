@@ -4714,13 +4714,18 @@ void PaymasterWidgetTests::paymasterGuidedSetupRendersConsistentTheme()
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_data()
 {
     QTest::addColumn<bool>("deferred_funding");
-    QTest::newRow("already-funded") << false;
-    QTest::newRow("disabled-provider-accepted-pending") << true;
+    QTest::addColumn<bool>("encrypted_start");
+    QTest::newRow("already-funded") << false << false;
+    QTest::newRow("disabled-provider-accepted-pending") << true << false;
+    QTest::newRow("encrypted-start") << true << true;
 }
 
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep()
 {
     QFETCH(bool, deferred_funding);
+    QFETCH(bool, encrypted_start);
+    int operating_unlocks{0}, reviewed_starts{0};
+    bool operating_default_seen{false};
     bool missing_funding = deferred_funding;
     int pool_approvals{0};
     bool funding_approved_while_disabled{false};
@@ -4834,7 +4839,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                     result.pushKV("preparation", UniValue{UniValue::VARR});
                     result.pushKV("active_operations", UniValue{UniValue::VARR});
                     aggregate.pushKV("unlocked_until", 0);
-                    aggregate.pushKV("encrypted", false);
+                    aggregate.pushKV("encrypted", encrypted_start);
                     aggregate.pushKV("observed_at", QDateTime::currentSecsSinceEpoch());
                     UniValue diagnostic, diagnostics{UniValue::VARR};
                     diagnostic.read(R"({"code":"PAYMASTER_LOCAL_READY","state":"ready","action":"start","area":"service"})");
@@ -4919,6 +4924,19 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
             if (command == "getpaymasterclientsafetystatus") {
                 UniValue result{UniValue::VOBJ};
                 result.pushKV("configured", false);
+                return result;
+            }
+            if (command == "walletpassphrase") {
+                if (params[1].getInt<int64_t>() != 0 || !params[2].isTrue()) throw std::runtime_error("Expected continuous operating unlock");
+                ++operating_unlocks;
+                return UniValue{};
+            }
+            if (command == "startpaymaster") {
+                if (operating_unlocks != 1 || !params[0].find_value("wait_for_readiness").isTrue()) throw std::runtime_error("Expected operating unlock before reviewed start");
+                ++reviewed_starts;
+                UniValue result{UniValue::VOBJ};
+                result.pushKV("start_requested", true);
+                result.pushKV("running", false);
                 return result;
             }
             if (command == "stoppaymaster") {
@@ -5347,6 +5365,9 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         custom_maintenance_per_day->setText(QStringLiteral("2.00000000"));
         maintenance_confirmation->setChecked(true);
 
+        auto* start_when_ready = wizard->findChild<QCheckBox*>("paymasterSetupStartWhenReady");
+        QVERIFY(start_when_ready);
+        start_when_ready->setChecked(encrypted_start);
         wizard->next();
 
         first_failure_visible =
@@ -5368,8 +5389,24 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         retry_completed = progress_page->isComplete() && !retry->isVisible();
         wizard->reject();
     });
+    QTimer operating_answer;
+    connect(&operating_answer, &QTimer::timeout, &tab, [&] {
+        if (auto* dialog = tab.findChild<QDialog*>("paymasterOperatingUnlockDialog"); dialog && dialog->isVisible()) {
+            auto* mode = dialog->findChild<QComboBox*>("paymasterOperatingUnlockMode");
+            operating_default_seen = mode && mode->currentIndex() == 0;
+            dialog->accept();
+        } else if (auto* password = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+            password->setTextValue(QStringLiteral("test passphrase"));
+            password->accept();
+        }
+    });
+    operating_answer.start(10);
     guided_setup->click();
+    operating_answer.stop();
 
+    QCOMPARE(operating_default_seen, encrypted_start);
+    QCOMPARE(operating_unlocks, encrypted_start ? 1 : 0);
+    QCOMPARE(reviewed_starts, encrypted_start ? 1 : 0);
     QVERIFY(wizard_opened);
     QVERIFY(user_paid_defaults_ready);
     QVERIFY(recommended_default);
@@ -6044,6 +6081,52 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     QVERIFY(headline->text().contains(QStringLiteral("unavailable")));
     QVERIFY(!action->text().contains(QStringLiteral("Start")));
 
+    // Use actual Core diagnostics: reserved payment capacity and unconfirmed
+    // successors are normal waits, not an unknown provider failure.
+    int unexpected_mutations{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command.rfind("get", 0) != 0 && command.rfind("list", 0) != 0) ++unexpected_mutations;
+        return UniValue{UniValue::VOBJ};
+    });
+    auto* capital = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
+    auto* capital_action = panel->findChild<QPushButton*>("paymasterOverviewLiquidityAction");
+    QVERIFY(capital && capital_action);
+    for (const bool reserved : {true, false}) {
+        UniValue waiting = ready;
+        auto provider = waiting.find_value("provider");
+        provider.pushKV("running", true);
+        provider.pushKV("ready", false);
+        provider.pushKV("service_state", "waiting_for_liquidity_confirmation");
+        provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+        UniValue errors{UniValue::VARR}, pool{UniValue::VOBJ};
+        errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        provider.pushKV("readiness_errors", errors);
+        pool.pushKV("reserved", reserved ? 2 : 0);
+        provider.pushKV("pool", pool);
+        waiting.pushKV("provider", provider);
+        waiting.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+        panel->setOperatorStatusForTesting(waiting);
+        QCOMPARE(headline->text(), reserved ? QStringLiteral("Payment in progress") : QStringLiteral("Waiting for reserve confirmations"));
+        QVERIFY(hint->text().contains(QStringLiteral("automatically")));
+        QVERIFY(!action->text().contains(QStringLiteral("Start")));
+        QCOMPARE(card->property("statusKind").toString(), QStringLiteral("waiting"));
+        QVERIFY(capital->text().contains(reserved ? QStringLiteral("reserved for a payment") : QStringLiteral("blockchain confirmation")));
+        QCOMPARE(capital_action->text(), QStringLiteral("View progress"));
+        action->click();
+        if (reserved) QVERIFY(tabs->currentWidget() != static_cast<QWidget*>(settings));
+        else QCOMPARE(settings->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+
+        // Unknown diagnostics take priority even with an expected service wait.
+        errors.push_back("PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+        provider.pushKV("readiness_errors", errors);
+        waiting.pushKV("provider", provider);
+        waiting.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+        panel->setOperatorStatusForTesting(waiting);
+        QCOMPARE(headline->text(), QStringLiteral("Status needs review"));
+        QCOMPARE(action->text(), QStringLiteral("View diagnostics"));
+    }
+    QCOMPARE(unexpected_mutations, 0);
+
     // Expired unlock information cannot leave the prior start action visible.
     UniValue expired = ready;
     expired.pushKV("unlocked_until", int64_t{1});
@@ -6057,6 +6140,64 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     QVERIFY(!action->toolTip().contains(QStringLiteral("Start")));
     panel->setPrivacy(false);
     QVERIFY(!action->text().contains(QStringLiteral("Start")));
+}
+
+void PaymasterWidgetTests::paymasterOperatingUnlock_data()
+{
+    QTest::addColumn<QString>("choice");
+    for (const auto* choice : {"continuous", "timed", "cancel", "privacy", "wallet_change", "privacy_password", "wallet_password"})
+        QTest::newRow(choice) << QString::fromLatin1(choice);
+}
+void PaymasterWidgetTests::paymasterOperatingUnlock()
+{
+    QFETCH(QString, choice);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    UniValue snapshot;
+    QVERIFY(snapshot.read(R"({"schema_version":1,"encrypted":true,"unlocked_until":12345678900,"provider":{"running":false,"ready":true,"wallet_locked":false,"service_state":"stopped"},"diagnostics":[]})"));
+    std::vector<UniValue> unlocks;
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "walletpassphrase") { unlocks.push_back(params); return UniValue{}; }
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        throw std::runtime_error("test follow-up unavailable");
+    });
+    auto* tabs = panel->findChild<QTabWidget*>("paymasterOperatorTabs");
+    auto* settings = panel->findChild<QTabWidget*>("paymasterSettingsTabs");
+    QVERIFY(tabs && settings);
+    tabs->setTabEnabled(tabs->indexOf(settings), true);
+    auto* button = panel->findChild<QPushButton*>("paymasterUnlockOperation");
+    QVERIFY(button);
+    QVERIFY(button->isEnabled());
+    bool saw_default{false}, saw_password{false};
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, panel.get(), [&] {
+        if (auto* dialog = panel->findChild<QDialog*>("paymasterOperatingUnlockDialog"); dialog && dialog->isVisible()) {
+            auto* mode = dialog->findChild<QComboBox*>("paymasterOperatingUnlockMode");
+            auto* seconds = dialog->findChild<QSpinBox*>("paymasterOperatingUnlockSeconds");
+            saw_default = mode && mode->currentIndex() == 0 && seconds && !seconds->isEnabled();
+            if (choice == QLatin1String("timed")) { mode->setCurrentIndex(1); seconds->setValue(7200); }
+            if (choice == QLatin1String("privacy")) panel->setPrivacy(true);
+            if (choice == QLatin1String("wallet_change")) panel->setWalletModel(nullptr);
+            dialog->done(choice == QLatin1String("cancel") ? QDialog::Rejected : QDialog::Accepted);
+        } else if (auto* password = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+            saw_password = true;
+            if (choice == QLatin1String("privacy_password")) panel->setPrivacy(true);
+            if (choice == QLatin1String("wallet_password")) panel->setWalletModel(nullptr);
+            password->setTextValue(QStringLiteral("test passphrase"));
+            password->accept();
+        }
+    });
+    answer.start(10);
+    button->click();
+    answer.stop();
+    QVERIFY(saw_default);
+    const bool approved = choice == QLatin1String("continuous") || choice == QLatin1String("timed");
+    QCOMPARE(saw_password, approved || choice == QLatin1String("privacy_password") || choice == QLatin1String("wallet_password"));
+    QCOMPARE(unlocks.size(), approved ? size_t{1} : size_t{0});
+    if (approved) {
+        QCOMPARE(unlocks[0][0].get_str(), std::string{"test passphrase"});
+        QCOMPARE(unlocks[0][1].getInt<int64_t>(), choice == QLatin1String("continuous") ? int64_t{0} : int64_t{7200});
+        QCOMPARE(unlocks[0][2].get_bool(), choice == QLatin1String("continuous"));
+    }
 }
 
 void PaymasterWidgetTests::paymasterClientFallbackContinues_data()

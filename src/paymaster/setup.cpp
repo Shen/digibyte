@@ -1,6 +1,12 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
 #include <algorithm>
+#include <consensus/amount.h>
+#include <istream>
+#include <limits>
+#include <ostream>
+#include <paymaster/types.h>
+#include <util/strencodings.h>
 #include <paymaster/setup.h>
 #include <set>
 #include <stdexcept>
@@ -62,6 +68,137 @@ UniValue SetupDefaultLiquidity(bool user_paid)
     result.pushKV("maximum_maintenance_fee_per_day_satoshis", 1000000000);
     return result;
 }
+SetupChoices SetupCliDefaults(const UniValue& snapshot)
+{
+    CheckSetupContext(snapshot, snapshot);
+    const auto& provider = snapshot.find_value("provider");
+    const bool existing = provider.find_value("settings_present").isTrue();
+    SetupChoices result;
+    result.enabled = existing ? provider.find_value("enabled").get_bool() : true;
+    result.operation_mode = existing ? provider.find_value("operation_mode").get_str() : "automatic";
+    result.autostart = existing ? provider.find_value("autostart").get_bool() : true;
+    if (provider.find_value("display_name").isStr()) result.display_name = provider.find_value("display_name").get_str();
+    const auto retain = [](UniValue& proposed, const UniValue& saved) {
+        if (!saved.isObject()) return;
+        for (const auto& key : proposed.getKeys()) {
+            if (saved.find_value(key).isNull()) throw std::runtime_error("PAYMASTER_SETUP_STATUS_INCOMPLETE");
+            proposed.pushKV(key, saved.find_value(key));
+        }
+    };
+    result.policy = SetupDefaultPolicy();
+    retain(result.policy, provider.find_value("policy"));
+    bool paid{false}, sponsored{false};
+    for (const auto& model : result.policy.find_value("funding_models").getValues()) {
+        paid |= model.get_str() == "user_paid";
+        sponsored |= model.get_str() == "sponsored";
+    }
+    result.safety = SetupDefaultSafety(result.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>(), paid, sponsored, result.policy.find_value("sponsorship_scope").get_str() == "restricted");
+    retain(result.safety, snapshot.find_value("safety").find_value("policy"));
+    result.liquidity = SetupDefaultLiquidity(paid);
+    const auto& liquidity = provider.find_value("liquidity");
+    if (liquidity.find_value("policy_configured").isTrue()) {
+        retain(result.liquidity, liquidity.find_value("policy"));
+    } else if (!existing) {
+        // Recommendations are only proposals until the complete review is
+        // approved. Do not silently enable refill on an existing provider.
+        result.liquidity.pushKV("automatic_replenishment", true);
+        result.liquidity.pushKV("paid_maintenance_approved", true);
+        result.liquidity.pushKV("maximum_maintenance_fee_per_transaction_satoshis", 50000000);
+    }
+    const auto& preparation = provider.find_value("preparation");
+    result.pool.pushKV("maximum_fee_satoshis", existing || (preparation.isArray() && !preparation.empty()) ? SetupFundingFee(snapshot) : 50000000);
+    return result;
+}
+
+const std::vector<SetupField>& SetupFields()
+{
+    static const std::vector<SetupField> fields{
+        {"fee_rate_bps", "Customer service fee", "Your DD income as a share of the payment. 0.50 means 0.50%, rounded up to whole DD cents per payment. Choose in steps of 0.10%. It does not guarantee that DD income covers DGB costs.", "%", 2, 0, MAX_RATE_BPS, 10},
+        {"min_amount_cents", "Smallest accepted payment", "Payments below this DD amount are declined. The protocol minimum is 1.00 DD.", "DD", 2, 100, MAX_DD_OUTPUT_CENTS},
+        {"max_amount_cents", "Largest accepted payment", "Payments above this DD amount are declined. Must be at least the smallest payment.", "DD", 2, 100, MAX_DD_OUTPUT_CENTS},
+        {"quote_ttl", "Offer lifetime", "Time for a customer to review and accept an offer. 60 seconds gives the maximum supported review time.", "seconds", 0, 1, 60},
+        {"maximum_network_fee_dgb_satoshis", "Advertised network-fee ceiling", "Upper DGB fee advertised for one customer payment. This is a ceiling, not a fixed charge. Actual spending must also fit the limits below.", "DGB", 8, 1, MAX_MONEY},
+        {"maximum_network_fee_per_transaction_satoshis", "Maximum fee per payment", "Cap on DGB spent for one customer payment. Must not exceed the advertised ceiling. Zero disables this payment model.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_reserved_network_fee_satoshis", "Maximum reserved payment budget", "Budget held for accepted offers at the same time; it is not a confirmed expense. Must cover at least one payment fee ceiling.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_network_fee_per_hour_satoshis", "Payment fees per rolling hour", "Total DGB fee allowance in any rolling 60 minutes. At the limit, new payments wait or are declined; the limit never increases itself.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_network_fee_per_day_satoshis", "Payment fees per rolling day", "Total DGB fee allowance in any rolling 24 hours, not a midnight reset. Must be at least the hourly limit.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_completed_per_hour", "Successful payments per rolling hour", "Additional count limit, independent of fee spending. Must be positive for an enabled payment model.", "payments", 0, 0, UINT32_MAX},
+        {"maximum_completed_per_day", "Successful payments per rolling day", "Additional rolling 24-hour count limit. Must be at least the hourly count.", "payments", 0, 0, UINT32_MAX},
+        {"maximum_active_quotes_total", "Simultaneous customer offers", "Limits accepted offers that can hold payment capacity. Keep the default unless you need more concurrent customers.", "offers", 0, 1, 8192},
+        {"maximum_active_quotes_per_netgroup", "Offers per customer network group", "Limits one network group's share of offers. Must not exceed the total offer limit.", "offers", 0, 1, 8192},
+        {"maximum_active_quotes_per_recipient", "Offers per recipient", "Limits simultaneous offers paying the same recipient. Must not exceed the total offer limit.", "offers", 0, 1, 8192},
+        {"maximum_quote_requests_per_netgroup_per_minute", "Offer requests per network group per minute", "Rate limit against repeated requests. Raising it can increase provider workload.", "requests", 0, 1, 8192},
+        {"target_admission_dgb", "DGB capacity-check reserves", "Separate outputs used to prove capacity before accepting payments. Keep 3 for a small provider; these funds remain wallet-owned.", "reserves", 0, 3, 16},
+        {"target_operational_dgb", "DGB payment reserves", "Prepared DGB outputs for actual payments. Start with 1; more can support additional concurrent payments but tie up more capital.", "reserves", 0, 1, 16},
+        {"target_admission_carriers", "DD capacity-check reserves", "Needed for customer-paid service fees. Use at least 3 with customer-paid offers; sponsored-only providers can use 0.", "reserves", 0, 0, 16},
+        {"target_operational_carriers", "DD payment reserves", "DD reserves to receive service fees. With customer-paid offers, match the DGB payment count for complete payment capacity. Sponsored-only providers can use 0.", "reserves", 0, 0, 16},
+        {"maximum_maintenance_fee_per_transaction_satoshis", "Maximum fee per refill transaction", "DGB ceiling for rebuilding reserves when confirmed change cannot be reused. This is separate from customer-payment fees.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_maintenance_fee_per_hour_satoshis", "Refill fees per rolling hour", "Maximum DGB for automatic reserve maintenance over 60 minutes. Must cover the per-transaction ceiling when paid refill is enabled.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_maintenance_fee_per_day_satoshis", "Refill fees per rolling day", "Maximum DGB for automatic maintenance over 24 hours. This allowance is additional to the customer-payment budget.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_fee_satoshis", "Maximum fee per setup transaction", "One-time ceiling for creating initial or missing reserves. 0.50 DGB is the new-provider proposal, not a fee estimate. Core stops if it is insufficient; an increase needs your review.", "DGB", 8, 1, MAX_MONEY},
+        {"unlock_seconds", "Wallet unlock duration", "Timed access stops new signing when it expires. Continuous access is recommended for uninterrupted operation until manual lock or node restart.", "seconds", 0, 60, 86400},
+    };
+    return fields;
+}
+
+std::string SetupFormatNumber(int64_t value, int decimals)
+{
+    if (value < 0 || decimals < 0 || decimals > 8) throw std::runtime_error("Invalid setup amount");
+    auto result = std::to_string(value);
+    if (decimals) {
+        if (result.size() <= size_t(decimals)) result.insert(0, size_t(decimals) + 1 - result.size(), '0');
+        result.insert(result.size() - decimals, 1, '.');
+    }
+    return result;
+}
+std::string SetupPrompt(std::istream& input, std::ostream& output, const std::string& label, const std::string& current)
+{
+    output << label << (current.empty() ? "" : " [" + current + "]") << ": " << std::flush;
+    std::string line;
+    if (!std::getline(input, line)) throw std::runtime_error("Setup closed. Earlier approved steps remain saved; no pending question was approved.");
+    line = TrimString(line);
+    return line.empty() ? current : line;
+}
+std::string SetupSelect(std::istream& input, std::ostream& output, const std::string& label, const std::vector<SetupMenuItem>& items, const std::string& current)
+{
+    if (items.empty() || std::none_of(items.begin(), items.end(), [&](const auto& item) { return item.value == current; })) throw std::runtime_error("Invalid setup menu default");
+    for (;;) {
+        output << '\n' << label << '\n';
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            output << "  " << i + 1 << ") " << item.title << (item.value == current ? " [selected]" : "") << "\n     " << item.explanation << '\n';
+        }
+        const auto answer = ToLower(SetupPrompt(input, output, "Choose a number or name; Enter keeps the selection (? repeats help)", current));
+        for (size_t i = 0; i < items.size(); ++i)
+            if (answer == items[i].value || answer == std::to_string(i + 1)) return items[i].value;
+        if (answer != "?") output << "Please choose one of the listed options. Your earlier choices are retained.\n";
+    }
+}
+bool SetupConfirm(std::istream& input, std::ostream& output, const std::string& label)
+{
+    for (;;) {
+        const auto answer = ToLower(SetupPrompt(input, output, label + " (type yes to approve; Enter declines)", "no"));
+        if (answer == "yes") return true;
+        if (answer == "no") return false;
+        output << "Type yes to approve or no to decline. Nothing has been approved by this answer.\n";
+    }
+}
+int64_t SetupReadNumber(std::istream& input, std::ostream& output, const SetupField& field, int64_t current)
+{
+    for (;;) {
+        output << field.explanation << '\n';
+        auto answer = SetupPrompt(input, output, field.title + " (" + field.unit + ")", SetupFormatNumber(current, field.decimals));
+        if (answer == "?") continue;
+        // Accept either decimal separator, but never guess thousands grouping.
+        if (answer.find('.') == std::string::npos && std::count(answer.begin(), answer.end(), ',') == 1) std::replace(answer.begin(), answer.end(), ',', '.');
+        int64_t value{0};
+        const bool plain = !answer.empty() && answer.find_first_not_of("0123456789.") == std::string::npos;
+        if (plain && ParseFixedPoint(answer, field.decimals, &value) && value >= field.minimum && value <= field.maximum && value % field.increment == 0) return value;
+        output << "Enter " << SetupFormatNumber(field.minimum, field.decimals) << " to " << SetupFormatNumber(field.maximum, field.decimals)
+               << ' ' << field.unit << " in steps of " << SetupFormatNumber(field.increment, field.decimals) << ". Use no thousands separators. Please try again.\n";
+    }
+}
+
 UniValue SetupNodePrerequisites(const UniValue& snapshot)
 {
     const auto& current = snapshot.find_value("node_settings");
@@ -200,6 +337,19 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
     if (service_error.isStr() && !service_error.get_str().empty()) {
         if (service_error.get_str() == "PAYMASTER_POOL_PREPARATION_PENDING") {
             if (!preparation_pending) add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
+        } else if (service_error.get_str() == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING" &&
+                   provider.find_value("running").isTrue() &&
+                   provider.find_value("service_state").isStr() &&
+                   provider.find_value("service_state").get_str() == "waiting_for_liquidity_confirmation") {
+            // This scheduler reason also covers capacity reserved by an ongoing
+            // payment. It does not imply a failure or a broadcast refill.
+            add(service_error.get_str(), "waiting", "liquidity", "wait");
+        } else if (service_error.get_str() == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
+                   service_error.get_str() == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED") {
+            add(service_error.get_str(), "action_required", "budgets", "review_budget");
+        } else if (service_error.get_str() == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
+                   service_error.get_str() == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") {
+            add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
         } else {
             add(service_error.get_str(), "error", "service", "inspect_error");
         }
@@ -221,6 +371,66 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
     result = UniValue{UniValue::VARR};
     for (const auto& item : items)
         result.push_back(item);
+    return result;
+}
+SetupProgress InspectSetupProgress(const UniValue& snapshot, bool require_running)
+{
+    SetupProgress result;
+    const auto& provider = snapshot.find_value("provider");
+    const auto& operations = provider.find_value("active_operations");
+    const auto& diagnostics = snapshot.find_value("diagnostics");
+    const auto& service = provider.find_value("service_state");
+    for (const auto* key : {"enabled", "wallet_locked", "ready", "pool_ready", "running"}) {
+        if (!provider.find_value(key).isBool()) throw std::runtime_error("PAYMASTER_SETUP_STATUS_INCOMPLETE");
+    }
+    if (!operations.isArray() || !diagnostics.isArray() || !service.isStr()) throw std::runtime_error("PAYMASTER_SETUP_STATUS_INCOMPLETE");
+    const std::set<std::string> known_states{"stopped", "active", "manual", "waiting_for_unlock", "waiting_for_readiness", "waiting_for_maintenance_approval", "replenishing_liquidity", "waiting_for_liquidity_confirmation", "drain_only", "error"};
+    if (!known_states.count(service.get_str())) return {false, false, true, "Unknown provider service state; inspect diagnostics before continuing."};
+    result.needs_unlock = provider.find_value("wallet_locked").isTrue();
+    if (!provider.find_value("enabled").isTrue()) return {false, false, true, "Provider configuration is disabled. Explicitly enable it before continuing."};
+    if (service.get_str() == "error") return {false, false, true, "Provider operation requires diagnostic review."};
+    bool waiting_funds{false};
+    bool waiting_confirmation{false};
+    int64_t confirmed{0}, required{0};
+    for (const auto& step : operations.getValues()) {
+        const auto state = step.find_value("state").get_str();
+        const auto error = step.find_value("error").get_str();
+        const auto code = error.substr(0, error.find(':'));
+        if (state != "pending_creation" && state != "pending_confirmation") return {false, false, true, "Setup requires review: " + state + " " + error};
+        // The journal can still contain the last locked/disabled observation
+        // until the next scheduler pass after explicit unlock/enable.
+        if (code == "PAYMASTER_POOL_WAITING_FUNDS" || code == "PAYMASTER_POOL_WAITING_DGB") waiting_funds = true;
+        else if (code == "PAYMASTER_POOL_FEE_LIMIT") return {false, false, true, "The approved setup fee ceiling is insufficient. Review the funding preview and explicitly approve any changed limit; setup has not completed."};
+        else if (code == "PAYMASTER_POOL_POLICY_CHANGED") return {false, false, true, "The provider policy changed. Review the saved setup before authorizing further preparation."};
+        else if (!code.empty() && code != "PAYMASTER_POOL_WAITING_CONFIRMATION" &&
+                 code != "PAYMASTER_WALLET_LOCKED" && code != "PAYMASTER_PROVIDER_DISABLED") return {false, false, true, "Setup requires review: " + error + ". Spending limits were not changed."};
+        if (state == "pending_confirmation") {
+            waiting_confirmation = true;
+            const auto have = step.find_value("confirmations").getInt<int64_t>();
+            const auto need = step.find_value("required_confirmations").getInt<int64_t>();
+            if (have < 0 || need < 1 || need > 1000000 || required > 1000000 - need) throw std::runtime_error("PAYMASTER_SETUP_CONFIRMATIONS_INVALID");
+            confirmed += std::min(have, need);
+            required += need;
+        }
+    }
+    for (const auto& diagnostic : diagnostics.getValues()) {
+        const auto action = diagnostic.find_value("action").get_str();
+        const auto code = diagnostic.find_value("code").get_str();
+        if (action == "enable" && code == "PAYMASTER_PROVIDER_DISABLED" && !operations.empty()) continue;
+        if (action == "inspect_error" || action == "configure_node" || action == "review_budget" || action == "setup" || action == "enable" ||
+            (action == "review_liquidity" && operations.empty() && !provider.find_value("pool_ready").isTrue())) {
+            return {false, false, true, "Action required: " + code + ". Review this requirement; setup has not completed."};
+        }
+    }
+    result.complete = !result.needs_unlock && provider.find_value("ready").isTrue() &&
+        provider.find_value("pool_ready").isTrue() && operations.empty() &&
+        (!require_running || (provider.find_value("running").isTrue() && (service.get_str() == "active" || service.get_str() == "manual")));
+    if (result.complete) result.message = require_running ? "Setup complete: provider is running and locally ready." : "Funding complete: reserves are confirmed and the provider is locally ready.";
+    else if (result.needs_unlock) result.message = "Waiting for wallet unlock. Approved setup remains saved.";
+    else if (waiting_funds) result.message = "Waiting for usable incoming DGB/DD funding. Confirmed funds are required; Core retries automatically within the approved limits.";
+    else if (waiting_confirmation) result.message = "Waiting for reserve confirmations: " + std::to_string(confirmed) + "/" + std::to_string(required) + ". Continuation is automatic.";
+    else if (!operations.empty()) result.message = "Core is creating the approved reserves or waiting for funding inputs to confirm. Continuation is automatic.";
+    else result.message = "Waiting for node readiness and the requested provider start. No new spending approval is issued.";
     return result;
 }
 std::string OperatorAmount(int64_t satoshis)
@@ -300,7 +510,9 @@ std::string OperatorSummary(const UniValue& snapshot)
     result += "\nOpen work: " + provider.find_value("service_queue").write();
     if (provider.find_value("preparation").isArray()) result += "\nApproved setup steps: " + provider.find_value("preparation").write();
     result += "\nWallet locked: " + provider.find_value("wallet_locked").write();
-    result += "\nUnlock deadline (epoch seconds, 0=no timed unlock): " + snapshot.find_value("unlocked_until").write();
+    result += snapshot.find_value("unlocked_until").isNum() && snapshot.find_value("unlocked_until").getInt<int64_t>() == -1
+        ? "\nOperating unlock: until manual lock, wallet unload or node restart (wallet-wide)."
+        : "\nUnlock deadline (epoch seconds, 0=no timed unlock): " + snapshot.find_value("unlocked_until").write();
     result += "\nFull-wallet backup reminder: " + provider.find_value("backup_status").find_value("required").write();
     for (const auto& item : diagnostics.getValues())
         result += "\n" + item.find_value("state").get_str() + ": " + item.find_value("code").get_str() + " -> " + explain(item.find_value("action").get_str());
@@ -409,7 +621,7 @@ std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoic
     steps.push_back(pool);
     UniValue runtime{UniValue::VOBJ};
     runtime.pushKV("operation_mode", choices.operation_mode);
-    runtime.pushKV("autostart", provider.find_value("autostart").isTrue());
+    runtime.pushKV("autostart", choices.autostart.value_or(provider.find_value("autostart").isTrue()));
     add("setpaymasterruntimesettings", runtime, runtime);
     UniValue enabled{UniValue::VOBJ};
     enabled.pushKV("enabled", choices.enabled);

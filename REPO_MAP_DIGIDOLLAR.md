@@ -1266,6 +1266,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - Navigation: Operation, Activity & finances, Settings.
   Settings nests Offer, Spending limits, Automation & reserves, and Connection & wallet. The single
   overview hero translates the current operator snapshot into a next action;
+  the shared diagnostic mapping treats the running scheduler's capacity wait
+  as informational, and the hero distinguishes reserved payment capacity from
+  reserve confirmation waits without suppressing unexpected errors;
   unknown/stale data cannot expose a start action. Technical details, reserve
   counts, additional safety limits and secondary finance views are disclosures.
   The selected finance summary is invalidated on period changes and failures;
@@ -1887,7 +1890,10 @@ Current oracle/MuSig2 fuzz source inventory:
 
 - `src/paymaster/setup.{h,cpp}`: shared profiles, prerequisite repair suggestions,
   ordered setup, context/reply/saved-state checks, exact pool preview validation
-  and read-only budget presentation for both UI adapters.
+  and read-only budget presentation for both UI adapters. Stream-based menu,
+  confirmation and exact DGB/DD/percent input helpers support CLI interaction
+  tests; `SetupCliDefaults` proposes 24/7 choices without replacing saved values.
+  Optional reviewed autostart in `SetupChoices` retains the GUI default contract.
   Operator diagnostics classify active finite-preparation step reasons before
   generic missing-slot symptoms, preserving unknown/conflict failures.
 - `src/qt/paymasterwidget.cpp`: live finite-preparation diagnostics, explicit
@@ -1897,9 +1903,16 @@ Current oracle/MuSig2 fuzz source inventory:
   for fee/funding/confirmation/policy/unknown waits, cancellation confirmation,
   privacy, wallet switching and a concurrent saved-transaction result.
 - `src/digibyte-cli.cpp`: interactive `-paymastersetup`, explicit wallet selection,
-  local no-echo unlock, operational actions, `-paymasterstatus` and `-watch`.
+  local no-echo operating unlock, optional DGB/DD funding addresses and a
+  wallet-bound funding/start monitor, operational actions, `-paymasterstatus`
+  and `-watch`. `InspectSetupProgress` in `paymaster/setup.cpp` classifies
+  funding, confirmed reserves, blocked requirements and actual start completion.
 - `src/qt/paymasterwidget.cpp`: common setup adapter, operator overview, node
-  configuration review, persistent pause/resume, timed unlock and report import.
+  configuration review, persistent pause/resume, continuous-by-default or timed
+  operating unlock and report import.
+- `src/wallet/rpc/encrypt.cpp`: optional `walletpassphrase` operating mode gated
+  by a saved provider identity/settings/policy; volatile `nRelockTime = -1`.
+  `wallet.cpp` and `paymaster_provider.cpp` report the mode without persisting it.
 - `src/wallet/rpc/paymaster_provider.cpp`: `getpaymasteroperatorinfo` aggregates
   current readiness without journal reconciliation; `paymaster.cpp` and
   `paymaster_internal.h` expose the nonpersistent readiness variant.

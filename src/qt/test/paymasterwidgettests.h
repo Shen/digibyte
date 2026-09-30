@@ -27,6 +27,8 @@ private Q_SLOTS:
     void paymasterDeferredStartIntentIsWalletScoped();
     void paymasterThreeDestinationsAndVisibleTasks();
     void paymasterOperatorOverviewGuidesAndFailsClosed();
+    void paymasterOperatingUnlock_data();
+    void paymasterOperatingUnlock();
     void paymasterPoolPreparationStoredFeeDiagnostics();
     void paymasterPoolPreparationDiagnostics_data();
     void paymasterPoolPreparationDiagnostics();

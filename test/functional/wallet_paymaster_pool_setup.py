@@ -242,9 +242,23 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         assert "txid" not in self.setup_steps(waiting)[0]
         waiting.setpaymasterenabled(True)
         self.wait_for(waiting, lambda steps: steps[0]["error"] == "PAYMASTER_WALLET_LOCKED")
-        waiting.walletpassphrase("pool-setup-test", 3600)
+        waiting.walletpassphrase("pool-setup-test", 0, True)
+        start = waiting.startpaymaster({"wait_for_readiness": True})
+        assert start["start_requested"] or start["running"]
         self.wait_for(waiting, lambda steps: "txid" in steps[0])
+        before_confirmation = waiting.getpaymasteroperatorinfo()["provider"]
+        assert_equal(before_confirmation["ready"], False)
+        assert before_confirmation["active_operations"]
         self.confirm(waiting, self.setup_steps(waiting)[0]["txid"])
+        self.wait_for(waiting, lambda steps: all(step["state"] == "complete" for step in steps))
+        self.wait_until(lambda: waiting.getpaymasteroperatorinfo()["provider"]["running"])
+        complete = waiting.getpaymasteroperatorinfo()["provider"]
+        assert_equal(complete["ready"], True)
+        assert_equal(complete["pool_ready"], True)
+        assert_equal(complete["active_operations"], [])
+        assert_equal(complete["autostart"], False)
+        assert_equal(waiting.getwalletinfo()["unlocked_until"], -1)
+        waiting.stoppaymaster()
 
         self.log.info("Fee ceiling is bound to the plan and stops construction")
         low = dict(targets, maximum_fee_satoshis=1)

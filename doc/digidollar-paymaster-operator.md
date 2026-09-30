@@ -38,6 +38,15 @@ An unknown/incomplete result never shows a start action. A locked wallet can
 block signing even when the service itself is running. Local listener readiness,
 a historical imported external report and confirmed payment remain distinct.
 
+During a payment, **Payment in progress** means that operating capital is
+reserved for the ongoing request. It is not a provider failure and does not
+prove that a maintenance transaction has been broadcast. **View payment
+activity** opens the existing activity view without changing the request.
+After reserve outputs have been created, **Waiting for reserve confirmations**
+explains that Core continues automatically when they confirm. Neither state
+requires starting setup again. Budget/approval problems retain their own next
+action; unexpected errors still lead to diagnostics.
+
 After restarting with an existing provider wallet, use **Operation → Start
 provider** (or **Resume provider** after a persistent pause). The setup
 assistant is optional when the saved settings are unchanged. Wallet unlock,
@@ -80,11 +89,57 @@ An explicitly selected unloaded wallet must first be loaded. Setup refuses
 nonterminal input before making RPC changes. Automation continues to use the
 individual RPCs. `-watch` reads status every ten seconds; Ctrl+C ends it.
 
-For an existing provider, `-paymastersetup` also offers **pause**, **resume**,
-**unlock**, and **backup** before the setup flow. These correspond to the Qt
+For an existing provider, `-paymastersetup` defaults to **status** and also offers
+**pause**, **resume**, **unlock**, **backup**, and **setup**. These correspond to the Qt
 Operation next action and Settings → Connection & wallet controls. Manual
 expert mode remains available. Setup does not store
 passwords, and no password belongs in a command argument, file, or log.
+
+## CLI choices for continuous operation
+
+The CLI assistant uses seven numbered stages: wallet, connection, customer offer,
+costs/reserves, startup, review/apply, and funding/completion. Each menu explains
+the consequences of its choices. Enter keeps the selected proposal, a number or
+option name selects another, and `?` repeats menu help. Invalid numeric input is
+corrected in place. Decimal point or comma is accepted; do not enter thousands
+separators. DD amounts use DD, DGB amounts use DGB, and service fees use percent
+(for example `0.50` means 0.50%, not 50%). Percent fees must use 0.10% steps.
+
+New-provider CLI proposals are:
+
+| Choice | Initial selection and reason |
+| --- | --- |
+| Payment model | Customer-paid, 0.50% DD service fee; separate DD income and DGB costs. Sponsorship is an explicit alternative. |
+| Payment range / offer lifetime | 1.00–1000.00 DD / 60 seconds, the supported maximum review time. |
+| Processing / enablement | Automatic / enabled, so Core processes customer queues. Manual processing requires operator intervention. |
+| Customer-payment budgets | 0.20 DGB per payment, 1 DGB reserved, 2 DGB per rolling hour and 10 DGB per rolling day; 10/100 completed payments per rolling hour/day. |
+| Reserve capacity | Three capacity-check reserves and one payment reserve per required asset; a small initial provider. Additional payment reserves require more capital. |
+| Reserve maintenance | Automatic and paid refill proposed, within 0.50 DGB per transaction, 2 DGB per rolling hour and 10 DGB per rolling day. |
+| One-time setup fee | At most 0.50 DGB per setup transaction. Core previews total capital and the total fee ceiling before spending approval. |
+| Autostart / start after setup | On / yes. Autostart can start the current session as well as later node sessions once ready. |
+| Encrypted-wallet access | Continuous until manual lock, wallet unload or node shutdown. A fresh password is still required after restart. |
+| Funding assistance | New receiving addresses when reserves are missing, otherwise monitor existing funding. Both remain optional. |
+
+These are finite proposed ceilings, not expected costs or a promise of
+profitability. Payment and refill budgets are separate: the initial customer-paid
+profile can authorize up to 20 DGB across their rolling-day fee ceilings, plus
+separately approved one-time setup fees. The review displays this combined
+ceiling as well as the separate budgets. Core never increases them automatically.
+
+Existing providers retain their saved offer, budgets, reserve policy, operating
+mode, enablement and autostart as preselected values. The first menu defaults to
+reading status rather than reconfiguring an existing provider. Changing the offer
+to activate a model with no usable budget displays a new finite proposal for
+that model; it is not authorized until the final review. Existing pool-preparation
+fee approvals are retained. The GUI's existing autostart defaults are unchanged
+by these CLI-specific recommendations.
+
+Keep advanced request-rate limits unless you need them. Customize exposes
+human-readable fields and their effects, including comparisons between payment,
+reserved, hourly and daily caps. The final review shows the selected permissions.
+**Only typing `yes` approves a mutation or spending review**; Enter declines.
+Choosing a recommended option alone never authorizes it. Initial pool creation
+has its own exact capital/fee approval after configuration review.
 
 ## Complete the setup
 
@@ -101,7 +156,8 @@ passwords, and no password belongs in a command argument, file, or log.
    effective transport budget after restart because OS limits can reduce it.
 4. Review the offer and finite safety limits. User-paid is the default;
    sponsorship is a separate choice. DD amounts are integer cents in RPC JSON;
-   DGB amounts are integer satoshis. CLI amount prompts accept exact DGB decimals.
+   DGB amounts are integer satoshis. CLI prompts convert exact DGB/DD decimal
+   amounts and percentages to these internal units.
 5. Review liquidity targets and the separate recurring maintenance budget.
    Automatic paid refill stays disabled until explicitly approved. Review
    transaction, rolling-hour and rolling-day ceilings; zero never means unlimited.
@@ -114,10 +170,39 @@ passwords, and no password belongs in a command argument, file, or log.
    together. One approval covers the unchanged task. A changed financial scope
    requires another review before additional spending. The CLI retains its
    separate funding confirmation.
-8. The saved autostart choice is retained (off for new providers). The optional
-   one-time start waits for readiness without changing autostart. Pause, wallet
+8. Existing autostart is preselected. New CLI providers propose autostart on;
+   the GUI retains its existing new-provider default of off. The reviewed choice
+   is saved. The optional one-time start waits for readiness without changing
+   that saved choice. Pause, wallet
    unload or node restart cancels that one-time intent. Accepted funding work
    remains in Core and can still await funds, wallet unlock or confirmations.
+
+### Optional CLI funding and verified completion
+
+After the exact pool preparation approval is saved, `-paymastersetup` offers:
+
+- `addresses`: generate and display a DGB receiving address and a DD receiving
+  address in the selected provider wallet, then monitor incoming funding;
+- `watch`: use existing addresses and monitor funding;
+- `skip`: omit this optional funding step.
+
+Send each asset to its matching address from your funding wallet. The setup
+never sends from another wallet. It checks balances and the same wallet
+generation every two seconds. Changed status/balances are printed immediately;
+an unchanged wait prints a ten-second heartbeat instead of repeating the screen. Confirmed balances are informational:
+Core must find usable inputs, create the approved reserve outputs, and observe
+their confirmations. Existing and pending reserves count toward the targets.
+Limits are not raised, and a waiting or lost response does not create another
+pool preparation.
+
+If the operator approves starting when ready, the CLI requests a one-shot start
+and remains open until Core reports a running, locally ready provider with no
+active preparation. Saved autostart is a separate choice. Wallet locking asks
+for another explicit unlock; fee limits, policy changes and unknown errors stop
+with an explanation. A wallet reload invalidates the monitor. Ctrl+C closes the
+CLI only: accepted funding and an accepted start request remain in Core; use
+Pause provider to stop new authorized work. Local completion does not prove
+external reachability.
 
 ## Guided daily tasks
 
@@ -234,11 +319,25 @@ requests start against the existing policy, without resetting any budget.
 The old argumentless `stoppaymaster` remains an ephemeral expert stop and may
 be undone by previously enabled autostart.
 
-Setup unlocks are short and separate from operating unlocks. Qt/CLI operating
-unlock prompts allow 60–86400 seconds and never renew automatically. An already
-unlocked wallet keeps its existing unlock duration. This is wallet-wide
-unlocking, not a new Paymaster-only key permission. Interactive CLI secrets
-are restricted to numeric loopback RPC or a separately configured local tunnel.
+Setup signing unlocks remain short and separate from operating unlocks.
+Qt and CLI default the operating choice to **continuous**, until manual
+`walletlock`, wallet unload or node shutdown. The operator must enter the
+passphrase; none is persisted. A timed 60–86400 second choice remains available.
+A fresh password approval can replace an existing timer without first locking.
+This unlocks the entire provider wallet, not only Paymaster signing keys.
+It grants no new provider start, spending limits or automatic-refill authority.
+Interactive CLI secrets require numeric loopback RPC or a separately configured
+local tunnel. After reload/restart a new manual unlock is required even with
+autostart enabled.
+
+The underlying RPC is `walletpassphrase "<passphrase>" 0 true`; the optional
+third parameter is named `paymaster_until_shutdown` and defaults to false.
+Only descriptor wallets with private keys and an existing provider identity,
+settings and policy can use it. Ordinary two-argument calls retain their old
+semantics, including immediate relock for timeout zero. `unlocked_until = -1`
+reports this volatile operating mode; it is never a persisted unlock permission.
+Do not put a real passphrase in a shell command/history; use the GUI or interactive
+CLI prompt.
 
 ## Check externally from your own second node
 

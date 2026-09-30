@@ -56,9 +56,26 @@ wallet unlock” → “Unlock wallet”. Funding pending: “Waiting for confir
 “Review limits”. Never suggest raising a budget as the automatic remedy.
 
 Pause explicitly persists disabled provider/autostart and stops new signatures;
-already signed transactions can still confirm. Unlock is wallet-wide, bounded
-and never automatically renewed. Startup and financial confirmation dialogs keep
-all existing Core checks and explicit consent.
+already signed transactions can still confirm. Operating unlock is wallet-wide:
+GUI and CLI default the explicit choice to continuous access until manual lock,
+wallet unload or node shutdown. A timed choice remains available. Passwords are
+never stored; encrypted wallets require another manual unlock after restart.
+This mode is available only to configured provider wallets and grants no new
+spending approval. Startup and financial confirmation dialogs keep all existing
+Core checks and explicit consent.
+
+CLI setup optionally generates separate DGB/DD receiving addresses or monitors
+existing ones. Its two-second monitor follows Core funding, reserve confirmations
+and the requested one-time start before reporting completion. Wallet generation
+changes invalidate the monitor; lost responses never repeat a financial approval.
+Autostart is a separate saved choice, and no fee limit is increased automatically.
+
+The CLI presents seven numbered stages, explained menu choices and editable
+DGB/DD/percentage values. Invalid input is retried locally. New-provider proposals
+select automatic processing, autostart and bounded paid refill for continuous
+operation; saved configurations retain their own selections. The review displays
+separate payment/refill allowances and their combined rolling-day ceiling. All
+mutations still require explicit approval; Enter at an approval prompt declines.
 
 Helpers explain consequences beside inputs. Tooltips supplement, never replace,
 important instructions. Keyboard focus, accessible names, selectable diagnostics,
