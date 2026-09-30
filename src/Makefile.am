@@ -813,6 +813,7 @@ libdigibyte_common_a_SOURCES = \
   paymaster/psbt.cpp \
   paymaster/recovery.cpp \
   paymaster/provider.cpp \
+  paymaster/provider_policy.cpp \
   paymaster/protocol.cpp \
   paymaster/reputation.cpp \
   paymaster/sponsorship.cpp \

@@ -706,6 +706,10 @@ struct ServiceFeePlan {
 
 bool PolicyAllowsFundingModel(const ProviderPolicy& policy, FundingModel model);
 bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error);
+/** Pure validators shared by setup and provider admission; no wallet/node access. */
+bool ValidateProviderFundingSafetyLimits(const FundingSafetyLimits& limits, bool required,
+                                        DGBSatoshis advertised_maximum, std::string& error);
+bool ValidateProviderSafetyQuoteLimits(const ProviderSafetyPolicy& policy, std::string& error);
 bool ValidateProviderSafetyPolicy(const ProviderSafetyPolicy& safety,
                                   const ProviderPolicy& advertised,
                                   std::string& error);
