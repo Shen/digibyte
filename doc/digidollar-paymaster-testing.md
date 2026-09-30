@@ -907,9 +907,25 @@ For terminal acceptance, use the isolated regtest instructions above. In additio
   amount. Earlier valid choices must remain intact while the prompt repeats.
 - Review an existing provider with autostart/refill off and customized limits;
   the saved values must be preselected. The existing-provider menu defaults to
-  read-only status. Restricted sponsorship must stay restricted when editing
-  unrelated offer amounts, including a mixed customer-paid/restricted offer.
+  read-only status. Restricted sponsorship must stay sponsored-only with zero
+  DD fee when editing unrelated offer amounts. Only public sponsorship can be
+  combined with customer-paid service; the CLI must not offer a restricted mix.
 - Verify the funding monitor reports changes immediately and a heartbeat every
   ten seconds while polling Core every two seconds, without flooding the screen.
 - Distinguish a one-time start request from saved autostart. Continuous operating
   access still requires manual password entry after a node restart.
+
+Restricted-sponsorship correction (2026-09-30): remove the invalid mixed CLI
+choice. Core already rejects restricted policies unless they are sponsored-only
+with zero DD fee. The shared setup planner now rejects this combination before
+returning any mutating step. The regression covers restricted customer-paid,
+restricted mixed and nonzero sponsored fees, plus valid restricted-only and
+public mixed policies. Run `paymaster_setup_tests` and
+`paymaster_provider_tests/sponsored_policy_always_charges_zero` after rebuilding.
+
+Correction verification: targeted MSVC compilation/linking passed. All 17 setup
+unit cases / 120 assertions passed, as did the existing Core sponsored-policy
+case / 6 assertions. The Qt guided setup group, including reconfiguration to
+restricted sponsored-only, passed 3 cases (5 including init/cleanup) with no
+failures or skips. `git diff --check` passed. Full build and terminal acceptance
+remain the operator checks described above.

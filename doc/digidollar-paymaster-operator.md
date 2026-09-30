@@ -105,6 +105,11 @@ corrected in place. Decimal point or comma is accepted; do not enter thousands
 separators. DD amounts use DD, DGB amounts use DGB, and service fees use percent
 (for example `0.50` means 0.50%, not 50%). Percent fees must use 0.10% steps.
 
+The supported offer choices are customer-paid, public sponsored, both public
+models, or restricted sponsored-only. Restricted sponsorship requires separate
+authorization and zero DD service fee; it cannot be combined with customer-paid
+service in one provider policy.
+
 New-provider CLI proposals are:
 
 | Choice | Initial selection and reason |

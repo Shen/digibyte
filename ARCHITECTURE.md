@@ -1881,8 +1881,9 @@ CLI presentation uses the stream-based `SetupSelect`, `SetupConfirm` and
 `SetupReadNumber` helpers in `paymaster/setup.cpp`. Menus and exact decimal-unit
 conversion are testable without an RPC transport. Field explanations and bounds
 map user DGB/DD/percent input to the existing integer RPC fields. Core validation
-remains authoritative. `SetupCliDefaults` builds proposals for new continuous
-providers and overlays complete saved values for existing wallets; it performs
+remains authoritative. The shared setup plan rejects restricted sponsorship
+unless it is sponsored-only with zero DD fee before returning any mutating step.
+`SetupCliDefaults` builds proposals for new continuous providers and overlays complete saved values for existing wallets; it performs
 no mutations. `SetupChoices::autostart` is optional: the existing GUI leaves it
 empty to retain saved behavior, while CLI applies the explicitly reviewed choice
 through the existing ordered runtime-settings step. Financial confirmation

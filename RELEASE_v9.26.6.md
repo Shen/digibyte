@@ -22,6 +22,9 @@ budgets. New providers propose automatic operation, bounded paid refill and
 autostart; saved settings remain preselected for existing wallets. Explicit-yes
 approval is still required, and encrypted wallets still need manual unlock after
 restart. Repeated unchanged funding status is condensed into a heartbeat.
+The CLI offers only supported policy combinations: restricted sponsorship is
+sponsored-only with zero DD service fee. Invalid restricted combinations are
+rejected by the shared setup planner before any configuration changes.
 
 These working-branch changes are outside the published RC2 change counts and do
 not move a release tag. Verification and remaining operator checks are recorded

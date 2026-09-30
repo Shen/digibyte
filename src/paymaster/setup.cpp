@@ -579,6 +579,14 @@ bool SetupPoolNeeded(const UniValue& preview)
 std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoices& choices)
 {
     CheckSetupContext(snapshot, snapshot);
+    // Match Core's restricted-policy boundary before returning any mutating
+    // step, including pause, identity creation or a safety-policy bridge.
+    const auto& models = choices.policy.find_value("funding_models");
+    if (choices.policy.find_value("sponsorship_scope").get_str() == "restricted" &&
+        (!models.isArray() || models.size() != 1 || models[0].get_str() != "sponsored" ||
+         choices.policy.find_value("fee_rate_bps").getInt<int64_t>() != 0)) {
+        throw std::runtime_error("PAYMASTER_INVALID_RESTRICTED_POLICY: Restricted sponsorship requires sponsored-only service with zero DD service fee.");
+    }
     const auto& provider = snapshot.find_value("provider");
     std::vector<SetupStep> steps;
     auto add = [&](std::string method, const UniValue& input, const UniValue& expected, std::string field = {}, bool unlock = false) {

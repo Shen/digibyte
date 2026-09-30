@@ -1894,6 +1894,8 @@ Current oracle/MuSig2 fuzz source inventory:
   confirmation and exact DGB/DD/percent input helpers support CLI interaction
   tests; `SetupCliDefaults` proposes 24/7 choices without replacing saved values.
   Optional reviewed autostart in `SetupChoices` retains the GUI default contract.
+  `BuildSetupPlan` rejects non-sponsored-only or nonzero-fee restricted policies
+  before producing pause, identity or configuration mutations.
   Operator diagnostics classify active finite-preparation step reasons before
   generic missing-slot symptoms, preserving unknown/conflict failures.
 - `src/qt/paymasterwidget.cpp`: live finite-preparation diagnostics, explicit

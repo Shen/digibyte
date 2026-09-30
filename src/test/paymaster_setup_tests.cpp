@@ -137,6 +137,33 @@ BOOST_AUTO_TEST_CASE(cli_currency_and_percentage_inputs_are_exact_and_retry_inva
     BOOST_CHECK_EQUAL(SetupReadNumber(slots, output, field("target_admission_dgb"), 3), 3);
     BOOST_CHECK(output.str().find("Please try again") != std::string::npos);
 }
+BOOST_AUTO_TEST_CASE(restricted_setup_is_sponsored_only_before_any_mutation)
+{
+    auto snapshot = Snapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("settings_present", true);
+    provider.pushKV("running", true);
+    snapshot.pushKV("provider", provider);
+    auto choices = Choices();
+    choices.policy.pushKV("sponsorship_scope", "restricted");
+    const auto restricted_error = [](const std::runtime_error& error) {
+        return std::string{error.what()}.find("PAYMASTER_INVALID_RESTRICTED_POLICY") == 0;
+    };
+    // Reject before a plan can pause the existing provider or change budgets.
+    BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
+    UniValue models{UniValue::VARR};
+    models.push_back("sponsored");
+    choices.policy.pushKV("funding_models", models);
+    BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
+    choices.policy.pushKV("fee_rate_bps", 0);
+    BOOST_CHECK_NO_THROW(BuildSetupPlan(snapshot, choices));
+    models.push_back("user_paid");
+    choices.policy.pushKV("funding_models", models);
+    BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
+    choices.policy.pushKV("sponsorship_scope", "public");
+    choices.policy.pushKV("fee_rate_bps", 50);
+    BOOST_CHECK_NO_THROW(BuildSetupPlan(snapshot, choices));
+}
 BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_preserves_saved_autostart)
 {
     auto snapshot = Snapshot();
