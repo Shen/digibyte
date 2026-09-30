@@ -674,7 +674,8 @@ public:
     //! Clears address data from in-memory cache (DigiByte fix)
     void EraseAddressData(const CTxDestination& dest) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
-    //! Holds a timestamp at which point the wallet is scheduled (externally) to be relocked. Caller must arrange for actual relocking to occur via Lock().
+    //! Relock timestamp; -1 denotes an explicit Paymaster operating unlock until lock/unload/shutdown (never persisted).
+    //! Caller must arrange timed relocking via Lock().
     int64_t nRelockTime GUARDED_BY(cs_wallet){0};
 
     // Used to prevent concurrent calls to walletpassphrase RPC.

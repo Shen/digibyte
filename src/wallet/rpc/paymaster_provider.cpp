@@ -3471,7 +3471,7 @@ RPCHelpMan getpaymasteroperatorinfo()
                                                                      {RPCResult::Type::STR, "wallet", "Explicitly selected wallet"},
                                                                      {RPCResult::Type::STR_HEX, "wallet_generation", "Ephemeral wallet load identity; changes on reload"},
                                                                      {RPCResult::Type::NUM_TIME, "observed_at", "Observation time"},
-                                                                     {RPCResult::Type::NUM_TIME, "unlocked_until", "Wallet relock time, zero when not timed"},
+                                                                     {RPCResult::Type::NUM_TIME, "unlocked_until", "Wallet relock time, zero when not timed; -1 for an explicit Paymaster unlock until lock/unload/shutdown"},
                                                                      {RPCResult::Type::BOOL, "encrypted", "Wallet uses key encryption"},
                                                                      {RPCResult::Type::OBJ, "provider", "Provider configuration and local readiness", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymasterinfo; no finance history scan"}}},
                                                                      {RPCResult::Type::OBJ, "node_settings", "Effective startup values, including ordinary_outbound_target; OS-limited capacity is reported separately in provider.transport", {{RPCResult::Type::ELISION, "", "Allowed Paymaster node options"}}},
@@ -3636,7 +3636,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             result.pushKV("wallet", wallet->GetName());
             result.pushKV("wallet_generation", wallet->m_paymaster_transport_owner.GetHex());
             result.pushKV("observed_at", now);
-            result.pushKV("unlocked_until", wallet->nRelockTime);
+            result.pushKV("unlocked_until", wallet->IsLocked() ? 0 : wallet->nRelockTime);
             result.pushKV("encrypted", wallet->IsCrypted());
             result.pushKV("diagnostics", OperatorDiagnostics(provider, wallet->nRelockTime, now));
             result.pushKV("provider", provider);

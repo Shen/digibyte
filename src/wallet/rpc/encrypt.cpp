@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <rpc/util.h>
+#include <wallet/paymasteridentity.h>
+#include <wallet/paymasterprovider.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
 
@@ -17,7 +19,8 @@ RPCHelpMan walletpassphrase()
             "time that overrides the old one.\n",
                 {
                     {"passphrase", RPCArg::Type::STR, RPCArg::Optional::NO, "The wallet passphrase"},
-                    {"timeout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The time to keep the decryption key in seconds; capped at 100000000 (~3 years)."},
+                    {"timeout", RPCArg::Type::NUM, RPCArg::Optional::NO, "The time to keep the decryption key in seconds; capped at 100000000 (~3 years). Use 0 with paymaster_until_shutdown."},
+                    {"paymaster_until_shutdown", RPCArg::Type::BOOL, RPCArg::Default{false}, "Only for a configured Paymaster provider wallet: explicitly unlock the entire wallet until walletlock, wallet unload or node shutdown. Requires timeout=0. No passphrase is stored and no start or spending permission is granted."},
                 },
                 RPCResult{RPCResult::Type::NONE, "", ""},
                 RPCExamples{
@@ -34,6 +37,7 @@ RPCHelpMan walletpassphrase()
     if (!wallet) return UniValue::VNULL;
     CWallet* const pwallet = wallet.get();
 
+    const bool paymaster_until_shutdown = !request.params[2].isNull() && request.params[2].get_bool();
     int64_t nSleepTime;
     int64_t relock_time;
     // Prevent concurrent calls to walletpassphrase with the same wallet.
@@ -55,6 +59,19 @@ RPCHelpMan walletpassphrase()
         // Timeout cannot be negative, otherwise it will relock immediately
         if (nSleepTime < 0) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Timeout cannot be negative.");
+        }
+        if (paymaster_until_shutdown) {
+            DigiDollar::Paymaster::ProviderIdentityRecord identity;
+            DigiDollar::Paymaster::ProviderSettings settings;
+            DigiDollar::Paymaster::ProviderPolicy policy;
+            std::string error;
+            if (nSleepTime != 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Paymaster operating unlock requires timeout=0");
+            if (!CheckPaymasterProviderWallet(*pwallet, error) ||
+                !GetPaymasterIdentity(*pwallet, identity) ||
+                !GetPaymasterProviderSettings(*pwallet, settings) ||
+                !GetPaymasterProviderPolicy(*pwallet, policy)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_CONFIGURATION_REQUIRED");
+            }
         }
         // Clamp timeout
         constexpr int64_t MAX_SLEEP_TIME = 100000000; // larger values trigger a macos/libevent bug?
@@ -82,12 +99,15 @@ RPCHelpMan walletpassphrase()
 
         pwallet->TopUpKeyPool();
 
-        pwallet->nRelockTime = GetTime() + nSleepTime;
+        // -1 is a volatile operating lease, distinct from a timed unlock or
+        // locked wallet. Old timed callbacks no longer match this deadline.
+        pwallet->nRelockTime = paymaster_until_shutdown ? -1 : GetTime() + nSleepTime;
         relock_time = pwallet->nRelockTime;
     }
 
     // Wallet is now unlocked by explicit user action. Safe to attempt oracle auto-start.
     pwallet->TryAutoStartOracles();
+    if (paymaster_until_shutdown) return UniValue::VNULL;
 
     // rpcRunLater must be called without cs_wallet held otherwise a deadlock
     // can occur. The deadlock would happen when RPCRunLater removes the

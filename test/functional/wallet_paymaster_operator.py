@@ -5,6 +5,7 @@
 from pathlib import Path
 import subprocess
 import json
+import time
 
 from test_framework.paymaster import paymaster_node_args, paymaster_port, provider_safety_policy
 from test_framework.test_framework import DigiByteTestFramework
@@ -27,7 +28,56 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
 
+    def check_operating_unlock(self):
+        self.log.info("Paymaster-only continuous unlock remains volatile and replaces old timers")
+        node = self.nodes[0]
+        node.createwallet("operating-unlock", passphrase="test passphrase")
+        provider = node.get_wallet_rpc("operating-unlock")
+        assert_raises_rpc_error(-4, "PAYMASTER_PROVIDER_CONFIGURATION_REQUIRED",
+                                provider.walletpassphrase, "test passphrase", 0, True)
+        provider.walletpassphrase("test passphrase", 60)
+        provider.createpaymasteridentity("Encrypted operator")
+        policy = {
+            "funding_models": ["sponsored"], "sponsorship_scope": "public",
+            "fee_rate_bps": 0, "min_amount_cents": 100, "max_amount_cents": 10000,
+            "quote_ttl": 60, "maximum_network_fee_dgb_satoshis": 20000000,
+        }
+        provider.setpaymasterpolicy(policy)
+        provider.setpaymasterenabled(False)
+        assert_raises_rpc_error(-8, "requires timeout=0", provider.walletpassphrase,
+                                "test passphrase", 60, True)
+        provider.walletpassphrase("test passphrase", 1)
+        # Exercise CLI conversion of the optional third boolean as well.
+        node.cli("-rpcwallet=operating-unlock").walletpassphrase("test passphrase", 0, True)
+        assert_equal(provider.getwalletinfo()["unlocked_until"], -1)
+        assert_equal(provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"], False)
+        assert_equal(provider.getpaymasteroperatorinfo()["provider"]["enabled"], False)
+        time.sleep(2)  # The superseded one-second relock callback must not lock this lease.
+        assert_equal(provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"], False)
+        assert_raises_rpc_error(-14, "incorrect", provider.walletpassphrase, "wrong", 0, True)
+        assert_equal(provider.getwalletinfo()["unlocked_until"], -1)
+        provider.walletlock()
+        assert_equal(provider.getwalletinfo()["unlocked_until"], 0)
+        provider.walletpassphrase("test passphrase", 0, True)
+        provider.walletpassphrase("test passphrase", 1)
+        self.wait_until(lambda: provider.getwalletinfo()["unlocked_until"] == 0)
+        provider.walletpassphrase("test passphrase", 0, True)
+        node.unloadwallet("operating-unlock")
+        node.loadwallet("operating-unlock")
+        assert_equal(provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"], True)
+        provider.walletpassphrase("test passphrase", 0, True)
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        provider = node.get_wallet_rpc("operating-unlock")
+        if "operating-unlock" not in node.listwallets():
+            node.loadwallet("operating-unlock")
+        assert_equal(provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"], True)
+        provider.walletpassphrase("test passphrase", 0)
+        self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"])
+        node.unloadwallet("operating-unlock")
+
     def run_test(self):
+        self.check_operating_unlock()
         node = self.nodes[0]
         node.createwallet("operator")
         wallet = node.get_wallet_rpc("operator")
