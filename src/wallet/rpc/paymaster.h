@@ -98,6 +98,7 @@ RPCHelpMan getpaymasterliquiditystatus();
 RPCHelpMan getpaymasterfinancestatus();
 RPCHelpMan acknowledgepaymasterproviderbackup();
 RPCHelpMan withdrawpaymastercarrier();
+RPCHelpMan releasepaymastercapital();
 RPCHelpMan preparepaymasterpool();
 RPCHelpMan rebalancepaymasterpool();
 RPCHelpMan getpaymasterinfo();

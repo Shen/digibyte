@@ -141,6 +141,12 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         assert_equal(liquidity["maintenance_fee_reserved_satoshis"],
                      liquidity["maintenance_fee_planned_satoshis"] + liquidity["maintenance_fee_broadcast_satoshis"])
         carrier = prepared["dd_txid"]
+        carrier_bytes = provider.gettransaction(carrier)["hex"]
+        self.log.info("Full capital release must not bypass an unfinished/signed setup")
+        provider.stoppaymaster({"persistent": True, "pause_setup": True})
+        assert_raises_rpc_error(-4, "PAYMASTER_CAPITAL_OPEN_MAINTENANCE", provider.releasepaymastercapital)
+        assert_equal(provider.gettransaction(carrier)["hex"], carrier_bytes)
+        provider.setpaymasterenabled(True)
         assert "dgb_txid" not in prepared
         assert carrier not in node.getrawmempool()
         assert_equal(len(provider.getpaymasterpoolinfo()["pool"]), 4)
@@ -348,6 +354,68 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         self.wait_for(legacy, lambda steps: steps[0]["state"] == "complete")
         assert_equal(len(legacy.getpaymasterpoolinfo()["pool"]), 4)
         assert_equal(legacy.getpaymasterinfo()["running"], False)
+
+        self.check_full_capital_release()
+
+    def check_full_capital_release(self):
+        node = self.nodes[0]
+        identities = {}
+        for name, carriers in (("setup", True), ("legacy", False)):
+            wallet = node.get_wallet_rpc(name)
+            # Always use actual CLI conversion for this operator workflow,
+            # including the otherwise native JSON-RPC baseline run.
+            cli = node.cli(f"-rpcwallet={name}")
+            wallet.setpaymasterliquiditypolicy(default_liquidity_policy(carriers))
+            wallet.getpaymasterpoolinfo()  # Reconcile confirmations separately.
+            identities[name] = wallet.getpaymasterinfo()["provider_id"]
+            assert_raises_rpc_error(-4, "PAYMASTER_CAPITAL_REQUIRES_PERSISTENT_STOP", cli.releasepaymastercapital)
+            cli.stoppaymaster({"persistent": True, "pause_setup": True})
+            before = wallet.getpaymasterpoolinfo()["pool"]
+            count = wallet.getwalletinfo()["txcount"]
+            finance_before = wallet.getpaymasterfinancestatus({"period": "all"})
+            preview = cli.releasepaymastercapital()
+            available = [entry for entry in before if entry["state"] == "available"]
+            assert_equal(preview["executed"], False)
+            assert_equal(preview["pool_entries"], len(available))
+            assert preview["pool_entries"] >= 4
+            assert_equal(preview["dgb_satoshis"], sum(entry["dgb_satoshis"] for entry in available))
+            assert_equal(preview["dd_cents"], sum(entry["dd_cents"] for entry in available))
+            assert_equal(preview["network_fee_satoshis"], 0)
+            assert_equal(wallet.getpaymasterpoolinfo()["pool"], before)
+            assert_raises_rpc_error(-8, "PAYMASTER_CAPITAL_PLAN_REQUIRED", cli.releasepaymastercapital, {"execute": True})
+            assert_raises_rpc_error(-4, "PAYMASTER_CAPITAL_PLAN_CHANGED", cli.releasepaymastercapital,
+                                    {"execute": True, "plan_id": "01" * 32})
+            changed = default_liquidity_policy(carriers)
+            changed["maximum_maintenance_fee_per_day_satoshis"] += 1
+            wallet.setpaymasterliquiditypolicy(changed)
+            assert_raises_rpc_error(-4, "PAYMASTER_CAPITAL_PLAN_CHANGED", cli.releasepaymastercapital,
+                                    {"execute": True, "plan_id": preview["plan_id"]})
+            preview = cli.releasepaymastercapital()
+            result = cli.releasepaymastercapital({"execute": True, "plan_id": preview["plan_id"]})
+            assert_equal(result, dict(preview, executed=True))
+            assert_equal(wallet.getwalletinfo()["txcount"], count)
+            assert all(entry["state"] in ("released", "spent") for entry in wallet.getpaymasterpoolinfo()["pool"])
+            saved = wallet.getpaymasterliquiditystatus()["policy"]
+            assert_equal(saved["automatic_replenishment"], False)
+            assert_equal(saved["paid_maintenance_approved"], False)
+            finance_after = wallet.getpaymasterfinancestatus({"period": "all"})
+            for field in ("service_fee_income_cents", "dgb_operating_cost_satoshis", "successful_transfers"):
+                assert_equal(finance_after[field], finance_before[field])
+            for value in finance_after["pool_capital"].values():
+                assert_equal(value, 0)
+            assert_raises_rpc_error(-4, "PAYMASTER_CAPITAL_PLAN_CHANGED", cli.releasepaymastercapital,
+                                    {"execute": True, "plan_id": preview["plan_id"]})
+            assert_equal(cli.releasepaymastercapital()["pool_entries"], 0)
+        self.restart_node(0, extra_args=self.extra_args[0])
+        node.setmockoracleprice(500_000)
+        for name, identity in identities.items():
+            wallet = node.get_wallet_rpc(name)
+            info = wallet.getpaymasterinfo()
+            assert_equal(info["provider_id"], identity)
+            assert_equal(info["enabled"], False)
+            assert_equal(info["autostart"], False)
+            assert_equal(info["running"], False)
+            assert all(entry["state"] in ("released", "spent") for entry in wallet.getpaymasterpoolinfo()["pool"])
 
 
 if __name__ == '__main__':

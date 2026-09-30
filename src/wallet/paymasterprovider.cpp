@@ -26,6 +26,7 @@
 #include <streams.h>
 #include <tinyformat.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/digidollarwallet.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/scriptpubkeyman.h>
@@ -1660,6 +1661,122 @@ bool SetPaymasterProviderPoolEntries(CWallet& wallet,
     if (!batch.WritePaymasterProviderPool(entries)) {
         error = "PAYMASTER_DATABASE_WRITE";
         return false;
+    }
+    return true;
+}
+
+bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
+                            int64_t now, PaymasterCapitalRelease& result, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    result = {};
+    error.clear();
+    const auto fail = [&](const char* code) { error = code; return false; };
+    if (now <= 0) return fail("PAYMASTER_INVALID_TIME");
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    ProviderSettings settings;
+    ProviderLiquidityPolicy liquidity;
+    std::vector<ProviderPoolEntry> pool;
+    if (!batch.ReadPaymasterIdentity(identity) || !batch.ReadPaymasterSettings(settings) ||
+        !batch.ReadPaymasterProviderPool(pool)) return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    if (settings.enabled || settings.autostart) return fail("PAYMASTER_CAPITAL_REQUIRES_PERSISTENT_STOP");
+    const auto liquidity_status = batch.ReadPaymasterLiquidityPolicyWithStatus(liquidity);
+    if (liquidity_status != DatabaseReadStatus::FOUND && liquidity_status != DatabaseReadStatus::NOT_FOUND)
+        return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    bool drain_work{false};
+    if (!PaymasterStore{wallet}.HasProviderDrainWork(identity.provider_id, drain_work, error)) return false;
+    if (drain_work) return fail("PAYMASTER_CAPITAL_OPEN_PAYMENTS");
+
+    ProviderBudgetLedger budgets;
+    const auto budget_status = batch.ReadPaymasterProviderBudgetLedgerWithStatus(budgets);
+    if (budget_status != DatabaseReadStatus::FOUND && budget_status != DatabaseReadStatus::NOT_FOUND)
+        return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    for (const auto& reservation : budgets.reservations)
+        if (reservation.state == BudgetReservationState::RESERVED) return fail("PAYMASTER_CAPITAL_RESERVED");
+    for (const auto& admission : budgets.capacity_admissions)
+        if (admission.state == CapacityAdmissionState::RESERVED) return fail("PAYMASTER_CAPITAL_RESERVED");
+
+    const auto confirmed = [&](const uint256& txid) {
+        const auto* tx = wallet.GetWalletTx(txid);
+        return tx && wallet.GetTxDepthInMainChain(*tx) > 0;
+    };
+    std::vector<ProviderCommitRecord> commits;
+    if (!batch.ListPaymasterProviderCommits(commits)) return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    for (const auto& commit : commits)
+        if (commit.provider_id == identity.provider_id && !confirmed(commit.final_txid))
+            return fail("PAYMASTER_CAPITAL_UNCONFIRMED_PAYMENT");
+    ProviderMaintenanceLedger maintenance;
+    const auto maintenance_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
+    if (maintenance_status != DatabaseReadStatus::FOUND && maintenance_status != DatabaseReadStatus::NOT_FOUND)
+        return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    for (const auto& record : maintenance.records) {
+        if (record.state != ProviderMaintenanceState::CONFIRMED && record.state != ProviderMaintenanceState::RELEASED)
+            return fail("PAYMASTER_CAPITAL_OPEN_MAINTENANCE");
+        if (!record.transaction_id.IsNull() && !confirmed(record.transaction_id))
+            return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
+    }
+    for (const auto& entry : pool) {
+        if (entry.state == PoolEntryState::SPENT || entry.state == PoolEntryState::RELEASED) continue;
+        // INVALIDATED is ambiguous too: do not drop conflict/reorg evidence.
+        if (entry.state != PoolEntryState::AVAILABLE || !entry.reservation_id.IsNull())
+            return fail("PAYMASTER_CAPITAL_RESERVED_OR_UNRESOLVED");
+        InputReservation reservation;
+        if (batch.ReadPaymasterReservationWithStatus(entry.outpoint, reservation) != DatabaseReadStatus::NOT_FOUND)
+            return fail("PAYMASTER_CAPITAL_INPUT_RESERVED_OR_UNREADABLE");
+        const auto* tx = wallet.GetWalletTx(entry.outpoint.hash);
+        if (!tx || entry.outpoint.n >= tx->tx->vout.size() || !confirmed(entry.outpoint.hash) ||
+            entry.confirmation_height <= 0 || wallet.IsSpent(entry.outpoint) ||
+            tx->tx->vout[entry.outpoint.n].scriptPubKey != entry.script_pub_key)
+            return fail("PAYMASTER_CAPITAL_OUTPUT_NOT_CONFIRMED_UNSPENT");
+        if (wallet.IsLockedCoin(entry.outpoint))
+            return fail("PAYMASTER_CAPITAL_COIN_MANUALLY_LOCKED");
+        if (!(wallet.IsMine(entry.script_pub_key) & ISMINE_SPENDABLE) ||
+            (entry.asset == PoolAsset::DGB && tx->tx->vout[entry.outpoint.n].nValue != entry.dgb_value.value))
+            return fail("PAYMASTER_CAPITAL_OUTPUT_MISMATCH");
+        if (entry.asset == PoolAsset::DD_CARRIER &&
+            (!wallet.GetDDWallet() || wallet.GetDDWallet()->GetDDFromUTXO(entry.outpoint) != entry.carrier_value.value))
+            return fail("PAYMASTER_CAPITAL_CARRIER_MISMATCH");
+        if (entry.dgb_value.value < 0 || entry.carrier_value.value < 0 ||
+            entry.dgb_value.value > std::numeric_limits<int64_t>::max() - result.dgb_satoshis ||
+            entry.carrier_value.value > std::numeric_limits<int64_t>::max() - result.dd_cents)
+            return fail("PAYMASTER_CAPITAL_AMOUNT_OVERFLOW");
+        result.dgb_satoshis += entry.dgb_value.value;
+        result.dd_cents += entry.carrier_value.value;
+        ++result.entries;
+    }
+    // Bind the exact persisted state, identity, network and wallet. No preview
+    // record or authorization is written; all prerequisites are rechecked above.
+    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster capital release v1"}
+        << Params().GenesisBlock().GetHash() << wallet.GetName() << identity.provider_id
+        << settings << liquidity << pool << maintenance << budgets).GetHash();
+    if (!execute) return true;
+    if (expected_plan.IsNull() || expected_plan != result.plan_id) return fail("PAYMASTER_CAPITAL_PLAN_CHANGED");
+    for (auto& entry : pool) {
+        if (entry.state != PoolEntryState::AVAILABLE) continue;
+        entry.state = PoolEntryState::RELEASED;
+        entry.updated_at = std::max(entry.updated_at, now);
+    }
+    // Keep targets and identity for an explicit future setup, but revoke
+    // recurring paid-maintenance consent. Stop/enable alone cannot refill it.
+    if (liquidity_status == DatabaseReadStatus::FOUND) {
+        if (liquidity.updated_at == std::numeric_limits<int64_t>::max())
+            return fail("PAYMASTER_LIQUIDITY_POLICY_TIME_EXHAUSTED");
+        liquidity.automatic_replenishment = false;
+        liquidity.paid_maintenance_approved = false;
+        liquidity.updated_at = std::max(now, liquidity.updated_at + 1);
+    }
+    if (!batch.TxnBegin()) return fail("PAYMASTER_DATABASE_BEGIN");
+    if (!batch.WritePaymasterProviderPool(pool) ||
+        (liquidity_status == DatabaseReadStatus::FOUND && !batch.WritePaymasterLiquidityPolicy(liquidity)) ||
+        !WriteProviderBackupReminder(batch, identity, now, error)) {
+        batch.TxnAbort();
+        if (error.empty()) error = "PAYMASTER_DATABASE_WRITE";
+        return false;
+    }
+    if (!batch.TxnCommit()) {
+        batch.TxnAbort();
+        return fail("PAYMASTER_DATABASE_COMMIT");
     }
     return true;
 }

@@ -106,12 +106,26 @@ using DigiDollarTest::SetupDescriptorsWallet;
 
 namespace {
 
+UniValue PaymasterOverviewFinance()
+{
+    // Deliberately no events/daily_totals: include_events=false omits them.
+    UniValue result;
+    if (!result.read(R"({"period":"all","history_partially_reconstructable":false,
+        "period_summaries":{"all":{"service_fee_income_cents":125,"dgb_operating_cost_satoshis":20000000,"successful_transfers":5}},
+        "pool_capital":{"dgb_available_satoshis":500000000,"dgb_reserved_satoshis":100000000,"dgb_pending_satoshis":50000000,
+        "carrier_base_cents":400,"carrier_earned_cents":25,"carrier_withdrawable_cents":20,"pending_maintenance_transactions":1}})"))
+        throw std::runtime_error("Invalid overview finance fixture");
+    result.pushKV("provider_id", std::string(64, 'a'));
+    return result;
+}
+
 UniValue PaymasterLiquiditySlotStatus(int ready, int pending, int missing,
                                       int target)
 {
     UniValue status{UniValue::VOBJ};
     status.pushKV("ready", ready);
     status.pushKV("pending", pending);
+    status.pushKV("reserved", 0);
     status.pushKV("missing", missing);
     status.pushKV("target", target);
     status.pushKV("counted_toward_target",
@@ -2253,6 +2267,11 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     auto* selected_summary = tab.findChild<QLabel*>(QStringLiteral("paymasterFinanceSelectedSummary"));
     QVERIFY(selected_summary);
     QVERIFY(selected_summary->text().contains(QStringLiteral("1.25 DD")));
+    auto* overview_finance = tab.findChild<QLabel*>("paymasterOverviewFinanceStatus");
+    QVERIFY(overview_finance);
+    // The detail page is 30d, but the overview stays explicitly all-time.
+    QVERIFY(overview_finance->text().contains("All time · confirmed"));
+    QVERIFY(overview_finance->text().contains("2.50 DD"));
     QVERIFY(period_income != nullptr);
     QVERIFY(result_estimate != nullptr);
     QVERIFY(model_breakdown_label != nullptr);
@@ -6020,7 +6039,7 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     auto* card = panel->findChild<QGroupBox*>(QStringLiteral("paymasterOperatorCard"));
     QVERIFY(tabs && settings && headline && hint && connection && action && pause && card);
     QCOMPARE(tabs->count(), 3);
-    QCOMPARE(settings->count(), 4);
+    QCOMPARE(settings->count(), 5);
     auto* details = panel->findChild<QWidget*>(QStringLiteral("paymasterTechnicalDetails"));
     QVERIFY(details);
     QVERIFY(details->isHidden());
@@ -7623,6 +7642,16 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
     panel->refreshStatus();
     QStringList displayed_steps;
     for (int step = 0; pending && step < 10; ++step) {
+        if (pending_command == QLatin1String("getpaymasterfinancestatus")) {
+            // Capital/finance is a serialized read; it must not erase the
+            // already validated operator status or pretend it needs setup.
+            QVERIFY(loading->isHidden());
+            QVERIFY(!action->isEnabled());
+            auto callback = std::move(pending);
+            pending = {};
+            callback(PaymasterOverviewFinance(), {});
+            continue;
+        }
         // Keep the callback pending across event processing, just like a slow
         // real wallet RPC. Synchronous snapshot tests cannot observe this gap.
         QCoreApplication::processEvents();
@@ -7700,7 +7729,8 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
             QFAIL("Unexpected startup RPC");
     }
     QVERIFY(!pending);
-    QCOMPARE(reads.size(), 1);
+    QCOMPARE(reads.count(QStringLiteral("getpaymasteroperatorinfo")), 1);
+    QCOMPARE(reads.size(), outcome == QLatin1String("initial_error") || outcome == QLatin1String("operator_error") || outcome == QLatin1String("malformed_operator") ? 1 : 2);
     QVERIFY(loading->isHidden());
     QVERIFY(step_label->text().isEmpty());
     QVERIFY(!timer->isActive());
@@ -7711,12 +7741,13 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
         QCOMPARE(action->text(), QStringLiteral("Refresh status"));
         QVERIFY(!headline->text().contains("Ready to start"));
     } else {
-        bool finance_prompt{false};
+        bool finance_summary{false};
         for (auto* label : panel->findChildren<QLabel*>()) {
             QVERIFY(!label->text().contains("finance ledger has not been initialized"));
-            finance_prompt |= label->text().contains("Open finances to load income and costs");
+            QVERIFY(!label->text().contains("Open finances to load income and costs"));
+            finance_summary |= label->text().contains("All time · confirmed");
         }
-        QVERIFY(finance_prompt);
+        QVERIFY(finance_summary);
         QCOMPARE(action->text(), QStringLiteral("Start provider…"));
         QVERIFY(headline->text().contains("Ready to start"));
         QVERIFY(hint->text().contains("do not need to repeat setup"));
@@ -7741,6 +7772,13 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
             auto callback = std::move(pending);
             pending = {};
             callback(snapshot, refresh == 2 ? QStringLiteral("connection lost") : QString{});
+            if (refresh < 2) {
+                QVERIFY(pending);
+                QCOMPARE(pending_command, QStringLiteral("getpaymasterfinancestatus"));
+                auto finance_callback = std::move(pending);
+                pending = {};
+                finance_callback(PaymasterOverviewFinance(), {});
+            }
         }
         QVERIFY(!headline->text().contains("Ready to start"));
         QCOMPARE(action->text(), QStringLiteral("Refresh status"));
@@ -7751,6 +7789,10 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
         auto callback = std::move(pending);
         pending = {};
         callback(snapshot, {});
+        QVERIFY(pending);
+        auto finance_callback = std::move(pending);
+        pending = {};
+        finance_callback(PaymasterOverviewFinance(), {});
         QCOMPARE(headline->text(), ready_headline);
         QVERIFY(loading->isHidden());
     }
@@ -7760,9 +7802,13 @@ void PaymasterWidgetTests::paymasterConnectionLayout_data()
 {
     QTest::addColumn<QString>("theme");
     QTest::addColumn<QSize>("window_size");
+    QTest::addColumn<bool>("management");
     for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
-        QTest::newRow(qPrintable(theme + "_narrow")) << theme << QSize(900, 620);
-        QTest::newRow(qPrintable(theme + "_wide")) << theme << QSize(1280, 900);
+        for (bool management : {false, true}) {
+            const auto prefix = theme + (management ? "_management" : "_connection");
+            QTest::newRow(qPrintable(prefix + "_narrow")) << theme << QSize(900, 620) << management;
+            QTest::newRow(qPrintable(prefix + "_wide")) << theme << QSize(1280, 900) << management;
+        }
     }
 }
 
@@ -7770,6 +7816,7 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
 {
     QFETCH(QString, theme);
     QFETCH(QSize, window_size);
+    QFETCH(bool, management);
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
     panel->setObjectName("paymasterWidget");
     QFile css(":/css/" + theme);
@@ -7777,11 +7824,27 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     panel->setStyleSheet(QString::fromUtf8(css.readAll()));
     auto* tabs = panel->findChild<QTabWidget*>("paymasterOperatorTabs");
     auto* settings = panel->findChild<QTabWidget*>("paymasterSettingsTabs");
-    auto* scroll = panel->findChild<QScrollArea*>("paymasterConnectionPage");
+    auto* scroll = panel->findChild<QScrollArea*>(management ? "paymasterManagementPage" : "paymasterConnectionPage");
     auto* prerequisites = panel->findChild<QPushButton*>("paymasterPrerequisitesToggle");
     auto* runtime = panel->findChild<QPushButton*>("paymasterRuntimeSettingsToggle");
     auto* backup = panel->findChild<QGroupBox*>("paymasterOverviewBackupNotice");
     QVERIFY(tabs && settings && scroll && prerequisites && runtime && backup);
+    QCOMPARE(settings->count(), 5);
+    auto* operation = panel->findChild<QWidget*>("paymasterOverviewPage");
+    auto* administration = panel->findChild<QWidget*>("paymasterManagementPage");
+    auto* connection = panel->findChild<QWidget*>("paymasterConnectionPage");
+    QVERIFY(operation && administration && connection);
+    for (const auto* name : {"paymasterOperatorStop", "paymasterOperatorRetire", "paymasterRuntimeSettingsPanel"}) {
+        auto* control = panel->findChild<QWidget*>(name);
+        QVERIFY(control && administration->isAncestorOf(control));
+        QVERIFY(!operation->isAncestorOf(control));
+        QVERIFY(!connection->isAncestorOf(control));
+    }
+    QVERIFY(operation->isAncestorOf(panel->findChild<QPushButton*>("paymasterOperatorPause")));
+    QVERIFY(operation->isAncestorOf(panel->findChild<QPushButton*>("paymasterOperatorNextAction")));
+    QVERIFY(operation->isAncestorOf(panel->findChild<QPushButton*>("paymasterOperatorStart")));
+    QVERIFY(connection->isAncestorOf(backup));
+    QVERIFY(connection->isAncestorOf(prerequisites));
     auto* contents = scroll->widget();
     auto* column = contents->findChild<QWidget*>("paymasterPageColumn");
     QVERIFY(column && column->layout());
@@ -7822,8 +7885,8 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     };
     verify_layout();
     const int collapsed_height = contents->height();
-    prerequisites->setChecked(true);
-    runtime->setChecked(true);
+    if (management) runtime->setChecked(true);
+    else prerequisites->setChecked(true);
     QTRY_VERIFY(contents->height() > collapsed_height);
     QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
     verify_layout();
@@ -7957,7 +8020,7 @@ void PaymasterWidgetTests::paymasterThreeDestinationsAndVisibleTasks()
     auto* history = panel->findChild<QTabWidget*>("paymasterHistoryTabs");
     QVERIFY(tabs && settings && history);
     QCOMPARE(tabs->count(), 3);
-    QCOMPARE(settings->count(), 4);
+    QCOMPARE(settings->count(), 5);
     QCOMPARE(history->count(), 2);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Operation"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("Activity && finances"));
@@ -8014,6 +8077,437 @@ UniValue GuidedOperatorSnapshot()
     snapshot.pushKV("safety", safety);
     return snapshot;
 }
+}
+
+void PaymasterWidgetTests::paymasterCapitalOverview_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const char* scenario : {"ready", "surplus_wrong_pool", "pending", "reserved", "sponsored",
+                                 "unsaved_targets", "partial_history", "zero_income", "finance_error",
+                                 "malformed_finance", "negative_capital", "wrong_provider"})
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+}
+
+void PaymasterWidgetTests::paymasterCapitalOverview()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    UniValue snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto liquidity = provider.find_value("liquidity");
+    auto finance = PaymasterOverviewFinance();
+    if (scenario == QLatin1String("surplus_wrong_pool")) {
+        liquidity.pushKV("admission_dgb", PaymasterLiquiditySlotStatus(4, 0, 0, 3));
+        liquidity.pushKV("operational_dgb", PaymasterLiquiditySlotStatus(0, 0, 1, 1));
+    } else if (scenario == QLatin1String("pending")) {
+        liquidity.pushKV("operational_dgb", PaymasterLiquiditySlotStatus(0, 1, 0, 1));
+    } else if (scenario == QLatin1String("reserved")) {
+        auto slot = PaymasterLiquiditySlotStatus(0, 0, 0, 1);
+        slot.pushKV("reserved", 1);
+        liquidity.pushKV("operational_dgb", slot);
+    } else if (scenario == QLatin1String("sponsored")) {
+        auto policy = provider.find_value("policy");
+        UniValue models{UniValue::VARR};
+        models.push_back("sponsored");
+        policy.pushKV("funding_models", models);
+        provider.pushKV("policy", policy);
+        auto targets = liquidity.find_value("policy");
+        targets.pushKV("target_admission_carriers", 0);
+        targets.pushKV("target_operational_carriers", 0);
+        liquidity.pushKV("policy", targets);
+        liquidity.pushKV("admission_carriers", PaymasterLiquiditySlotStatus(0, 0, 0, 0));
+        liquidity.pushKV("operational_carriers", PaymasterLiquiditySlotStatus(0, 0, 0, 0));
+    }
+    provider.pushKV("liquidity", liquidity);
+    snapshot.pushKV("provider", provider);
+    if (scenario == QLatin1String("partial_history")) finance.pushKV("history_partially_reconstructable", true);
+    if (scenario == QLatin1String("zero_income")) {
+        UniValue summaries, totals;
+        QVERIFY(totals.read(R"({"service_fee_income_cents":0,"dgb_operating_cost_satoshis":0,"successful_transfers":0})"));
+        summaries.setObject();
+        summaries.pushKV("all", totals);
+        finance.pushKV("period_summaries", summaries);
+    }
+    if (scenario == QLatin1String("malformed_finance")) finance = UniValue{UniValue::VOBJ};
+    if (scenario == QLatin1String("negative_capital")) {
+        auto capital = finance.find_value("pool_capital");
+        capital.pushKV("dgb_available_satoshis", -1);
+        finance.pushKV("pool_capital", capital);
+    }
+    if (scenario == QLatin1String("wrong_provider")) finance.pushKV("provider_id", std::string(64, 'b'));
+    QStringList commands;
+    UniValue finance_params;
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        commands << QString::fromStdString(command);
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasterfinancestatus") {
+            finance_params = params;
+            if (scenario == QLatin1String("finance_error")) throw std::runtime_error("injected read failure");
+            return finance;
+        }
+        throw std::runtime_error("Unexpected dashboard RPC");
+    });
+    panel->refreshStatus();
+    QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo", "getpaymasterfinancestatus"}));
+    QCOMPARE(finance_params[0].find_value("period").get_str(), std::string("all"));
+    QVERIFY(finance_params[0].find_value("include_events").isFalse());
+    const auto metric = [&](const char* name) { return panel->findChild<QLabel*>(QStringLiteral("paymasterCapital_") + name); };
+    auto* status = panel->findChild<QLabel*>("paymasterOverviewFinanceStatus");
+    auto* pool_status = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
+    QVERIFY(status && pool_status && metric("operational_dgb") && metric("dgb_available"));
+    if (scenario == QLatin1String("finance_error") || scenario == QLatin1String("malformed_finance") ||
+        scenario == QLatin1String("negative_capital") || scenario == QLatin1String("wrong_provider")) {
+        QCOMPARE(status->property("statusKind").toString(), QStringLiteral("action"));
+        QVERIFY(status->text().contains("unavailable"));
+        QVERIFY(!metric("dgb_available")->text().contains("5"));
+    } else {
+        QCOMPARE(status->property("statusKind").toString(), scenario == QLatin1String("partial_history") ? QStringLiteral("action") : QStringLiteral("neutral"));
+        QVERIFY(status->text().contains("All time · confirmed"));
+        QVERIFY(metric("dgb_available")->text().contains("Available DGB: 5"));
+        QVERIFY(metric("dgb_reserved")->text().contains("Reserved DGB: 1"));
+        QVERIFY(metric("dgb_pending")->text().contains("Pending DGB: 0.5"));
+        QVERIFY(metric("carrier_base")->text().contains("4.00 DD"));
+        QVERIFY(metric("carrier_earned")->text().contains("0.25 DD"));
+        QVERIFY(metric("carrier_withdrawable")->text().contains("0.20 DD"));
+        QCOMPARE(metric("maintenance_pending")->property("statusKind").toString(), QStringLiteral("waiting"));
+    }
+    if (scenario == QLatin1String("surplus_wrong_pool")) {
+        QVERIFY(pool_status->property("statusKind").toString() != QLatin1String("ready"));
+        QCOMPARE(metric("operational_dgb")->property("statusKind").toString(), QStringLiteral("error"));
+    } else if (scenario == QLatin1String("pending") || scenario == QLatin1String("reserved")) {
+        QVERIFY(pool_status->property("statusKind").toString() != QLatin1String("ready"));
+        QCOMPARE(metric("operational_dgb")->property("statusKind").toString(), QStringLiteral("waiting"));
+    } else {
+        QCOMPARE(pool_status->property("statusKind").toString(), QStringLiteral("ready"));
+    }
+    if (scenario == QLatin1String("sponsored"))
+        QCOMPARE(metric("operational_carriers")->property("statusKind").toString(), QStringLiteral("neutral"));
+    if (scenario == QLatin1String("unsaved_targets")) {
+        auto* target = panel->findChild<QSpinBox*>("paymasterOperationalDgbSlots");
+        QVERIFY(target);
+        target->setValue(16);
+        QVERIFY(metric("operational_dgb")->text().contains("1 / 1 ready"));
+        QCOMPARE(pool_status->property("statusKind").toString(), QStringLiteral("ready"));
+        QCOMPARE(commands.size(), 2); // Editing is not an authorization or RPC.
+    }
+}
+
+void PaymasterWidgetTests::paymasterOverviewFinanceWalletAndPrivacyBinding()
+{
+    for (bool close_wallet : {false, true}) {
+        std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+        DigiDollarPaymasterWidget::RpcCallback pending;
+        QString command;
+        panel->setAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue&, DigiDollarPaymasterWidget::RpcCallback callback) {
+            QVERIFY(!pending);
+            command = QString::fromStdString(method);
+            pending = std::move(callback);
+        });
+        panel->refreshStatus();
+        QCOMPARE(command, QStringLiteral("getpaymasteroperatorinfo"));
+        auto provider_callback = std::move(pending);
+        pending = {};
+        provider_callback(GuidedOperatorSnapshot(), {});
+        QVERIFY(pending);
+        QCOMPARE(command, QStringLiteral("getpaymasterfinancestatus"));
+        if (close_wallet) panel->setWalletModel(nullptr);
+        else panel->setPrivacy(true);
+        auto finance_callback = std::move(pending);
+        pending = {};
+        finance_callback(PaymasterOverviewFinance(), {});
+        QVERIFY(!pending);
+        auto* capital = panel->findChild<QWidget*>("paymasterOverviewCapitalDetails");
+        auto* status = panel->findChild<QLabel*>("paymasterOverviewFinanceStatus");
+        QVERIFY(capital && status);
+        QVERIFY(!status->text().contains("1.25"));
+        if (close_wallet) {
+            for (auto* label : capital->findChildren<QLabel*>()) QVERIFY(!label->text().contains("5"));
+        } else QVERIFY(capital->isHidden());
+    }
+}
+
+void PaymasterWidgetTests::paymasterStopAndRelease_data()
+{
+    QTest::addColumn<QString>("decision");
+    QTest::addColumn<bool>("retire");
+    for (const char* decision : {"cancel_stop", "stop_only", "cancel_release", "release", "blocked", "bad_receipt", "privacy", "wallet_change"})
+        QTest::newRow(decision) << QString::fromLatin1(decision) << false;
+    for (const char* decision : {"cancel_stop", "cancel_release", "release", "blocked", "bad_receipt", "privacy", "wallet_change", "stop_error", "bad_stop",
+                                "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool"})
+        QTest::newRow(qPrintable(QStringLiteral("retire_") + decision)) << QString::fromLatin1(decision) << true;
+}
+
+void PaymasterWidgetTests::paymasterStopAndRelease()
+{
+    QFETCH(QString, decision);
+    QFETCH(bool, retire);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    UniValue backup_status{UniValue::VOBJ}; backup_status.pushKV("required", true);
+    provider.pushKV("backup_status", backup_status);
+    snapshot.pushKV("provider", provider);
+    QStringList writes;
+    int previews{0}, executions{0}, balance_reads{0}, backup_requests{0};
+    panel->setProviderBackupRequestHandler([&] { ++backup_requests; }); // cancelled file dialog: no acknowledgement
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        if (method == "stoppaymaster") {
+            if (decision == "stop_error") throw std::runtime_error("Provider busy");
+            if (!params[0].find_value("persistent").isTrue() || !params[0].find_value("pause_setup").isTrue())
+                throw std::runtime_error("Stop must be persistent");
+            writes << QStringLiteral("stop");
+            auto provider = snapshot.find_value("provider");
+            provider.pushKV("enabled", false);
+            provider.pushKV("running", false);
+            provider.pushKV("autostart", false);
+            snapshot.pushKV("provider", provider);
+            UniValue result{UniValue::VOBJ}; result.pushKV("running", decision == "bad_stop"); return result;
+        }
+        if (method == "releasepaymastercapital") {
+            const bool execute = params.size() > 0 && params[0].find_value("execute").isTrue();
+            execute ? ++executions : ++previews;
+            if (decision == QLatin1String("blocked")) throw std::runtime_error("PAYMASTER_CAPITAL_RESERVED");
+            if (execute && params[0].find_value("plan_id").get_str() != std::string(64, 'c'))
+                throw std::runtime_error("Unreviewed release plan");
+            if (execute) writes << QStringLiteral("release");
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("executed", execute);
+            result.pushKV("plan_id", std::string(64, execute && decision == QLatin1String("bad_receipt") ? 'd' : 'c'));
+            result.pushKV("pool_entries", decision == "empty_pool" ? 0 : 8);
+            result.pushKV("dgb_satoshis", decision == "empty_pool" ? 0 : 100000000);
+            result.pushKV("dd_cents", decision == "empty_pool" ? 0 : 425);
+            result.pushKV("network_fee_satoshis", 0);
+            return result;
+        }
+        if (method == "getbalances") {
+            ++balance_reads;
+            if (decision == "balance_error") throw std::runtime_error("Balance unavailable");
+            UniValue result;
+            result.read(R"({"mine":{"trusted":12.00000001,"untrusted_pending":0.5,"immature":3,"used":0.2}})");
+            if (decision == "bad_dgb") result.read(R"({"mine":{"trusted":-1,"untrusted_pending":0,"immature":0}})");
+            return result;
+        }
+        if (method == "getdigidollarbalance") {
+            if (params.size() != 2 || params[0].get_str() != "" || params[1].getInt<int>() != 0)
+                throw std::runtime_error("Pending DD must be included");
+            UniValue result;
+            result.read(R"({"confirmed":1234,"unconfirmed":50,"total":1284})");
+            if (decision == "bad_dd") result.pushKV("total", 1283);
+            return result;
+        }
+        throw std::runtime_error("Unexpected stop RPC");
+    });
+    panel->refreshStatus();
+    auto* button = panel->findChild<QPushButton*>(retire ? "paymasterOperatorRetire" : "paymasterOperatorStop");
+    auto* status = panel->findChild<QLabel*>("paymasterStopStatus");
+    QVERIFY(button && status && button->isEnabled());
+    bool default_checked_correctly{false}, reviewed{false};
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, panel.get(), [&] {
+        if (auto* dialog = panel->findChild<QDialog*>("paymasterStopDialog"); dialog && dialog->isVisible()) {
+            auto* release = dialog->findChild<QCheckBox*>("paymasterStopReleaseAll");
+            QVERIFY(release);
+            default_checked_correctly = release->isChecked() == retire;
+            QCOMPARE(release->isEnabled(), !retire);
+            if (!retire) release->setChecked(decision != QLatin1String("stop_only"));
+            dialog->done(decision == QLatin1String("cancel_stop") ? QDialog::Rejected : QDialog::Accepted);
+        } else if (auto* review = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            QVERIFY(review->text().contains(decision == "empty_pool" ? "0.00 DD" : "4.25 DD"));
+            reviewed = true;
+            if (decision == QLatin1String("privacy")) panel->setPrivacy(true);
+            if (decision == QLatin1String("wallet_change")) panel->setWalletModel(nullptr);
+            review->done(decision == QLatin1String("cancel_release") ? QMessageBox::No : QMessageBox::Yes);
+        }
+    });
+    answer.start(10);
+    button->click();
+    answer.stop();
+    QVERIFY(default_checked_correctly);
+    QCOMPARE(writes.count(QStringLiteral("stop")), decision == "cancel_stop" || decision == "stop_error" ? 0 : 1);
+    const bool approved = QStringList{"release", "bad_receipt", "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool"}.contains(decision);
+    QCOMPARE(executions, approved ? 1 : 0);
+    const bool stop_confirmed = !QStringList{"cancel_stop", "stop_only", "stop_error", "bad_stop"}.contains(decision);
+    QCOMPARE(previews, stop_confirmed ? 1 : 0);
+    if (approved) QVERIFY(reviewed);
+    if (decision == QLatin1String("release")) QVERIFY(status->text().contains(retire ? "Review the remaining funds" : "all reviewed pool capital"));
+    if (decision == QLatin1String("bad_receipt")) QVERIFY(status->text().contains("unclear"));
+    if (decision == QLatin1String("blocked")) QVERIFY(status->text().contains("capital was not released"));
+    if (decision == "stop_error" || decision == "bad_stop") QVERIFY(status->text().contains("Stop not confirmed"));
+    const bool balance_review = retire && approved && decision != "bad_receipt";
+    QCOMPARE(balance_reads, balance_review ? 1 : 0);
+    auto* summary = panel->findChild<QGroupBox*>("paymasterRetirementSummary");
+    auto* balances = panel->findChild<QLabel*>("paymasterRetirementBalances");
+    QVERIFY(summary && balances);
+    QCOMPARE(summary->isHidden(), !balance_review);
+    if (balance_review) {
+        if (decision == "balance_error" || decision == "bad_dgb" || decision == "bad_dd") {
+            QVERIFY(balances->text().contains("could not be verified"));
+            QVERIFY(status->text().contains("incomplete"));
+        } else {
+            QVERIFY(balances->text().contains("12.00000001 DGB"));
+            QVERIFY(balances->text().contains("12.34 DD"));
+            QVERIFY(balances->text().contains("0.50 DD"));
+            QVERIFY(balances->text().contains("DGB excluded by address-reuse avoidance"));
+        }
+    }
+    if (decision == "backup_cancelled") {
+        auto* backup = panel->findChild<QPushButton*>("paymasterRetirementBackup");
+        QVERIFY(backup && backup->isEnabled());
+        backup->click();
+        QCOMPARE(backup_requests, 1);
+        QVERIFY(panel->findChild<QLabel*>("paymasterRetirementBackupStatus")->text().contains("still recommended"));
+        QCOMPARE(writes, QStringList({"stop", "release"}));
+    }
+}
+
+void PaymasterWidgetTests::paymasterHomeStartIsSeparateFromSettings()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    int calls{0};
+    panel->setRpcExecutorForTesting([&](const std::string&, const UniValue&) {
+        ++calls;
+        return UniValue{UniValue::VOBJ};
+    });
+    auto* start = panel->findChild<QPushButton*>("paymasterOperatorStart");
+    auto* next = panel->findChild<QPushButton*>("paymasterOperatorNextAction");
+    auto* overview = panel->findChild<QWidget*>("paymasterOverviewPage");
+    QVERIFY(start && next && overview && overview->isAncestorOf(start));
+    QVERIFY(!start->isEnabled());
+    auto snapshot = GuidedOperatorSnapshot();
+    panel->setOperatorStatusForTesting(snapshot);
+    QVERIFY(start->isEnabled());
+    QVERIFY(next->isHidden()); // No duplicate Start button.
+    UniValue diagnostics;
+    QVERIFY(diagnostics.read(R"([{"code":"PAYMASTER_BACKUP_REQUIRED","state":"action_required","action":"backup_wallet","area":"wallet"}])"));
+    snapshot.pushKV("diagnostics", diagnostics);
+    panel->setOperatorStatusForTesting(snapshot);
+    QVERIFY(start->isEnabled()); // Reminder is not a readiness gate.
+    QVERIFY(!next->isHidden()); // Backup shortcut remains available.
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, panel.get(), [&] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+            dialog->done(QMessageBox::Cancel);
+    });
+    answer.start(10);
+    start->click();
+    answer.stop();
+    QCOMPARE(calls, 0);
+    for (const char* scenario : {"locked", "not_ready", "no_identity", "running", "unknown"}) {
+        auto current = snapshot;
+        auto provider = current.find_value("provider");
+        if (std::string(scenario) == "locked") provider.pushKV("wallet_locked", true);
+        if (std::string(scenario) == "not_ready") provider.pushKV("ready", false);
+        if (std::string(scenario) == "no_identity") provider.pushKV("provider_id", "");
+        if (std::string(scenario) == "running") {
+            provider.pushKV("running", true);
+            provider.pushKV("service_state", "active");
+        }
+        if (std::string(scenario) == "unknown") current.pushKV("schema_version", 999);
+        current.pushKV("provider", provider);
+        panel->setOperatorStatusForTesting(current);
+        QVERIFY2(!start->isEnabled(), scenario);
+        start->click();
+        QCOMPARE(calls, 0);
+    }
+    panel->setOperatorStatusForTesting(snapshot);
+    panel->setPrivacy(true);
+    QVERIFY(!start->isEnabled());
+    QCOMPARE(calls, 0);
+}
+
+void PaymasterWidgetTests::paymasterRetirementLateResults_data()
+{
+    QTest::addColumn<QString>("phase");
+    QTest::addColumn<bool>("wallet_change");
+    for (const char* phase : {"stop", "preview", "execute", "dgb", "dd"}) {
+        for (bool wallet_change : {false, true})
+            QTest::newRow(qPrintable(QString::fromLatin1(phase) + (wallet_change ? "_wallet" : "_privacy")))
+                << QString::fromLatin1(phase) << wallet_change;
+    }
+}
+
+void PaymasterWidgetTests::paymasterRetirementLateResults()
+{
+    QFETCH(QString, phase);
+    QFETCH(bool, wallet_change);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    DigiDollarPaymasterWidget::RpcCallback pending;
+    QString command;
+    UniValue parameters;
+    QStringList calls;
+    panel->setAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback callback) {
+        QVERIFY(!pending);
+        command = QString::fromStdString(method);
+        parameters = params;
+        calls << command;
+        pending = std::move(callback);
+    });
+    const auto reply = [&](const UniValue& result) {
+        QVERIFY(pending);
+        auto callback = std::move(pending); pending = {};
+        callback(result, {});
+    };
+    panel->refreshStatus();
+    QCOMPARE(command, QStringLiteral("getpaymasteroperatorinfo"));
+    reply(GuidedOperatorSnapshot());
+    QCOMPARE(command, QStringLiteral("getpaymasterfinancestatus"));
+    reply(PaymasterOverviewFinance());
+    QVERIFY(!pending);
+    auto* retire = panel->findChild<QPushButton*>("paymasterOperatorRetire");
+    QVERIFY(retire && retire->isEnabled());
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, panel.get(), [&] {
+        if (auto* dialog = panel->findChild<QDialog*>("paymasterStopDialog"); dialog && dialog->isVisible())
+            dialog->accept();
+        else if (auto* review = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+            review->done(QMessageBox::Yes);
+    });
+    answer.start(10);
+    retire->click();
+    for (const char* stage : {"stop", "preview", "execute", "dgb", "dd"}) {
+        QVERIFY(pending);
+        UniValue result{UniValue::VOBJ};
+        const QString current = QString::fromLatin1(stage);
+        if (current == "stop") {
+            QCOMPARE(command, QStringLiteral("stoppaymaster"));
+            result.pushKV("running", false);
+        } else if (current == "preview" || current == "execute") {
+            QCOMPARE(command, QStringLiteral("releasepaymastercapital"));
+            if (current == "execute") {
+                QVERIFY(parameters[0].find_value("execute").isTrue());
+                QCOMPARE(parameters[0].find_value("plan_id").get_str(), std::string(64, 'c'));
+            }
+            result.pushKV("executed", current == "execute");
+            result.pushKV("plan_id", std::string(64, 'c'));
+            result.pushKV("pool_entries", 0);
+            result.pushKV("dgb_satoshis", 0);
+            result.pushKV("dd_cents", 0);
+            result.pushKV("network_fee_satoshis", 0);
+        } else if (current == "dgb") {
+            QCOMPARE(command, QStringLiteral("getbalances"));
+            QVERIFY(result.read(R"({"mine":{"trusted":12.3456,"untrusted_pending":0,"immature":0}})"));
+        } else {
+            QCOMPARE(command, QStringLiteral("getdigidollarbalance"));
+            QVERIFY(result.read(R"({"confirmed":2345,"unconfirmed":0,"total":2345})"));
+        }
+        if (current == phase) {
+            if (wallet_change) panel->setWalletModel(nullptr);
+            else panel->setPrivacy(true);
+            const auto count = calls.size();
+            reply(result);
+            QVERIFY(!pending);
+            QCOMPARE(calls.size(), count); // no follow-on mutation, balance read or backup
+            QVERIFY(panel->findChild<QGroupBox*>("paymasterRetirementSummary")->isHidden());
+            QVERIFY(panel->findChild<QLabel*>("paymasterRetirementBalances")->text().isEmpty());
+            QVERIFY(panel->findChild<QLabel*>("paymasterStopStatus")->isHidden());
+            answer.stop();
+            return;
+        }
+        reply(result);
+    }
+    QFAIL("Requested retirement boundary was not exercised");
 }
 
 void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval_data()

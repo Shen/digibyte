@@ -997,6 +997,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"digidollar", &setpaymasterliquiditypolicy},
         {"digidollar", &getpaymasterliquiditystatus},
         {"digidollar", &withdrawpaymastercarrier},
+        {"digidollar", &releasepaymastercapital},
         {"digidollar", &getpaymasterfinancestatus},
         {"digidollar", &acknowledgepaymasterproviderbackup},
         {"digidollar", &getpaymasterinfo},

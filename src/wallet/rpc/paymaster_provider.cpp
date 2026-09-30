@@ -749,6 +749,75 @@ RPCHelpMan getpaymasterliquiditystatus()
     };
 }
 
+RPCHelpMan releasepaymastercapital()
+{
+    return RPCHelpMan{
+        "releasepaymastercapital",
+        "Preview or atomically release all quiescent Paymaster pool outputs to ordinary wallet coin selection.\n"
+        "First stop persistently with stoppaymaster {\"persistent\":true,\"pause_setup\":true}.\n"
+        "No payment, network fee, wallet deletion or forced reservation release is performed.\n"
+        "Open payments, reservations, unresolved maintenance, manual coin locks and unconfirmed outputs block the entire operation.\n"
+        "Execution requires the unchanged preview plan. Recurring paid-maintenance consent is revoked; identity, targets, budgets and recovery history remain.\n"
+        "A replay after success fails PLAN_CHANGED; inspect pool state and obtain a new preview, never abandon signed work.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Explicit release approval", {
+            {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Release the reviewed capital"},
+            {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
+        }}},
+        RPCResult{RPCResult::Type::OBJ, "", "Capital release preview or receipt", {
+            {RPCResult::Type::BOOL, "executed", "Whether the atomic wallet update completed"},
+            {RPCResult::Type::STR_HEX, "plan_id", "Binding to the exact reviewed wallet state"},
+            {RPCResult::Type::NUM, "pool_entries", "Number of released outputs"},
+            {RPCResult::Type::NUM, "dgb_satoshis", "DGB pool capital"},
+            {RPCResult::Type::NUM, "dd_cents", "DD carrier capital including earnings"},
+            {RPCResult::Type::NUM, "network_fee_satoshis", "Always zero; wallet-local release"},
+        }},
+        RPCExamples{HelpExampleCli("releasepaymastercapital", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            using namespace DigiDollar::Paymaster;
+            auto wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            auto& context = EnsureWalletContext(request.context);
+            if (!context.paymaster || !context.paymaster->Enabled())
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DISABLED");
+            const auto& options = request.params[0];
+            if (!options.isNull()) RPCTypeCheckObj(options, {
+                {"execute", UniValueType(UniValue::VBOOL)}, {"plan_id", UniValueType(UniValue::VSTR)},
+            }, true, true);
+            const bool execute = options.find_value("execute").isTrue();
+            uint256 plan;
+            if (execute) {
+                if (options.find_value("plan_id").isNull())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CAPITAL_PLAN_REQUIRED");
+                plan = ParseHashV(options.find_value("plan_id"), "plan_id");
+            } else if (!options.find_value("plan_id").isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CAPITAL_PREVIEW_TAKES_NO_PLAN");
+            }
+            wallet->BlockUntilSyncedToCurrentChain();
+            if (wallet->chain().isInitialBlockDownload())
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CAPITAL_CHAIN_NOT_READY");
+            ProviderIdentityRecord identity;
+            if (!GetPaymasterIdentity(*wallet, identity))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_IDENTITY_NOT_FOUND");
+            ProviderWorkGuard guard{*context.paymaster, wallet->GetName(), identity.provider_id, false};
+            if (!guard.Acquired()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_BUSY");
+            if (context.paymaster->IsProviderRunning(wallet->GetName(), identity.provider_id))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_MUST_BE_STOPPED");
+            PaymasterCapitalRelease release;
+            std::string error;
+            if (!ReleasePaymasterCapital(*wallet, execute, plan, GetTime(), release, error))
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("executed", execute);
+            result.pushKV("plan_id", release.plan_id.GetHex());
+            result.pushKV("pool_entries", release.entries);
+            result.pushKV("dgb_satoshis", release.dgb_satoshis);
+            result.pushKV("dd_cents", release.dd_cents);
+            result.pushKV("network_fee_satoshis", 0);
+            return result;
+        },
+    };
+}
+
 RPCHelpMan withdrawpaymastercarrier()
 {
     return RPCHelpMan{

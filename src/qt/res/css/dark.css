@@ -6254,6 +6254,7 @@ QWidget#paymasterWidget QTabWidget#paymasterSettingsTabs::pane,
 QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane,
 QWidget#paymasterWidget QScrollArea#paymasterOverviewPage,
 QWidget#paymasterWidget QScrollArea#paymasterConnectionPage,
+QWidget#paymasterWidget QScrollArea#paymasterManagementPage,
 QWidget#paymasterWidget QScrollArea#paymasterConfigurationPage,
 QWidget#paymasterWidget QScrollArea#paymasterSafetyPolicyPage,
 QWidget#paymasterWidget QScrollArea#paymasterLiquidityPage,
@@ -6261,6 +6262,7 @@ QWidget#paymasterWidget QScrollArea#paymasterFinancesPage,
 QWidget#paymasterWidget QScrollArea#paymasterActivityPage,
 QWidget#paymasterWidget QWidget#paymasterOverviewContents,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents,
+QWidget#paymasterWidget QWidget#paymasterManagementContents,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents,
@@ -6271,6 +6273,7 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents {
 }
 
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QGroupBox,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QGroupBox,
@@ -6284,11 +6287,13 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents QGroupBox {
 }
 
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterActivityContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QCheckBox,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QCheckBox,
@@ -6297,12 +6302,16 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents QCheckBox {
 }
 
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QLineEdit,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QSpinBox,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QDoubleSpinBox,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QDoubleSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QDoubleSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QComboBox,
+QWidget#paymasterWidget QWidget#paymasterManagementContents QComboBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QComboBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QSpinBox,
@@ -6527,6 +6536,16 @@ QWidget#paymasterWidget QLabel[paymasterRole="summaryText"] {
     padding: 9px 11px;
     font-weight: 500;
 }
+
+QWidget#paymasterWidget QLabel[paymasterRole="statusText"][statusKind="neutral"] {
+    color: #b2c7ba;
+    border-left: 3px solid #6c907c;
+    background-color: transparent;
+}
+QWidget#paymasterWidget QLabel[paymasterRole="capitalMetric"] { color: #b2c7ba; }
+QWidget#paymasterWidget QLabel[paymasterRole="capitalMetric"][statusKind="ready"] { color: #42d884; }
+QWidget#paymasterWidget QLabel[paymasterRole="capitalMetric"][statusKind="waiting"] { color: #ffd166; }
+QWidget#paymasterWidget QLabel[paymasterRole="capitalMetric"][statusKind="error"] { color: #ff8982; }
 
 QWidget#paymasterWidget QGroupBox[paymasterRole="card"],
 QWidget#paymasterWidget QGroupBox[paymasterRole="technicalCard"],

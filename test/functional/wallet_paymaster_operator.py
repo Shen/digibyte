@@ -48,7 +48,10 @@ class PaymasterOperatorTest(DigiByteTestFramework):
                                 "test passphrase", 60, True)
         provider.walletpassphrase("test passphrase", 1)
         # Exercise CLI conversion of the optional third boolean as well.
-        node.cli("-rpcwallet=operating-unlock").walletpassphrase("test passphrase", 0, True)
+        # Native and --usecli runs must not put even fixture passphrases in
+        # process arguments or the framework's command-vector debug log.
+        node.cli("-rpcwallet=operating-unlock", "-stdin",
+                 input="test passphrase\n0\ntrue\n").walletpassphrase()
         assert_equal(provider.getwalletinfo()["unlocked_until"], -1)
         assert_equal(provider.getpaymasteroperatorinfo()["provider"]["wallet_locked"], False)
         assert_equal(provider.getpaymasteroperatorinfo()["provider"]["enabled"], False)

@@ -51,6 +51,14 @@ private Q_SLOTS:
     void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
     void paymasterManualActivityUsesExpectedRpcAndReadableStates();
     void paymasterFinancesAndBackupWorkflow();
+    void paymasterCapitalOverview_data();
+    void paymasterCapitalOverview();
+    void paymasterOverviewFinanceWalletAndPrivacyBinding();
+    void paymasterStopAndRelease_data();
+    void paymasterStopAndRelease();
+    void paymasterHomeStartIsSeparateFromSettings();
+    void paymasterRetirementLateResults_data();
+    void paymasterRetirementLateResults();
     void paymasterClientConfirmationRequiresObservation();
     void paymasterConfirmationGuardDetectsMaterialChanges();
     void paymasterRecoveryConfirmationGuardDetectsMaterialChanges();

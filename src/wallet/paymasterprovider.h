@@ -199,6 +199,19 @@ bool GetPaymasterProviderPoolEntries(
     const CWallet& wallet,
     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
 
+/** Wallet-local, fee-free release of all quiescent pool capital. The caller
+ * holds the provider work guard and verifies the runtime is stopped. Neither
+ * preview nor execution signs, broadcasts, abandons or erases recovery data.
+ * A changed plan (including a replay after success) must be reviewed again. */
+struct PaymasterCapitalRelease {
+    uint256 plan_id;
+    int64_t dgb_satoshis{0};
+    int64_t dd_cents{0};
+    uint32_t entries{0};
+};
+bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
+                            int64_t now, PaymasterCapitalRelease& result, std::string& error);
+
 /** Atomically reserve at most one operational DGB entry and, when required,
  * one carrier. Repeating the same reservation id returns the exact same slot.
  */

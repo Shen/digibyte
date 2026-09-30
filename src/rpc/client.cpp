@@ -342,6 +342,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "setpaymasterenabled", 0, "enabled" },
     { "setpaymasterruntimesettings", 0, "settings" },
     { "withdrawpaymastercarrier", 0, "options" },
+    { "releasepaymastercapital", 0, "options" },
     { "preparepaymasterpool", 0, "options" },
     { "rebalancepaymasterpool", 0, "options" },
     { "sendmanydigidollar", 1, "amounts" },

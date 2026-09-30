@@ -1518,6 +1518,10 @@ BOOST_AUTO_TEST_CASE(self_recovery_is_same_input_idempotent_and_reorg_safe)
 
 BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_and_atomic)
 {
+    // Drain pending genesis/tip callbacks and keep their expiry clock in the
+    // same synthetic time domain as this test's records. Otherwise tip
+    // reconciliation can compact the snapshot before the cloned DB is tested.
+    ScopedRecoveryMockTime mock_time{100};
     PaymasterStore store{m_wallet};
     PaymentSession session;
     std::string error;
@@ -1925,6 +1929,21 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     // while the global snapshot and outpoint indexes are bounded after the
     // replay/evidence horizon. A failed compaction must not leave half-erased
     // indexes behind.
+    {
+        LOCK(expiry_wallet.cs_wallet);
+        WalletBatch batch{expiry_wallet.GetDatabase()};
+        ValidatedCapacitySnapshot snapshot;
+        uint256 indexed_snapshot;
+        CapacityResourceBinding resource;
+        BOOST_REQUIRE(batch.ReadPaymasterCapacitySnapshot(
+            quoted.capacity_snapshot.snapshot_id, snapshot));
+        BOOST_REQUIRE(batch.ReadPaymasterCapacitySlot(
+            quoted.capacity_snapshot.resource_commitment, indexed_snapshot));
+        BOOST_REQUIRE(indexed_snapshot == snapshot.snapshot_id);
+        BOOST_REQUIRE(batch.ReadPaymasterCapacityResource(
+            quoted.provider_id, provider_capacity_input.outpoint, resource));
+        BOOST_REQUIRE(resource.snapshot_id == snapshot.snapshot_id);
+    }
     const MockableData before_capacity_compaction = expiry_mock.m_records;
     size_t compacted_snapshots{0};
     // Compaction is erase-only, so inject the fallible transaction commit
