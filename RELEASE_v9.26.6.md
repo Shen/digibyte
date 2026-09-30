@@ -26,6 +26,14 @@ The CLI offers only supported policy combinations: restricted sponsorship is
 sponsored-only with zero DD service fee. Invalid restricted combinations are
 rejected by the shared setup planner before any configuration changes.
 
+A follow-up setup audit extends shared preflight to the complete proposed
+configuration using Core's existing policy validators. The Qt assistant now
+prevents restricted mixed models, clears DD targets for sponsored-only pool
+preparation, retains exact saved policy values in both preview and execution,
+and reviews inactive budget adjustments. CLI exposes inactive saved limits,
+accepts an optional valid identity name and enforces the pool setup fee bound.
+The Core policy rules themselves remain unchanged.
+
 These working-branch changes are outside the published RC2 change counts and do
 not move a release tag. Verification and remaining operator checks are recorded
 in [the Paymaster test guide](doc/digidollar-paymaster-testing.md).

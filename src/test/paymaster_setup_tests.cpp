@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see COPYING.
 #include <boost/test/unit_test.hpp>
 #include <paymaster/setup.h>
+#include <consensus/amount.h>
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
@@ -29,6 +30,7 @@ SetupChoices Choices()
     choices.policy = SetupDefaultPolicy();
     choices.safety = SetupDefaultSafety(20000000, true, false, false);
     choices.liquidity = SetupDefaultLiquidity(true);
+    choices.pool = SetupCliDefaults(Snapshot()).pool;
     choices.pool.pushKV("execute", false);
     return choices;
 }
@@ -156,13 +158,77 @@ BOOST_AUTO_TEST_CASE(restricted_setup_is_sponsored_only_before_any_mutation)
     choices.policy.pushKV("funding_models", models);
     BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
     choices.policy.pushKV("fee_rate_bps", 0);
+    choices.safety = SetupDefaultSafety(20000000, false, true, true);
+    choices.liquidity = SetupDefaultLiquidity(false);
+    choices.pool.pushKV("admission_carrier_slots", 0);
+    choices.pool.pushKV("operational_carrier_slots", 0);
     BOOST_CHECK_NO_THROW(BuildSetupPlan(snapshot, choices));
     models.push_back("user_paid");
     choices.policy.pushKV("funding_models", models);
     BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
     choices.policy.pushKV("sponsorship_scope", "public");
     choices.policy.pushKV("fee_rate_bps", 50);
+    choices.safety = SetupDefaultSafety(20000000, true, true, false);
+    choices.liquidity = SetupDefaultLiquidity(true);
+    choices.pool.pushKV("admission_carrier_slots", 3);
+    choices.pool.pushKV("operational_carrier_slots", 1);
     BOOST_CHECK_NO_THROW(BuildSetupPlan(snapshot, choices));
+}
+BOOST_AUTO_TEST_CASE(setup_checks_core_policy_budgets_and_pool_before_writes)
+{
+    const auto good = Choices();
+    const auto rejects = [&](const SetupChoices& choices, const std::string& expected) {
+        BOOST_CHECK_EXCEPTION(BuildSetupPlan(Snapshot(), choices), std::runtime_error,
+            [&](const std::runtime_error& error) { return std::string{error.what()} == expected; });
+    };
+    auto bad = good;
+    bad.policy.pushKV("fee_rate_bps", 55);
+    rejects(bad, "PAYMASTER_INVALID_RATE");
+    bad = good;
+    bad.policy.pushKV("max_amount_cents", 99);
+    rejects(bad, "PAYMASTER_INVALID_PAYMENT_RANGE");
+    bad = good;
+    bad.policy.pushKV("quote_ttl", 61);
+    rejects(bad, "PAYMASTER_INVALID_QUOTE_TTL");
+    bad = good;
+    bad.safety = SetupDefaultSafety(30000000, true, true, false);
+    auto paid = good.safety.find_value("user_paid");
+    bad.safety.pushKV("user_paid", paid);
+    rejects(bad, "PAYMASTER_INVALID_SAFETY_LIMITS"); // Inactive class exceeds the offer.
+    bad = good;
+    bad.safety.pushKV("maximum_active_quotes_per_recipient", 17);
+    rejects(bad, "PAYMASTER_INVALID_SAFETY_QUOTE_LIMITS");
+    bad = good;
+    bad.liquidity.pushKV("paid_maintenance_approved", true);
+    bad.liquidity.pushKV("maximum_maintenance_fee_per_hour_satoshis", 1);
+    rejects(bad, "PAYMASTER_INVALID_LIQUIDITY_POLICY");
+    bad = good;
+    bad.pool.pushKV("maximum_fee_satoshis", MAX_MONEY / 2 + 1);
+    rejects(bad, "PAYMASTER_POOL_INVALID_FEE_LIMIT");
+    bad.pool.pushKV("maximum_fee_satoshis", MAX_MONEY / 2);
+    BOOST_CHECK_NO_THROW(CheckSetupChoices(bad));
+    bad = good;
+    bad.pool.pushKV("operational_dgb_slots", 17);
+    rejects(bad, "PAYMASTER_INVALID_POOL_TARGET");
+    bad = good;
+    UniValue sponsored{UniValue::VARR}; sponsored.push_back("sponsored");
+    bad.policy.pushKV("funding_models", sponsored);
+    bad.policy.pushKV("fee_rate_bps", 0);
+    bad.safety = SetupDefaultSafety(20000000, false, true, false);
+    rejects(bad, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
+    bad.pool.pushKV("admission_carrier_slots", 0);
+    bad.pool.pushKV("operational_carrier_slots", 0);
+    BOOST_CHECK_NO_THROW(CheckSetupChoices(bad)); // Stored liquidity targets remain a separate Core policy.
+    bad = good;
+    bad.display_name = "invalid/name";
+    rejects(bad, "PAYMASTER_INVALID_DISPLAY_NAME");
+    bad.display_name.clear();
+    BOOST_CHECK_NO_THROW(BuildSetupPlan(Snapshot(), bad));
+    const auto& fields = SetupFields();
+    const auto field = std::find_if(fields.begin(), fields.end(), [](const auto& item) { return item.key == "maximum_network_fee_per_day_satoshis"; });
+    std::istringstream maximum{SetupFormatNumber(MAX_MONEY, 8) + "\n"};
+    std::ostringstream output;
+    BOOST_CHECK_EQUAL(SetupReadNumber(maximum, output, *field, 0), MAX_MONEY);
 }
 BOOST_AUTO_TEST_CASE(plan_stops_before_changes_and_preserves_saved_autostart)
 {

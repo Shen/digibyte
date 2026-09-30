@@ -1740,8 +1740,13 @@ for fee authorization, V3/V4 persistence compatibility, and legacy adoption.
 
 On `feature/paymaster-operator-workflow` from RC2 `1a08828ca1`,
 `paymaster/setup.{h,cpp}` owns UI-independent finite profiles, ordered setup,
-context/reply/persisted-state checks and status budget arithmetic. CLI and Qt
-use this common plan through their existing RPC adapters. Core alone owns
+context/reply/persisted-state checks and status budget arithmetic. Its
+`CheckSetupChoices` runs the same pure offer, safety and liquidity validators
+as provider admission before producing any mutating step. These validators live
+in `paymaster/provider_policy.cpp`, independently of node, wallet, oracle and
+transaction machinery, so the CLI can link them without server dependencies.
+CLI and Qt use this common plan through their existing RPC adapters; the Qt
+wizard constructs preview and execution from the same choices. Core alone owns
 validation, signatures, reservations and existing journal persistence.
 `getpaymasteroperatorinfo` uses a non-reconciling, non-blocking readiness view;
 existing callers retain normal reconciliation. `stoppaymaster` can atomically

@@ -4748,6 +4748,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     int operating_policy_attempts{0};
     int safety_attempts{0};
     UniValue advertised_policy;
+    UniValue last_preview_policy;
     UniValue safety_policy;
     UniValue liquidity_policy;
     QList<UniValue> safety_payloads;
@@ -4996,6 +4997,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 return params[0];
             }
             if (command == "preparepaymasterpool") {
+                if (params[0].find_value("preview_policy").isObject()) last_preview_policy = params[0].find_value("preview_policy");
                 UniValue result{UniValue::VOBJ};
                 result.pushKV("preview_only", params[0].find_value("preview_policy").isObject());
                 result.pushKV("accepted", params[0].find_value("execute").isTrue());
@@ -5148,7 +5150,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     bool user_paid_defaults_ready{false};
     bool recommended_default{false};
     bool identity_name_validation_ready{false};
-    bool sponsored_policy_defaults_preserve_liquidity{false};
+    bool sponsored_policy_defaults_remove_carrier_targets{false};
     bool profile_keeps_network_fee{false};
     bool approval_invalidated_by_custom_limit{false};
     bool maintenance_start_copy_consistent{false};
@@ -5299,12 +5301,12 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         sponsorship_scope->setCurrentIndex(sponsorship_scope->findData(
             QStringLiteral("restricted")));
         restore_policy_defaults->click();
-        sponsored_policy_defaults_preserve_liquidity =
+        sponsored_policy_defaults_remove_carrier_targets =
             !user_paid->isChecked() &&
             sponsored->isChecked() && !service_fee->isEnabled() &&
             service_fee->value() == 0.0 && minimum_payment->minimum() == 100 &&
-            admission_carriers->value() == 3 &&
-            operational_carriers->value() == 1;
+            admission_carriers->value() == 0 &&
+            operational_carriers->value() == 0 && !admission_carriers->isEnabled() && !operational_carriers->isEnabled();
         restore_funding_defaults->click();
         restore_policy_defaults->click();
 
@@ -5411,7 +5413,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QVERIFY(user_paid_defaults_ready);
     QVERIFY(recommended_default);
     QVERIFY(identity_name_validation_ready);
-    QVERIFY(sponsored_policy_defaults_preserve_liquidity);
+    QVERIFY(sponsored_policy_defaults_remove_carrier_targets);
     QVERIFY(profile_keeps_network_fee);
     QVERIFY(approval_invalidated_by_custom_limit);
     QVERIFY(maintenance_start_copy_consistent);
@@ -5617,7 +5619,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     tab.setPaymasterReadinessStatusForTesting(enabled_existing);
 
     bool reconfiguration_completed{false};
-    bool existing_carriers_retained{false};
+    bool sponsored_carrier_targets_cleared{false};
     bool disabled_target_retained{false};
     QTimer::singleShot(0, [&] {
         auto* wizard = qobject_cast<QWizard*>(
@@ -5674,8 +5676,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         restore_safety->click();
         provider_enabled->setChecked(false);
         autostart->setChecked(true);
-        existing_carriers_retained = admission_carriers->value() == 3 &&
-            operational_carriers->value() == 1;
+        sponsored_carrier_targets_cleared = admission_carriers->value() == 0 &&
+            operational_carriers->value() == 0;
         disabled_target_retained = !provider_enabled->isChecked();
 
         int page_guard{0};
@@ -5700,7 +5702,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     guided_setup->click();
 
     QVERIFY(reconfiguration_completed);
-    QVERIFY(existing_carriers_retained);
+    QVERIFY(sponsored_carrier_targets_cleared);
     QVERIFY(disabled_target_retained);
     QCOMPARE(operating_policy_attempts, 2);
     QCOMPARE(safety_attempts, 4);
@@ -5730,15 +5732,50 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QCOMPARE(bridge.find_value("restricted_sponsored").find_value(
         "maximum_network_fee_per_transaction_satoshis").getInt<qint64>(),
         10000000);
-    // The final policy preserves the already persisted budget of the model
-    // that is no longer selected. Only the temporary bridge is capped while
-    // the two independently validated Core policies change order.
+    // Core also validates inactive classes against the new advertised ceiling.
+    // The review shows the reduced per-transfer ceiling; aggregate limits stay saved.
     QCOMPARE(safety_policy.find_value("user_paid").find_value(
         "maximum_network_fee_per_transaction_satoshis").getInt<qint64>(),
-        30000000);
+        10000000);
     QCOMPARE(safety_policy.find_value("restricted_sponsored").find_value(
         "maximum_network_fee_per_transaction_satoshis").getInt<qint64>(),
         10000000);
+
+    // An out-of-range QSpinBox value remains the exact policy in both preview
+    // and execution. It must never be silently replaced by the display limit.
+    advertised_policy.pushKV("maximum_network_fee_dgb_satoshis", int64_t{3000000000});
+    rpc_autostart = true;
+    auto* refresh_setup = tab.findChild<QPushButton*>("paymasterOverviewRefresh");
+    QVERIFY(refresh_setup);
+    refresh_setup->click();
+    bool retained_large_policy{false};
+    bool restored_autostart_matches{false};
+    QTimer::singleShot(0, [&] {
+        auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
+        if (!wizard) return;
+        auto* wallet_confirmation = wizard->findChild<QCheckBox*>("paymasterSetupWalletConfirmation");
+        auto* approval = wizard->findChild<QCheckBox*>("paymasterSetupMaintenanceApproval");
+        auto* restore_liquidity = wizard->findChild<QPushButton*>("paymasterSetupRestoreLiquidityDefaults");
+        auto* autostart = wizard->findChild<QCheckBox*>("paymasterSetupAutostart");
+        auto* enabled = wizard->findChild<QCheckBox*>("paymasterSetupProviderEnabled");
+        auto* progress = wizard->findChild<QWizardPage*>("paymasterSetupProgressPage");
+        if (!wallet_confirmation || !approval || !restore_liquidity || !autostart || !enabled || !progress) { wizard->reject(); return; }
+        wallet_confirmation->setChecked(true);
+        restore_liquidity->click();
+        restored_autostart_matches = autostart->isChecked() == rpc_autostart;
+        enabled->setChecked(false);
+        for (int i = 0; i < 10 && wizard->currentPage()->objectName() != QLatin1String("paymasterSetupReviewPage"); ++i) wizard->next();
+        if (last_preview_policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>() == 3000000000) {
+            approval->setChecked(true);
+            wizard->next();
+            QCoreApplication::processEvents();
+            retained_large_policy = progress->isComplete() && advertised_policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>() == 3000000000;
+        }
+        wizard->reject();
+    });
+    guided_setup->click();
+    QVERIFY(restored_autostart_matches);
+    QVERIFY(retained_large_policy);
 
     UniValue disabled_with_autostart{UniValue::VOBJ};
     disabled_with_autostart.pushKV("wallet_eligible", true);

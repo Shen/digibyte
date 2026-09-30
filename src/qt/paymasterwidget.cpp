@@ -8508,7 +8508,7 @@ private:
         const QString route = QInputDialog::getItem(this, tr("Provider route"), tr("Choose the route explicitly; there is no automatic fallback."), {tr("Tor onion"), tr("Clearnet")}, 0, false, &ok);
         if (!ok) return;
         const bool onion = route == tr("Tor onion");
-        const QString bind = QInputDialog::getText(this, tr("Dedicated Direct listener"), tr("Numeric local IP:port, separate from P2P and RPC"), QLineEdit::Normal, onion ? QStringLiteral("127.0.0.1:12033") : QString{}, &ok);
+        const QString bind = QInputDialog::getText(this, tr("Dedicated Direct listener"), tr("Numeric local IP:port, separate from P2P and RPC"), QLineEdit::Normal, onion ? QStringLiteral("127.0.0.1:18450") : QString{}, &ok);
         if (!ok) return;
         const auto& current_endpoint = current.find_value("provider").find_value("endpoint");
         const QString endpoint = QInputDialog::getText(this, tr("Announced endpoint"), tr("Public numeric IP:port or your onion:port. Configure firewall/NAT or Tor to forward to the dedicated listener."), QLineEdit::Normal, current_endpoint.isStr() ? QString::fromStdString(current_endpoint.get_str()) : QString{}, &ok);
@@ -10262,7 +10262,7 @@ private:
         if (selected_scope >= 0) wizard_scope->setCurrentIndex(selected_scope);
         wizard_scope->setEnabled(wizard_sponsored->isChecked());
         auto* scope_note = new QLabel(tr(
-            "Core validates whether the selected sponsorship scope and funding-model combination is supported. The assistant preserves your exact selection and reports any rejection without rewriting it."), model_page);
+            "Both public models may be combined. Restricted sponsorship is sponsored-only and charges no DD service fee."), model_page);
         scope_note->setWordWrap(true);
         model_layout->addWidget(wizard_user_paid);
         model_layout->addWidget(user_paid_note);
@@ -10279,6 +10279,17 @@ private:
         wizard.addPage(model_page);
 
         connect(wizard_sponsored, &QCheckBox::toggled, wizard_scope, &QWidget::setEnabled);
+        connect(wizard_scope, qOverload<int>(&QComboBox::currentIndexChanged), model_page,
+                [wizard_scope, wizard_user_paid, wizard_sponsored] {
+                    if (wizard_scope->currentData().toString() == QLatin1String("restricted")) {
+                        wizard_sponsored->setChecked(true);
+                        wizard_user_paid->setChecked(false);
+                    }
+                });
+        connect(wizard_user_paid, &QCheckBox::toggled, model_page,
+                [wizard_scope](bool paid) {
+                    if (paid) wizard_scope->setCurrentIndex(wizard_scope->findData(QStringLiteral("public")));
+                });
         connect(restore_model_defaults, &QPushButton::clicked, model_page,
                 [wizard_user_paid, wizard_sponsored, wizard_scope] {
                     wizard_scope->setCurrentIndex(
@@ -10892,6 +10903,14 @@ private:
                 : wizard_user_paid->isChecked() ? 1 : 0);
         operational_carriers->setObjectName("paymasterSetupOperationalCarrierSlots");
         operational_carriers->setAccessibleName(tr("Immediately usable DigiDollar carrier slots"));
+        const auto update_carrier_targets = [admission_carriers, operational_carriers](bool paid) {
+            admission_carriers->setEnabled(paid);
+            operational_carriers->setEnabled(paid);
+            admission_carriers->setValue(paid ? std::max(3, admission_carriers->value()) : 0);
+            operational_carriers->setValue(paid ? std::max(1, operational_carriers->value()) : 0);
+        };
+        connect(wizard_user_paid, &QCheckBox::toggled, pool_page, update_carrier_targets);
+        update_carrier_targets(wizard_user_paid->isChecked());
         pool_layout->addRow(tr("Reserve DGB slots for network admission:"), admission_dgb);
         pool_layout->addRow(tr("Immediately usable DGB slots:"), operational_dgb);
         pool_layout->addRow(tr("Reserve DigiDollar carrier slots:"), admission_carriers);
@@ -10920,7 +10939,7 @@ private:
                         operation_mode->setCurrentIndex(
                             operation_mode->findData(QStringLiteral("automatic")));
                     }
-                    autostart->setChecked(false);
+                    autostart->setChecked(m_autostart_enabled);
                     provider_enabled->setChecked(true);
                 });
         auto* liquidity_help = new QFrame(pool_page);
@@ -10963,7 +10982,7 @@ private:
                           .arg(admission_carriers->value())
                     : admission_carriers->value() == 0
                         ? tr("Carrier outputs are not needed for sponsored-only service, so a fresh setup leaves this target at zero.")
-                        : tr("Carrier outputs are not needed for sponsored-only service. This existing saved target is retained and can be reused if user-paid service is enabled later."));
+                        : tr("Sponsored-only pool preparation requires zero DD targets. Existing DD outputs are retained; this setup does not withdraw them."));
             } else if (field == operational_carriers) {
                 liquidity_help_title->setText(tr("Immediately usable DigiDollar carrier slots"));
                 liquidity_help_text->setText(wizard_user_paid->isChecked()
@@ -10971,7 +10990,7 @@ private:
                           .arg(operational_carriers->value())
                     : operational_carriers->value() == 0
                         ? tr("Sponsored transfers charge no $DD service fee and therefore need no operational carrier slots.")
-                        : tr("Sponsored transfers do not use carrier slots. This existing saved target is retained for a possible later return to user-paid service."));
+                        : tr("Sponsored-only pool preparation requires zero DD targets. Existing DD outputs remain wallet-owned."));
             }
         };
         connect(qApp, &QApplication::focusChanged, pool_page,
@@ -11216,13 +11235,18 @@ private:
             if (!enabled) start_after_setup->setChecked(false);
         });
         review_layout->addWidget(start_after_setup);
-        const auto proposed_policy = [wizard_sponsored, wizard_user_paid, wizard_scope, fee, minimum, maximum, lifetime, network_fee] {
+        const auto proposed_policy = [this, replace_unrepresentable_policy, wizard_sponsored, wizard_user_paid, wizard_scope, fee, minimum, maximum, lifetime, network_fee] {
+            if (!*replace_unrepresentable_policy) {
+                UniValue retained = DigiDollar::Paymaster::SetupDefaultPolicy();
+                for (const auto& key : retained.getKeys()) retained.pushKV(key, m_unrepresentable_policy_snapshot.find_value(key));
+                return retained;
+            }
             UniValue funding{UniValue::VARR}, policy{UniValue::VOBJ};
             if (wizard_sponsored->isChecked()) funding.push_back("sponsored");
             if (wizard_user_paid->isChecked()) funding.push_back("user_paid");
             policy.pushKV("funding_models", funding);
             policy.pushKV("sponsorship_scope", wizard_scope->currentData().toString().toStdString());
-            policy.pushKV("fee_rate_bps", qRound(fee->value() * 100.0));
+            policy.pushKV("fee_rate_bps", wizard_user_paid->isChecked() ? qRound(fee->value() * 100.0) : 0);
             policy.pushKV("min_amount_cents", minimum->value());
             policy.pushKV("max_amount_cents", maximum->value());
             policy.pushKV("quote_ttl", lifetime->value());
@@ -11240,11 +11264,67 @@ private:
             options.pushKV("operational_carrier_slots", operational_carriers->value());
             options.pushKV("execute", execute);
             qint64 fee{0};
-            if (!m_preparation_fee->satoshis(fee) || fee <= 0) throw std::runtime_error("PAYMASTER_POOL_INVALID_FEE_LIMIT");
+            if (!m_preparation_fee->satoshis(fee) || fee <= 0 || fee > MAX_MONEY / 2) throw std::runtime_error("PAYMASTER_POOL_INVALID_FEE_LIMIT");
             options.pushKV("maximum_fee_satoshis", fee);
             UniValue params{UniValue::VARR};
             params.push_back(std::move(options));
             return params;
+        };
+        const auto wizard_choices = [=] {
+            using namespace DigiDollar::Paymaster;
+            SetupChoices choices;
+            choices.display_name = display->text().trimmed().toStdString();
+            choices.policy = proposed_policy();
+            choices.operation_mode = operation_mode->currentData().toString().toStdString();
+            choices.enabled = provider_enabled->isChecked();
+            choices.pool = wizard_pool_options(false)[0];
+            const auto guided = current_safety_limits();
+            const auto cap = choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>();
+            const bool paid = wizard_user_paid->isChecked();
+            const bool sponsored = wizard_sponsored->isChecked();
+            const bool restricted = wizard_scope->currentData().toString() == QLatin1String("restricted");
+            const auto add_limits = [&](const char* name, const FundingSafetyControls& controls, bool selected) {
+                FundingSafetyValues values;
+                if (!readFundingSafety(controls, values)) throw std::runtime_error("PAYMASTER_SETUP_SAFETY_UNAVAILABLE");
+                if (selected && (!m_provider_safety_configured || *safety_profile_edited || values.allZero())) {
+                    values.per_transaction = guided.per_transaction;
+                    values.reserved = guided.reserved;
+                    values.per_hour = guided.per_hour;
+                    values.per_day = guided.per_day;
+                    values.completed_per_hour = guided.completed_per_hour;
+                    values.completed_per_day = guided.completed_per_day;
+                }
+                // Core validates inactive classes too. Lower only a stale
+                // per-transfer ceiling; expose the resulting values in review.
+                if (!selected) values.per_transaction = std::min<qint64>(values.per_transaction, cap);
+                choices.safety.pushKV(name, fundingSafetyToJSON(values));
+            };
+            add_limits("user_paid", m_user_paid_safety, paid);
+            add_limits("public_sponsored", m_public_sponsored_safety, sponsored && !restricted);
+            add_limits("restricted_sponsored", m_restricted_sponsored_safety, sponsored && restricted);
+            choices.safety.pushKV("maximum_active_quotes_total", custom_max_active_quotes_total->value());
+            choices.safety.pushKV("maximum_active_quotes_per_netgroup", custom_max_active_quotes_per_netgroup->value());
+            choices.safety.pushKV("maximum_active_quotes_per_recipient", custom_max_active_quotes_per_recipient->value());
+            choices.safety.pushKV("maximum_quote_requests_per_netgroup_per_minute", custom_max_quote_requests_per_netgroup->value());
+            LiquidityPolicyValues liquidity;
+            liquidity.automatic_replenishment = automatic_replenishment->isChecked();
+            liquidity.paid_maintenance_approved = paid_maintenance_approved->isChecked();
+            liquidity.admission_dgb = admission_dgb->value();
+            liquidity.operational_dgb = operational_dgb->value();
+            liquidity.admission_carriers = admission_carriers->value();
+            liquidity.operational_carriers = operational_carriers->value();
+            const bool conservative = safety_profile->currentData().toString() == QLatin1String("conservative");
+            liquidity.fee_per_transaction = conservative ? 10000000 : 20000000;
+            liquidity.fee_per_hour = conservative ? 50000000 : 200000000;
+            liquidity.fee_per_day = conservative ? 200000000 : 1000000000;
+            if (safety_profile->currentData().toString() == QLatin1String("custom") &&
+                (!custom_maintenance_per_transaction->satoshis(liquidity.fee_per_transaction) ||
+                 !custom_maintenance_per_hour->satoshis(liquidity.fee_per_hour) ||
+                 !custom_maintenance_per_day->satoshis(liquidity.fee_per_day)))
+                throw std::runtime_error("PAYMASTER_INVALID_LIQUIDITY_POLICY");
+            choices.liquidity = liquidityPolicyToJSON(liquidity);
+            CheckSetupChoices(choices);
+            return choices;
         };
         const auto wizard_pool_preview_text = [this](const UniValue& result) {
             QString text = formatPoolResult("preparepaymasterpool", result);
@@ -11255,15 +11335,16 @@ private:
         };
         auto refresh_preview = std::make_shared<std::function<void()>>();
         *refresh_preview = [this, review_page, preview_status, preview_details, preview_retry,
-                            reviewed_pool, maintenance_confirmation, wizard_pool_options, proposed_policy, wizard_pool_preview_text] {
+                            reviewed_pool, maintenance_confirmation, wizard_choices, wizard_pool_preview_text] {
             *reviewed_pool = UniValue{};
             review_page->setComplete(false);
             preview_retry->setVisible(false);
             preview_status->setText(tr("Checking the proposed configuration and current reserves…"));
             UniValue params;
             try {
-                auto options = wizard_pool_options(false)[0];
-                options.pushKV("preview_policy", proposed_policy());
+                const auto choices = wizard_choices();
+                auto options = choices.pool;
+                options.pushKV("preview_policy", choices.policy);
                 params = UniValue{UniValue::VARR};
                 params.push_back(options);
             } catch (const std::exception& error) { preview_status->setText(QString::fromUtf8(error.what())); preview_retry->show(); return; }
@@ -11320,7 +11401,7 @@ private:
                         .arg(model)
                         .arg(QString::number(minimum->value() / 100.0, 'f', 2))
                         .arg(QString::number(maximum->value() / 100.0, 'f', 2))
-                        .arg(QString::number(fee->value(), 'f', 2))
+                        .arg(QString::number(wizard_user_paid->isChecked() ? fee->value() : 0.0, 'f', 2))
                         .arg(lifetime->value())
                         .arg(QString::number(selected_network_fee() / 100000000.0, 'f', 8))
                         .arg(safety_profile->currentText())
@@ -11382,6 +11463,23 @@ private:
                             "\nExisting provider identity: retained unchanged; its saved display name remains authoritative.");
                     } else {
                         review_text += tr("\nProvider identity: a new persistent BIP86 identity will be created.");
+                    }
+                    try {
+                        const auto choices = wizard_choices();
+                        review_text += tr("\nSaved inactive budgets remain disabled; their per-transfer ceiling is reduced if needed to fit the reviewed offer.");
+                        for (const auto& item : {std::pair{"user_paid", tr("User paid")}, {"public_sponsored", tr("Public sponsored")}, {"restricted_sponsored", tr("Restricted sponsored")}}) {
+                            const auto& limits = choices.safety.find_value(item.first);
+                            review_text += tr("\n%1 limits: %2 DGB per transfer; %3 DGB reserved; %4 DGB/hour; %5 DGB/day; %6 transfers/hour and %7/day")
+                                .arg(item.second,
+                                     dgbAmount(limits.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>()),
+                                     dgbAmount(limits.find_value("maximum_reserved_network_fee_satoshis").getInt<int64_t>()),
+                                     dgbAmount(limits.find_value("maximum_network_fee_per_hour_satoshis").getInt<int64_t>()),
+                                     dgbAmount(limits.find_value("maximum_network_fee_per_day_satoshis").getInt<int64_t>()))
+                                .arg(limits.find_value("maximum_completed_per_hour").getInt<int64_t>())
+                                .arg(limits.find_value("maximum_completed_per_day").getInt<int64_t>());
+                        }
+                    } catch (const std::exception& error) {
+                        review_text += tr("\nCorrect these settings before continuing: %1").arg(QString::fromUtf8(error.what()));
                     }
                     review->setText(review_text);
                     (*refresh_preview)();
@@ -11455,14 +11553,10 @@ private:
         auto setup_needs_identity = std::make_shared<bool>(false);
         auto setup_needs_liquidity = std::make_shared<bool>(false);
         auto setup_provider_id = std::make_shared<QString>();
-        auto identity_params = std::make_shared<UniValue>();
         auto policy_params = std::make_shared<UniValue>();
         auto safety_params = std::make_shared<UniValue>();
-        auto transition_safety_params = std::make_shared<UniValue>();
         auto liquidity_policy_params = std::make_shared<UniValue>();
         auto liquidity_preview_params = std::make_shared<UniValue>();
-        auto liquidity_params = std::make_shared<UniValue>();
-        auto setup_needs_safety_transition = std::make_shared<bool>(false);
 
         const auto set_progress = [progress_steps, progress_names](int step,
                                                                    const QString& marker,
@@ -11617,13 +11711,10 @@ private:
         const auto prepare_setup_execution = [&, setup_step, setup_started,
                                               setup_needs_identity,
                                                setup_needs_liquidity,
-                                               identity_params, policy_params,
+                                               policy_params,
                                                safety_params,
-                                               transition_safety_params,
-                                               setup_needs_safety_transition,
                                               liquidity_policy_params,
                                               liquidity_preview_params,
-                                              liquidity_params,
                                               reviewed_pool, advance_setup,
                                               setup_model, setup_wallet_id,
                                               wallet_confirmation,
@@ -11641,185 +11732,20 @@ private:
             }
             *setup_started = true;
 
-            const bool needs_safety_transition =
-                *replace_unrepresentable_policy && m_policy_loaded &&
-                m_provider_safety_configured;
-            const qint64 previous_network_fee = m_network_fee->value();
-            FundingSafetyValues previous_user_paid;
-            FundingSafetyValues previous_public_sponsored;
-            FundingSafetyValues previous_restricted_sponsored;
-            if (!readFundingSafety(m_user_paid_safety, previous_user_paid) ||
-                !readFundingSafety(m_public_sponsored_safety,
-                                   previous_public_sponsored) ||
-                !readFundingSafety(m_restricted_sponsored_safety,
-                                   previous_restricted_sponsored)) {
-                fail_setup(tr(
-                    "The saved provider safety policy could not be read exactly. No setup setting was written; refresh the Paymaster status before retrying."));
+            try {
+                const auto choices = wizard_choices();
+                *policy_params = UniValue{UniValue::VARR};
+                policy_params->push_back(choices.policy);
+                *safety_params = UniValue{UniValue::VARR};
+                safety_params->push_back(choices.safety);
+                *liquidity_policy_params = UniValue{UniValue::VARR};
+                liquidity_policy_params->push_back(choices.liquidity);
+                *liquidity_preview_params = UniValue{UniValue::VARR};
+                liquidity_preview_params->push_back(choices.pool);
+            } catch (const std::exception& error) {
+                fail_setup(QString::fromUtf8(error.what()));
                 return;
             }
-
-            const bool conservative =
-                safety_profile->currentData().toString() == QLatin1String("conservative");
-            const GuidedPaymasterSafetyLimits guided_safety = current_safety_limits();
-            FundingSafetyValues user_paid = previous_user_paid;
-            FundingSafetyValues public_sponsored = previous_public_sponsored;
-            FundingSafetyValues restricted_sponsored =
-                previous_restricted_sponsored;
-            const auto apply_safety_profile = [guided_safety,
-                                                safety_profile_edited,
-                                                this](
-                    FundingSafetyValues& values, bool selected) {
-                if (!selected ||
-                    (!*safety_profile_edited &&
-                     m_provider_safety_configured)) return;
-                values.per_transaction = guided_safety.per_transaction;
-                values.reserved = guided_safety.reserved;
-                values.per_hour = guided_safety.per_hour;
-                values.per_day = guided_safety.per_day;
-                values.completed_per_hour = guided_safety.completed_per_hour;
-                values.completed_per_day = guided_safety.completed_per_day;
-            };
-            apply_safety_profile(user_paid, wizard_user_paid->isChecked());
-            apply_safety_profile(
-                public_sponsored,
-                wizard_sponsored->isChecked() &&
-                    wizard_scope->currentData().toString() == QLatin1String("public"));
-            apply_safety_profile(
-                restricted_sponsored,
-                wizard_sponsored->isChecked() &&
-                    wizard_scope->currentData().toString() == QLatin1String("restricted"));
-
-            UniValue identity{UniValue::VARR};
-            identity.push_back(display->text().trimmed().toStdString());
-            *identity_params = std::move(identity);
-
-            UniValue funding{UniValue::VARR};
-            if (wizard_sponsored->isChecked()) funding.push_back("sponsored");
-            if (wizard_user_paid->isChecked()) funding.push_back("user_paid");
-            UniValue policy{UniValue::VOBJ};
-            policy.pushKV("funding_models", std::move(funding));
-            policy.pushKV("sponsorship_scope", wizard_scope->currentData().toString().toStdString());
-            policy.pushKV("fee_rate_bps", qRound(fee->value() * 100.0));
-            policy.pushKV("min_amount_cents", minimum->value());
-            policy.pushKV("max_amount_cents", maximum->value());
-            policy.pushKV("quote_ttl", lifetime->value());
-            policy.pushKV("maximum_network_fee_dgb_satoshis", network_fee->value());
-            UniValue policy_array{UniValue::VARR};
-            policy_array.push_back(std::move(policy));
-            *policy_params = std::move(policy_array);
-
-            UniValue safety{UniValue::VOBJ};
-            safety.pushKV("user_paid", fundingSafetyToJSON(user_paid));
-            safety.pushKV("public_sponsored", fundingSafetyToJSON(public_sponsored));
-            safety.pushKV("restricted_sponsored", fundingSafetyToJSON(restricted_sponsored));
-            safety.pushKV("maximum_active_quotes_total",
-                          custom_max_active_quotes_total->value());
-            safety.pushKV("maximum_active_quotes_per_netgroup",
-                          custom_max_active_quotes_per_netgroup->value());
-            safety.pushKV("maximum_active_quotes_per_recipient",
-                          custom_max_active_quotes_per_recipient->value());
-            safety.pushKV("maximum_quote_requests_per_netgroup_per_minute",
-                          custom_max_quote_requests_per_netgroup->value());
-            UniValue safety_array{UniValue::VARR};
-            safety_array.push_back(std::move(safety));
-            *safety_params = std::move(safety_array);
-
-            *setup_needs_safety_transition = needs_safety_transition;
-            if (needs_safety_transition) {
-                // The operating and safety policies have separate atomic Core
-                // setters, and each setter validates against the other policy
-                // already in the wallet. A temporary bridge therefore keeps
-                // every budget class needed by either policy valid under the
-                // lower of both advertised fee ceilings. This is an explicit
-                // durable wizard step; it never changes safety_params, whose
-                // final Custom values are sent and acknowledged byte-for-byte.
-                const qint64 transition_cap = std::min(
-                    previous_network_fee,
-                    static_cast<qint64>(network_fee->value()));
-                const auto bridge_limits =
-                    [transition_cap](const FundingSafetyValues& previous,
-                                     const FundingSafetyValues& target) {
-                        FundingSafetyValues bridge = target.allZero()
-                            ? previous : target;
-                        if (bridge.allZero()) return bridge;
-                        bridge.per_transaction = std::min(
-                            bridge.per_transaction, transition_cap);
-                        bridge.reserved = std::max(
-                            bridge.reserved, bridge.per_transaction);
-                        bridge.per_hour = std::max(
-                            bridge.per_hour, bridge.per_transaction);
-                        bridge.per_day = std::max(
-                            bridge.per_day, bridge.per_hour);
-                        bridge.completed_per_day = std::max(
-                            bridge.completed_per_day,
-                            bridge.completed_per_hour);
-                        return bridge;
-                    };
-                UniValue transition{UniValue::VOBJ};
-                transition.pushKV(
-                    "user_paid",
-                    fundingSafetyToJSON(bridge_limits(
-                        previous_user_paid, user_paid)));
-                transition.pushKV(
-                    "public_sponsored",
-                    fundingSafetyToJSON(bridge_limits(
-                        previous_public_sponsored, public_sponsored)));
-                transition.pushKV(
-                    "restricted_sponsored",
-                    fundingSafetyToJSON(bridge_limits(
-                        previous_restricted_sponsored,
-                        restricted_sponsored)));
-                // Retain the already persisted quote-rate limits for the
-                // bridge. User-entered Custom quote values belong only to the
-                // exact final policy and are left for Core to validate there.
-                transition.pushKV("maximum_active_quotes_total",
-                                  m_max_active_quotes_total->value());
-                transition.pushKV("maximum_active_quotes_per_netgroup",
-                                  m_max_active_quotes_per_netgroup->value());
-                transition.pushKV("maximum_active_quotes_per_recipient",
-                                  m_max_active_quotes_per_recipient->value());
-                transition.pushKV(
-                    "maximum_quote_requests_per_netgroup_per_minute",
-                    m_max_quote_requests_per_netgroup->value());
-                UniValue transition_array{UniValue::VARR};
-                transition_array.push_back(std::move(transition));
-                *transition_safety_params = std::move(transition_array);
-            }
-
-            LiquidityPolicyValues liquidity_policy;
-            liquidity_policy.automatic_replenishment =
-                automatic_replenishment->isChecked();
-            liquidity_policy.paid_maintenance_approved =
-                paid_maintenance_approved->isChecked();
-            liquidity_policy.admission_dgb = admission_dgb->value();
-            liquidity_policy.operational_dgb = operational_dgb->value();
-            liquidity_policy.admission_carriers = admission_carriers->value();
-            liquidity_policy.operational_carriers =
-                operational_carriers->value();
-            liquidity_policy.fee_per_transaction =
-                conservative ? 10000000 : 20000000;
-            liquidity_policy.fee_per_hour =
-                conservative ? 50000000 : 200000000;
-            liquidity_policy.fee_per_day =
-                conservative ? 200000000 : 1000000000;
-            if (safety_profile->currentData().toString() ==
-                    QLatin1String("custom") &&
-                (!custom_maintenance_per_transaction->satoshis(
-                     liquidity_policy.fee_per_transaction) ||
-                 !custom_maintenance_per_hour->satoshis(
-                     liquidity_policy.fee_per_hour) ||
-                 !custom_maintenance_per_day->satoshis(
-                     liquidity_policy.fee_per_day))) {
-                fail_setup(tr(
-                    "The selected automatic-liquidity targets or maintenance ceilings are outside the supported range."));
-                return;
-            }
-            UniValue liquidity_policy_array{UniValue::VARR};
-            liquidity_policy_array.push_back(
-                liquidityPolicyToJSON(liquidity_policy));
-            *liquidity_policy_params = std::move(liquidity_policy_array);
-            *liquidity_preview_params = wizard_pool_options(false);
-            *liquidity_params = wizard_pool_options(true);
 
             const qint64 missing_outputs =
                 poolNumber(*reviewed_pool, "missing_admission_dgb_slots") +

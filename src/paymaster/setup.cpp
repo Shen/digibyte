@@ -6,6 +6,7 @@
 #include <limits>
 #include <ostream>
 #include <paymaster/types.h>
+#include <paymaster/provider.h>
 #include <util/strencodings.h>
 #include <paymaster/setup.h>
 #include <set>
@@ -107,6 +108,8 @@ SetupChoices SetupCliDefaults(const UniValue& snapshot)
     }
     const auto& preparation = provider.find_value("preparation");
     result.pool.pushKV("maximum_fee_satoshis", existing || (preparation.isArray() && !preparation.empty()) ? SetupFundingFee(snapshot) : 50000000);
+    for (const auto& names : {std::pair{"admission_dgb_slots", "target_admission_dgb"}, {"operational_dgb_slots", "target_operational_dgb"}, {"admission_carrier_slots", "target_admission_carriers"}, {"operational_carrier_slots", "target_operational_carriers"}})
+        result.pool.pushKV(names.first, result.liquidity.find_value(names.second));
     return result;
 }
 
@@ -135,7 +138,7 @@ const std::vector<SetupField>& SetupFields()
         {"maximum_maintenance_fee_per_transaction_satoshis", "Maximum fee per refill transaction", "DGB ceiling for rebuilding reserves when confirmed change cannot be reused. This is separate from customer-payment fees.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_maintenance_fee_per_hour_satoshis", "Refill fees per rolling hour", "Maximum DGB for automatic reserve maintenance over 60 minutes. Must cover the per-transaction ceiling when paid refill is enabled.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_maintenance_fee_per_day_satoshis", "Refill fees per rolling day", "Maximum DGB for automatic maintenance over 24 hours. This allowance is additional to the customer-payment budget.", "DGB", 8, 0, MAX_MONEY},
-        {"maximum_fee_satoshis", "Maximum fee per setup transaction", "One-time ceiling for creating initial or missing reserves. 0.50 DGB is the new-provider proposal, not a fee estimate. Core stops if it is insufficient; an increase needs your review.", "DGB", 8, 1, MAX_MONEY},
+        {"maximum_fee_satoshis", "Maximum fee per setup transaction", "One-time ceiling for creating initial or missing reserves. 0.50 DGB is the new-provider proposal, not a fee estimate. Core stops if it is insufficient; an increase needs your review.", "DGB", 8, 1, MAX_MONEY / 2},
         {"unlock_seconds", "Wallet unlock duration", "Timed access stops new signing when it expires. Continuous access is recommended for uninterrupted operation until manual lock or node restart.", "seconds", 0, 60, 86400},
     };
     return fields;
@@ -191,9 +194,20 @@ int64_t SetupReadNumber(std::istream& input, std::ostream& output, const SetupFi
         if (answer == "?") continue;
         // Accept either decimal separator, but never guess thousands grouping.
         if (answer.find('.') == std::string::npos && std::count(answer.begin(), answer.end(), ',') == 1) std::replace(answer.begin(), answer.end(), ',', '.');
-        int64_t value{0};
-        const bool plain = !answer.empty() && answer.find_first_not_of("0123456789.") == std::string::npos;
-        if (plain && ParseFixedPoint(answer, field.decimals, &value) && value >= field.minimum && value <= field.maximum && value % field.increment == 0) return value;
+        // Parse the full int64 range exactly. ParseFixedPoint is limited to
+        // 10^18-1 subunits, below DigiByte's MAX_MONEY of 2.1 * 10^18.
+        const auto point = answer.find('.');
+        const auto whole = answer.substr(0, point);
+        auto fraction = point == std::string::npos ? std::string{} : answer.substr(point + 1);
+        while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+        const bool plain = !whole.empty() && whole.find_first_not_of("0123456789") == std::string::npos &&
+            fraction.find_first_not_of("0123456789") == std::string::npos && fraction.size() <= size_t(field.decimals);
+        uint64_t parsed{0};
+        if (plain) {
+            fraction.append(size_t(field.decimals) - fraction.size(), '0');
+            if (ParseUInt64(whole + fraction, &parsed) && parsed <= uint64_t(field.maximum) && parsed >= uint64_t(field.minimum) && parsed % field.increment == 0)
+                return int64_t(parsed);
+        }
         output << "Enter " << SetupFormatNumber(field.minimum, field.decimals) << " to " << SetupFormatNumber(field.maximum, field.decimals)
                << ' ' << field.unit << " in steps of " << SetupFormatNumber(field.increment, field.decimals) << ". Use no thousands separators. Please try again.\n";
     }
@@ -576,18 +590,85 @@ bool SetupPoolNeeded(const UniValue& preview)
     }
     return needed;
 }
+void CheckSetupChoices(const SetupChoices& choices)
+{
+    ProviderPolicy policy;
+    for (const auto& model : choices.policy.find_value("funding_models").get_array().getValues()) {
+        const auto name = model.get_str();
+        const uint8_t bit = name == "user_paid" ? FUNDING_MODEL_USER_PAID : name == "sponsored" ? FUNDING_MODEL_SPONSORED : 0;
+        if (!bit || (policy.funding_models & bit)) throw std::runtime_error("PAYMASTER_INVALID_FUNDING_MODELS");
+        policy.funding_models |= bit;
+    }
+    const auto scope = choices.policy.find_value("sponsorship_scope").get_str();
+    if (scope != "public" && scope != "restricted") throw std::runtime_error("PAYMASTER_INVALID_SPONSORSHIP_SCOPE");
+    policy.sponsorship_scope = scope == "public" ? SponsorshipScope::PUBLIC : SponsorshipScope::RESTRICTED;
+    policy.fee_rate_bps = choices.policy.find_value("fee_rate_bps").getInt<uint32_t>();
+    policy.min_payment = DDCents{choices.policy.find_value("min_amount_cents").getInt<int64_t>()};
+    policy.max_payment = DDCents{choices.policy.find_value("max_amount_cents").getInt<int64_t>()};
+    policy.quote_ttl = choices.policy.find_value("quote_ttl").getInt<int64_t>();
+    policy.maximum_network_fee = DGBSatoshis{choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>()};
+    std::string error;
+    if (!ValidateProviderPolicy(policy, error)) throw std::runtime_error(error);
+
+    const auto funding_limits = [](const UniValue& value) {
+        FundingSafetyLimits limits;
+        limits.maximum_network_fee_per_transaction = DGBSatoshis{value.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>()};
+        limits.maximum_reserved_network_fee = DGBSatoshis{value.find_value("maximum_reserved_network_fee_satoshis").getInt<int64_t>()};
+        limits.maximum_network_fee_per_hour = DGBSatoshis{value.find_value("maximum_network_fee_per_hour_satoshis").getInt<int64_t>()};
+        limits.maximum_network_fee_per_day = DGBSatoshis{value.find_value("maximum_network_fee_per_day_satoshis").getInt<int64_t>()};
+        limits.maximum_completed_per_hour = value.find_value("maximum_completed_per_hour").getInt<uint32_t>();
+        limits.maximum_completed_per_day = value.find_value("maximum_completed_per_day").getInt<uint32_t>();
+        return limits;
+    };
+    ProviderSafetyPolicy safety;
+    safety.user_paid = funding_limits(choices.safety.find_value("user_paid"));
+    safety.public_sponsored = funding_limits(choices.safety.find_value("public_sponsored"));
+    safety.restricted_sponsored = funding_limits(choices.safety.find_value("restricted_sponsored"));
+    safety.maximum_active_quotes_total = choices.safety.find_value("maximum_active_quotes_total").getInt<uint32_t>();
+    safety.maximum_active_quotes_per_netgroup = choices.safety.find_value("maximum_active_quotes_per_netgroup").getInt<uint32_t>();
+    safety.maximum_active_quotes_per_recipient = choices.safety.find_value("maximum_active_quotes_per_recipient").getInt<uint32_t>();
+    safety.maximum_quote_requests_per_netgroup_per_minute = choices.safety.find_value("maximum_quote_requests_per_netgroup_per_minute").getInt<uint32_t>();
+    safety.updated_at = 1; // Presence required by Core; no persisted timestamp is changed.
+    if (!ValidateProviderSafetyPolicy(safety, policy, error)) throw std::runtime_error(error);
+
+    ProviderLiquidityPolicy liquidity;
+    liquidity.automatic_replenishment = choices.liquidity.find_value("automatic_replenishment").get_bool();
+    liquidity.paid_maintenance_approved = choices.liquidity.find_value("paid_maintenance_approved").get_bool();
+    liquidity.target_admission_dgb = choices.liquidity.find_value("target_admission_dgb").getInt<uint16_t>();
+    liquidity.target_operational_dgb = choices.liquidity.find_value("target_operational_dgb").getInt<uint16_t>();
+    liquidity.target_admission_carriers = choices.liquidity.find_value("target_admission_carriers").getInt<uint16_t>();
+    liquidity.target_operational_carriers = choices.liquidity.find_value("target_operational_carriers").getInt<uint16_t>();
+    liquidity.maximum_maintenance_fee_per_transaction = DGBSatoshis{choices.liquidity.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>()};
+    liquidity.maximum_maintenance_fee_per_hour = DGBSatoshis{choices.liquidity.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>()};
+    liquidity.maximum_maintenance_fee_per_day = DGBSatoshis{choices.liquidity.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>()};
+    liquidity.updated_at = 1;
+    if (!ValidateProviderLiquidityPolicy(liquidity, error)) throw std::runtime_error(error);
+    if (!ProviderLiquidityTargetsSatisfyPolicy(liquidity, policy)) throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+
+    const int admission = choices.pool.find_value("admission_dgb_slots").getInt<int>();
+    const int operational = choices.pool.find_value("operational_dgb_slots").getInt<int>();
+    const int carriers = choices.pool.find_value("admission_carrier_slots").getInt<int>();
+    const int operational_carriers = choices.pool.find_value("operational_carrier_slots").getInt<int>();
+    if (admission < 3 || admission > 16 || operational < 1 || operational > 16 || carriers < 0 || carriers > 16 || operational_carriers < 0 || operational_carriers > 16)
+        throw std::runtime_error("PAYMASTER_INVALID_POOL_TARGET");
+    if (PolicyAllowsFundingModel(policy, FundingModel::USER_PAID)) {
+        if (carriers < 3 || operational_carriers < 1) throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+    } else if (carriers || operational_carriers) {
+        throw std::runtime_error("PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
+    }
+    if (!choices.pool.find_value("maximum_fee_satoshis").isNull()) {
+        const auto fee = choices.pool.find_value("maximum_fee_satoshis").getInt<int64_t>();
+        if (fee <= 0 || fee > MAX_MONEY / 2) throw std::runtime_error("PAYMASTER_POOL_INVALID_FEE_LIMIT");
+    }
+    if (choices.operation_mode != "automatic" && choices.operation_mode != "manual") throw std::runtime_error("PAYMASTER_INVALID_OPERATION_MODE");
+}
 std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoices& choices)
 {
     CheckSetupContext(snapshot, snapshot);
-    // Match Core's restricted-policy boundary before returning any mutating
-    // step, including pause, identity creation or a safety-policy bridge.
-    const auto& models = choices.policy.find_value("funding_models");
-    if (choices.policy.find_value("sponsorship_scope").get_str() == "restricted" &&
-        (!models.isArray() || models.size() != 1 || models[0].get_str() != "sponsored" ||
-         choices.policy.find_value("fee_rate_bps").getInt<int64_t>() != 0)) {
-        throw std::runtime_error("PAYMASTER_INVALID_RESTRICTED_POLICY: Restricted sponsorship requires sponsored-only service with zero DD service fee.");
-    }
+    CheckSetupChoices(choices);
     const auto& provider = snapshot.find_value("provider");
+    if (provider.find_value("provider_id").isNull() && !IsValidPaymasterDisplayName(choices.display_name))
+        throw std::runtime_error("PAYMASTER_INVALID_DISPLAY_NAME");
     std::vector<SetupStep> steps;
     auto add = [&](std::string method, const UniValue& input, const UniValue& expected, std::string field = {}, bool unlock = false) {
         SetupStep step;

@@ -146,6 +146,30 @@ reserved, hourly and daily caps. The final review shows the selected permissions
 Choosing a recommended option alone never authorizes it. Initial pool creation
 has its own exact capital/fee approval after configuration review.
 
+## Setup rules checked before applying changes
+
+Both assistants check the proposed offer, all three saved budget classes,
+liquidity policy and pool request using the same pure validators as Core before
+returning any configuration-writing step. Core still rechecks each RPC and the
+current wallet state.
+
+- Restricted sponsorship permits only sponsored service and a zero DD service
+  fee. Customer-paid service can be combined with **public** sponsorship only.
+- Sponsored-only pool preparation requires zero DD carrier targets. Switching
+  the setup targets to zero does not withdraw existing DD outputs.
+- Inactive saved budget classes must also satisfy the advertised network-fee
+  ceiling. CLI exposes these limits for correction. The GUI proposes lowering
+  an inactive per-transfer ceiling when necessary and shows all resulting
+  limits in review; it does not raise the saved aggregate budgets.
+- Preview and execution use the same proposed values. A saved policy outside
+  a GUI input's numeric range stays exact unless explicitly replaced. Restoring
+  liquidity defaults retains the saved autostart choice.
+- The one-time setup fee ceiling cannot exceed half of Core's monetary range,
+  because pool preparation can authorize two funding transactions. DGB input is
+  parsed exactly over the field's permitted range.
+- A public name is optional for a new identity: at most 32 printable ASCII
+  characters, excluding `/` and `@`. Existing identities keep their saved name.
+
 ## Complete the setup
 
 1. Confirm the node, active network and selected wallet. The wallet must pass
@@ -280,10 +304,10 @@ can only be established when the listener is actually opened after restart.
 For Tor, below an operator-managed `HiddenServiceDir`, configure:
 
 ```text
-HiddenServicePort <announced-port> 127.0.0.1:12033
+HiddenServicePort <announced-port> 127.0.0.1:18450
 ```
 
-Use `paymasterbind=127.0.0.1:12033=onion` for this forwarding target and announce
+Use `paymasterbind=127.0.0.1:18450=onion` for this forwarding target and announce
 that service's onion endpoint. Reload Tor through the operator's service tools.
 The assistant does not create a Tor service. For clearnet, use a numeric local
 interface address, a dedicated Direct TCP port and the matching public numeric
@@ -349,7 +373,7 @@ CLI prompt.
 On a controlled independent node with free Direct capacity:
 
 ```powershell
-.\src\digibyte-cli.exe checkpaymasterendpoint 'PUBLIC_IP:12033'
+.\src\digibyte-cli.exe checkpaymasterendpoint 'PUBLIC_IP:18450'
 # Or use the provider's full onion:port through a configured Tor proxy.
 ```
 

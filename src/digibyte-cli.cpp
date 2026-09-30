@@ -44,6 +44,7 @@
 #include <event2/buffer.h>
 #include <event2/keyvalq_struct.h>
 #include <paymaster/setup.h>
+#include <paymaster/types.h>
 #include <set>
 #include <support/cleanse.h>
 #include <support/events.h>
@@ -1204,6 +1205,16 @@ std::vector<std::pair<std::string, std::string>> OperatorBudgetModels(const UniV
     }
     return result;
 }
+std::vector<std::pair<std::string, std::string>> OperatorStoredBudgetModels(const UniValue& policy, const UniValue& safety)
+{
+    auto models = OperatorBudgetModels(policy);
+    for (const auto& model : {std::pair<std::string, std::string>{"user_paid", "Customer-paid"}, {"public_sponsored", "Public sponsored"}, {"restricted_sponsored", "Restricted sponsored"}}) {
+        if (std::any_of(models.begin(), models.end(), [&](const auto& active) { return active.first == model.first; })) continue;
+        if (safety.find_value(model.first).find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>() > 0)
+            models.emplace_back(model.first, model.second + " (inactive saved limits)");
+    }
+    return models;
+}
 void OperatorShowOffer(UniValue& policy)
 {
     std::cout << "Payment model:";
@@ -1213,7 +1224,7 @@ void OperatorShowOffer(UniValue& policy)
 }
 void OperatorShowSafety(const UniValue& policy, const UniValue& safety)
 {
-    for (const auto& model : OperatorBudgetModels(policy)) {
+    for (const auto& model : OperatorStoredBudgetModels(policy, safety)) {
         std::cout << model.second << " - DGB spending limits\n";
         auto limits = safety.find_value(model.first);
         OperatorFields(limits, false);
@@ -1464,7 +1475,7 @@ int PaymasterCli(bool setup)
             {"clearnet", "Public IP connection", "Use a reachable public IP and forward/open the dedicated provider port in your router and firewall."},
             {"onion", "Tor onion service", "Choose this if you already operate or will configure a Tor hidden service. Setup does not install or configure Tor."}}, endpoint.isStr() && endpoint.get_str().find(".onion:") != std::string::npos ? "onion" : "clearnet");
         std::cout << "Use a dedicated port, separate from RPC and ordinary peer connections. Enter IPv6 as [address]:port.\n"
-                  << "Example local bind: 127.0.0.1:12033 for Tor forwarding; 0.0.0.0:12033 listens on all IPv4 interfaces.\n";
+                  << "Example local bind: 127.0.0.1:18450 for Tor forwarding; 0.0.0.0:18450 listens on all IPv4 interfaces.\n";
         const auto bind = OperatorPrompt("Local listening IP:port");
         UniValue binds{UniValue::VARR};
         binds.push_back(bind + (route == "onion" ? "=onion" : ""));
@@ -1493,8 +1504,16 @@ int PaymasterCli(bool setup)
     const bool existing = provider.find_value("settings_present").isTrue();
     std::cout << (existing ? "Saved settings are preselected below; no recommendation overwrites them.\n" : "The selections below propose a small 24/7 provider. Review its finite budgets before approval.\n");
     OperatorStep(3, "Choose your customer offer");
-    choices.display_name = OperatorPrompt("Public provider name (shown to customers)", choices.display_name);
-    while (choices.display_name.empty()) choices.display_name = OperatorPrompt("Please enter a public provider name");
+    if (provider.find_value("provider_id").isNull()) {
+        do {
+            choices.display_name = OperatorPrompt("Optional public name (up to 32 printable ASCII characters; no / or @)", choices.display_name);
+            if (IsValidPaymasterDisplayName(choices.display_name)) break;
+            std::cout << "Invalid provider name. Leave it empty or use up to 32 printable ASCII characters without / or @.\n";
+            choices.display_name.clear();
+        } while (true);
+    } else {
+        std::cout << "Existing provider identity and name remain unchanged.\n";
+    }
     OperatorShowOffer(choices.policy);
     if (OperatorCustomize("Customer offer")) {
         const bool paid_before = OperatorAllowsModel(choices.policy, "user_paid");
@@ -1524,7 +1543,10 @@ int PaymasterCli(bool setup)
               << "Limits are rolling hour/day ceilings, not a daily target or a fixed fee. Reaching a limit interrupts new work.\n";
     const auto recommended = SetupDefaultSafety(choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>(), paid,
         OperatorAllowsModel(choices.policy, "sponsored"), choices.policy.find_value("sponsorship_scope").get_str() == "restricted");
-    for (const auto& model : OperatorBudgetModels(choices.policy)) {
+    const auto active_models = OperatorBudgetModels(choices.policy);
+    for (const auto& model : OperatorStoredBudgetModels(choices.policy, choices.safety)) {
+        const bool active = std::any_of(active_models.begin(), active_models.end(), [&](const auto& item) { return item.first == model.first; });
+        if (!active) std::cout << "Saved inactive limits must also fit the new advertised fee ceiling. Adjust them below if needed; this does not enable the model.\n";
         auto limits = choices.safety.find_value(model.first);
         std::cout << '\n' << model.second << '\n';
         if (limits.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>() == 0) {
@@ -1535,6 +1557,9 @@ int PaymasterCli(bool setup)
         bool edit = OperatorCustomize("Payment limits");
         for (;;) {
             if (edit) OperatorFields(limits, true);
+            bool disabled = true;
+            for (const auto& key : limits.getKeys()) disabled &= limits.find_value(key).getInt<int64_t>() == 0;
+            if (!active && disabled) break;
             const auto per = limits.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>();
             const auto hour = limits.find_value("maximum_network_fee_per_hour_satoshis").getInt<int64_t>();
             const auto count = limits.find_value("maximum_completed_per_hour").getInt<int64_t>();
@@ -1560,7 +1585,8 @@ int PaymasterCli(bool setup)
     }
     std::cout << "\nReserves are your operating capital, not an expense. Payment reserves determine concurrent capacity.\n"
               << "Capacity-check reserves prove availability before an offer; payment reserves fund actual transfers.\n";
-    if (!existing && !paid) {
+    if (!paid) {
+        std::cout << "Sponsored-only setup uses zero DD reserve targets. Existing DD outputs are not withdrawn by this change.\n";
         choices.liquidity.pushKV("target_admission_carriers", 0);
         choices.liquidity.pushKV("target_operational_carriers", 0);
     }
@@ -1570,8 +1596,8 @@ int PaymasterCli(bool setup)
         const int admission = choices.liquidity.find_value("target_admission_carriers").getInt<int>();
         const int operational = choices.liquidity.find_value("target_operational_carriers").getInt<int>();
         if ((paid && admission >= 3 && operational >= 1) ||
-            (!paid && ((admission == 0 && operational == 0) || admission >= 3))) break;
-        std::cout << "Customer-paid service needs at least 3 DD capacity-check reserves and 1 DD payment reserve. For sponsored-only service, use zero for both DD counts or at least 3 DD capacity-check reserves. Review the targets.\n";
+            (!paid && admission == 0 && operational == 0)) break;
+        std::cout << "Customer-paid service needs at least 3 DD capacity-check reserves and 1 DD payment reserve. Sponsored-only pool preparation requires zero for both DD counts. Review the targets.\n";
         OperatorFields(choices.liquidity, true);
     }
     choices.liquidity.pushKV("automatic_replenishment", OperatorSetting("Maintain reserves automatically? (recommended for 24/7)",
@@ -1607,6 +1633,7 @@ int PaymasterCli(bool setup)
         "Start the provider manually after each restart. A start requested below applies only to this node session.");
     const bool start_requested = choices.enabled && OperatorSetting("Start when this setup is ready?", !existing || provider.find_value("running").isTrue(),
         "Wait for usable funding and confirmed reserves, then start and verify local readiness.", "Save the configuration without a one-time start request. Saved autostart remains independently effective.");
+    CheckSetupChoices(choices);
     OperatorStep(6, "Review and approve the complete configuration");
     std::cout << "Wallet: " << wallet << " | Network: " << snapshot.find_value("network").get_str() << '\n';
     OperatorShowOffer(choices.policy);

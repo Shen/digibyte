@@ -662,6 +662,8 @@ installed, close running binaries built from this output directory, then run:
 
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'
+python .\build_msvc\msvc-autogen.py
+if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster build failed' }
 $env:PYTHONUTF8 = '1'
@@ -825,11 +827,14 @@ build, the complete Qt suite, or a real-terminal CLI funding walkthrough.
 
 Full Windows build and the complete Qt suite remain operator checks. From
 `D:\Digibyte\digibyte-fork`, use the existing VS/MSVC 14.43, Qt 5.15.10 and static
-vcpkg installation. No new source-list generation is needed for this change.
+vcpkg installation. The setup rule audit adds `paymaster/provider_policy.cpp`;
+regenerate the MSVC projects once before building the current revision.
 Allow several minutes for the incremental solution build; require exit code 0:
 
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'
+python .\build_msvc\msvc-autogen.py
+if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
 & 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 ```
@@ -929,3 +934,38 @@ case / 6 assertions. The Qt guided setup group, including reconfiguration to
 restricted sponsored-only, passed 3 cases (5 including init/cleanup) with no
 failures or skips. `git diff --check` passed. Full build and terminal acceptance
 remain the operator checks described above.
+
+### CLI/GUI setup rule audit (2026-09-30)
+
+The common preflight calls the existing Core offer/safety/liquidity validators
+from the new pure `paymaster/provider_policy.cpp` translation unit. It also
+matches pool RPC target and one-time fee bounds before constructing any write.
+The validator bodies were compared with the previous implementation: no policy
+rule changed. The Qt wizard now builds preview and execution from one choices
+collector; inactive saved limits and exact policy values are part of review.
+
+Targeted regression coverage includes invalid rates/ranges/expiry, inactive
+budgets, quote limits, refill limits, sponsored-only carrier counts, setup fee
+bounds, optional identity names, exact maximum DGB parsing, restricted GUI
+reconfiguration, retained large policy values and saved autostart.
+
+Recorded for this audit: all changed translation units compiled; common/Qt
+libraries, CLI, daemon and both test binaries linked with MSVC. The two focused
+unit groups (`paymaster_setup_tests:paymaster_provider_tests`) passed 59 cases /
+1,211 assertions. Three Qt functions passed 11 actual data cases (17 including
+init/cleanup) across the final focused runs, with no failures/skips: guided setup,
+setup theme and operating unlock. The new large-policy/autostart test initially
+omitted a status refresh after changing its simulated Core snapshot; correcting
+the fixture made all three setup rows pass. Operator and pool-setup descriptor
+regtests passed in 43 seconds, together with all 18 framework unit tests.
+`git diff --check` passed. This is not a full solution build or release approval.
+
+Operator acceptance: regenerate project files and use the full Windows build
+and complete Paymaster Qt commands above. Full build/Qt runs take minutes to
+tens of minutes and must return exit code 0 with no requested failures/skips.
+The terminal funding walkthrough above remains required; these targeted checks
+do not exercise a real interactive console from first prompt through funding.
+Also reconfigure an existing provider from user-paid to restricted sponsored,
+then back to public mixed service. Verify that inactive saved budgets are shown,
+invalid edits can be corrected before approval, sponsored DD targets become
+zero without withdrawing funds, and the exact reviewed values are persisted.

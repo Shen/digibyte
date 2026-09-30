@@ -48,6 +48,8 @@ struct SetupChoices {
     // Empty preserves saved autostart (the GUI contract). CLI reviews a choice.
     std::optional<bool> autostart;
 };
+/** Validate complete proposed settings with the Core policy validators, without writes. */
+void CheckSetupChoices(const SetupChoices& choices);
 /** Proposed CLI defaults only: callers must obtain explicit approval to apply. */
 SetupChoices SetupCliDefaults(const UniValue& snapshot);
 struct SetupMenuItem {
