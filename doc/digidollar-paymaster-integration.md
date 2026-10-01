@@ -184,7 +184,7 @@ with the status RPC. Neither case creates another payment or reconstructs proof.
 | RPC | Use and possible effects |
 | --- | --- |
 | `getpaymasterclientinfo` | Read capabilities and local readiness; no synchronization wait, reservation, signature, provider traffic or finance reconciliation. |
-| `getpaymasteroffers` | Inspect locally known eligible offers; not an authorization or reservation guarantee. |
+| `getpaymasteroffers` | Inspect locally known offers filtered by the requested fee ceiling, wallet fee limits, remaining rolling-day budget and privacy profile; not an authorization, reservation or availability guarantee. |
 | `senddigidollar` in Paymaster mode | Prepare, explicitly authorize, advance or resume the same durable order; may reserve, communicate, sign and submit according to the authorization stage. |
 | `getdigidollarsendsession` | Read one wallet-scoped session by an object containing `request_id` or `session_id`; no new payment operation. |
 | `listdigidollarsendsessions` | Read a bounded session page; follow its cursor and use `active_only=false` when completed sessions are needed. |
@@ -195,6 +195,14 @@ The high-level Paymaster result and session-shaped responses include `status`,
 This is not a promise that every low-level quote/PSBT/submit RPC returns that
 shape. Use the high-level entry point plus session inspection for integrations;
 consult `help <method>` from the same build for each low-level schema.
+
+`getpaymasteroffers(amount_cents, options)` accepts the same
+`maximum_paymaster_fee_cents` and `privacy` values as preparation, plus
+`subtract_paymaster_fee_from_amount`. Core further limits the preview fee by
+the wallet's per-transaction ceiling and remaining rolling-day budget. The
+`high` privacy profile excludes non-Tor endpoints. A later preparation still
+rechecks the policy and provider state; an empty preview is not proof that no
+provider could become eligible after local state changes.
 
 RPC access uses the existing node authentication and authorization model. A
 wallet URL selects context, not a separate security tenant. Do not expose spending

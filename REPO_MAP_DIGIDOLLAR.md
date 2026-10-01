@@ -861,10 +861,13 @@ or chain parameters.
   activation, BIP324-v2, and mainnet message-capture gates. High privacy also
   preflights onion-proxy presence, stream isolation, IP logging, and message
   capture before creating a session or reservation.
-- `getpaymasteroffers` can preview a fixed gross amount. It returns the exact
-  recipient, service-fee, and total values for mathematically exact candidates;
-  cent-rounding gaps fail before input reservation. `requestpaymasterquote`
-  retains its exact-recipient semantics.
+- `getpaymasteroffers` previews the requested amount against the caller's fee
+  ceiling, wallet per-transaction limit, remaining rolling-day budget and
+  privacy profile. High privacy includes only Tor endpoints. It returns exact
+  recipient, service-fee and total values for eligible candidates; cent-rounding
+  gaps fail before input reservation. The preview reserves nothing and cannot
+  guarantee provider availability. `requestpaymasterquote` retains its
+  exact-recipient semantics.
 - Shared response formatting exposes authoritative session/pending/finality,
   fee, provider, quote/policy, broadcast, and confirmation state.
 

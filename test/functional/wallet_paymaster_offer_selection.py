@@ -209,6 +209,31 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         assert_equal(
             [offer["user_total_cents"] for offer in offers], [1_005, 1_020])
 
+        capped_offers = client.getpaymasteroffers(1_000, {
+            "maximum_paymaster_fee_cents": 10,
+            "privacy": "standard",
+        })
+        assert_equal(
+            [offer["provider_id"] for offer in capped_offers],
+            [cheap_identity["provider_id"]])
+
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 4,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
+        assert_equal(client.getpaymasteroffers(1_000, {
+            "maximum_paymaster_fee_cents": 100,
+        }), [])
+
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
+        assert_equal(client.getpaymasteroffers(1_000, {
+            "maximum_paymaster_fee_cents": 100,
+            "privacy": "high",
+        }), [])
+
         self.log.info("Replace one offer monotonically and restore its price")
         initial_cheap_sequence = next(
             entry["sequence"] for entry in client_node.listpaymasters()
@@ -291,9 +316,23 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             assert_equal(result["provider_id"], cheap_identity["provider_id"])
             return result
 
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 9,
+            "maximum_service_fee_per_day_cents": 9,
+        })
         initial = send()
         assert_equal(initial["request_id"], request_id)
         assert_equal(initial["status"], "pending")
+        assert_equal(
+            client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"],
+            5)
+        assert_equal(client.getpaymasteroffers(1_000, {
+            "maximum_paymaster_fee_cents": 100,
+        }), [])
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
 
         capacity_seen = False
         provider_quote = {}

@@ -92,6 +92,45 @@ uint256 CanonicalClientRequestHash(
     return hasher.GetSHA256();
 }
 
+DDCents PreviewMaximumServiceFee(CWallet& wallet, DDCents requested_limit,
+                                int64_t now, std::string& error)
+{
+    ClientSafetyPolicy policy;
+    if (!GetPaymasterClientSafetyPolicy(wallet, policy)) {
+        error = "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED";
+        return DDCents{-1};
+    }
+    if (!ValidateClientSafetyPolicy(policy, error)) return DDCents{-1};
+    if (requested_limit.value < 0 || requested_limit.value > MAX_DD_OUTPUT_CENTS) {
+        error = "PAYMASTER_CLIENT_FEE_LIMIT_INVALID";
+        return DDCents{-1};
+    }
+
+    ClientFeeLedger ledger;
+    if (!GetPaymasterClientFeeLedger(wallet, ledger)) {
+        error = "PAYMASTER_CLIENT_FEE_LEDGER_REQUIRED";
+        return DDCents{-1};
+    }
+
+    int64_t available_today = policy.maximum_service_fee_per_day.value;
+    const int64_t effective_now = std::max(now, ledger.accounting_time_high_water);
+    for (const ClientFeeReservation& reservation : ledger.reservations) {
+        const bool counts_against_budget =
+            reservation.state == BudgetReservationState::RESERVED ||
+            (reservation.state == BudgetReservationState::SPENT &&
+             !TimeDeltaExceeds(effective_now, reservation.updated_at, 24 * 60 * 60));
+        if (!counts_against_budget || reservation.service_fee.value <= 0) continue;
+        available_today = reservation.service_fee.value >= available_today
+                              ? 0
+                              : available_today - reservation.service_fee.value;
+    }
+
+    error.clear();
+    return DDCents{std::min({requested_limit.value,
+                             policy.maximum_service_fee_per_transaction.value,
+                             available_today})};
+}
+
 } // namespace
 
 RPCHelpMan getpaymasteroffers()
@@ -104,6 +143,8 @@ RPCHelpMan getpaymasteroffers()
             {"amount_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Recipient amount, or exact total DD outflow when subtract_paymaster_fee_from_amount is true"},
             {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional local offer-preview semantics", {
                 {"subtract_paymaster_fee_from_amount", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Treat amount_cents as exact total DD outflow and derive the recipient amount"},
+                {"maximum_paymaster_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Requested fee ceiling, further limited by wallet policy and remaining daily budget"},
+                {"privacy", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "standard or high; high includes only Tor endpoints"},
             }},
         },
         RPCResult{RPCResult::Type::ARR, "", "Eligible public offers", {{RPCResult::Type::OBJ, "", /*optional=*/false, "Sorted offer", {
@@ -145,18 +186,39 @@ RPCHelpMan getpaymasteroffers()
             std::string error;
             const int64_t now = GetTime();
             bool subtract_fee{false};
+            int64_t requested_fee_limit{DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS};
+            PrivacyProfile privacy{PrivacyProfile::STANDARD};
             if (!request.params[1].isNull()) {
                 const UniValue& options = request.params[1].get_obj();
                 RPCTypeCheckObj(
                     options,
-                    {{"subtract_paymaster_fee_from_amount",
-                      UniValueType(UniValue::VBOOL)}},
+                    {{"subtract_paymaster_fee_from_amount", UniValueType(UniValue::VBOOL)},
+                     {"maximum_paymaster_fee_cents", UniValueType(UniValue::VNUM)},
+                     {"privacy", UniValueType(UniValue::VSTR)}},
                     /*fAllowNull=*/true, /*fStrict=*/true);
                 if (!options.find_value(
                         "subtract_paymaster_fee_from_amount").isNull()) {
                     subtract_fee = options.find_value(
                         "subtract_paymaster_fee_from_amount").get_bool();
                 }
+                if (!options.find_value("maximum_paymaster_fee_cents").isNull()) {
+                    requested_fee_limit = options.find_value(
+                        "maximum_paymaster_fee_cents").getInt<int64_t>();
+                }
+                if (!options.find_value("privacy").isNull()) {
+                    const std::string profile = options.find_value("privacy").get_str();
+                    if (profile == "high") {
+                        privacy = PrivacyProfile::HIGH;
+                    } else if (profile != "standard") {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                           "privacy must be standard or high");
+                    }
+                }
+            }
+            const DDCents maximum_service_fee = PreviewMaximumServiceFee(
+                *wallet, DDCents{requested_fee_limit}, now, error);
+            if (maximum_service_fee.value < 0) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
             }
             const DigiDollar::Paymaster::DDCents requested_amount{
                 request.params[0].getInt<int64_t>()};
@@ -165,19 +227,19 @@ RPCHelpMan getpaymasteroffers()
                       context.paymaster->GetDirectory().List(now),
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
-                      DigiDollar::Paymaster::DDCents{
-                          DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS},
+                      maximum_service_fee,
                       reputation, now, error)
                 : DigiDollar::Paymaster::BuildOfferCandidates(
                       context.paymaster->GetDirectory().List(now),
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
-                      DigiDollar::Paymaster::DDCents{
-                          DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS},
+                      maximum_service_fee,
                       reputation, now, error);
             if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
             UniValue result{UniValue::VARR};
             for (const auto& candidate : candidates) {
+                if (privacy == PrivacyProfile::HIGH &&
+                    !candidate.endpoint.IsTor()) continue;
                 UniValue offer{UniValue::VOBJ};
                 offer.pushKV("provider_id", candidate.provider_id.GetHex());
                 offer.pushKV("display_name", candidate.display_name);

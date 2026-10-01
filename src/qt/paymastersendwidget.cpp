@@ -2414,6 +2414,8 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
     preview_options.pushKV(
         "subtract_paymaster_fee_from_amount",
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
+    preview_options.pushKV("maximum_paymaster_fee_cents", m_feeCapSpin->value());
+    preview_options.pushKV("privacy", m_privacyCombo->currentData().toString().toStdString());
     const bool subtract_from_amount =
         m_subtractPaymasterFeeCheck &&
         m_subtractPaymasterFeeCheck->isChecked();
