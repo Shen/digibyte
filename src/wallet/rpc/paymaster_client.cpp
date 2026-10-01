@@ -2422,7 +2422,21 @@ RPCHelpMan submitpaymasterdigidollar()
             using namespace DigiDollar::Paymaster;
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            wallet->BlockUntilSyncedToCurrentChain();
+            // processpaymastersubmits invokes this handler on the validation
+            // scheduler. A new tip can arrive after its initial readiness
+            // check; waiting here would deadlock that same notification queue.
+            const bool automatic_service =
+                request.strMethod == INTERNAL_PAYMASTER_SERVICE_METHOD;
+            const ExactFinalTxIndexMode txindex_mode = automatic_service
+                ? ExactFinalTxIndexMode::NONBLOCKING
+                : ExactFinalTxIndexMode::WAIT_FOR_SYNC;
+            if (automatic_service) {
+                if (!AutomaticProviderStateIsSynchronized(*wallet)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_SYNCING");
+                }
+            } else {
+                wallet->BlockUntilSyncedToCurrentChain();
+            }
 
             PartiallySignedTransaction user_psbt;
             std::string error;
@@ -2618,7 +2632,7 @@ RPCHelpMan submitpaymasterdigidollar()
                     FinalTransactionPresence::NONE};
                 if (!PreflightFinalPaymasterTransaction(
                         *wallet, MakeTransactionRef(final_transaction),
-                        signed_presence, error)) {
+                        signed_presence, error, txindex_mode)) {
                     const bool transient =
                         error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" ||
                         error == "PAYMASTER_TXINDEX_NOT_READY";
@@ -2716,7 +2730,7 @@ RPCHelpMan submitpaymasterdigidollar()
                 }
                 if (!PreflightFinalPaymasterTransaction(
                         *wallet, MakeTransactionRef(validated_final),
-                        final_presence, error)) {
+                        final_presence, error, txindex_mode)) {
                     const bool transient =
                         error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" ||
                         error == "PAYMASTER_TXINDEX_NOT_READY";

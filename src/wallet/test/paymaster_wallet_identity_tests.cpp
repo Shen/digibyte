@@ -4,6 +4,11 @@
 
 /** \file Persistent provider-identity ownership and signing tests. */
 
+#include <wallet/rpc/paymaster.h>
+#include <rpc/util.h>
+#include <rpc/request.h>
+#include <paymaster/wire.h>
+#include <paymaster/manager.h>
 #include <boost/test/unit_test.hpp>
 
 #include <chainparams.h>
@@ -1548,6 +1553,36 @@ BOOST_AUTO_TEST_CASE(operator_readiness_and_legacy_backup_do_not_write)
     BOOST_CHECK(ProviderBackupRequired(backup));
     BOOST_CHECK(!WalletBatch{m_wallet.GetDatabase()}.HasPaymasterBackupStatus());
     BOOST_CHECK_EQUAL(m_wallet.GetDatabase().nUpdateCounter.load(), updates);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+}
+
+BOOST_AUTO_TEST_CASE(automatic_submit_defers_before_wallet_or_index_wait)
+{
+    SyncWithValidationInterfaceQueue();
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    {
+        LOCK(context.wallets_mutex);
+        context.wallets.emplace_back(&m_wallet, [](CWallet*) {});
+    }
+    {
+        LOCK(m_wallet.cs_wallet);
+        // Model a new block arriving after the outer submit handler checked
+        // readiness. The nested handler must defer before parsing or signing.
+        m_wallet.SetLastBlockProcessed(0, uint256::ONE);
+    }
+    JSONRPCRequest request;
+    request.context = &context;
+    request.strMethod = paymaster_rpc::internal::INTERNAL_PAYMASTER_SERVICE_METHOD;
+    request.params = UniValue{UniValue::VARR};
+    request.params.push_back("invalid-psbt-must-not-be-processed");
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK_EXCEPTION(submitpaymasterdigidollar().HandleRequest(request), UniValue,
+        [](const UniValue& error) {
+            return error.find_value("code").getInt<int>() == -4 &&
+                   error.find_value("message").get_str() == "PAYMASTER_PROVIDER_SYNCING";
+        });
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
 }
 

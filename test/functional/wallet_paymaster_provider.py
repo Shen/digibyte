@@ -831,7 +831,15 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
             def process_submit():
                 nonlocal provider_commit
-                provider_commit = provider_wallet.processpaymastersubmits()
+                try:
+                    provider_commit = provider_wallet.processpaymastersubmits()
+                except JSONRPCException as error:
+                    # The service guard can be held briefly by announcement or
+                    # maintenance reconciliation even in manual processing mode.
+                    # A busy rejection acquired no work; poll within wait_until.
+                    if error.error["code"] == -4 and error.error["message"] == "PAYMASTER_PROVIDER_SERVICE_BUSY":
+                        return False
+                    raise
                 if not provider_commit["processed"]:
                     return False
                 if provider_commit["request_id"] != request_id:
@@ -1220,8 +1228,17 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         second_user_paid_request_id = (
             "550e8400-e29b-41d4-a716-446655440108")
         second_mempool_before = set(node.getrawmempool())
+        def advance_tip_during_automatic_submit():
+            # Keep the payment unconfirmed while notifications race with the
+            # automatic provider's nested submit and final-tx preflights.
+            # Scheduler work must yield, never wait on its own wallet/index queue.
+            for _ in range(3):
+                self.generateblock(node, wallet.getnewaddress(), [],
+                                   sync_fun=lambda: None)
+
         second_user_paid_txid = complete_paymaster_transfer(
             second_user_paid_request_id, 500, 3,
+            after_authorization=advance_tip_during_automatic_submit,
             automatic_provider=True)
         second_maintenance_txids = assert_automatic_liquidity_recovery(
             second_user_paid_txid, 106, second_mempool_before)
