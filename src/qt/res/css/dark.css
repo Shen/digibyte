@@ -6267,6 +6267,8 @@ QWidget#paymasterWidget QScrollArea#paymasterActivityPage,
 QWidget#paymasterWidget QWidget#paymasterOverviewContents,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents,
 QWidget#paymasterWidget QWidget#paymasterManagementContents,
+QWidget#paymasterWidget QWidget#paymasterSettingsContents,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents,
@@ -6278,6 +6280,7 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents {
 
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QGroupBox,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QGroupBox,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QGroupBox,
@@ -6311,15 +6314,19 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents QCheckBox {
 
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QLineEdit,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QSpinBox,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QSpinBox,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QDoubleSpinBox,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QDoubleSpinBox,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QDoubleSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QDoubleSpinBox,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QComboBox,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QComboBox,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QComboBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QComboBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLineEdit,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QSpinBox,
@@ -6482,34 +6489,11 @@ QWidget#paymasterWidget QLabel[paymasterRole="globalStatus"] {
     font-weight: 400;
 }
 
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane {
+QWidget#paymasterWidget QStackedWidget#paymasterOperatorPages {
     background-color: transparent;
     border: 0px;
     border-top: 1px solid #245b42;
     top: -1px;
-}
-
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab {
-    background-color: #0b2d20;
-    color: #bcd8c8;
-    border: 1px solid #275e44;
-    border-bottom: 0px;
-    padding: 9px 18px;
-    margin-right: 3px;
-    min-width: 92px;
-    font-size: 10pt;
-    font-weight: 500;
-}
-
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab:selected {
-    background-color: #168b55;
-    color: #ffffff;
-    border-color: #43d98a;
-}
-
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab:hover:!selected {
-    background-color: #12422f;
-    color: #ffffff;
 }
 
 QWidget#paymasterWidget QWidget#paymasterPageColumn {
@@ -7153,12 +7137,6 @@ QWidget#paymasterWidget QLabel#paymasterFinanceSelectedSummary {
     border-radius: 8px;
 }
 
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs > QTabBar::tab,
-QWidget#paymasterWidget QTabWidget#paymasterSettingsTabs > QTabBar::tab {
-    min-width: 145px;
-    padding: 10px 14px;
-}
-
 /* Indeterminate provider-status activity, distinct from a percentage estimate. */
 QWidget#paymasterWidget QProgressBar#paymasterOperatorProgress {
     border: 1px solid #39745a;
@@ -7197,7 +7175,8 @@ DigiDollarSendWidget QLabel#paymasterOfferCheckHelp {
     padding: 0;
 }
 
-/* Provider finance tables: explicit palette for cells, empty space and selection. */
+/* Provider activity and finance tables: cells, empty space and selection. */
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents {
     background-color: #09251a;
@@ -7208,21 +7187,25 @@ QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents {
     selection-background-color: #246b49;
     selection-color: #e4f8ec;
 }
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations::item,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals::item,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents::item {
     background-color: #09251a;
     color: #e4f8ec;
     padding: 6px 10px;
 }
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations::item:alternate,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals::item:alternate,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents::item:alternate {
     background-color: #123b2a;
 }
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations::item:selected,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals::item:selected,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents::item:selected {
     background-color: #246b49;
     color: #e4f8ec;
 }
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations QHeaderView::section,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals QHeaderView::section,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents QHeaderView::section {
     background-color: #16804f;
@@ -7232,8 +7215,69 @@ QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents QHeaderView::section
     border-right: 1px solid #39745a;
     font-weight: 600;
 }
+QWidget#paymasterWidget QTableWidget#paymasterActivityReservations QTableCornerButton::section,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceDailyTotals QTableCornerButton::section,
 QWidget#paymasterWidget QTableWidget#paymasterFinanceEvents QTableCornerButton::section {
     background-color: #16804f;
     border: none;
+}
+
+
+/* Task-oriented Paymaster operator navigation. Keep these rules local. */
+QWidget#paymasterWidget QStackedWidget#paymasterOperatorPages,
+QWidget#paymasterWidget QStackedWidget#paymasterSettingsPages {
+    background-color: #10231a;
+    border: none;
+}
+QWidget#paymasterWidget QListWidget#paymasterNavigation {
+    background-color: #10231a;
+    color: #edf8f1;
+    border: none;
+    padding: 4px;
+    outline: 0;
+}
+QWidget#paymasterWidget QListWidget#paymasterNavigation::item {
+    padding: 14px 10px;
+    margin: 3px 0;
+    border-radius: 6px;
+}
+QWidget#paymasterWidget QListWidget#paymasterNavigation::item:selected {
+    background-color: #24583b;
+    color: #edf8f1;
+    font-weight: bold;
+}
+QWidget#paymasterWidget QListWidget#paymasterNavigation::item:disabled {
+    color: #b0cdbb;
+}
+QWidget#paymasterWidget QListWidget#paymasterNavigation::item:focus,
+QWidget#paymasterWidget QPushButton:focus,
+QWidget#paymasterWidget QComboBox#paymasterNavigationSelect:focus {
+    border: 2px solid #72e7a9;
+}
+QWidget#paymasterWidget QPushButton[paymasterRole="settingsAction"] {
+    text-align: left;
+    background-color: #172f23;
+    color: #edf8f1;
+    border: 1px solid #365746;
+    border-radius: 6px;
+    padding: 12px;
+    font-weight: bold;
+}
+QWidget#paymasterWidget QWidget#paymasterAutostartPanel {
+    border-top: 1px solid #365746;
+}
+QWidget#paymasterWidget QComboBox#paymasterNavigationSelect {
+    min-height: 32px;
+}
+
+QWidget#paymasterWidget QProgressBar#paymasterTaskProgress {
+    background: #09251a;
+    border: 1px solid #28694a;
+    border-radius: 4px;
+    min-height: 6px;
+    max-height: 8px;
+}
+QWidget#paymasterWidget QProgressBar#paymasterTaskProgress::chunk {
+    background: #58d997;
+    border-radius: 3px;
 }

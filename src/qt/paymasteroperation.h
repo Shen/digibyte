@@ -46,6 +46,34 @@ public:
     bool stale(int64_t now) const { return received_at == 0 || now - received_at > 30; }
     bool busy() const { return phase == Phase::Checking || phase == Phase::Review || phase == Phase::Executing; }
 
+    /** A start intent authorizes no reserve creation. Do not present it as
+     * automatic progress when no saved work or pending capacity can fill the gap. */
+    bool startNeedsReserveApproval() const
+    {
+        const auto& provider = snapshot.find_value("provider");
+        const auto& operations = provider.find_value("active_operations");
+        const auto& preparation = provider.find_value("preparation");
+        if (!provider.find_value("start_requested").isTrue() || !provider.find_value("pool_ready").isFalse() ||
+            !operations.isArray() || !operations.empty() || !preparation.isArray()) return false;
+        for (const auto& step : preparation.getValues()) {
+            const auto& state = step.find_value("state");
+            if (!state.isStr() || (state.get_str() != "complete" && state.get_str() != "cancelled")) return false;
+        }
+        const auto& liquidity = provider.find_value("liquidity");
+        bool missing = liquidity.find_value("targets_satisfy_provider_policy").isFalse();
+        try {
+            for (const char* asset : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
+                const auto& counts = liquidity.find_value(asset);
+                // Reserved payments and unconfirmed successor outputs are real
+                // work even when no maintenance operation is in the journal.
+                if (counts.find_value("pending").getInt<int64_t>() != 0 ||
+                    counts.find_value("reserved").getInt<int64_t>() != 0) return false;
+                missing |= counts.find_value("missing").getInt<int64_t>() > 0;
+            }
+        } catch (const std::exception&) { return false; }
+        return missing;
+    }
+
     /** Reject an old wallet's result before touching any visible state. */
     bool observe(const UniValue& value, uint64_t wallet_generation, int64_t now)
     {
@@ -86,6 +114,9 @@ public:
                 } else if (needs_processing && provider.find_value("wallet_locked").isTrue()) {
                     blocked = true;
                     error = QStringLiteral("PAYMASTER_WALLET_LOCKED");
+                } else if (startNeedsReserveApproval()) {
+                    blocked = true;
+                    error = QStringLiteral("PAYMASTER_POOL_PREPARATION_REQUIRED");
                 }
                 phase = blocked ? Phase::Blocked : Phase::Waiting;
                 if (!blocked) error.clear();
@@ -96,6 +127,30 @@ public:
             }
         }
         return true;
+    }
+
+    /** An explicit restore may propose repairing deliberately reduced DD
+     * capacity. Merely observing a wallet must never persist this proposal. */
+    static UniValue restorationPolicy(const UniValue& snapshot)
+    {
+        const auto& provider = snapshot.find_value("provider");
+        const auto& saved = provider.find_value("liquidity").find_value("policy");
+        UniValue proposed{UniValue::VOBJ};
+        for (const char* key : {"automatic_replenishment", "paid_maintenance_approved",
+                               "target_admission_dgb", "target_operational_dgb",
+                               "target_admission_carriers", "target_operational_carriers",
+                               "maximum_maintenance_fee_per_transaction_satoshis",
+                               "maximum_maintenance_fee_per_hour_satoshis",
+                               "maximum_maintenance_fee_per_day_satoshis"}) {
+            proposed.pushKV(key, saved.find_value(key));
+        }
+        const auto& models = provider.find_value("policy").find_value("funding_models");
+        for (const auto& model : models.getValues()) {
+            if (model.get_str() != "user_paid") continue;
+            proposed.pushKV("target_admission_carriers", std::max(3, saved.find_value("target_admission_carriers").getInt<int>()));
+            proposed.pushKV("target_operational_carriers", std::max(1, saved.find_value("target_operational_carriers").getInt<int>()));
+        }
+        return proposed;
     }
 
     /** A post-configuration executable preview may shrink, never expand the

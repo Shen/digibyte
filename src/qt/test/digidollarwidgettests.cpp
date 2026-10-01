@@ -120,6 +120,8 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTabWidget>
+#include <QStackedWidget>
+#include <QListWidget>
 #include <QWheelEvent>
 #include <QWizard>
 #include <QTimer>
@@ -3682,18 +3684,18 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         QCOMPARE(tabWidget->tabText(i), expectedTabLabels.at(i));
     }
     QVERIFY(tab.findChild<QWidget*>("paymasterWidget") != nullptr);
-    QTabWidget* paymasterTabs = tab.findChild<QTabWidget*>("paymasterOperatorTabs");
+    QStackedWidget* paymasterTabs = tab.findChild<QStackedWidget*>("paymasterOperatorPages");
     QVERIFY(paymasterTabs != nullptr);
     const QStringList expectedPaymasterTabs{
         QStringLiteral("Overview"),
+        QStringLiteral("Funds & reserves"),
         QStringLiteral("Activity"),
-        QStringLiteral("Operating capital"),
-        QStringLiteral("Income && costs"),
+        QStringLiteral("Income & costs"),
         QStringLiteral("Settings"),
     };
     QCOMPARE(paymasterTabs->count(), expectedPaymasterTabs.size());
     for (int i = 0; i < expectedPaymasterTabs.size(); ++i) {
-        QCOMPARE(paymasterTabs->tabText(i), expectedPaymasterTabs.at(i));
+        QCOMPARE(paymasterTabs->widget(i)->property("paymasterPageTitle").toString(), expectedPaymasterTabs.at(i));
     }
     QWidget* setupChoice = tab.findChild<QWidget*>("paymasterSetupChoice");
     QWidget* configuredOverview = tab.findChild<QWidget*>("paymasterConfiguredOverview");
@@ -3703,9 +3705,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         tab.findChild<QScrollArea*>("paymasterOverviewPage");
     QWidget* overviewContents =
         tab.findChild<QWidget*>("paymasterOverviewContents");
-    auto* settingsTabs = tab.findChild<QTabWidget*>("paymasterSettingsTabs");
+    auto* settingsTabs = tab.findChild<QStackedWidget*>("paymasterSettingsPages");
     QVERIFY(settingsTabs != nullptr);
-    QCOMPARE(settingsTabs->count(), 3);
+    QCOMPARE(settingsTabs->count(), 6);
     QWidget* configurationPage = tab.findChild<QWidget*>("paymasterConfigurationPage");
     QWidget* safetyPage = tab.findChild<QWidget*>("paymasterSafetyPolicyPage");
     QWidget* liquidityPage = tab.findChild<QWidget*>("paymasterLiquidityPage");
@@ -3809,7 +3811,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QCOMPARE(liquiditySettings->text(), QStringLiteral("Change liquidity settings"));
     const QList<QWidget*> pageColumns =
         tab.findChildren<QWidget*>("paymasterPageColumn");
-    QCOMPARE(pageColumns.size(), 7);
+    QCOMPARE(pageColumns.size(), 10);
     for (QWidget* column : pageColumns) {
         QCOMPARE(column->maximumWidth(), 1100);
     }
@@ -3817,12 +3819,12 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(advancedLiquidity->isHidden());
     QVERIFY(!setupChoice->isHidden());
     QVERIFY(configuredOverview->isHidden());
-    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(settingsTabs)));
-    QCOMPARE(settingsTabs->indexOf(configurationPage), 0);
-    QCOMPARE(settingsTabs->indexOf(safetyPage), 1);
-    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(liquidityPage)));
-    QVERIFY(!paymasterTabs->isTabEnabled(paymasterTabs->indexOf(financesPage)));
-    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(activityPage)));
+    QVERIFY(!settingsTabs->isEnabled());
+    QCOMPARE(settingsTabs->indexOf(configurationPage), 1);
+    QCOMPARE(settingsTabs->indexOf(safetyPage), 2);
+    QVERIFY(!liquidityPage->isEnabled());
+    QVERIFY(!financesPage->isEnabled());
+    QVERIFY(activityPage->isEnabled());
     QLabel* paymasterIntroduction = tab.findChild<QLabel*>("paymasterIntroduction");
     QLabel* paymasterNextStep = tab.findChild<QLabel*>("paymasterNextStep");
     QWidget* paymasterDetails = tab.findChild<QWidget*>("paymasterTechnicalDetails");
@@ -3944,7 +3946,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
                                            requirements->text().contains(QStringLiteral("txindex=1")) &&
                                            requirements->text().contains(QStringLiteral("BIP324")) &&
                                            nextActions->text().contains(QStringLiteral("Runtime and the requested enabled state are saved last")) &&
-                                           nextActions->text().contains(QStringLiteral("Autostart remains off until an explicit start")) &&
+                                           nextActions->text().contains(QStringLiteral("The saved autostart choice is retained")) &&
                                            progressResult->text().contains(QStringLiteral("not started")) &&
                                            firstProgressStep->text().contains(QStringLiteral("Pending")) &&
                                            transitionProgressStep->text().contains(QStringLiteral("safety transition")) &&
@@ -3989,8 +3991,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         // remaining widget contracts still run in the headless suite.
         setupChoice->hide();
         configuredOverview->show();
-        paymasterTabs->setTabEnabled(paymasterTabs->indexOf(settingsTabs), true);
-        paymasterTabs->setTabEnabled(paymasterTabs->indexOf(liquidityPage), true);
+        paymasterTabs->widget(paymasterTabs->indexOf(settingsTabs))->setEnabled(true);
+        paymasterTabs->widget(paymasterTabs->indexOf(liquidityPage))->setEnabled(true);
         QPushButton* runtime_toggle = tab.findChild<QPushButton*>(
             "paymasterRuntimeSettingsToggle");
         QVERIFY(runtime_toggle != nullptr);
@@ -3998,10 +4000,10 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     }
     QVERIFY(setupChoice->isHidden());
     QVERIFY(!configuredOverview->isHidden());
-    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(settingsTabs)));
-    QVERIFY(settingsTabs->isTabEnabled(settingsTabs->indexOf(configurationPage)));
-    QVERIFY(settingsTabs->isTabEnabled(settingsTabs->indexOf(safetyPage)));
-    QVERIFY(paymasterTabs->isTabEnabled(paymasterTabs->indexOf(liquidityPage)));
+    QVERIFY(settingsTabs->isEnabled());
+    QVERIFY(configurationPage->isEnabled());
+    QVERIFY(safetyPage->isEnabled());
+    QVERIFY(liquidityPage->isEnabled());
     QLabel* configurationIntroduction =
         tab.findChild<QLabel*>("paymasterConfigurationIntroduction");
     QLabel* policySummary = tab.findChild<QLabel*>("paymasterPolicySummary");
@@ -4112,10 +4114,10 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QSpinBox* admissionCarriers =
         tab.findChild<QSpinBox*>("paymasterAdmissionCarrierSlots");
     QVERIFY(liquidityIntroduction != nullptr);
-    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("wallet-owned reserves")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("Funds remain in this wallet")));
     QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("network fee")));
     QVERIFY(liquiditySteps != nullptr);
-    QVERIFY(liquiditySteps->text().contains(QStringLiteral("Preview pool preparation")));
+    QVERIFY(liquiditySteps->text().contains(QStringLiteral("review the exact amounts and fees")));
     QVERIFY(liquiditySummary != nullptr);
     QVERIFY(liquidityCurrentStatus != nullptr);
     QVERIFY(liquidityCurrentStatus->text().contains(QStringLiteral("status not loaded")));
@@ -4203,10 +4205,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(!processSubmit->isEnabled());
     QVERIFY(runtimeSettingsToggle != nullptr);
     QVERIFY(runtimeSettingsPanel != nullptr);
-    // This path deliberately selected manual expert setup above. Expert setup
-    // opens the advanced operator controls; guided setup keeps them collapsed.
-    QVERIFY(runtimeSettingsToggle->isChecked());
-    QVERIFY(!runtimeSettingsPanel->isHidden());
+    // Processing settings are a separate, initially collapsed disclosure.
+    QVERIFY(!runtimeSettingsToggle->isChecked());
+    QVERIFY(runtimeSettingsPanel->isHidden());
     QVERIFY(operationMode != nullptr);
     QCOMPARE(operationMode->currentData().toString(), QStringLiteral("automatic"));
     QVERIFY(providerAutostart != nullptr);

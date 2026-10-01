@@ -1,133 +1,82 @@
 # Paymaster: operator experience
 
-Status: guided three-area implementation candidate, 2026-09-29. This changes presentation, not spending authority or protocol. The HTML preview uses example data only.
+Current implementation candidate: 2026-10-01. Consensus and payment authority
+are unchanged. See the testing runbook for verification and remaining acceptance.
 
-## Daily operation
+## Find the task
 
-Use three destinations: Operation, Activity & finances, Settings.
-Settings contains Offer, Spending limits, Automation & reserves, and Connection & wallet. Paying with a
-Paymaster remains in the normal DigiDollar Send flow; this panel operates a provider.
+| Destination | Responsibility |
+| --- | --- |
+| Overview | Operational state, Start/Pause, immediate autostart and refill switches, compact capital/budget/results summaries. |
+| Funds & reserves | Balances, four visible capital actions, reserve targets and refill costs; separate stop/release/backup completion. |
+| Activity | Active work and reservations with next steps; raw records in disclosures; manual processing only in manual mode. |
+| Income & costs | Period DD revenue, DGB costs, bookings and complete CSV export; link to capital management. |
+| Settings | Offer, Spending limits, Operation & automation, Node connection, Wallet & backup. |
 
-Operation answers three questions: Is the provider running? What needs attention?
-What should I do next? Show one context-sensitive primary action, with persistent
-pause as a secondary action while running. Readiness, external reachability and
-confirmed payment are independent observations. A locally ready provider is not
-labelled externally verified. Unknown or stale status never enables a start.
+The sidebar becomes a selector below 960 logical pixels. Current task progress
+survives navigation. Navigation stays available during an RPC; competing changes
+remain disabled. Backup reminders do not set the operational hero's state,
+color or primary action. Backup timestamps and the separately labelled manual
+external confirmation belong to Wallet & backup.
 
-Avoid a second dashboard below the first. Show brief capital, budget and financial
-summaries; place detailed prerequisite checks and raw RPC diagnostics behind
-disclosures. Keep Start provider / Resume provider and Pause provider together
-at the top; do not duplicate them in technical details. Put wallet backup and
-connection controls on Connection & wallet, together with runtime processing
-and explicit autostart.
-Retain a visible short overview reminder. Starting/resuming enables the saved
-configuration; pausing disables it persistently. The temporary stop remains an
-RPC expert action. Outstanding work and recovery remain accessible even if
-setup is unfinished.
+## Three independent automation choices
 
-## Information hierarchy
+Autostart and automatic reserve refill have immediate-save checkboxes on
+Overview and Operation & automation. Request processing has its own form.
+Switches show the saved intent separately from current execution and never
+save another form's draft. Pause disables autostart but retains refill policy.
+Wallet locking, missing funds, budget exhaustion and manual processing do not
+clear saved refill intent. Full retirement revokes refill and paid consent.
 
-- One page title, one purpose sentence, one primary task per section.
-- Normal overview: human-readable state, next action, local connection status,
-  wallet lock state and backup reminder. No raw diagnostic codes or provider IDs.
-- Errors use text and symbols; colors are supplementary. Unknown codes remain in
-  technical details, accompanied by an actionable unknown-status notice.
-- Exact financial values keep their currency. Read-only compact values may trim
-  trailing zeroes, never round away meaningful digits. Editable ceilings retain
-  their exact value. DD revenue and DGB cost are never directly subtracted.
-- Show payment-model budgets separately; no combined total implying one shared
-  cap. Keep reserved exposure distinct from spent amounts. Inactive models do
-  not occupy the overview. Hour/day caps remain rolling windows.
-- Show per-transfer/hour/day fee limits first. Concurrent reservations and count
-  limits remain available in expanded controls, with saved values preserved.
-- Show one selected finance period. Comparative periods, valuation and capital
-  details are secondary. Incomplete historical coverage remains visible.
+Enabling refill reuses valid approved finite limits. Otherwise a cancellable
+review requires positive transaction/hour/day caps before any write. Disabling
+refill preserves those caps and existing signed work. A lost reply reads the
+saved state before permitting another write. Wallet/privacy changes invalidate
+open reviews and late callbacks.
 
-## Flows and wording
+The confirmed liquidity snapshot is separate from editable targets/costs and
+the revision captured when editing begins. An acknowledged local quick change
+rebases that draft while preserving edited targets/costs; external revisions
+still require explicit reload/review. setpaymasterliquiditypolicy accepts
+optional expected_updated_at; Core checks it under the wallet lock with the
+write. Zero expects no saved policy. Older callers remain compatible.
+automation_status on operator/liquidity reads reports configured/enabled intent,
+paid consent, actual state/reason and pending transactions. The older
+maintenance_state remains a demand summary, not proof of running work.
 
-New wallet: Choose wallet → Check node → Configure endpoint → Offer and finite
-limits → Review capital, maximum setup fees, recurring limits and optional start
-→ Approve once → Automatic execution and confirmations. Resume existing setup without another identity or
-duplicate pool approval. No new defaults overwrite persisted values.
+## Capital and configuration reviews
 
-Stopped and ready: “Ready to start” → “Start provider”. Locked: “Waiting for
-wallet unlock” → “Unlock wallet”. Funding pending: “Waiting for confirmations”
-→ “Review operating capital”. Budget exhausted: “Spending limit reached” →
-“Review limits”. Never suggest raising a budget as the automatic remedy.
+Funds & reserves visibly explains Prepare reserves, Withdraw DD service fees,
+Release one DD reserve and Release excess DGB. All use current plan review,
+explicit approval and the shared wallet-bound task controller. DGB-only
+rebalance preserves every DD reserve and binds maximum_fee_satoshis into the
+plan hash. Full retirement follows pause, open-work checks, separate exact
+release approval and backup. An uncertain reply never triggers automatic
+re-execution. Technical forms do not offer a second independent execution path.
 
-Pause explicitly persists disabled provider/autostart and stops new signatures;
-already signed transactions can still confirm. Operating unlock is wallet-wide:
-GUI and CLI default the explicit choice to continuous access until manual lock,
-wallet unload or node shutdown. A timed choice remains available. Passwords are
-never stored; encrypted wallets require another manual unlock after restart.
-This mode is available only to configured provider wallets and grants no new
-spending approval. Startup and financial confirmation dialogs keep all existing
-Core checks and explicit consent.
+Targets and refill costs share one Save/Discard form. Offer, spending limits
+and processing mode have independent drafts and discard actions. The seven-step
+setup loads existing values; amount widgets use exact DD cents/DGB satoshis
+internally and human currency units on screen.
 
-CLI setup optionally generates separate DGB/DD receiving addresses or monitors
-existing ones. Its two-second monitor follows Core funding, reserve confirmations
-and the requested one-time start before reporting completion. Wallet generation
-changes invalidate the monitor; lost responses never repeat a financial approval.
-Autostart is a separate saved choice, and no fee limit is increased automatically.
+getpaymasternodeconfig is read-only and nodewide. It distinguishes effective
+loaded values/sources from current main-file values and pending restart changes.
+Command-line, settings.json and forced values are locked per field. Included,
+negated, duplicate and conflicting entries are identified before editing.
+The inline editor and setup use the same component. Saving still requires the
+existing file-bound preview, conflict recheck, backup and atomic replacement.
+Saving does not restart or report a file change as effective runtime state.
 
-The CLI presents seven numbered stages, explained menu choices and editable
-DGB/DD/percentage values. Invalid input is retried locally. New-provider proposals
-select automatic processing, autostart and bounded paid refill for continuous
-operation; saved configurations retain their own selections. The review displays
-separate payment/refill allowances and their combined rolling-day ceiling. All
-mutations still require explicit approval; Enter at an approval prompt declines.
+## Presentation and verification
 
-Helpers explain consequences beside inputs. Tooltips supplement, never replace,
-important instructions. Keyboard focus, accessible names, selectable diagnostics,
-privacy mode and wallet-switch invalidation apply to all new controls. Keep
-technical material collapsed initially and preserve responsiveness at narrow
-window widths. New Qt source strings use tr(); translator catalogs follow the
-repository translation process.
+Native strings remain English tr() source text. Both themes apply to pages,
+wizard and dialogs. Narrow-window, scaling, keyboard and privacy tests include
+late replies and exact monetary approvals. The HTML preview is an example-only
+interaction model with no RPC or wallet access. It is not runtime evidence.
 
-## Review and validation
+## Historical evidence
 
-The HTML preview documents the earlier five-tab candidate; the three-tab Qt implementation is authoritative. It
-is not connected to a wallet. Qt regression checks must cover navigation into
-nested settings, one primary action, no raw codes in the hero, unknown/stale
-status, privacy, correct financial period, and existing approval guards.
-Full builds and full test matrices remain operator work per AGENTS.md. Record
-actual targeted results below; earlier tests do not validate this redesign.
-
-## Operator acceptance commands
-
-Working directory: `D:\Digibyte\digibyte-fork`, branch
-`feature/paymaster-ux-navigation`. Use Qt 5.15.10 and the configured MSVC/vcpkg
-installation. Run the full Windows build from
-[the build runbook](../digidollar-paymaster-testing.md) first (minutes to tens
-of minutes). A full build is not replaced by the targeted object compilation
-used while developing this UI.
-
-Then run both affected Qt groups on the Windows desktop (seconds to a few
-minutes). Success means exit code 0 with no failed test cases for each group:
-
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-$env:QT_QPA_PLATFORM = 'windows'
-$env:QT_FORCE_STDERR_LOGGING = '1'
-Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
-Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
-try {
-    foreach ($suite in @('PaymasterWidgetTests', 'DigiDollarWidgetTests')) {
-        $env:DIGIBYTE_QT_TEST_SUITE = $suite
-        & .\build_msvc\x64\Release\test_digibyte-qt.exe
-        if ($LASTEXITCODE -ne 0) { throw "Qt regression failed: $suite" }
-    }
-} finally {
-    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE -ErrorAction SilentlyContinue
-}
-```
-
-Interactive review: select an existing provider wallet; open all three areas and their nested pages;
-verify nested settings, a locked wallet, exhausted/pending states and privacy;
-review a financial period, expand exact limits and cancel a mutation preview;
-confirm that the ordinary pause explains persistent autostart disablement.
-Check both themes and a narrow window. Real Tor/payment and 24-hour acceptance
-remain the separate Core/operator release gates, not claims of this redesign.
+The following results describe the previous candidate only.
 
 ## Recorded candidate verification (2026-09-28)
 

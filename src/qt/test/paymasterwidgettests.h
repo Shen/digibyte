@@ -25,8 +25,15 @@ private Q_SLOTS:
     void paymasterOperationControllerRecoversWithoutDuplicateApproval();
     void paymasterOperationFundingReviewIsBounded();
     void paymasterDeferredStartIntentIsWalletScoped();
-    void paymasterThreeDestinationsAndVisibleTasks();
+    void paymasterFiveDestinationsAndVisibleTasks();
     void paymasterOperatorOverviewGuidesAndFailsClosed();
+    void paymasterPreparationFeeRecovery();
+    void paymasterStartIntentNeedsReserveApproval();
+    void paymasterPreparationContinuesAfterRefresh_data();
+    void paymasterPreparationContinuesAfterRefresh();
+    void paymasterProviderCommandLocksPages();
+    void paymasterNodeConnectionEditor_data();
+    void paymasterNodeConnectionEditor();
     void paymasterOperatingUnlock_data();
     void paymasterOperatingUnlock();
     void paymasterPoolPreparationStoredFeeDiagnostics();
@@ -40,6 +47,8 @@ private Q_SLOTS:
     void paymasterOperatorDelayedStartup();
     void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
     void paymasterLiquidityPolicySavePersistsVisibleValues();
+    void paymasterLiquiditySaveAcrossRefresh_data();
+    void paymasterLiquiditySaveAcrossRefresh();
     void paymasterLiquidityMaintenanceStatesAreReadable();
     void paymasterExternalReadinessIsSeparatedFromConfiguration();
     void paymasterPendingStartUsesLiveStatusInsteadOfStaleModal();
@@ -51,6 +60,10 @@ private Q_SLOTS:
     void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
     void paymasterManualActivityUsesExpectedRpcAndReadableStates();
     void paymasterFinancesAndBackupWorkflow();
+    void paymasterOverviewAutostart_data();
+    void paymasterOverviewAutostart();
+    void paymasterOverviewRefill_data();
+    void paymasterOverviewRefill();
     void paymasterCapitalOverview_data();
     void paymasterCapitalOverview();
     void paymasterOverviewFinanceWalletAndPrivacyBinding();
