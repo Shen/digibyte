@@ -4034,10 +4034,33 @@ bool QueuePersistedPaymasterSubmit(
         return false;
     }
 
+    PartiallySignedTransaction persisted_user_psbt;
+    if (!DecodeRawPSBT(persisted_user_psbt,
+                       MakeByteSpan(attempt.user_signed_psbt), error) ||
+        !ValidateCollaborativePSBT(
+            persisted_user_psbt, authorized_template,
+            CollaborativeSignatureStage::USER_SIGNED, error)) {
+        if (error.empty()) error = "PAYMASTER_PERSISTED_USER_PSBT_INVALID";
+        return false;
+    }
+    CDataStream canonical_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    canonical_stream << persisted_user_psbt;
+    const auto canonical_span = MakeUCharSpan(canonical_stream);
+    if (std::vector<unsigned char>{canonical_span.begin(), canonical_span.end()} !=
+        attempt.user_signed_psbt) {
+        error = "PAYMASTER_PERSISTED_USER_PSBT_NONCANONICAL";
+        return false;
+    }
+    if (!ValidateClientAuthorizationOwnership(
+            wallet, attempt.client_manifest, error)) {
+        return false;
+    }
+
     // A persisted USER signature is not authority to reuse stale or replaced
     // provider liquidity. Reconstruct the exact capacity artifacts and apply
     // the same identity/control-proof/chainstate firewall used immediately
-    // before the first signature on every retry.
+    // before the first signature on every retry, except for inputs proven to
+    // belong to the exact locally observed final transaction below.
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;
     try {
@@ -4074,6 +4097,40 @@ bool QueuePersistedPaymasterSubmit(
         return false;
     }
     node::NodeContext* node = wallet.chain().context();
+    if (!node || !node->chainman) {
+        error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
+        return false;
+    }
+    // A restarted client may have missed the provider's signed result even
+    // though the exact payment is already mined. Only a fully validated,
+    // locally observed final transaction permits retrying its spent Capacity.
+    // The unsigned txid or persisted USER PSBT alone never grants this exception.
+    CTransactionRef known_final;
+    {
+        LOCK(wallet.cs_wallet);
+        if (const auto* wallet_tx = wallet.GetWalletTx(attempt.unsigned_txid))
+            known_final = wallet_tx->tx;
+    }
+    if (!known_final) {
+        uint256 block_hash;
+        known_final = node::GetTransaction(nullptr, node->mempool.get(),
+            attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
+    }
+    auto resource_mode = AuthorizedCapacityResourceMode::REQUIRE_UNSPENT;
+    if (known_final) {
+        FinalTransactionPresence presence{FinalTransactionPresence::NONE};
+        if (!ValidateFinalCollaborativeTransaction(
+                CMutableTransaction{*known_final}, known_final->GetHash(),
+                known_final->GetWitnessHash(), authorized_template, error) ||
+            !PreflightFinalPaymasterTransaction(wallet, known_final, presence,
+                error, ExactFinalTxIndexMode::NONBLOCKING)) {
+            return false;
+        }
+        if (presence != FinalTransactionPresence::NONE)
+            resource_mode = AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN;
+        else
+            known_final.reset();
+    }
     const int64_t observation_time =
         std::max(now, attempt.client_manifest_accepted_at);
     if (!node || !node->chainman ||
@@ -4081,29 +4138,8 @@ bool QueuePersistedPaymasterSubmit(
             capacity_proof, capacity_request,
             attempt.provider_identity_key, *node->chainman,
             attempt.client_manifest_accepted_at, observation_time,
-            AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, error)) {
+            resource_mode, error, known_final.get())) {
         if (error.empty()) error = "PAYMASTER_CAPACITY_NOT_CURRENT";
-        return false;
-    }
-    PartiallySignedTransaction persisted_user_psbt;
-    if (!DecodeRawPSBT(persisted_user_psbt,
-                       MakeByteSpan(attempt.user_signed_psbt), error) ||
-        !ValidateCollaborativePSBT(
-            persisted_user_psbt, authorized_template,
-            CollaborativeSignatureStage::USER_SIGNED, error)) {
-        if (error.empty()) error = "PAYMASTER_PERSISTED_USER_PSBT_INVALID";
-        return false;
-    }
-    CDataStream canonical_stream{SER_NETWORK, ::PROTOCOL_VERSION};
-    canonical_stream << persisted_user_psbt;
-    const auto canonical_span = MakeUCharSpan(canonical_stream);
-    if (std::vector<unsigned char>{canonical_span.begin(), canonical_span.end()} !=
-        attempt.user_signed_psbt) {
-        error = "PAYMASTER_PERSISTED_USER_PSBT_NONCANONICAL";
-        return false;
-    }
-    if (!ValidateClientAuthorizationOwnership(
-            wallet, attempt.client_manifest, error)) {
         return false;
     }
 

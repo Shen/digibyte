@@ -643,7 +643,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                                         after_authorization=None,
                                         automatic_provider=False,
                                         client_wallet=None,
-                                        payment_recipient=None):
+                                        payment_recipient=None,
+                                        restart_before_exact_retry=False):
+            nonlocal client
             transfer_client = client if client_wallet is None else client_wallet
             transfer_recipient = (recipient if payment_recipient is None else
                                   payment_recipient)
@@ -875,6 +877,48 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 final_txid = commit["txid"]
                 assert_equal(provider_commit["txid"], final_txid)
                 assert_equal(len(final_txid), 64)
+
+            if restart_before_exact_retry:
+                self.log.info("Recover a confirmed payment after losing the client result inbox")
+                assert not automatic_provider and client_wallet is None
+                # Mine without consuming the signed provider result. Restart
+                # drops the transport inbox while retaining the USER PSBT.
+                self.generatetoaddress(node, 1, wallet.getnewaddress())
+                self.sync_blocks()
+                self.restart_node(1)
+                self.connect_nodes(1, 0, peer_advertises_v2=True)
+                if self.pre_paymaster_digibyted:
+                    self.connect_nodes(1, 2, peer_advertises_v2=True)
+                self.sync_blocks()
+                client = client_node.get_wallet_rpc("client")
+                transfer_client = client
+                lookup = {"request_id": request_id}
+                restored = client.resolvepaymastersession(lookup, "refresh")
+                assert_equal(restored["artifact"], "user_psbt")
+                assert_equal(restored["session"]["payment_confirmed"], False)
+                assert client_node.getrawtransaction(final_txid, True)["confirmations"] > 0
+                attempts_before = client.getdigidollarsendsession(lookup)["provider_attempts"]
+                attempt_id_before = restored["attempt"]["attempt_id"]
+                mempool_before_retry = set(node.getrawmempool())
+                retried = client.resolvepaymastersession(lookup, "retry_same")
+                assert_equal(retried["artifact"], "user_psbt")
+
+                def collect_exact_result():
+                    snapshot = client.resolvepaymastersession(lookup, "retry_same")
+                    if snapshot["artifact"] != "final_transaction":
+                        process_submit()
+                        return False
+                    assert_equal(snapshot["attempt"]["attempt_id"], attempt_id_before)
+                    assert_equal(snapshot["session"]["txid"], final_txid)
+                    assert_equal(snapshot["session"]["payment_confirmed"], True)
+                    assert_equal(snapshot["session"]["session_state"], "CONFIRMED")
+                    return True
+
+                self.wait_until(collect_exact_result)
+                assert_equal(set(node.getrawmempool()), mempool_before_retry)
+                attempts_after = client.getdigidollarsendsession(lookup)["provider_attempts"]
+                assert_equal(attempts_after, attempts_before)
+                return final_txid
 
             def process_result():
                 nonlocal client_result
@@ -1643,7 +1687,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         sponsored_txid = complete_paymaster_transfer(
             "550e8400-e29b-41d4-a716-446655440102", 100, 0,
             provider_wallet=selected_provider,
-            unselected_provider_wallet=unselected_provider)
+            unselected_provider_wallet=unselected_provider,
+            restart_before_exact_retry=True)
         assert sponsored_txid != final_txid
         assert sponsored_txid != second_user_paid_txid
         self.generatetoaddress(node, 1, wallet.getnewaddress())

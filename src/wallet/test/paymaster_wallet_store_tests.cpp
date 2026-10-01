@@ -4843,6 +4843,77 @@ BOOST_AUTO_TEST_CASE(manifestless_client_final_exact_replay_is_rejected_read_onl
     BOOST_CHECK(database.m_records == before_exact_replay);
 }
 
+BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
+{
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440089";
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256::ONE,
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    ValidClientResultArtifacts artifacts;
+    BOOST_REQUIRE_MESSAGE(BuildValidClientResultArtifacts(m_wallet, session, request_id,
+        uint256S("89"), 101, artifacts, error, nullptr, true), error);
+    auto attempt = artifacts.attempt;
+    session.attempt_ids = {attempt.attempt_id};
+    session.state = SessionState::PENDING_PROVIDER;
+    session.pending_phase = PendingPhase::USER_SIGNATURE_SENT;
+    session.updated_at = 101;
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{0};
+    policy.maximum_service_fee_per_day = DDCents{0};
+    policy.updated_at = 100;
+    ClientFeeLedger ledger;
+    ledger.accounting_time_high_water = 100;
+    BOOST_REQUIRE_MESSAGE(ReserveClientFee(ledger, policy, attempt.commit_key, DDCents{0}, 101, error), error);
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.WritePaymasterClientSafetyPolicy(policy));
+    BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(ledger));
+    bool completed{false};
+    // Neither absent nor shallow observations authorize completion.
+    BOOST_REQUIRE(store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
+    BOOST_CHECK(!completed);
+    const auto transaction = MakeTransactionRef(artifacts.final_transaction);
+    m_wallet.SetLastBlockProcessed(1, uint256S("a1"));
+    BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
+    BOOST_REQUIRE(store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
+    BOOST_CHECK(!completed);
+    m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a2"));
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    CMutableTransaction wrong_witness{*transaction};
+    wrong_witness.vin[0].scriptWitness.stack[0][0] ^= 1;
+    m_wallet.mapWallet.at(transaction->GetHash()).tx = MakeTransactionRef(wrong_witness);
+    BOOST_CHECK(!store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
+    BOOST_CHECK(!completed);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    m_wallet.mapWallet.at(transaction->GetHash()).tx = transaction;
+    for (size_t fail_at : {0U, 1U, 2U}) {
+        GetMockableDatabase(m_wallet).FailWriteAt(fail_at);
+        BOOST_CHECK(!store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
+        GetMockableDatabase(m_wallet).ClearFailureInjection();
+        BOOST_CHECK(!completed);
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    }
+    // Historical consent remains sufficient to observe an already mined exact
+    // transaction even after its retry/signing deadline; no new signature exists.
+    BOOST_REQUIRE_MESSAGE(store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error), error);
+    BOOST_CHECK(completed);
+    BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
+    BOOST_CHECK(session.state == SessionState::CONFIRMED);
+    PaymasterSessionObservation observation;
+    BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
+    BOOST_CHECK(observation.PaymentConfirmed(session.state));
+    BOOST_CHECK(!batch.HasPaymasterResult(attempt.commit_key));
+    BOOST_REQUIRE(batch.ReadPaymasterClientFeeLedger(ledger));
+    BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::SPENT);
+    std::vector<CTransactionRef> broadcasts;
+    BOOST_REQUIRE(store.ListClientDurableFinalTransactions(broadcasts, error));
+    BOOST_CHECK(broadcasts.empty());
+}
+
 BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)
 {
     PaymasterStore store{m_wallet};

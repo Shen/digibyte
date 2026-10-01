@@ -155,6 +155,11 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
                                        error)) {
             return false;
         }
+        // A locally observed payment can outlive the provider's replay journal.
+        // Keep it available for exact chain/reorg observation, but never turn
+        // the absence of a signed provider result into rebroadcast authority.
+        if (recovery_artifact.txid.IsNull() && observed_attempt &&
+            !batch.HasPaymasterResult(observed_attempt->commit_key)) continue;
         const ExactFinalArtifact& selected =
             !recovery_artifact.txid.IsNull() ? recovery_artifact : payment_artifact;
         if (selected.txid.IsNull() ||

@@ -1458,6 +1458,92 @@ bool PaymasterStore::RecordClientFinalObservation(const std::string& request_id,
     return true;
 }
 
+bool PaymasterStore::CompleteClientConfirmedPayment(
+    const std::string& request_id, const uint256& attempt_id,
+    int64_t now, bool& completed, std::string& error)
+{
+    completed = false;
+    error.clear();
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession session;
+    ProviderAttempt attempt;
+    if (now <= 0 || !batch.ReadPaymasterSession(request_id, session) ||
+        session.provider_side || !batch.ReadPaymasterAttempt(attempt_id, attempt) ||
+        attempt.session_id != session.session_id || session.attempt_ids.empty() ||
+        session.attempt_ids.back() != attempt_id ||
+        !attempt.final_transaction.empty() || !session.final_txid.IsNull()) {
+        error = "PAYMASTER_CLIENT_OBSERVATION_BINDING_MISMATCH";
+        return false;
+    }
+    const auto* wallet_tx = m_wallet.GetWalletTx(attempt.unsigned_txid);
+    if (!wallet_tx || m_wallet.GetTxDepthInMainChain(*wallet_tx) < DEFAULT_REORG_SAFETY_DEPTH)
+        return true;
+    if ((attempt.state != AttemptState::USER_SIGNED &&
+         attempt.state != AttemptState::USER_PSBT_ACCEPTED &&
+         attempt.state != AttemptState::AMBIGUOUS) ||
+        (session.state != SessionState::AUTHORIZED &&
+         session.state != SessionState::PENDING_PROVIDER) ||
+        attempt.client_manifest_accepted_at > session.updated_at ||
+        !ValidateClientAuthorizationOwnership(m_wallet, attempt.client_manifest, error)) {
+        if (error.empty()) error = "PAYMASTER_CLIENT_OBSERVATION_NOT_AUTHORIZED";
+        return false;
+    }
+    // Validate the exact stored USER signature, manifest, quote, prevouts and
+    // every final witness. An unsigned txid or terminal state is not a receipt.
+    attempt.final_txid = wallet_tx->tx->GetHash();
+    attempt.final_transaction = CanonicalBytes(*wallet_tx->tx);
+    attempt.state = AttemptState::MEMPOOL;
+    CMutableTransaction validated;
+    if (!ValidateClientFinalForExecution(attempt, wallet_tx->tx->GetWitnessHash(),
+                                         validated, error)) return false;
+    ExactFinalArtifact artifact;
+    ExactFinalObservation observation;
+    if (!DecodeExactFinalArtifact(attempt.final_transaction, attempt.final_txid, artifact, error) ||
+        !ObserveExactWalletArtifact(m_wallet, artifact, observation, error) ||
+        observation.confirmation_depth < DEFAULT_REORG_SAFETY_DEPTH) {
+        if (error.empty()) error = "PAYMASTER_CLIENT_OBSERVATION_NOT_CONFIRMED";
+        return false;
+    }
+    ClientFeeLedger ledger;
+    const auto ledger_status = batch.ReadPaymasterClientFeeLedgerWithStatus(ledger);
+    if (ledger_status != DatabaseReadStatus::FOUND && ledger_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
+        return false;
+    }
+    if (ledger_status == DatabaseReadStatus::NOT_FOUND && attempt.client_manifest.service_fee.value != 0) {
+        error = "PAYMASTER_CLIENT_FEE_RESERVATION_MISSING";
+        return false;
+    }
+    bool write_ledger{false};
+    if (ledger_status == DatabaseReadStatus::FOUND) {
+        const auto reservation = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
+            [&](const ClientFeeReservation& entry) { return entry.commit_key == attempt.commit_key; });
+        if (reservation != ledger.reservations.end()) {
+            if (!SpendClientFee(ledger, attempt.commit_key, now, error)) return false;
+            write_ledger = true;
+        } else if (attempt.client_manifest.service_fee.value != 0) {
+            error = "PAYMASTER_CLIENT_FEE_RESERVATION_MISSING";
+            return false;
+        }
+    }
+    attempt.updated_at = std::max(attempt.updated_at, now);
+    session.final_txid = attempt.final_txid;
+    session.state = SessionState::CONFIRMED;
+    session.pending_phase = PendingPhase::NONE;
+    session.updated_at = std::max(session.updated_at, now);
+    if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    if (!batch.WritePaymasterAttempt(attempt) || !batch.WritePaymasterSession(session) ||
+        (write_ledger && !batch.WritePaymasterClientFeeLedger(ledger)))
+        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    if (!batch.TxnCommit()) {
+        error = "PAYMASTER_DATABASE_COMMIT";
+        return false;
+    }
+    completed = true;
+    return true;
+}
+
 bool PaymasterStore::GetProviderResult(const uint256& commit_key,
                                        PaymasterResult& result) const
 {

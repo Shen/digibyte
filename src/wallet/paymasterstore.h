@@ -505,6 +505,14 @@ public:
                                       bool confirmed,
                                       int64_t now,
                                       std::string& error);
+    /** Complete a client payment from its exact locally confirmed transaction
+     * after the provider replay-retention depth. No result signature is invented
+     * and no broadcast authority is created. Insufficient depth is a no-op. */
+    bool CompleteClientConfirmedPayment(const std::string& request_id,
+                                        const uint256& attempt_id,
+                                        int64_t now,
+                                        bool& completed,
+                                        std::string& error);
     bool GetProviderResult(const uint256& commit_key,
                            DigiDollar::Paymaster::PaymasterResult& result) const;
 

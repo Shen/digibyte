@@ -1904,6 +1904,92 @@ RPCHelpMan resolvepaymastersession()
             if (!store.GetAttempt(attempt_id, attempt)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster attempt not found");
             }
+            if (action == "retry_same" && attempt_id == session.attempt_ids.back() &&
+                context.paymaster && context.paymaster->Enabled()) {
+                if (!attempt.user_signed_psbt.empty() &&
+                    attempt.final_transaction.empty()) {
+                    // A spend with no wallet change output may not have been
+                    // inserted in mapWallet before the provider result arrived.
+                    // Recover only a fully validated, deeply confirmed exact
+                    // transaction from the local index, without broadcasting it.
+                    CTransactionRef observed_transaction;
+                    ExactFinalTransactionPreflight observed;
+                    bool missing_wallet_transaction{false};
+                    {
+                        LOCK(wallet->cs_wallet);
+                        missing_wallet_transaction = !wallet->GetWalletTx(attempt.unsigned_txid);
+                    }
+                    if (missing_wallet_transaction) {
+                        const auto* node = wallet->chain().context();
+                        if (node && node->chainman) {
+                            uint256 block_hash;
+                            observed_transaction = node::GetTransaction(nullptr, node->mempool.get(),
+                                attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
+                            std::string observation_error;
+                            if (observed_transaction &&
+                                PreflightExactPaymasterFinalTransaction(*wallet, observed_transaction,
+                                    ExactFinalTxIndexMode::NONBLOCKING, observed, observation_error) &&
+                                observed.presence == ExactFinalTransactionPresence::CONFIRMED &&
+                                observed.confirmation_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
+                                auto candidate = attempt;
+                                candidate.final_txid = observed_transaction->GetHash();
+                                CDataStream bytes{SER_NETWORK, ::PROTOCOL_VERSION};
+                                bytes << *observed_transaction;
+                                const auto span = MakeUCharSpan(bytes);
+                                candidate.final_transaction.assign(span.begin(), span.end());
+                                candidate.state = AttemptState::MEMPOOL;
+                                CMutableTransaction validated;
+                                if (!ValidateClientFinalForExecution(candidate, observed_transaction->GetWitnessHash(),
+                                        validated, observation_error) ||
+                                    !ValidateClientAuthorizationOwnership(*wallet, candidate.client_manifest, observation_error))
+                                    throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
+                            } else {
+                                observed_transaction.reset();
+                            }
+                        }
+                    }
+                    {
+                        // Keep the completed snapshot bound to the full records
+                        // until it has been built; tip pruning may run afterwards.
+                        LOCK(wallet->cs_wallet);
+                        if (observed_transaction && !wallet->GetWalletTx(attempt.unsigned_txid) &&
+                            !wallet->AddToWallet(observed_transaction,
+                                TxStateConfirmed{observed.confirmed_block, observed.confirmed_height, observed.confirmed_position}))
+                            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_OBSERVED_TRANSACTION_WRITE");
+                        bool completed{false};
+                        std::string observation_error;
+                        if (!store.CompleteClientConfirmedPayment(session.request_id,
+                                attempt_id, GetTime(), completed, observation_error))
+                            throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
+                        if (completed) {
+                            if (!store.GetSessionByRequestId(session.request_id, session))
+                                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DATABASE_READ");
+                            if (auto* dd_wallet = wallet->GetDDWallet()) {
+                                std::string history_error;
+                                if (!dd_wallet->RecordPaymasterSendHistory(session.final_txid,
+                                        attempt.client_manifest.recipient_script,
+                                        attempt.client_manifest.recipient_amount.value + attempt.client_manifest.service_fee.value,
+                                        history_error))
+                                    wallet->WalletLogPrintf("Paymaster observed payment history update deferred\n");
+                            }
+                            if (const auto* node = wallet->chain().context(); node && node->connman)
+                                node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, attempt.provider_id));
+                            return ClientSessionSnapshotToJSON(store, session, action);
+                        }
+                    }
+                    // Collect an already received result before rechecking
+                    // Capacity that may have been spent by this exact payment.
+                    JSONRPCRequest nested{request};
+                    nested.params = UniValue{UniValue::VARR};
+                    nested.params.push_back(session.request_id);
+                    const auto received = processpaymasterresult().HandleRequest(nested);
+                    if (received.find_value("processed").isTrue()) {
+                        if (!store.GetSessionByRequestId(session.request_id, session))
+                            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DATABASE_READ");
+                        return ClientSessionSnapshotToJSON(store, session, action);
+                    }
+                }
+            }
             if (action == "cancel_to_self") {
                 if (options.find_value("retry_transport").isTrue()) {
                     DigiDollar::Paymaster::AlternativeRecoveryRecord recovery;
