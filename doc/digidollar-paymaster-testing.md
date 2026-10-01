@@ -1,5 +1,72 @@
 # Paymaster build and test runbook
 
+## Uncreated client request and CLI status checks (2026-10-01)
+
+Source base: PR #452 integration `44b70ddea7`. This follow-up separates confirmed
+session absence from unreadable/versioned state. Qt can leave a failed initial
+prepare-only attempt after authoritative absence, while known sessions remain
+protected. The same lookup errors and detailed DD selection reason reach CLI
+clients. See the [client contract](digidollar-paymaster-integration.md#failed-preparation-and-session-lookup).
+
+Verification completed: selected MSVC 14.43 / Qt 5.15.10 compilation of seven
+translation units (`paymasterstore_client`, wallet RPC `paymaster`,
+`paymaster_client`, `paymaster_discovery`, Qt `paymastersendwidget`, wallet store
+tests and Qt Paymaster tests), plus Python syntax and Git whitespace checks.
+Objects/logs are isolated under `build_msvc/paymaster-absence-check/`. No
+application/test executable was relinked and no operator wallet was changed.
+The new runtime tests below are **pending**, not passing results.
+
+Use the full build command in
+[Operator verification for this integration](#operator-verification-for-this-integration)
+first, including `msvc-autogen.py` to refresh generated configuration/projects.
+Working directory and prerequisites remain `D:\Digibyte\digibyte-fork`, the
+installed MSVC/SDK/Python/static vcpkg dependencies and Qt at
+`D:\Qt51510\install`. Allow minutes for native tests and tens of minutes or
+longer for the functional contract test. Success requires exit 0 and every
+selected case passing without unexpected skips. Return the failing command,
+exit code and complete output for investigation.
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+$checks = @(
+    'paymaster_wallet_store_tests/session_lookup_distinguishes_absence_from_read_failure',
+    'paymaster_wallet_store_tests/auto_dispatch_rejects_unreadable_session_before_funding_or_signing',
+    'paymaster_wallet_store_tests/ambiguous_authorization_is_protected_and_prunes_to_tombstone'
+)
+foreach ($check in $checks) {
+    & .\build_msvc\x64\Release\test_digibyte.exe "--run_test=$check" --report_level=short
+    if ($LASTEXITCODE -ne 0) { throw "Native regression failed: $check" }
+}
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    foreach ($check in @('paymasterClientUncreatedRequestReturnsToCompose', 'paymasterClientLiveSendProgressesAcrossAsyncPhases', 'paymasterClientCoreCancellationRoundTrip', 'paymasterClientSessionDiscoveryFailures')) {
+        $env:DIGIBYTE_QT_TEST_FUNCTION = $check
+        & .\build_msvc\x64\Release\test_digibyte-qt.exe
+        if ($LASTEXITCODE -ne 0) { throw "Qt regression failed: $check" }
+    }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+python -u test/functional/test_runner.py wallet_paymaster_rpc.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'RPC/CLI regression failed' }
+```
+
+The functional test explicitly exercises both HTTP RPC and real
+`digibyte-cli` calls: failed PAYMASTER/AUTO preparation against a cached offer
+from a paused provider, unchanged balances/reservations, authoritative absence,
+and CLI cancellation of an existing unsigned request while the provider stays
+paused. The Qt tests include real Core lookup/read-failure paths, an ambiguous
+legacy missing-session response and disappearance of a known session. Existing
+lost-first-reply tests ensure a created request is reconciled rather than reset.
+The preceding integration's broader runtime matrix and previously observed
+light-theme failure remain open; this follow-up does not certify them.
+
 ## PR #452 source integration (2026-10-01)
 
 Source baseline: fork `504489f447cb` plus official PR #452 at

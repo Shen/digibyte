@@ -2828,10 +2828,15 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
             setPaymasterBusy(false);
             const bool expired = error.contains(QStringLiteral("EXPIRED")) ||
                                  error.contains(QStringLiteral("quote expired"), Qt::CaseInsensitive);
-            const bool database_error = error.contains(QStringLiteral("PAYMASTER_SESSION_DATABASE_READ"));
+            const bool database_error = error.contains(QStringLiteral("PAYMASTER_SESSION_DATABASE_READ")) ||
+                                        error.contains(QStringLiteral("PAYMASTER_SESSION_READ_FAILED")) ||
+                                        error.contains(QStringLiteral("PAYMASTER_UNSUPPORTED_PERSISTED_VERSION"));
             QString reason = DigiDollarSendWidget::tr("The payment attempt could not be completed.");
             if (database_error)
                 reason = DigiDollarSendWidget::tr("Wallet data could not be read reliably. Existing reservations and authorizations remain protected. Preserve the wallet backup and debug log; check the current status before continuing.");
+            else if (error.startsWith(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: ")))
+                reason = DigiDollarSendWidget::tr("The payment and Paymaster fee cannot be funded with the current $DD inputs. %1")
+                             .arg(error.mid(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: ").size()));
             else if (expired) reason = DigiDollarSendWidget::tr("The provider offer expired before the payment could continue.");
             else if (error.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER")))
                 reason = DigiDollarSendWidget::tr("No usable provider offer remains for this attempt.");
@@ -3986,7 +3991,20 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
     setPaymasterBusy(true);
     executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
         [guard = QPointer<PaymasterSendWidget>(this), reason, allow_cancel, lookup](UniValue result, QString error) {
-            if (!guard) return;
+            if (!guard || guard->m_paymasterRequestId.toStdString() != lookup.find_value("request_id").get_str()) return;
+            // The first prepare-only call may fail before creating a session.
+            // Only Core's status-aware absence result can release this local
+            // compose state. A known session disappearing remains an error.
+            if (error == QStringLiteral("PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found") &&
+                !guard->m_paymasterSessionPersisted && guard->m_paymasterSessionId.isEmpty() &&
+                (guard->m_paymasterArtifact.isEmpty() || guard->m_paymasterArtifact == QStringLiteral("none")) &&
+                guard->m_paymasterTransactionId.isEmpty() && guard->m_paymasterRecoveryTransactionId.isEmpty()) {
+                guard->clearClosedPaymasterSession();
+                guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("No Paymaster transfer was created"));
+                guard->setPaymasterNotice(DigiDollarSendWidget::tr(
+                    "%1 No Paymaster transfer was created. Recipient and amount were kept; review the payment or choose another funding method.").arg(reason));
+                return;
+            }
             QString decode_error;
             if (!error.isEmpty() || !guard->updatePaymasterSessionView(result, &decode_error)) {
                 guard->setPaymasterNotice(DigiDollarSendWidget::tr(
@@ -4035,9 +4053,17 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
 void PaymasterSendWidget::clearUnsignedPaymasterSession()
 {
     if (!m_paymasterUnsignedClosed) return;
-    m_paymasterClosureReason.clear();
+    clearClosedPaymasterSession();
     setPaymasterNotice(DigiDollarSendWidget::tr(
         "The unsigned request is closed. No payment was sent for this request and it no longer reserves funds. Recipient and amount were kept."));
+    m_paymasterStateValue->setText(
+        DigiDollarSendWidget::tr("Unsigned transfer canceled; reserved $DD is available again"));
+    m_paymasterCostValue->setText(DigiDollarSendWidget::tr("No service fee was authorized"));
+}
+
+void PaymasterSendWidget::clearClosedPaymasterSession()
+{
+    m_paymasterClosureReason.clear();
     stopPaymasterPolling();
     m_paymasterSendTemplate = UniValue{};
     m_paymasterRequestId.clear();
@@ -4069,8 +4095,7 @@ void PaymasterSendWidget::clearUnsignedPaymasterSession()
     m_paymasterRecoveryActive = false;
     m_paymasterConfirmationGuard.Reset();
     m_paymasterRecoveryConfirmationGuard.Reset();
-    m_paymasterStateValue->setText(
-        DigiDollarSendWidget::tr("Unsigned transfer canceled; reserved $DD is available again"));
+    m_paymasterStateValue->setText(DigiDollarSendWidget::tr("No active session"));
     m_paymasterIdentityValue->setText(DigiDollarSendWidget::tr("—"));
     m_paymasterCostValue->setText(
         DigiDollarSendWidget::tr("No service fee was authorized"));
@@ -5269,6 +5294,11 @@ bool PaymasterSendWidget::DescribeBackendError(
             "A listed announcement does not confirm that the provider is currently reachable.\n\n"
             "Try again later or use another provider. Check the current transfer's status "
             "for safe retry or cancellation options.\n\nTechnical details: %1").arg(reasonFailed);
+    } else if (reasonFailed.startsWith(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: "))) {
+        errorTitle = DigiDollarSendWidget::tr("Cannot fund the Paymaster payment");
+        errorMessage = DigiDollarSendWidget::tr(
+            "The payment and Paymaster fee cannot be funded with the current $DD inputs.\n\n%1")
+            .arg(reasonFailed.mid(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: ").size()));
     } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_INSUFFICIENT_USER_DD"))) {
         errorTitle = DigiDollarSendWidget::tr("Not enough $DD for the selected offer");
         errorMessage = DigiDollarSendWidget::tr(

@@ -150,6 +150,8 @@ private:
     Q_SLOT void abandonUnsignedPaymasterSession();
     void cancelUnsignedPaymasterSession(bool confirm);
     void clearUnsignedPaymasterSession();
+    /** Clear presentation only after Core confirms absence or unsigned closure. */
+    void clearClosedPaymasterSession();
     void closeUnusablePaymasterOffer(const QString& reason, bool allow_cancel = true);
     void setPaymasterNotice(const QString& text);
     UniValue buildAlternativePaymasterRecoveryParams() const;

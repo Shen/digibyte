@@ -97,6 +97,8 @@ private Q_SLOTS:
     void paymasterClientFundingBalanceChanges();
     void paymasterFeeAmountsAndPercentages();
     void paymasterClientReleasedInputsCanBeReservedAgain();
+    void paymasterClientUncreatedRequestReturnsToCompose_data();
+    void paymasterClientUncreatedRequestReturnsToCompose();
     void paymasterClientCoreCancellationRoundTrip_data();
     void paymasterClientCoreCancellationRoundTrip();
     void paymasterOperatorConfirmationWalletBinding_data();

@@ -571,3 +571,31 @@ changing approval. The existing `wallet_paymaster_pool_setup.py` functional
 scenario remains the operator's broader check using freshly built binaries and
 the documented test runbook; a higher limit must never be presumed necessary
 from the old generic code alone.
+
+## Failed first preparation and paused providers (2026-10-01)
+
+A DD coin-selection failure could occur before Core created a session. Qt then
+looked up its local UUID, treated the old generic missing-session error like an
+unreadable wallet and left only Check current status available indefinitely.
+
+The shared RPC lookup now preserves missing/read/version distinctions for both
+request and session IDs. A dangling index remains a read failure; an unreadable
+live session never falls back to its completion tombstone. After an exact
+confirmed-absence response, Qt clears an unpersisted local attempt and keeps the
+recipient and amount editable. A previously observed session is never cleared
+this way. An old generic missing-session response remains protected. The
+Paymaster automatic quote path also forwards upstream's precise DD selection
+error, with a stable GUI/CLI category.
+
+`paymasterClientUncreatedRequestReturnsToCompose` covers the reported early
+input failure, detailed selection errors, unreachable providers, legacy absence,
+read failure and unsupported versions. It uses real Core lookups for confirmed
+absence and database read failure, verifies no durable mutation and requires a
+new UUID only after an explicit new send. The live-send regression adds a known
+session disappearing; existing lost-reply and unsigned-cancellation round trips
+remain required. Store tests cover request and session-ID lookup, corrupted
+records, future versions, completion retention and dangling indexes. The RPC
+functional test uses both HTTP RPC and actual CLI calls with a paused provider.
+
+Targeted compilation succeeded; rebuilt C++/Qt and functional execution remains
+pending as recorded in the test runbook. No running operator wallet was changed.

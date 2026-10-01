@@ -15,6 +15,15 @@ Paymaster metadata remain hidden in transaction RPC responses. The official
 v9.26.6 document is unchanged; integration runtime verification remains pending
 as recorded in the test runbook.
 
+## Failed client preparation
+
+An early preparation error no longer strands an uncreated local request after
+Core confirms its absence. Qt retains editable recipient/amount fields; known
+or unreadable sessions remain protected. CLI/RPC now distinguish missing
+sessions from read/version failures, and DD selection errors retain upstream's
+specific reason. Existing unsigned cancellation works without a running
+provider; signed payments still require their existing retry/recovery path.
+
 ## Unreleased integration follow-up
 
 The Paymaster operator interface now separates Overview, Funds & reserves,

@@ -8,6 +8,15 @@
 
 ## Paymaster architecture in this branch
 
+After a failed first prepare-only RPC, Qt reconciles the same wallet/request
+before offering another payment. A status-aware missing-session result clears
+only an unpersisted local attempt, retaining its recipient and amount. Known
+sessions, unreadable records and unsupported versions remain protected. The
+same distinction is exposed by CLI/RPC session inspection; an indexed session
+whose record is missing or mismatched is a read failure. Found unsigned requests
+use Core's existing cancellation capability, including while a provider is
+paused. No consensus, wire or persisted-record format changes are involved.
+
 The integration includes official PR #452 through `92330d952625` (v9.26.6).
 `DigiDollarWallet::PlanDigiDollarTransfer` retains upstream's DD-only input,
 change and capacity preflight, including its detailed errors. The fork's
