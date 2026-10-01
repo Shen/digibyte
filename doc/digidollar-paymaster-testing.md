@@ -1,6 +1,250 @@
 # Paymaster build and test runbook
 
-## Guided provider tasks: current acceptance (2026-09-29)
+## Commit checkpoint (2026-10-01)
+
+The working changes based on `7ad04ea744` were separated into focused local
+commits. Source files were preserved; no new build or full functional suite was
+run for this checkpoint. Individual intermediate commits were not rebuilt.
+
+Four focused tests passed using the existing Windows `test_digibyte.exe`
+(90 assertions):
+
+- `paymaster_wallet_identity_tests/automatic_submit_defers_before_wallet_or_index_wait`
+- `paymaster_wallet_identity_tests/stale_submit_is_consumed_without_faulting_provider`
+- `paymaster_wallet_store_tests/client_confirmed_payment_without_provider_result`
+- `paymaster_wallet_store_tests/client_final_observation_is_atomic_and_idempotent`
+
+The existing Windows Qt test binary ran
+`PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound` with
+`QT_QPA_PLATFORM=windows` and failed its light-theme dialog palette assertion:
+actual `#0b2419`, expected `#eef9f2`. This checkpoint does not establish the cause
+or claim that the Qt regression passes. The earlier dated results below remain
+historical evidence. An initial offscreen launch did not reach the test and was
+terminated; it is not counted as a test result.
+
+Review the theme failure and rebuild the intended source revision before using
+these commits as a verified integration candidate. Python syntax and Git
+whitespace checks supplement, but do not replace, the build and runtime matrix.
+
+## Pending payment, blank provider page and dialog theme (2026-10-01)
+
+A local read-only investigation observed a queued provider submit, a transaction
+index behind the chain tip and a finance status request timing out. The nested
+`submitpaymasterdigidollar` call from automatic processing still performed wallet
+and final-preflight index synchronization waits on the validation scheduler.
+These three waits now preserve the automatic service's nonblocking context;
+manual RPC synchronization and financial authorization remain unchanged.
+
+Qt no longer disables painting for the lifetime of an asynchronous status chain.
+Navigation, window exposure and resizing keep the last verified page visible;
+reads lasting two seconds expose their step and elapsed time. Conflicting
+commands remain gated. Provider dialogs, including refill approval, inherit
+both the active surface colors and green buttons.
+
+Targeted Windows verification (MSVC 14.43, Qt 5.15.10):
+
+- Compiled the changed wallet RPC, Qt widget/resources and affected test sources;
+  relinked wallet/Qt archives, daemon, test executables and operator GUI.
+- `automatic_submit_defers_before_wallet_or_index_wait`: passed with a mismatched
+  wallet tip, verifies the readiness error precedes PSBT parsing and database writes.
+- `paymasterProviderCommandLocksPages`: passed navigation, resize and actual paint
+  events while the asynchronous status reply is withheld, plus error/wallet guards.
+- `paymasterOverviewRefill`: 15 cases passed, including native dark/light approval
+  palette checks, cancellation, stale revisions, lost responses and wallet/privacy
+  changes. Both dialog renderings were inspected.
+- `paymasterFinancesAndBackupWorkflow`: passed.
+- `wallet_paymaster_provider.py --descriptors`: passed, including three empty
+  blocks while an authorized automatic payment completes, exact retries,
+  capital actions, finance accounting and restart.
+
+Both `build_msvc/x64/Release/digibyte-qt.exe` and the separately named
+`digibyte-qt-operator.exe` now contain this fix. The operator terminated the old
+Paymaster process after its shutdown stalled. Before that, the wallet file and
+journal were copied with unchanged source hashes; SQLite integrity checking
+passed on a separate copy. After verifying that no GUI process remained, the
+regular executable was backed up and replaced, and its SHA256 was checked
+against the tested candidate. No live payment was resent or cancelled and no
+wallet was restarted by this work. Inspect the existing payment's status after
+restart instead of creating a replacement request. Full builds and suites
+remain operator checks using the commands below.
+
+
+## Deep operator redesign (2026-10-01)
+
+The current candidate separates operation from backup, mirrors immediate
+startup/refill controls, consolidates capital approvals, uses revision-bound
+liquidity writes and exposes node configuration provenance in an inline editor.
+The operator/design documentation describes the actual page responsibilities.
+Repository and src/ instructions, CLAUDE/DigiDollar architecture and maps,
+Qt/translation and functional-test guidance apply. No consensus, payment wire
+or wallet database migration is involved.
+
+Verification on Windows, MSVC 14.43 / Qt 5.15.10:
+
+- Targeted compilation of Qt implementation/tests/MOC, wallet RPCs, node RPCs
+  and CLI conversion; affected archives and native test/daemon/GUI relinked.
+- 149 selected Qt cases in 26 functions passed, excluding init/cleanup counts.
+  This includes 14 refill cases, 10 autostart cases, 24 common capital cases,
+  22 stop/release cases, 10 late retirement replies, 10 connection editor cases,
+  16 responsive settings layouts, and 4 scaled/themed task layouts.
+- The operator functional test passed revision conflicts (including CLI),
+  persisted refill intent across pause/reload, config sources/conflicts and
+  effective-versus-pending values. The provider functional test passed exact
+  DGB-only fee-bound execution, rejected insufficient caps without pool changes,
+  retained DD reserves, legacy rebalance, transfers, finance and restart.
+- The provider test's manual-submit polling now retries only the explicit
+  PAYMASTER_PROVIDER_SERVICE_BUSY rejection; other RPC errors still fail it.
+  An initial run exposed this contention. A later insufficient-cap fixture
+  correctly failed at 0.01 DGB (actual minimum fee 0.0169 DGB); the success
+  fixture now approves 0.20 DGB and separately tests a one-satoshi rejection.
+- Native light/dark views and the existing keyboard/layout checks were examined.
+  A headless Edge interaction check passed immediate autostart, refill approval,
+  cancellation and pause persistence in the example HTML. Python syntax and
+  git diff --check passed. Existing generic Qt stylesheet property warnings
+  do not fail the cases.
+
+This is targeted verification, not a full solution build, complete Qt/Core
+suite, cross-platform test or production acceptance. Run the existing
+[Windows build](#windows-build) first for a clean complete build. Prerequisites
+are the documented v143 C++ tools, static Qt 5.15.10, existing vcpkg libraries,
+Python functional-test dependencies (including digibyte_scrypt), and a matching
+test/config.ini. Full builds take tens of minutes or longer; the following
+suite checks take minutes to tens of minutes. Every selected test must execute
+with exit 0; skips or stale executables do not count.
+
+From D:\Digibyte\digibyte-fork in PowerShell, after that build:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+& .\build_msvc\x64\Release\test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
+& .\build_msvc\x64\Release\test_digibyte.exe --run_test=paymaster_wallet_identity_tests,paymaster_setup_tests,paymaster_provider_tests
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster Core tests failed' }
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python -X utf8 test/functional/test_runner.py wallet_paymaster_operator.py wallet_paymaster_provider.py wallet_paymaster_pool_setup.py wallet_paymaster_lifecycle.py wallet_paymaster_readiness.py wallet_paymaster_rpc.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional tests failed' }
+```
+
+Both the regular digibyte-qt.exe and the separately named digibyte-qt-operator.exe
+contain this candidate. The regular executable was relinked only after checking
+that the original GUI processes were no longer running. No operator process was
+stopped, wallet opened or live configuration changed by this work. Use the usual
+network/configuration/wallet arguments and run only one instance per data dir.
+
+
+## Rejected single-reserve release (2026-10-01)
+
+A guided release could reuse a previously populated carrier selector. Core
+correctly rejected an output that had since become reserved, unconfirmed,
+spent or released with `PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE`; the task showed
+only the generic error code.
+
+The GUI now rereads `getpaymasterpoolinfo` before every single-reserve selection,
+validates it, and binds the preview to the displayed outpoint even if a nested
+modal event changes the live selector. A rejected release explains the likely
+states and provides **Refresh reserves**, which only rereads the pool and
+operator status. The task is accurately named **Release one DD reserve**.
+Technical details are initially collapsed and cleared on wallet/privacy changes.
+Core's release, reservation, confirmation, policy and plan guards are unchanged.
+
+Focused verification: 43 test cases from five selected Qt functions passed,
+with no failed or skipped cases (excluding init/cleanup). The capital regression covers
+nine added rows for a changed old selection, reordered selector, no eligible
+reserve, malformed pool, failed pool read, preview/execution rejection, changed
+plan and a zero saved target. It checks that Refresh reserves performs no
+preview, pause or execution. Existing approval/cancel, wallet change, lost-reply,
+restoration, fee recovery and themed task-layout checks are included.
+The affected widget/tests were compiled and the Qt archive and test executable
+relinked. The existing GUI executable is locked by running instances, so the
+same GUI link produces `build_msvc/x64/Release/digibyte-qt-release-fix.exe`.
+Close the running GUI normally before starting that build with the intended
+wallet/network arguments. The native rejected-release view was captured and inspected;
+`git diff --check` passed. No live wallet was queried or modified. Full builds
+and complete suites remain operator work under the commands below.
+
+## Operator navigation and visible Autostart (2026-10-01)
+
+This presentation revision supersedes the older navigation acceptance below.
+The operator has five destinations with a responsive sidebar/selector, focused
+settings pages, a persistent task card and seven numbered setup steps. Autostart
+is beside Start/Pause with independent saved/draft state and Save/Discard.
+No Core, consensus, RPC schema or spending-policy change was made for this UI
+revision; earlier uncommitted Core work remains part of the wider candidate.
+
+Guidance applied: CLAUDE and its DigiDollar reading order, CONTRIBUTING,
+ARCHITECTURE, repository maps, developer notes, src/AGENTS, C++ formatting,
+Qt component guidance and the translation-string policy. New native strings
+use tr(); catalog updates remain in the repository translation workflow.
+
+Local validation used MSVC 14.43.34808 and Qt 5.15.10 static. Only the affected
+widget, two test translation units, test MOC and Qt resources were compiled.
+The Qt archive, test executable and GUI were explicitly relinked against the
+existing dependency objects. This is targeted build evidence, not a clean or
+complete solution build. The executable is
+`build_msvc/x64/Release/digibyte-qt.exe`; no real wallet was opened for validation.
+
+Focused Qt results: 25 selected functions / 135 test cases passed, with no
+failed or skipped cases (excluding init/cleanup counts). Coverage includes:
+
+- Eleven Autostart scenarios: enable, disable, already running, discard, lost
+  reply after saving, lost reply without saving, malformed reply, wallet change,
+  privacy, persistent pause, and an independent unsaved processing-mode edit.
+  The fixture checks the exact one-field RPC and prevents a duplicate mutation.
+- Five destinations, responsive selection, first-visit access, disabled pages
+  while a command runs, normal and enlarged fonts, light/dark layouts, and
+  task progress outside the scrollable page.
+- Seven numbered setup pages, bounded approvals/retries, delayed startup,
+  wallet-bound confirmations, reserve save/refresh, configuration/runtime,
+  finance/backup/privacy, capital tasks, restoration, stop and late results.
+- The embedding DigiDollar widget assertions, including setup and amounts.
+
+Native narrow/wide and light/dark screenshots were captured; representative
+renders were inspected. The standalone HTML preview was exercised in local
+headless Edge for navigation, categories, Autostart draft/save/discard, reviewed
+start/pause and all seven illustrative setup steps. It returned `passed`.
+Existing non-fatal Qt table icon-property warnings remain. Formatting was
+checked with `git diff --check`.
+
+Operator acceptance remains: a full incremental/clean solution build, complete
+unit/Qt/regtest groups, and a manual run in an isolated test wallet. Use
+[Windows build](#windows-build) and the group commands immediately below.
+Run from `D:\Digibyte\digibyte-fork` with the documented v143 toolset, static Qt,
+vcpkg dependencies and Python. Expect minutes to tens of minutes for a full
+build and minutes for the selected groups. Require exit code 0, no failed or
+skipped requested cases, and freshly built matching node/CLI/test executables.
+These expensive checks were not run during this UI revision, per the local
+operator working instructions.
+
+For the focused Autostart check after building:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+$env:QT_QPA_PLATFORM = 'windows'
+$env:QT_FORCE_STDERR_LOGGING = '1'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:DIGIBYTE_QT_TEST_FUNCTION = 'paymasterOverviewAutostart'
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Autostart regression failed' }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+```
+
+Manually confirm that Autostart stays adjacent to Start/Pause in both themes,
+that saving it leaves an unsaved processing-mode choice untouched, and that
+Pause clears it. Move between all five areas during a confirmation wait; the
+task must stay visible. Check all settings return buttons, keyboard navigation
+and a narrow window with enlarged text. Enabling Autostart may start an enabled
+provider during the current wallet load once ready; it never unlocks a wallet.
+Turning it off does not stop a provider that is already running.
+
+## Guided provider tasks: previous acceptance (2026-09-29)
 
 This candidate changes Qt navigation and adds optional Core operator RPC fields.
 Earlier dated passes below do not validate this revision. Follow the repository
@@ -969,3 +1213,352 @@ Also reconfigure an existing provider from user-paid to restricted sponsored,
 then back to public mixed service. Verify that inactive saved budgets are shown,
 invalid edits can be corrected before approval, sponsored DD targets become
 zero without withdrawing funds, and the exact reviewed values are persisted.
+
+### Earnings below the withdrawal minimum (2026-09-30)
+
+Diagnosis against the running operator regtest used `getpaymasteroperatorinfo`
+and a non-executing `withdrawpaymastercarrier` preview. The wallet had 6 cents of
+confirmed carrier excess; Core rejected the preview with
+`PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED: Amount below minimum DigiDollar
+output. Minimum: 100 cents`. No withdrawal was executed. Readiness and the
+backup recommendation were not the cause.
+
+Qt now applies `Params().GetDigiDollarParams().minOutputAmount` to both payout
+entry points and to accepted preview replies. Below the minimum, a visible hint
+reports accumulated earnings and the threshold. Wallet changes and
+privacy clear the hint; pending tasks retain their own progress presentation.
+Specific minimum-output failures explain the wait and preserve the earnings;
+unknown task errors retain their actual diagnostic.
+
+Verification: affected Qt source/test files compiled with MSVC and the Qt test
+binary linked. All 18 data cases (26 including init/cleanup) passed across
+`paymasterCarrierWithdrawalActionsFailClosed`,
+`paymasterCarrierWithdrawalPreviewsArePlanBound`, `paymasterGuidedCapitalTasks`
+and `paymasterGuidedTaskLayout`. Cases cover 0/6/99/100 cents, late preview
+rejection, unknown error detail, approval/cancellation/lost reply, wallet
+changes, privacy and the existing light/dark 11/17-point layout checks.
+Earlier successful withdrawal fixtures used an impossible 6-cent payout; their
+valid cases now use 100 cents. Existing light-theme icon-property warnings
+remain unrelated. `git diff --check` passed. Core transaction rules are unchanged.
+
+The running GUI was not replaced. Close both Qt regtest applications before the
+operator Windows build above; this change adds no source files. The complete
+Paymaster Qt suite remains the larger operator check. For manual acceptance,
+open Operation with 0.06 DD earnings: both payout buttons must be disabled and
+the hint must explain the 1.00 DD minimum. At exactly 1.00 DD, a fresh preview
+and explicit payout review must be possible within the existing DGB fee limits.
+Neither repeated clicks nor a failed preview may send a withdrawal.
+
+## Guided restoration after intentional capital release
+
+`paymasterGuidedRestoreHasOneApproval` also models a stopped USER_PAID provider
+with saved operational DD target zero. The main Operation action must produce
+one review containing 0 → 1, capital, bounded setup fees, unchanged maintenance
+limits and the requested start. Before approval there are no writes. Decline,
+privacy activation and wallet switch perform no write or execution. Approval
+preserves the other saved fields, reads the target write back, executes only a
+fresh Core plan within the reviewed scope, enables continuation if necessary,
+and requests `wait_for_readiness` without changing Autostart. A lost target-save
+reply is reconciled without a second write. Changed policy, increased funding
+and a failed write must not execute funding or start the provider.
+
+Run the focused Qt tests after building the current test binary (PowerShell,
+repository root; seconds, not the full suite):
+
+```powershell
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:DIGIBYTE_QT_TEST_FUNCTION = 'paymasterGuidedRestoreHasOneApproval'
+try {
+    .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Guided restoration failed' }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION
+}
+```
+
+Manual acceptance with an isolated regtest wallet: release its last operational
+DD reserve, then use the main restore-and-start action. Check the one approval,
+confirm the resulting transactions and verify readiness/start. Also decline a
+review and reload the wallet: the saved zero target must remain zero. Both themes,
+a narrow window, larger text and keyboard access must retain readable task and
+status text. Reserve and spending settings remain reachable via Settings; the
+Operation cards must not duplicate those buttons.
+
+Verification for this follow-up: targeted MSVC compilation of the widget and
+Qt tests, library/test linking and 32 focused cases passed (44 including suite
+init/cleanup, no failures or skips). Coverage comprises guided restoration,
+capital tasks, funding bounds, operator diagnostics, liquidity-state text and
+the two-theme/font layout matrix. Generated dark/light repair views were also
+inspected. A read-only preview against the operator's regtest node confirmed
+one missing 100-cent payment reserve, no extra DGB output capital and a
+20,000,000-satoshi setup fee ceiling; `accepted` and `executed` were false.
+No live targets, transactions or provider start state were changed. The full
+solution build, full Qt suite and real-transaction release/restore walkthrough
+remain operator checks using the commands above.
+
+## Single-window node connection review
+
+`paymasterNodeConnectionEditor` covers unchanged values (no preview/write RPC),
+command-line overrides, exact preview/apply, invalidation after editing, inline
+Core override errors with retained entries, wallet switch, privacy and closing
+while a preview is running. `wallet_paymaster_operator.py` checks live argument
+provenance and the effective announced endpoint in the operator snapshot.
+Build the updated Core and GUI before using source labels. The full build and
+functional commands above remain operator checks; the focused Qt function can
+be selected using `DIGIBYTE_QT_TEST_FUNCTION=paymasterNodeConnectionEditor`.
+
+Verification: targeted MSVC compilation of the widget, Qt test, generated moc
+and provider RPC translation units succeeded. All eight connection-editor cases
+passed (10 including suite init/cleanup). The dialog capture was inspected for
+readable labels, and the functional test passed Python syntax validation. No live
+node configuration was changed. A full application build and the functional
+operator test with the rebuilt daemon remain outstanding operator checks.
+
+## Overview card presentation follow-up
+
+Targeted widget/test compilation and test-binary linking succeeded.
+`paymasterCapitalOverview`, `paymasterOverviewFinanceWalletAndPrivacyBinding`
+and `paymasterGuidedTaskLayout` passed: 17 cases, 23 including suite
+init/cleanup, no failures or skips. Existing checks now verify DGB suffixes,
+finance-card ownership of earnings and payout guidance, and privacy of the
+relocated metrics. The layout matrix uses dark/light themes and 11/17-point
+font settings; generated card captures were inspected. Existing light-theme
+QTableWidget iconColor property warnings remain. `git diff --check` passed.
+The full application build and full Qt suite remain operator checks; no Core
+accounting, financial limits or payment authorization were changed.
+
+## Provider command-in-progress gate
+
+Targeted MSVC compilation (widget, tests, moc) and test linking passed.
+`paymasterProviderCommandLocksPages` covers every page button during delayed
+RPC replies, chained finance reads, errors and stale-wallet completion.
+`paymasterRetirementLateResults` also attempts repeated clicks during each
+stop/preview/execute/balance phase. These and `paymasterNodeConnectionEditor`
+and `paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows` passed: 20 cases
+(28 including init/cleanup), no failures or skips in the final runs.
+`git diff --check` passed. Full application build and full suites remain
+operator checks; the running GUI executable was not replaced.
+
+## Setup fee recovery
+
+Targeted widget/test/moc compilation passed. Fee recovery, preparation
+diagnostics, existing cancellation and page-lock tests passed (20 test
+entries plus eight init/cleanup entries). The fee-recovery entry exercises
+five outcomes: fresh preview, preview failure, refusal, a saved-transaction
+race and wallet change; the fresh preview is declined and authorizes no
+replacement. Full application build and live regtest remain operator checks.
+
+## Background refresh paint batching
+
+The widget/test targeted compilation and test linking passed. The page-lock
+test initially asserted a 250-ms paint deferral; this proved insufficient
+for slower responses and is superseded by the stable-status regression below. Together with
+finance wallet/privacy binding, fee recovery and the eight connection-editor
+cases, 11 test entries passed (19 including init/cleanup), without failures
+or skips. Polling intervals are unchanged. `git diff --check` passed. Full
+application build/full suites remain operator checks.
+
+## Stable operator view before startup
+
+Valid snapshots no longer call the full reset before rendering. The page-lock
+regression uses a stopped, ready provider, delays a reply beyond the former
+250-ms boundary, and observes visibility events across the status/finance
+reply chain. Unchanged budget sections must not hide/show, command locks must
+remain active, and completion/failure must restore painting.
+Targeted widget/test compilation and linking passed. The page-lock, operator
+fail-closed, capital overview, wallet/privacy and theme/font layout checks
+passed: 19 cases (29 including init/cleanup), no failures or skips. Existing
+light-theme table iconColor property warnings remain. Formatting checks passed.
+The running GUI was not relinked; close both wallet instances, perform a normal
+incremental application build and restart for the operator's live verification.
+A clean rebuild is not required.
+
+## Retirement notice after restart
+
+The stop/retirement workflow test now completes retirement, supplies a current
+running snapshot and verifies that the successful completion notice is cleared
+and hidden, including after toggling privacy. Its backup fixture includes the
+three required Core timestamps. Targeted widget/test compilation and linking
+passed; `paymasterStopAndRelease` passed 22 cases and
+`paymasterRetirementLateResults` passed 10 (36 including init/cleanup), without
+failures or skips in the final runs. `git diff --check` passed. The application
+executable still needs the operator's normal incremental build and restart.
+
+The retirement-dialog follow-up replaces the fixed checkbox with a release
+notice. `paymasterStopAndRelease` now clicks the optional Stop checkbox both
+on and off and checks the retirement notice and separate release approval.
+Targeted widget/test compilation and linking passed; all 22 cases passed
+(24 including init/cleanup), no failures or skips. Formatting checks passed.
+An incremental application build and restart are required to use the change.
+
+The node connection read-only presentation adds dark/light all-overridden
+cases to `paymasterNodeConnectionEditor`. Fixed values must be selectable
+labels with explicit Yes/No values; Preview/Save are hidden when no setting
+is editable. Scroll contents and viewport must not restore native background
+fills. All 10 cases passed (12 including init/cleanup), following targeted
+widget/test compilation and linking. The dark read-only capture was inspected.
+Existing light-theme table iconColor warnings remain. The first screenshot
+run used an invalid extension; the final PNG run passed. An incremental
+application build and restart are still required.
+
+## Reserve restoration after a pending start or fee correction
+
+The read-only operator snapshot reproduced a pending start with no preparation
+or active operation, missing DD reserves, and automatic/paid replenishment off.
+This is an approval requirement, not a confirmation wait. No live-wallet write
+was used for diagnosis or verification.
+
+`paymasterStartIntentNeedsReserveApproval` covers that distinction, incomplete
+status, saved work, pending/reserved capacity, wallet lock and disabled provider.
+`paymasterPreparationContinuesAfterRefresh` covers confirmed cancellation followed
+by a replacement preview, a status read arriving before the approval dialog,
+approval through confirmation and running state, decline, wallet switch, privacy,
+and restoration when only the start intent remains. Preview and execution retain
+the chosen fee and exact plan; duplicate clicks cannot add an execution.
+
+Targeted MSVC 14.43 / Qt 5.15.10 widget/test compilation and test linking passed.
+Together with `paymasterPreparationFeeRecovery`,
+`paymasterOperationControllerRecoversWithoutDuplicateApproval`,
+`paymasterGuidedRestoreHasOneApproval`, `paymasterProviderCommandLocksPages`,
+`paymasterGuidedTaskLayout` and `paymasterOperatorOverviewGuidesAndFailsClosed`,
+27 cases passed (43 including per-run init/cleanup), no failures or skips.
+The final rerun used consistent missing, unconfirmed and ready reserve snapshots.
+Existing light-theme table iconColor warnings remain. `git diff --check` passed.
+
+The running application was not relinked. Close both wallet instances and use
+the normal incremental `/t:Build` command in the Native Windows section above;
+a clean rebuild is unnecessary. The configured MSVC/vcpkg/static Qt prerequisites
+remain the same. Allow minutes for the incremental build and several minutes
+for the full Paymaster Qt group; require exit code zero and no failed tests.
+The full application build and full regression group remain operator checks.
+
+After restart, Operation must offer an actionable reserve review when capital
+is missing. Approve the displayed capital and fee limit; if a fee-limit check
+blocks creation, use **Review setup fee and continue**, choose the ceiling and
+approve the replacement plan. The next view must show the saved creation step
+or real confirmation count. On Regtest, mine a block only once a transaction
+actually exists. After confirmation the explicitly requested start should finish.
+Declining approval must show an actionable state without automatic-progress text.
+Recurring limits and the saved autostart setting must remain unchanged.
+
+## Saving liquidity settings during background refresh
+
+`paymasterLiquiditySaveAcrossRefresh` adds nine UI/RPC cases: approved save,
+automatic refill selected without paid approval, declined review, wallet switch,
+privacy activation, lost reply, malformed reply, rejected write and failed
+readback. The test clicks the controls, keeps the edit across an old status
+snapshot, checks the command lock during review, verifies exact DGB-to-satoshi
+values and reloads confirmed values into a fresh view. Uncertain saves trigger
+one readback and never an automatic duplicate write; rejected writes keep edits.
+
+Targeted widget/test/moc compilation and Qt library/test linking passed with
+MSVC 14.43 and Qt 5.15.10. The nine new cases plus the five existing liquidity
+save/default/status, command-lock and RPC-workflow cases passed: 14 cases,
+26 including init/cleanup, no failures or skips. `git diff --check` passed.
+Core's wallet policy was inspected read-only; no live setting was changed.
+
+A normal incremental application build and restart are still required. Use the
+Native Windows build command above after closing both running GUI instances;
+a clean rebuild is unnecessary. The full application build and full suites
+remain operator checks under the repository's local collaboration rules.
+For the focused rerun from the repository root after building:
+
+```powershell
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:DIGIBYTE_QT_TEST_FUNCTION = 'paymasterLiquiditySaveAcrossRefresh'
+try {
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Liquidity-setting regression failed' }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+```
+
+The focused test takes seconds; require nine cases plus init/cleanup to pass.
+For live acceptance, enable automatic refill, review and explicitly approve the
+finite paid-refill limits, save, then reopen the page and restart the wallet.
+Both saved choices and all limits must remain visible. Rejected or declined
+changes must not be described as saved, and background polls must retain edits.
+
+### Confirmed-payment retry after a lost client result (2026-10-01)
+
+The explicit `retry_same` path first consumes the selected latest attempt's
+signed result. If the inbox was lost on restart, saved USER-PSBT resubmission
+validates the locally observed exact final and uses the existing exact-final
+Capacity exception. Normal unspent checks remain mandatory without that proof.
+Qt continues only the explicitly initiated retry, for at most two minutes, and
+ends it on completion, error, privacy or wallet change. Passive restore remains
+observation-only. Recovery messages follow both themes.
+
+Targeted MSVC 14.43 / Qt 5.15.10 compilation and wallet/Qt/test/daemon/GUI linking
+passed. The prepared GUI is `build_msvc/x64/Release/digibyte-qt-operator.exe`;
+after the operator closed both running GUI instances, that tested artifact was
+installed as `digibyte-qt.exe`, with the previous binary backed up and SHA-256
+verified. Installation details are in `build_msvc/retry-artifact.json`.
+
+Verification:
+
+- `paymasterClientSessionRpcActionsAreBound`: restore is read-only; explicit
+  same-request retry progresses to confirmed, does not repeat after completion,
+  stops after privacy/error, and exposes uncertain outcome plus technical error.
+  Actual QMessageBox surfaces were checked and captured in dark/light themes.
+- `paymasterClientSessionActionMatrix`,
+  `paymasterClientRestartCreatedSessionWithoutRecipientIsReadOnly`, and
+  `paymasterClientDelayedCallbackIgnoresWalletClose`: action gates and stale
+  callback/restore protections.
+- `paymaster_wire_tests/capacity_full_validation*` (3),
+  `paymaster_psbt_tests` (4), and
+  `paymaster_wallet_store_tests/client_final_observation_is_atomic_and_idempotent`
+  (1): validation, signature/template binding and idempotent final observation.
+- `wallet_paymaster_provider.py --descriptors`: a payment is mined before the
+  client consumes its result; restart drops the inbox; repeated explicit retry
+  reconnects, collects the signed result and reports CONFIRMED with the same
+  transaction and attempt, unchanged attempt count and no extra mempool payment.
+  The full targeted provider script passed with the earlier automatic-submit,
+  reserve-recycling, recovery, restart and production-log checks included.
+- `git diff --check` passed. Full repository suites and cross-platform builds
+  were not run, in accordance with local operator build guidance.
+
+One intermediate functional run hit the existing setup-time
+`PAYMASTER_PROVIDER_BUSY` race at `setpaymasterenabled(false)` before reaching
+this regression; the subsequent complete run passed. Qt retains unrelated
+QTableWidget icon-property warnings. Test logs and both dialog images are under
+`build_msvc/retry-*`.
+
+### Retry after provider replay-journal pruning (2026-10-01)
+
+The preceding regression covered a retained provider reply, not its removal at
+240 confirmations. The follow-up adds explicit client completion from the exact
+locally confirmed transaction and accepted USER authority, atomic fee settlement,
+and index recovery for payments missing from mapWallet. Observed finals without
+provider results are excluded from rebroadcast; existing observation/reorg and
+retention paths remain active. Stale/mismatched inbound submissions are consumed
+individually, while corrupt/unreadable database bindings still fail closed.
+
+Targeted MSVC compilation and Core/daemon/GUI links passed. Checks:
+
+- `paymaster_wallet_store_tests/client_confirmed_payment_without_provider_result`:
+  absent/shallow observations do nothing, altered witnesses fail unchanged,
+  all three DB writes roll back on injected failure, historical consent permits
+  observation after expiry, the fee reservation becomes spent, no provider result
+  is invented, and no rebroadcast candidate is created.
+- `paymaster_wallet_identity_tests/stale_submit_is_consumed_without_faulting_provider`:
+  only the addressed stale message is consumed, a different provider's message
+  survives, the next call is idle, the provider stays running and the DB is unchanged.
+- Existing final-observation and atomic/monotonic result-persistence unit tests.
+- `wallet_paymaster_lifecycle.py --descriptors`: after provider pruning, restore
+  an older authorized client backup, complete while the provider is stopped,
+  verify the exact transaction, one-cent fee settled once, unchanged provider
+  finances/mempools, and reload the completed wallet. The default run also covers
+  the existing provider crash, replenishment and locked-autostart lifecycle.
+- `wallet_paymaster_lifecycle.py --descriptors --client-without-change`: focused
+  payment/restart variant using all 1.01 DD for a 1.00 DD payment plus fee; the
+  subsequent reserve-only scenarios remain covered by the default variant.
+
+An intermediate attempt to put 240-block pruning into the general provider
+scenario disrupted its later offer-discovery setup; that test retains its prior
+one-confirmation retry case. The pruning regression belongs to the lifecycle
+fixture above. A no-change variant initially also ran the reserve-only fixture
+with a different funding layout; it now intentionally runs the payment/restart
+scenario only. Logs are `build_msvc/binding-*`. Full repository suites and
+cross-platform builds remain operator-run, per repository instructions.

@@ -16,6 +16,26 @@ first reply is reconciled by UUID. Explicitly initiated alternative recovery
 also advances its bound preparation and accepted signature through bounded
 polling; restored sessions remain read-only. These changes add no durable journal.
 
+Explicit same-provider retry collects an already received signed result before
+rechecking spent Capacity. If a restarted client has lost that inbox, Core may
+requeue its unchanged USER PSBT only after validating a locally observed exact
+final transaction against the authorized template and normal final preflight.
+Only this proof enables the existing exact-final Capacity exception; an unsigned
+txid alone is insufficient. Qt advances this explicitly initiated retry for at
+most two minutes, bound to the wallet/request, and stops on completion, error or
+privacy entry. Restoring a session does not grant retry authority.
+
+After `DEFAULT_REORG_SAFETY_DEPTH` (240 confirmations), the provider may have
+pruned its reply journal. Explicit client retry can then complete from the exact
+local chain transaction and the client's accepted manifest/USER PSBT. A missing
+wallet transaction is recovered from the synchronized local index only after
+full final/template/signature validation. `CompleteClientConfirmedPayment`
+atomically records the observed final and settles the existing client fee. It
+does not invent a provider result or grant rebroadcast authority; exact wallet
+observation/reorg handling and normal retention remain in force. Provider
+submissions with absent or mismatched bindings are acknowledged individually;
+database read failures remain faults instead of being swallowed as peer errors.
+
 Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
 releases the original payment lease after durable preparation so the separate
 recovery lease can use the default single outgoing slot. Expected Capacity
@@ -24,17 +44,37 @@ exact request binding retained. `senddigidollar` forwards explicit transport
 retries, including the authorized-submit path, without renewing financial
 authority. See [current verification](doc/digidollar-paymaster-connection-capacity.md#current-verification-status).
 
-The Qt operator presentation uses three destinations: Operation, Activity &
-finances, and Settings. Settings owns Offer, Spending limits, Automation &
-reserves and Connection & wallet. The overview derives a human-readable next
+The Qt operator presentation uses five destinations: Overview, Funds & reserves,
+Activity, Income & costs, and Settings. A responsive sidebar/selector drives one
+page stack; settings uses focused pages with a visible return path. The current
+task remains visible across areas. Immediate autostart/refill switches beside
+Start/Pause mirror Operation & automation; drafts and confirmed policy stay
+separate. Lost replies reconcile through read-only status. Liquidity writes
+optionally bind expected_updated_at atomically; additive automation_status
+reports saved intent and actual scheduler/journal state independently.
+Capital actions and target/cost forms live in Funds & reserves; the operational
+hero excludes backup reminders. getpaymasternodeconfig supplies nodewide
+effective source, editability/conflicts and pending restart changes to the
+shared inline/setup editor. Config writes retain file-bound preview/backup/
+atomic replacement. DGB-only rebalance binds its finite fee cap into the plan
+and preserves DD reserves. No wallet migration or consensus change is involved.
+Single-carrier release refreshes the pool before selection and binds its
+preview to the displayed outpoint. Rejected availability produces a read-only
+reserve refresh action; raw task errors remain in a collapsed disclosure.
+The setup assistant has seven numbered pages, combining identity, model and
+offer controls into one step. The overview derives a human-readable next
 action from the existing read-only operator snapshot; unknown data cannot grant
 start authority. The serialized RPC lifecycle shows an explicit reading/busy
 state with indeterminate activity, current check and elapsed loading time until
 all queued status callbacks finish, even if an intermediate snapshot already
 reports local readiness. Its display timer makes no additional RPC calls. Disclosures reorganize presentation only.
 Start/resume and persistent pause controls are consolidated at the top of
-Operation; technical details provide diagnostics without alternate runtime
-controls. Core financial policies, persistence, protocol and the shared Qt/CLI
+Overview; technical details provide diagnostics without alternate runtime
+controls. Earnings withdrawal uses the active network's `minOutputAmount` for
+both guided and advanced actions; accumulated excess below that amount is
+explained without authorizing a transaction. Preview validation applies the same
+minimum and unknown task errors retain their exact diagnostic text. Core
+financial policies, persistence, protocol and the shared Qt/CLI
 setup controller remain
 authoritative. See the [operator guide](doc/digidollar-paymaster-operator.md)
 and [UI design contract](doc/design/paymaster-operator-ux.md).
@@ -1823,11 +1863,18 @@ There is no consensus, wire-protocol or wallet-format change. See the
 ## Paymaster guided operator tasks
 
 The Qt provider panel has Operation, Activity & finances and Settings.
-Provider-wallet backup controls live only in Settings / Connection & wallet;
+Provider-wallet backup controls live only in Settings / Wallet & backup;
 the Operation reminder navigates there, and Finances has no duplicate panel.
 `src/qt/paymasteroperation.h` owns wallet-generation-bound phases, current operation
-observations and approved funding-scope comparisons; the widget renders that
-state and adapts the existing RPC transport. Core maintenance journals remain
+observations, explicit restoration target proposals and approved funding-scope
+comparisons; the widget renders that state and adapts the existing RPC transport.
+An explicit restore can propose repairing reduced DD capacity for USER_PAID,
+without modifying any saved replenishment approval or spending limit. After one
+review the adapter checks wallet identity and saved policies, persists only the
+reviewed capacity repair, reads it back even after a lost reply, and obtains a
+fresh Core plan. Execution requires that plan to stay within the original
+capital and fee approval. Settings or funding-scope changes stop continuation.
+Observation never repairs deliberately released capacity on its own. Core maintenance journals remain
 the authority for financial continuation and idempotence. Under the provider
 work guard, the automatic runtime releases obsolete unsigned recurring refill
 plans when confirmed targets are satisfied, after wallet-transaction recovery.
@@ -1888,3 +1935,64 @@ no mutations. `SetupChoices::autostart` is optional: the existing GUI leaves it
 empty to retain saved behavior, while CLI applies the explicitly reviewed choice
 through the existing ordered runtime-settings step. Financial confirmation
 remains a separate explicit-yes boundary; empty/default input never approves it.
+
+### Paymaster node-connection editor
+
+The Qt connection editor uses one dialog with current values, provenance,
+inline preview and explicit apply. `getpaymasteroperatorinfo.node_settings`
+also includes the announced endpoint; `node_setting_overrides` maps the exposed
+Paymaster options to command-line, forced or writable-settings control. This is
+advisory presentation metadata. `preparepaymasternodeconfig` and
+`applypaymasternodeconfig` remain authoritative for included-file conflicts,
+plan binding and configuration writes. The editor submits only changes and
+invalidates its plan after edits; wallet generation/privacy guards prevent
+later GUI continuation in another wallet. No network or financial policy changes.
+
+Provider overview presentation separates current pool principal/capacity from
+confirmed lifetime finance results and current withdrawable earnings. The
+payout explanation belongs to the finance card; detailed reserve counts are
+a disclosure. Spending-limit values retain their native DGB unit. This is a
+Qt presentation change and does not alter Core accounting or authorizations.
+
+The provider RPC busy gate disables the common tab container, in addition to
+individual action predicates, until the serialized callback chain drains.
+This prevents child status renders from re-enabling another page command.
+Wallet switches reset the gate; generation checks reject late completions.
+Modal review windows retain their own approval/cancellation controls.
+
+Setup fee recovery in Qt binds cancellation to the saved wholly uncreated
+plan. A replacement preview follows only a confirmed cancellation whose
+returned preparation records are all terminal. Its new capital and fee scope
+still requires the normal guided-task approval. Wallet generation/privacy
+guards apply across both dialogs. The replacement preview is enqueued directly
+in the cancellation RPC chain; its approval stays queued until any intervening
+status/finance reads finish. Wallet switches and privacy discard queued reviews.
+Core continues to protect saved signatures and validate plans. Recurring budgets
+are untouched. A start intent without active preparation, pending or reserved
+capacity cannot imply reserve creation: missing reserves become an actionable
+review state, while actual saved work retains its wait/confirmation state.
+
+The Qt RPC busy gate keeps operator pages paintable across asynchronous
+status/finance reads, including navigation, resizing and window exposure.
+Conflicting commands remain gated; a poll lasting two seconds shows its
+current read and elapsed time without discarding the last validated snapshot.
+Valid snapshots update the existing presentation directly; only invalid status
+uses the full reset. Budget sections change visibility only when their active
+funding models change. Poll intervals, serialization and backend checks are unchanged.
+
+Automatic provider submissions preserve the internal scheduler context through
+`submitpaymasterdigidollar`: wallet readiness is checked without waiting, and
+both final-transaction preflights use nonblocking index observation. A new tip
+between the outer queue check and the nested submit defers processing rather
+than waiting on the scheduler's own validation notifications. Explicit RPC
+calls retain their synchronization waits; signatures and commit validation stay
+unchanged.
+
+Liquidity-setting approval holds the Qt RPC busy gate throughout the modal
+review and binds the save to the same wallet generation. A refresh preserves
+unsaved edits; neither navigation nor a status poll grants paid-maintenance
+consent. Save errors and incomplete acknowledgements are reconciled by reading
+`getpaymasterliquiditystatus` and comparing the entire requested policy before
+claiming success. Unconfirmed edits remain dirty with an inline explanation;
+no write is retried automatically. The form reports automatic refill and
+paid-maintenance approval separately, including zero-limit blocking.

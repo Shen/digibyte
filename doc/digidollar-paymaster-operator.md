@@ -1,23 +1,67 @@
 # Paymaster operator workflow
 
-Current UI candidate: `feature/paymaster-ux-navigation`, based on integrated
-RC2 `cac8e521e71ebce29a5afdcbb636ba417350bf05`, 2026-09-28. The earlier
-operator-workflow implementation and its dated results are recorded below.
-The navigation redesign has separate verification; earlier results do not
-validate the changed Qt code. This is not a release approval.
+Current UI candidate: integration/paymaster-v9.26.6rc2, 2026-10-01.
+The task-oriented redesign has separate verification; earlier results do not
+validate this revision. This is not a release approval.
 
 ## Find the right page in Qt
 
-The earlier [clickable design preview](design/paymaster-operator-preview.html)
-is a historical five-tab layout. It uses example data, makes no RPC calls and does not save funds,
-settings or passwords. The [design contract](design/paymaster-operator-ux.md)
-explains the information hierarchy.
+The [clickable design preview](design/paymaster-operator-preview.html) uses
+example data and has no wallet connection.
+The [design contract](design/paymaster-operator-ux.md) describes the interface.
 
 | Area | Use it for |
 | --- | --- |
-| **Operation** | Current state, one next action, Start/Pause, capacity and active tasks. Restore reserves, withdraw earnings or release operating capital from here. |
-| **Activity & finances** | Payments, recovery, income, actual costs and financial history. Detailed history is loaded only when opened. |
-| **Settings** | Offer, spending limits, automation/reserves and connection/wallet. Individual reserve types and manual preview/execute controls are under advanced disclosures. |
+| **Overview** | Operational state, Start/Pause, autostart and automatic refill switches. |
+| **Funds & reserves** | Restore reserves, release earnings into the same wallet or review capital release. |
+| **Activity** | Payments, durable reservations, recovery and manual expert processing. |
+| **Income & costs** | DD income, DGB costs, financial history and complete CSV export. |
+| **Settings** | Offer, Spending limits, Operation & automation, Node connection, Wallet & backup. |
+
+A sidebar is used from 960 logical pixels; a compact selector opens the same
+pages in narrower windows. Settings categories have a Back to settings action.
+Current task progress stays visible while navigating. Background reads preserve
+the visible pages, including when the window is resized or uncovered. If a read
+takes more than two seconds, its current step and elapsed time are shown;
+conflicting wallet actions remain unavailable until the reply arrives.
+
+### Autostart beside Start/Pause
+
+Changing **Automatically start Paymaster when this wallet is ready** saves
+immediately. The same switch is available in Operation & automation. Saving,
+the confirmed value and any failure are shown beside it.
+The option may start an enabled provider during the current wallet load as
+well as after a future load, once Core readiness permits it. Encrypted wallets
+still need manual unlock after restart; no password is stored. Turning this
+option off does not pause an already running provider.
+
+Persistent **Pause** or **Stop** turns autostart off and explains this result.
+The saved automatic-refill choice and its approved limits are retained. A subsequent manual Start/Resume does not re-enable it.
+New GUI setups default to off; existing settings are retained.
+Autostart and automatic request processing are separate settings. Each saves
+only its own field. If a save reply is lost, the interface checks the saved
+state before allowing another attempt.
+
+### Automatic reserve refill
+
+The additional **Automatically refill missing reserves** switch saves immediately
+and mirrors Operation & automation. Its checkmark is the saved choice. The
+status below it explains whether work is off, ready, paused, blocked, running or
+waiting for confirmation. Wallet locks and exhausted budgets do not clear it.
+Turning it off prevents new automatic work but preserves approved limits and
+already signed transactions. Enabling without valid finite consent opens a
+cancellable fee review. Full capital release revokes both refill and paid consent.
+
+Targets and refill cost limits share a Save/Discard form in Funds & reserves.
+No quick switch submits drafts from this form. A stale policy revision is
+rejected and must be refreshed before a new review.
+
+### Seven-step setup
+
+Confirm wallet → Check connection → Set offer → Limit spending →
+Reserves and operation → Review and approve → Setup and result.
+The offer step includes the optional name, payment model and price/range.
+All existing approvals and exact capital/fee reviews remain in place.
 
 **Settings → Offer** and guided setup show an example recipient amount beside
 the percentage tariff. The example computes the DD service fee, effective
@@ -32,7 +76,7 @@ minutes after creation. A list refresh is not a reachability test. Qt identifies
 the local list update and announcement expiry separately and reports endpoint/
 proxy failures through a specific connection message.
 
-The normal Operation action changes with the current cause: start/resume,
+The normal Overview action changes with the current cause: start/resume,
 unlock, review a limit, review reserves, inspect progress or open diagnostics.
 An unknown/incomplete result never shows a start action. A locked wallet can
 block signing even when the service itself is running. Local listener readiness,
@@ -47,7 +91,7 @@ explains that Core continues automatically when they confirm. Neither state
 requires starting setup again. Budget/approval problems retain their own next
 action; unexpected errors still lead to diagnostics.
 
-After restarting with an existing provider wallet, use **Operation → Start
+After restarting with an existing provider wallet, use **Overview → Start
 provider** (or **Resume provider** after a persistent pause). The setup
 assistant is optional when the saved settings are unchanged. Wallet unlock,
 node synchronization, confirmed liquidity and current budget checks still apply.
@@ -91,7 +135,7 @@ individual RPCs. `-watch` reads status every ten seconds; Ctrl+C ends it.
 
 For an existing provider, `-paymastersetup` defaults to **status** and also offers
 **pause**, **resume**, **unlock**, **backup**, and **setup**. These correspond to the Qt
-Operation next action and Settings → Connection & wallet controls. Manual
+Overview next action and Settings → Wallet & backup controls. Manual
 expert mode remains available. Setup does not store
 passwords, and no password belongs in a command argument, file, or log.
 
@@ -241,10 +285,40 @@ next action also offers restoration and a one-time start when a stopped provider
 needs reserves. A locked wallet or insufficient balance is a waiting condition;
 limits are never raised automatically.
 
-**Withdraw earnings** previews only carrier value above the required base. Review
+After releasing the last DD payment reserve, the saved payment-capacity target
+is deliberately zero. A user-paid offer cannot operate with that target. Choose
+**Restore reserves and start** on Overview: the single review proposes the
+minimum DD capacity required for that offer, shows the old and new targets,
+missing capital, maximum setup fees and unchanged recurring limits. Approving
+restores this deliberately released capacity and requests a one-time start after
+readiness. Declining changes nothing. Refreshing or reopening the wallet alone
+never raises a reduced target. Existing higher targets, replenishment choices,
+customer-payment limits and Autostart are retained.
+
+Overview no longer duplicates the reserve and budget settings buttons below
+the status cards. Those controls remain under **Settings → Automation & reserves**
+and **Settings → Spending limits**. The highlighted next action runs the guided
+task; it does not merely focus a configuration button.
+
+**Withdraw earnings** previews only carrier value above the required base. The
+combined confirmed excess must reach the network's minimum DD output (currently
+1.00 DD). For example, 0.06 DD remains accumulated in the wallet until another
+0.94 DD is available; the operating-capital base is not used to make up the
+minimum. Both the guided and advanced payout controls remain disabled below
+this threshold, with the current amount and minimum explained. Review
 the DD payout and DGB fee once. Core journals the transaction; waiting for a block
-does not require another execution. **Release operating capital** explicitly
+does not require another execution. **Release one DD reserve** explicitly
 reviews the selected reserve, provider pause and reduced carrier target together.
+The reserve selector is refreshed from Core before each new review, even when
+an older list is already visible. The choice is bound to the displayed outpoint;
+a list refresh cannot silently select a different reserve. If Core reports
+`PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE`, the reserve may be reserved, unconfirmed,
+spent or already released. The task explains this and offers **Refresh reserves**;
+that action only reads status and never repeats a release. Wait for active work
+to finish, then explicitly select and review an available reserve. Raw error codes
+remain available under **Show technical details**. An already-approved pause is
+not undone when release fails.
+
 The released carrier becomes ordinary wallet balance; that reduced target is not
 automatically rebuilt. Other individual reserve adjustments remain under advanced
 automation/reserve settings.
@@ -255,7 +329,7 @@ and a reason, not an estimated percentage. Planned fee authorization, fees of
 broadcast unconfirmed transactions and confirmed costs are separate amounts.
 A reserved budget without a transaction is not shown as waiting for a block.
 
-Operation refreshes on opening and after actions, every two seconds for active
+Overview refreshes on opening and after actions, every two seconds for active
 work and every ten seconds otherwise. Requests never overlap; old-wallet replies
 are discarded. Financial actions require complete current snapshots. Closing the
 page does not cancel accepted Core work. Cancellation can release only steps
@@ -388,7 +462,7 @@ launching an independent unbudgeted connection.
 The report includes network, endpoint, observation time, terminal state and
 positively passed v2/Paymaster stages. Unknown stages are not proof of failure
 or success. `identity_verified` and `payment_verified` are always false.
-Qt **Settings → Connection & wallet → Import external check** imports this JSON as a historical operator assertion,
+Qt **Settings → Node connection → Import external check** imports this JSON as a historical operator assertion,
 not a trusted Core readiness result. Reports are invalidated on wallet reload
 or network/endpoint mismatch. Status reads never automatically run a probe.
 
@@ -529,14 +603,14 @@ ledger is missing.
 
 ### Wallet backup location
 
-Backup controls live in Settings → Connection & wallet. Operation's backup
+Backup controls live in Settings → Wallet & backup. Overview's backup
 reminder opens that section; Income & costs has no second backup panel. The
 central controls remain available after a successful backup. Both backup methods
 refer to the complete provider wallet, including its financial records.
 
 ### Spending limits at a glance
 
-Operation shows a separate budget block for each enabled payment model and for
+Overview shows a separate budget block for each enabled payment model and for
 reserve maintenance. Each block aligns Spent, Limit and Reserved budget in rows;
 the heading identifies DGB and the rolling 24-hour period. Reserved budget is
 not a confirmed expense. Detailed approvals and other time limits remain under
@@ -546,6 +620,34 @@ The daily and booking tables follow the selected light/dark theme, including
 alternating and selected rows. Amounts and counts align right; booking text and
 UTC dates align left. Columns and row heights fit their content, and the table
 can scroll horizontally when the window is narrow.
+
+### A restored transfer still waits after the payment was confirmed
+
+A client restart can leave a saved transfer waiting when the provider's signed
+result was lost from the transport inbox. A previous version could report
+`PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE` on **Retry the exact provider step**
+because the original payment had already spent that reserve. This error alone
+is not evidence of a failed payment. Check the transaction before creating
+another payment for the same purpose.
+
+With the corrected client, the explicit retry collects the existing signed
+result, or requests it again using the unchanged authorized artifact. A spent
+reserve is accepted only when Core validates the exact final transaction already
+present locally. No new recipient, amount, signatures or payment attempt are
+created. The GUI continues this request for at most two minutes, then offers a
+status check if the result has not arrived. Errors, a wallet switch or entering
+privacy mode end the active continuation. Merely restoring a saved transfer
+remains observational; it does not submit anything automatically.
+
+After 240 confirmations the provider normally discards detailed payment replay
+records. An older client could then cause `PAYMASTER_SUBMIT_BINDING_MISMATCH`
+and leave one submission blocking the provider. The corrected client completes
+an explicitly retried transfer from the deeply confirmed local transaction,
+validated against its saved consent and signatures. This also works with a
+stopped provider and for a payment without client change. The already charged
+service fee is settled once; no transaction is signed or broadcast. The provider
+consumes stale/mismatched submissions individually instead of treating them as a
+persistent service fault. Genuine wallet database failures still require review.
 
 ### Client retry after an unsigned quote expires
 
@@ -581,3 +683,98 @@ cancellation after a lost reply. Technical authorization identifiers are under
 the approval window's Details control. Changing wallets or enabling privacy
 mode closes an open approval window without accepting or canceling that wallet's
 request.
+
+## Reviewing node connection settings
+
+**Settings → Node connection** contains the editor for listener addresses,
+the announced address, required node features and connection limits. These
+settings apply to every wallet on this node. Each field shows its effective
+value/source, editable saved value or lock reason, and any pending restart.
+**Refresh connection settings** rereads source/conflict information. The setup
+assistant embeds the same editor. Start-command/BAT,
+`settings.json` and forced runtime overrides are labelled and read-only. For
+example, `-paymasterbind=127.0.0.1:18450` in a Regtest launcher controls that value;
+change it in the launcher and restart, or deliberately move it into the node's
+configuration and remove the overriding argument before editing it here.
+
+Only changed editable values are submitted by **Preview changes**. Unchanged
+values do not cause override errors. Review the changes in the same window,
+then choose **Save reviewed changes**. Editing any value invalidates the preview.
+Core rechecks configuration/override conflicts; failures stay in the window and
+retain your entries. Included files, duplicate/negated entries and conflicting settings.json
+values are checked on opening/refresh as well as during the guarded save. No restart, Tor/firewall setup, reindex,
+wallet unlock or provider start occurs automatically. Wallet switch/privacy
+closes the editor; a write already dispatched may still finish.
+
+The Overview cards separate payment capacity and pool principal from earnings.
+Operating capital groups ready payment capacity, DGB network-fee reserves and
+DD base capital; per-pool counts remain under Show reserve counts. Spending
+limits show DGB on every amount (these are network-fee budgets, not DD service
+fees). Income & costs groups confirmed lifetime income/costs and current
+accumulated/withdrawable DD earnings. Funds & reserves holds the payout
+actions and their minimum-payout explanation.
+Lifetime income is not the currently withdrawable balance.
+
+While a provider RPC is executing, the provider pages are disabled until its
+result/error handling and queued follow-up reads complete. Review dialogs
+remain usable. A blockchain confirmation wait is a separate task state;
+its allowed actions are still determined by Core and the task controller.
+
+For a wholly uncreated setup plan blocked by `PAYMASTER_POOL_FEE_LIMIT`, use
+**Review setup fee and continue** on Overview. The dialog displays the saved
+fee ceiling and diagnostics, accepts a new finite DGB ceiling and an explicit
+start-after-readiness choice. Continue cancels only the uncreated plan, then
+opens the existing capital/total-fee preview for separate approval. Declining
+the first dialog changes nothing; declining the subsequent preview leaves the
+old plan cancelled and authorizes no replacement. A saved transaction or an
+unconfirmed cancellation blocks replacement. Recurring maintenance budgets
+are unchanged. The GUI never invents an estimated fee when Core provides none.
+The replacement review remains available across background status reads.
+
+If a start is already requested but reserves are missing and no reserve task or
+confirmation is pending, Overview shows **Restore reserves and start**. Review
+the missing capital and fee ceiling there. A start request alone does not approve
+reserve creation, and automatic replenishment may be disabled. After approval,
+Core creates the reserves and starts when ready. Declining the review leaves the
+start waiting and authorizes no spending. The saved autostart setting is unchanged.
+
+Overview maintenance counts include planned work, so they are labelled open
+maintenance tasks, not pending transactions.
+
+Background status reads retain the last validated view until their replies
+are processed. Valid snapshots update that view directly instead of hiding
+and rebuilding its sections. Refresh frequency and command guards remain
+unchanged. Initial loading, failed reads and actual state changes remain visible.
+
+After a confirmed provider restart, successful stop/retirement notices are
+cleared together with the retirement balance summary. Toggling privacy must
+not restore those old notices. Failed or incomplete stop results retain their
+error explanation.
+
+The retirement dialog explains that reviewing full capital release is part
+of retirement; it no longer shows a disabled checkbox for that fixed step.
+The subsequent release still requires separate approval. In Stop Paymaster,
+the optional capital-release checkbox remains editable and unchecked by default.
+
+Connection settings supplied by startup arguments or other overriding sources
+are displayed as selectable text, including explicit Yes/No values, rather
+than disabled inputs. The source and startup option are shown with each fixed
+value. If every setting is fixed, the dialog is explicitly read-only and hides
+Preview/Save; edit the BAT/configuration source and restart to change them.
+
+### Saving automatic refill settings
+
+Automatic refill and permission to pay refill fees are separate saved settings.
+To enable paid automatic replenishment, select **Automatically refill missing
+reserves**, review the limits that open below it, select **Permit paid maintenance**,
+and choose **Save settings and approve bounded refill**. The confirmation lists
+the automatic-refill choice, target capital and each DGB fee ceiling. Turning on
+the first checkbox alone does not approve spending. A zero ceiling blocks paid
+refill even when both checkboxes are selected.
+
+Status refreshes preserve unsaved edits. While the approval is open and the save
+is running, the page cannot submit another command. After saving, the message
+states whether automatic refill and paid refill are enabled. If the reply is lost,
+the GUI checks the stored policy before reporting success or offering a retry.
+An unconfirmed save leaves the edits visible and explains the error beside them.
+A wallet switch or privacy activation during review prevents the save.

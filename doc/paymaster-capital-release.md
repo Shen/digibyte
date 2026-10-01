@@ -1,8 +1,8 @@
 # Stop a provider and release its operating capital
 
-Start/resume and Pause belong to Qt **Operation**. Pause retains prepared pool
+Start/resume and Pause belong to Qt **Overview**. Pause retains prepared pool
 capital and disables provider operation and autostart until an explicit resume.
-Under **Settings → Operation & shutdown**, **Stop Paymaster…** offers an
+Under **Funds & reserves → Stop operation and release capital**, **Stop Paymaster…** offers an
 unchecked **Also review release of all operating capital** option. Stopping is
 confirmed first. A second review shows the exact DGB and DD amounts and pool
 output count before releasing anything. Declining this review leaves the
@@ -11,11 +11,11 @@ The node, its listeners and other wallets are not shut down by this wallet-local
 
 ## Settings and retirement
 
-Settings separates Offer, Spending limits, Automation & reserves, Connection &
-wallet, and Operation & shutdown. Connection & wallet groups reachability,
-wallet-wide unlock and full-wallet backup. Local technical checks remain a
-disclosure; processing/autostart and the optional setup review are under
-Operation & shutdown. Automatic request processing is not automatic startup,
+Settings separates Offer, Spending limits, Operation & automation,
+Node connection, and Wallet & backup. Capital actions and retirement are visible
+in Funds & reserves. Its shared target/cost form has Save and Discard controls.
+Autostart and refill switches are immediate and mirrored on Overview; request
+processing remains a separate saved choice. Automatic request processing is not automatic startup,
 and neither is recurring paid reserve maintenance.
 
 **Retire Paymaster…** is a guided, non-destructive completion of the same
@@ -45,6 +45,21 @@ Core state; the archive checklist itself is not a persistent retirement record.
 `released`, returning their outputs to ordinary wallet coin selection. It does
 not send coins to another address, sign a transaction, charge a network fee,
 remove the wallet, delete the provider identity or abandon a payment.
+
+## Releasing one DD reserve
+
+**Funds & reserves → Release one DD reserve** reduces the saved DD payment
+capacity by one. This differs from releasing all capital during retirement.
+The GUI first refreshes the available confirmed reserves, binds the user's
+choice to its output, and obtains a fresh preview before approval. Core still
+rechecks availability when executing the reviewed plan.
+
+If the reserve is no longer available, the task offers **Refresh reserves**
+and explains that it may be in use, unconfirmed, spent or already released.
+Refresh only reads status. It does not release a replacement reserve, bypass
+reservations, or resume a provider that was paused during the approved action.
+Technical error codes remain in an initially collapsed disclosure. A new
+release always needs another explicit selection and review.
 
 ## CLI workflow
 
@@ -109,3 +124,14 @@ remain; they are not active funds. Create a full-wallet backup after completion.
 
 Test source is not a runtime PASS. Build and execution evidence must be recorded
 for the exact source snapshot before using the feature with a funded wallet.
+
+## Windows integration check (2026-09-30)
+
+Integration of `7ad04ea744` with the local guided-restoration changes exposed
+three Qt compile defects: duplicate retirement-layout locals, a local named
+`slots` colliding with Qt's keyword macro, and deleted counters still used by
+the advanced capacity editor. The integration fixes rename the locals and keep
+editor counters separate from the overview's saved per-pool readiness check.
+The existing local restoration and withdrawal changes remain in place.
+A complete build and execution of the new Core/RPC and Qt tests remain required;
+older binary test results do not validate this combined source revision.
