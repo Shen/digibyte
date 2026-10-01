@@ -1,5 +1,87 @@
 # Paymaster build and test runbook
 
+## Paymaster wallet responsiveness (2026-10-01)
+
+Source base: `07e3392177`. This follow-up reduces work under the wallet lock in
+Paymaster balance/coin-selection hooks and finance reconciliation. It does not
+change Qt tab handling, service frequency, reservations or spending authority.
+Relevant guidance: repository/src instructions, CLAUDE's DigiDollar reading
+order, contribution/developer locking rules, wallet architecture/maps, test and
+Windows build guidance. Full builds remain operator work.
+
+Selected MSVC 14.43 compilation passed for `wallet/paymasterstore.cpp`,
+`wallet/digidollarwallet.cpp`, `wallet/spend.cpp`,
+`wallet/paymasterstore_reconciliation.cpp`, `wallet/rpc/paymaster.cpp` and
+`wallet/test/paymaster_wallet_identity_tests.cpp`. The current wallet objects
+were archived and linked with the existing integration libraries into separate
+`digibyted-paymaster-performance.exe`, `test_digibyte-paymaster-performance.exe`
+and `digibyte-qt-paymaster-performance.exe` under `build_msvc/x64/Release/`.
+With both Qt wallets closed, the normal `build_msvc/x64/Release/digibyte-qt.exe`
+was replaced with the linked performance executable; SHA-256 equality was
+verified. Its previous executable is retained as
+`build_msvc/paymaster-performance-check/digibyte-qt-before-performance.exe`.
+No running wallet process was terminated.
+
+This is an incremental diagnostic build, not a complete rebuild. As in the
+RPC/CLI checkpoint, the diagnostic Core binary excludes three unrelated old
+test objects that need recompiling against the changed DD-selection signature.
+
+Completed checks:
+
+- The new `paymaster_input_scan_reuses_pool_without_cross_scan_cache` test checks
+  512 candidate inputs against a valid 256-entry pool. Repeated single-input
+  calls took 5,056,219 microseconds; one scoped scan took 9,676 microseconds on
+  this machine. This compares the helper's single-input compatibility path with
+  the batched path, not two separately built historical releases. Both returned
+  identical results. The deterministic assertion is **512 database batches to
+  one**, with no machine-dependent timing threshold.
+- The same test exercises production DD balance/UTXO hooks, explicit and pool
+  reservations, release, transaction abort, unreadable and unsupported records.
+  Each new scan sees the current database; unreadable authority remains locked.
+- All 25 selected Core cases passed, with 1,184 assertions: the full
+  `paymaster_wallet_identity_tests` suite plus store regressions for shared
+  coin locks, final-transaction mempool/reorg/retention observations, atomic
+  provider quote expiry and idempotent carrier/DGB successor reconciliation.
+- `wallet_paymaster_lifecycle.py --descriptors` passed, including provider
+  restart, restored-payment RPC/CLI paths and reserve/autostart persistence.
+- `wallet_paymaster_rpc.py --descriptors --client-preparation-only` passed,
+  covering HTTP and actual CLI preparation/cancellation and read-only status.
+- `wallet_paymaster_reorg.py --descriptors` passed: finance and pool state roll
+  back on a real longer branch, then reconfirm without duplicate accounting.
+
+Logs and response files are under `build_msvc/paymaster-performance-check/`;
+selected compilation logs are `build_msvc/paymaster-performance-compile.log`
+and `build_msvc/paymaster-performance-test-compile.log`. Test nodes were isolated
+from operator wallets. No live payment or reserve state was changed.
+
+### Remaining operator checks
+
+The bounded timing test demonstrates eliminated repeated work, not measured
+end-to-end GUI latency. After restarting with the updated executable, switch
+between Overview, Send DD, Receive DD and Paymaster in both client and provider
+wallets. Repeat while the provider is active and while status refreshes run.
+Expected: the previous multi-second pauses are reduced; payments and status
+updates continue. Record any remaining pause with its time, wallet and tab.
+The [operator diagnostics](digidollar-paymaster-operator.md#diagnosing-brief-pauses-when-changing-wallet-tabs)
+explain opt-in reconciliation timing. This native GUI check has not been run.
+
+For a complete build, use the exact commands and prerequisites under
+[Operator verification for this integration](#operator-verification-for-this-integration).
+Allow minutes or longer for the build; the full functional contract may take
+tens of minutes. After that build, from `D:\Digibyte\digibyte-fork`:
+
+```powershell
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_wallet_identity_tests:paymaster_wallet_store_tests/reservations_share_standard_wallet_locks:paymaster_wallet_store_tests/final_transaction_observations_handle_mempool_reorg_and_retention:paymaster_wallet_store_tests/expired_provider_quotes_release_pool_and_budget_atomically:paymaster_wallet_store_tests/provider_successor_reconciliation_recycles_carrier_and_dgb_idempotently' --log_level=message --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'Wallet regression failed' }
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+python -X utf8 test/functional/test_runner.py wallet_paymaster_rpc.py wallet_paymaster_lifecycle.py wallet_paymaster_reorg.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster regression failed' }
+```
+
+Success requires exit 0 without unexpected skipped selected cases. Full suites,
+cross-platform builds and live native GUI verification are not claimed here.
+
 ## Uncreated client request and CLI status checks (2026-10-01)
 
 Source base: PR #452 integration `44b70ddea7`. This follow-up separates confirmed

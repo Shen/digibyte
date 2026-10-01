@@ -4322,6 +4322,7 @@ CAmount DigiDollarWallet::GetPaymasterReservedDDBalance() const
 DigiDollarBalanceSummary DigiDollarWallet::GetDDBalanceSummary() const
 {
     auto locks = LockDDWallet();
+    wallet::PaymasterInputReservations paymaster_inputs{m_wallet};
     DigiDollarBalanceSummary summary;
     if (!m_wallet) {
         for (const auto& [outpoint, dd_amount] : dd_utxos) {
@@ -4346,7 +4347,7 @@ DigiDollarBalanceSummary DigiDollarWallet::GetDDBalanceSummary() const
         }
 
         summary.confirmed_total += dd_amount;
-        if (wallet::IsPaymasterInputReserved(*m_wallet, outpoint)) {
+        if (paymaster_inputs.IsReserved(outpoint)) {
             summary.paymaster_reserved += dd_amount;
         } else {
             summary.spendable += dd_amount;
@@ -4452,13 +4453,14 @@ std::vector<WalletCollateralPosition> DigiDollarWallet::GetDDTimeLocks(bool acti
 
 std::vector<DDUtxo> DigiDollarWallet::GetDDUTXOs(bool include_unconfirmed) const {
     auto locks = LockDDWallet();
+    wallet::PaymasterInputReservations paymaster_inputs{m_wallet};
     std::vector<DDUtxo> utxos;
 
     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetDDUTXOs - Scanning dd_utxos map (FIX #1)\n");
 
     // FIX #1: Use actual tracked UTXOs instead of assuming positions
     for (const auto& [outpoint, dd_amount] : dd_utxos) {
-        if (m_wallet && wallet::IsPaymasterInputReserved(*m_wallet, outpoint)) {
+        if (m_wallet && paymaster_inputs.IsReserved(outpoint)) {
             continue;
         }
         // Verify UTXO is still unspent in wallet
@@ -7118,6 +7120,7 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount,
                                      bool allow_paymaster_pool_inputs) const
 {
     auto locks = LockDDWallet();
+    wallet::PaymasterInputReservations paymaster_inputs{m_wallet};
     selected_utxos.clear();
     selected_total = 0;
     if (amounts) amounts->clear();
@@ -7143,7 +7146,7 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount,
         if (!seen.insert(outpoint).second) {
             return fail(strprintf("Duplicate selected DD input: %s:%u", outpoint.hash.ToString(), outpoint.n));
         }
-        if (m_wallet && wallet::IsPaymasterInputReserved(*m_wallet, outpoint) &&
+        if (m_wallet && paymaster_inputs.IsReserved(outpoint) &&
             !allow_paymaster_pool_inputs) {
             return fail("Selected DD input is reserved by an active Paymaster session");
         }

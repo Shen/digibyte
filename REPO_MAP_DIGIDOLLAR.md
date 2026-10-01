@@ -1004,6 +1004,13 @@ or chain parameters.
 - `paymasterstore.cpp` and `paymasterstore_internal.h` provide shared
   fail-closed record validation, canonical artifact decoding, Capacity binding,
   and atomic helper boundaries; `paymasterstore.h` remains the public store API.
+- `PaymasterInputReservations` in `paymasterstore.{h,cpp}` reuses one validated
+  pool/input set and one database batch during a locked, read-only DD balance
+  or selection scan (`digidollarwallet.cpp`, selected-input hook in `spend.cpp`).
+  Point reservation errors fail closed; no cache crosses a scan or mutation.
+  `rpc/paymaster.cpp` indexes finance events and confirmed block times within
+  each reconciliation call. Session/maintenance/finance durations are available
+  through opt-in `bench` logging; periodic reconciliation is not skipped.
 - `paymasterstore_client.cpp` owns client sessions, reservations, Capacity
   snapshots, intent state, and safe fallback transitions. Its read-only live
   reservation query recognizes a proven unsigned failed session's historical

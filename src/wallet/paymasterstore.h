@@ -16,6 +16,7 @@
 #include <wallet/db.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -30,6 +31,29 @@ class CWallet;
  * hints they may not be bypassed by preset coin-control inputs.
  */
 bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint);
+
+class WalletBatch;
+
+/** One read-only coin/balance scan under cs_wallet. Lazily opens one database
+ * batch and validates/indexes the provider pool once. Do not retain this view
+ * across wallet mutations or release cs_wallet while using it. Point reservation
+ * reads remain fail-closed; nothing is cached between scans. A null wallet is
+ * supported by the standalone DigiDollar test wallet. */
+class PaymasterInputReservations
+{
+public:
+    explicit PaymasterInputReservations(const CWallet* wallet);
+    ~PaymasterInputReservations();
+    bool IsReserved(const COutPoint& outpoint);
+
+private:
+    const CWallet* m_wallet;
+    std::unique_ptr<WalletBatch> m_batch;
+    bool m_pool_loaded{false};
+    bool m_pool_read_failed{false};
+    std::set<COutPoint> m_pool_inputs;
+};
+
 
 /** Snapshot every live provider-pool input for one coin-selection pass. A
  * non-success status must make the caller fail closed instead of treating an

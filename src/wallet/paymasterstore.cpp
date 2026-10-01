@@ -48,27 +48,44 @@ using namespace DigiDollar::Paymaster;
 // workflow owns an output. Keep this view deliberately conservative: both an
 // explicit reservation and every live pool state make the outpoint unavailable
 // to ordinary sends.
+PaymasterInputReservations::PaymasterInputReservations(const CWallet* wallet)
+    : m_wallet{wallet}
+{
+}
+
+PaymasterInputReservations::~PaymasterInputReservations() = default;
+
+bool PaymasterInputReservations::IsReserved(const COutPoint& outpoint)
+{
+    if (!m_wallet) return false;
+    AssertLockHeld(m_wallet->cs_wallet);
+    if (!m_batch) m_batch = std::make_unique<WalletBatch>(m_wallet->GetDatabase());
+    InputReservation reservation;
+    const DatabaseReadStatus reservation_status{
+        m_batch->ReadPaymasterReservationWithStatus(outpoint, reservation)};
+    if (reservation_status == DatabaseReadStatus::FOUND) return true;
+    if (reservation_status != DatabaseReadStatus::NOT_FOUND) return true;
+    if (!m_pool_loaded) {
+        std::vector<ProviderPoolEntry> pool;
+        const auto status = m_batch->ReadPaymasterProviderPoolWithStatus(pool);
+        m_pool_read_failed = status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND;
+        if (status == DatabaseReadStatus::FOUND) {
+            for (const auto& entry : pool) {
+                if (IsActiveProviderPoolState(entry.state)) m_pool_inputs.insert(entry.outpoint);
+            }
+        }
+        m_pool_loaded = true;
+    }
+    // AVAILABLE pool entries are dedicated liquidity too. An unreadable pool
+    // conservatively protects every input, exactly as the single-input check.
+    return m_pool_read_failed || m_pool_inputs.count(outpoint) != 0;
+}
+
 bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint)
 {
     LOCK(wallet.cs_wallet);
-    WalletBatch batch{wallet.GetDatabase()};
-    InputReservation reservation;
-    const DatabaseReadStatus reservation_status{
-        batch.ReadPaymasterReservationWithStatus(outpoint, reservation)};
-    if (reservation_status == DatabaseReadStatus::FOUND) return true;
-    if (reservation_status != DatabaseReadStatus::NOT_FOUND) return true;
-    std::vector<ProviderPoolEntry> pool;
-    const DatabaseReadStatus pool_status{
-        batch.ReadPaymasterProviderPoolWithStatus(pool)};
-    if (pool_status == DatabaseReadStatus::NOT_FOUND) return false;
-    if (pool_status != DatabaseReadStatus::FOUND) return true;
-    const auto entry = std::find_if(pool.begin(), pool.end(), [&](const ProviderPoolEntry& candidate) {
-        return candidate.outpoint == outpoint;
-    });
-    // Every live provider-pool entry is dedicated Paymaster liquidity. An
-    // AVAILABLE entry must not be consumed by an unrelated wallet send before
-    // it can be reserved for a quote or used in an admission proof.
-    return entry != pool.end() && IsActiveProviderPoolState(entry->state);
+    PaymasterInputReservations reservations{&wallet};
+    return reservations.IsReserved(outpoint);
 }
 
 DatabaseReadStatus GetPaymasterProviderPoolInputs(

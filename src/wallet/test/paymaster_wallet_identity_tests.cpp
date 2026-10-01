@@ -31,11 +31,23 @@
 #include <wallet/walletdb.h>
 
 #include <algorithm>
+#include <chrono>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 
 namespace {
+class CountingPaymasterDatabase : public MockableDatabase
+{
+public:
+    size_t batches{0};
+    std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
+    {
+        ++batches;
+        return MockableDatabase::MakeBatch(flush_on_close);
+    }
+};
+
 class ScopedPaymasterMockTime
 {
 public:
@@ -182,6 +194,128 @@ BOOST_AUTO_TEST_CASE(unreadable_paymaster_locks_fail_closed_for_coin_selection)
     BOOST_CHECK(pool_inputs.empty());
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet,
                                          outdated_pool_entry.outpoint));
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_input_scan_reuses_pool_without_cross_scan_cache)
+{
+    auto database = std::make_unique<CountingPaymasterDatabase>();
+    auto& counted = *database;
+    CWallet wallet{m_node.chain.get(), "paymaster-input-scan", std::move(database)};
+    LOCK(wallet.cs_wallet);
+    CKey key;
+    key.MakeNewKey(true);
+    TaprootBuilder builder;
+    builder.Finalize(XOnlyPubKey{key.GetPubKey()});
+    const auto script = GetScriptForDestination(builder.GetOutput());
+    std::vector<ProviderPoolEntry> pool;
+    for (uint32_t i = 0; i < 256; ++i) {
+        ProviderPoolEntry entry;
+        entry.outpoint = COutPoint{uint256::ONE, i};
+        entry.purpose = PoolPurpose::OPERATIONAL;
+        entry.asset = PoolAsset::DD_CARRIER;
+        entry.state = PoolEntryState::AVAILABLE;
+        entry.carrier_value = DDCents{100};
+        entry.script_pub_key = script;
+        entry.confirmation_height = 1;
+        entry.updated_at = 1;
+        pool.push_back(entry);
+    }
+    WalletBatch batch{wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    InputReservation reservation;
+    reservation.outpoint = COutPoint{uint256::ONE, 300};
+    reservation.request_id = "550e8400-e29b-41d4-a716-446655440097";
+    reservation.session_id = uint256S("02");
+    reservation.role = ReservationRole::USER_DD;
+    reservation.created_at = 1;
+    BOOST_REQUIRE(batch.WritePaymasterReservation(reservation));
+
+    // Deterministic I/O regression; elapsed times are diagnostic, not flaky
+    // machine-dependent acceptance thresholds.
+    std::vector<bool> before;
+    counted.batches = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < 512; ++i) {
+        before.push_back(IsPaymasterInputReserved(wallet, COutPoint{uint256::ONE, i}));
+    }
+    const auto baseline = std::chrono::steady_clock::now() - start;
+    BOOST_CHECK_EQUAL(counted.batches, 512U);
+    counted.batches = 0;
+    const auto scan_start = std::chrono::steady_clock::now();
+    {
+        PaymasterInputReservations scan{&wallet};
+        for (uint32_t i = 0; i < 512; ++i) {
+            BOOST_CHECK_EQUAL(scan.IsReserved(COutPoint{uint256::ONE, i}), before[i]);
+        }
+    }
+    const auto optimized = std::chrono::steady_clock::now() - scan_start;
+    BOOST_CHECK_EQUAL(counted.batches, 1U);
+    BOOST_TEST_MESSAGE("Paymaster 512-input/256-pool scan: individual="
+        << std::chrono::duration_cast<std::chrono::microseconds>(baseline).count()
+        << "us, batched=" << std::chrono::duration_cast<std::chrono::microseconds>(optimized).count()
+        << "us; database batches 512 -> 1");
+
+    // Production balance/selection hooks use that same bounded view.
+    wallet.EnsureDDWallet();
+    auto* dd_wallet = wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet);
+    dd_wallet->AddDDUTXO(COutPoint{uint256::ONE, 0}, 100);
+    dd_wallet->AddDDUTXO(reservation.outpoint, 100);
+    dd_wallet->AddDDUTXO(COutPoint{uint256::ONE, 511}, 100);
+    counted.batches = 0;
+    const auto balance = dd_wallet->GetDDBalanceSummary();
+    BOOST_CHECK_EQUAL(balance.confirmed_total, 300);
+    BOOST_CHECK_EQUAL(balance.paymaster_reserved, 200);
+    BOOST_CHECK_EQUAL(balance.spendable, 100);
+    BOOST_CHECK_EQUAL(counted.batches, 1U);
+    counted.batches = 0;
+    BOOST_CHECK_EQUAL(dd_wallet->GetDDUTXOs().size(), 1U);
+    BOOST_CHECK_EQUAL(counted.batches, 1U);
+
+    // New scans immediately see releases and transaction rollback.
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+    BOOST_REQUIRE(batch.ErasePaymasterReservation(reservation.outpoint));
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(!scan.IsReserved(pool.front().outpoint));
+        BOOST_CHECK(!scan.IsReserved(reservation.outpoint));
+    }
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(scan.IsReserved(pool.front().outpoint));
+    }
+    BOOST_REQUIRE(batch.TxnAbort());
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(!scan.IsReserved(pool.front().outpoint));
+    }
+
+    // Unreadable and unsupported records stay protected, even on a later
+    // point lookup in the same scan. A new successful scan is not poisoned.
+    counted.m_pass = false;
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(scan.IsReserved(COutPoint{uint256::ONE, 511}));
+    }
+    counted.m_pass = true;
+    pool.front().version = 0;
+    BOOST_REQUIRE(wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_POOL, pool));
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(scan.IsReserved(COutPoint{uint256::ONE, 511}));
+        BOOST_CHECK(scan.IsReserved(pool.back().outpoint));
+    }
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+    reservation.version = 0;
+    BOOST_REQUIRE(wallet.GetDatabase().MakeBatch()->Write(
+        std::make_pair(DBKeys::PAYMASTER_RESERVATION, reservation.outpoint), reservation));
+    {
+        PaymasterInputReservations scan{&wallet};
+        BOOST_CHECK(scan.IsReserved(reservation.outpoint));
+        BOOST_CHECK(!scan.IsReserved(COutPoint{uint256::ONE, 511}));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(legacy_wallet_is_rejected)

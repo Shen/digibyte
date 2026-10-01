@@ -173,6 +173,14 @@ Paymaster record codecs remain `WalletBatch` methods in `wallet/paymasterdb.cpp`
 `PaymasterStore` still owns atomic state transitions. Free functions in
 `wallet/rpc/paymaster_send.cpp` isolate the existing send RPC integration without
 adding a payment endpoint, persisted state, or another service layer.
+Paymaster reservation checks in DD balance and coin-selection scans share a
+`PaymasterInputReservations` view only while `cs_wallet` remains held. It reads
+and validates the provider pool once per scan, with fresh point-reservation
+reads and conservative rejection on unreadable records. It must not survive
+wallet mutations or a lock release. Provider finance reconciliation builds
+per-call event and block-time indexes; nothing is retained across calls, so
+expiry, reorg, rollback and new-payment observations remain authoritative.
+Optional `bench` logging times session, maintenance and finance reconciliation.
 The additive `getpaymasterclientinfo` RPC reports local integration support and
 readiness. Transient payment/recovery observations in `PaymasterStore` feed one
 shared RPC/Qt outcome derivation; only validated, locally confirmed recipient

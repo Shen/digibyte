@@ -804,3 +804,36 @@ states whether automatic refill and paid refill are enabled. If the reply is los
 the GUI checks the stored policy before reporting success or offering a retry.
 An unconfirmed save leaves the edits visible and explains the error beside them.
 A wallet switch or privacy activation during review prevents the save.
+
+
+## Diagnosing brief pauses when changing wallet tabs
+
+Both client and provider wallets share the Paymaster reservation checks. Balance
+and coin-selection scans now load and validate the provider pool once per scan;
+provider finance reconciliation also avoids repeated historical event lookups.
+These changes reduce work performed while the wallet lock is held. They do not
+remove locks or change automatic payment/refill permissions.
+
+To investigate remaining delays, temporarily enable existing benchmark logging
+in the affected node's debug console:
+
+```text
+logging ["bench"] []
+```
+
+Reproduce the short pause and note its time, wallet and tab. The node's
+`debug.log` includes `ReconcileFinalSessionsAtTip`,
+`ReconcileProviderMaintenance` and `ReconcileProviderFinances` durations.
+Those durations cover the whole call, including any lock wait; they are not a
+measurement of GUI paint latency. These added records contain function names
+and elapsed time, not payment details. Other existing benchmark records may
+also be emitted. Disable the category after collecting the observation if it
+was previously off:
+
+```text
+logging [] ["bench"]
+```
+
+Do not release reservations or cancel a payment to diagnose a slow tab switch.
+A measured improvement in the bounded scan regression does not by itself prove
+that every pause in a live wallet has been eliminated.

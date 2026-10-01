@@ -35,6 +35,17 @@ queueing another submit. No signed provider receipt is fabricated and no expired
 spending authority is renewed. The corrections reside in the shared wallet Core;
 CLI argument encoding needs no change.
 
+## Wallet responsiveness
+
+Paymaster reservation checks now validate the provider pool once per balance or
+coin-selection scan, reducing repeated database decoding and key validation
+while holding the wallet lock. Finance reconciliation also reuses event lookups
+and block times within each call. GUI and RPC/CLI share these improvements;
+reservation safety, fee limits and reconciliation frequency are unchanged.
+Optional `bench` logging helps diagnose remaining delays. See the
+[test checkpoint](../digidollar-paymaster-testing.md#paymaster-wallet-responsiveness-2026-10-01)
+for measurements and the remaining live GUI check.
+
 ## Unreleased integration follow-up
 
 The Paymaster operator interface now separates Overview, Funds & reserves,

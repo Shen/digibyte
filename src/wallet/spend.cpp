@@ -263,8 +263,9 @@ util::Result<PreSelectedInputs> FetchSelectedInputs(const CWallet& wallet, const
     PreSelectedInputs result;
     const bool can_grind_r = wallet.CanGrindR();
     std::map<COutPoint, CAmount> map_of_bump_fees = wallet.chain().CalculateIndividualBumpFees(coin_control.ListSelected(), coin_selection_params.m_effective_feerate);
+    PaymasterInputReservations paymaster_inputs{&wallet};
     for (const COutPoint& outpoint : coin_control.ListSelected()) {
-        if (IsPaymasterInputReserved(wallet, outpoint) &&
+        if (paymaster_inputs.IsReserved(outpoint) &&
             !coin_control.m_allow_paymaster_pool_inputs) {
             return util::Error{_("Pre-selected input is reserved by an active Paymaster session")};
         }

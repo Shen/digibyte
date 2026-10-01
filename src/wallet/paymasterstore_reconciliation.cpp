@@ -5,6 +5,8 @@
 /** \file Durable final rebroadcast, wallet reconciliation, reorgs, and pruning. */
 
 #include <wallet/paymasterstore.h>
+
+#include <logging/timer.h>
 #include <wallet/paymasterstore_internal.h>
 
 #include <chainparams.h>
@@ -691,6 +693,7 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
 bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
                                                  std::string& error)
 {
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster session reconciliation", BCLog::BENCH);
     error.clear();
     if (now <= 0) {
         error = "PAYMASTER_INVALID_TRANSACTION_OBSERVATION";

@@ -25,6 +25,7 @@
 #include <key.h>
 #include <key_io.h>
 #include <logging.h>
+#include <logging/timer.h>
 #include <net.h>
 #include <netbase.h>
 #include <netmessagemaker.h>
@@ -1398,6 +1399,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                                   size_t& recovered,
                                   std::string& error)
 {
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
     using namespace DigiDollar::Paymaster;
     recovered = 0;
     error.clear();
@@ -1819,6 +1821,7 @@ bool ReconcileProviderFinances(CWallet& wallet,
                                size_t& changed_events,
                                std::string& error)
 {
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
     using namespace DigiDollar::Paymaster;
     changed_events = 0;
     error.clear();
@@ -1864,6 +1867,11 @@ bool ReconcileProviderFinances(CWallet& wallet,
         return false;
     }
 
+    std::map<uint256, size_t> event_positions;
+    for (size_t i = 0; i < finance.events.size(); ++i) {
+        event_positions.emplace(finance.events[i].event_id, i);
+    }
+    std::map<uint256, int64_t> confirmation_times;
     const int64_t now = GetTime();
     const auto transaction_state = [&](const uint256& txid,
                                        int64_t created_at,
@@ -1883,9 +1891,12 @@ bool ReconcileProviderFinances(CWallet& wallet,
             int64_t block_time{0};
             if (const auto* confirmed =
                     transaction->second.state<TxStateConfirmed>()) {
-                wallet.chain().findBlock(
-                    confirmed->confirmed_block_hash,
-                    interfaces::FoundBlock().time(block_time));
+                const auto [entry, inserted] = confirmation_times.emplace(confirmed->confirmed_block_hash, 0);
+                if (inserted) {
+                    wallet.chain().findBlock(confirmed->confirmed_block_hash,
+                                            interfaces::FoundBlock().time(entry->second));
+                }
+                block_time = entry->second;
             }
             // UTC totals follow the active-chain confirmation day. The wallet
             // observation time remains a conservative fallback for old or
@@ -1896,11 +1907,9 @@ bool ReconcileProviderFinances(CWallet& wallet,
         }
     };
     const auto apply_event = [&](ProviderFinanceEvent event) {
-        auto existing = std::find_if(
-            finance.events.begin(), finance.events.end(),
-            [&](const ProviderFinanceEvent& candidate) {
-                return candidate.event_id == event.event_id;
-            });
+        const auto position = event_positions.find(event.event_id);
+        auto existing = position == event_positions.end()
+            ? finance.events.end() : finance.events.begin() + position->second;
         if (existing != finance.events.end()) {
             const bool same_economic_event =
                 existing->genesis_hash == event.genesis_hash &&
@@ -1943,7 +1952,9 @@ bool ReconcileProviderFinances(CWallet& wallet,
             // The shared upsert enforces the durable event bound. Existing
             // entries are updated directly below so reconciliation can rebuild
             // daily totals once, rather than once per historical event.
-            return UpsertProviderFinanceEvent(finance, event, error);
+            if (!UpsertProviderFinanceEvent(finance, event, error)) return false;
+            event_positions.emplace(event.event_id, finance.events.size() - 1);
+            return true;
         }
         *existing = std::move(event);
         return true;
@@ -1977,10 +1988,7 @@ bool ReconcileProviderFinances(CWallet& wallet,
             "DigiByte Paymaster Finance Event v1");
         event_hasher << identity.provider_id << static_cast<uint8_t>(kind) << txid;
         const uint256 event_id = event_hasher.GetSHA256();
-        if (std::any_of(finance.events.begin(), finance.events.end(),
-                        [&](const ProviderFinanceEvent& event) {
-                            return event.event_id == event_id;
-                        })) {
+        if (event_positions.count(event_id) != 0) {
             return true;
         }
         const auto transaction = wallet.mapWallet.find(txid);
