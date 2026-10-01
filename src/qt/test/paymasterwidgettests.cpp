@@ -6543,6 +6543,10 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
     unsafe_history.state = SessionState::INPUTS_RESERVED;
     QVERIFY(!store.ClientSessionHasLiveReservations(unsafe_history, live, error));
     unsafe_history = old_session;
+    unsafe_history.pending_phase = PendingPhase::PENDING_NETWORK;
+    QVERIFY2(store.ClientSessionHasLiveReservations(unsafe_history, live, error), error.c_str());
+    QVERIFY(!live);
+    unsafe_history = old_session;
     unsafe_history.final_txid = uint256::ONE;
     QVERIFY(!store.ClientSessionHasLiveReservations(unsafe_history, live, error));
     unsafe_history = old_session;

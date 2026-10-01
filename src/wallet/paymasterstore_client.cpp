@@ -286,8 +286,16 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
     // same unspent inputs. Prove the old request is unsigned and terminal before
     // treating another validated owner's reservation as unrelated history.
     const auto released_unsigned_session = [&] {
-        if (session.state != SessionState::FAILED || session.pending_phase != PendingPhase::NONE ||
-            !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) return false;
+        if ((session.state != SessionState::FAILED &&
+             session.state != SessionState::CANCELED_SAFE &&
+             session.state != SessionState::CONFLICTED) ||
+            !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) {
+            return false;
+        }
+        // Terminal failed/canceled/conflicted sessions are durable history. A
+        // stale pending-phase bit can survive a restart or a cancelled RPC flow
+        // without indicating any active authorization risk; it must not keep an
+        // otherwise released reservation pinned forever.
         SelfRecoveryRecord self_recovery;
         uint256 alternative_recovery_id;
         if (batch.ReadPaymasterRecoveryWithStatus(session.request_id, self_recovery) != DatabaseReadStatus::NOT_FOUND ||
