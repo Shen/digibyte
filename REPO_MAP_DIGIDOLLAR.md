@@ -801,7 +801,10 @@ or chain parameters.
   and local readiness without provider traffic, reservations, or reconciliation.
 - `paymaster_client.cpp` owns persistent session inspection/resolution,
   alternative recovery, role-limited PSBT processing, submit, and client result
-  handling.
+  handling. Shared `FindSession` preserves the store's request/session-ID read
+  statuses: absence is distinct from read/version errors and dangling indexes.
+  Qt and CLI use the same missing-session error contract after preparation.
+  `GetSessionBySessionIdWithStatus` shares request-ID/tombstone validation.
 - `paymaster_discovery.cpp` owns offer discovery, automatic/manual quote
   selection, reputation, pool inspection, reservations, and quote cancellation.
 - `paymaster_provider.cpp` owns provider identity, policies, safety limits,

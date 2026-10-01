@@ -621,7 +621,9 @@ RPCHelpMan getdigidollarsendsession()
 {
     return RPCHelpMan{
         "getdigidollarsendsession",
-        "Return one persistent DigiDollar send session without creating a new payment attempt.\n",
+        "Return one persistent DigiDollar send session without creating a new payment attempt.\n"
+        "PAYMASTER_SESSION_NOT_FOUND means neither a session nor its retained completion record was found. "
+        "PAYMASTER_SESSION_READ_FAILED and PAYMASTER_UNSUPPORTED_PERSISTED_VERSION never prove absence.\n",
         {
             {"lookup", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Exactly one persistent session identifier", {
                                                                                                                  {"request_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Canonical lowercase UUID"},
@@ -639,7 +641,7 @@ RPCHelpMan getdigidollarsendsession()
             PaymasterStore store{*wallet};
             DigiDollar::Paymaster::PaymentSession session;
             if (!FindSession(request.params[0].get_obj(), store, session)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster session not found");
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
             }
             return SessionToJSON(session, &store);
         },
@@ -1719,6 +1721,8 @@ RPCHelpMan resolvepaymastersession()
         "Inspect or recover an existing Paymaster session.\n"
         "refresh may persist already-received provider equivocation evidence, but creates no payment, signature or reservation. "
         "Use getdigidollarsendsession for a strictly read-only payment observation.\n"
+        "PAYMASTER_SESSION_NOT_FOUND means no session or retained completion was found; "
+        "PAYMASTER_SESSION_READ_FAILED and PAYMASTER_UNSUPPORTED_PERSISTED_VERSION leave status unknown.\n"
         "retry_same never creates a quote, attempt, reservation, or signature. "
         "fallback is allowed only before a user PSBT exists. abandon_unsigned "
         "atomically releases a session for which no transaction authorization can exist. "
@@ -1833,7 +1837,7 @@ RPCHelpMan resolvepaymastersession()
             PaymasterStore store{*wallet};
             DigiDollar::Paymaster::PaymentSession session;
             if (!FindSession(request.params[0].get_obj(), store, session)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster session not found");
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
             }
             if (action == "refresh") wallet->BlockUntilSyncedToCurrentChain();
             if (context.paymaster && context.paymaster->Enabled()) {
@@ -1854,7 +1858,7 @@ RPCHelpMan resolvepaymastersession()
                 if (!FindSession(request.params[0].get_obj(), store,
                                  session)) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
-                                       "Paymaster session not found");
+                                       "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
                 }
                 if (action == "refresh") {
                     return ClientSessionSnapshotToJSON(store, session, action);

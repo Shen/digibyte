@@ -244,6 +244,62 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             -8, "cursor must be a canonical lowercase request UUID",
             client.listdigidollarsendsessions, {"cursor": "not-a-cursor"})
 
+        self.log.info("Paused provider announcements do not trap failed RPC or CLI preparation")
+        client_cli = self.nodes[1].cli("-rpcwallet=client")
+        assert_equal(provider.stoppaymaster({"persistent": True, "pause_setup": True})["running"], False)
+        # Discovery is a cached announcement, not proof that the provider is running.
+        assert len(client.getpaymasteroffers(500)) > 0
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 300,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
+        before_failed_prepare = value_snapshot(self.nodes[0], provider, client, recipient_wallet)
+        missing_lookup = {"request_id": "550e8400-e29b-41d4-a716-446655449001"}
+        for rpc in (client, client_cli):
+            for fee_mode in ("paymaster", "auto"):
+                failed_options = {
+                    **missing_lookup,
+                    "fee_mode": fee_mode,
+                    "maximum_paymaster_fee_cents": 300,
+                    "prepare_only": True,
+                }
+                # The 1,500 cents cover the recipient but not its extra service fee.
+                assert_raises_rpc_error(
+                    -6, "PAYMASTER_DD_INPUT_SELECTION_FAILED: Insufficient confirmed DD balance",
+                    rpc.senddigidollar, recipient, 1_500, "", 0, None, "cents", failed_options)
+                for action in ("refresh", "abandon_unsigned"):
+                    assert_raises_rpc_error(
+                        -4, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found",
+                        rpc.resolvepaymastersession, missing_lookup, action)
+                assert_raises_rpc_error(
+                    -4, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found",
+                    rpc.getdigidollarsendsession, missing_lookup)
+        assert_equal(client.listdigidollarsendsessions()["count"], 0)
+        assert_equal(client.listpaymasterreservations(), [])
+        assert_snapshot_equal(before_failed_prepare, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
+
+        # With sufficient inputs a request can exist before the provider replies.
+        # CLI cancellation uses Core's unsigned capability and needs no provider.
+        paused_lookup = {"request_id": "550e8400-e29b-41d4-a716-446655449002"}
+        paused_options = {**paused_lookup, "fee_mode": "paymaster",
+                          "maximum_paymaster_fee_cents": 100, "prepare_only": True}
+        client_cli.senddigidollar(recipient, 500, "", 0, None, "cents", paused_options)
+        paused_session = client_cli.resolvepaymastersession(paused_lookup, "refresh")
+        assert_equal(paused_session["artifact"], "none")
+        assert "abandon_unsigned" in paused_session["allowed_actions"]
+        closed = client_cli.resolvepaymastersession(paused_lookup, "abandon_unsigned")
+        assert_equal(closed["session"]["state"], "FAILED")
+        assert_equal(closed["artifact"], "none")
+        assert_equal(client.listpaymasterreservations(), [])
+        assert_equal(client.listdigidollarsendsessions()["count"], 0)
+        provider.setpaymasterenabled(True)
+        assert_equal(provider.startpaymaster()["running"], True)
+        self.wait_until(lambda: len(client.getpaymasteroffers(500)) > 0)
+
         self.log.info("Reject malformed client PSBTs at the direct RPC boundary")
         assert_raises_rpc_error(
             -22, "Paymaster PSBT decode failed",

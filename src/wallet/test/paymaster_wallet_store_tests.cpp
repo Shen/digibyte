@@ -762,6 +762,87 @@ BOOST_AUTO_TEST_CASE(outdated_session_records_fail_without_mutation)
 }
 
 
+BOOST_AUTO_TEST_CASE(session_lookup_distinguishes_absence_from_read_failure)
+{
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-44665544f005";
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    PaymentSession session;
+    UniValue by_request{UniValue::VOBJ};
+    by_request.pushKV("request_id", request_id);
+    BOOST_CHECK(!paymaster_rpc::internal::FindSession(by_request, store, session));
+    std::string error;
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f005"), FeeMode::PAYMASTER,
+                                           100, session, error) == CreatePaymasterSessionResult::CREATED);
+    UniValue by_session{UniValue::VOBJ};
+    by_session.pushKV("session_id", session.session_id.GetHex());
+    const std::vector<UniValue> lookups{by_request, by_session};
+    const auto check_lookup = [&](const char* expected_error) {
+        const auto before = database.m_records;
+        for (const auto& lookup : lookups) {
+            PaymentSession loaded;
+            if (expected_error) {
+                BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(lookup, store, loaded), UniValue,
+                    [&](const UniValue& failure) {
+                        return failure.find_value("code").getInt<int>() == RPC_WALLET_ERROR &&
+                               failure.find_value("message").get_str() == expected_error;
+                    });
+            } else {
+                BOOST_REQUIRE(paymaster_rpc::internal::FindSession(lookup, store, loaded));
+                BOOST_CHECK_EQUAL(loaded.request_id, request_id);
+                BOOST_CHECK(loaded.session_id == session.session_id);
+            }
+        }
+        BOOST_CHECK(database.m_records == before);
+    };
+    check_lookup(nullptr);
+    database.m_pass = false;
+    check_lookup("PAYMASTER_SESSION_READ_FAILED");
+    database.m_pass = true;
+
+    const auto record_key = [&](const std::string& type) {
+        DataStream stream;
+        stream << std::make_pair(type, std::string{request_id});
+        return SerializeData{stream.begin(), stream.end()};
+    };
+    const auto session_key = record_key(DBKeys::PAYMASTER_SESSION);
+    const auto tombstone_key = record_key(DBKeys::PAYMASTER_TOMBSTONE);
+    const auto saved_session = database.m_records.at(session_key);
+    IdempotencyTombstone tombstone;
+    tombstone.request_id = request_id;
+    tombstone.session_id = session.session_id;
+    tombstone.canonical_request_hash = session.canonical_request_hash;
+    tombstone.final_state = SessionState::FAILED;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterTombstone(tombstone));
+    }
+    const auto saved_tombstone = database.m_records.at(tombstone_key);
+    // Unreadable live state must not fall back to a readable completion record.
+    for (const bool corrupt_tombstone : {false, true}) {
+        if (corrupt_tombstone) database.m_records.erase(session_key);
+        const auto& key = corrupt_tombstone ? tombstone_key : session_key;
+        const uint16_t version = corrupt_tombstone ? IdempotencyTombstone::CURRENT_VERSION : PaymentSession::CURRENT_VERSION;
+        for (const bool future_version : {false, true}) {
+            CDataStream value{SER_DISK, CLIENT_VERSION};
+            value << static_cast<uint16_t>(version + (future_version ? 1 : 0));
+            database.m_records[key] = SerializeData{value.begin(), value.end()};
+            check_lookup(future_version ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_SESSION_READ_FAILED");
+        }
+        database.m_records[key] = corrupt_tombstone ? saved_tombstone : saved_session;
+    }
+    // A retained completion remains a found session through either identifier.
+    check_lookup(nullptr);
+    database.m_records.erase(tombstone_key);
+    BOOST_CHECK(!paymaster_rpc::internal::FindSession(by_request, store, session));
+    const auto orphaned = database.m_records;
+    BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(by_session, store, session), UniValue,
+        [](const UniValue& failure) {
+            return failure.find_value("message").get_str() == "PAYMASTER_SESSION_READ_FAILED";
+        });
+    BOOST_CHECK(database.m_records == orphaned);
+}
+
 BOOST_AUTO_TEST_CASE(auto_dispatch_rejects_unreadable_session_before_funding_or_signing)
 {
     constexpr auto request_id = "550e8400-e29b-41d4-a716-44665544f003";

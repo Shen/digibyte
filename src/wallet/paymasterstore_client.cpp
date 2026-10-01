@@ -225,44 +225,25 @@ DatabaseReadStatus PaymasterStore::GetSessionByRequestIdWithStatus(
 
 bool PaymasterStore::GetSessionBySessionId(const uint256& session_id, PaymentSession& session) const
 {
+    return GetSessionBySessionIdWithStatus(session_id, session) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetSessionBySessionIdWithStatus(
+    const uint256& session_id, PaymentSession& session) const
+{
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::string request_id;
-    if (batch.ReadPaymasterSessionIdWithStatus(session_id, request_id) !=
-        DatabaseReadStatus::FOUND) {
-        return false;
+    const auto index_status = batch.ReadPaymasterSessionIdWithStatus(session_id, request_id);
+    if (index_status != DatabaseReadStatus::FOUND) return index_status;
+    const auto session_status = GetSessionByRequestIdWithStatus(request_id, session);
+    // An index pointing to a missing or different session is damaged state,
+    // never evidence that the requested payment was not created.
+    if (session_status == DatabaseReadStatus::NOT_FOUND ||
+        (session_status == DatabaseReadStatus::FOUND && session.session_id != session_id)) {
+        return DatabaseReadStatus::READ_ERROR;
     }
-    const DatabaseReadStatus session_status =
-        batch.ReadPaymasterSessionWithStatus(request_id, session);
-    if (session_status == DatabaseReadStatus::FOUND) {
-        return session.session_id == session_id;
-    }
-    // A present-but-unreadable live session must never be reinterpreted as its
-    // tombstone. Only a genuinely absent live record permits the fallback.
-    if (session_status != DatabaseReadStatus::NOT_FOUND) return false;
-    IdempotencyTombstone tombstone;
-    if (batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone) !=
-            DatabaseReadStatus::FOUND ||
-        tombstone.session_id != session_id) {
-        return false;
-    }
-    session = {};
-    session.request_id = tombstone.request_id;
-    session.session_id = tombstone.session_id;
-    session.canonical_request_hash = tombstone.canonical_request_hash;
-    session.fee_mode_requested = tombstone.fee_mode_requested;
-    session.fee_mode_used = tombstone.fee_mode_used;
-    session.requested_amount = tombstone.requested_amount;
-    session.subtract_paymaster_fee_from_amount =
-        tombstone.subtract_paymaster_fee_from_amount;
-    session.send_all_spendable_dd = tombstone.send_all_spendable_dd;
-    session.state = tombstone.final_state;
-    if (tombstone.final_state == SessionState::CANCELED_SAFE) {
-        session.recovery_txid = tombstone.final_txid;
-    } else {
-        session.final_txid = tombstone.final_txid;
-    }
-    return true;
+    return session_status;
 }
 
 bool PaymasterStore::ListClientSessions(

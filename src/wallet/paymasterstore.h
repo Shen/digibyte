@@ -110,6 +110,10 @@ public:
         DigiDollar::Paymaster::PaymentSession& session) const;
     bool GetSessionByRequestId(const std::string& request_id,
                                DigiDollar::Paymaster::PaymentSession& session) const;
+    /** Preserve missing/index/read/version failures for RPC status inspection. */
+    DatabaseReadStatus GetSessionBySessionIdWithStatus(
+        const uint256& session_id,
+        DigiDollar::Paymaster::PaymentSession& session) const;
     bool GetSessionBySessionId(const uint256& session_id,
                                DigiDollar::Paymaster::PaymentSession& session) const;
     /** Snapshot client-side sessions for periodic inbox maintenance. Provider

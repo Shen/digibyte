@@ -18,6 +18,44 @@ budget, another send RPC,
 or deferred execution after signing. No consensus, Paymaster wire encoding,
 wallet record encoding, or wallet feature flag is introduced by this package.
 
+## Failed preparation and session lookup
+
+A public announcement can remain cached for up to ten minutes after its
+creation even if the provider pauses. Discovery does not prove availability.
+After a failed or lost preparation reply, inspect the same request UUID on the
+same wallet endpoint before preparing another payment. This applies equally to
+Qt, HTTP RPC and `digibyte-cli`.
+
+`getdigidollarsendsession` and `resolvepaymastersession` distinguish:
+
+- `PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found` (`-4`): a
+  status-aware lookup found neither the requested session nor its retained
+  completion record. Only a fresh prepare-only attempt with no previously
+  observed session or authorization may return to composition on this result.
+- `PAYMASTER_SESSION_READ_FAILED` (`-4`): a read, validation or session-index
+  inconsistency; the payment state remains unknown.
+- `PAYMASTER_UNSUPPORTED_PERSISTED_VERSION` (`-4`): an unreadable record version;
+  preserve the request and wallet. It is never evidence of absence.
+
+A known session disappearing is an error even if the lookup reports absence.
+Older generic missing-session messages do not establish the new distinction.
+Existing successful result schemas and RPC argument positions are unchanged.
+
+`PAYMASTER_DD_INPUT_SELECTION_FAILED: ...` (`-6`) preserves the upstream DD
+input/change error, including the provider's service fee in the target amount.
+This send error alone does not prove that no session exists; always reconcile
+its request UUID. The initial recipient amount can fit the displayed balance
+while the total with the service fee does not.
+
+For a found unsigned session, read `allowed_actions` and use `abandon_unsigned`
+when permitted. It releases the local unsigned reservation without requiring
+the provider to resume. Inspect the same request after an uncertain cancellation
+reply. For signed or otherwise protected state, retain the same payment and
+use only the offered retry/recovery actions; never create a replacement payment
+merely because its provider is offline. Qt clears only a confirmed uncreated
+local attempt or an authoritatively closed unsigned request, preserving the
+recipient and amount for the user's next decision.
+
 ## Explicit transport retry
 
 `senddigidollar` accepts the optional boolean `retry_transport` in its Paymaster

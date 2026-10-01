@@ -3025,15 +3025,23 @@ bool FindSession(const UniValue& lookup, PaymasterStore& store,
         throw JSONRPCError(RPC_INVALID_PARAMETER,
                            "lookup must contain exactly one of request_id or session_id");
     }
+    DatabaseReadStatus status;
     if (by_request) {
         const std::string request_id = lookup.find_value("request_id").get_str();
         if (!DigiDollar::Paymaster::IsCanonicalRequestId(request_id)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER,
                                "request_id must be a canonical lowercase UUID");
         }
-        return store.GetSessionByRequestId(request_id, session);
+        status = store.GetSessionByRequestIdWithStatus(request_id, session);
+    } else {
+        status = store.GetSessionBySessionIdWithStatus(ParseHashO(lookup, "session_id"), session);
     }
-    return store.GetSessionBySessionId(ParseHashO(lookup, "session_id"), session);
+    if (status == DatabaseReadStatus::FOUND) return true;
+    if (status == DatabaseReadStatus::NOT_FOUND) return false;
+    throw JSONRPCError(RPC_WALLET_ERROR,
+                       status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                           ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION"
+                           : "PAYMASTER_SESSION_READ_FAILED");
 }
 
 UniValue AttemptToJSON(const DigiDollar::Paymaster::ProviderAttempt& attempt)

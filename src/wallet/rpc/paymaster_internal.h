@@ -299,6 +299,7 @@ void AddSessionPaymentStatus(UniValue& result,
                              const PaymasterStore* store);
 UniValue SessionToJSON(const DigiDollar::Paymaster::PaymentSession& session,
                        const PaymasterStore* store = nullptr);
+/** False means confirmed absence; unreadable or unsupported records throw. */
 bool FindSession(const UniValue& lookup,
                  PaymasterStore& store,
                  DigiDollar::Paymaster::PaymentSession& session);

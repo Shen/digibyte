@@ -1770,11 +1770,14 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                                              &selected_amounts, &error);
     } else {
         inputs_ok = dd_wallet->SelectDDCoins(selected->user_total.value, selected_inputs,
-                                             selected_total, &selected_amounts);
+                                             selected_total, &selected_amounts, &error);
     }
     if (!inputs_ok) {
+        // Preserve the upstream selection reason and give GUI/CLI clients a
+        // stable category. Session existence still requires a separate lookup.
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-                           error.empty() ? "Insufficient confirmed DigiDollar inputs" : error);
+                           "PAYMASTER_DD_INPUT_SELECTION_FAILED: " +
+                               (error.empty() ? "Insufficient confirmed DigiDollar inputs" : error));
     }
 
     UniValue inputs{UniValue::VARR};
