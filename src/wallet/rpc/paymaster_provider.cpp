@@ -3544,6 +3544,7 @@ RPCHelpMan getpaymasteroperatorinfo()
                                                                      {RPCResult::Type::BOOL, "encrypted", "Wallet uses key encryption"},
                                                                      {RPCResult::Type::OBJ, "provider", "Provider configuration and local readiness", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymasterinfo; no finance history scan"}}},
                                                                      {RPCResult::Type::OBJ, "node_settings", "Effective startup values, including ordinary_outbound_target; OS-limited capacity is reported separately in provider.transport", {{RPCResult::Type::ELISION, "", "Allowed Paymaster node options"}}},
+                                                                     {RPCResult::Type::OBJ, "node_setting_overrides", "Options controlled outside the editable config: command_line, forced, or settings_json; advisory, configuration RPCs recheck conflicts", {{RPCResult::Type::ELISION, "", "Setting name and controlling source"}}},
                                                                      {RPCResult::Type::OBJ, "safety", "Finite policies and budget accounting", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymastersafetystatus; no expiry mutation"}}},
                                                                      {RPCResult::Type::ARR, "diagnostics", "Ordered causes and action identifiers", {{RPCResult::Type::OBJ, "", "Diagnostic", {
                                                                                                                                                                                                   {RPCResult::Type::STR, "code", "Stable code"},
@@ -3697,9 +3698,25 @@ RPCHelpMan getpaymasteroperatorinfo()
                 for (const auto& bind : context.args->GetArgs("-paymasterbind"))
                     binds.push_back(bind);
                 startup.pushKV("paymasterbind", binds);
+                startup.pushKV("paymasterendpoint", context.args->GetArg("-paymasterendpoint", ""));
                 if (const auto* node = wallet->chain().context(); node && node->connman) startup.pushKV("ordinary_outbound_target", node->connman->GetOrdinaryOutboundTarget());
             }
             result.pushKV("node_settings", startup);
+            // Advisory provenance for the connection editor. The configuration
+            // RPC still rechecks all overrides and included files before writing.
+            UniValue overrides{UniValue::VOBJ};
+            if (context.args) {
+                context.args->LockSettings([&](const common::Settings& settings) {
+                    for (const auto* key : {"digidollar", "paymaster", "txindex", "v2transport", "prune",
+                                           "maxconnections", "paymastermaxoutbound", "paymastermaxinbound",
+                                           "paymasterbind", "paymasterendpoint"}) {
+                        if (settings.forced_settings.count(key)) overrides.pushKV(key, "forced");
+                        else if (settings.command_line_options.count(key)) overrides.pushKV(key, "command_line");
+                        else if (settings.rw_settings.count(key)) overrides.pushKV(key, "settings_json");
+                    }
+                });
+            }
+            result.pushKV("node_setting_overrides", overrides);
             result.pushKV("schema_version", 1);
             result.pushKV("network", ChainTypeToString(Params().GetChainType()));
             result.pushKV("wallet", wallet->GetName());

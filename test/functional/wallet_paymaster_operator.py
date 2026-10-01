@@ -89,6 +89,17 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         status = wallet.getpaymasteroperatorinfo()
         assert_equal(status["schema_version"], 1)
         assert_equal(status["network"], "regtest")
+        for option in ("digidollar", "paymaster", "prune", "txindex", "v2transport"):
+            assert_equal(status["node_setting_overrides"][option], "command_line")
+        assert_equal(status["node_settings"]["paymasterendpoint"], "")
+        assert "paymasterbind" not in status["node_setting_overrides"]
+        node_settings = node.getpaymasternodeconfig()
+        assert_equal(node_settings["network"], "regtest")
+        for option in ("digidollar", "paymaster", "prune", "txindex", "v2transport"):
+            assert_equal(node_settings["fields"][option]["source"], "command_line")
+            assert_equal(node_settings["fields"][option]["editable"], False)
+        assert_equal(node_settings["fields"]["paymasterbind"]["editable"], True)
+
         assert_equal(status["wallet"], "operator")
         assert_equal(status["provider"]["settings_present"], False)
         assert any(item["code"] == "PAYMASTER_EXTERNAL_REACHABILITY_UNKNOWN" for item in status["diagnostics"])
@@ -182,6 +193,11 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         result = node.applypaymasternodeconfig(plan)
         assert_equal(result["applied"], True)
         assert_equal(Path(result["backup"]).read_bytes(), original)
+        pending = node.getpaymasternodeconfig()["fields"]["paymastermaxoutbound"]
+        assert_equal(pending["value"], 1)
+        assert_equal(pending["configured_value"], 2)
+        assert_equal(pending["restart_required"], True)
+
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["transport"]["outbound_limit"], 1)
         self.restart_node(0)
         if "operator" not in node.listwallets():
@@ -191,8 +207,16 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["transport"]["outbound_limit"], 2)
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["enabled"], False)
         updated = config.read_bytes()
+        config.write_bytes(original)
+        removed = node.getpaymasternodeconfig()["fields"]["paymastermaxoutbound"]
+        assert_equal(removed["source"], "loaded_configuration")
+        assert_equal(removed["value"], 2)
+        assert_equal(removed["configured_value"], 1)
+        assert_equal(removed["restart_required"], True)
         config.write_bytes(updated + b"\n[regtest]\npaymastermaxoutbound=3\n")
         assert_raises_rpc_error(-8, "duplicate", node.preparepaymasternodeconfig, {"paymastermaxoutbound": 1})
+        assert_equal(node.getpaymasternodeconfig()["fields"]["paymastermaxoutbound"]["editable"], False)
+
         config.write_bytes(updated + b"\n[regtest]\nincludeconf=operator.conf\n")
         assert_raises_rpc_error(-8, "INCLUDED_FILE", node.preparepaymasternodeconfig, {"paymastermaxoutbound": 1})
         config.write_bytes(updated)
@@ -206,6 +230,13 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert_raises_rpc_error(-8, "PLAN_CHANGED", node.applypaymasternodeconfig, {"plan_id": preview["plan_id"], "settings": preview["settings"]})
         included.write_text("[regtest]\npaymastermaxoutbound=3\n", encoding="utf-8")
         assert_raises_rpc_error(-8, "included file", node.preparepaymasternodeconfig, {"paymastermaxoutbound": 1})
+        included_field = node.getpaymasternodeconfig()["fields"]["paymastermaxoutbound"]
+        assert_equal(included_field["editable"], False)
+        assert "included file" in included_field["reason"]
+        included.write_text("paymasterbind=127.0.0.1:18499\n", encoding="utf-8")
+        assert_equal(node.getpaymasternodeconfig()["fields"]["paymasterbind"]["editable"], False)
+        assert_raises_rpc_error(-8, "included file", node.preparepaymasternodeconfig, {"paymasterbind": ["127.0.0.1:18498"]})
+
         config.write_bytes(updated)
         settings = node.chain_path / "settings.json"
         settings_original = settings.read_bytes() if settings.exists() else None
@@ -214,6 +245,11 @@ class PaymasterOperatorTest(DigiByteTestFramework):
             prior["paymastermaxoutbound"] = 3
             settings.write_text(json.dumps(prior), encoding="utf-8")
             assert_raises_rpc_error(-8, "settings.json", node.preparepaymasternodeconfig, {"paymastermaxoutbound": 1})
+            disk_setting = node.getpaymasternodeconfig()["fields"]["paymastermaxoutbound"]
+            assert_equal(disk_setting["value"], 2)
+            assert_equal(disk_setting["source"], "loaded_configuration")
+            assert_equal(disk_setting["editable"], False)
+            assert "settings.json" in disk_setting["reason"]
         finally:
             if settings_original is None:
                 settings.unlink()

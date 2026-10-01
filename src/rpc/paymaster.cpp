@@ -343,6 +343,125 @@ std::vector<RPCArg> NodeSettingsArgs()
     }
     return fields;
 }
+RPCHelpMan getpaymasternodeconfig()
+{
+    return RPCHelpMan{
+        "getpaymasternodeconfig",
+        "Inspect effective Paymaster node values and the current configuration file without writing. Values apply to every wallet on this node. Loaded configuration provenance is distinguished from the current file contents.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "Node configuration", {
+            {RPCResult::Type::STR, "network", "Active network"},
+            {RPCResult::Type::STR, "target", "Editable configuration file"},
+            {RPCResult::Type::OBJ, "fields", "Managed options", {{RPCResult::Type::ELISION, "", "value, source, configured_value, editable, reason, restart_required"}}},
+        }},
+        RPCExamples{HelpExampleCli("getpaymasternodeconfig", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
+            std::lock_guard<std::mutex> lock(g_config_mutex);
+            auto& args = *EnsureAnyNodeContext(request.context).args;
+            const auto network = ChainTypeToString(Params().GetChainType());
+            const auto path = args.GetConfigFilePath();
+            const auto entries = ParseConfig(ReadConfig(path));
+            std::map<std::string, std::string> conflicts;
+            common::Settings loaded;
+            args.LockSettings([&](const common::Settings& value) { loaded = value; });
+            const auto applicable = [&](const ConfigEntry& entry) {
+                if (!entry.section.empty()) return entry.section == network;
+                const auto key = entry.key.substr(0, 2) == "no" ? entry.key.substr(2) : entry.key;
+                return network == "main" || (key != "paymasterbind" && key != "paymasterendpoint");
+            };
+            size_t includes{0};
+            for (const auto& entry : entries) {
+                if (loaded.command_line_options.count("includeconf") || !applicable(entry)) continue;
+                if (entry.key == "noincludeconf") throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_OVERRIDE: negated includeconf");
+                if (entry.key != "includeconf") continue;
+                if (++includes > 16) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_TOO_MANY_INCLUDES");
+                const auto included_path = AbsPathForConfigVal(args, fs::PathFromString(entry.value), false);
+                if (!fs::exists(included_path)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_INCLUDED_FILE_MISSING");
+                for (const auto& item : ParseConfig(ReadConfig(included_path))) {
+                    const auto key = item.key.substr(0, 2) == "no" ? item.key.substr(2) : item.key;
+                    if ((item.section.empty() || item.section == network) && CONFIG_KEYS.count(key)) conflicts[key] = "included file: " + fs::PathToString(included_path);
+                }
+            }
+            fs::path settings_path;
+            if (args.GetSettingsPath(&settings_path)) {
+                UniValue disk;
+                const auto data = ReadConfig(settings_path);
+                if (fs::exists(settings_path) && (!disk.read(data) || !disk.isObject()))
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_SETTINGS_INVALID");
+                for (const auto& key : CONFIG_KEYS)
+                    for (const auto& candidate : {key, "no" + key, network + "." + key, network + ".no" + key})
+                        if (!disk.find_value(candidate).isNull()) conflicts[key] = "settings.json: " + fs::PathToString(settings_path);
+            }
+            UniValue fields{UniValue::VOBJ};
+            for (const auto& key : CONFIG_KEYS) {
+                UniValue current;
+                if (key == "paymasterbind") {
+                    current.setArray();
+                    for (const auto& bind : args.GetArgs("-" + key)) current.push_back(bind);
+                } else if (key == "paymasterendpoint") current = UniValue{args.GetArg("-" + key, "")};
+                else if (key == "maxconnections") current = UniValue{args.GetIntArg("-" + key, DEFAULT_MAX_PEER_CONNECTIONS)};
+                else if (key == "paymastermaxoutbound") current = UniValue{args.GetIntArg("-" + key, DigiDollar::Paymaster::DEFAULT_DIRECT_OUTBOUND)};
+                else if (key == "paymastermaxinbound") current = UniValue{args.GetIntArg("-" + key, DigiDollar::Paymaster::MAX_DIRECT_INBOUND)};
+                else if (key == "prune") current = UniValue{args.GetIntArg("-prune", 0)};
+                else current = UniValue{int(args.GetBoolArg("-" + key, key == "paymaster" || (key == "v2transport" && DEFAULT_V2_TRANSPORT)))};
+                std::string source{"default"};
+                if (loaded.forced_settings.count(key)) source = "forced";
+                else if (loaded.command_line_options.count(key)) source = "command_line";
+                else if (loaded.rw_settings.count(key)) source = "settings_json";
+                else {
+                    for (const auto& section : loaded.ro_config)
+                        if ((section.first == network || (section.first.empty() && (network == "main" || (key != "paymasterbind" && key != "paymasterendpoint")))) && section.second.count(key))
+                            source = "loaded_configuration";
+                }
+                std::vector<std::string> defaults, selected;
+                for (const auto& entry : entries) {
+                    if (!applicable(entry)) continue;
+                    if (entry.key == "no" + key) conflicts[key] = "negated configuration entry";
+                    if (entry.key != key) continue;
+                    (entry.section.empty() ? defaults : selected).push_back(entry.value);
+                }
+                if ((defaults.size() > 1) || (selected.size() > 1 && key != "paymasterbind"))
+                    conflicts[key] = "duplicate configuration entries";
+                if (key == "paymasterbind" && !defaults.empty()) conflicts[key] = "move default-section binds to the active network section";
+                if (selected.empty()) selected = defaults;
+                UniValue configured;
+                if (key == "paymasterbind") configured.setArray();
+                else if (key == "paymasterendpoint") configured = UniValue{""};
+                else if (key == "maxconnections") configured = UniValue{DEFAULT_MAX_PEER_CONNECTIONS};
+                else if (key == "paymastermaxoutbound") configured = UniValue{DigiDollar::Paymaster::DEFAULT_DIRECT_OUTBOUND};
+                else if (key == "paymastermaxinbound") configured = UniValue{DigiDollar::Paymaster::MAX_DIRECT_INBOUND};
+                else if (key == "prune") configured = UniValue{0};
+                else configured = UniValue{int(key == "paymaster" || (key == "v2transport" && DEFAULT_V2_TRANSPORT))};
+                if (!selected.empty()) {
+                    if (key == "paymasterbind") {
+                        configured.setArray();
+                        for (const auto& value : selected) configured.push_back(value);
+                    } else if (key == "paymasterendpoint") configured = UniValue{selected.front()};
+                    else {
+                        UniValue number;
+                        if (!number.read(selected.front()) || !number.isNum()) conflicts[key] = "configuration value requires manual review";
+                        else configured = number;
+                    }
+                }
+                const bool external = source == "forced" || source == "command_line" || source == "settings_json";
+                const bool editable = !external && !conflicts.count(key);
+                UniValue field{UniValue::VOBJ};
+                field.pushKV("value", current);
+                field.pushKV("source", source);
+                field.pushKV("configured_value", configured);
+                field.pushKV("editable", editable);
+                field.pushKV("reason", external ? source : conflicts.count(key) ? conflicts.at(key) : "");
+                field.pushKV("restart_required", editable && configured.write() != current.write());
+                fields.pushKV(key, field);
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("network", network);
+            result.pushKV("target", fs::PathToString(path));
+            result.pushKV("fields", fields);
+            return result;
+        }};
+}
+
 RPCHelpMan preparepaymasternodeconfig()
 {
     return RPCHelpMan{"preparepaymasternodeconfig", "Preview restart-only changes to this node's active configuration. Does not write or probe. Conflicting overrides, ambiguous entries and conflicting included files require manual resolution.\n", {{"settings", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Allowed Paymaster node options", NodeSettingsArgs()}}, RPCResult{RPCResult::Type::OBJ, "", "Reviewable config plan", {{RPCResult::Type::ELISION, "", "plan_id, network, target, settings, changes, restart_required, external_reachability, instructions"}}}, RPCExamples{HelpExampleCli("preparepaymasternodeconfig", "'{\"paymastermaxoutbound\":1}'")}, [](const RPCHelpMan&, const JSONRPCRequest& request) {
@@ -425,6 +544,7 @@ RPCHelpMan checkpaymasterendpoint()
 void RegisterPaymasterRPCCommands(CRPCTable& table)
 {
     static const CRPCCommand commands[]{
+        {"digidollar", &getpaymasternodeconfig},
         {"digidollar", &preparepaymasternodeconfig},
         {"digidollar", &applypaymasternodeconfig},
         {"digidollar", &checkpaymasterendpoint},
