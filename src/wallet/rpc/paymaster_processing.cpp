@@ -45,6 +45,7 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/util.h>
 #include <wallet/spend.h>
+#include <wallet/walletdb.h>
 
 #include <univalue.h>
 #include <util/overflow.h>
@@ -398,6 +399,8 @@ RPCHelpMan processpaymastersubmits()
         RPCResult{RPCResult::Type::OBJ, "", "Provider submit processing result", {
                                                                                      {RPCResult::Type::BOOL, "processed", "Whether a submit was available"},
                                                                                      {RPCResult::Type::BOOL, "queued", "Whether PMRESULT was queued"},
+                                                                                     {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether this stale or mismatched submission was discarded"},
+                                                                                     {RPCResult::Type::STR, "rejection_reason", /*optional=*/true, "Reason for discarding only this submission"},
                                                                                      {RPCResult::Type::STR, "message_type", /*optional=*/true, "submit or recovery_submit"},
                                                                                      {RPCResult::Type::STR, "request_id", /*optional=*/true, "Canonical request UUID"},
                                                                                      {RPCResult::Type::STR_HEX, "session_id", /*optional=*/true, "Client session"},
@@ -885,10 +888,32 @@ RPCHelpMan processpaymastersubmits()
             }
             PaymasterStore store{*wallet};
             ProviderAttempt attempt;
-            if (!store.GetAttemptByTemplateCommitment(submit->template_commitment, attempt) ||
+            bool have_attempt{false};
+            {
+                LOCK(wallet->cs_wallet);
+                WalletBatch batch{wallet->GetDatabase()};
+                uint256 indexed_attempt;
+                const auto status = batch.ReadPaymasterTemplateWithStatus(submit->template_commitment, indexed_attempt);
+                if (status == DatabaseReadStatus::FOUND) {
+                    if (batch.ReadPaymasterAttemptWithStatus(indexed_attempt, attempt) != DatabaseReadStatus::FOUND ||
+                        attempt.template_commitment != submit->template_commitment)
+                        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SUBMIT_ATTEMPT_DATABASE_READ");
+                    have_attempt = true;
+                } else if (status != DatabaseReadStatus::NOT_FOUND) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SUBMIT_TEMPLATE_DATABASE_READ");
+                }
+            }
+            if (!have_attempt ||
                 attempt.provider_id != submit->provider_id || attempt.session_id != submit->session_id ||
                 attempt.quote_id != submit->quote_id || attempt.commit_key != submit->commit_key) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_SUBMIT_BINDING_MISMATCH");
+                // Stale or foreign submissions are peer-local failures. In
+                // particular, a confirmed session may already be a tombstone.
+                // Consume only this message so it cannot pin the service queue.
+                if (!AcknowledgeRejectedDirectMessage(*context.paymaster, direct, error))
+                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                result.pushKV("rejected", true);
+                result.pushKV("rejection_reason", "PAYMASTER_SUBMIT_BINDING_MISMATCH");
+                return result;
             }
             PaymentSession session;
             if (!store.GetSessionBySessionId(attempt.session_id, session) ||

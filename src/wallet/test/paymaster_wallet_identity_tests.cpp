@@ -4,17 +4,16 @@
 
 /** \file Persistent provider-identity ownership and signing tests. */
 
-#include <wallet/rpc/paymaster.h>
-#include <rpc/util.h>
-#include <rpc/request.h>
-#include <paymaster/wire.h>
-#include <paymaster/manager.h>
 #include <boost/test/unit_test.hpp>
 
 #include <chainparams.h>
 #include <hash.h>
 #include <key.h>
 #include <paymaster/directory.h>
+#include <paymaster/manager.h>
+#include <paymaster/wire.h>
+#include <rpc/request.h>
+#include <rpc/util.h>
 #include <script/standard.h>
 #include <streams.h>
 #include <util/time.h>
@@ -24,6 +23,7 @@
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -1584,6 +1584,70 @@ BOOST_AUTO_TEST_CASE(automatic_submit_defers_before_wallet_or_index_wait)
                    error.find_value("message").get_str() == "PAYMASTER_PROVIDER_SYNCING";
         });
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+}
+
+BOOST_AUTO_TEST_CASE(stale_submit_is_consumed_without_faulting_provider)
+{
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "stale-provider", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(provider_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    Manager manager{true};
+    context.paymaster = &manager;
+    context.wallets.emplace_back(&provider_wallet, [](CWallet*) {});
+    ProviderIdentityRecord identity;
+    std::string error;
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
+                                      m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "Stale submit", GetTime(), identity, error));
+        ProviderSettings settings;
+        settings.enabled = true;
+        settings.policy_hash = uint256::ONE;
+        settings.updated_at = GetTime();
+        settings.operation_mode = ProviderOperationMode::MANUAL;
+        BOOST_REQUIRE(WalletBatch{provider_wallet.GetDatabase()}.WritePaymasterSettings(settings));
+    }
+    BOOST_REQUIRE(context.paymaster->StartProvider(provider_wallet.GetName(), identity.provider_id));
+    PaymasterSubmit submit;
+    submit.genesis_hash = Params().GenesisBlock().GetHash();
+    submit.provider_id = identity.provider_id;
+    submit.request_id = "550e8400-e29b-41d4-a716-446655440088";
+    submit.session_id = uint256S("81");
+    submit.quote_id = uint256S("82");
+    submit.commit_key = uint256S("83");
+    submit.template_commitment = uint256S("84");
+    submit.user_psbt = {1};
+    BOOST_REQUIRE(ValidateSubmitEnvelope(submit, submit.genesis_hash, error));
+    BOOST_REQUIRE(context.paymaster->EnqueueDirectMessage(31, uint256S("85"), 100,
+        DirectPayload{submit}, GetTime()));
+    PaymasterSubmit other = submit;
+    other.provider_id = uint256S("86");
+    BOOST_REQUIRE(context.paymaster->EnqueueDirectMessage(32, uint256S("87"), 100,
+        DirectPayload{other}, GetTime()));
+    JSONRPCRequest request;
+    request.context = &context;
+    request.strMethod = "processpaymastersubmits";
+    request.params = UniValue{UniValue::VARR};
+    const auto before = GetMockableDatabase(provider_wallet).m_records;
+    UniValue result;
+    try {
+        result = processpaymastersubmits().HandleRequest(request);
+    } catch (const UniValue& rpc_error) {
+        BOOST_FAIL(rpc_error.write());
+    }
+    BOOST_CHECK(result.find_value("processed").isTrue());
+    BOOST_CHECK(result.find_value("rejected").isTrue());
+    BOOST_CHECK_EQUAL(result.find_value("rejection_reason").get_str(), "PAYMASTER_SUBMIT_BINDING_MISMATCH");
+    BOOST_CHECK_EQUAL(context.paymaster->DirectMessageCount(), 1U);
+    BOOST_CHECK(!processpaymastersubmits().HandleRequest(request).find_value("processed").get_bool());
+    BOOST_CHECK(context.paymaster->IsProviderRunning(provider_wallet.GetName(), identity.provider_id));
+    BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
