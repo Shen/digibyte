@@ -59,6 +59,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
     def add_options(self, parser):
         self.add_wallet_options(parser, legacy=False)
+        parser.add_argument("--client-preparation-only", action="store_true",
+                            help="Run capability, failed-preparation and paused-provider cancellation contracts only")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -292,13 +294,16 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(paused_session["artifact"], "none")
         assert "abandon_unsigned" in paused_session["allowed_actions"]
         closed = client_cli.resolvepaymastersession(paused_lookup, "abandon_unsigned")
-        assert_equal(closed["session"]["state"], "FAILED")
+        assert_equal(closed["session"]["session_state"], "FAILED")
         assert_equal(closed["artifact"], "none")
         assert_equal(client.listpaymasterreservations(), [])
         assert_equal(client.listdigidollarsendsessions()["count"], 0)
         provider.setpaymasterenabled(True)
         assert_equal(provider.startpaymaster()["running"], True)
         self.wait_until(lambda: len(client.getpaymasteroffers(500)) > 0)
+
+        if self.options.client_preparation_only:
+            return
 
         self.log.info("Reject malformed client PSBTs at the direct RPC boundary")
         assert_raises_rpc_error(

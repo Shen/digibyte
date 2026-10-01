@@ -81,6 +81,7 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         request_id = "72f58f36-babf-4e84-a830-f3e055f5bf54"
         options, _, resume_send = harness.wait_for_quote(
             request_id, recipient, 100)
+        unsigned_psbt = resume_send()["psbt"]
         authorized = harness.authorize_quote(options, resume_send)
         assert_equal(authorized["session_state"], "PENDING_PROVIDER")
         mempool_before = set(self.nodes[0].getrawmempool())
@@ -180,45 +181,87 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         self.sync_mempools()
         mempools_before_restore = [set(node.getrawmempool()) for node in self.nodes]
         self.nodes[1].unloadwallet("client")
-        self.nodes[1].restorewallet("authorized_restore", authorized_backup)
-        restored_client = self.nodes[1].get_wallet_rpc("authorized_restore")
         try:
-            # Never run two loaded copies of the same wallet during this check.
-            harness.client = restored_client
-            restored_session = restored_client.getdigidollarsendsession({
-                "request_id": request_id})
-            assert_equal(restored_session["session_id"], signed_session["session_id"])
-            assert_equal(restored_session["reserved_user_inputs"],
-                         signed_session["reserved_user_inputs"])
-            restored_budget = restored_client.getpaymasterclientsafetystatus()
-            assert_equal(restored_budget["active_reservations"], 1)
-            # Exact chain evidence settles this old authorization without any
-            # provider response, new signature, broadcast or second fee.
-            reconciled = restored_client.resolvepaymastersession(
-                {"request_id": request_id}, "retry_same")
-            assert_equal(reconciled["session"]["payment_confirmed"], True)
-            assert_equal(reconciled["session"]["txid"], payment_txid)
-            assert_equal(reconciled["artifact"], "final_transaction")
-            assert reconciled["result_status"] is None
-            settled_budget = restored_client.getpaymasterclientsafetystatus()
-            assert_equal(settled_budget["active_reservations"], 0)
-            assert_equal(settled_budget["spent_service_fee_last_day_cents"], 1)
-            restored_client.resolvepaymastersession({"request_id": request_id}, "refresh")
-            assert_equal(restored_client.getpaymasterclientsafetystatus()[
-                "spent_service_fee_last_day_cents"], 1)
-            assert_equal([set(node.getrawmempool()) for node in self.nodes],
-                         mempools_before_restore)
-            finance_after_restore = provider.getpaymasterfinancestatus({"limit": 100})
-            finance_after_restore.pop("valuation_time")
-            assert_equal(finance_after_restore, finance_before_restore)
-            self.nodes[1].unloadwallet("authorized_restore")
-            self.nodes[1].loadwallet("authorized_restore")
-            restored_client = self.nodes[1].get_wallet_rpc("authorized_restore")
-            durable = restored_client.getdigidollarsendsession({"request_id": request_id})
-            assert_equal(durable["session_state"], "CONFIRMED")
-            assert_equal(durable["txid"], payment_txid)
+            for transport in ("rpc", "cli"):
+                for entry in ("resolve", "result", "send", "psbt"):
+                    self.log.info("Reconcile restored authorization through %s/%s", transport, entry)
+                    restore_name = f"authorized_{transport}_{entry}"
+                    if transport == "cli" and entry != "resolve":
+                        # Observing a confirmed payment does not extend expired
+                        # signing/submission authority. These CLI paths must
+                        # still reconcile it using its historical acceptance.
+                        self.nodes[1].setmocktime(authorized["expires_at"] + 1)
+                    self.nodes[1].restorewallet(restore_name, authorized_backup)
+                    restored_client = self.nodes[1].get_wallet_rpc(restore_name)
+                    try:
+                        # Never run two loaded copies of the same wallet during this check.
+                        harness.client = restored_client
+                        restored_session = restored_client.getdigidollarsendsession({
+                            "request_id": request_id})
+                        assert_equal(restored_session["session_id"], signed_session["session_id"])
+                        assert_equal(restored_session["reserved_user_inputs"],
+                                     signed_session["reserved_user_inputs"])
+                        restored_budget = restored_client.getpaymasterclientsafetystatus()
+                        assert_equal(restored_budget["active_reservations"], 1)
+                        # Exact chain evidence settles this old authorization without any
+                        # provider response, new signature, broadcast or second fee.
+                        api = (self.nodes[1].cli(f"-rpcwallet={restore_name}")
+                               if transport == "cli" else restored_client)
+                        lookup = {"request_id": request_id}
+                        api.resolvepaymastersession(lookup, "refresh")
+                        assert_equal(api.getpaymasterclientsafetystatus()["active_reservations"], 1)
+                        if entry == "resolve":
+                            reconciled = api.resolvepaymastersession(lookup, "retry_same")
+                            assert_equal(reconciled["session"]["payment_confirmed"], True)
+                            assert_equal(reconciled["session"]["txid"], payment_txid)
+                            assert_equal(reconciled["artifact"], "final_transaction")
+                            assert reconciled["result_status"] is None
+                        elif entry == "result":
+                            reconciled = api.processpaymasterresult(request_id)
+                            assert_equal(reconciled["processed"], True)
+                            assert "result_status" not in reconciled
+                        elif entry == "send":
+                            reconciled = api.senddigidollar(
+                                recipient, 100, "", 0, None, "cents", options)
+                            assert_equal(reconciled["processed"], True)
+                        else:
+                            assert_raises_rpc_error(-4, "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH",
+                                                    api.walletprocesspaymasterpsbt, unsigned_psbt, "11" * 32)
+                            reconciled = api.walletprocesspaymasterpsbt(unsigned_psbt)
+                            assert_equal(reconciled["queued"], False)
+                            assert_equal(reconciled["connection_pending"], False)
+                        if entry != "resolve":
+                            assert_equal(reconciled["session_state"], "CONFIRMED")
+                            assert_equal(reconciled["txid"], payment_txid)
+                        # Read-only reconciliation still creates no provider receipt.
+                        snapshot = api.resolvepaymastersession(lookup, "refresh")
+                        assert snapshot["result_status"] is None
+                        # Repeated result processing returns the known txid even without
+                        # another provider envelope and never spends the fee twice.
+                        repeated = api.processpaymasterresult(request_id)
+                        assert_equal(repeated["processed"], False)
+                        assert_equal(repeated["txid"], payment_txid)
+                        settled_budget = restored_client.getpaymasterclientsafetystatus()
+                        assert_equal(settled_budget["active_reservations"], 0)
+                        assert_equal(settled_budget["spent_service_fee_last_day_cents"], 1)
+                        restored_client.resolvepaymastersession({"request_id": request_id}, "refresh")
+                        assert_equal(restored_client.getpaymasterclientsafetystatus()[
+                            "spent_service_fee_last_day_cents"], 1)
+                        assert_equal([set(node.getrawmempool()) for node in self.nodes],
+                                     mempools_before_restore)
+                        finance_after_restore = provider.getpaymasterfinancestatus({"limit": 100})
+                        finance_after_restore.pop("valuation_time")
+                        assert_equal(finance_after_restore, finance_before_restore)
+                        self.nodes[1].unloadwallet(restore_name)
+                        self.nodes[1].loadwallet(restore_name)
+                        restored_client = self.nodes[1].get_wallet_rpc(restore_name)
+                        durable = restored_client.getdigidollarsendsession({"request_id": request_id})
+                        assert_equal(durable["session_state"], "CONFIRMED")
+                        assert_equal(durable["txid"], payment_txid)
+                    finally:
+                        self.nodes[1].unloadwallet(restore_name)
         finally:
-            self.nodes[1].unloadwallet("authorized_restore")
+            self.nodes[1].setmocktime(0)
             self.nodes[1].loadwallet("client")
             client = self.nodes[1].get_wallet_rpc("client")
             harness.client = client

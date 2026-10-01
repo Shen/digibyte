@@ -69,6 +69,44 @@ using namespace paymaster_rpc::internal;
 
 namespace {
 
+UniValue SignedClientPSBTToJSON(const PaymentSession& session,
+                               const ProviderAttempt& attempt,
+                               const PaymasterSubmitQueueState& queue_state)
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
+    result.pushKV("request_id", session.request_id);
+    result.pushKV("session_id", session.session_id.GetHex());
+    result.pushKV("provider_id", attempt.provider_id.GetHex());
+    result.pushKV("attempt_id", attempt.attempt_id.GetHex());
+    result.pushKV("quote_id", attempt.quote_id.GetHex());
+    result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
+    result.pushKV("template_commitment", attempt.template_commitment.GetHex());
+    if (!attempt.client_manifest.manifest_id.IsNull()) {
+        result.pushKV("authorization_commitment",
+                      attempt.client_manifest.manifest_id.GetHex());
+    }
+    const bool authorization_accepted =
+        attempt.accepted_client_manifest_id ==
+            attempt.client_manifest.manifest_id &&
+        !attempt.accepted_client_manifest_id.IsNull() &&
+        attempt.client_manifest_accepted_at > 0;
+    result.pushKV("authorization_accepted",
+                  authorization_accepted);
+    if (authorization_accepted) {
+        result.pushKV("authorization_accepted_at",
+                      attempt.client_manifest_accepted_at);
+    }
+    result.pushKV("session_state", std::string{DigiDollar::Paymaster::SessionStateName(session.state)});
+    result.pushKV("attempt_state", std::string{DigiDollar::Paymaster::AttemptStateName(attempt.state)});
+    result.pushKV("expires_at", attempt.retry_until);
+    result.pushKV("queued", queue_state.queued);
+    result.pushKV("connection_pending", queue_state.connection_pending);
+    result.pushKV("route_available", queue_state.route_available);
+    if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
+    return result;
+}
+
 struct ClientSessionView {
     std::optional<ProviderAttempt> attempt;
     std::optional<AlternativeRecoveryRecord> recovery;
@@ -1912,75 +1950,6 @@ RPCHelpMan resolvepaymastersession()
                 context.paymaster && context.paymaster->Enabled()) {
                 if (!attempt.user_signed_psbt.empty() &&
                     attempt.final_transaction.empty()) {
-                    // A spend with no wallet change output may not have been
-                    // inserted in mapWallet before the provider result arrived.
-                    // Recover only a fully validated, deeply confirmed exact
-                    // transaction from the local index, without broadcasting it.
-                    CTransactionRef observed_transaction;
-                    ExactFinalTransactionPreflight observed;
-                    bool missing_wallet_transaction{false};
-                    {
-                        LOCK(wallet->cs_wallet);
-                        missing_wallet_transaction = !wallet->GetWalletTx(attempt.unsigned_txid);
-                    }
-                    if (missing_wallet_transaction) {
-                        const auto* node = wallet->chain().context();
-                        if (node && node->chainman) {
-                            uint256 block_hash;
-                            observed_transaction = node::GetTransaction(nullptr, node->mempool.get(),
-                                attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
-                            std::string observation_error;
-                            if (observed_transaction &&
-                                PreflightExactPaymasterFinalTransaction(*wallet, observed_transaction,
-                                    ExactFinalTxIndexMode::NONBLOCKING, observed, observation_error) &&
-                                observed.presence == ExactFinalTransactionPresence::CONFIRMED &&
-                                observed.confirmation_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
-                                auto candidate = attempt;
-                                candidate.final_txid = observed_transaction->GetHash();
-                                CDataStream bytes{SER_NETWORK, ::PROTOCOL_VERSION};
-                                bytes << *observed_transaction;
-                                const auto span = MakeUCharSpan(bytes);
-                                candidate.final_transaction.assign(span.begin(), span.end());
-                                candidate.state = AttemptState::MEMPOOL;
-                                CMutableTransaction validated;
-                                if (!ValidateClientFinalForExecution(candidate, observed_transaction->GetWitnessHash(),
-                                        validated, observation_error) ||
-                                    !ValidateClientAuthorizationOwnership(*wallet, candidate.client_manifest, observation_error))
-                                    throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
-                            } else {
-                                observed_transaction.reset();
-                            }
-                        }
-                    }
-                    {
-                        // Keep the completed snapshot bound to the full records
-                        // until it has been built; tip pruning may run afterwards.
-                        LOCK(wallet->cs_wallet);
-                        if (observed_transaction && !wallet->GetWalletTx(attempt.unsigned_txid) &&
-                            !wallet->AddToWallet(observed_transaction,
-                                TxStateConfirmed{observed.confirmed_block, observed.confirmed_height, observed.confirmed_position}))
-                            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_OBSERVED_TRANSACTION_WRITE");
-                        bool completed{false};
-                        std::string observation_error;
-                        if (!store.CompleteClientConfirmedPayment(session.request_id,
-                                attempt_id, GetTime(), completed, observation_error))
-                            throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
-                        if (completed) {
-                            if (!store.GetSessionByRequestId(session.request_id, session))
-                                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DATABASE_READ");
-                            if (auto* dd_wallet = wallet->GetDDWallet()) {
-                                std::string history_error;
-                                if (!dd_wallet->RecordPaymasterSendHistory(session.final_txid,
-                                        attempt.client_manifest.recipient_script,
-                                        attempt.client_manifest.recipient_amount.value + attempt.client_manifest.service_fee.value,
-                                        history_error))
-                                    wallet->WalletLogPrintf("Paymaster observed payment history update deferred\n");
-                            }
-                            if (const auto* node = wallet->chain().context(); node && node->connman)
-                                node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, attempt.provider_id));
-                            return ClientSessionSnapshotToJSON(store, session, action);
-                        }
-                    }
                     // Collect an already received result before rechecking
                     // Capacity that may have been spent by this exact payment.
                     JSONRPCRequest nested{request};
@@ -2159,6 +2128,7 @@ RPCHelpMan walletprocesspaymasterpsbt()
                                                                                            {RPCResult::Type::NUM_TIME, "authorization_accepted_at", /*optional=*/true, "Monotonic durable acceptance time"},
                                                                                            {RPCResult::Type::STR, "session_state", "Authoritative session state"},
                                                                                            {RPCResult::Type::STR, "attempt_state", "Authoritative attempt state"},
+                                                                                           {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known final transaction"},
                                                                                            {RPCResult::Type::NUM_TIME, "expires_at", "Provider retry deadline"},
                                                                                            {RPCResult::Type::BOOL, "queued", "Whether PMSUBMIT is queued to a connected v2 peer"},
                                                                                            {RPCResult::Type::BOOL, "connection_pending", "Whether reconnecting to the provider was requested"},
@@ -2207,6 +2177,15 @@ RPCHelpMan walletprocesspaymasterpsbt()
             if (!DrainClientSessionEquivocations(
                     *context.paymaster, store, session, error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+            if (supplied_authorization_commitment &&
+                *supplied_authorization_commitment != attempt.client_manifest.manifest_id) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH");
+            }
+            if (ReconcileConfirmedClientPayment(*wallet, session, attempt) ||
+                (session.state == SessionState::CONFIRMED &&
+                 !session.final_txid.IsNull() && session.final_txid == attempt.final_txid)) {
+                return SignedClientPSBTToJSON(session, attempt, {});
             }
             const int64_t now = GetTime();
             PaymentIntent authorized_intent;
@@ -2443,37 +2422,7 @@ RPCHelpMan walletprocesspaymasterpsbt()
                     error == "PAYMASTER_DIRECT_QUEUE_FULL" ? RPC_CLIENT_NODE_CAPACITY_REACHED : RPC_WALLET_ERROR,
                     error);
             }
-            UniValue result{UniValue::VOBJ};
-            result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
-            result.pushKV("request_id", authoritative.request_id);
-            result.pushKV("session_id", authoritative.session_id.GetHex());
-            result.pushKV("provider_id", attempt.provider_id.GetHex());
-            result.pushKV("attempt_id", attempt.attempt_id.GetHex());
-            result.pushKV("quote_id", attempt.quote_id.GetHex());
-            result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-            result.pushKV("template_commitment", attempt.template_commitment.GetHex());
-            if (!attempt.client_manifest.manifest_id.IsNull()) {
-                result.pushKV("authorization_commitment",
-                              attempt.client_manifest.manifest_id.GetHex());
-            }
-            const bool authorization_accepted =
-                attempt.accepted_client_manifest_id ==
-                    attempt.client_manifest.manifest_id &&
-                !attempt.accepted_client_manifest_id.IsNull() &&
-                attempt.client_manifest_accepted_at > 0;
-            result.pushKV("authorization_accepted",
-                          authorization_accepted);
-            if (authorization_accepted) {
-                result.pushKV("authorization_accepted_at",
-                              attempt.client_manifest_accepted_at);
-            }
-            result.pushKV("session_state", std::string{DigiDollar::Paymaster::SessionStateName(authoritative.state)});
-            result.pushKV("attempt_state", std::string{DigiDollar::Paymaster::AttemptStateName(attempt.state)});
-            result.pushKV("expires_at", attempt.retry_until);
-            result.pushKV("queued", queue_state.queued);
-            result.pushKV("connection_pending", queue_state.connection_pending);
-            result.pushKV("route_available", queue_state.route_available);
-            return result;
+            return SignedClientPSBTToJSON(authoritative, attempt, queue_state);
         },
     };
 }

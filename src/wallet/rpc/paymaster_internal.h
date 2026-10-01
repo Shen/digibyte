@@ -461,6 +461,12 @@ bool LoadAttemptAuthorizationArtifacts(
 bool HasDurableClientAuthorization(
     const DigiDollar::Paymaster::ProviderAttempt& attempt,
     int64_t observation_time);
+/** Observe an already authorized exact payment; never sign, submit, or broadcast.
+ * Returns true on completion and copies the full records before pruning can run.
+ * Throws an RPC error on failed validation or persistence. */
+bool ReconcileConfirmedClientPayment(
+    CWallet& wallet, DigiDollar::Paymaster::PaymentSession& session,
+    DigiDollar::Paymaster::ProviderAttempt& attempt);
 bool QueuePersistedPaymasterSubmit(
     WalletContext& context,
     CWallet& wallet,

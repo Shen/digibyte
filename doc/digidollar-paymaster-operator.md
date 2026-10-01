@@ -649,6 +649,32 @@ service fee is settled once; no transaction is signed or broadcast. The provider
 consumes stale/mismatched submissions individually instead of treating them as a
 persistent service fault. Genuine wallet database failures still require review.
 
+### CLI/RPC reconciliation of an already confirmed payment
+
+These corrections run in the wallet Core shared by `digibyted` and
+`digibyte-qt`. The CLI is an RPC client; replacing only `digibyte-cli` does not
+update the wallet's payment processing. The scheduler and stale-provider-submit
+corrections therefore apply equally to providers operated through RPC.
+
+For an old authorized transfer, select its client wallet explicitly and use the
+existing request UUID. `processpaymasterresult "<request UUID>"` now also checks
+for the exact locally confirmed payment after provider replay records have been
+pruned. It can settle that observation after the signing/retry deadline, without
+renewing consent. A completed observation returns `processed=true`,
+`session_state="CONFIRMED"` and `txid`; it omits `result_status` and
+`result_sequence` because no provider-signed receipt was received. Later calls
+can return `processed=false` with the same known `txid`: this means no new result
+was processed, not that the payment failed. If client details have also been
+pruned, inspect the durable session through `getdigidollarsendsession`.
+
+The same reconciliation is used by an authorized `senddigidollar` resume with
+unchanged order/options and by `resolvepaymastersession` with `retry_same` while
+that action remains available. An exact already-signed
+`walletprocesspaymasterpsbt` retry returns the persisted signature and confirmed
+`txid`, with `queued=false`. None of these observations creates another payment,
+charges a second service fee or fabricates a provider receipt. Read-only status
+and refresh calls do not acquire signing or retry authority.
+
 ### Client retry after an unsigned quote expires
 
 `PAYMASTER_INPUT_ALREADY_RESERVED` means that a required input is already

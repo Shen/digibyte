@@ -66,14 +66,95 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_rpc::internal;
 
+bool paymaster_rpc::internal::ReconcileConfirmedClientPayment(
+    CWallet& wallet, PaymentSession& session, ProviderAttempt& attempt)
+{
+    if (session.provider_side || session.attempt_ids.empty() ||
+        session.attempt_ids.back() != attempt.attempt_id ||
+        attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+        !session.final_txid.IsNull()) return false;
+    PaymasterStore store{wallet};
+    // A spend with no wallet change output may not have been
+    // inserted in mapWallet before the provider result arrived.
+    // Recover only a fully validated, deeply confirmed exact
+    // transaction from the local index, without broadcasting it.
+    CTransactionRef observed_transaction;
+    ExactFinalTransactionPreflight observed;
+    bool missing_wallet_transaction{false};
+    {
+        LOCK(wallet.cs_wallet);
+        missing_wallet_transaction = !wallet.GetWalletTx(attempt.unsigned_txid);
+    }
+    if (missing_wallet_transaction) {
+        const auto* node = wallet.chain().context();
+        if (node && node->chainman) {
+            uint256 block_hash;
+            observed_transaction = node::GetTransaction(nullptr, node->mempool.get(),
+                attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
+            std::string observation_error;
+            if (observed_transaction &&
+                PreflightExactPaymasterFinalTransaction(wallet, observed_transaction,
+                    ExactFinalTxIndexMode::NONBLOCKING, observed, observation_error) &&
+                observed.presence == ExactFinalTransactionPresence::CONFIRMED &&
+                observed.confirmation_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
+                auto candidate = attempt;
+                candidate.final_txid = observed_transaction->GetHash();
+                CDataStream bytes{SER_NETWORK, ::PROTOCOL_VERSION};
+                bytes << *observed_transaction;
+                const auto span = MakeUCharSpan(bytes);
+                candidate.final_transaction.assign(span.begin(), span.end());
+                candidate.state = AttemptState::MEMPOOL;
+                CMutableTransaction validated;
+                if (!ValidateClientFinalForExecution(candidate, observed_transaction->GetWitnessHash(),
+                        validated, observation_error) ||
+                    !ValidateClientAuthorizationOwnership(wallet, candidate.client_manifest, observation_error))
+                    throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
+            } else {
+                observed_transaction.reset();
+            }
+        }
+    }
+    {
+        // Copy the completed full records before tip pruning can run.
+        LOCK(wallet.cs_wallet);
+        if (observed_transaction && !wallet.GetWalletTx(attempt.unsigned_txid) &&
+            !wallet.AddToWallet(observed_transaction,
+                TxStateConfirmed{observed.confirmed_block, observed.confirmed_height, observed.confirmed_position}))
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_OBSERVED_TRANSACTION_WRITE");
+        bool completed{false};
+        std::string observation_error;
+        if (!store.CompleteClientConfirmedPayment(session.request_id,
+                attempt.attempt_id, GetTime(), completed, observation_error))
+            throw JSONRPCError(RPC_WALLET_ERROR, observation_error);
+        if (completed) {
+            if (!store.GetSessionByRequestId(session.request_id, session) ||
+                !store.GetAttempt(attempt.attempt_id, attempt))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DATABASE_READ");
+            if (auto* dd_wallet = wallet.GetDDWallet()) {
+                std::string history_error;
+                if (!dd_wallet->RecordPaymasterSendHistory(session.final_txid,
+                        attempt.client_manifest.recipient_script,
+                        attempt.client_manifest.recipient_amount.value + attempt.client_manifest.service_fee.value,
+                        history_error))
+                    wallet.WalletLogPrintf("Paymaster observed payment history update deferred\n");
+            }
+            if (const auto* node = wallet.chain().context(); node && node->connman)
+                node->connman->ReleasePaymasterConnection(PaymentChannelKey(wallet, session, attempt.provider_id));
+            return true;
+        }
+    }
+    return false;
+}
+
 RPCHelpMan processpaymasterresult()
 {
     return RPCHelpMan{
         "processpaymasterresult",
-        "Validate and persist at most one PMRESULT for an existing client session.\n",
+        "Validate and persist at most one PMRESULT for an existing client session, or reconcile "
+        "its exact locally observed payment after 240 confirmations without a provider result.\n",
         {{"request_id", RPCArg::Type::STR, RPCArg::Optional::NO, "Canonical request UUID"}},
         RPCResult{RPCResult::Type::OBJ, "", "Authoritative result processing state", {
-                                                                                         {RPCResult::Type::BOOL, "processed", "Whether a matching result was available"},
+                                                                                         {RPCResult::Type::BOOL, "processed", "Whether a matching result or newly reconciled confirmed payment was available"},
                                                                                          {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
                                                                                          {RPCResult::Type::STR_HEX, "session_id", "Persistent session"},
                                                                                          {RPCResult::Type::STR_HEX, "provider_id", "Provider identity"},
@@ -139,7 +220,8 @@ RPCHelpMan processpaymasterresult()
                     RPC_WALLET_ERROR,
                     error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED" : error);
             }
-            const auto messages = context.paymaster->TakeResults(
+            const bool observed_payment = ReconcileConfirmedClientPayment(*wallet, session, attempt);
+            const auto messages = observed_payment ? std::vector<DirectMessage>{} : context.paymaster->TakeResults(
                 request_id, session.session_id, attempt.provider_id, 1);
             std::optional<PaymasterResult> accepted_result;
             FinalTransactionPresence final_presence{FinalTransactionPresence::NONE};
@@ -320,8 +402,13 @@ RPCHelpMan processpaymasterresult()
                     }
                 }
             }
-            store.GetSessionByRequestId(request_id, session);
-            store.GetAttempt(session.attempt_ids.back(), attempt);
+            if (!observed_payment) {
+                LOCK(wallet->cs_wallet);
+                if (!store.GetSessionByRequestId(request_id, session) || session.attempt_ids.empty() ||
+                    !store.GetAttempt(session.attempt_ids.back(), attempt)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_FINAL_STATE_RELOAD_FAILED");
+                }
+            }
 
             // Collaborative Paymaster transactions bypass the ordinary
             // TransferDigiDollarMany() path that records an outgoing DD row.
@@ -347,7 +434,7 @@ RPCHelpMan processpaymasterresult()
                 }
             }
             UniValue result{UniValue::VOBJ};
-            result.pushKV("processed", accepted_result.has_value());
+            result.pushKV("processed", observed_payment || accepted_result.has_value());
             result.pushKV("request_id", request_id);
             result.pushKV("session_id", session.session_id.GetHex());
             result.pushKV("provider_id", attempt.provider_id.GetHex());
@@ -384,6 +471,7 @@ RPCHelpMan processpaymasterresult()
                 result.pushKV("result_sequence", accepted_result->result_sequence);
                 if (accepted_result->txid) result.pushKV("txid", accepted_result->txid->GetHex());
             }
+            if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
             return result;
         },
     };

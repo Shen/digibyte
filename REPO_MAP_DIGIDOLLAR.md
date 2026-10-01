@@ -2039,11 +2039,21 @@ Current oracle/MuSig2 fuzz source inventory:
 - `CompleteClientConfirmedPayment` in `wallet/paymasterstore_finalization.cpp`
   atomically completes a deeply confirmed client payment from validated local
   transaction evidence after provider journal pruning, settling its reserved
-  fee without fabricating a signed provider result. The explicit retry in
-  `wallet/rpc/paymaster_client.cpp` can recover a missing wallet transaction from
-  txindex; `ListClientDurableFinalTransactions` excludes resultless observations
+  fee without fabricating a signed provider result. The shared RPC helper
+  `ReconcileConfirmedClientPayment` in `wallet/rpc/paymaster_processing.cpp`
+  (declared in `paymaster_internal.h`) recovers a missing wallet transaction from
+  txindex. Result processing, explicit resolve retry, high-level send resumption
+  and exact signed-PSBT retry use it; `SignedClientPSBTToJSON` preserves the
+  signing RPC schema, adding a known confirmed txid without requeueing.
+  `ListClientDurableFinalTransactions` excludes resultless observations
   from rebroadcast. `paymaster_processing.cpp` consumes stale/mismatched submit
   entries without faulting unrelated provider work and retains DB-read faults.
   Store/identity unit regressions and `wallet_paymaster_lifecycle.py` (also
   `--client-without-change`) cover atomicity, witnesses, queue isolation,
-  pruned/offline providers, fee idempotency and wallet reload.
+  pruned/offline providers, fee idempotency and wallet reload. The lifecycle
+  regression restores each authorization independently through four entry points
+  over RPC and the real CLI, including expired authority and wrong commitments.
+
+- `wallet_paymaster_rpc.py --client-preparation-only` runs the focused public
+  preparation/absence/cancellation contracts, including actual CLI calls while
+  the provider is paused, without running the full capital/recovery matrix.

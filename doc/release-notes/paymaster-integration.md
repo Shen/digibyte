@@ -24,6 +24,17 @@ sessions from read/version failures, and DD selection errors retain upstream's
 specific reason. Existing unsigned cancellation works without a running
 provider; signed payments still require their existing retry/recovery path.
 
+## CLI/RPC recovery parity
+
+Confirmed-payment recovery now also covers direct result processing, authorized
+`senddigidollar` resumption and exact already-signed PSBT retries. These paths
+share the same local transaction/signature checks as explicit GUI recovery,
+including after provider replay-journal pruning. Result polling returns a known
+txid even without another provider message; PSBT retry reports completion without
+queueing another submit. No signed provider receipt is fabricated and no expired
+spending authority is renewed. The corrections reside in the shared wallet Core;
+CLI argument encoding needs no change.
+
 ## Unreleased integration follow-up
 
 The Paymaster operator interface now separates Overview, Funds & reserves,

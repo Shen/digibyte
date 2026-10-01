@@ -14,7 +14,10 @@ translation units (`paymasterstore_client`, wallet RPC `paymaster`,
 tests and Qt Paymaster tests), plus Python syntax and Git whitespace checks.
 Objects/logs are isolated under `build_msvc/paymaster-absence-check/`. No
 application/test executable was relinked and no operator wallet was changed.
-The new runtime tests below are **pending**, not passing results.
+At that checkpoint the new runtime tests below were **pending**. The later
+[RPC/CLI parity checkpoint](#rpccli-recovery-parity-2026-10-01) executes the three
+native checks and the focused preparation/cancellation contract with current
+objects linked. Its results do not cover the pending Qt tests or full RPC suite.
 
 Use the full build command in
 [Operator verification for this integration](#operator-verification-for-this-integration)
@@ -1726,3 +1729,69 @@ fixture above. A no-change variant initially also ran the reserve-only fixture
 with a different funding layout; it now intentionally runs the payment/restart
 scenario only. Logs are `build_msvc/binding-*`. Full repository suites and
 cross-platform builds remain operator-run, per repository instructions.
+
+### RPC/CLI recovery parity (2026-10-01)
+
+The 240-confirmation reconciliation is now a shared RPC helper. The lifecycle
+regression restores a separate copy of the pre-result client backup for each of
+`resolvepaymastersession retry_same`, `processpaymasterresult`, authorized
+`senddigidollar` resumption and `walletprocesspaymasterpsbt`, first through RPC
+and then the real `digibyte-cli` executable. Only one copy is loaded at a time.
+The provider is stopped and its replay journal has been pruned. Checks cover:
+
+- exact original txid and no fabricated provider receipt;
+- unchanged mempools and provider finance records;
+- one fee settlement, idempotent result polling and durable wallet reload;
+- read-only refresh preserving the pending fee reservation;
+- rejection of a wrong PSBT authorization commitment;
+- result/send/PSBT reconciliation after authorization expiry through CLI,
+  without a new signature or submit.
+
+Targeted MSVC compilation of the two changed RPC units and wallet/Core-test/daemon
+links passed. Both lifecycle variants passed (16 independently restored
+RPC/CLI cases in total):
+
+```powershell
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python -X utf8 test/functional/wallet_paymaster_lifecycle.py --descriptors
+python -X utf8 test/functional/wallet_paymaster_lifecycle.py --descriptors --client-without-change
+```
+
+Run from the repository root with the current MSVC binaries and the functional
+Python dependencies. Each targeted script takes about one minute on this
+workstation and must end with `Tests successful`/exit 0. The default variant also
+retains the provider crash, reserve replenishment and locked-autostart checks.
+Seven Core regressions passed: resultless confirmed payment, atomic final
+observation, monotonic immutable result persistence, isolated stale submit
+rejection, missing/read-failed session distinction, unreadable AUTO session
+rejection before funding, and protected ambiguous authorization/tombstone pruning.
+The focused preparation contract also passed:
+
+```powershell
+python -X utf8 test/functional/wallet_paymaster_rpc.py --descriptors --client-preparation-only
+```
+
+This optional subset covers capabilities/access checks, failed PAYMASTER/AUTO
+preparation over HTTP and actual CLI, authoritative session absence and unsigned
+CLI cancellation while the provider is paused. The default full test is unchanged.
+Its existing cancellation assertion used `state` instead of the documented
+`session_state`; the runtime check exposed and corrected that test error.
+
+Final logs are under `build_msvc/`: `paymaster-cli-current-core-tests.log`,
+`paymaster-cli-current-default.log`, `paymaster-cli-current-no-change.log` and
+`paymaster-cli-preparation2.log`. The executable contains the current PR #452
+and absence-check objects as well as the two new RPC units. An initial link used
+older default objects because the prior integration compiles were isolated;
+those first passing runs are not the current-source checkpoint. The final daemon
+was relinked with the selected current objects and all checks above rerun.
+A separate `test_digibyte-paymaster-cli.exe` diagnostic link includes current
+store/planner tests and omits three unrelated old test units requiring recompilation
+for the changed DD-selection signature. This is not a full test-binary rebuild;
+full builds and the complete contract suite remain operator work.
+
+An initial test draft incorrectly obtained the unsigned PSBT from the provider
+quote response; it now captures the client preparation reply. The initial
+multi-file MSBuild argument was also rejected before compilation; selecting the
+two units separately succeeded. No full build, complete suite or cross-platform
+run was performed; those remain operator-run under repository guidance.
