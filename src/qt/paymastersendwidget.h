@@ -144,6 +144,7 @@ private:
     void refreshPaymasterSessionForAction(
         const QString& required_action, std::function<void()> continuation);
     Q_SLOT void retryPaymasterSession();
+    void continuePaymasterRetry();
     Q_SLOT void fallbackPaymasterSession();
     Q_SLOT void recoverPaymasterSessionToSelf();
     Q_SLOT void abandonUnsignedPaymasterSession();
@@ -308,6 +309,8 @@ private:
     // the timer. Restored sessions have no continuation or signing authority.
     UniValue m_paymasterActiveSendParams;
     QElapsedTimer m_paymasterActiveSendStarted;
+    QString m_paymasterActiveRetryRequest;
+    QElapsedTimer m_paymasterActiveRetryStarted;
     static constexpr int MAX_PAYMASTER_ACTIVE_SEND_MS{120000};
     QFrame* m_offerCheckFrame{nullptr};
     QLabel* m_offerStateIcon{nullptr};

@@ -6514,11 +6514,15 @@ DigiDollarSendWidget QPushButton#paymasterExplanationButton:hover {
 /* Explicit Paymaster scroll surfaces avoid platform-palette leaks and keep
    the operator pages consistent when switching between themes. */
 QWidget#paymasterWidget,
-QWidget#paymasterWidget QTabWidget#paymasterSettingsTabs::pane,
-QWidget#paymasterWidget QTabWidget#paymasterOperatorTabs::pane,
+QWidget#paymasterWidget QDialog,
+DigiDollarSendWidget QMessageBox,
+QWidget#paymasterWidget QStackedWidget#paymasterSettingsPages,
+QWidget#paymasterWidget QStackedWidget#paymasterOperatorPages,
 QWidget#paymasterWidget QScrollArea#paymasterOverviewPage,
 QWidget#paymasterWidget QScrollArea#paymasterConnectionPage,
 QWidget#paymasterWidget QScrollArea#paymasterManagementPage,
+QWidget#paymasterWidget QScrollArea#paymasterAutomationPage,
+QWidget#paymasterWidget QScrollArea#paymasterSettingsHome,
 QWidget#paymasterWidget QScrollArea#paymasterConfigurationPage,
 QWidget#paymasterWidget QScrollArea#paymasterSafetyPolicyPage,
 QWidget#paymasterWidget QScrollArea#paymasterLiquidityPage,
@@ -6550,14 +6554,18 @@ QWidget#paymasterWidget QWidget#paymasterActivityContents QGroupBox {
     padding-top: 8px;
 }
 
+QWidget#paymasterWidget QDialog QLabel,
+DigiDollarSendWidget QMessageBox QLabel,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QLabel,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterActivityContents QLabel,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterManagementContents QCheckBox,
+QWidget#paymasterWidget QWidget#paymasterAutomationContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterConfigurationContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterSafetyPolicyContents QCheckBox,
 QWidget#paymasterWidget QWidget#paymasterLiquidityContents QCheckBox,
@@ -7223,6 +7231,8 @@ QLabel[digidollarRole="statusText"][statusKind="error"] { color: #b42318; }
 
 /* DigiDollar action controls must never fall back to the application's blue
    DigiByte palette. The root selector covers current and future DD buttons. */
+QWidget#paymasterWidget QDialog QPushButton,
+DigiDollarSendWidget QMessageBox QPushButton,
 QWidget#digiDollarTab QPushButton,
 QDialog#digiDollarClientSafetyDialog QPushButton {
     background-color: #1f9d57;
@@ -7233,6 +7243,8 @@ QDialog#digiDollarClientSafetyDialog QPushButton {
     font-weight: 600;
 }
 
+QWidget#paymasterWidget QDialog QPushButton:hover,
+DigiDollarSendWidget QMessageBox QPushButton:hover,
 QWidget#digiDollarTab QPushButton:hover,
 QDialog#digiDollarClientSafetyDialog QPushButton:hover {
     background-color: #16894d;
@@ -7240,12 +7252,16 @@ QDialog#digiDollarClientSafetyDialog QPushButton:hover {
     color: #ffffff !important;
 }
 
+QWidget#paymasterWidget QDialog QPushButton:pressed,
+DigiDollarSendWidget QMessageBox QPushButton:pressed,
 QWidget#digiDollarTab QPushButton:pressed,
 QDialog#digiDollarClientSafetyDialog QPushButton:pressed {
     background-color: #0f633c;
     border-color: #0f633c;
 }
 
+QWidget#paymasterWidget QDialog QPushButton:disabled,
+DigiDollarSendWidget QMessageBox QPushButton:disabled,
 QWidget#digiDollarTab QPushButton:disabled,
 QDialog#digiDollarClientSafetyDialog QPushButton:disabled {
     background-color: #c9ddd1;

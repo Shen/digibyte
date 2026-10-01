@@ -705,6 +705,8 @@ void PaymasterSendWidget::setPrivacy(bool privacy)
     m_privacy = privacy;
     updateFeeDisplay();
     if (m_privacy) {
+        m_paymasterActiveRetryRequest.clear();
+        m_paymasterActiveRetryStarted.invalidate();
         m_feeValue->setText(m_form.maskValue(m_feeValue->text()));
         m_totalValue->setText(m_form.maskValue(m_form.formatDDAmount(0)));
         m_feeSummary->setText(m_form.maskValue(m_feeSummary->text()));
@@ -3487,6 +3489,10 @@ bool PaymasterSendWidget::canContinueActivePaymasterSend() const
 void PaymasterSendWidget::pollPaymasterSession()
 {
     if (m_paymasterBusy || m_paymasterRequestId.isEmpty()) return;
+    if (m_paymasterActiveRetryRequest == m_paymasterRequestId) {
+        continuePaymasterRetry();
+        return;
+    }
     if (m_paymasterRecoveryActive && m_paymasterActiveRecoveryParams.isArray()) {
         if (!m_paymasterActiveRecoveryStarted.isValid() ||
             m_paymasterActiveRecoveryStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
@@ -3551,7 +3557,7 @@ void PaymasterSendWidget::refreshPaymasterSessionState()
                               DigiDollarSendWidget::tr("no durable session is selected"));
         return;
     }
-    if (canContinueActivePaymasterSend()) {
+    if (canContinueActivePaymasterSend() || m_paymasterActiveRetryRequest == m_paymasterRequestId) {
         pollPaymasterSession();
         return;
     }
@@ -3564,6 +3570,8 @@ void PaymasterSendWidget::refreshPaymasterSessionState()
 
 void PaymasterSendWidget::stopPaymasterPolling()
 {
+    m_paymasterActiveRetryRequest.clear();
+    m_paymasterActiveRetryStarted.invalidate();
     m_paymasterActiveRecoveryParams = UniValue{};
     m_paymasterActiveRecoveryStarted.invalidate();
     m_paymasterActiveSendParams = UniValue{};
@@ -3618,6 +3626,8 @@ void PaymasterSendWidget::refreshPaymasterSessionForAction(
     params.push_back(std::move(lookup));
     params.push_back("refresh");
     // Explicit session actions supersede the in-memory live continuation.
+    m_paymasterActiveRetryRequest.clear();
+    m_paymasterActiveRetryStarted.invalidate();
     m_paymasterActiveRecoveryParams = UniValue{};
     m_paymasterActiveRecoveryStarted.invalidate();
     m_paymasterActiveSendParams = UniValue{};
@@ -3696,38 +3706,55 @@ void PaymasterSendWidget::retryPaymasterSession()
                     DigiDollarSendWidget::tr("the refreshed session has no retryable signed artifact"));
                 return;
             }
-            UniValue lookup{UniValue::VOBJ};
-            lookup.pushKV("request_id",
-                          guard->m_paymasterRequestId.toStdString());
-            UniValue params{UniValue::VARR};
-            params.push_back(std::move(lookup));
-            params.push_back("retry_same");
-            guard->setPaymasterBusy(true);
-            guard->executePaymasterRpcAsync(
-                "resolvepaymastersession", std::move(params),
-                [guard](UniValue result, QString error) {
-                    if (!guard) return;
-                    if (!error.isEmpty()) {
-                        guard->m_form.showWarning(
-                            DigiDollarSendWidget::tr("Paymaster recovery"), error);
-                        guard->setPaymasterBusy(false);
-                        return;
-                    }
-                    QString decode_error;
-                    if (!guard->updatePaymasterSessionView(
-                            result, &decode_error)) {
-                        guard->stopPaymasterPolling();
-                        guard->m_form.showWarning(
-                            DigiDollarSendWidget::tr("Paymaster status unavailable"),
-                            DigiDollarSendWidget::tr("Core returned an invalid retry snapshot (%1).")
-                                .arg(decode_error));
-                        guard->setPaymasterBusy(false);
-                        return;
-                    }
-                    guard->setPaymasterBusy(false);
-                    guard->schedulePaymasterPoll(
-                        /*state_changed=*/false);
-                });
+            guard->m_paymasterActiveRetryRequest = guard->m_paymasterRequestId;
+            guard->m_paymasterActiveRetryStarted.start();
+            guard->continuePaymasterRetry();
+        });
+}
+
+void PaymasterSendWidget::continuePaymasterRetry()
+{
+    if (!m_walletModel || m_paymasterBusy || m_privacy ||
+        m_paymasterActiveRetryRequest.isEmpty() ||
+        m_paymasterActiveRetryRequest != m_paymasterRequestId) return;
+    if (!m_paymasterActiveRetryStarted.isValid() ||
+        m_paymasterActiveRetryStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
+        stopPaymasterPolling();
+        m_form.showWarning(DigiDollarSendWidget::tr("Exact retry paused"),
+            DigiDollarSendWidget::tr("The provider result has not arrived within two minutes. The existing transfer remains protected. Check its status before choosing the next step."));
+        return;
+    }
+    UniValue lookup{UniValue::VOBJ};
+    lookup.pushKV("request_id", m_paymasterRequestId.toStdString());
+    UniValue params{UniValue::VARR};
+    params.push_back(std::move(lookup));
+    params.push_back("retry_same");
+    setPaymasterBusy(true);
+    executePaymasterRpcAsync("resolvepaymastersession", std::move(params),
+        [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, QString error) {
+            if (!guard) return;
+            if (!error.isEmpty()) {
+                guard->stopPaymasterPolling();
+                guard->m_form.showWarning(DigiDollarSendWidget::tr("Exact retry paused"),
+                    DigiDollarSendWidget::tr("The existing transfer could not be reconciled yet. It may already have completed; this message does not mean the payment failed. Check its status before creating another payment.\n\nTechnical details: %1").arg(error));
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            QString decode_error;
+            if (!guard->updatePaymasterSessionView(result, &decode_error)) {
+                guard->stopPaymasterPolling();
+                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"),
+                    DigiDollarSendWidget::tr("Core returned an invalid retry snapshot (%1).").arg(decode_error));
+                guard->setPaymasterBusy(false);
+                return;
+            }
+            const bool completed = guard->handleAuthoritativePaymasterCompletion(result);
+            if (guard->m_paymasterArtifact != QStringLiteral("user_psbt")) {
+                guard->m_paymasterActiveRetryRequest.clear();
+                guard->m_paymasterActiveRetryStarted.invalidate();
+            }
+            guard->setPaymasterBusy(false);
+            if (!completed) guard->schedulePaymasterPoll(/*state_changed=*/false);
         });
 }
 

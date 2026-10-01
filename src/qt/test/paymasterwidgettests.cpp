@@ -3884,6 +3884,78 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
     QVERIFY(send_parameters.back()[6].find_value("retry_transport").isNull());
     QCOMPARE(QString::fromStdString(options.find_value("request_id").get_str()),
              QStringLiteral("00000000-0000-4000-8000-000000000001"));
+
+    auto* paymaster = send_widget.findChild<PaymasterSendWidget*>();
+    int exact_retries{0};
+    bool completed{false};
+    bool retry_error{false};
+    paymaster->setPaymasterRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params) {
+            if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+            if (command != "resolvepaymastersession")
+                throw std::runtime_error("restored retry must not create a new payment");
+            const auto action = params[1].get_str();
+            if (action == "retry_same") {
+                if (retry_error) throw std::runtime_error("PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE");
+                if (params[0].find_value("request_id").get_str() != "00000000-0000-4000-8000-000000000001")
+                    throw std::runtime_error("retry changed the durable request");
+                completed = ++exact_retries == 2;
+            }
+            return completed ? PaymasterSessionView("CONFIRMED", "final_transaction", "CONFIRMED") :
+                               PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED");
+        });
+    paymaster->setPaymasterSessionForTesting(
+        QStringLiteral("PENDING_PROVIDER"), QStringLiteral("user_psbt"), true,
+        QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"),
+        3.25, QStringLiteral("USER_SIGNED"));
+    // Restoring and observing alone never grant authority to resubmit.
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 0);
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "retryPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 1);
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 2);
+    QVERIFY(completed);
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 2);
+
+    completed = false;
+    exact_retries = 0;
+    paymaster->setPaymasterSessionForTesting("PENDING_PROVIDER", "user_psbt", true,
+        "RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx", 3.25, "USER_SIGNED");
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "retryPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 1);
+    paymaster->setPrivacy(true);
+    paymaster->setPrivacy(false);
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 1);
+    retry_error = true;
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "retryPaymasterSession", Qt::DirectConnection));
+    QVERIFY(action_warning.contains("may already have completed"));
+    QVERIFY(action_warning.contains("PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE"));
+    retry_error = false;
+    QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
+    QCOMPARE(exact_retries, 1);
+
+    // Recovery messages use the same surface in both application themes.
+    for (const auto* theme : {"dark", "light"}) {
+        QFile css(QString(":/css/") + theme);
+        QVERIFY(css.open(QIODevice::ReadOnly));
+        send_widget.setStyleSheet(QString::fromUtf8(css.readAll()));
+        QMessageBox message(QMessageBox::Warning, "Exact retry paused",
+            "The existing transfer could not be reconciled yet. It may already have completed.",
+            QMessageBox::Ok, &send_widget);
+        message.ensurePolished();
+        QCOMPARE(message.palette().color(QPalette::Window),
+                 QColor(QString::fromLatin1(theme) == "dark" ? "#0b2419" : "#eef9f2"));
+        const QString capture = qEnvironmentVariable("DIGIBYTE_PAYMASTER_RETRY_SCREENSHOT");
+        if (!capture.isEmpty()) {
+            message.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&message));
+            QVERIFY(message.grab().save(capture + "-" + theme + ".png"));
+        }
+    }
+
 }
 
 void PaymasterWidgetTests::paymasterClientRestartCreatedSessionWithoutRecipientIsReadOnly()
