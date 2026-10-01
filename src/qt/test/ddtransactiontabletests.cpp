@@ -34,10 +34,12 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSet>
 #include <QStringList>
+#include <QStandardItemModel>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QSettings>
@@ -506,6 +508,27 @@ void DDTransactionTableTests::sendFromOwnTokenShowsTheFeeOnItsOwnRow()
     QVERIFY2(saw_fee_row, "the fee was not shown on a row of its own");
 }
 
+void DDTransactionTableTests::csvDatesHaveSeconds()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QStandardItemModel model(1, 2);
+    const QDateTime date(QDate(2026, 9, 28), QTime(12, 34, 56), Qt::UTC);
+    model.setData(model.index(0, 0), date);
+    model.setData(model.index(0, 1), QString("Local note, \"quoted\""));
+    const QString path = dir.filePath("dates.csv");
+    CSVModelWriter writer(path);
+    writer.setModel(&model);
+    writer.addColumn("Date", 0, Qt::DisplayRole);
+    writer.addColumn("Note", 1, Qt::DisplayRole);
+    QVERIFY(writer.write());
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    QCOMPARE(QString::fromUtf8(file.readAll()),
+             QString("\"Date\",\"Note\"\n\"2026-09-28 12:34:56\",\"Local note, \"\"quoted\"\"\"\n"));
+    QCOMPARE(model.index(0, 0).data().toDateTime(), date);
+}
+
 void DDTransactionTableTests::csvExportHasSeparateAmountColumns()
 {
     if (MaybeSkipMacMinimal()) return;
@@ -554,18 +577,28 @@ void DDTransactionTableTests::csvExportHasSeparateAmountColumns()
     QVERIFY2(header.contains("$DD"),
              qPrintable(QString("CSV header has no DigiDollar amount column: %1").arg(header)));
 
-    // Every data line must carry both fields, and no field may hold both a
-    // DigiByte number and a DigiDollar number.
+    const QStringList headings = header.split("\",\"");
+    const int dd_column = headings.indexOf("Amount ($DD)");
+    QVERIFY(dd_column >= 0);
     bool saw_dd_value = false;
+    bool saw_dgb_only_row = false;
     for (int i = 1; i < lines.size(); ++i) {
         const QStringList fields = lines.at(i).split("\",\"");
-        for (const QString& field : fields) {
-            QVERIFY2(!(field.contains("$DD") && field.contains(".") && field.count('.') > 1),
-                     qPrintable(QString("CSV field mixes amounts: %1").arg(field)));
+        QCOMPARE(fields.size(), headings.size());
+        const QString amount = fields.at(dd_column);
+        QVERIFY(!amount.contains("$DD"));
+        if (amount.isEmpty()) {
+            saw_dgb_only_row = true;
+            continue;
         }
-        if (lines.at(i).contains("$DD")) saw_dd_value = true;
+        bool numeric = false;
+        amount.toDouble(&numeric);
+        QVERIFY2(numeric, qPrintable(amount));
+        QCOMPARE(amount.section('.', 1).size(), 2);
+        saw_dd_value = true;
     }
-    QVERIFY2(saw_dd_value, "no DigiDollar amount reached the CSV file");
+    QVERIFY(saw_dd_value);
+    QVERIFY(saw_dgb_only_row);
 }
 
 void DDTransactionTableTests::digiDollarRowTypesAreLabelled()
@@ -683,7 +716,7 @@ void DDTransactionTableTests::theSingleAmountIsTheOneTheRowHas()
         if (dgb_number == 0 && dd_number != 0) {
             saw_a_dollar_row = true;
             // The dollar figure, not a DigiByte zero.
-            QCOMPARE(single, idx.data(TransactionTableModel::FormattedAmountDDRole).toString());
+            QCOMPARE(single, model->index(row, dd_column).data(Qt::DisplayRole).toString());
             QVERIFY2(single.contains("$DD"), "a DigiDollar row must show the dollar figure");
             QCOMPARE(single_number, dd_number);
         } else {

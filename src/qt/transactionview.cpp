@@ -23,6 +23,8 @@
 #include <optional>
 
 #include <QApplication>
+#include <QDir>
+#include <QStandardPaths>
 #include <QComboBox>
 #include <QDateTimeEdit>
 #include <QDesktopServices>
@@ -97,10 +99,12 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     hlayout->addWidget(typeWidget);
 
     search_widget = new QLineEdit(this);
+    search_widget->setObjectName(QStringLiteral("transactionSearchEdit"));
     search_widget->setPlaceholderText(tr("Enter address, transaction id, or label to search"));
     hlayout->addWidget(search_widget);
 
     amountWidget = new QLineEdit(this);
+    amountWidget->setObjectName(QStringLiteral("transactionAmountEdit"));
     amountWidget->setPlaceholderText(tr("Min amount"));
     amountWidget->setToolTip(tr("Show only rows whose DigiByte amount is at least this much. "
                                 "Rows that hold a DigiDollar amount are left alone."));
@@ -381,7 +385,9 @@ void TransactionView::exportClicked()
 
     // CSV is currently the only supported format
     QString filename = GUIUtil::getSaveFileName(this,
-        tr("Export Transaction History"), QString(),
+        tr("Export Transaction History"),
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+            .filePath(QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")) + QStringLiteral("_Transactions.csv")),
         /*: Expanded name of the CSV file format.
             See: https://en.wikipedia.org/wiki/Comma-separated_values. */
         tr("Comma separated file") + QLatin1String(" (*.csv)"), nullptr);

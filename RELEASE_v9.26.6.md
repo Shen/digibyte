@@ -1,92 +1,162 @@
 # DigiByte Core v9.26.6 release notes
 
-## Unreleased integration follow-up
+## Final v9.26.6 release
 
-The Paymaster operator interface now separates Overview, Funds & reserves,
-Activity, Income & costs, and Settings. Autostart is visible beside Start/Pause
-and saves immediately; a second switch controls reserve refill with explicit
-review for new paid consent. Both mirror Operation & automation. Single-reserve release refreshes the
-available outputs before review, preserves the selected output through dialog
-updates and explains unavailable reserves with a read-only recovery action. Its existing behavior is unchanged:
-an enabled provider may start when ready, encrypted wallets need manual unlock,
-and persistent pause disables autostart. Seven numbered setup steps, focused
-settings pages and task progress across navigation simplify operation. This
-candidate adds optional liquidity revision checks, read-only node configuration
-metadata and automation status. Funds & reserves now owns capital actions,
-targets/costs and retirement; backup has its own settings page and no longer
-overrides operating status. DGB-only release preserves DD reserves and binds
-a finite fee cap. Spending authority and consensus rules remain unchanged.
-Automatic provider submission now preserves nonblocking wallet/index checks
-through its nested signing and final-transaction preflights, avoiding a scheduler
-self-wait when a new block arrives during payment processing. Operator pages
-remain paintable during pending reads, slow reads show elapsed progress, and
-provider approval dialogs use the active green theme.
-Explicit client retry now reconciles a lost provider result after restart even
-when the exact authorized payment has already consumed its Capacity. The spent
-reserve exception requires the validated locally observed final transaction.
-Qt follows the explicitly requested retry through result collection, stops on
-completion/error/privacy entry, and themes client recovery message boxes in
-both light and dark mode. Session restoration remains read-only.
-A further retry correction covers provider journal pruning after 240
-confirmations: the client can complete from validated local chain evidence,
-including payments absent from its transaction cache, and settles its reserved
-fee atomically. Stale/mismatched inbound submissions no longer pin the provider
-queue. No provider receipt is fabricated and no new broadcast authority is added.
-Verification for this UI revision is recorded separately in the test runbook.
+v9.26.6 includes RC1, RC2 and the final wallet improvements listed below.
+The final changes improve minting from wallets with many small coins, explain
+send errors, and make the wallet easier to read. **They do not change RC2's
+consensus rules, oracle requirements or Thaw Day heights.** Consensus means
+the rules nodes use to agree on valid blocks.
 
+**All full-node and mining operators must upgrade before mainnet block
+24,490,000, including operators who do not use DigiDollar.** Older software
+can disagree about valid blocks after that height. Testnet26 activated Thaw
+Day at block **432,100**. Mainnet activation is controlled by its block
+height, not a calendar date.
 
-Configured Paymaster wallets can explicitly select continuous wallet-wide
-operating unlock until manual lock, wallet unload or node shutdown. GUI and CLI
-setup preselect this choice; timed access remains available. Passwords are never
-stored, encrypted wallets still require manual unlock after restart, and existing
-wallets receive no automatic unlock or additional spending authorization.
-The optional third `walletpassphrase` argument `paymaster_until_shutdown=true`
-requires timeout zero; `unlocked_until=-1` reports this volatile mode.
+### What to do
 
-CLI setup can optionally generate separate DGB/DD receiving addresses and watch
-incoming funding, approved reserve preparation and confirmations. A requested
-one-time start is verified before setup reports completion. Autostart remains
-separate. Ordinary payment-capacity waits now receive a waiting explanation
-instead of an error headline.
+1. Back up your wallets and configuration. Keep the backups private.
+2. Download the final release for your system and verify its signed checksums.
+3. Stop the old wallet or daemon normally, replace the program, and restart it.
+4. Check that the version is v9.26.6 and that the node finishes synchronizing.
 
-The CLI assistant now explains each choice in seven stages, accepts exact DGB,
-DD and percentage inputs, retries invalid input in place and reviews readable
-budgets. New providers propose automatic operation, bounded paid refill and
-autostart; saved settings remain preselected for existing wallets. Explicit-yes
-approval is still required, and encrypted wallets still need manual unlock after
-restart. Repeated unchanged funding status is condensed into a heartbeat.
-The CLI offers only supported policy combinations: restricted sponsorship is
-sponsored-only with zero DD service fee. Invalid restricted combinations are
-rejected by the shared setup planner before any configuration changes.
+A normal upgrade from a working RC2 node does not require a reindex. Keep the
+required DigiDollar block history. If the old node stopped on a rejected block,
+use the reviewed recovery instructions for that failure.
 
-A follow-up setup audit extends shared preflight to the complete proposed
-configuration using Core's existing policy validators. The Qt assistant now
-prevents restricted mixed models, clears DD targets for sponsored-only pool
-preparation, retains exact saved policy values in both preview and execution,
-and reviews inactive budget adjustments. CLI exposes inactive saved limits,
-accepts an optional valid identity name and enforces the pool setup fee bound.
-The Core policy rules themselves remain unchanged.
+Installing this release enables its wallet and display improvements immediately.
+The scheduled mainnet rule changes begin at block 24,490,000. Minting still
+requires an eligible price, sufficient collateral and the other existing checks.
 
-Node connection review now uses a single window with current values and startup
-source labels. Overridden values are read-only; only changed values are previewed,
-errors retain the entered values, and saving requires the reviewed Core plan.
+### Changes added after RC2
 
-The provider's main reserve action now guides restoration after deliberately
-releasing the last DD payment reserve. It reviews the required capacity change,
-capital and fees together, preserves all spending limits, and can start the
-provider when ready. Lost settings replies are reconciled before continuation;
-changed settings or increased funding require a new review. Operation no longer
-repeats the reserve/budget settings buttons below its status cards.
+Each entry is one change group. Supporting tests count with their fix.
+The version number, wallet version image and release-note edits are not extra fixes.
 
-Earnings withdrawal now explains the network minimum output (currently 1 DD)
-and disables guided and advanced payout below that amount. Smaller earnings
-remain accumulated without consuming the provider's operating capital. Unknown
-operator-task failures retain their actual error instead of a generic provider
-requirement; no Core payment or minimum-output rule changes.
+| Release stage | Change groups added |
+| --- | ---: |
+| RC1 | 83 |
+| RC2 | 24 |
+| Final release | 18 |
+| **Total for v9.26.6** | **125** |
 
-These working-branch changes are outside the published RC2 change counts and do
-not move a release tag. Verification and remaining operator checks are recorded
-in [the Paymaster test guide](doc/digidollar-paymaster-testing.md).
+#### Minting and sending
+
+1. **Change:** Large mints wait for coin-merge transactions to confirm before building the mint, and show the merge transaction IDs. Repeated requests reuse that pending status, including after restart.\
+   **Why:** Spending several large, unconfirmed merges at once can exceed the existing transaction-chain limit. The wallet must explain the wait without recording a failed mint or starting unnecessary extra merges.
+
+2. **Change:** The Qt mint form respects manually locked DGB coins and uses the wallet's normal spendable-coin checks.\
+   **Why:** Coins the user has locked must stay out of automatic collateral selection.
+
+3. **Change:** DigiDollar sends report the actual coin-selection error and check the selected inputs before asking for confirmation.\
+   **Why:** Change below $1 needs a different amount or input selection. Waiting for confirmations will not fix that error. The $1 output minimum is unchanged.
+
+4. **Change:** Oversized DGB sends explain that too many coins are needed and suggest a smaller send or combining small coins first.\
+   **Why:** The existing transaction-size limit remains necessary, but users need a useful next step.
+
+5. **Change:** A DigiDollar send that lacks fee funds shows the estimated fee in DGB.\
+   **Why:** Users should not have to convert an internal unit or assume every send costs the same amount.
+
+#### Wallet screens and CSV exports
+
+6. **Change:** The Send DigiDollar address field says "Enter a DigiDollar address."\
+   **Why:** Example text should not look like an address already entered by the user.
+
+7. **Change:** DigiDollar paste and address-book icons have readable contrast, and Send and Clear buttons visibly respond to hovering and clicking.\
+   **Why:** The controls should be recognizable and show when they are being used in both themes.
+
+8. **Change:** DigiDollar transaction rows, filters and dropdowns use the DigiDollar green theme consistently.\
+   **Why:** Mixed background and text colours made the page harder to read.
+
+9. **Change:** Main Transactions CSV dates include hours, minutes and seconds without an unnecessary ".000" ending.\
+   **Why:** Exports should contain clear, consistent dates. Dates shown inside the wallet still follow the computer's regional settings.
+
+10. **Change:** The main Transactions page exports DigiDollar amounts as plain decimal numbers without a currency suffix.\
+    **Why:** Spreadsheets need numeric cells for calculations. This completes the CSV amount repair started in RC2.
+
+11. **Change:** Transaction exports suggest a dated filename and make the disabled Save button readable.\
+    **Why:** Users should have a useful starting filename and understand when saving is unavailable.
+
+12. **Change:** New folder names remain readable while editing them in the dark-theme export dialog.\
+    **Why:** The old styling could put white text on a white background.
+
+13. **Change:** The About window gives its text enough room, keeps links readable, and points to the current DigiByte website and source repository.\
+    **Why:** Users need to find their version and the project's current information without a cramped text column.
+
+#### RPC, logging and test tools
+
+14. **Change:** `listdigidollaraddresses` returns saved labels, transaction counts and last-used times from the wallet.\
+    **Why:** These fields previously returned empty or zero values. An unknown address creation date remains empty rather than being guessed.
+
+15. **Change:** `validateaddress` help and wallet integration instructions direct DigiDollar users to `validateddaddress`.\
+    **Why:** DigiByte and DigiDollar use different address formats. The existing DigiDollar command checks DD, TD and RD addresses without changing ordinary DigiByte address validation.
+
+16. **Change:** Expected nonmatching DigiDollar key checks appear only when DigiDollar debug logging is enabled.\
+    **Why:** Routine wallet scanning should not fill the normal log with misleading messages.
+
+17. **Change:** The isolated Thaw Day test builds the current release candidate by default and also accepts an exact commit or tag.\
+    **Why:** Each rehearsal must exercise the intended candidate rather than an older, fixed commit.
+
+18. **Change:** The Thaw Day test leaves its last permitted block available while oracle signatures finish.\
+    **Why:** A block mined without a price bundle cannot gain one later. The test must wait before mining that block and still check the actual signed bundle afterward.
+
+### Integration notes and limits
+
+When a mint needs coin merging, `mintdigidollar` can return
+`status: "consolidation_pending"` and `consolidation_txids`. This means that
+**no DigiDollar has been minted yet**. Wait for those transactions to confirm,
+then retry. Check any accompanying `error` if a later merge failed. The normal
+successful mint response is unchanged. Coin merges are ordinary DGB
+transactions and pay the normal network fees.
+
+`listdigidollaraddresses` counts distinct DigiDollar transactions known to the
+wallet. `last_used` is the latest wallet transaction time, in UTC. These fields
+describe this wallet's records, not a complete public address history.
+
+This release does not add a general "combine coins" button or DigiDollar
+watch-only import support. An oracle pause remains a restriction, not permission
+to bypass missing signatures or price checks. A reported Windows-only blank
+progress popup was not reproduced in the Linux checks; no speculative change
+was made for it.
+
+### Final verification
+
+The Linux test runs checked the production source at `a96e6b10b6`. The later
+rehearsal correction changes only the test script and its regression tests;
+the production source is identical.
+
+| Check | Result |
+| --- | --- |
+| Core unit tests | 3,759 cases passed; two existing cases have partial-fixture warnings |
+| Extended functional tests | 405 passed, 17 skipped, none failed |
+| Qt tests | All 11 suites passed: 178 reported rows, including setup and cleanup |
+| Fuzz tests | All 256 targets completed with memory and undefined-behavior checks |
+| Cryptography and supporting library tests | All six test programs passed |
+| Utility and RPC authentication tests | Passed |
+| Rehearsal script regression tests | All seven passed |
+| Full private Thaw Day rehearsal | Passed before and after activation, including price limits, recovery, reindex and fresh sync |
+
+The functional skips require older binaries, tracing support, special network
+interfaces, or unsupported Signet features. Fuzz checks replayed the saved
+test inputs; the two targets without saved inputs each generated new inputs
+for ten seconds. This was a bounded test run, not an exhaustive search.
+
+Linux visual checks covered all seven DigiDollar tabs, the changed controls
+and export dialogs, and the About window in light and dark themes. Native
+Windows and macOS checks are still needed on their release packages.
+
+The private rehearsal used commit `86c8176902` with the isolated lab patch.
+All nine nodes finished on the same block at height 5,686. The lab changes
+its own network settings and activation height; it does not replace a full
+mainnet history reindex or native release-package checks.
+
+The RC1 and RC2 results below describe those earlier candidates. Release
+packages must be built from the reviewed final tag and checked before
+publication. These source tests do not verify packages that have not yet
+been built.
+
+---
 
 ## RC2 — second release candidate
 
@@ -118,7 +188,7 @@ validation also applies when checking blocks below Thaw Day.
 | --- | ---: | ---: | ---: | ---: |
 | RC1 | 53 | 23 | 7 | **83** |
 | RC2 | 12 | 9 | 3 | **24** |
-| Combined release | 65 | 32 | 10 | **107** |
+| RC1 + RC2 subtotal | 65 | 32 | 10 | **107** |
 
 Each numbered entry counts one distinct change group. Related repairs are
 grouped, and a repair's supporting tests are included with that repair. A
@@ -736,38 +806,3 @@ Include the version, network, block height and hash, what you expected, what
 happened and relevant log lines. Remove private information from logs first.
 Report security-sensitive details through the project's private security
 channel, rather than a public bug report.
-
-The provider overview groups operating capital by capacity and reserve asset,
-shows DGB beside every spending-limit amount, and places accumulated earnings
-and the payout threshold in Income & costs. Technical pool counts are expandable.
-
-Provider pages now share a command-in-progress lock, preventing repeated or
-competing button actions until the RPC and its follow-up processing finish.
-
-Pool setup fee-limit errors now have a direct guided recovery action: inspect
-the approved ceiling, cancel an uncreated plan safely and review a replacement.
-Higher fees still need explicit approval. Overview maintenance counts are
-labelled tasks, since they also include work without a saved transaction.
-The replacement preview now remains in the serialized RPC chain and its approval
-survives intervening status reads. A pending start without a reserve-creation
-order leads to a reserve review instead of an endless automatic-progress display.
-
-Background operator refreshes retain the last validated frame and update
-valid snapshots without resetting and rebuilding the layout. This also avoids
-flashing before provider startup with slower replies. Status polling and
-command serialization are unchanged.
-
-A successful retirement/stop completion notice is cleared after Core confirms
-that the provider is running again, avoiding a stale stopped-state message.
-
-The retirement confirmation replaces its non-editable capital-release
-checkbox with an explanation and directs stop-only users to Stop Paymaster.
-
-The node connection dialog presents externally controlled settings as readable
-fixed values and hides edit actions when everything is read-only. Its scroll
-background follows the active theme instead of the native light palette.
-
-Liquidity settings now keep their approval and save protected from background
-refreshes, preserve unconfirmed edits and reconcile lost save replies against
-the wallet's stored policy. The form explicitly distinguishes automatic refill
-from permission to pay refill fees and opens the fee controls when needed.

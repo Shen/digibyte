@@ -1066,7 +1066,7 @@ RPCHelpMan withdrawpaymastercarrier()
                     }
                     DDTransferPlan transfer_plan;
                     std::string plan_error;
-                    if (!dd_wallet->PlanDigiDollarTransfer(
+                    if (!dd_wallet->PlanFundedDigiDollarTransfer(
                             recipients, transfer_plan, plan_error,
                             &plan.source_carriers,
                             /*allow_paymaster_pool_inputs=*/true)) {
@@ -1408,7 +1408,7 @@ RPCHelpMan withdrawpaymastercarrier()
             }
             DDTransferPlan transfer_plan;
             std::string transfer_error;
-            if (!dd_wallet->PlanDigiDollarTransfer(
+            if (!dd_wallet->PlanFundedDigiDollarTransfer(
                     recipients, transfer_plan, transfer_error,
                     &plan.source_carriers,
                     /*allow_paymaster_pool_inputs=*/true) ||
@@ -1782,7 +1782,7 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         }
         DDTransferPlan plan;
         std::string error;
-        if (!dd_wallet->PlanDigiDollarTransfer(recipients, plan, error)) return "PAYMASTER_POOL_WAITING_FUNDS: " + error;
+        if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, plan, error)) return "PAYMASTER_POOL_WAITING_FUNDS: " + error;
         if (plan.estimated_fee <= 0) return "PAYMASTER_POOL_FEE_INVALID";
         if (plan.estimated_fee > record.maximum_fee.value) return PreparationFeeLimit("estimated", plan.estimated_fee, record.maximum_fee.value);
         CMutableTransaction inputs;
@@ -2693,7 +2693,7 @@ RPCHelpMan rebalancepaymasterpool()
                 std::string transfer_error;
                 DDTransferPlan transfer_plan;
                 CMutableTransaction transaction;
-                if (!dd_wallet->PlanDigiDollarTransfer(recipients, transfer_plan, transfer_error,
+                if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, transfer_plan, transfer_error,
                                                        &inputs, /*allow_paymaster_pool_inputs=*/true) ||
                     !dd_wallet->BuildDigiDollarTransfer(transfer_plan, transaction, transfer_error)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);

@@ -273,7 +273,7 @@ std::optional<UniValue> PrepareDigiDollarFeeFunding(
         DDTransferPlan plan;
         std::string preflight_error;
         const bool can_fund_direct = send_all_snapshot_available &&
-            dd_wallet.PlanDigiDollarTransfer(
+            dd_wallet.PlanFundedDigiDollarTransfer(
                 {{dd_address, amount}}, plan, preflight_error,
                 preset_dd_inputs);
         if (!can_fund_direct) {

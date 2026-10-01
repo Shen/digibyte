@@ -8,6 +8,16 @@
 
 ## Paymaster architecture in this branch
 
+The integration includes official PR #452 through `92330d952625` (v9.26.6).
+`DigiDollarWallet::PlanDigiDollarTransfer` retains upstream's DD-only input,
+change and capacity preflight, including its detailed errors. The fork's
+`PlanFundedDigiDollarTransfer` adds concrete DGB fee inputs under the wallet
+lock for direct execution, AUTO fee-shortage detection and provider maintenance.
+Only `INSUFFICIENT_DGB_FEE_INPUTS` permits AUTO fallback; invalid DD selections
+and capacity errors do not. The ordinary Qt send performs upstream's selected-DD
+preflight before confirmation; provider-funded sends use their existing Core
+preparation and approval flow. See the [integration checkpoint](doc/digidollar-paymaster-v9.26.6rc2-integration.md#official-pr-452-integration-2026-10-01).
+
 The [Qt flow audit](doc/design/paymaster-flow-audit.md) binds modal approvals and
 unlock continuations to the wallet generation, keeps live request arguments
 stable, and treats session-list failures separately from an empty wallet.

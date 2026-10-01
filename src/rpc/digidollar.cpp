@@ -53,6 +53,7 @@
 #include <wallet/coinselection.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/digidollarmintcapability.h>
+#include <wallet/digidollarmintconsolidation.h>
 #include <wallet/walletdb.h>
 #include <wallet/scriptpubkeyman.h>
 #include <interfaces/wallet.h>
@@ -1718,13 +1719,15 @@ RPCHelpMan mintdigidollar()
     return RPCHelpMan{"mintdigidollar",
                 "\nMint new DigiDollar with DGB collateral.\n"
                 "Creates a new DigiDollar position by locking DGB as collateral.\n"
-                "The amount of collateral required depends on the lock period and current system health.\n",
+                "The amount of collateral required depends on the lock period and current system health.\n"
+                "A fragmented wallet may send coin merges instead. Wait for them to confirm, then retry.\n",
                 {
                     {"dd_amount", RPCArg::Type::NUM, RPCArg::Optional::NO, "Amount of DigiDollar to mint in cents (min 10000/$100, max 10000000/$100K)", RPCArgOptions{.skip_type_check = true}},
                     {"lock_tier", RPCArg::Type::NUM, RPCArg::Optional::NO, "Lock tier 0-9 (0=1h, 1=30d, 2=90d, 3=180d, 4=1y, 5=2y, 6=3y, 7=5y, 8=7y, 9=10y)", RPCArgOptions{.skip_type_check = true}},
                     {"fee_rate", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Fee rate in sat/kB; values below 35000000 are floored to 35000000 to satisfy the DD fee floor", RPCArgOptions{.skip_type_check = true}}
                 },
-                RPCResult{
+                {
+                RPCResult{"when a mint is created",
                     RPCResult::Type::OBJ, "", "",
                     {
                         {RPCResult::Type::STR_HEX, "txid", "Transaction ID of the mint transaction"},
@@ -1734,10 +1737,19 @@ RPCHelpMan mintdigidollar()
                         {RPCResult::Type::NUM, "unlock_height", "Block height when collateral becomes unlockable"},
                         {RPCResult::Type::NUM, "collateral_ratio", "Effective collateral ratio percentage"},
                         {RPCResult::Type::STR_AMOUNT, "fee_paid", "Transaction fee paid"},
-                        {RPCResult::Type::STR, "position_id", "Unique position identifier"},
-                        {RPCResult::Type::STR_HEX, "consolidation_txid", /*optional=*/true, "TXID of auto-consolidation transaction (only present if UTXOs were consolidated)"},
-                        {RPCResult::Type::BOOL, "utxos_consolidated", /*optional=*/true, "True if wallet UTXOs were auto-consolidated before minting"}
+                        {RPCResult::Type::STR, "position_id", "Unique position identifier"}
                     }
+                },
+                RPCResult{"when coin merges are waiting for confirmation; no mint was created",
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "status", "consolidation_pending"},
+                        {RPCResult::Type::STR, "message", "Wait for confirmation, then retry the mint"},
+                        {RPCResult::Type::ARR, "consolidation_txids", "Coin merge transactions awaiting confirmation",
+                            {{RPCResult::Type::STR_HEX, "txid", "Coin merge transaction ID"}}},
+                        {RPCResult::Type::STR, "error", /*optional=*/true, "Reason a later merge could not complete; earlier transactions are still pending"}
+                    }
+                },
                 },
                 RPCExamples{
                     HelpExampleCli("mintdigidollar", "10000 3") +
@@ -1913,6 +1925,20 @@ RPCHelpMan mintdigidollar()
             WAIT_LOCK(pwallet->cs_wallet, mint_wallet_lock);
             WAIT_LOCK(dd_wallet->cs_dd_wallet, mint_dd_wallet_lock);
 
+            auto pending_consolidation = [](const wallet::MintConsolidationResult& consolidated) {
+                UniValue pending(UniValue::VOBJ);
+                pending.pushKV("status", "consolidation_pending");
+                pending.pushKV("message", "Coins were merged. No DigiDollar was minted. Wait for confirmation, then retry the mint.");
+                UniValue txids(UniValue::VARR);
+                for (const auto& txid : consolidated.txids) txids.push_back(txid.GetHex());
+                pending.pushKV("consolidation_txids", txids);
+                if (!consolidated.error.empty()) pending.pushKV("error", consolidated.error);
+                return pending;
+            };
+            const auto pending_merges = wallet::GetPendingDigiDollarMintConsolidations(*pwallet);
+            if (!pending_merges.txids.empty()) return pending_consolidation(pending_merges);
+            if (!pending_merges.error.empty()) throw JSONRPCError(RPC_WALLET_ERROR, pending_merges.error);
+
             // Get available UTXOs from wallet and build value map
             std::vector<COutPoint> availableUtxos;
             std::map<COutPoint, CAmount> utxoValues;
@@ -1926,7 +1952,7 @@ RPCHelpMan mintdigidollar()
             }
 
             if (availableUtxos.empty()) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "No available UTXOs for collateral");
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "No spendable DGB coins for collateral. If a transaction is waiting for confirmation, retry after it confirms.");
             }
 
             // Generate owner key from wallet using HD derivation
@@ -1988,125 +2014,18 @@ RPCHelpMan mintdigidollar()
 
             DigiDollar::TxBuilderResult result = builder.BuildMintTransaction(params);
 
-            // Auto-consolidate if mint failed due to UTXO fragmentation
-            std::string consolidation_txid;
+            // Merged coins must confirm before they can fund a mint.
             if (!result.success && result.error.find("Too many small UTXOs") != std::string::npos) {
-                LogPrintf("DigiDollar RPC Mint: UTXO fragmentation detected (%zu UTXOs). Auto-consolidating...\n",
-                          availableUtxos.size());
-
-                if (!pwallet->GetBroadcastTransactions()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                        "Auto-consolidation requires wallet transaction broadcast to be enabled");
+                const auto consolidated = wallet::ConsolidateDigiDollarMintCoins(
+                    *pwallet, availableUtxos, utxoValues, result.collateralRequired + 20000000);
+                if (consolidated.txids.empty()) {
+                    int error_code = RPC_WALLET_ERROR;
+                    if (consolidated.failure == wallet::MintConsolidationFailure::INSUFFICIENT_FUNDS) error_code = RPC_WALLET_INSUFFICIENT_FUNDS;
+                    if (consolidated.failure == wallet::MintConsolidationFailure::REJECTED) error_code = RPC_TRANSACTION_REJECTED;
+                    throw JSONRPCError(error_code, consolidated.error);
                 }
+                return pending_consolidation(consolidated);
 
-                auto sort_available_utxos_by_value = [&]() {
-                    std::sort(availableUtxos.begin(), availableUtxos.end(),
-                        [&](const COutPoint& a, const COutPoint& b) {
-                            const CAmount av = utxoValues.count(a) ? utxoValues.at(a) : 0;
-                            const CAmount bv = utxoValues.count(b) ? utxoValues.at(b) : 0;
-                            if (av != bv) return av > bv;
-                            return a < b;
-                        });
-                };
-
-                auto commit_consolidation = [&](const CTransactionRef& consolidation_tx) {
-                    std::string commit_error;
-                    bool commit_success = false;
-                    {
-                        LOCK(pwallet->cs_wallet);
-                        commit_success = pwallet->CommitTransaction(consolidation_tx, {}, {}, &commit_error);
-                    }
-                    if (!commit_success) {
-                        throw JSONRPCError(RPC_TRANSACTION_REJECTED,
-                            strprintf("Auto-consolidation transaction rejected by mempool: %s", commit_error));
-                    }
-                };
-
-                sort_available_utxos_by_value();
-
-                CAmount totalAvailable = 0;
-                for (const auto& [outpoint, value] : utxoValues) {
-                    totalAvailable += value;
-                }
-                CAmount minRequired = result.collateralRequired + 20000000;
-                if (totalAvailable < minRequired) {
-                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-                        strprintf("Insufficient funds for collateral. Need %.2f DGB, have %.2f DGB.",
-                                  result.collateralRequired / 100000000.0,
-                                  totalAvailable / 100000000.0));
-                }
-
-                CTxDestination consolidationDest;
-                {
-                    LOCK(pwallet->cs_wallet);
-                    auto op_dest = pwallet->GetNewChangeDestination(OutputType::BECH32);
-                    if (!op_dest) {
-                        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to get consolidation address");
-                    }
-                    consolidationDest = *op_dest;
-                }
-
-                // Multi-pass consolidation: MAX_STANDARD_TX_WEIGHT is 400k WU.
-                // P2WPKH input ≈ 271 WU. Conservative limit: 1400 inputs per pass.
-                static const size_t MAX_CONSOLIDATION_INPUTS = 1400;
-                static const int MAX_CONSOLIDATION_PASSES = 10;
-                int pass = 0;
-                std::vector<COutPoint> consolidatedUtxos;
-                std::map<COutPoint, CAmount> consolidatedValues;
-
-                for (size_t offset = 0; offset < availableUtxos.size() && pass < MAX_CONSOLIDATION_PASSES;) {
-                    ++pass;
-                    size_t batch_size = std::min(availableUtxos.size() - offset, MAX_CONSOLIDATION_INPUTS);
-                    LogPrintf("DigiDollar RPC Mint: Consolidation pass %d — sweeping %zu of %zu UTXOs\n",
-                              pass, batch_size, availableUtxos.size());
-
-                    wallet::CCoinControl coin_control;
-                    CAmount batchTotal = 0;
-                    for (size_t i = 0; i < batch_size; ++i) {
-                        const COutPoint& utxo = availableUtxos[offset + i];
-                        coin_control.Select(utxo);
-                        batchTotal += utxoValues[utxo];
-                    }
-                    coin_control.m_allow_other_inputs = false;
-
-                    wallet::CRecipient recipient{consolidationDest, batchTotal, /*subtract_fee=*/true};
-                    std::vector<wallet::CRecipient> recipients = {recipient};
-
-                    auto consolidation_result = wallet::CreateTransaction(*pwallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
-                    if (!consolidation_result) {
-                        throw JSONRPCError(RPC_WALLET_ERROR,
-                            strprintf("Auto-consolidation pass %d failed: %s. Try manually consolidating UTXOs.",
-                                      pass, util::ErrorString(consolidation_result).original));
-                    }
-
-                    const CTransactionRef& consolidation_tx = consolidation_result->tx;
-                    consolidation_txid = consolidation_tx->GetHash().GetHex();
-                    commit_consolidation(consolidation_tx);
-
-                    LogPrintf("DigiDollar RPC Mint: Consolidation pass %d tx: %s (swept %.2f DGB from %zu inputs)\n",
-                              pass, consolidation_txid, batchTotal / 100000000.0, batch_size);
-
-                    COutPoint consolidated_outpoint(consolidation_tx->GetHash(), 0);
-                    consolidatedUtxos.push_back(consolidated_outpoint);
-                    consolidatedValues[consolidated_outpoint] = consolidation_tx->vout[0].nValue;
-                    offset += batch_size;
-                }
-
-                if (consolidatedUtxos.empty() || consolidatedUtxos.size() > MAX_CONSOLIDATION_PASSES) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                        "Auto-consolidation failed: too many fragmented UTXOs. Try manually consolidating UTXOs.");
-                }
-
-                availableUtxos = std::move(consolidatedUtxos);
-                utxoValues = std::move(consolidatedValues);
-
-                LogPrintf("DigiDollar RPC Mint: After consolidation: %zu UTXOs available (passes: %d)\n",
-                          availableUtxos.size(), pass);
-
-                RpcMintTxBuilder retryBuilder(Params(), mintHeight, oraclePriceMicroUSD, utxoValues);
-                if (candidateHealth.active) retryBuilder.SetCandidateHealth(candidateHealth.health);
-                params.utxos = availableUtxos;
-                result = retryBuilder.BuildMintTransaction(params);
             }
 
             if (!result.success) {
@@ -2254,10 +2173,6 @@ RPCHelpMan mintdigidollar()
             resultObj.pushKV("collateral_ratio", collateralRatio);
             resultObj.pushKV("fee_paid", ValueFromAmount(result.totalFees));
             resultObj.pushKV("position_id", positionId.GetHex());
-            if (!consolidation_txid.empty()) {
-                resultObj.pushKV("consolidation_txid", consolidation_txid);
-                resultObj.pushKV("utxos_consolidated", true);
-            }
 
             return resultObj;
         },
@@ -2267,6 +2182,7 @@ RPCHelpMan mintdigidollar()
 RPCHelpMan senddigidollar()
 {
     return RPCHelpMan{"senddigidollar",
+                "Each recipient must receive at least 100 cents ($1.00). Change from the selected inputs must be zero or at least 100 cents ($1.00).\n"
                 "\nSend DigiDollar to another DigiDollar address.\n"
                 "Creates a transaction that transfers DigiDollar from your wallet to the specified address.\n"
                 "In DGB fee mode, the sending wallet also needs spendable DGB to pay the transaction fee; DigiDollar cannot pay that fee. Paymaster mode funds the DGB fee through the provider.\n"
@@ -2541,6 +2457,7 @@ RPCHelpMan senddigidollar()
 RPCHelpMan sendmanydigidollar()
 {
     return RPCHelpMan{"sendmanydigidollar",
+                "Each recipient must receive at least 100 cents ($1.00). Change from the selected inputs must be zero or at least 100 cents ($1.00).\n"
                 "\nSend DigiDollar to multiple DigiDollar addresses in one transaction.\n"
                 "Every amount is a whole number of cents unless amount_unit says otherwise: 5000 is $50.00.\n"
                 "One amount_unit applies to every recipient in the request.\n",
@@ -3758,7 +3675,8 @@ RPCHelpMan validateddaddress()
 {
     return RPCHelpMan{"validateddaddress",
                 "\nValidate a DigiDollar address format and return detailed information.\n"
-                "Checks if the address has the correct prefix, encoding, and checksum.\n",
+                "Checks if the address has the correct prefix for the current network, encoding, and checksum.\n"
+                "Use this wallet RPC for DD, TD and RD addresses; validateaddress handles DigiByte addresses.\n",
                 {
                     {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "DigiDollar address to validate"}
                 },
@@ -3894,9 +3812,9 @@ RPCHelpMan listdigidollaraddresses()
                                 {RPCResult::Type::STR_AMOUNT, "balance", "DD balance (in cents)"},
                                 {RPCResult::Type::BOOL, "ismine", "Whether address is owned by wallet"},
                                 {RPCResult::Type::BOOL, "iswatchonly", "Whether address is watch-only"},
-                                {RPCResult::Type::NUM, "txcount", "Number of transactions involving this address"},
-                                {RPCResult::Type::STR, "created_date", "Date when address was created"},
-                                {RPCResult::Type::STR, "last_used", "Date of last transaction"}
+                                {RPCResult::Type::NUM, "txcount", "Number of distinct wallet DigiDollar transactions receiving to or spending from this address"},
+                                {RPCResult::Type::STR, "created_date", "Address creation date, or an empty string when not recorded"},
+                                {RPCResult::Type::STR, "last_used", "Latest wallet DigiDollar transaction time in ISO 8601 UTC, or an empty string if unused"}
                             }
                         }
                     }
@@ -3976,6 +3894,37 @@ RPCHelpMan listdigidollaraddresses()
                 addressBalances.try_emplace(addr, 0);
             }
 
+            struct AddressActivity {
+                int tx_count{0};
+                int64_t last_used{0};
+            };
+            std::map<std::string, AddressActivity> activity;
+            for (const auto& [txid, wtx] : pwallet->mapWallet) {
+                if (!wtx.tx || !IsDigiDollarTransaction(*wtx.tx)) continue;
+                std::set<std::string> involved;
+                auto record_output = [&](const CTxOut& output) {
+                    CTxDestination dest;
+                    if (output.nValue != 0 || !ExtractDestination(output.scriptPubKey, dest) ||
+                        !std::holds_alternative<WitnessV1Taproot>(dest)) return;
+                    const std::string address = EncodeDigiDollarAddress(dest);
+                    if (addressBalances.count(address)) involved.insert(address);
+                };
+                for (const auto& output : wtx.tx->vout) record_output(output);
+                for (const auto& input : wtx.tx->vin) {
+                    const auto* previous = pwallet->GetWalletTx(input.prevout.hash);
+                    if (previous && input.prevout.n < previous->tx->vout.size() &&
+                        IsDigiDollarTransaction(*previous->tx)) {
+                        record_output(previous->tx->vout[input.prevout.n]);
+                    }
+                }
+                // Multiple outputs or inputs at one address count only once.
+                for (const auto& address : involved) {
+                    auto& stats = activity[address];
+                    ++stats.tx_count;
+                    stats.last_used = std::max(stats.last_used, wtx.GetTxTime());
+                }
+            }
+
             for (const auto& [addr, balance] : addressBalances) {
                 if (balance < minBalance) continue;
                 // DD-FA-FUNC-024: hide zero-balance addresses by default.
@@ -3988,13 +3937,16 @@ RPCHelpMan listdigidollaraddresses()
 
                 UniValue addrInfo(UniValue::VOBJ);
                 addrInfo.pushKV("address", addr);
-                addrInfo.pushKV("label", "");
+                const auto* address_book = pwallet->FindAddressBookEntry(DecodeDigiDollarAddress(addr));
+                addrInfo.pushKV("label", address_book ? address_book->GetLabel() : "");
                 addrInfo.pushKV("balance", balance);
                 addrInfo.pushKV("ismine", isMine);
                 addrInfo.pushKV("iswatchonly", isWatchOnly);
-                addrInfo.pushKV("txcount", 0);
+                const auto& stats = activity[addr];
+                addrInfo.pushKV("txcount", stats.tx_count);
+                // Key birthdays and first receipts are not address creation dates.
                 addrInfo.pushKV("created_date", "");
-                addrInfo.pushKV("last_used", "");
+                addrInfo.pushKV("last_used", stats.last_used > 0 ? FormatISO8601DateTime(stats.last_used) : "");
 
                 result.push_back(addrInfo);
             }

@@ -26,6 +26,9 @@ public:
     Q_OBJECT
 
 private Q_SLOTS:
+    void mintRespectsManuallyLockedCoins();
+    void mintWaitsForCoinMergeConfirmation_data();
+    void mintWaitsForCoinMergeConfirmation();
     void mintSavesItsRecordBeforeSendingTheTransaction();
     void mintDoesNotSendWhenTheWalletCannotSaveIt();
     void mintStoppedByAChangedPriceLeavesNothingBehind();

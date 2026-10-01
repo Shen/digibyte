@@ -1,5 +1,43 @@
 # Paymaster integration with DigiByte v9.26.6rc2
 
+## Official PR #452 integration (2026-10-01)
+
+The branch now incorporates [DigiByte-Core/digibyte#452](https://github.com/DigiByte-Core/digibyte/pull/452)
+at `92330d952625e20aef2ee40671a179ef03872ac1`, starting from fork commit
+`504489f447cb899c7523c42aeb96c84ae32ee003`. This adds the 22 official commits
+since common ancestor `d96d58545a4683057cfc24dc903353a64fe71698`. The branch
+name remains `integration/paymaster-v9.26.6rc2`; upstream's version is now
+final v9.26.6. The dated checkpoints below describe earlier revisions.
+
+Official changes take precedence. Mint consolidation, confirmation waits and
+persistent state, locked-coin selection, DD input/change errors, selected-input
+Qt preflight, address activity RPC, CSV export and dialog styles are retained.
+The normal wallet input-selection checks also exclude dedicated Paymaster pool
+coins from mint consolidation; this integration does not grant new spending
+authority or alter consensus, Paymaster wire fields or its durable records.
+
+Paymaster's former extension of `PlanDigiDollarTransfer` now lives in
+`PlanFundedDigiDollarTransfer`. This preserves the upstream DD-only preflight
+without local DGB, while direct execution and the Paymaster RPC paths still
+check concrete fee inputs. AUTO fallback remains limited to a typed DGB fee
+shortage, never a DD selection/change/capacity failure. Provider maintenance
+retains its explicit pool-input override and exact funded plan.
+
+The direct Qt send checks selected DD inputs before confirmation. The official
+GUI regression explicitly selects direct DGB mode and primes the fork's cached
+balance. Official mint-consolidation metadata and private Paymaster metadata
+are both excluded from transaction RPC responses. Upstream's file-dialog styles
+coexist with the fork's operator styles.
+
+[RELEASE_v9.26.6.md](../RELEASE_v9.26.6.md) is the unchanged official document.
+Fork additions formerly embedded there are preserved in
+[Paymaster integration release notes](release-notes/paymaster-integration.md).
+The [test runbook](digidollar-paymaster-testing.md#pr-452-source-integration-2026-10-01)
+records targeted compile/check results and the pending rebuilt runtime tests.
+This checkpoint is source integration, not release acceptance.
+
+## Earlier transport and client checkpoints
+
 Current transport/retry source: `1789c803be`, 2026-09-27. The
 [capacity guide](digidollar-paymaster-connection-capacity.md#current-verification-status)
 records the implemented one-channel queue, DoS admission controls, recovery

@@ -879,6 +879,9 @@ or chain parameters.
 ### src/wallet/digidollarmintcapability.h
 - `wallet::GetDigiDollarMintWalletError(wallet)` → checks mint wallet support without allocating keys or requiring unlock; descriptor/private-key/HD support, Taproot receiving and bech32 change descriptors are required. Actual owner-key derivation and signing must still succeed.
 
+### src/wallet/digidollarmintconsolidation.h
+- Shared Qt/RPC helper for combining confirmed DGB coins before a mint. Returns the merge transaction IDs and any partial failure. Existing wallet transaction metadata prevents repeated merges while confirmation is pending; known failed attempts use the normal abandonment path. It does not change transaction or consensus limits.
+
 ### src/wallet/digidollarwallet.h
 - `DDTransaction` (struct) → wallet-facing DD transaction: txid, amount, timestamp, confirmations, incoming, address, category (send/receive/mint/redeem), blockheight, blockhash, fee, comment, abandoned, lock_tier
 - `WalletDDBalance` (struct) → address → balance mapping with last_updated timestamp
@@ -967,7 +970,9 @@ or chain parameters.
     - `ProcessIncomingDDTransaction(tx)` → coordinator: detect → add UTXO → update balance
     - `ProcessIncomingTransaction(tx, txid)` → processes any incoming DD tx and adds to history
   - **Coin Selection:**
-    - `SelectDDCoins(target, selected_utxos, selected_total, amounts)` → selects DD UTXOs for target amount
+    - `SelectDDCoins(target, selected_utxos, selected_total, amounts, error)` → selects DD UTXOs and reports upstream balance/change errors
+    - `PlanDigiDollarTransfer(recipients, plan, error, preset_inputs)` → upstream DD-only input/change/capacity preflight; does not require DGB fee coins
+    - `PlanFundedDigiDollarTransfer(recipients, plan, error, preset_inputs, allow_paymaster_pool_inputs)` → fork funding wrapper for direct execution, AUTO fallback and exact provider-maintenance plans; selects DGB fee inputs and classifies shortages
     - `SelectFeeCoins(fee_amount, selected_utxos, selected_total, amounts, exclude)` → selects DGB UTXOs for fees
     - `CalculateTransactionFee(tx)` → estimates fee for transaction
   - **Utility:**

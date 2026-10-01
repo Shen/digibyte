@@ -1,5 +1,102 @@
 # Paymaster build and test runbook
 
+## PR #452 source integration (2026-10-01)
+
+Source baseline: fork `504489f447cb` plus official PR #452 at
+`92330d952625e20aef2ee40671a179ef03872ac1`. See the
+[integration notes](digidollar-paymaster-v9.26.6rc2-integration.md#official-pr-452-integration-2026-10-01)
+for conflict decisions and the upstream/funded planner split.
+
+Checks performed on the integrated source:
+
+- Ten selected translation units compiled with MSVC 14.43 / Qt 5.15.10:
+  `wallet/digidollarwallet.cpp`, wallet RPC `paymaster.cpp`,
+  `paymaster_provider.cpp`, `paymaster_send.cpp`, `transactions.cpp`,
+  `qt/digidollarsendwidget.cpp`, `qt/walletmodel.cpp`, `rpc/digidollar.cpp`,
+  `wallet/test/digidollar_wave17_spendability_tests.cpp` and
+  `qt/test/digidollarwidgettests.cpp`.
+- Compilation used `/t:ClCompile`, verified single-file selection and isolated
+  objects under `build_msvc/pr452-check/`. No application or test executable was
+  linked. MSBuild emitted MSB8028 intermediate-directory warnings while
+  evaluating referenced test projects; the selected compiles returned zero.
+  Existing generated build configuration was retained for these checks.
+- `python -B contrib/thawday/test_rehearsal.py`: all seven tests passed.
+- Python syntax, whitespace/conflict-marker and upstream source-preservation
+  checks passed. The official release document is unchanged.
+
+The C++/Qt regression sources compiled but have **not run against rebuilt
+integrated binaries**. The planner tests cover upstream preflight without DGB,
+DGB-denominated fee errors, typed AUTO-fallback boundaries and non-mutating
+funded plans. The Qt regression retains rejection of unusable selected DD inputs
+before confirmation. The pre-existing light-theme dialog failure in the next
+checkpoint remains unresolved until checked on the rebuilt integration.
+Previous dated passing results do not certify this source revision.
+
+### Operator verification for this integration
+
+Working directory: `D:\Digibyte\digibyte-fork`. Prerequisites: the installed
+Visual Studio v143/MSVC 14.43 toolchain, Windows SDK, Python, Qt 5.15.10 at
+`D:\Qt51510\install` and the existing static vcpkg dependencies. No dependency
+installation is requested. Close programs running from the build outputs
+before rebuilding; the repository build copies executables into `src/`.
+Allow several minutes or longer for the solution build, minutes for native
+regressions and tens of minutes or longer for the functional matrix. These
+commands are pending operator work, not completed verification.
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+python .\build_msvc\msvc-autogen.py
+if ($LASTEXITCODE -ne 0) { throw 'Project/configuration generation failed' }
+& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'PR 452 integration build failed' }
+
+$unitChecks = @(
+    'digidollar_wave17_spendability_tests',
+    'wallet_tests/transaction_rpc_keeps_coin_merge_state_private',
+    'paymaster_wallet_identity_tests/automatic_submit_defers_before_wallet_or_index_wait',
+    'paymaster_wallet_identity_tests/stale_submit_is_consumed_without_faulting_provider',
+    'paymaster_wallet_store_tests/client_confirmed_payment_without_provider_result',
+    'paymaster_wallet_store_tests/client_final_observation_is_atomic_and_idempotent'
+)
+foreach ($unitCheck in $unitChecks) {
+    & .\build_msvc\x64\Release\test_digibyte.exe "--run_test=$unitCheck" --report_level=short
+    if ($LASTEXITCODE -ne 0) { throw "Unit regression failed: $unitCheck" }
+}
+
+$env:QT_QPA_PLATFORM = 'windows'
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    $env:DIGIBYTE_QT_TEST_SUITE = 'DigiDollarWidgetTests'
+    $env:DIGIBYTE_QT_TEST_FUNCTION = 'sendWidgetCoinControlDialogSelectionFeedsSend'
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Selected-input Qt preflight failed' }
+    Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION
+    $env:DIGIBYTE_QT_TEST_SUITE = 'DigiDollarMintRecordTests,DDTransactionTableTests'
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Official mint/history Qt regressions failed' }
+    $env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt regressions failed; retain complete output' }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+$env:DIGIBYTEWALLET = (Resolve-Path .\build_msvc\x64\Release\digibyte-wallet.exe).Path
+$env:DIGIBYTEUTIL = (Resolve-Path .\build_msvc\x64\Release\digibyte-util.exe).Path
+python -u test/functional/test_runner.py digidollar_mint.py digidollar_mint_consolidation.py digidollar_rpc_addresses.py wallet_digidollar_descriptors.py wallet_digidollar_rc33_regressions.py wallet_fundrawtransaction.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_lifecycle.py wallet_paymaster_operator.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'PR 452 / Paymaster functional regressions failed' }
+```
+
+Success requires build exit 0, every selected native/Qt case passing and every
+selected functional variant passing, without unexpected skips. Return the
+failed command, its exit code and complete output if a check stops. Final release
+acceptance, reference compatibility and cross-platform builds remain separate
+operator gates.
+
 ## Commit checkpoint (2026-10-01)
 
 The working changes based on `7ad04ea744` were separated into focused local

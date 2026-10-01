@@ -33,6 +33,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPainter>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -239,24 +240,33 @@ void DigiDollarSendWidget::setupAddressSection()
     m_addressEdit = new QLineEdit(this);
     m_addressEdit->setObjectName("addressEdit");
     m_addressEdit->setValidator(m_addressValidator);
-    m_addressEdit->setPlaceholderText("DD1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+    m_addressEdit->setPlaceholderText(tr("Enter a DigiDollar address"));
     m_addressEdit->setToolTip(tr("The DigiDollar address to send the payment to.\n\nValid formats:\n• DD... (Mainnet)\n• TD... (Testnet)\n• RD... (Regtest)"));
     m_addressEdit->setFocusPolicy(Qt::StrongFocus);
     m_addressEdit->setAttribute(Qt::WA_InputMethodEnabled, true);
     QFont monospaceFont = GUIUtil::fixedPitchFont();
     m_addressEdit->setFont(monospaceFont);
 
+    // White icons remain readable on the green buttons in both themes.
+    const auto buttonIcon = [](const QString& path) {
+        QPixmap pixmap = QIcon(path).pixmap(22, 22);
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), Qt::white);
+        painter.end();
+        return QIcon(pixmap);
+    };
     m_pasteAddressButton = new QToolButton(this);
     m_pasteAddressButton->setToolTip(tr("Paste address from clipboard (Alt+P)"));
     m_pasteAddressButton->setIconSize(QSize(22, 22));
     m_pasteAddressButton->setShortcut(QKeySequence("Alt+P"));
-    m_pasteAddressButton->setIcon(m_platformStyle->SingleColorIcon(":/icons/editpaste"));
+    m_pasteAddressButton->setIcon(buttonIcon(":/icons/editpaste"));
 
     m_addressBookButton = new QToolButton(this);
     m_addressBookButton->setToolTip(tr("Choose from address book (Alt+A)"));
     m_addressBookButton->setIconSize(QSize(22, 22));
     m_addressBookButton->setShortcut(QKeySequence("Alt+A"));
-    m_addressBookButton->setIcon(m_platformStyle->SingleColorIcon(":/icons/address-book"));
+    m_addressBookButton->setIcon(buttonIcon(":/icons/address-book"));
 
     addressInputLayout->addWidget(m_addressEdit);
     addressInputLayout->addWidget(m_addressBookButton);
@@ -662,6 +672,19 @@ void DigiDollarSendWidget::onSendClicked()
     if (m_paymaster->paymasterModeSelected()) {
         m_paymaster->send(address, amount_cents);
     } else {
+        std::vector<COutPoint> selected_inputs;
+        const std::vector<COutPoint>* preset_inputs = nullptr;
+        if (m_coinControl && m_coinControl->HasSelected()) {
+            selected_inputs = m_coinControl->ListSelected();
+            preset_inputs = &selected_inputs;
+        }
+        const QString transfer_error = m_walletModel->getDigiDollarTransferError(
+            address, amount_cents, preset_inputs);
+        if (!transfer_error.isEmpty()) {
+            showError(tr("Cannot Send DigiDollar"), transfer_error);
+            return;
+        }
+
         // PHASE 7.2: Enhanced confirmation dialog with fee display. The direct
         // path has only one signing/broadcast confirmation.
         if (!m_paymaster->showConfirmationDialog(address, amount)) {
@@ -1170,7 +1193,7 @@ void DigiDollarSendWidget::updateAmountValidation()
 
     if (problem.isEmpty()) {
         m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(successColor));
-        m_amountValidationLabel->setText(tr("✓ Amount can be sent"));
+        m_amountValidationLabel->setText(tr("✓ Amount is within the send limits"));
         m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(successColor));
         return;
     }

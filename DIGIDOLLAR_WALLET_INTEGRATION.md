@@ -69,6 +69,15 @@ digibyte-cli getdigidollaraddress
 # Returns a Base58Check DD/TD/RD address for the current network
 ```
 
+**Validate a customer's DD address:**
+```bash
+digibyte-cli -rpcwallet="your-wallet" validateddaddress "<DD, TD or RD address>"
+```
+
+Check `isvalid` before accepting the address. This wallet RPC checks the current
+network and checksum. The ordinary `validateaddress` RPC handles DGB addresses;
+use `validateddaddress` for DigiDollar.
+
 **List DD addresses in wallet:**
 ```bash
 digibyte-cli listdigidollaraddresses
@@ -178,6 +187,32 @@ digibyte-cli mintdigidollar 10000 3
   "position_id": "abc123..."
 }
 ```
+
+### When coins must be combined first
+
+If the wallet needs too many small DGB coins, `mintdigidollar` combines only
+enough coins for the requested mint and its fees. It then returns a different
+result:
+
+```json
+{
+  "status": "consolidation_pending",
+  "message": "Coins were merged. No DigiDollar was minted. Wait for confirmation, then retry the mint.",
+  "consolidation_txids": ["first-merge-transaction-id", "second-merge-transaction-id"]
+}
+```
+
+This result is **not a mint**. Do not credit DigiDollars or record a new vault.
+Wait for the listed transactions to confirm, then request the mint again.
+There is no fixed confirmation time. Repeated requests, including after a
+restart, report pending merges instead of paying for another set of merges.
+The normal successful mint response above is unchanged.
+
+An `error` field can accompany the transaction IDs if a later merge fails.
+Keep those IDs: earlier merges may already have been sent and paid fees.
+A wallet-file error must be resolved before retrying. The wallet releases
+failed local attempts through its existing transaction-abandonment path; it
+does not discard an accepted merge simply because it leaves the mempool.
 
 ### What Happens Under the Hood
 

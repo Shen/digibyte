@@ -2657,7 +2657,7 @@ bool RunAutomaticCarrierReplenishment(
 
     DDTransferPlan plan;
     std::string plan_error;
-    if (!dd_wallet->PlanDigiDollarTransfer(
+    if (!dd_wallet->PlanFundedDigiDollarTransfer(
             recipients, plan, plan_error,
             /*preset_dd_inputs=*/nullptr,
             /*allow_paymaster_pool_inputs=*/false)) {

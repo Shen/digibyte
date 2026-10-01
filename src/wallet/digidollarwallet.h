@@ -1132,7 +1132,7 @@ public:
     void ClearWalletData();
 
     // Coin selection and fee calculation helpers (public for testing and integration)
-    bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr) const;
+    bool SelectDDCoins(const CAmount& target_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr) const;
     bool SelectDDCoins(const CAmount& target_amount, const std::vector<COutPoint>& preset_inputs, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* amounts = nullptr, std::string* error = nullptr, bool allow_paymaster_pool_inputs = false) const;
     /** Snapshot all confirmed ordinary DD inputs and require their sum to
      * match a previously previewed send-all balance. Active Paymaster
@@ -1142,7 +1142,10 @@ public:
                                    CAmount& selected_total,
                                    std::vector<CAmount>* amounts,
                                    std::string& error) const;
+    /** Upstream DD input/change/capacity preflight; does not select DGB fee inputs. */
     bool PlanDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr, bool allow_paymaster_pool_inputs = false) const;
+    /** Add exact DGB fee funding for direct execution and Paymaster fallback/maintenance. */
+    bool PlanFundedDigiDollarTransfer(const std::vector<std::pair<CDigiDollarAddress, CAmount>>& recipients, DDTransferPlan& plan, std::string& error, const std::vector<COutPoint>* preset_dd_inputs = nullptr, bool allow_paymaster_pool_inputs = false) const;
     /** Build and sign a previously validated transfer plan without inserting
      * it into the wallet or broadcasting it. */
     bool BuildDigiDollarTransfer(const DDTransferPlan& plan,

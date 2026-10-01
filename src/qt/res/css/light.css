@@ -2586,36 +2586,11 @@ background-color:rgba(255, 255, 255, 0.15);
 
     /* TRANSACTIONS PAGE */
 
-    TransactionView QLineEdit { /* Filters */
+    TransactionView QLineEdit#transactionSearchEdit,
+    TransactionView QLineEdit#transactionAmountEdit { /* Filters */
     margin-bottom:2px;
     margin-right:1px;
     min-width:111px;
-    text-align:center;
-    background-color: #ffffff;
-    color: #003366;
-    border: 2px solid #003366;
-    border-radius: 4px;
-    padding: 6px;
-    font-weight: bold;
-    }
-
-    TransactionView QLineEdit#addressWidget { /* Address Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    min-width:405px;
-    text-align:center;
-    background-color: #ffffff;
-    color: #003366;
-    border: 2px solid #003366;
-    border-radius: 4px;
-    padding: 6px;
-    font-weight: bold;
-    }
-
-    TransactionView QLineEdit#amountWidget { /* Amount Filter */
-    margin-bottom:2px;
-    margin-right:1px;
-    max-width:100px;
     text-align:center;
     background-color: #ffffff;
     color: #003366;
@@ -5070,13 +5045,13 @@ DigiDollarSendWidget QPushButton#sendButton {
 }
 
 DigiDollarSendWidget QPushButton#sendButton:hover {
-    background-color: #147a42;
+    background-color: #198e4e;
     color: #ffffff !important;
 }
 
 DigiDollarSendWidget QPushButton#sendButton:pressed {
-    background-color: #147a42;
-    border: 1px solid #147a42;
+    background-color: #0e5a30;
+    border: 1px solid #0e5a30;
 }
 
 DigiDollarSendWidget QPushButton#sendButton:disabled {
@@ -5097,13 +5072,13 @@ DigiDollarSendWidget QPushButton#clearButton {
 }
 
 DigiDollarSendWidget QPushButton#clearButton:hover {
-    background-color: #147a42;
+    background-color: #198e4e;
     color: #ffffff !important;
 }
 
 DigiDollarSendWidget QPushButton#clearButton:pressed {
-    background-color: #147a42;
-    border: 1px solid #147a42;
+    background-color: #0e5a30;
+    border: 1px solid #0e5a30;
 }
 
 /* Use available balance button - secondary style */
@@ -5128,7 +5103,7 @@ DigiDollarSendWidget QPushButton#useAvailableBalanceButton:pressed {
 
 /* Paste address button - tool button styling */
 DigiDollarSendWidget QToolButton {
-    background-color: #ffffff;
+    background-color: #147a42;
     color: #123f2b;
     border: 2px solid #123f2b;
     border-left: none;
@@ -5139,11 +5114,11 @@ DigiDollarSendWidget QToolButton {
 }
 
 DigiDollarSendWidget QToolButton:hover {
-    background-color: #e6f7ec;
+    background-color: #198e4e;
 }
 
 DigiDollarSendWidget QToolButton:pressed {
-    background-color: #d7f0e0;
+    background-color: #0e5a30;
 }
 
 /* ============================= */
@@ -5675,7 +5650,7 @@ DigiDollarTransactionsWidget QTableWidget::item:alternate {
 }
 
 DigiDollarTransactionsWidget QTableWidget::item:hover {
-    background-color: rgba(0, 102, 204, 0.3);
+    background-color: #bfe7ce;
     color: #123f2b;
 }
 
@@ -6212,8 +6187,6 @@ DigiDollarReceiveWidget QPushButton#showRequestButton:hover,
 DigiDollarReceiveWidget QPushButton#editRequestButton:hover,
 DigiDollarReceiveWidget QPushButton#removeRequestButton:hover,
 DigiDollarSendWidget QPushButton#coinControlButton:hover,
-DigiDollarSendWidget QPushButton#sendButton:hover,
-DigiDollarSendWidget QPushButton#clearButton:hover,
 DigiDollarMintWidget QPushButton#mintButton:hover,
 DigiDollarMintWidget QPushButton#clearButton:hover,
 DigiDollarRedeemWidget QPushButton#coinControlButton:hover,
@@ -7353,6 +7326,12 @@ DigiDollarSendWidget .QLineEdit#noteEdit {
     background-color: #ffffff;
     color: #123f2b;
     border-color: #147a42;
+}
+
+/* Keep disabled export actions readable in the Qt file dialog. */
+QFileDialog QDialogButtonBox QPushButton:disabled {
+    background-color: #dbe3eb;
+    color: #536477;
 }
 
 /* Daily Paymaster operation: clear hierarchy, detail on demand. */
