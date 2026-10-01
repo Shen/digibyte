@@ -652,6 +652,7 @@ RPCHelpMan setpaymasterliquiditypolicy()
                 {"maximum_maintenance_fee_per_hour_satoshis", RPCArg::Type::NUM, RPCArg::Optional::NO, "Rolling-hour maintenance fee ceiling, in satoshis"},
                 {"maximum_maintenance_fee_per_day_satoshis", RPCArg::Type::NUM, RPCArg::Optional::NO, "Rolling-day maintenance fee ceiling, in satoshis"},
             }},
+            {"expected_updated_at", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Reject a stale edit atomically; zero requires no saved policy"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Saved policy",
                   ProviderLiquidityPolicyResults()},
@@ -705,6 +706,16 @@ RPCHelpMan setpaymasterliquiditypolicy()
                 value.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>()};
             policy.maximum_maintenance_fee_per_day = DGBSatoshis{
                 value.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>()};
+            // Serialize the revision check with the write, including CLI edits.
+            LOCK(wallet->cs_wallet);
+            ProviderLiquidityPolicy saved_policy;
+            const bool have_saved = GetPaymasterProviderLiquidityPolicy(*wallet, saved_policy);
+            if (!request.params[1].isNull()) {
+                const int64_t expected = request.params[1].getInt<int64_t>();
+                if (expected < 0 || expected != (have_saved ? saved_policy.updated_at : 0)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+                }
+            }
             int64_t policy_time = GetTime();
             ProviderLiquidityPolicy current_policy;
             if (GetPaymasterProviderLiquidityPolicy(
@@ -744,7 +755,9 @@ RPCHelpMan getpaymasterliquiditystatus()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
-            return ProviderLiquidityStatusToJSON(readiness, GetTime());
+            auto result = ProviderLiquidityStatusToJSON(readiness, GetTime());
+            result.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness));
+            return result;
         },
     };
 }
@@ -3594,6 +3607,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("pool", pool_summary);
             provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
             auto liquidity = ProviderLiquidityStatusToJSON(readiness, now);
+            liquidity.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness));
             for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
                 auto counts = liquidity.find_value(key);
                 size_t reserved{0};

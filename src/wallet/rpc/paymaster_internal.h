@@ -245,6 +245,8 @@ UniValue LiquidityPolicyToJSON(
 DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     const ProviderReadiness& readiness,
     int64_t now);
+UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
+                                        const ProviderReadiness& readiness);
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
                                        int64_t now);
 uint256 CarrierWithdrawalPlanId(

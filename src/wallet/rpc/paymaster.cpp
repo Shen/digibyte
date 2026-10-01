@@ -1026,6 +1026,55 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     return result;
 }
 
+UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
+                                        const ProviderReadiness& readiness)
+{
+    using namespace DigiDollar::Paymaster;
+    const auto& policy = readiness.liquidity_policy;
+    const bool configured = readiness.have_liquidity_policy;
+    const bool enabled = configured && policy.automatic_replenishment;
+    const bool approved = configured && policy.paid_maintenance_approved;
+    const bool running = readiness.have_identity && context.paymaster &&
+        context.paymaster->IsProviderRunning(wallet.GetName(), readiness.identity.provider_id);
+    std::string state{"ready"}, reason;
+    bool pending{false}, planned{false};
+    for (const auto& record : readiness.maintenance_ledger.records) {
+        if (record.IsPreparation()) continue;
+        pending |= record.state == ProviderMaintenanceState::BROADCAST;
+        planned |= record.state == ProviderMaintenanceState::PLANNED;
+    }
+    if (!enabled) {
+        state = "off";
+        reason = configured ? "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" : "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+    } else if (!approved || policy.maximum_maintenance_fee_per_transaction.value <= 0 ||
+               policy.maximum_maintenance_fee_per_hour.value <= 0 ||
+               policy.maximum_maintenance_fee_per_day.value <= 0) {
+        state = "blocked"; reason = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+    } else if (!readiness.settings.enabled || !running) {
+        state = "paused"; reason = "PAYMASTER_PROVIDER_STOPPED";
+    } else if (wallet.IsLocked()) {
+        state = "paused"; reason = "PAYMASTER_WALLET_LOCKED";
+    } else if (readiness.settings.operation_mode != ProviderOperationMode::AUTOMATIC) {
+        state = "paused"; reason = "PAYMASTER_MANUAL_PROCESSING";
+    } else {
+        const auto service = context.paymaster->GetProviderServiceStatus(wallet.GetName());
+        reason = service.last_error;
+        if (pending) state = "waiting_confirmation";
+        else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = "blocked";
+        else if (planned) state = "working";
+        else if (!readiness.ready) state = "blocked";
+        if (state == "blocked" && reason.empty() && !readiness.errors.empty()) reason = readiness.errors.front();
+    }
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("configured", configured);
+    result.pushKV("enabled", enabled);
+    result.pushKV("paid_maintenance_approved", approved);
+    result.pushKV("state", state);
+    result.pushKV("reason", reason);
+    result.pushKV("pending_transaction", pending);
+    return result;
+}
+
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
                                        int64_t now)
 {
@@ -5239,7 +5288,15 @@ std::vector<RPCResult> ProviderLiquidityStatusResults()
     return {
         {RPCResult::Type::BOOL, "policy_configured", "Whether the operator saved the policy"},
         {RPCResult::Type::BOOL, "targets_satisfy_provider_policy", "Whether the saved targets can satisfy the active provider offer"},
-        {RPCResult::Type::STR, "maintenance_state", "Current automatic liquidity state"},
+        {RPCResult::Type::STR, "maintenance_state", "Reserve demand; does not imply active automatic work"},
+        {RPCResult::Type::OBJ, "automation_status", /*optional=*/true, "Saved intent and observed execution", {
+            {RPCResult::Type::BOOL, "configured", "Policy is saved"},
+            {RPCResult::Type::BOOL, "enabled", "Saved refill choice"},
+            {RPCResult::Type::BOOL, "paid_maintenance_approved", "Saved bounded spending consent"},
+            {RPCResult::Type::STR, "state", "off, ready, paused, blocked, working or waiting_confirmation"},
+            {RPCResult::Type::STR, "reason", "Stable reason, empty when ready"},
+            {RPCResult::Type::BOOL, "pending_transaction", "Previously signed refill is still pending"},
+        }},
         {RPCResult::Type::OBJ, "policy", "Saved or suggested liquidity policy",
          ProviderLiquidityPolicyResults()},
         {RPCResult::Type::OBJ, "admission_dgb", "Admission DGB slot status",

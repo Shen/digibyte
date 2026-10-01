@@ -132,6 +132,25 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         wallet.setpaymastersafetypolicy(provider_safety_policy(["sponsored"]))
         wallet.setpaymasterenabled(True)
         wallet.setpaymasterruntimesettings({"autostart": False})
+        self.log.info("Refill intent is revision-bound and survives runtime transitions")
+        refill = {
+            "automatic_replenishment": True, "paid_maintenance_approved": True,
+            "target_admission_dgb": 3, "target_operational_dgb": 1,
+            "target_admission_carriers": 0, "target_operational_carriers": 0,
+            "maximum_maintenance_fee_per_transaction_satoshis": 10_000_000,
+            "maximum_maintenance_fee_per_hour_satoshis": 50_000_000,
+            "maximum_maintenance_fee_per_day_satoshis": 200_000_000,
+        }
+        saved = wallet.setpaymasterliquiditypolicy(refill, 0)
+        assert_raises_rpc_error(-4, "PAYMASTER_LIQUIDITY_POLICY_CHANGED",
+                                wallet.setpaymasterliquiditypolicy, dict(refill, automatic_replenishment=False), 0)
+        assert_equal(wallet.getpaymasterliquiditystatus()["policy"], saved)
+        # Exercise optional numeric argument conversion through the actual CLI.
+        updated = node.cli("-rpcwallet=operator").setpaymasterliquiditypolicy(refill, saved["updated_at"])
+        assert updated["updated_at"] > saved["updated_at"]
+        assert_equal(wallet.getpaymasterliquiditystatus()["automation_status"]["enabled"], True)
+        assert_equal(wallet.getpaymasterliquiditystatus()["automation_status"]["state"], "paused")
+
         self.log.info("One-shot start waits without changing autostart and is cleared by pause and unload")
         waiting = wallet.startpaymaster({"wait_for_readiness": True})
         assert_equal(waiting["running"], False)
@@ -167,6 +186,10 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert_equal(after["provider"]["policy"], before["provider"]["policy"])
         assert_equal(after["provider"]["enabled"], False)
         assert_equal(after["provider"]["autostart"], False)
+        assert_equal(after["provider"]["liquidity"]["policy"]["automatic_replenishment"], True)
+        assert_equal(after["provider"]["liquidity"]["policy"]["paid_maintenance_approved"], True)
+        assert_equal(after["provider"]["liquidity"]["automation_status"]["state"], "paused")
+
 
         self.log.info("An explicit transport check neither signs nor funds provider work")
         transactions = wallet.getwalletinfo()["txcount"]
