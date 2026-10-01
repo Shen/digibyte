@@ -322,6 +322,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         value_rebalance_target = {
             "admission_dgb_slots": 4,
             "operational_dgb_slots": 2,
+            "dgb_only": True,
+            "maximum_fee_satoshis": 20000000,
         }
         value_rebalance_preview = cli.rebalancepaymasterpool(
             value_rebalance_target)
@@ -334,6 +336,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         value_rebalance_target["plan_id"] = value_rebalance_preview["plan_id"]
         value_rebalanced = cli.rebalancepaymasterpool(value_rebalance_target)
         assert_equal(value_rebalanced["executed"], True)
+        assert 0 < value_rebalanced["network_fee_satoshis"] <= value_rebalance_target["maximum_fee_satoshis"]
+        assert_equal(value_rebalanced["retired_carrier_cents"], 0)
         self.generatetoaddress(node, 1, wallet.getnewaddress())
         retained_operational_values = sorted(
             entry["dgb_satoshis"]
@@ -413,6 +417,22 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "admission_carrier_slots": 3,
             "operational_carrier_slots": 1,
         }
+        # DGB-only release must preserve DD reserves and bind its fee cap.
+        dgb_target = dict(minimum_target, dgb_only=True, maximum_fee_satoshis=1)
+        dgb_preview = cli.rebalancepaymasterpool(dgb_target)
+        assert_equal(dgb_preview["retired_admission_carrier_slots"], 0)
+        assert_equal(dgb_preview["retired_operational_carrier_slots"], 0)
+        assert_equal(dgb_preview["retired_carrier_cents"], 0)
+        assert_equal(dgb_preview["maximum_network_fee_satoshis"], 1)
+        dgb_larger_cap = cli.rebalancepaymasterpool(dict(dgb_target, maximum_fee_satoshis=1000000))
+        assert dgb_larger_cap["plan_id"] != dgb_preview["plan_id"]
+        assert_raises_rpc_error(-8, "PAYMASTER_RETIREMENT_FEE_LIMIT",
+                                cli.rebalancepaymasterpool, dict(minimum_target, maximum_fee_satoshis=1))
+        assert_raises_rpc_error(-4, "PAYMASTER_RETIREMENT_FEE_LIMIT",
+                                cli.rebalancepaymasterpool,
+                                dict(dgb_target, execute=True, plan_id=dgb_preview["plan_id"]))
+        assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
+
         rebalance_preview = cli.rebalancepaymasterpool(minimum_target)
         assert_equal(rebalance_preview["executed"], False)
         assert_equal(rebalance_preview["retired_admission_dgb_slots"], 1)
