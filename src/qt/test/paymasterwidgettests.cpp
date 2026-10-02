@@ -7290,7 +7290,7 @@ void PaymasterWidgetTests::paymasterFeeAmountsAndPercentages()
         QCOMPARE(cap->value(), 37);
         // Invalid precision, grouping or exponential text cannot authorize more.
         for (const QString& invalid : {QStringLiteral("1e3"), QStringLiteral("1,234.56"),
-                                       QStringLiteral("0") + locale.decimalPoint() + QStringLiteral("123")}) {
+                                       QString(QStringLiteral("0") + locale.decimalPoint() + QStringLiteral("123"))}) {
             editor->setText(invalid);
             cap->interpretText();
             QCOMPARE(cap->value(), 37);
@@ -9333,7 +9333,7 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
                 auto* reserves = panel->findChild<QComboBox*>("paymasterReleaseCarrierSelection");
                 if (reserves) {
                     reserves->clear();
-                    reserves->addItem("A different reserve", QString(64, 'c') + ":7");
+                    reserves->addItem("A different reserve", QString(QString(64, 'c') + ":7"));
                 }
             }
             if (decision == QLatin1String("wallet_selection")) {
