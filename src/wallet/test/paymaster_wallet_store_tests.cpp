@@ -3641,8 +3641,10 @@ BOOST_AUTO_TEST_CASE(pending_capacity_pair_is_bound_and_phase_two_failure_is_fai
     BOOST_CHECK(persisted_attempt.capacity_snapshot.capacity_proof.empty());
 }
 
-BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_authorizing)
+namespace {
+void CheckAlternativeRecoveryCapacityCandidate(WalletTestingSetup& fixture, uint16_t version)
 {
+    auto& m_wallet = fixture.m_wallet;
     ScopedRecoveryMockTime mock_time{104};
     PaymasterStore store{m_wallet};
     std::string error;
@@ -3679,6 +3681,7 @@ BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_
     recovery.capacity_request.client_nonce = recovery.client_nonce;
     recovery.capacity_request.funding_model = FundingModel::USER_PAID;
     recovery.capacity_request.requires_carrier = false;
+    recovery.capacity_request.version = version;
     recovery.capacity_request.requested_slots = 1;
     recovery.capacity_request.created_at = 101;
     recovery.capacity_request.expires_at = 150;
@@ -3699,6 +3702,7 @@ BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_
                                 const uint256& snapshot_id,
                                 int64_t created_at) {
         PaymasterCapacityProof proof;
+        proof.version = request.version;
         proof.genesis_hash = request.genesis_hash;
         proof.provider_id = request.provider_id;
         proof.request_id = request.request_id;
@@ -3943,6 +3947,18 @@ BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_
     BOOST_REQUIRE(store.GetProviderBlock(recovery_provider_id, block, error) ==
                   DatabaseReadStatus::FOUND);
     BOOST_CHECK(block.kind == EquivocationKind::CAPACITY);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(alternative_recovery_capacity_candidate_is_durable_and_non_authorizing)
+{
+    CheckAlternativeRecoveryCapacityCandidate(*this, DigiDollar::Paymaster::PROTOCOL_VERSION);
+}
+
+BOOST_AUTO_TEST_CASE(v5_alternative_recovery_capacity_candidate_is_non_authorizing)
+{
+    CheckAlternativeRecoveryCapacityCandidate(*this, DigiDollar::Paymaster::LEGACY_DIRECT_PROTOCOL_VERSION);
 }
 
 BOOST_AUTO_TEST_CASE(conflicting_capacity_proofs_are_evidence_and_block_provider)

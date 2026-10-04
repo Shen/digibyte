@@ -285,8 +285,10 @@ BOOST_AUTO_TEST_CASE(client_change_ownership_is_rechecked_immediately_before_sig
         m_wallet, manifest, error));
 }
 
-BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
+namespace {
+void CheckProviderExecutionFirewall(WalletTestingSetup& fixture, uint16_t version)
 {
+    auto& m_wallet = fixture.m_wallet;
     CKey key;
     key.MakeNewKey(true);
     FlatSigningProvider signing_provider;
@@ -430,7 +432,7 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
         nullptr, uint256{}));
 
     PaymasterCapacityProof capacity_proof;
-    capacity_proof.version = DigiDollar::Paymaster::PROTOCOL_VERSION;
+    capacity_proof.version = version;
     capacity_proof.genesis_hash = intent.genesis_hash;
     capacity_proof.provider_id = intent.provider_id;
     capacity_proof.request_id = intent.request_id;
@@ -496,8 +498,10 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
                           error);
 
     PaymasterQuoteRequest quote_request;
+    quote_request.version = version;
     quote_request.intent = intent;
     PaymasterQuoteResponse quote_response;
+    quote_response.version = version;
     quote_response.request_id = intent.request_id;
     quote_response.session_id = intent.session_id;
     quote_response.quote = quote;
@@ -818,10 +822,30 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
     BOOST_CHECK(CTransaction{validated_final}.GetWitnessHash() ==
                 final.GetWitnessHash());
 
+    // Both complete direct-payment versions retain the same inner signed
+    // quote and exact final transaction, including after quote/retry expiry.
+    for (const uint16_t version : {DigiDollar::Paymaster::LEGACY_DIRECT_PROTOCOL_VERSION,
+                                   DigiDollar::Paymaster::PROTOCOL_VERSION}) {
+        PaymasterQuoteRequest supported_request{quote_request};
+        PaymasterQuoteResponse supported_response{quote_response};
+        supported_request.version = version;
+        supported_response.version = version;
+        ProviderAttempt supported_attempt{attempt};
+        supported_attempt.quote_request = SerializePaymasterTestArtifact(supported_request);
+        supported_attempt.signed_quote = SerializePaymasterTestArtifact(supported_response);
+        ProviderAttempt before_signature{supported_attempt};
+        before_signature.state = AttemptState::USER_PSBT_ACCEPTED;
+        BOOST_REQUIRE_MESSAGE(ValidateProviderAuthorizationForExecution(
+            before_signature, now + 1, signing_template, error), error);
+        BOOST_REQUIRE_MESSAGE(ValidateProviderCommitForExecution(
+            supported_attempt, commit, commit.retry_until + 1, validated_final, error), error);
+        BOOST_CHECK(CTransaction{validated_final}.GetWitnessHash() == final.GetWitnessHash());
+    }
+
     // Protocols 1-4 cannot authorize either a new signature or execution of a
     // previously persisted commit.
     for (uint16_t protocol_version{1};
-         protocol_version < DigiDollar::Paymaster::PROTOCOL_VERSION;
+         protocol_version < DigiDollar::Paymaster::LEGACY_DIRECT_PROTOCOL_VERSION;
          ++protocol_version) {
         PaymasterQuoteRequest legacy_request{quote_request};
         PaymasterQuoteResponse legacy_response{quote_response};
@@ -863,6 +887,18 @@ BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
         BOOST_CHECK_EQUAL(
             error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
     }
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
+{
+    CheckProviderExecutionFirewall(*this, DigiDollar::Paymaster::PROTOCOL_VERSION);
+}
+
+BOOST_AUTO_TEST_CASE(v5_provider_commit_preserves_exact_signed_authority)
+{
+    CheckProviderExecutionFirewall(*this, DigiDollar::Paymaster::LEGACY_DIRECT_PROTOCOL_VERSION);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

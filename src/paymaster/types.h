@@ -31,6 +31,18 @@ namespace DigiDollar::Paymaster {
 // adds the provider's maximum user-paid service fee to signed announcements.
 // Recovery messages are never downgraded to the regular quote flow.
 static constexpr uint16_t PROTOCOL_VERSION{6};
+/** V6 changes signed announcements, but retains the complete V5 direct-payment
+ * layouts. Preserve original signed artifacts and replay barriers after upgrade;
+ * pre-V5 messages lack the full client-order binding and remain unsupported.
+ * Discovery announcements and direct-channel negotiation still require V6.
+ */
+static constexpr uint16_t LEGACY_DIRECT_PROTOCOL_VERSION{5};
+
+constexpr bool IsSupportedDirectProtocolVersion(uint16_t version)
+{
+    return version == LEGACY_DIRECT_PROTOCOL_VERSION || version == PROTOCOL_VERSION;
+}
+
 /** SENDPMASTERS capability used by the outbound half of a short-lived
  * paymaster connection. The accepting peer uses it to classify its locally
  * INBOUND half as the same isolated direct channel.

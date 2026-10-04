@@ -166,7 +166,7 @@ bool ValidateCapacityRequestEnvelope(const PaymasterCapacityRequest& request,
                                      int64_t now,
                                      std::string& error)
 {
-    if (request.version != PROTOCOL_VERSION || request.genesis_hash != expected_genesis) {
+    if (!IsSupportedDirectProtocolVersion(request.version) || request.genesis_hash != expected_genesis) {
         error = "PAYMASTER_WRONG_PROTOCOL_OR_CHAIN";
         return false;
     }
@@ -193,7 +193,7 @@ bool ValidateCapacityProofEnvelope(const PaymasterCapacityProof& proof,
                                    int64_t now,
                                    std::string& error)
 {
-    if (proof.version != PROTOCOL_VERSION || proof.genesis_hash != expected_genesis ||
+    if (!IsSupportedDirectProtocolVersion(proof.version) || proof.genesis_hash != expected_genesis ||
         proof.provider_id.IsNull() || !IsCanonicalRequestId(proof.request_id) ||
         proof.session_id.IsNull() || proof.client_nonce.IsNull() ||
         (proof.funding_model != FundingModel::USER_PAID &&
@@ -346,7 +346,7 @@ bool ValidateQuoteRequestEnvelope(const PaymasterQuoteRequest& request,
                                   int64_t now,
                                   std::string& error)
 {
-    if (request.version != PROTOCOL_VERSION || !ValidIntentShape(request.intent, expected_genesis, now)) {
+    if (!IsSupportedDirectProtocolVersion(request.version) || !ValidIntentShape(request.intent, expected_genesis, now)) {
         error = "PAYMASTER_INVALID_QUOTE_REQUEST";
         return false;
     }
@@ -403,7 +403,7 @@ bool ValidateRedactedQuoteRequestEnvelope(const PaymasterQuoteRequest& request,
                                           int64_t now,
                                           std::string& error)
 {
-    if (request.version != PROTOCOL_VERSION ||
+    if (!IsSupportedDirectProtocolVersion(request.version) ||
         !ValidIntentShape(request.intent, expected_genesis, now)) {
         error = "PAYMASTER_INVALID_QUOTE_REQUEST";
         return false;
@@ -421,7 +421,7 @@ bool ValidateQuoteResponseEnvelope(const PaymasterQuoteResponse& response,
                                    int64_t now,
                                    std::string& error)
 {
-    if (response.version != PROTOCOL_VERSION || !IsCanonicalRequestId(response.request_id) ||
+    if (!IsSupportedDirectProtocolVersion(response.version) || !IsCanonicalRequestId(response.request_id) ||
         response.session_id.IsNull() || !ValidQuoteShape(response.quote, expected_genesis, now)) {
         error = "PAYMASTER_INVALID_QUOTE_RESPONSE";
         return false;
@@ -434,7 +434,7 @@ bool ValidateSubmitEnvelope(const PaymasterSubmit& submit,
                             const uint256& expected_genesis,
                             std::string& error)
 {
-    if (submit.version != PROTOCOL_VERSION || submit.genesis_hash != expected_genesis ||
+    if (!IsSupportedDirectProtocolVersion(submit.version) || submit.genesis_hash != expected_genesis ||
         submit.provider_id.IsNull() || !IsCanonicalRequestId(submit.request_id) ||
         submit.session_id.IsNull() || submit.quote_id.IsNull() || submit.commit_key.IsNull() ||
         submit.template_commitment.IsNull() || submit.user_psbt.empty() ||
@@ -451,7 +451,7 @@ bool ValidateResultMessageEnvelope(const PaymasterResultMessage& message,
                                    int64_t now,
                                    std::string& error)
 {
-    if (message.version != PROTOCOL_VERSION || !IsCanonicalRequestId(message.request_id) ||
+    if (!IsSupportedDirectProtocolVersion(message.version) || !IsCanonicalRequestId(message.request_id) ||
         message.session_id.IsNull() || message.result.genesis_hash != expected_genesis ||
         TimeDeltaExceeds(message.result.updated_at, now, 60) ||
         !ValidatePaymasterResultShape(message.result, error)) {

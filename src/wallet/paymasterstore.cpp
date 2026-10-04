@@ -686,7 +686,7 @@ bool ValidateAlternativeRecoveryRecordShape(
         recovery.recovery_id != GetAlternativeRecoveryId(
                                     recovery.request_id, recovery.session_id,
                                     recovery.recovery_provider_id, recovery.client_nonce) ||
-        recovery.capacity_request.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+        !DigiDollar::Paymaster::IsSupportedDirectProtocolVersion(recovery.capacity_request.version) ||
         recovery.capacity_request.genesis_hash.IsNull() ||
         recovery.capacity_request.provider_id != recovery.recovery_provider_id ||
         recovery.capacity_request.request_id != recovery.request_id ||

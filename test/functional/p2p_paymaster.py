@@ -22,7 +22,7 @@ from test_framework.util import (
 )
 
 
-PAYMASTER_PROTOCOL_VERSION = 5
+PAYMASTER_PROTOCOL_VERSION = 6
 
 
 class PaymasterP2PTest(DigiByteTestFramework):
@@ -60,10 +60,12 @@ class PaymasterP2PTest(DigiByteTestFramework):
         assert_equal(inactive.message_count["getpmasters"], 0)
 
         self.log.info("Invalid negotiation versions and capabilities fail closed")
-        wrong_version = node.add_p2p_connection(P2PInterface())
-        wrong_version.send_and_ping(msg_sendpmasters(
-            version=PAYMASTER_PROTOCOL_VERSION - 1, capabilities=0))
-        assert_equal(wrong_version.message_count["getpmasters"], 0)
+        for version in (0, PAYMASTER_PROTOCOL_VERSION - 1,
+                        PAYMASTER_PROTOCOL_VERSION + 1):
+            wrong_version = node.add_p2p_connection(P2PInterface())
+            wrong_version.send_and_ping(msg_sendpmasters(
+                version=version, capabilities=0))
+            assert_equal(wrong_version.message_count["getpmasters"], 0)
 
         unknown_capability = node.add_p2p_connection(P2PInterface())
         unknown_capability.send_and_ping(msg_sendpmasters(

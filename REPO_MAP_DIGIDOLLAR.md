@@ -708,11 +708,16 @@ or chain parameters.
   drain-only, and error service states without persisting a passphrase.
 - Protocol V6 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure
   and carries the maximum user-paid DD service fee in signed public offers,
-  rejects every older Paymaster wire format, persists semantic replays
+  requires V6 announcements/direct-channel negotiation, persists semantic replays
   independently of peer ID, and binds a later quote to the exact validated
   resource snapshot. Provider policy V2 adds the DD service-fee cap and can
-  read the prior V1 policy layout as uncapped; other Paymaster persistence
-  remains current-only and fails closed without migration or replacement.
+  read the prior V1 policy layout as uncapped. `types.h` explicitly accepts
+  exactly V5/V6 direct payloads, whose complete payment layouts are unchanged;
+  `wire.cpp` and `psbt.cpp` retain full validation of original signed artifacts.
+  Provider drain/expiry/replay and alternative recovery preserve V5 Capacity
+  records; generated Capacity/quote replies preserve the request version.
+  Other Paymaster persistence remains current-only and fails closed without
+  migration or replacement. Pre-V5/future direct versions remain rejected.
 
 ### src/paymaster/client.{h,cpp} and reputation.{h,cpp}
 - Builds bound client intents, validates quote responses, calculates exact
@@ -1530,7 +1535,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_types_tests.cpp` | Strong amount types, fee rounding/bounds, exact gross-to-recipient inversion (including cent-rounding gaps), and canonical request UUIDs |
 | `paymaster_txbuilder_tests.cpp` | Deterministic collaborative transfer construction, prevout resolution, conservation, carrier/change, and fee bounds |
 | `paymaster_psbt_tests.cpp` | Exact PSBT template, input roles, signature stages, gross/recipient/fee authorization binding, unexpected-field rejection, and `SIGHASH_DEFAULT` |
-| `paymaster_protocol_tests.cpp` / `paymaster_wire_tests.cpp` | V5 order/capacity bindings, explicit no-downgrade parsing, semantic replay, and bounded envelopes |
+| `paymaster_protocol_tests.cpp` / `paymaster_wire_tests.cpp` | V5 order/capacity bindings, explicit V5/V6 direct compatibility with strict V6 announcements, semantic replay, and bounded envelopes |
 | `paymaster_provider_tests.cpp` / `paymaster_recovery_tests.cpp` | Finite safety and maintenance budgets, pool-successor provenance/lifecycle, carrier-withdrawal plans, atomic reservation accounting, provider-finance idempotency/reorg/model totals, malicious-counterparty rejection, and distinct-provider recovery |
 | `paymaster_protocol_tests.cpp` | Intent/quote/result binding, monotonic result sequences, exact final artifacts, and optional-field serialization |
 | `paymaster_provider_tests.cpp` / `paymaster_sponsorship_tests.cpp` | Provider policy, BIP86 identity shape, separated pools, fee boundaries, public/restricted sponsorship and durable hash-only authorization |

@@ -251,8 +251,8 @@ bool DecodeProviderAuthorizationArtifacts(
     intent = std::move(request.intent);
     quote = std::move(response.quote);
     const uint256 intent_hash{GetPaymentIntentHash(intent)};
-    if (request.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
-        response.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+    if (!IsSupportedDirectProtocolVersion(request.version) ||
+        !IsSupportedDirectProtocolVersion(response.version) ||
         intent.version != PaymentIntent::CURRENT_VERSION ||
         quote.version != PaymasterQuote::CURRENT_VERSION ||
         response.request_id != intent.request_id ||
@@ -389,7 +389,7 @@ bool ValidateQuoteAgainstCapacitySnapshot(
         error = "PAYMASTER_CAPACITY_SNAPSHOT_ENCODING";
         return false;
     }
-    if (proof.version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
+    if (!IsSupportedDirectProtocolVersion(proof.version) ||
         SerializeExact(proof) != capacity.capacity_proof ||
         proof.snapshot_id != capacity.snapshot_id ||
         proof.provider_id != capacity.provider_id ||

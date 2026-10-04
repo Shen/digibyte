@@ -920,7 +920,7 @@ bool PaymasterStore::HasProviderDrainWork(
             error = "PAYMASTER_CAPACITY_RESPONSE_ENCODING";
             return false;
         }
-        if (proof.version != DigiDollar::Paymaster::PROTOCOL_VERSION) {
+        if (!DigiDollar::Paymaster::IsSupportedDirectProtocolVersion(proof.version)) {
             error = PersistedVersionError(
                 "PaymasterCapacityProof", proof.version,
                 DigiDollar::Paymaster::PROTOCOL_VERSION,

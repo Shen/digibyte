@@ -1479,7 +1479,12 @@ finite-budget maintenance only when configured targets remain missing
   recovery uses exact-provider retry or a same-input `cancel_to_self` spend
   funded by a distinct Capacity-validated recovery provider when the client
   has no DGB.
-- Paymaster wire requests and responses require V5. Intents, quotes, manifests,
+- Paymaster announcements and direct-channel negotiation require V6. Direct
+  Capacity, quote, submit and result payloads accept exactly V5 and V6 because
+  V6 only changed signed offer fee caps. Original V5 signed artifacts and
+  replay barriers remain fully validated after upgrade, without rewriting
+  bytes or signatures. Pre-V5 and unknown future exchanges remain rejected.
+  Intents, quotes, manifests,
   recovery objects, sessions, attempts, safety ledgers and pool entries require
   their current persisted versions. The maintenance journal explicitly accepts
   V3 and V4; a V3 record gains no finite-setup authority. This limited read

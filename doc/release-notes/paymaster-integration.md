@@ -5,6 +5,20 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Existing V5 payment artifacts after upgrade
+
+The V6 offer fee-cap update incorrectly rejected unchanged, retained V5
+Capacity proofs during provider startup, including expired/released replay
+barriers. Direct Capacity, quote, submit and result payloads now explicitly
+accept exactly V5 and V6 with all existing signature, resource, consent, fee
+and execution checks. Capacity/quote responses preserve the request version;
+existing signed data, reservations and replay barriers are never rewritten.
+GUI, RPC/CLI and automatic processing use these shared Core paths.
+
+Announcements and connection negotiation still require V6. Pre-V5/future
+direct versions and unsupported inner wallet-record versions remain rejected.
+No wallet-data reset, migration, reindex or renewed spending approval is needed.
+
 ## Official v9.26.6 integration
 
 Official PR #452 (`92330d952625`) is integrated with precedence over fork

@@ -1947,6 +1947,7 @@ RPCHelpMan processpaymasterrequests()
                                    error.empty() ? "PAYMASTER_QUOTE_SIGNING_FAILED" : error);
             }
             PaymasterQuoteResponse response;
+            response.version = quote_request->version;
             response.request_id = quote_request->intent.request_id;
             response.session_id = quote_request->intent.session_id;
             response.quote = built.quote;

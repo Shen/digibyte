@@ -171,7 +171,13 @@ from the durable provider commit.
 The [wire records](../src/paymaster/wire.h),
 [protocol records](../src/paymaster/protocol.h), and
 [P2P command names](../src/protocol.cpp) define the actual encoding. V6 is
-required; there is no downgrade to earlier Paymaster exchanges. Alternative
+required for announcements and direct-channel negotiation. Direct Capacity,
+quote, submit and result payloads accept exactly V5 and V6: V6 changed signed
+offer fee caps, while those fully bound V5 payment layouts remained unchanged.
+Persisted V5 proof/quote bytes, signatures and replay barriers are retained and
+fully validated after upgrade. Replies preserve the supported request version.
+V0, V1–V4 and unknown future versions remain unsupported; inner authorization
+records still require their exact current versions. Alternative
 recovery uses `pmrecreq`, `pmrecresp`, `pmrecsub`, and `pmrecresult` on the
 isolated direct connection.
 

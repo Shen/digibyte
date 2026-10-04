@@ -1952,7 +1952,7 @@ bool BuildPaymasterCapacityProof(CWallet& wallet,
         return false;
     }
 
-    proof.version = DigiDollar::Paymaster::PROTOCOL_VERSION;
+    proof.version = request.version;
     proof.genesis_hash = expected_genesis;
     proof.provider_id = identity.provider_id;
     proof.request_id = request.request_id;

@@ -1,5 +1,57 @@
 # Paymaster build and test runbook
 
+## V5 payment artifacts after the V6 upgrade (2026-10-04)
+
+Source base: `80ee78557f`. The V6 announcement update inadvertently rejected
+unchanged V5 Capacity proofs, including discharged provider replay barriers.
+Direct payloads now accept exactly V5/V6 with the existing full validation;
+announcement/connection negotiation and inner-record requirements stay strict.
+No signed artifact, replay key, reservation or spending approval is rewritten.
+
+Completed using the existing MSVC v143 / Qt 5.15.10 toolchain:
+
+- Selected compilation of six affected Core/wallet/RPC sources and four test
+  sources; incremental common/wallet archive and separate application/test links.
+- 28 distinct focused Core/wallet cases passed (1,244 assertions), covering
+  exact V5/V6 proofs, signature mutations, rejected pre-V5/future payloads,
+  original signed V5 provider commits after expiry, wallet reload, exact replay,
+  atomic reservation release/fault injection, non-authorizing recovery evidence,
+  client finality, budget enforcement and idempotency.
+- The functional P2P test now expects V6 negotiation and rejects V0/V5/V7.
+  Python AST syntax and `git diff --check` passed; the live P2P test was not run.
+- The normal Qt executable was replaced with wallets closed and both candidate
+  and backup SHA256 verified. Artifacts/logs are under
+  `build_msvc/paymaster-v5-compatibility-check/`; the previous executable is
+  `digibyte-qt-before-v5-compatibility.exe` in that directory.
+
+Installed `build_msvc/x64/Release/digibyte-qt.exe` SHA256:
+`6620D32C599F39A2516AD40A19BD61CA8076EB8B25E9AFC3171460E7559DD10D`.
+
+This is targeted incremental verification. Full builds/suites, live upgraded
+client/provider tests and cross-platform builds remain operator checks. Relevant
+guidance: repository/src instructions, DigiDollar/Paymaster architecture/maps,
+developer notes and Core/wallet/functional/MSVC test instructions.
+
+Run the following from `D:\Digibyte\digibyte-fork`, with the normal wallets
+closed, using the existing static Qt/vcpkg, MSVC, Python and wallet-test
+prerequisites described below. Incremental builds and the broader focused
+suite take minutes; clean builds and multi-node tests can take substantially
+longer. Success requires exit 0 and all requested tests passing with required
+components enabled. The daemon must be rebuilt before live RPC/P2P checks:
+
+```powershell
+& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'V5 compatibility build failed' }
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_wire_tests:paymaster_wallet_identity_tests:paymaster_wallet_psbt_tests:paymaster_wallet_store_tests' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'V5 compatibility Core/wallet checks failed' }
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+python -X utf8 test/functional/test_runner.py wallet_paymaster_provider.py wallet_paymaster_lifecycle.py wallet_paymaster_rpc.py -j1 --descriptors
+if ($LASTEXITCODE -ne 0) { throw 'V5 compatibility RPC/provider checks failed' }
+python -X utf8 test/functional/test_runner.py p2p_paymaster.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'V6 negotiation checks failed' }
+```
+
 ## Selectable public offers and app number format (2026-10-04)
 
 Source base: `902b12b203`, retaining the existing uncommitted financial/protocol

@@ -91,6 +91,7 @@ PaymasterCapacityProof SignedCapacityProof(const PaymasterCapacityRequest& reque
                                            int64_t now)
 {
     PaymasterCapacityProof proof;
+    proof.version = request.version;
     proof.genesis_hash = request.genesis_hash;
     proof.provider_id = request.provider_id;
     proof.request_id = request.request_id;
@@ -470,6 +471,77 @@ BOOST_AUTO_TEST_CASE(capacity_full_validation_checks_identity_bip86_and_chainsta
     BOOST_CHECK_EQUAL(reference_calls, 1U);
     BOOST_CHECK_EQUAL(dgb_calls, 1U);
     BOOST_CHECK_EQUAL(carrier_calls, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(capacity_v5_and_v6_preserve_signed_version_and_validation)
+{
+    constexpr int64_t now{100000};
+    const uint256 genesis{uint256S("20")};
+    CKey identity_key;
+    CKey dgb_key;
+    CKey carrier_key;
+    identity_key.MakeNewKey(true);
+    dgb_key.MakeNewKey(true);
+    carrier_key.MakeNewKey(true);
+
+    for (const uint16_t version : {LEGACY_DIRECT_PROTOCOL_VERSION, DigiDollar::Paymaster::PROTOCOL_VERSION}) {
+        PaymasterCapacityRequest request;
+        request.version = version;
+        request.genesis_hash = genesis;
+        request.provider_id = GetPaymasterId(XOnlyPubKey{identity_key.GetPubKey()});
+        request.request_id = "550e8400-e29b-41d4-a716-446655440021";
+        request.session_id = uint256S("22");
+        request.client_nonce = uint256S("21");
+        request.funding_model = FundingModel::USER_PAID;
+        request.requires_carrier = true;
+        request.created_at = now;
+        request.expires_at = now + 60;
+        const auto proof = SignedCapacityProof(request, identity_key, dgb_key, carrier_key, now);
+        CapacityChainstateCallbacks chainstate;
+        chainstate.validate_reference_block = [](const uint256& block, std::string&) {
+            return block == uint256S("15");
+        };
+        chainstate.validate_dgb_input = [&](const VerifiedDGBInput& input, XOnlyPubKey& key, std::string&) {
+            key = BIP86OutputKey(dgb_key);
+            return input.outpoint == proof.liquidity_slots.front().dgb_inputs.front().input.outpoint &&
+                   input.value.value == 10000000;
+        };
+        chainstate.validate_dd_carrier = [&](const VerifiedDDCarrier& carrier, XOnlyPubKey& key, std::string&) {
+            key = BIP86OutputKey(carrier_key);
+            return carrier.outpoint == proof.liquidity_slots.front().carrier->carrier.outpoint &&
+                   carrier.value.value == 100;
+        };
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(ValidateCapacityProof(proof, request, genesis,
+                              XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error), error);
+
+        // A supported version does not permit rewriting an existing signature.
+        auto changed = proof;
+        changed.version = version == DigiDollar::Paymaster::PROTOCOL_VERSION ? LEGACY_DIRECT_PROTOCOL_VERSION : DigiDollar::Paymaster::PROTOCOL_VERSION;
+        BOOST_CHECK(!ValidateCapacityProof(changed, request, genesis,
+                     XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error));
+        changed = proof;
+        changed.identity_signature.front() ^= 1;
+        BOOST_CHECK(!ValidateCapacityProof(changed, request, genesis,
+                     XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error));
+        auto wrong_request = request;
+        wrong_request.client_nonce = uint256S("99");
+        BOOST_CHECK(!ValidateCapacityProof(proof, wrong_request, genesis,
+                     XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error));
+        BOOST_CHECK(!ValidateCapacityProof(proof, request, uint256S("98"),
+                     XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error));
+
+        for (const uint16_t unsupported : {uint16_t{0}, uint16_t{1}, uint16_t{2},
+                                          uint16_t{3}, uint16_t{4}, uint16_t{7}}) {
+            auto old_request = request;
+            old_request.version = unsupported;
+            changed = proof;
+            changed.version = unsupported;
+            BOOST_CHECK(!ValidateCapacityRequestEnvelope(old_request, genesis, now, error));
+            BOOST_CHECK(!ValidateCapacityProof(changed, old_request, genesis,
+                         XOnlyPubKey{identity_key.GetPubKey()}, chainstate, now, error));
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(capacity_full_validation_rejects_signature_and_request_mutations)
@@ -923,6 +995,73 @@ BOOST_AUTO_TEST_CASE(restricted_capability_is_bound_but_not_signature_checked_on
     request.restricted_capability->amount.value++;
     BOOST_CHECK(!ValidateQuoteRequestEnvelope(request, genesis, now, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPABILITY_BINDING_MISMATCH");
+}
+
+BOOST_AUTO_TEST_CASE(direct_payment_envelopes_accept_only_complete_v5_and_v6)
+{
+    constexpr int64_t now{100000};
+    const uint256 genesis{uint256S("30")};
+    for (uint16_t version{0}; version <= DigiDollar::Paymaster::PROTOCOL_VERSION + 1; ++version) {
+        const bool supported = version == LEGACY_DIRECT_PROTOCOL_VERSION ||
+                               version == DigiDollar::Paymaster::PROTOCOL_VERSION;
+        PaymasterQuoteRequest request;
+        request.version = version;
+        request.intent = Intent(genesis, now, SponsorshipScope::PUBLIC);
+        PaymasterQuoteResponse response;
+        response.version = version;
+        response.request_id = request.intent.request_id;
+        response.session_id = request.intent.session_id;
+        response.quote.genesis_hash = genesis;
+        response.quote.provider_id = request.intent.provider_id;
+        response.quote.quote_id = uint256S("33");
+        response.quote.intent_hash = GetPaymentIntentHash(request.intent);
+        response.quote.offer_id = request.intent.offer_id;
+        response.quote.policy_hash = request.intent.policy_hash;
+        response.quote.network_fee = DGBSatoshis{1000};
+        response.quote.created_at = now;
+        response.quote.expires_at = now + 30;
+        response.quote.retry_until = now + 60;
+        response.quote.reserved_dgb_inputs.emplace_back();
+        response.quote.reserved_dgb_inputs.back().outpoint = COutPoint{uint256S("34"), 0};
+        response.quote.unsigned_txid = uint256S("35");
+        response.quote.template_commitment = uint256S("36");
+        response.quote.identity_signature.resize(64);
+        PaymasterSubmit submit;
+        submit.version = version;
+        submit.genesis_hash = genesis;
+        submit.provider_id = request.intent.provider_id;
+        submit.request_id = request.intent.request_id;
+        submit.session_id = request.intent.session_id;
+        submit.quote_id = response.quote.quote_id;
+        submit.commit_key = uint256S("37");
+        submit.template_commitment = response.quote.template_commitment;
+        submit.user_psbt = {0x70, 0x73, 0x62, 0x74};
+        PaymasterResultMessage result;
+        result.version = version;
+        result.request_id = request.intent.request_id;
+        result.session_id = request.intent.session_id;
+        result.result.genesis_hash = genesis;
+        result.result.provider_id = request.intent.provider_id;
+        result.result.commit_key = submit.commit_key;
+        result.result.result_sequence = 1;
+        result.result.status = PaymasterResultStatus::SLOT_UNAVAILABLE;
+        result.result.updated_at = now;
+        result.result.identity_signature.resize(64);
+        std::string error;
+        BOOST_CHECK_EQUAL(ValidateQuoteRequestEnvelope(request, genesis, now, error), supported);
+        BOOST_CHECK_EQUAL(ValidateRedactedQuoteRequestEnvelope(request, genesis, now, error), supported);
+        BOOST_CHECK_EQUAL(ValidateQuoteResponseEnvelope(response, genesis, now, error), supported);
+        BOOST_CHECK_EQUAL(ValidateSubmitEnvelope(submit, genesis, error), supported);
+        BOOST_CHECK_EQUAL(ValidateResultMessageEnvelope(result, genesis, now, error), supported);
+        if (supported) {
+            --request.intent.version;
+            BOOST_CHECK(!ValidateQuoteRequestEnvelope(request, genesis, now, error));
+            --response.quote.version;
+            BOOST_CHECK(!ValidateQuoteResponseEnvelope(response, genesis, now, error));
+            --result.result.version;
+            BOOST_CHECK(!ValidateResultMessageEnvelope(result, genesis, now, error));
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(submit_has_hard_psbt_limit_and_round_trips_canonically)
@@ -2734,6 +2873,9 @@ BOOST_AUTO_TEST_CASE(announcement_v6_signs_fee_cap_and_v5_keeps_legacy_layout)
     BOOST_REQUIRE_EQUAL(legacy_decoded.offers.size(), 1U);
     BOOST_CHECK_EQUAL(
         legacy_decoded.offers.front().maximum_user_paid_service_fee.value, 0);
+    std::string error;
+    BOOST_CHECK(!ValidateAnnouncementEnvelope(legacy_decoded, legacy_decoded.genesis_hash, 100000, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_WRONG_PROTOCOL_OR_CHAIN");
 }
 
 BOOST_AUTO_TEST_CASE(manager_announcement_limits_apply_before_expensive_validation)

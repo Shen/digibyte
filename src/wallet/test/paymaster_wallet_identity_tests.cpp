@@ -974,8 +974,11 @@ BOOST_AUTO_TEST_CASE(provider_safety_policy_time_never_regresses_below_accountin
     BOOST_CHECK_EQUAL(persisted_ledger.accounting_time_high_water, 500);
 }
 
-BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_slot)
+namespace {
+void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_t version)
 {
+    auto& m_wallet = fixture.m_wallet;
+    auto& m_node = fixture.m_node;
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
@@ -1018,6 +1021,7 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
     const uint256 genesis{uint256S("a1")};
     const uint256 reference_block{uint256S("a2")};
     PaymasterCapacityRequest request;
+    request.version = version;
     request.genesis_hash = genesis;
     request.provider_id = identity.provider_id;
     request.request_id = "550e8400-e29b-41d4-a716-4466554400a3";
@@ -1034,6 +1038,7 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
                               reference_block, now, proof, error),
                           error);
     BOOST_CHECK_EQUAL(proof.provider_id, identity.provider_id);
+    BOOST_CHECK_EQUAL(proof.version, version);
     BOOST_CHECK_EQUAL(proof.request_id, request.request_id);
     BOOST_CHECK_EQUAL(proof.session_id, request.session_id);
     BOOST_CHECK_EQUAL(proof.client_nonce, request.client_nonce);
@@ -1423,6 +1428,18 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
                                        entry.reservation_id ==
                                            rebound_request.client_nonce;
                             }));
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_slot)
+{
+    CheckCapacityProofReservationLifecycle(*this, DigiDollar::Paymaster::PROTOCOL_VERSION);
+}
+
+BOOST_AUTO_TEST_CASE(v5_capacity_proof_survives_reload_replay_and_atomic_release)
+{
+    CheckCapacityProofReservationLifecycle(*this, LEGACY_DIRECT_PROTOCOL_VERSION);
 }
 
 BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_records)

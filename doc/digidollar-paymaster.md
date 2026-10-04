@@ -126,10 +126,14 @@ The wallet requires `txindex` to be fully synchronized before it creates a
 quote or a new Paymaster signature. Discovery and relay remain available to
 upgraded nodes that are not configured for client or provider operation.
 
-Automatic transfers require the exact Paymaster protocol V6 Capacity feature.
+Automatic transfers require Paymaster V6 announcements and direct-channel
+negotiation, including the authenticated Capacity feature.
 Peers that implement only an earlier Paymaster flow are excluded; there is no
 silent downgrade. BIP324 v2 is still mandatory for direct transport, but is not
-a substitute for the signed Provider Capacity proof.
+a substitute for the signed Provider Capacity proof. Upgraded nodes also accept
+fully validated V5 direct-payment payloads so existing signed proofs, quotes
+and recovery remain usable. Original wallet records and signatures are not
+rewritten. An old node that only negotiates V5 is still excluded.
 
 Provider configuration and runtime state are wallet scoped. The normal first
 start remains an explicit operator action. After that start, the recommended

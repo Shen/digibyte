@@ -66,7 +66,10 @@ documents are not evidence of an upstream merge or a production release.
 ## Current scope and document status
 
 The current RPC integration contract is version 1; Paymaster wire messages use
-V6, which advertises the user-paid DD fee ceiling in signed offers. These
+V6 for signed offers and connection negotiation, advertising the user-paid DD
+fee ceiling. Unchanged direct-payment layouts accept exactly V5 and V6 to
+preserve original signed payment artifacts and replay barriers after upgrade;
+pre-V5 and unknown future messages remain unsupported. These
 numbers do not version the wallet database. Sessions and tombstones
 retain their existing encodings. Finite pool setup separately introduced a V4
 maintenance journal that can still read V3 records without granting new setup
