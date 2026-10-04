@@ -1,5 +1,176 @@
 # Paymaster build and test runbook
 
+## Selectable public offers and app number format (2026-10-04)
+
+Source base: `902b12b203`, retaining the existing uncommitted financial/protocol
+and offer-policy fixes. Main-view provider cards show exact fee/effective rate
+and total, recommend/preselect the cheapest suitable offer, preserve explicit
+choices on refresh and send paired first-provider/offer preferences to Core.
+Unsigned failed contacts, authenticated rejections and confirmed payments populate the existing
+idempotent local reliability history. First unsuccessful attempts without a
+known success sort after available alternatives, even below five samples.
+No request-hash, wallet-record or signing-authority format changes were made.
+
+This request supersedes the locale-dependent monetary presentation recorded in
+the 2026-10-03 checkpoint below: all Paymaster money editors now use the app's
+decimal point, and large readouts use `DigiByteUnits` thin-space grouping.
+German system locale does not alter money parsing; dates remain locale-aware.
+DD/DGB values remain integer cents/satoshis. RPC/CSV formats are unchanged.
+
+Relevant guidance: repository/src instructions, DigiDollar architecture and
+maps, Qt README/translation rules, developer notes and functional/MSVC test
+guidance. Full builds/suites remain delegated operator work.
+
+Completed with MSVC v143 / Qt 5.15.10:
+
+- Selected compilation of the affected client, wallet RPC/store, node RPC and
+  Qt sources/tests; test MOC and CSS resources regenerated. Existing libraries
+  were archived with the newly compiled objects and separately linked into
+  `digibyte-qt-offer-cards.exe`, `test_digibyte-qt-offer-cards.exe` and
+  `test_digibyte-offer-cards.exe`. Historical alternate RPC object paths were
+  explicitly replaced with these current compiled objects.
+- **30 native Qt cases passed**, none skipped: four card/theme/width cases,
+  app-standard formatting with C/German defaults, ten decimal/draft-save cases,
+  four aligned-field layouts, fee calculations, both preparation gates, both
+  preview regressions, automatic refresh, exact two-stage authority,
+  configuration workflow, funding-balance changes and two real Core unsigned
+  cancellation round trips (reopened/lost first reply). Card cases also cover
+  keyboard selection, literal untrusted names, fresh cheaper recommendations,
+  preserved manual choice, privacy masking, amount invalidation, selected-offer
+  loss and a delayed reply after wallet closure.
+- **18 Core/wallet cases passed**: the ten client-selection cases plus paired
+  public preference validation, idempotent unsigned availability observation,
+  confirmed payment without provider result (including one success observation),
+  existing mempool/reorg/retention reconciliation, signed rejection followed by
+  confirmed success, rejection after prior confirmation, atomic/monotonic final
+  result handling and existing outcome uniqueness/local clearing. Failure/
+  availability-to-success updates include write/commit failure injection and
+  duplicate success checks. Signed authorization/recovery protections remain.
+- Before committing this series, **10 additional fee-cap Core/wallet cases
+  passed** (150 assertions), covering capped arithmetic, provider fee/output
+  boundaries and policy validation/hash binding, client quote binding, V6/V5
+  announcement layouts, CLI numeric input, setup validation and provider-policy
+  backup round trips. The targeted executable was reused; no full solution
+  build was run. Evidence: `paymaster-offer-cards-check/cap-core-tests.txt`.
+- Native captures in both themes at 720/1200 pixels were visually inspected;
+  no horizontal card overflow, monetary locale mismatch or blue scroll track.
+- Extended `wallet_paymaster_offer_selection.py` with explicit more expensive
+  provider choice, missing selected offer, request-ID conflict and unsigned
+  cancellation. Python AST syntax checking passed; the real-node test was
+  **not run** here. `git diff --check` passed.
+
+Artifacts and individual test logs are in
+`build_msvc/paymaster-offer-cards-check/`. This is a targeted incremental link,
+not a full solution rebuild. Full suites, real-node selection/offline/restart
+acceptance and cross-platform builds remain unverified.
+
+The regular `build_msvc/x64/Release/digibyte-qt.exe` was updated with wallets
+closed and verified against the final candidate. The preceding executable is
+preserved as `paymaster-offer-cards-check/digibyte-qt-before-offer-cards.exe`.
+Final application SHA256:
+`7810FC50158B0F811FF26A946DC9295B8253902A1BDE6C1C46F34532649D9B7C`.
+
+After the [Windows build](#windows-build), run from
+`D:\Digibyte\digibyte-fork` with the wallet/SQLite, static Qt and Python
+functional-test prerequisites documented there. Focused tests take seconds to
+minutes; the real-node tests can take several minutes or longer. Success requires
+exit 0, all requested cases passing, and no skipped required components:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+try {
+    foreach ($case in @('paymasterClientOfferCards', 'paymasterAppNumberFormat', 'paymasterOfferPolicyTypedValues', 'paymasterClientAuthorizationIsTwoStageAndFailClosed')) {
+        $env:DIGIBYTE_QT_TEST_FUNCTION = $case
+        & .\build_msvc\x64\Release\test_digibyte-qt.exe
+        if ($LASTEXITCODE -ne 0) { throw "Paymaster Qt check failed: $case" }
+    }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_client_tests:paymaster_wallet_store_tests/send_preferred_public_offer_is_an_explicit_pair:paymaster_wallet_store_tests/unavailable_unsigned_provider_observation_is_idempotent:paymaster_wallet_store_tests/client_confirmed_payment_without_provider_result:paymaster_wallet_store_tests/final_transaction_observations_handle_mempool_reorg_and_retention' --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster Core checks failed' }
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+python test/functional/test_runner.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py -j1
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster selection/failover checks failed' }
+```
+
+## Offer policy decimal editing and alignment (2026-10-03)
+
+Source base: `902b12b203`, retaining the existing uncommitted service-fee-cap
+changes. Qt's scaled QSpinBox controls overrode decimal display/parsing but kept
+Qt's whole-number validator. A regression using actual keyboard entry of
+German `0,80 %` reproduced a transmitted `fee_rate_bps` of 8000 instead of 80
+against the preceding Qt library. See `before-fix.txt` below. No operator policy
+was changed by this injected-RPC test.
+
+The corrected controls share locale-aware validation and integer decimal
+conversion. Unsupported precision, mixed separators, negative/out-of-range and
+exponential inputs cannot be submitted as another value. Invalid text survives
+focus loss before Save; the form retains drafts on RPC/acknowledgement failures
+and ignores stale readback of a successfully saved policy. Save feedback stays
+on the offer page. Identity, policy and expanded-limit label columns are shared;
+fee examples participate in their parent's form in both settings and setup.
+
+Relevant guidance: repository/src constraints, DigiDollar architecture/maps,
+Qt README, translation policy, developer coding rules and Windows/test runbooks.
+English UI feedback remains translatable. This fixes GUI parameter preparation;
+CLI/RPC integer-value parsing is unchanged by this follow-up.
+
+Completed verification with MSVC 14.43 / Qt 5.15.10:
+
+- Selected compilation of `qt/paymasterwidget.cpp`,
+  `qt/test/paymasterwidgettests.cpp` and regenerated test MOC.
+- Incremental Qt archive and separate application/test links:
+  `build_msvc/x64/Release/digibyte-qt-policy-save.exe` and
+  `test_digibyte-qt-policy-save.exe`, using the existing current Core libraries.
+- Native Windows Qt: all 16 selected cases passed without skips. Ten cases
+  cover English/German typed percentages, DD caps/ranges, eight-decimal DGB
+  ceilings, save/error/stale-readback, partial drafts across refresh and invalid-input focus loss. Four check
+  matching input left/right edges at 640/1200 widths with real light/dark CSS.
+  Fee calculation/percentage and configuration workflow regressions also pass.
+- `git diff --check` passed. Existing uncommitted changes were retained.
+
+After the operator closed both wallets, the normal
+`build_msvc/x64/Release/digibyte-qt.exe` was replaced with the updated executable;
+SHA-256 equality was verified. The preceding executable is retained at
+`build_msvc/paymaster-policy-save-check/digibyte-qt-before-policy-save.exe`.
+No wallet process was terminated and no live policy was changed.
+
+Logs, link response files and full offer-content captures are in
+`build_msvc/paymaster-policy-save-check/`. Final native logs have the prefix
+`windows-`. Early minimal-platform geometry checks did not load the actual CSS;
+final layout checks load it and run with `QT_QPA_PLATFORM=windows`. The minimal
+platform also crashed in its native QMessageBox error path. The final inline
+save-error handler avoids that modal path and passes on Windows. The old
+fee-display fixture's local button assertion now respects its no-wallet
+ancestor gate; production onboarding remains gated.
+
+For a full build, use the exact prerequisites and commands under
+[Operator verification for this integration](#operator-verification-for-this-integration).
+That build may take several minutes or longer and remains operator work. After
+building, run from `D:\Digibyte\digibyte-fork` in PowerShell:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+try {
+    foreach ($check in @('paymasterOfferPolicyTypedValues', 'paymasterOfferFormAlignment', 'paymasterFeeAmountsAndPercentages', 'paymasterInjectedRpcCoversConfigurationWorkflows')) {
+        $env:DIGIBYTE_QT_TEST_FUNCTION = $check
+        & .\build_msvc\x64\Release\test_digibyte-qt.exe
+        if ($LASTEXITCODE -ne 0) { throw "Offer policy regression failed: $check" }
+    }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+}
+```
+
+These focused tests take seconds. Success requires exit 0 with all selected
+cases passing. A live operator save/restart persistence check, full solution
+build, full Core/RPC suites and cross-platform runs were not performed here.
+
 ## Paymaster wallet responsiveness (2026-10-01)
 
 Source base: `07e3392177`. This follow-up reduces work under the wallet lock in

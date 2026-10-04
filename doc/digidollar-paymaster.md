@@ -54,7 +54,7 @@ BIP324 v2 without v1 fallback. High-privacy mode additionally requires an onion
 provider and Tor stream isolation, allows one provider attempt, and has no
 clearnet fallback.
 
-The wallet never sends a private key or seed. Protocol V5 treats the remote
+The wallet never sends a private key or seed. Protocol V6 treats the remote
 counterparty as potentially malicious. Each side reconstructs the complete
 transaction locally and signs only after a wallet-local authorization manifest
 has been revalidated immediately before signing. The client signs only its DD
@@ -126,7 +126,7 @@ The wallet requires `txindex` to be fully synchronized before it creates a
 quote or a new Paymaster signature. Discovery and relay remain available to
 upgraded nodes that are not configured for client or provider operation.
 
-Automatic transfers require the exact Paymaster protocol V5 Capacity feature.
+Automatic transfers require the exact Paymaster protocol V6 Capacity feature.
 Peers that implement only an earlier Paymaster flow are excluded; there is no
 silent downgrade. BIP324 v2 is still mandatory for direct transport, but is not
 a substitute for the signed Provider Capacity proof.
@@ -155,13 +155,13 @@ public/Tor reachability.
 ### Discovery, offer checks and progress in Qt
 
 For explicit **Paymaster** fee funding, enter the recipient and amount, then
-choose **Prepare payment**. This starts provider contact and may temporarily
+select an offer card and choose **Send payment**. This starts provider contact and may temporarily
 reserve the required DigiDollar; it does not authorize a payment signature.
 There is no extra Find offer confirmation. Qt waits for the exact verified
 offer and presents the provider, recipient amount and service fee for explicit
 approval. Automatic with spendable DGB offers Send payment and retains its initial
 transaction confirmation. Without own DGB, it requires a current offer and uses
-the same Prepare payment flow as explicit Paymaster funding.
+the same preparation flow as explicit Paymaster funding.
 
 **Manually clicking Check offers / Refresh offers is optional**: the automatic
 check also updates the offers and enables preparation when it finds a match.
@@ -183,8 +183,17 @@ results**, **check complete without a match**, **stale/expired**, and **failed**
 A completed check shows its local timestamp. **Check again** is useful after a
 provider starts or the node reconnects if you want an immediate check instead of
 waiting for the next automatic refresh; **Refresh offers** is also available
-after input changes or expiry. Detailed provider rows remain under Advanced Paymaster
-settings. Preparing the payment consults current offers again, so a manual
+after input changes or expiry. Public offers appear as selectable cards in the
+main view, showing exact service fee, effective percentage and total outflow.
+The cheapest eligible offer without a known first failure is **Recommended**
+and preselected when available. Choosing another card selects that exact first
+provider/offer; an unavailable choice is reported without silent substitution.
+A still-valid manual choice survives list refresh. A provider with unsuccessful
+first attempts and no known success is recommended after available alternatives;
+local cancellations or wallet locking do not penalize it. This wallet-local
+history is advisory, and a lone eligible provider remains usable. Technical rows
+remain under **Advanced Paymaster settings**. Preparing consults current offers
+again, so a manual
 preview is optional. Empty results do not mean a search is still running.
 
 During an explicitly started transfer, the session instead explains whether it
@@ -563,27 +572,29 @@ expired and failed checks have distinct symbols and text. The local check time,
 preparation hint and automatic ten-second refresh notice are secondary. The
 checkmark means public offers were found, not that a provider connection,
 exact quote or payment has been approved. This is a directory snapshot.
-**Prepare payment** is enabled in explicit Paymaster mode only after the
+**Send payment** is enabled in explicit Paymaster mode only after the
 current check finds a public offer. It stays disabled while checking, after an
 empty or failed check, or when the inputs change or the preview expires. The
 automatic ten-second check can enable it when an offer appears; **Check again**
 also requests a fresh check. Automatic uses **Send payment** when the wallet
-reports spendable DGB. With no spendable DGB it instead uses **Prepare payment**
+reports spendable DGB. With no spendable DGB the same button first prepares a Paymaster payment
 and requires a current offer, just like explicit Paymaster mode. Without either
 funding source the button stays disabled. **Own DGB** is disabled without
 spendable DGB even if a provider is listed. Wallet balance changes update the
 button automatically. A positive DGB balance is only a preliminary check: Core
 still verifies suitable fee inputs and the actual fee before sending.
 
-A Prepare payment click in Automatic is bound to Paymaster funding for that
+A Send payment click in Automatic without own DGB is bound to Paymaster funding for that
 request, including when DGB arrives later; it does not authorize a direct spend.
 Existing-session actions are unaffected by these compose checks.
 Preparation still uses the latest offers, checks the selected
 fee/privacy requirements and contacts a provider. It can temporarily reserve
 DD, but does not authorize signing. A public offer can still fail those checks;
 the exact provider and fee still require approval before signing. Displayed DD
-amounts use two decimal places without a duplicate cent value; RPC amounts
-remain integer cents. Details of the preview are in the preparation hint's
+amounts use the app-standard decimal point and thin-space grouping for large
+readouts, even on German systems. DD uses two decimal places and DGB up to eight;
+editors accept ungrouped decimal-point values. RPC amounts remain integer cents.
+Details of the preview are in the preparation hint's
 tooltip and **Advanced Paymaster settings**.
 
 The client fee ceiling is entered in **DD**, with a read-only percentage of the
@@ -782,7 +793,10 @@ The provider lifecycle is deliberately staged:
    `maximum_network_fee_dgb_satoshis` must be positive.
    A public provider may advertise `user_paid` and `sponsored` at the same
    time. User-paid transfers use the configured DD service-fee rate, while
-   sponsored transfers charge no DD service fee. Restricted sponsorship is a
+   the optional `maximum_user_paid_service_fee_cents` caps each user-paid fee;
+   zero means no cap. The value is included in the signed public offer and is
+   available through `setpaymasterpolicy` as well as the CLI/Qt setup controls.
+   Sponsored transfers charge no DD service fee. Restricted sponsorship is a
    sponsored-only invitation mode and cannot be combined with `user_paid`.
 4. Set a complete finite provider loss/rate policy with
    `setpaymastersafetypolicy` and inspect it with

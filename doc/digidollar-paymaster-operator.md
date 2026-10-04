@@ -70,6 +70,36 @@ configured payment range or budgets. For example, a 0.50% tariff on 1.00 DD
 costs 0.01 DD, effectively 1.00%. Client fee ceilings remain absolute DD limits;
 the client percentage is a comparison, not a provider price.
 
+Across Paymaster settings, setup and payment dialogs, enter percentages and
+amounts using the app's decimal point (for example, `0.80 %` and `1.25 DD`,
+including with German system settings). Large readouts use thin-space grouping,
+for example `12 345.67 DD`; entry fields do not accept grouping. **Save policy**
+commits the exact typed values to Core. Unsupported precision, mixed separators
+and out-of-range values leave the draft intact and select the field to correct.
+Save feedback appears on the offer form. A failed or unconfirmed reply retains
+your edits; a stale status reply cannot overwrite an acknowledged save. Pause
+the running provider before changing its operating policy.
+
+The client's **Send DD** view lists public providers as selectable cards.
+Each shows the recipient amount, DD service fee, effective percentage and total
+wallet outflow. **Recommended** preselects the cheapest eligible offer without a
+known first failed attempt when such an alternative exists. Select any other
+listed card to use it, then click **Send payment**. The exact verified quote is
+reviewed again before signing. Refreshing preserves a still-valid manual choice;
+changing the amount, fee/privacy inputs or wallet requires a new selection.
+An expired or unavailable selected offer is reported rather than silently
+replaced. Offer lists remain local previews, not reachability guarantees.
+
+Failed unsigned provider contacts and authenticated provider rejections populate
+this wallet's local history. Signed transfers remain protected after rejection;
+a later confirmed payment replaces its failed/advisory outcome with success.
+An otherwise eligible provider with no successful payment and an earlier
+failure is recommended after alternatives, even with only one observation.
+Active short cooldowns may temporarily exclude it. A lone eligible provider
+remains usable; a subsequently confirmed payment removes this initial-failure
+demotion. User cancellation, local connection limits and wallet locking do not
+penalize a provider. This local history is advisory, not a public reputation score.
+
 Stopping a provider does not instantly withdraw already relayed announcements.
 They can remain in clients' local lists until their signed expiry, at most ten
 minutes after creation. A list refresh is not a reachability test. Qt identifies

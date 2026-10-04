@@ -35,6 +35,29 @@ queueing another submit. No signed provider receipt is fabricated and no expired
 spending authority is renewed. The corrections reside in the shared wallet Core;
 CLI argument encoding needs no change.
 
+## Offer selection and policy editing
+
+Public Paymaster offers now appear as selectable main-view cards with exact
+service fees, effective percentages and wallet totals. The cheapest eligible
+offer without an unsuccessful first attempt is recommended/preselected when
+available; users can choose a different listed provider. The paired initial
+provider/offer preference is enforced by shared RPC Core. An unavailable choice
+is reported, and fresh exact quote approval remains mandatory before signing.
+Local unsigned contact failures and confirmed payments now populate the existing
+idempotent reliability history used for recommendation demotion. Authenticated
+provider rejections also count, preserving signed recovery protection. Later
+confirmed completion can supersede its earlier failed/advisory outcome once;
+late negative replies cannot downgrade a confirmed success.
+
+Paymaster monetary fields and dialogs consistently use the app's decimal point,
+with thin-space grouping for large readouts, also on German systems. Integer
+cent/satoshi authority and machine-readable RPC/CSV formats remain unchanged.
+
+Decimal offer inputs now validate and save the displayed percentage/DD/DGB
+values exactly. Invalid precision or format retains the draft with inline
+feedback. Save errors also appear on the form. Identity, offer fields and the
+fee example share aligned columns; setup uses the same example form rows.
+
 ## Wallet responsiveness
 
 Paymaster reservation checks now validate the provider pool once per balance or

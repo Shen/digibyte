@@ -81,6 +81,10 @@ Start/Pause mirror Operation & automation; drafts and confirmed policy stay
 separate. Lost replies reconcile through read-only status. Liquidity writes
 optionally bind expected_updated_at atomically; additive automation_status
 reports saved intent and actual scheduler/journal state independently.
+Offer inputs validate the same scaled decimal format they display and convert
+typed values to integer cents, basis points and satoshis. Invalid drafts remain
+editable without a policy RPC; acknowledgement/readback preserve saved edits.
+Offer sections share label columns, and fee examples use their parent form.
 Capital actions and target/cost forms live in Funds & reserves; the operational
 hero excludes backup reminders. getpaymasternodeconfig supplies nodewide
 effective source, editability/conflicts and pending restart changes to the
@@ -133,8 +137,8 @@ The checkmark means directory matches were found, without claiming
 fee/privacy/transport eligibility. New requests in explicit Paymaster mode
 require a current, nonempty preview; empty, pending, failed or expired checks
 keep preparation disabled. Own DGB requires a positive cached spendable DGB
-balance. Automatic requires either that balance or a current offer: it labels
-the action Send payment with own DGB, otherwise Prepare payment. The latter
+balance. Automatic requires either that balance or a current offer. The action
+is consistently labelled Send payment; when Paymaster funding is needed it
 freezes Paymaster-only funding in the request template and cannot authorize a
 direct spend. Balance notifications update the controls. These compose gates
 do not prove exact fee-input sufficiency or provider reachability; Core checks
@@ -144,6 +148,27 @@ edits its absolute fee ceiling in DD and sees an informational percentage of the
 recipient amount. Provider settings/setup retain the percentage tariff with a
 local DD example computed by Core's integer fee helper, including cent rounding.
 Examples and effective percentages never change authorization or policy.
+Public offers also appear as selectable cards in the main send view, showing
+recipient amount, exact service fee/effective percentage and total wallet
+outflow. The least expensive non-deprioritized offer is recommended by default;
+an explicit choice survives directory refresh while that offer remains eligible.
+The paired `preferred_provider_id`/`preferred_offer_id` options bind the first
+public attempt. Core refuses an unavailable initial choice instead of silently
+substituting another. A live order retains its first-attempt binding; terminal
+replays keep the existing canonical-order/idempotency rules after detail pruning.
+Explicit later fallback still requires review of its fresh exact authorization.
+Wallet-local unsigned provider contact failures record an idempotent availability
+observation, authenticated provider rejections record a failure, and locally
+confirmed recipient payments record success. A rejection never removes existing
+signing risk. A later confirmed success can supersede a failed/advisory outcome
+marker, atomically and without duplicate success counts; success cannot be
+downgraded by late negative responses. Providers
+with unsuccessful first attempts and no known success are recommended after
+alternatives, even before the general reliability score has enough samples.
+Local cancellations, wallet locking and local connection limits do not count as
+provider availability failures. Monetary editors and readouts follow the app's
+locale-independent decimal point and thin-space grouping for large readouts;
+RPC/CSV representations and locale-aware dates retain their established formats.
 Canceling exact-offer approval requests Core-verified unsigned closure
 and returns to the retained compose inputs only after safe closure is proven.
 Malformed review details never count as user cancellation. A complete exact offer

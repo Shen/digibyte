@@ -204,6 +204,35 @@ the wallet's per-transaction ceiling and remaining rolling-day budget. The
 rechecks the policy and provider state; an empty preview is not proof that no
 provider could become eligible after local state changes.
 
+Offer objects additionally contain the boolean `recommendation_deprioritized`.
+It is true when wallet-local provider failure or availability observations exist
+without a known successful payment, including below the general reliability
+score's five-sample threshold. Eligible alternatives sort ahead of these offers;
+existing cooldowns still filter candidates. Signed announcements alone do not
+prove availability. Unsigned contact failures are recorded idempotently per
+attempt. Authenticated `REJECTED`/`SLOT_UNAVAILABLE` results also record a failure
+while signed attempts retain their protected ambiguous/recovery state. A later
+locally confirmed recipient payment can atomically replace its failed/advisory
+outcome marker with success; duplicate observations do not add successes and
+success cannot be downgraded. The latest failure count is corrected when it can
+be identified; after intervening observations or cleared history, historical
+counts are retained conservatively. A known success removes initial-failure
+recommendation demotion independently of those counters. Local wallet
+locking, user cancellation and local connection limits are not provider failures.
+
+`senddigidollar` public Paymaster options accept the optional paired hex IDs
+`preferred_provider_id` and `preferred_offer_id` from the offer preview. Both
+must be nonzero and supplied together; own-DGB mode and restricted sponsorship
+reject this public choice. A new request tries that exact first provider/offer
+or returns `PAYMASTER_SELECTED_OFFER_UNAVAILABLE` before creating an attempt.
+A nonterminal repeat cannot change its durable first-attempt binding
+(`PAYMASTER_REQUEST_ID_CONFLICT`). Explicit subsequent fallback can select a
+different provider but still requires the existing fresh exact quote approval.
+Terminal replays retain canonical-order checks and return the original result
+after detail pruning. These preferences introduce no canonical-request-hash or
+wallet record format change and grant no signing authority. CLI sends them in
+the existing JSON options object; no CLI conversion change is needed.
+
 RPC access uses the existing node authentication and authorization model. A
 wallet URL selects context, not a separate security tenant. Do not expose spending
 credentials to an external resource server or facilitator; see the repository's
@@ -308,9 +337,10 @@ planned adapter or implemented wallet features.
 `integration_version` versions this RPC contract. Additive fields do not change
 it; clients should ignore unknown fields and handle unknown enum/error values
 conservatively. Changes to existing field meanings require a contract-version
-change and release notes. Wire protocol V5 and each persistent record's own
-version are independent. This package introduces RPC version 1; it does not bump
-wire or record versions. Frozen `PaymentSession` v4 and `IdempotencyTombstone` v2
+change and release notes. Wire protocol V6 and each persistent record's own
+version are independent. This package introduces RPC version 1; V6 adds the
+signed user-paid service-fee cap to public offers. Frozen `PaymentSession` v4
+and `IdempotencyTombstone` v2
 byte vectors in `paymaster_wallet_store_tests` pin the baseline encoding for later
 compatibility checks. Preserve those vectors when releasing; a new version must
 add fixtures and an explicit compatibility decision instead of replacing them.

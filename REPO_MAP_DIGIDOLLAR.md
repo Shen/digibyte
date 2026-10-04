@@ -706,11 +706,13 @@ or chain parameters.
 - Its wallet-scoped work guard serializes automatic scheduler work with manual
   expert RPCs and exposes stopped, unlock/readiness wait, active, manual,
   drain-only, and error service states without persisting a passphrase.
-- Protocol V5 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure,
+- Protocol V6 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure
+  and carries the maximum user-paid DD service fee in signed public offers,
   rejects every older Paymaster wire format, persists semantic replays
   independently of peer ID, and binds a later quote to the exact validated
-  resource snapshot. Paymaster persistence is also current-only: old records
-  fail closed without migration, deletion, or implicit replacement.
+  resource snapshot. Provider policy V2 adds the DD service-fee cap and can
+  read the prior V1 policy layout as uncapped; other Paymaster persistence
+  remains current-only and fails closed without migration or replacement.
 
 ### src/paymaster/client.{h,cpp} and reputation.{h,cpp}
 - Builds bound client intents, validates quote responses, calculates exact
@@ -718,6 +720,9 @@ or chain parameters.
   reputation constraints.
 - Reputation is local, day-bucketed, and treats neutral failures separately
   from provider failures.
+- A first provider failure/availability timeout without a known success
+  deprioritizes recommendations before the five-sample score threshold. Active
+  cooldowns remain filters; an otherwise eligible lone provider remains usable.
 
 ### src/paymaster/reservation.{h,cpp}
 - Versioned session, attempt, reservation, authorization, final-commit,
@@ -807,6 +812,9 @@ or chain parameters.
   `GetSessionBySessionIdWithStatus` shares request-ID/tombstone validation.
 - `paymaster_discovery.cpp` owns offer discovery, automatic/manual quote
   selection, reputation, pool inspection, reservations, and quote cancellation.
+  Public first-attempt preferences are paired provider/offer IDs, checked again
+  by Core; a missing initial offer does not silently select a substitute.
+  Unsigned endpoint/contact failures record idempotent availability outcomes.
 - `paymaster_provider.cpp` owns provider identity, policies, safety limits,
   liquidity preparation/rebalancing/withdrawal, finance reporting, backup
   acknowledgement, and provider status.
@@ -863,7 +871,9 @@ or chain parameters.
   capture before creating a session or reservation.
 - `getpaymasteroffers` previews the requested amount against the caller's fee
   ceiling, wallet per-transaction limit, remaining rolling-day budget and
-  privacy profile. High privacy includes only Tor endpoints. It returns exact
+  privacy profile. Its fee is the rounded percentage, capped by the provider's
+  advertised maximum user-paid service fee when nonzero. High privacy includes
+  only Tor endpoints. It returns exact
   recipient, service-fee and total values for eligible candidates; cent-rounding
   gaps fail before input reservation. The preview reserves nothing and cannot
   guarantee provider availability. `requestpaymasterquote` retains its
@@ -1033,6 +1043,12 @@ or chain parameters.
   `PaymasterPaymentViewResult` shares the additive observation schema.
   See [client integration contract](doc/digidollar-paymaster-integration.md).
   Neither the view nor the RPC integration version changes record formats.
+  Confirmed client payments record advisory success before detail pruning;
+  `CompleteClientConfirmedPayment` also records success when no provider result
+  arrives. Outcome write failure never turns a confirmed payment into a failure.
+  Authenticated negative client results record provider failure while retaining
+  signed recovery protection. A later confirmed success can replace a failure/
+  availability marker atomically and once; late negatives cannot downgrade it.
 - `PaymasterStore` atomically persists sessions, exact append-only attempts,
   reservations, authorizations, provider commits/results, self-recovery raw
   transactions, outcome markers, and permanent idempotency tombstones.
@@ -1400,7 +1416,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/qt/paymasteramount.h
 - `PaymasterAmountSpinBox` presents DD while preserving integer-cent signals and
-  values; locale decimals are parsed exactly, excess precision/grouping rejected.
+  values; app-standard decimal-point inputs are parsed exactly, excess
+  precision/grouping rejected. Shared DD/DGB readouts use `DigiByteUnits` numeric
+  formatting with its decimal point and thin-space grouping.
 - `PaymasterEffectivePercent` formats a bounded, informational fee/recipient
   percentage with integer arithmetic, without modifying payment authority.
 
@@ -1415,6 +1433,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   controls, persistent-session presentation, polling, exact-offer confirmation,
   retries and recovery. It reuses `WalletModel::executeRpcAsync` and the existing
   confirmation guards; Core remains authoritative for spending and persistence.
+- Main-view public offer cards show exact fees/totals and a preselected cheapest
+  suitable recommendation. Manual choices survive refresh; editing compose
+  inputs/wallet changes clears them. Paired `senddigidollar` preferences select
+  the exact first public offer, retaining the explicit signing/fallback review.
 - Wallet-generation guards and Qt lifetime guards discard stale callbacks.
   Existing translation context, object names and two-stage authorization remain.
 - The ordinary Send view exposes offer-check progress, completion timestamps,
@@ -1431,10 +1453,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and never sends RPCs. The checkmark confirms discovery, not transport,
   fee-limit or privacy eligibility. New explicit-Paymaster requests require a
   current nonempty preview; invalidation immediately disables preparation.
-  Automatic without cached spendable DGB uses the same gate and Prepare payment;
-  with own DGB it offers Send payment and retains direct-spend confirmation.
+  Automatic without cached spendable DGB uses the same gate. Send payment first
+  prepares an exact Paymaster offer; own DGB retains direct-spend confirmation.
   Own DGB stays disabled at zero cached spendable DGB, even with an offer.
-  Balance notifications refresh the action and hints. Prepare payment freezes
+  Balance notifications refresh the action and hints. Paymaster preparation freezes
   Paymaster funding in the immutable request; existing sessions retain their
   separate actions. Exact fee-input sufficiency remains a Core decision.
   Preparation rechecks Core state; exact-offer approval remains mandatory.
@@ -1450,7 +1472,7 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   Read-back resolves lost replies; a persistent inline notice explains closure
   or protected recovery without duplicate error modals. Session-database read
   failures explain the protected state inline and reconcile read-only.
-- Explicit Paymaster mode starts through Prepare payment, without an initial
+- Explicit Paymaster mode starts through Send payment, without an initial
   confirmation modal. Automatic with own DGB retains direct-spend confirmation. The
   queued-quote part of AWAITING_USER_SIGNATURE continues automatically and
   cannot claim an exact offer is ready. RPC failures trigger a read-only state
@@ -1907,8 +1929,10 @@ Current oracle/MuSig2 fuzz source inventory:
   Fee-check errors distinguish invalid calculations and exceeded planner
   estimates from approval ceilings; the stable fee-limit token retains an
   optional diagnostic with phase and amounts in pool/operator JSON.
-- `src/paymaster/provider.{h,cpp}`: V4 maintenance records add setup request and
-  authorization bindings while retaining V3 readability and recurring budgets.
+- `src/paymaster/provider.{h,cpp}`: ProviderPolicy V2 adds the maximum user-paid
+  DD service fee and preserves V1 policies as uncapped; V4 maintenance records
+  add setup request and authorization bindings while retaining V3 readability
+  and recurring budgets.
 - `src/wallet/rpc/paymaster.cpp`: shared maintenance reconciliation recovers
   unique wallet transactions and exact setup fees into the provider pool,
   including reconfirmation after a conflict. Finance recovery also reads the
@@ -1980,6 +2004,11 @@ Current oracle/MuSig2 fuzz source inventory:
   action and avoids duplicate reserve/budget settings links.
 - `src/qt/paymasterwidget.cpp`: five destinations, guided task RPC adapter,
   aggregate status polling and DGB inputs.
+  Its scaled offer controls share decimal validation/parsing, exact integer
+  conversion and inline save feedback; `AlignPaymasterFormLabels` aligns the
+  identity/offer/expanded-limit sections and `PaymasterFeeExample::addToForm`
+  aligns example inputs in settings and setup. Qt tests cover typed saves,
+  invalid drafts, failed/stale replies and both themes at narrow/wide sizes.
 - `src/paymaster/manager.{h,cpp}` and `src/wallet/rpc/paymaster_runtime.cpp`:
   volatile start-when-ready intent, consumed on start and cleared by stop/unload.
 - `src/wallet/rpc/paymaster_provider.cpp`: proposed-policy preparation preview,
