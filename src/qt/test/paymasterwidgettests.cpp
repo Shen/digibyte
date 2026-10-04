@@ -3459,7 +3459,7 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     }
     mode->setCurrentIndex(mode->findData(automatic || outcome == QStringLiteral("auto_prepare") ? QStringLiteral("auto") : QStringLiteral("paymaster")));
     QCOMPARE(send_widget.findChild<QPushButton*>(QStringLiteral("sendButton"))->text(),
-             automatic ? QStringLiteral("Send payment") : QStringLiteral("Prepare payment"));
+             QStringLiteral("Send payment"));
     send_widget.findChild<QLineEdit*>("addressEdit")->setText(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"));
     send_widget.findChild<QLineEdit*>("amountEdit")->setText(QStringLiteral("3.25"));
     send_widget.setAvailableDigiDollarBalanceForTesting(1000);
@@ -7560,7 +7560,7 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     QCOMPARE(dialogs, 0); // A direct call cannot bypass the zero-DGB guard.
     select("auto");
     QVERIFY(!send->isEnabled());
-    QCOMPARE(send->text(), QStringLiteral("Prepare payment"));
+    QCOMPARE(send->text(), QStringLiteral("Send payment"));
     client->send(recipient, 325);
     QCOMPARE(mutations, 0);
 
@@ -7588,10 +7588,10 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     gui.walletModel->pollBalanceChanged();
     QVERIFY(!client->hasOwnDgbForFees());
     QVERIFY(!send->isEnabled());
-    QCOMPARE(send->text(), QStringLiteral("Prepare payment"));
+    QCOMPARE(send->text(), QStringLiteral("Send payment"));
     QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
     QVERIFY(send->isEnabled());
-    QCOMPARE(send->text(), QStringLiteral("Prepare payment"));
+    QCOMPARE(send->text(), QStringLiteral("Send payment"));
     select("dgb");
     QVERIFY(!send->isEnabled()); // A provider cannot fund Own DGB mode.
     QVERIFY(QMetaObject::invokeMethod(&form, "onSendClicked", Qt::DirectConnection));
@@ -10352,6 +10352,7 @@ void PaymasterWidgetTests::paymasterLiquiditySaveAcrossRefresh()
     QCOMPARE(writes, 1);
 }
 
+
 void PaymasterWidgetTests::paymasterOfferPolicyTypedValues_data()
 {
     QTest::addColumn<bool>("german");
@@ -10543,6 +10544,138 @@ void PaymasterWidgetTests::paymasterOfferFormAlignment()
         QVERIFY(scroll->widget()->grab().save(screenshot_dir + QStringLiteral("/offer-%1-%2.png")
             .arg(dark ? "dark" : "light").arg(width)));
     }
+}
+
+
+void PaymasterWidgetTests::paymasterClientOfferCards_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::addColumn<int>("width");
+    for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+        for (int width : {720, 1200}) {
+            QTest::newRow(qPrintable(theme + QString::number(width))) << theme << width;
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterClientOfferCards()
+{
+    QFETCH(QString, theme);
+    QFETCH(int, width);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-offer-cards");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    form.setObjectName("digiDollarTab"); // Apply the containing tab's shared styles.
+    QFile css(":/css/" + theme);
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    form.setStyleSheet(QString::fromUtf8(css.readAll()));
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    auto* timer = client->findChild<QTimer*>("paymasterOfferRefreshTimer");
+    timer->stop();
+    const int64_t expires = QDateTime::currentSecsSinceEpoch() + 600;
+    UniValue offers{UniValue::VARR};
+    offers.push_back(PaymasterOffer("Higher fee", std::string(64, 'a'), "user_paid", 5, 325, false, expires, 150));
+    offers.push_back(PaymasterOffer("<b>Lowest & cost</b>", std::string(64, 'b'), "user_paid", 2, 325, false, expires));
+    auto unavailable = PaymasterOffer("Earlier failed provider", std::string(64, 'c'), "sponsored", 0, 325, false, expires);
+    unavailable.pushKV("recommendation_deprioritized", true);
+    offers.push_back(unavailable);
+    UniValue sent;
+    WalletModel::RpcCallback pending_send;
+    client->setPaymasterAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue& params, WalletModel::RpcCallback callback) {
+        if (method == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+        else if (method == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+        else if (method == "getpaymasteroffers") callback(offers, {});
+        else if (method == "senddigidollar") {
+            sent = params;
+            pending_send = std::move(callback);
+        } else QFAIL("Unexpected RPC in offer-card test");
+    });
+    form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    form.findChild<QRadioButton*>("feeFundingPaymaster")->setChecked(true);
+    form.findChild<QLineEdit*>("amountEdit")->setText("3.25");
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
+    form.setDialogHandlerForTesting([](QMessageBox::Icon, const QString&, const QString&, QMessageBox::StandardButtons, QMessageBox::StandardButton) { return QMessageBox::Yes; });
+    const auto refresh = [&] { return QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection); };
+    QVERIFY(refresh());
+    auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
+    QVERIFY(cards && !cards->isHidden());
+    QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'b'));
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice0")->isChecked());
+    QVERIFY(form.findChild<QLabel*>("paymasterRecommendedOffer"));
+    auto* first = form.findChild<QFrame*>("paymasterOfferCard0");
+    QStringList texts;
+    for (auto* label : first->findChildren<QLabel*>()) {
+        QCOMPARE(label->textFormat(), Qt::PlainText);
+        texts.push_back(label->text());
+    }
+    QVERIFY(texts.contains(QStringLiteral("<b>Lowest & cost</b>")));
+    QVERIFY(texts.contains(QStringLiteral("Service fee: 0.02 $DD (≈ 0.62%)")));
+    QVERIFY(texts.contains(QStringLiteral("Total from your wallet: 3.27 $DD")));
+    QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard2")->property("providerId").toString(), QString(64, 'c'));
+    auto* manual_choice = form.findChild<QRadioButton*>("paymasterOfferChoice1");
+    manual_choice->setFocus();
+    QTest::keyClick(manual_choice, Qt::Key_Space);
+    QVERIFY(form.findChild<QFrame*>("paymasterOfferCard1")->property("feeSelected").toBool());
+    // A new cheaper provider changes the recommendation, preserving the
+    // operator's explicit choice of another still-valid offer.
+    offers.push_back(PaymasterOffer("New sponsor", std::string(64, 'e'), "sponsored", 0, 325, false, expires));
+    QVERIFY(refresh());
+    QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'e'));
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
+    client->setPrivacy(true);
+    QVERIFY(cards->isHidden());
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    client->setPrivacy(false);
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
+    form.resize(width, 1600);
+    form.show();
+    QTest::qWait(20);
+    QVERIFY(cards->width() <= form.width());
+    const QString screenshots = qEnvironmentVariable("DIGIBYTE_QT_TEST_SCREENSHOT_DIR");
+    if (!screenshots.isEmpty()) {
+        QVERIFY(form.findChild<QFrame*>("feeFrame")->grab().save(screenshots + "/offer-cards-" + theme + "-" + QString::number(width) + ".png"));
+    }
+    // Editing the amount invalidates both the cost preview and selection.
+    auto* amount = form.findChild<QLineEdit*>("amountEdit");
+    amount->setText("3.26");
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    QVERIFY(!client->hasCurrentPaymasterOffer());
+    amount->setText("3.25");
+    QVERIFY(refresh());
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice0")->isChecked());
+    // Select a higher fee explicitly and verify the immutable RPC template.
+    form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
+    auto* send = form.findChild<QPushButton*>("sendButton");
+    QCOMPARE(send->text(), QStringLiteral("Send payment"));
+    QVERIFY(send->isEnabled());
+    send->click();
+    QVERIFY(pending_send);
+    QCOMPARE(sent[6].find_value("preferred_provider_id").get_str(), std::string(64, 'a'));
+    QCOMPARE(sent[6].find_value("preferred_offer_id").get_str(), std::string(64, 'd'));
+    QVERIFY(sent[6].find_value("prepare_only").isTrue());
+    auto unavailable_callback = std::move(pending_send);
+    unavailable_callback({}, QStringLiteral("PAYMASTER_SELECTED_OFFER_UNAVAILABLE"));
+    QVERIFY(!client->hasCurrentPaymasterOffer());
+    QVERIFY(!form.findChild<QLineEdit*>("addressEdit")->isReadOnly());
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    // A subsequent explicit send uses a fresh preview; no silent substitute.
+    QVERIFY(refresh());
+    form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
+    send->click();
+    QVERIFY(pending_send);
+    // Wallet closure erases cards and rejects the delayed old-wallet reply.
+    form.setWalletModel(nullptr);
+    auto callback = std::move(pending_send);
+    callback(PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED"), {});
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    QVERIFY(!client->hasCurrentPaymasterOffer());
 }
 
 void PaymasterWidgetTests::paymasterAppNumberFormat()

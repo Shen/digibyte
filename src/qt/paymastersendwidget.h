@@ -20,6 +20,7 @@ class DigiDollarSendWidget;
 
 QT_BEGIN_NAMESPACE
 class QCheckBox;
+class QButtonGroup;
 class QComboBox;
 class QFrame;
 class QGridLayout;
@@ -33,6 +34,7 @@ class QResizeEvent;
 class QSpinBox;
 class QTableWidget;
 class QTimer;
+class QVBoxLayout;
 QT_END_NAMESPACE
 
 /** Owns fee selection and the Paymaster client presentation state. Core remains
@@ -60,7 +62,7 @@ public:
     static bool DescribeBackendError(const QString& reasonFailed, QString& title, QString& message);
     bool paymasterModeSelected() const;
     bool paymasterOnlySelected() const;
-    void invalidatePaymasterOfferPreview();
+    void invalidatePaymasterOfferPreview(bool preserve_choice = false);
     void updateFeeDisplay();
     bool showConfirmationDialog(const QString& address, double amount);
     void setWalletModel(WalletModel* model);
@@ -114,6 +116,9 @@ private:
     enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, STALE, FAILED, NEEDS_AMOUNT };
     void setOfferCheckStatus(OfferCheckState state, const QString& text);
     void updateOfferCheckControls();
+    void clearOfferCards();
+    void renderOfferCards();
+    void selectOfferCard(int index, bool manual);
     void updateOfferCheckIcon();
     void renderOfferSpinner();
     Q_SLOT void pollPaymasterOffers();
@@ -212,6 +217,13 @@ private:
     QLabel* m_offersUpdated{nullptr};
     QLabel* m_offerCheckHelp{nullptr};
     QTableWidget* m_offersTable{nullptr};
+    QFrame* m_offerCardsFrame{nullptr};
+    QVBoxLayout* m_offerCardsLayout{nullptr};
+    QButtonGroup* m_offerSelectionGroup{nullptr};
+    UniValue m_offerPreview{UniValue::VARR};
+    QString m_selectedOfferProvider;
+    QString m_selectedOfferId;
+    bool m_offerManuallySelected{false};
     QFrame* m_persistedPaymasterSessionsFrame{nullptr};
     QLabel* m_persistedSessionsStatus{nullptr};
     QLabel* m_sessionDiscoveryError{nullptr};

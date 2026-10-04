@@ -7514,3 +7514,37 @@ QWidget#paymasterWidget QProgressBar#paymasterTaskProgress::chunk {
     background: #14884a;
     border-radius: 3px;
 }
+
+/* Native public-offer cards follow the DigiDollar theme, including the scroll viewport. */
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll,
+DigiDollarSendWidget QWidget#paymasterOfferCards {
+    background-color: #f7fcf9;
+    color: #123f2b;
+    border: none;
+}
+
+DigiDollarSendWidget QWidget#paymasterOfferCards QLabel[offerCardText="true"] {
+    font-size: 10pt;
+    font-weight: normal;
+}
+DigiDollarSendWidget QWidget#paymasterOfferCards QLabel[offerCardEmphasis="true"] {
+    font-weight: 700;
+}
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar:vertical {
+    background-color: #edf8f1;
+    width: 11px;
+    margin: 0px;
+}
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::handle:vertical {
+    background-color: #93c9a8;
+    border-radius: 5px;
+    min-height: 32px;
+}
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::add-line:vertical,
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::add-page:vertical,
+DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::sub-page:vertical {
+    background-color: #edf8f1;
+}

@@ -92,6 +92,8 @@ private Q_SLOTS:
     void paymasterClientReviewCancellation_data();
     void paymasterClientReviewCancellation();
     void paymasterClientOfferAutomaticRefresh();
+    void paymasterClientOfferCards_data();
+    void paymasterClientOfferCards();
     void paymasterAppNumberFormat();
     void paymasterClientPreparationRequiresCurrentOffer_data();
     void paymasterClientPreparationRequiresCurrentOffer();

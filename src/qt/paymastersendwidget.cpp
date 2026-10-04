@@ -54,6 +54,7 @@
 #include <QRadioButton>
 #include <QResizeEvent>
 #include <QSpinBox>
+#include <QScrollArea>
 #include <QTableWidget>
 #include <QUuid>
 #include <QWheelEvent>
@@ -1096,7 +1097,7 @@ void PaymasterSendWidget::setupFeeSection()
     m_offersUpdated->setText(DigiDollarSendWidget::tr("Automatic check every 10 s while this form is open."));
     offer_check_layout->addWidget(m_offersUpdated, 2, 1, 1, 2);
     m_offerCheckHelp = new QLabel(DigiDollarSendWidget::tr(
-                                            "Prepare payment verifies the provider and fee and may temporarily reserve $DD. You confirm before signing."),
+                                            "Send payment verifies the selected provider and fee and may temporarily reserve $DD. You confirm before signing."),
                                         m_offerCheckFrame);
     m_offerCheckHelp->setObjectName("paymasterOfferCheckHelp");
     m_offerCheckHelp->setTextFormat(Qt::PlainText);
@@ -1143,7 +1144,34 @@ void PaymasterSendWidget::setupFeeSection()
         "Offer preview only. Core authenticates and selects the exact offer when the transfer is prepared."));
     m_offersTable->setMinimumHeight(130);
     advanced_layout->addWidget(m_offersTable, 8, 0, 1, 2);
-    m_feeLayout->addWidget(m_advancedPaymasterFrame, 7, 0, 1, 2);
+    m_offerCardsFrame = new QFrame(m_feeFrame);
+    m_offerCardsFrame->setObjectName("paymasterOfferCardsFrame");
+    auto* cards_frame_layout = new QVBoxLayout(m_offerCardsFrame);
+    cards_frame_layout->setContentsMargins(0, 0, 0, 0);
+    auto* cards_heading = new QLabel(DigiDollarSendWidget::tr("Choose a Paymaster"), m_offerCardsFrame);
+    QFont cards_font = cards_heading->font();
+    cards_font.setBold(true);
+    cards_heading->setFont(cards_font);
+    cards_frame_layout->addWidget(cards_heading);
+    auto* scroll = new QScrollArea(m_offerCardsFrame);
+    scroll->setObjectName("paymasterOfferCardsScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setMinimumHeight(240);
+    scroll->setMaximumHeight(540);
+    auto* cards = new QWidget(scroll);
+    cards->setObjectName("paymasterOfferCards");
+    m_offerCardsLayout = new QVBoxLayout(cards);
+    m_offerCardsLayout->setContentsMargins(0, 0, 0, 0);
+    m_offerCardsLayout->setSpacing(10);
+    m_offerCardsLayout->setAlignment(Qt::AlignTop);
+    scroll->setWidget(cards);
+    cards_frame_layout->addWidget(scroll);
+    m_offerSelectionGroup = new QButtonGroup(this);
+    m_feeLayout->addWidget(m_offerCardsFrame, 7, 0, 1, 2);
+    m_offerCardsFrame->hide();
+    m_feeLayout->addWidget(m_advancedPaymasterFrame, 8, 0, 1, 2);
 
     m_persistedPaymasterSessionsFrame = new QFrame(m_feeFrame);
     m_persistedPaymasterSessionsFrame->setObjectName(
@@ -2250,6 +2278,11 @@ bool PaymasterSendWidget::hasFeeFundingCandidate() const
 
 void PaymasterSendWidget::updateOfferCheckControls()
 {
+    if (m_offerCardsFrame) {
+        m_offerCardsFrame->setVisible(preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
+                                      !m_privacy && !m_offerPreview.empty());
+        m_offerCardsFrame->setEnabled(!m_paymasterBusy && !m_privacy);
+    }
     if (!m_offerCheckFrame) return;
     m_offerCheckFrame->setVisible(paymasterModeSelected() && m_paymasterRequestId.isEmpty());
     const bool checking = m_offerCheckState == OfferCheckState::CHECKING;
@@ -2354,7 +2387,144 @@ void PaymasterSendWidget::expirePaymasterOfferPreview()
     updateFeeDisplay();
 }
 
-void PaymasterSendWidget::invalidatePaymasterOfferPreview()
+void PaymasterSendWidget::clearOfferCards()
+{
+    if (!m_offerCardsLayout) return;
+    while (auto* item = m_offerCardsLayout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    m_offerCardsFrame->hide();
+}
+
+void PaymasterSendWidget::selectOfferCard(int index, bool manual)
+{
+    if (index < 0 || static_cast<size_t>(index) >= m_offerPreview.size()) return;
+    const UniValue& offer = m_offerPreview[index];
+    m_selectedOfferProvider = QString::fromStdString(offer.find_value("provider_id").get_str());
+    m_selectedOfferId = QString::fromStdString(offer.find_value("offer_id").get_str());
+    m_offerManuallySelected = manual;
+    m_paymasterPreviewRecipientCents = offer.find_value("payment_cents").getInt<qint64>();
+    m_paymasterPreviewServiceFeeCents = offer.find_value("service_fee_cents").getInt<qint64>();
+    m_paymasterPreviewTotalCents = offer.find_value("user_total_cents").getInt<qint64>();
+    updateFeeDisplay();
+    m_form.updateSendButton();
+}
+
+void PaymasterSendWidget::renderOfferCards()
+{
+    clearOfferCards();
+    if (m_privacy || m_offerPreview.empty()) return;
+    auto offers = m_offerPreview.getValues();
+    std::stable_sort(offers.begin(), offers.end(), [](const UniValue& lhs, const UniValue& rhs) {
+        const bool lhs_failed = lhs.find_value("recommendation_deprioritized").isTrue();
+        const bool rhs_failed = rhs.find_value("recommendation_deprioritized").isTrue();
+        if (lhs_failed != rhs_failed) return !lhs_failed;
+        return lhs.find_value("service_fee_cents").getInt<qint64>() <
+               rhs.find_value("service_fee_cents").getInt<qint64>();
+    });
+    m_offerPreview = UniValue{UniValue::VARR};
+    for (const auto& offer : offers) m_offerPreview.push_back(offer);
+    int selected{0};
+    if (m_offerManuallySelected) {
+        bool found{false};
+        for (int index = 0; index < static_cast<int>(offers.size()); ++index) {
+            const auto& offer = offers[index];
+            if (QString::fromStdString(offer.find_value("provider_id").get_str()) == m_selectedOfferProvider &&
+                QString::fromStdString(offer.find_value("offer_id").get_str()) == m_selectedOfferId) {
+                selected = index;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            m_offerManuallySelected = false;
+            setPaymasterNotice(DigiDollarSendWidget::tr("The selected offer is no longer available. Review the new recommendation before sending."));
+        }
+    }
+    for (int index = 0; index < static_cast<int>(offers.size()); ++index) {
+        const UniValue& offer = offers[index];
+        const QString provider_id = QString::fromStdString(offer.find_value("provider_id").get_str());
+        const QString name = QString::fromStdString(offer.find_value("display_name").get_str()).trimmed();
+        auto* card = new FeeFundingCard(m_offerCardsLayout->parentWidget());
+        card->setObjectName(QStringLiteral("paymasterOfferCard%1").arg(index));
+        card->setProperty("feeChoice", true);
+        card->setProperty("feeSelected", false);
+        card->setProperty("providerId", provider_id);
+        card->setProperty("offerId", QString::fromStdString(offer.find_value("offer_id").get_str()));
+        card->setCursor(Qt::PointingHandCursor);
+        auto* layout = new QVBoxLayout(card);
+        layout->setContentsMargins(14, 12, 14, 12);
+        layout->setSpacing(6);
+        auto* heading = new QHBoxLayout();
+        auto* choice = new QRadioButton(card);
+        choice->setObjectName(QStringLiteral("paymasterOfferChoice%1").arg(index));
+        card->setChoiceButton(choice);
+        m_offerSelectionGroup->addButton(choice, index);
+        auto add_label = [card](const QString& text) {
+            auto* label = new QLabel(text, card);
+            label->setProperty("offerCardText", true);
+            label->setTextFormat(Qt::PlainText);
+            label->setWordWrap(true);
+            label->setAttribute(Qt::WA_TransparentForMouseEvents);
+            return label;
+        };
+        auto* title = add_label(name.isEmpty() ? DigiDollarSendWidget::tr("Paymaster") : name);
+        QFont title_font = title->font();
+        title_font.setBold(true);
+        title->setFont(title_font);
+        title->setProperty("offerCardEmphasis", true);
+        heading->addWidget(choice);
+        heading->addWidget(title, 1);
+        if (index == 0) {
+            auto* recommended = add_label(DigiDollarSendWidget::tr("Recommended"));
+            recommended->setObjectName("paymasterRecommendedOffer");
+            recommended->setProperty("feeChoiceBadge", true);
+            recommended->setProperty("offerCardText", false);
+            recommended->setToolTip(DigiDollarSendWidget::tr("Lowest service fee among providers without a first failed attempt, when available. Local history is advisory; availability is checked before signing."));
+            heading->addWidget(recommended);
+        }
+        layout->addLayout(heading);
+        auto* identity = add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)));
+        identity->setToolTip(provider_id);
+        layout->addWidget(identity);
+        const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
+        const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
+        const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
+        const QString recipient_text = DigiDollarSendWidget::tr("Recipient receives: %1").arg(formatCents(payment));
+        const QString fee_text = DigiDollarSendWidget::tr("Service fee: %1 (≈ %2%)")
+                                     .arg(formatCents(fee), PaymasterEffectivePercent(fee, payment));
+        const QString total_text = DigiDollarSendWidget::tr("Total from your wallet: %1").arg(formatCents(total));
+        layout->addWidget(add_label(recipient_text));
+        layout->addWidget(add_label(fee_text));
+        auto* total_label = add_label(total_text);
+        total_label->setFont(title_font);
+        total_label->setProperty("offerCardEmphasis", true);
+        total_label->setObjectName("paymasterOfferCardTotal");
+        layout->addWidget(total_label);
+        const bool failed = offer.find_value("recommendation_deprioritized").isTrue();
+        layout->addWidget(add_label(failed
+            ? DigiDollarSendWidget::tr("An earlier attempt did not complete. Other available providers are recommended first.")
+            : friendlyFundingModel(QString::fromStdString(offer.find_value("funding_model").get_str()))));
+        choice->setAccessibleName(title->text());
+        choice->setAccessibleDescription(provider_id + QStringLiteral("\n") + recipient_text + QStringLiteral("\n") +
+                                         fee_text + QStringLiteral("\n") + total_text);
+        connect(choice, &QRadioButton::toggled, card, [this, card, index](bool checked) {
+            card->setProperty("feeSelected", checked);
+            card->style()->unpolish(card);
+            card->style()->polish(card);
+            card->update();
+            if (checked) selectOfferCard(index, /*manual=*/true);
+        });
+        m_offerCardsLayout->addWidget(card);
+    }
+    const bool manual = m_offerManuallySelected;
+    m_offerSelectionGroup->button(selected)->setChecked(true);
+    selectOfferCard(selected, manual);
+    updateOfferCheckControls();
+}
+
+void PaymasterSendWidget::invalidatePaymasterOfferPreview(bool preserve_choice)
 {
     if (!m_paymasterRequestId.isEmpty()) return;
     ++m_paymasterOfferPreviewGeneration;
@@ -2368,6 +2538,13 @@ void PaymasterSendWidget::invalidatePaymasterOfferPreview()
     m_paymasterPreviewRecipientCents = -1;
     m_paymasterPreviewServiceFeeCents = -1;
     m_paymasterPreviewTotalCents = -1;
+    m_offerPreview = UniValue{UniValue::VARR};
+    clearOfferCards();
+    if (!preserve_choice) {
+        m_selectedOfferProvider.clear();
+        m_selectedOfferId.clear();
+        m_offerManuallySelected = false;
+    }
     if (m_offersTable) m_offersTable->setRowCount(0);
     if (had_preview && m_offersStatus) {
         setOfferCheckStatus(OfferCheckState::STALE, DigiDollarSendWidget::tr(
@@ -2399,7 +2576,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                              DigiDollarSendWidget::tr("another Paymaster operation is still active"));
         return;
     }
-    invalidatePaymasterOfferPreview();
+    invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
     const CAmount amount_cents = input.amount_cents;
     if (!input.amount_valid) {
         setOfferCheckStatus(OfferCheckState::NEEDS_AMOUNT, DigiDollarSendWidget::tr("Enter a valid $DD amount, then check offers."));
@@ -2610,6 +2787,8 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
             guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
                                        row == 0 ? DigiDollarSendWidget::tr("No public offer for this amount yet.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
                                                                                                                                 DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
+            guard->m_offerPreview = result;
+            if (!guard->m_privacy) guard->renderOfferCards();
             if (row > 0) {
                 qint64 earliest_expiry = std::numeric_limits<qint64>::max();
                 for (const auto& offer : result.getValues()) {
@@ -2669,7 +2848,7 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     }
     params.push_back("cents"); // Upstream amount_unit precedes Paymaster options.
     UniValue options{UniValue::VOBJ};
-    // A Prepare payment click must never become direct-spend authorization.
+    // Paymaster preparation must never become direct-spend authorization.
     // Freeze the effective mode in the existing immutable request template.
     options.pushKV("fee_mode", preparesPaymasterPayment() ? "paymaster" : feeMode().toStdString());
     options.pushKV("request_id", m_paymasterRequestId.toStdString());
@@ -2677,6 +2856,10 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     options.pushKV("maximum_provider_attempts", m_maxAttemptsSpin->value());
     options.pushKV("privacy", m_privacyCombo->currentData().toString().toStdString());
     options.pushKV("selection", m_selectionCombo->currentData().toString().toStdString());
+    if (hasCurrentPaymasterOffer() && preparesPaymasterPayment() && !m_selectedOfferProvider.isEmpty()) {
+        options.pushKV("preferred_provider_id", m_selectedOfferProvider.toStdString());
+        options.pushKV("preferred_offer_id", m_selectedOfferId.toStdString());
+    }
     options.pushKV(
         "subtract_paymaster_fee_from_amount",
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
@@ -2831,6 +3014,7 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
         }
         if ((error.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER")) ||
              error.contains(QStringLiteral("PAYMASTER_NO_EXACT_GROSS_OFFER")) ||
+             error.contains(QStringLiteral("PAYMASTER_SELECTED_OFFER_UNAVAILABLE")) ||
              error.contains(QStringLiteral("PAYMASTER_SWEEP_BALANCE_CHANGED"))) &&
             !m_paymasterSessionPersisted) {
             // Offer selection failed before Core returned a durable session.
@@ -2862,6 +3046,7 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
             m_paymasterIdentityValue->setText(DigiDollarSendWidget::tr("No provider selected"));
             m_paymasterCostValue->setText(DigiDollarSendWidget::tr("No service fee reserved or authorized"));
             m_paymasterExpiryValue->setText(DigiDollarSendWidget::tr("—"));
+            invalidatePaymasterOfferPreview();
         } else {
             m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Paymaster error: %1").arg(error));
         }
@@ -4553,10 +4738,11 @@ void PaymasterSendWidget::updateFeeDisplay()
                 .arg(PaymasterEffectivePercent(m_feeCapSpin->value(), input.amount_cents)));
         }
     }
-    const bool exact_preview = subtract_fee &&
+    const bool exact_preview = hasCurrentPaymasterOffer() &&
         m_paymasterPreviewRecipientCents >= 0 &&
         m_paymasterPreviewServiceFeeCents >= 0 &&
-        m_paymasterPreviewTotalCents == amount_cents;
+        (subtract_fee ? m_paymasterPreviewTotalCents == amount_cents
+                      : m_paymasterPreviewRecipientCents == amount_cents);
     const QString recipient_amount = m_form.formatDDAmount(amount);
     const QString maximum_fee = formatCents(m_feeCapSpin->value());
     const QString maximum_outflow = subtract_fee
@@ -4624,7 +4810,8 @@ void PaymasterSendWidget::updateFeeDisplay()
         }
         m_feeSummary->setToolTip(dgb_status);
     } else {
-        m_feeValue->setText(DigiDollarSendWidget::tr("Exact provider quote; at most %1").arg(maximum_fee));
+        m_feeValue->setText(exact_preview ? formatCents(m_paymasterPreviewServiceFeeCents)
+                                        : DigiDollarSendWidget::tr("Exact provider quote; at most %1").arg(maximum_fee));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Service fee:"));
         m_feeModeExplanation->setText(DigiDollarSendWidget::tr(
             "Selected: Paymaster. A provider must supply the DGB network fee. A sponsored offer costs no "
@@ -4644,6 +4831,16 @@ void PaymasterSendWidget::updateFeeDisplay()
                      m_sendAllSpendableDD
                          ? DigiDollarSendWidget::tr("<br><b>Wallet emptying:</b> every confirmed, ordinary spendable $DD input will be bound to this exact request.")
                          : QString{}));
+        } else if (exact_preview) {
+            m_feeSummary->setText(DigiDollarSendWidget::tr(
+                "<table cellspacing=\"3\">"
+                "<tr><td><b>Recipient receives</b></td><td>%1</td></tr>"
+                "<tr><td><b>Network fee</b></td><td>Paid in DGB by the selected provider</td></tr>"
+                "<tr><td><b>Service fee</b></td><td>%2</td></tr>"
+                "<tr><td><b>Total from your wallet</b></td><td>%3</td></tr>"
+                "</table>").arg(formatCents(m_paymasterPreviewRecipientCents),
+                               formatCents(m_paymasterPreviewServiceFeeCents),
+                               formatCents(m_paymasterPreviewTotalCents)));
         } else {
             m_feeSummary->setText(DigiDollarSendWidget::tr(
                 "<table cellspacing=\"3\">"
@@ -4898,6 +5095,9 @@ void PaymasterSendWidget::setPaymasterAsyncRpcExecutorForTesting(
 void PaymasterSendWidget::applyPaymasterPrivacy()
 {
     if (!m_paymasterSessionFrame || !m_offersTable) return;
+    if (m_privacy) clearOfferCards();
+    else if (!m_offerPreview.empty() && m_offerCardsLayout->count() == 0) renderOfferCards();
+    updateOfferCheckControls();
     m_paymasterNotice->setVisible(!m_privacy && !m_paymasterNotice->text().isEmpty());
 
     const QString hidden = DigiDollarSendWidget::tr("Hidden while privacy mode is enabled");
@@ -5172,8 +5372,8 @@ void PaymasterSendWidget::send(const QString& address, CAmount amount_cents)
             return;
         }
 
-        // In explicit Paymaster mode, the clearly labelled Prepare payment
-        // button authorizes preparation only. The exact provider/fee approval
+        // In explicit Paymaster mode, Send payment authorizes preparation
+        // only. The exact provider/fee approval
         // remains mandatory. Automatic with own DGB can spend directly and
         // retains its ordinary transaction confirmation before the first RPC.
         // Privacy mode still requires exposing the payment fields for review.
@@ -5312,6 +5512,9 @@ bool PaymasterSendWidget::DescribeBackendError(
             "Refresh the balance and start Wallet emptying again. Reserved, pending and "
             "Paymaster-pool $DD remain untouched.\n\nTechnical details: %1")
             .arg(reasonFailed);
+    } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_SELECTED_OFFER_UNAVAILABLE"))) {
+        errorTitle = DigiDollarSendWidget::tr("Selected Paymaster offer unavailable");
+        errorMessage = DigiDollarSendWidget::tr("The selected offer changed or is no longer available. Refresh the offers and choose a Paymaster again. No other provider was selected for this request.");
     } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER"))) {
         errorTitle = DigiDollarSendWidget::tr("No suitable Paymaster available");
         errorMessage = DigiDollarSendWidget::tr(

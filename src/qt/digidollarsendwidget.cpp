@@ -764,7 +764,7 @@ void DigiDollarSendWidget::updateSendButton()
     // creates the action buttons. Fee-mode updates during that construction
     // phase must not dereference the not-yet-created send button.
     if (!m_sendButton) return;
-    m_sendButton->setText(m_paymaster->preparesPaymasterPayment() ? tr("Prepare payment") : tr("Send payment"));
+    m_sendButton->setText(tr("Send payment"));
 
     bool addressValid = validateAddress();
     bool amountValid = validateAmount();
