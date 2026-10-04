@@ -10544,3 +10544,32 @@ void PaymasterWidgetTests::paymasterOfferFormAlignment()
             .arg(dark ? "dark" : "light").arg(width)));
     }
 }
+
+void PaymasterWidgetTests::paymasterAppNumberFormat()
+{
+    struct RestoreLocale {
+        QLocale saved;
+        ~RestoreLocale() { QLocale::setDefault(saved); }
+    } restore;
+    for (const auto& locale : {QLocale::c(), QLocale(QLocale::German)}) {
+        QLocale::setDefault(locale);
+        PaymasterAmountSpinBox amount(nullptr);
+        QCOMPARE(amount.locale(), QLocale::c());
+        amount.setValue(1234567);
+        QCOMPARE(amount.text(), QStringLiteral("12345.67 DD"));
+        QCOMPARE(PaymasterFormatDD(1234567), QString::fromUtf8("12\xE2\x80\x89" "345.67"));
+        QCOMPARE(PaymasterFormatDGB(1234567890000LL), QString::fromUtf8("12\xE2\x80\x89" "345.67890000"));
+        auto* editor = amount.findChild<QLineEdit*>();
+        editor->setText("1,000.00 DD");
+        QVERIFY(!amount.hasAcceptableInput());
+        amount.interpretText();
+        QCOMPARE(amount.value(), 1234567);
+        std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+        for (auto* spin : panel->findChildren<QSpinBox*>()) QCOMPARE(spin->locale(), QLocale::c());
+        for (auto* spin : panel->findChildren<QDoubleSpinBox*>()) QCOMPARE(spin->locale(), QLocale::c());
+        auto* rate = panel->findChild<QSpinBox*>("paymasterPolicyFeeBps");
+        rate->setValue(80);
+        QVERIFY(rate->text().contains("0.80"));
+        QVERIFY(!rate->text().contains(','));
+    }
+}

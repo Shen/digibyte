@@ -64,7 +64,7 @@ namespace {
 class NoWheelSpinBox final : public QSpinBox
 {
 public:
-    explicit NoWheelSpinBox(QWidget* parent) : QSpinBox(parent) {}
+    explicit NoWheelSpinBox(QWidget* parent) : QSpinBox(parent) { setLocale(QLocale::c()); }
 
 protected:
     void wheelEvent(QWheelEvent* event) override { event->ignore(); }
@@ -4572,8 +4572,7 @@ void PaymasterSendWidget::updateFeeDisplay()
     QString dgb_status;
     if (m_walletModel) {
         const CAmount dgb_balance = m_walletModel->getAvailableDGBBalance();
-        const QString readable_balance = QLocale().toString(
-            static_cast<double>(dgb_balance) / COIN, 'f', 2);
+        const QString readable_balance = PaymasterFormatDGB(dgb_balance);
         dgb_status = DigiDollarSendWidget::tr("Available DGB: %1 DGB").arg(readable_balance);
         if (dgb_balance < COIN / 10) {
             dgb_status += DigiDollarSendWidget::tr(" — currently below the estimated network fee");
@@ -4681,10 +4680,7 @@ QString PaymasterSendWidget::formatCents(qint64 cents) const
     // Keep the two decimal places exact without converting integer cents to a
     // floating-point amount. The UI uses one unit; RPC values remain cents.
     // Match the fixed decimal notation used by the recipient/outflow labels.
-    QString amount = QString::number(cents / 100) + QLatin1Char('.') +
-                     QStringLiteral("%1").arg(qAbs(cents % 100), 2, 10, QLatin1Char('0'));
-    if (cents < 0 && cents > -100) amount.prepend(QLatin1Char('-'));
-    return DigiDollarSendWidget::tr("%1 $DD").arg(amount);
+    return DigiDollarSendWidget::tr("%1 $DD").arg(PaymasterFormatDD(cents));
 }
 
 QString PaymasterSendWidget::friendlyFundingModel(const QString& model) const

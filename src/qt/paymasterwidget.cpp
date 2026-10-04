@@ -196,7 +196,7 @@ private:
 class NoWheelSpinBox final : public QSpinBox
 {
 public:
-    explicit NoWheelSpinBox(QWidget* parent) : QSpinBox(parent) {}
+    explicit NoWheelSpinBox(QWidget* parent) : QSpinBox(parent) { setLocale(QLocale::c()); }
 
 protected:
     void wheelEvent(QWheelEvent* event) override { event->ignore(); }
@@ -205,7 +205,7 @@ protected:
 class NoWheelDoubleSpinBox final : public QDoubleSpinBox
 {
 public:
-    explicit NoWheelDoubleSpinBox(QWidget* parent) : QDoubleSpinBox(parent) {}
+    explicit NoWheelDoubleSpinBox(QWidget* parent) : QDoubleSpinBox(parent) { setLocale(QLocale::c()); }
 
 protected:
     void wheelEvent(QWheelEvent* event) override { event->ignore(); }
@@ -331,14 +331,13 @@ public:
     {
         setMaxLength(24);
         setValidator(new QRegularExpressionValidator(
-            QRegularExpression(QStringLiteral("[0-9]{1,11}([.,][0-9]{0,8})?")), this));
+            QRegularExpression(QStringLiteral("[0-9]{1,11}([.][0-9]{0,8})?")), this));
         setSatoshis(satoshis);
     }
 
     bool satoshis(qint64& value) const
     {
         QString amount = text().trimmed();
-        amount.replace(',', '.');
         const QStringList parts = amount.split('.');
         if (parts.isEmpty() || parts.size() > 2) return false;
         bool whole_ok{false};
@@ -5586,8 +5585,7 @@ private:
 
     static QString dgbAmount(qint64 satoshis)
     {
-        return (satoshis < 0 ? QStringLiteral("-") : QString{}) +
-               QStringLiteral("%1.%2").arg(std::abs(satoshis / COIN)).arg(std::abs(satoshis % COIN), 8, 10, QLatin1Char('0'));
+        return PaymasterFormatDGB(satoshis);
     }
 
     static QString compactDgbAmount(qint64 satoshis)
@@ -5601,8 +5599,7 @@ private:
 
     static QString ddAmount(qint64 cents)
     {
-        return (cents < 0 ? QStringLiteral("-") : QString{}) +
-               QStringLiteral("%1.%2").arg(std::abs(cents / 100)).arg(std::abs(cents % 100), 2, 10, QLatin1Char('0'));
+        return PaymasterFormatDD(cents);
     }
 
     static qint64 financeNumber(const UniValue& object, const char* name)
@@ -6770,7 +6767,7 @@ private:
             .arg(values.admission_carriers)
             .arg(values.operational_carriers)
             .arg(dgbAmount(bound_dgb))
-            .arg(QString::number(bound_carriers / 100.0, 'f', 2))
+            .arg(PaymasterFormatDD(bound_carriers))
             .arg(dgbAmount(values.fee_per_transaction))
             .arg(dgbAmount(values.fee_per_hour))
             .arg(dgbAmount(values.fee_per_day));
@@ -7162,8 +7159,8 @@ private:
             result, "carrier_withdrawable_excess_cents");
         m_carrier_value_status->setText(tr(
             "Confirmed carrier base: %1 DD · accumulated earnings: %2 DD. The base remains wallet-owned and reserved only while its slot is active.")
-            .arg(QString::number(m_carrier_base_cents / 100.0, 'f', 2),
-                 QString::number(m_carrier_excess_cents / 100.0, 'f', 2)));
+            .arg(PaymasterFormatDD(m_carrier_base_cents),
+                 PaymasterFormatDD(m_carrier_excess_cents)));
         m_preview_carrier_excess->setEnabled(
             configured && hasCompleteMutationSnapshots() &&
             m_carrier_excess_cents >= Params().GetDigiDollarParams().minOutputAmount && !m_busy);
@@ -7246,7 +7243,7 @@ private:
             const QString key = QStringLiteral("%1:%2").arg(txid).arg(vout);
             m_release_carrier_select->addItem(
                 tr("%1 DD — %2…:%3")
-                    .arg(QString::number(cents / 100.0, 'f', 2),
+                    .arg(PaymasterFormatDD(cents),
                          txid.left(12))
                     .arg(vout),
                 key);
@@ -7261,9 +7258,7 @@ private:
         if (m_pending_successor_carrier_cents > 0) {
             recycling.push_back(tr(
                 "Carrier is being reused: %1 DD, waiting for confirmation.")
-                .arg(QString::number(
-                    m_pending_successor_carrier_cents / 100.0,
-                    'f', 2)));
+                .arg(PaymasterFormatDD(m_pending_successor_carrier_cents)));
         }
         if (m_pending_successor_dgb_satoshis > 0) {
             recycling.push_back(tr(
@@ -7775,8 +7770,8 @@ private:
                 m_network_fee->value() > applicable_per_transaction) {
                 return tr(
                     "The advertised network-fee ceiling (%1 DGB) exceeds the applicable safety limit per transfer (%2 DGB). Lower the ceiling in Configuration or increase the limit in Safety limits, then save the changed setting.")
-                    .arg(QString::number(m_network_fee->value() / 100000000.0, 'f', 8))
-                    .arg(QString::number(applicable_per_transaction / 100000000.0, 'f', 8));
+                    .arg(PaymasterFormatDGB(m_network_fee->value()))
+                    .arg(PaymasterFormatDGB(applicable_per_transaction));
             }
             return tr("The configured provider budget or rate limit has been reached.");
         }
@@ -7787,7 +7782,7 @@ private:
         if (error.startsWith(QLatin1String("PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED:")) &&
             error.contains(QLatin1String("Amount below minimum DigiDollar output."))) {
             return tr("The payout must be at least %1 DD. Wait until enough confirmed earnings have accumulated. No withdrawal was submitted; your earnings remain in the wallet.")
-                .arg(QString::number(Params().GetDigiDollarParams().minOutputAmount / 100.0, 'f', 2));
+                .arg(PaymasterFormatDD(Params().GetDigiDollarParams().minOutputAmount));
         }
         if (error == QLatin1String("PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE"))
             return tr("This DD reserve is no longer available for release. It may be in use, awaiting confirmation, spent or already released. Refresh the reserves, wait for open payments to finish, then review an available reserve. This attempt did not release capital.");
@@ -8073,12 +8068,9 @@ private:
             controls.mode->setText(tr(
                 "Incomplete — an enabled model requires all six limits to be greater than zero. Use all zero values only to disable the model."));
         } else {
-            const QString per_transaction = QString::number(
-                values.per_transaction / 100000000.0, 'f', 8);
-            const QString per_hour = QString::number(
-                values.per_hour / 100000000.0, 'f', 8);
-            const QString per_day = QString::number(
-                values.per_day / 100000000.0, 'f', 8);
+            const QString per_transaction = PaymasterFormatDGB(values.per_transaction);
+            const QString per_hour = PaymasterFormatDGB(values.per_hour);
+            const QString per_day = PaymasterFormatDGB(values.per_day);
             controls.mode->setText(persisted
                 ? tr("Active finite limits — at most %1 DGB per transfer, %2 DGB per rolling hour and %3 DGB per rolling day.")
                       .arg(per_transaction, per_hour, per_day)
@@ -8097,13 +8089,13 @@ private:
         } else if (persisted) {
             m_client_safety_mode->setText(tr(
                 "Active limits — at most %1 DD per transfer and %2 DD in a rolling day.")
-                .arg(QString::number(m_client_fee_per_transaction->value() / 100.0, 'f', 2),
-                     QString::number(m_client_fee_per_day->value() / 100.0, 'f', 2)));
+                .arg(PaymasterFormatDD(m_client_fee_per_transaction->value()),
+                     PaymasterFormatDD(m_client_fee_per_day->value())));
         } else {
             m_client_safety_mode->setText(tr(
                 "Unsaved limits — at most %1 DD per transfer and %2 DD in a rolling day. Save the client safety policy to activate them.")
-                .arg(QString::number(m_client_fee_per_transaction->value() / 100.0, 'f', 2),
-                     QString::number(m_client_fee_per_day->value() / 100.0, 'f', 2)));
+                .arg(PaymasterFormatDD(m_client_fee_per_transaction->value()),
+                     PaymasterFormatDD(m_client_fee_per_day->value())));
         }
     }
 
@@ -8296,9 +8288,9 @@ private:
             budgets.push_back(tr(
                 "%1: at most %2 DGB per transfer, %3 DGB per rolling hour and %4 DGB per rolling day; %5 transfers/hour and %6 transfers/day.")
                 .arg(name)
-                .arg(QString::number(values.per_transaction / 100000000.0, 'f', 8))
-                .arg(QString::number(values.per_hour / 100000000.0, 'f', 8))
-                .arg(QString::number(values.per_day / 100000000.0, 'f', 8))
+                .arg(PaymasterFormatDGB(values.per_transaction))
+                .arg(PaymasterFormatDGB(values.per_hour))
+                .arg(PaymasterFormatDGB(values.per_day))
                 .arg(values.completed_per_hour)
                 .arg(values.completed_per_day));
         };
@@ -8322,12 +8314,9 @@ private:
             liquidity_values.paid_maintenance_approved) {
             liquidity_budget = tr(
                 "\nAutomatic liquidity maintenance: at most %1 DGB per maintenance transaction, %2 DGB per rolling hour and %3 DGB per rolling day.")
-                .arg(QString::number(
-                    liquidity_values.fee_per_transaction / 100000000.0, 'f', 8))
-                .arg(QString::number(
-                    liquidity_values.fee_per_hour / 100000000.0, 'f', 8))
-                .arg(QString::number(
-                    liquidity_values.fee_per_day / 100000000.0, 'f', 8));
+                .arg(PaymasterFormatDGB(liquidity_values.fee_per_transaction))
+                .arg(PaymasterFormatDGB(liquidity_values.fee_per_hour))
+                .arg(PaymasterFormatDGB(liquidity_values.fee_per_day));
         }
         return tr(
             "Start this provider now in %1 mode?\n\n%2%3\n\n"
@@ -8515,7 +8504,7 @@ private:
                                       slot_value * poolNumber(saved, "target_operational_dgb");
             const qint64 target_dd = 100 * (poolNumber(saved, "target_admission_carriers") + poolNumber(saved, "target_operational_carriers"));
             explanation->setText(explanation->text() + tr("\n\nTarget capital: at least %1 DGB and %2 DD, before network fees. Existing usable reserves count toward these targets; only missing capacity is refilled.")
-                .arg(dgbAmount(target_dgb), QString::number(target_dd / 100.0, 'f', 2)));
+                .arg(dgbAmount(target_dgb), PaymasterFormatDD(target_dd)));
             explanation->setWordWrap(true);
             explanation->setMaximumWidth(620);
             form->addRow(explanation);
@@ -10177,8 +10166,8 @@ private:
     {
         const QString withdrawal_hint = m_privacy || !hasCompleteMutationSnapshots() ? QString{} : tr(
             "Minimum payout: %2 DD. Currently accumulated: %1 DD. Earnings remain in the reserve until the minimum is reached; base capital is retained.")
-            .arg(QString::number(m_carrier_excess_cents / 100.0, 'f', 2),
-                 QString::number(Params().GetDigiDollarParams().minOutputAmount / 100.0, 'f', 2));
+            .arg(PaymasterFormatDD(m_carrier_excess_cents),
+                 PaymasterFormatDD(Params().GetDigiDollarParams().minOutputAmount));
         m_withdrawal_hint->setText(withdrawal_hint);
         m_withdrawal_hint->setVisible(!m_privacy && hasCompleteMutationSnapshots() &&
             m_carrier_excess_cents < Params().GetDigiDollarParams().minOutputAmount &&
@@ -10437,14 +10426,14 @@ private:
             m_guided_review_text = preparation
                 ? tr("Create only the missing reserves.\n\nAdditional capital: %1 DGB and %2 DD.\nMaximum setup fees: %3 DGB total; at most %4 DGB per transaction.\n\nExisting and pending reserves are already included. Core will create the approved reserves and wait for confirmations automatically.")
                     .arg(dgbAmount(poolNumber(preview, "total_output_satoshis")),
-                         QString::number(poolNumber(preview, "total_carrier_cents") / 100.0, 'f', 2),
+                         PaymasterFormatDD(poolNumber(preview, "total_carrier_cents")),
                          dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
                          dgbAmount(poolNumber(preview, "maximum_fee_satoshis")))
                 : rebalance ? tr("Return %1 DGB to ordinary wallet funds, less a network fee of at most %2 DGB. Saved targets, DD reserves and refill approval remain unchanged.")
                     .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")))
                 : task == QLatin1String("all_excess")
                     ? tr("Withdraw %1 DD earnings. Keep %2 DD operating capital. Estimated network fee: %3 DGB.")
-                        .arg(QString::number(poolNumber(preview, "withdrawable_excess_cents") / 100.0, 'f', 2), QString::number(poolNumber(preview, "retained_carrier_cents") / 100.0, 'f', 2), dgbAmount(poolNumber(preview, "estimated_network_fee_satoshis")))
+                        .arg(PaymasterFormatDD(poolNumber(preview, "withdrawable_excess_cents")), PaymasterFormatDD(poolNumber(preview, "retained_carrier_cents")), dgbAmount(poolNumber(preview, "estimated_network_fee_satoshis")))
                     : tr("Pause the provider, return the selected reserve to ordinary wallet balance and reduce its saved capacity to %1. Released capital will not be replenished automatically.")
                         .arg(poolNumber(preview, "operational_carrier_target"));
             if (repair_targets) {
@@ -11356,7 +11345,7 @@ private:
             if (!progress.isEmpty()) lines << progress;
             if (result.find_value("maximum_total_fee_satoshis").isNum()) {
                 lines.push_back(tr("Maximum approved setup fees: %1 DGB. Execution authorizes later automatic completion within this limit.")
-                    .arg(QString::number(poolNumber(result, "maximum_total_fee_satoshis") / 100000000.0, 'f', 8)));
+                    .arg(PaymasterFormatDGB(poolNumber(result, "maximum_total_fee_satoshis"))));
             }
             lines.push_back(tr(
                 "Missing outputs to create — admission DGB: %1; operational DGB: %2; admission carriers: %3; operational carriers: %4.")
@@ -11366,12 +11355,12 @@ private:
                 .arg(poolNumber(result, "missing_operational_carrier_slots")));
             lines.push_back(tr(
                 "Value per output — admission DGB: %1 DGB; operational DGB: %2 DGB; DD carrier: %3 DD.")
-                .arg(QString::number(poolNumber(result, "admission_dgb_satoshis_each") / 100000000.0, 'f', 8),
-                     QString::number(poolNumber(result, "operational_dgb_satoshis_each") / 100000000.0, 'f', 8),
-                     QString::number(poolNumber(result, "carrier_cents_each") / 100.0, 'f', 2)));
+                .arg(PaymasterFormatDGB(poolNumber(result, "admission_dgb_satoshis_each")),
+                     PaymasterFormatDGB(poolNumber(result, "operational_dgb_satoshis_each")),
+                     PaymasterFormatDD(poolNumber(result, "carrier_cents_each"))));
             lines.push_back(tr("New pool total — %1 DGB and %2 DD.")
-                .arg(QString::number(poolNumber(result, "total_output_satoshis") / 100000000.0, 'f', 8),
-                     QString::number(poolNumber(result, "total_carrier_cents") / 100.0, 'f', 2)));
+                .arg(PaymasterFormatDGB(poolNumber(result, "total_output_satoshis")),
+                     PaymasterFormatDD(poolNumber(result, "total_carrier_cents"))));
         } else {
             lines.push_back(executed
                 ? tr("Retirement executed: selected excess available liquidity is being returned to the wallet.")
@@ -11383,12 +11372,12 @@ private:
                 .arg(poolNumber(result, "retired_admission_carrier_slots"))
                 .arg(poolNumber(result, "retired_operational_carrier_slots")));
             lines.push_back(tr("Returned before network fee — %1 DGB and %2 DD.")
-                .arg(QString::number(poolNumber(result, "retired_dgb_satoshis") / 100000000.0, 'f', 8),
-                     QString::number(poolNumber(result, "retired_carrier_cents") / 100.0, 'f', 2)));
+                .arg(PaymasterFormatDGB(poolNumber(result, "retired_dgb_satoshis")),
+                     PaymasterFormatDD(poolNumber(result, "retired_carrier_cents"))));
         }
         if (result.find_value("network_fee_satoshis").isNum()) {
             lines.push_back(tr("DGB network fee paid: %1 DGB.")
-                .arg(QString::number(poolNumber(result, "network_fee_satoshis") / 100000000.0, 'f', 8)));
+                .arg(PaymasterFormatDGB(poolNumber(result, "network_fee_satoshis"))));
         }
         const UniValue& dgb_txid = result.find_value("dgb_txid");
         const UniValue& dd_txid = result.find_value("dd_txid");
@@ -11445,12 +11434,10 @@ private:
     {
         const QString asset = activityText(entry, "asset");
         if (asset == QLatin1String("dgb")) {
-            return tr("%1 DGB").arg(QString::number(
-                poolNumber(entry, "dgb_satoshis") / 100000000.0, 'f', 8));
+            return tr("%1 DGB").arg(PaymasterFormatDGB(poolNumber(entry, "dgb_satoshis")));
         }
         if (asset == QLatin1String("dd_carrier")) {
-            return tr("%1 DD carrier").arg(QString::number(
-                poolNumber(entry, "dd_cents") / 100.0, 'f', 2));
+            return tr("%1 DD carrier").arg(PaymasterFormatDD(poolNumber(entry, "dd_cents")));
         }
         return asset.isEmpty() ? tr("unknown asset") : asset;
     }
@@ -12526,10 +12513,10 @@ private:
                 "%5 completed transfers per hour and %6 per day. Request admission permits at most "
                 "%7 active quotes total, %8 per netgroup, %9 per recipient bucket and %10 quote "
                 "requests per netgroup/minute.")
-                .arg(QString::number(limits.per_transaction / 100000000.0, 'f', 8),
-                     QString::number(limits.reserved / 100000000.0, 'f', 8),
-                     QString::number(limits.per_hour / 100000000.0, 'f', 8),
-                     QString::number(limits.per_day / 100000000.0, 'f', 8))
+                .arg(PaymasterFormatDGB(limits.per_transaction),
+                     PaymasterFormatDGB(limits.reserved),
+                     PaymasterFormatDGB(limits.per_hour),
+                     PaymasterFormatDGB(limits.per_day))
                 .arg(limits.completed_per_hour)
                 .arg(limits.completed_per_day)
                 .arg(custom_max_active_quotes_total->value())
@@ -13218,11 +13205,11 @@ private:
                         .arg(setup_wallet_name)
                         .arg(display->text().trimmed().isEmpty() ? tr("No public name") : display->text().trimmed())
                         .arg(model)
-                        .arg(QString::number(minimum->value() / 100.0, 'f', 2))
-                        .arg(QString::number(maximum->value() / 100.0, 'f', 2))
+                        .arg(PaymasterFormatDD(minimum->value()))
+                        .arg(PaymasterFormatDD(maximum->value()))
                         .arg(QString::number(wizard_user_paid->isChecked() ? fee->value() : 0.0, 'f', 2))
                         .arg(lifetime->value())
-                        .arg(QString::number(selected_network_fee() / 100000000.0, 'f', 8))
+                        .arg(PaymasterFormatDGB(selected_network_fee()))
                         .arg(safety_profile->currentText())
                         .arg(operation_mode->currentText(),
                              autostart->isChecked() ? tr("on") : tr("off"),
