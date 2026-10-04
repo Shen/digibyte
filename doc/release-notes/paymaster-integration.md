@@ -5,6 +5,20 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Provider process display
+
+Overview and the provider header now share the current payment/capacity/
+confirmation presentation. Additive RPC activity counts ignore historical
+committed entries and expired admissions; CLI uses the same work classification.
+Known synchronization waits remain waits, and scheduler errors report the
+reason belonging to their actual state. Genuine faults still take priority.
+
+Visible active-provider status refreshes every two seconds without repeatedly
+scanning finance history. Finance summaries refresh on changed capital/budgets,
+at thirty seconds or on explicit refresh. Unsaved offer drafts survive polling.
+Temporary reserved capacity no longer describes saved refill consent as a
+configuration failure. No spending authority or payment execution changes.
+
 ## Existing V5 payment artifacts after upgrade
 
 The V6 offer fee-cap update incorrectly rejected unchanged, retained V5

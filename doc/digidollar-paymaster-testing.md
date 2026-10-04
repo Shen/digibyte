@@ -1,5 +1,56 @@
 # Paymaster build and test runbook
 
+## Provider work presentation (2026-10-04)
+
+Source base: `6829c063bb`. Current work is derived from the loaded budget,
+Capacity-admission and pool records, independently of the last scheduler phase.
+Completed/committed history and expired admissions do not imply active work.
+Core service reasons match the step that selects the current state. CLI and Qt
+share work classification; genuine faults keep priority. Saved refill consent,
+payment validation and execution authority are unchanged.
+
+Selected MSVC v143 / Qt 5.15.10 compilation and incremental separate
+application/CLI/test links were used. The 24 focused Core/wallet/CLI cases pass
+with 201 assertions: the complete small setup suite plus current-work lifetime,
+non-mutating refill-state transitions, pre-index/sync submit deferral and stale
+submit consumption. The existing resume-fee fixture now uses saved CLI defaults
+instead of an unrelated explicit new-provider fee proposal; its exact fee
+assertion is retained.
+
+All 48 targeted native Qt cases pass. They cover work transitions in both themes, historical
+committed outputs, reserved capacity with free slots, scheduler waits/faults,
+confirmation and return to idle, manual processing, two-second active polling,
+throttled finance, preserved offer drafts, privacy, delayed startup, wallet
+binding, capital overview, refill switches and exact Save policy values. Cached
+polls hide an inherited loading panel; a slow-read display timer has no RPC
+side effects. Application and CLI candidates are linked from the changed files
+and existing objects; this is not a full current-source rebuild.
+
+Full rebuild and live RPC/provider walkthrough remain operator checks. Use the
+existing VS v143, Qt 5.15.10 and static vcpkg installation, from
+`D:\Digibyte\digibyte-fork`. Build runtime is in the tens of minutes; success
+requires exit code zero. Then run the selected RPC/provider tests (minutes,
+isolated regtest wallets; success requires every test to pass):
+
+```powershell
+$builder = 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe'
+& $builder .\build_msvc\digibyte.sln /m:2 /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false
+if ($LASTEXITCODE -ne 0) { throw 'Full build failed' }
+$env:DIGIBYTED = (Resolve-Path .\build_msvc\x64\Release\digibyted.exe).Path
+$env:DIGIBYTECLI = (Resolve-Path .\build_msvc\x64\Release\digibyte-cli.exe).Path
+python -X utf8 test/functional/test_runner.py wallet_paymaster_rpc.py wallet_paymaster_provider.py wallet_paymaster_lifecycle.py -j1 --descriptors
+if ($LASTEXITCODE -ne 0) { throw 'Provider/RPC checks failed' }
+```
+
+Native acceptance: with client and provider open, request a quote, approve the
+payment, broadcast, confirm the successor outputs, and observe reserved capacity,
+payment work, confirmation wait and return to the current operating state.
+Check that header/hero agree, manual processing never promises automatic
+continuation, genuine errors remain actionable, offer drafts survive navigation,
+and refill consent survives temporary capacity use. Snapshots refresh every two
+seconds while active and visible; shorter phases can fall between reads. Hidden
+pages/privacy and an outstanding read must not create overlapping polling.
+
 ## V5 payment artifacts after the V6 upgrade (2026-10-04)
 
 Source base: `80ee78557f`. The V6 announcement update inadvertently rejected

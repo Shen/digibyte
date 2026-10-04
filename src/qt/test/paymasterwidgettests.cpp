@@ -7948,10 +7948,12 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
             QCOMPARE(hint->text(), ready_hint);
             QCOMPARE(action->text(), QStringLiteral("Start provider…"));
             QVERIFY(loading->isHidden());
-            QVERIFY(!timer->isActive());
+            QVERIFY(timer->isActive()); // Local elapsed-time updates can expose a slow read.
             QVERIFY(!action->isEnabled());
             QVERIFY(!pause->isEnabled());
             const int before = reads.size();
+            if (refresh == 0) QTRY_VERIFY_WITH_TIMEOUT(!loading->isHidden(), 3000);
+            QCOMPARE(reads.size(), before); // The display timer never polls Core.
             panel->refreshStatus();
             QCOMPARE(reads.size(), before); // No overlapping poll.
             auto callback = std::move(pending);
@@ -8308,6 +8310,160 @@ UniValue GuidedOperatorSnapshot()
     snapshot.pushKV("wallet_generation", "loaded-provider");
     return snapshot;
 }
+}
+
+void PaymasterWidgetTests::paymasterOperatorWorkTransitions_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QStringLiteral("dark");
+    QTest::newRow("light") << QStringLiteral("light");
+}
+
+void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
+{
+    QFETCH(QString, theme);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QFile css(":/css/" + theme);
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    panel->resize(760, 860);
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "active");
+    auto pool = provider.find_value("pool");
+    pool.pushKV("reserved", 12); // Historical committed entries are not current work.
+    UniValue activity{UniValue::VOBJ};
+    for (const auto* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"}) activity.pushKV(key, 0);
+    QStringList commands;
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        commands << QString::fromStdString(command);
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        throw std::runtime_error("Unexpected process-display RPC");
+    });
+    auto* headline = panel->findChild<QLabel*>("paymasterOperatorHeadline");
+    auto* header = panel->findChild<QLabel*>("paymasterProviderStatus");
+    auto* hint = panel->findChild<QLabel*>("paymasterOperatorHint");
+    auto* action = panel->findChild<QPushButton*>("paymasterOperatorNextAction");
+    auto* pause = panel->findChild<QPushButton*>("paymasterOperatorPause");
+    QVERIFY(headline && header && hint && action && pause);
+    const auto observe = [&] {
+        pool.pushKV("activity", activity);
+        provider.pushKV("pool", pool);
+        snapshot.pushKV("provider", provider);
+        snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+        commands.clear();
+        panel->refreshStatus();
+        QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo", "getpaymasterfinancestatus"}));
+        QCOMPARE(header->text(), headline->text());
+        QVERIFY(pause->isEnabled());
+    };
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Provider is running"));
+    activity.pushKV("capacity_requests", 1);
+    activity.pushKV("reserved_outputs", 2);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Payment capacity reserved"));
+    QCOMPARE(action->text(), QStringLiteral("View payment activity"));
+    activity.pushKV("capacity_requests", 0);
+    activity.pushKV("active_payments", 1);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    provider.pushKV("service_state", "waiting_for_readiness");
+    provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    provider.pushKV("last_service_error", "PAYMASTER_PROVIDER_SYNCING");
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Waiting for the node"));
+    provider.pushKV("service_state", "error");
+    provider.pushKV("last_service_error", "PAYMASTER_SUBMIT_BINDING_MISMATCH");
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Status needs review"));
+    provider.pushKV("service_state", "active");
+    provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    provider.pushKV("ready", false);
+    UniValue errors{UniValue::VARR};
+    errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    provider.pushKV("readiness_errors", errors);
+    activity.pushKV("active_payments", 0);
+    activity.pushKV("reserved_outputs", 0);
+    activity.pushKV("pending_confirmations", 2);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Waiting for reserve confirmations"));
+    QCOMPARE(action->text(), QStringLiteral("View progress"));
+    provider.pushKV("ready", true);
+    provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+    activity.pushKV("pending_confirmations", 0);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Provider is running"));
+    provider.pushKV("service_state", "manual");
+    provider.pushKV("last_service_error", "");
+    activity.pushKV("active_payments", 1);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    QVERIFY(hint->text().contains("manual processing"));
+    QVERIFY(!hint->text().contains("continues automatically"));
+    provider.pushKV("service_state", "error");
+    provider.pushKV("last_service_error", "PAYMASTER_FUTURE_CONFIRMATION_ERROR");
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Status needs review"));
+}
+
+void PaymasterWidgetTests::paymasterOperatorPollingPreservesDraftsAndThrottlesFinance()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "active");
+    snapshot.pushKV("provider", provider);
+    QStringList commands;
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        commands << QString::fromStdString(command);
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        throw std::runtime_error("Unexpected polling RPC");
+    });
+    panel->show();
+    panel->refreshStatus();
+    auto* timer = panel->findChild<QTimer*>("paymasterSetupStatusTimer");
+    auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyFeeBps");
+    QVERIFY(timer && fee);
+    QCOMPARE(timer->interval(), 2000);
+    fee->setValue(84);
+    QVERIFY(timer->isActive()); // An offer draft must not freeze the Overview.
+    const auto tick = [&] {
+        commands.clear();
+        QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+        QCOMPARE(fee->value(), 84);
+    };
+    tick();
+    QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo"}));
+    UniValue activity{UniValue::VOBJ};
+    for (const auto* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"}) activity.pushKV(key, 0);
+    activity.pushKV("active_payments", 1);
+    auto pool = provider.find_value("pool");
+    pool.pushKV("activity", activity);
+    provider.pushKV("pool", pool);
+    snapshot.pushKV("provider", provider);
+    tick();
+    QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo", "getpaymasterfinancestatus"}));
+    tick();
+    QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo"}));
+    commands.clear();
+    panel->refreshStatus();
+    QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo", "getpaymasterfinancestatus"}));
+    provider.pushKV("running", false);
+    provider.pushKV("service_state", "stopped");
+    snapshot.pushKV("provider", provider);
+    tick();
+    QCOMPARE(timer->interval(), 30000);
+    panel->setPrivacy(true);
+    QVERIFY(!timer->isActive());
+    tick();
+    QVERIFY(commands.isEmpty());
 }
 
 void PaymasterWidgetTests::paymasterOverviewAutostart_data()

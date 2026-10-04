@@ -121,6 +121,17 @@ explains that Core continues automatically when they confirm. Neither state
 requires starting setup again. Budget/approval problems retain their own next
 action; unexpected errors still lead to diagnostics.
 
+Before quote acceptance, **Payment capacity reserved** identifies operating
+capacity assigned to the request. A payment can remain in progress while other
+slots are available. Historical committed outputs are not current work. After
+confirmation/release the display returns to the current operating state; an
+old scheduler wait does not keep a ready provider waiting. The header uses the
+same state as the main card. Active providers refresh every two seconds while
+the page is visible; finance summaries refresh less often or when capital and
+budgets change. Manual Refresh always reads both. Unsaved offer changes remain
+in the form and do not stop Overview updates. Genuine errors still take
+precedence over normal payment and confirmation waits.
+
 After restarting with an existing provider wallet, use **Overview → Start
 provider** (or **Resume provider** after a persistent pause). The setup
 assistant is optional when the saved settings are unchanged. Wallet unlock,

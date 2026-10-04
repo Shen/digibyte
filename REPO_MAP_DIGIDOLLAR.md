@@ -1318,9 +1318,13 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   operation_mode. The setup wizard combines name/model/offer into one page
   for seven numbered stages. The single
   overview hero translates the current operator snapshot into a next action;
-  the shared diagnostic mapping treats the running scheduler's capacity wait
-  as informational, and the hero distinguishes reserved payment capacity from
-  reserve confirmation waits without suppressing unexpected errors;
+  the shared `OperatorWorkPhase`/diagnostic mapping uses additive pool.activity
+  counts of live payment budgets, Capacity admissions, reserved operational
+  outputs and unconfirmed successors, excluding committed history. Scheduler
+  reasons follow the resulting service state. Active providers refresh every
+  two seconds; finance summaries stay at thirty seconds unless capital or
+  budgets change. Header/hero share the same presentation; offer drafts survive
+  polling. Capacity and confirmation waits do not suppress unexpected errors;
   unknown/stale data cannot expose a start action. Technical details, reserve
   counts, additional safety limits and secondary finance views are disclosures.
   The selected finance summary is invalidated on period changes and failures;

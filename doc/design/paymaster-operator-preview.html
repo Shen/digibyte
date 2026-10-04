@@ -24,8 +24,8 @@ dialog::backdrop{background:#0009}[hidden]{display:none!important}progress{width
 </style>
 </head>
 <body>
-<div class="demo"><span>Bedienentwurf · 01.10.2026 · Beispieldaten, keine Wallet-Verbindung</span>
-<label>Beispielzustand <select id="scenario"><option value="ready">Bereit</option><option value="running">Läuft</option><option value="locked">Wallet gesperrt</option><option value="pending">Bestätigung ausstehend</option><option value="unknown">Status unbekannt</option><option value="new">Neue Einrichtung</option></select></label></div>
+<div class="demo"><span>Bedienentwurf · 04.10.2026 · Beispieldaten, keine Wallet-Verbindung</span>
+<label>Beispielzustand <select id="scenario"><option value="ready">Bereit</option><option value="running">Läuft</option><option value="capacity">Zahlungskapazität reserviert</option><option value="payment">Zahlung läuft</option><option value="locked">Wallet gesperrt</option><option value="pending">Bestätigung ausstehend</option><option value="unknown">Status unbekannt</option><option value="new">Neue Einrichtung</option></select></label></div>
 <main>
 <header><h1>Paymaster betreiben</h1><p class="muted">Wallet: Beispielanbieter · Netzwerk: Testnet · Status: Beispieldaten</p></header>
 <div id="task" class="card" hidden role="status"><strong>Aktuelle Aufgabe</strong><p id="task-text"></p><button id="task-clear">Hinweis schließen</button></div>
@@ -87,13 +87,15 @@ function render(){
 const labels={
 ready:["Bereit zum Starten","Gespeicherte Einstellungen und Limits sind bereit.","Paymaster starten…"],
 running:["Paymaster läuft","Anfragen werden innerhalb deiner freigegebenen Limits verarbeitet.","Aktivität öffnen"],
+capacity:["Zahlungskapazität reserviert","Kapital ist für eine aktuelle Anfrage reserviert. Bereits abgeschlossene Zahlungen halten diese Anzeige nicht aktiv.","Zahlungsaktivität öffnen"],
+payment:["Zahlung läuft","Core verarbeitet die aktuelle Zahlung. Weitere freie Kapazität kann gleichzeitig verfügbar sein.","Zahlungsaktivität öffnen"],
 locked:["Wallet entsperren","Der Anbieter wartet auf deine manuelle Entsperrung.","Wallet öffnen"],
 pending:["Bestätigung ausstehend","Bereits vorbereitete Reserven müssen noch bestätigt werden.","Fortschritt ansehen"],
 unknown:["Status nicht verfügbar","Die Betriebsbereitschaft ist unbekannt. Prüfe den Status erneut.","Status prüfen"],
 new:["Paymaster einrichten","Der Assistent führt dich durch sieben Schritte.","Einrichtung starten…"]
 }[state];
 $("headline").textContent=labels[0];$("hint").textContent=labels[1];$("next").textContent=labels[2];
-$("next").disabled=false;$("pause").hidden=state!=="running";
+$("next").disabled=false;$("pause").hidden=!["running","capacity","payment","pending"].includes(state);
 $("autostart").disabled=state==="new"||state==="unknown";
 
 $("autostart-status").textContent="Gespeichert: Autostart "+(saved?"an.":"aus.");

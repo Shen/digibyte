@@ -1948,14 +1948,20 @@ plans when confirmed targets are satisfied, after wallet-transaction recovery.
 This does not cancel explicit setup jobs or committed transactions. `getpaymasteroperatorinfo`
 adds active operations, actual confirmation counts and planned/broadcast fee
 reservations; ordinary polling does not load financial history. Visible active
-tasks poll at two seconds, idle status at ten seconds, with one request in flight.
+providers and active tasks poll at two seconds, stopped idle status at thirty
+seconds, with one request in flight. Background finance summaries refresh at
+thirty seconds or on changed capital/budgets; an explicit refresh reads both.
 Background status reads retain the recent validated presentation without showing
 the initial loading panel again. Initial reads and recovery after invalidation
 still show loading; mutations remain guarded during an outstanding RPC.
-`OperatorDiagnostics` classifies the running scheduler's explicit liquidity
-confirmation wait as informational, not an unknown service error. The Qt
-snapshot distinguishes reserved payment capacity from reserve confirmation
-waits and keeps the header, next action and capital summary consistent.
+The additive `provider.pool.activity` snapshot counts live budget reservations,
+unexpired Capacity admissions, reserved operational outputs and unconfirmed
+successors from already loaded state. Completed/committed history is excluded.
+`OperatorWorkPhase` and `OperatorDiagnostics` distinguish payment work, reserved
+offer capacity and confirmation waits independently of the last scheduler
+phase. CLI and Qt use the same classification. A scheduler step's wait/error
+reason follows the service state selected by that step. The Qt header and hero
+share one presentation; unsaved offer drafts do not freeze Overview polling.
 Unexpected errors still override these waits; this presentation changes no
 readiness checks, spending limits, reservations or transaction handling.
 

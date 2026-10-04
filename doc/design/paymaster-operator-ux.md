@@ -19,6 +19,20 @@ remain disabled. Backup reminders do not set the operational hero's state,
 color or primary action. Backup timestamps and the separately labelled manual
 external confirmation belong to Wallet & backup.
 
+The header and operational hero use one presentation of the current snapshot.
+Live payment-budget reservations, unexpired Capacity admissions and reserved
+operational outputs show payment work even while other payment slots remain
+available. Historical committed outputs do not keep a payment active. Pending
+successor outputs show confirmation waits. Known node/index synchronization
+waits and genuine faults retain priority; the scheduler's reason matches its
+current service state. CLI uses the same work-phase classification.
+
+Visible running providers refresh through the asynchronous operator read every
+two seconds, stopped idle providers every thirty seconds. Finance summaries
+refresh at thirty seconds or when capital/budgets change; an explicit refresh
+reads both. Open offer drafts are preserved and do not freeze Overview polling.
+Temporary capacity use pauses refill execution without changing saved consent.
+
 ## Three independent automation choices
 
 Autostart and automatic reserve refill have immediate-save checkboxes on
