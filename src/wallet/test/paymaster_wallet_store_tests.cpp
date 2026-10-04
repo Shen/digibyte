@@ -2831,6 +2831,59 @@ BOOST_AUTO_TEST_CASE(unavailable_submit_rejection_and_pool_release_are_atomic)
     BOOST_CHECK_EQUAL(pool.front().updated_at, rejection.updated_at);
 }
 
+
+
+BOOST_AUTO_TEST_CASE(unavailable_unsigned_provider_observation_is_idempotent)
+{
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440047";
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256::ONE, FeeMode::PAYMASTER, 100,
+                                             session, error) == CreatePaymasterSessionResult::CREATED);
+    ProviderAttempt attempt;
+    attempt.attempt_id = uint256S("471");
+    attempt.provider_id = uint256S("472");
+    attempt.created_at = attempt.updated_at = 101;
+    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    attempt.session_id = session.session_id;
+    attempt.state = AttemptState::REJECTED;
+    attempt.updated_at = 102;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(attempt));
+    }
+    BOOST_REQUIRE(store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::AVAILABILITY_TIMEOUT, 103, 0, error));
+    BOOST_REQUIRE(store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::AVAILABILITY_TIMEOUT, 104, 0, error));
+    PaymasterReliabilityRecord record;
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, record));
+    BOOST_CHECK_EQUAL(SummarizeReliability(record, 104).availability_timeouts, 1U);
+    BOOST_CHECK_EQUAL(SummarizeReliability(record, 104).provider_failures, 0U);
+    attempt.state = AttemptState::MEMPOOL;
+    attempt.updated_at = 105;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(attempt));
+    }
+    auto& database = GetMockableDatabase(m_wallet);
+    const MockableData before_success = database.m_records;
+    for (size_t fail_at : {0U, 1U}) {
+        database.FailWriteAt(fail_at);
+        BOOST_CHECK(!store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::SUCCESS, 105, 0, error));
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before_success);
+    }
+    database.FailCommit();
+    BOOST_CHECK(!store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::SUCCESS, 105, 0, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before_success);
+    BOOST_REQUIRE(store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::SUCCESS, 105, 0, error));
+    BOOST_REQUIRE(store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::SUCCESS, 106, 0, error));
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, record));
+    BOOST_CHECK_EQUAL(SummarizeReliability(record, 106).availability_timeouts, 0U);
+    BOOST_CHECK_EQUAL(SummarizeReliability(record, 106).successful_attempts, 1U);
+}
+
 BOOST_AUTO_TEST_CASE(provider_outcome_is_recorded_once_without_payment_details)
 {
     PaymasterStore store{m_wallet};
@@ -4993,6 +5046,9 @@ BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
     std::vector<CTransactionRef> broadcasts;
     BOOST_REQUIRE(store.ListClientDurableFinalTransactions(broadcasts, error));
     BOOST_CHECK(broadcasts.empty());
+    PaymasterReliabilityRecord reliability;
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
+    BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 1000).successful_attempts, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)
@@ -5218,6 +5274,10 @@ BOOST_AUTO_TEST_CASE(negative_result_after_user_signature_remains_recoverable)
     BOOST_CHECK(pending.state == SessionState::PENDING_PROVIDER);
     BOOST_CHECK(pending.pending_phase == PendingPhase::USER_SIGNATURE_SENT);
 
+    PaymasterReliabilityRecord reliability;
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
+    BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 102).provider_failures, 1U);
+
     PaymasterResult final{rejected};
     final.result_sequence = 2;
     final.status = PaymasterResultStatus::FINAL_COMMITTED;
@@ -5242,6 +5302,13 @@ BOOST_AUTO_TEST_CASE(negative_result_after_user_signature_remains_recoverable)
     BOOST_REQUIRE(store.GetUserAuthorization(attempt.commit_key, authorization));
     BOOST_CHECK_EQUAL(authorization.canonical_psbt_hash,
                       Hash(attempt.user_signed_psbt));
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{transaction}, 1, false, 104, error), error);
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
+    BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 104).provider_failures, 0U);
+    BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 104).successful_attempts, 1U);
+    BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 1, false, 105, error));
+    BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
+    BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 105).successful_attempts, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(client_pre_store_final_validation_failure_is_atomic_and_recoverable)

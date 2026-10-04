@@ -1095,8 +1095,18 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
     if (write_attempt) attempt.updated_at = std::max(attempt.updated_at, now);
     if (write_session) session.updated_at = std::max(session.updated_at, now);
 
+    const auto record_rejection = [&] {
+        if (!negative_result) return;
+        std::string outcome_error;
+        if (!RecordProviderOutcome(attempt_id, ReliabilityOutcome::PROVIDER_FAILURE, now, 0, outcome_error)) {
+            LogPrint(BCLog::WALLETDB, "Paymaster rejected outcome could not be saved: %s\n", outcome_error);
+        }
+    };
     if (exact_replay && !write_authorization && !write_attempt && !write_session &&
-        !write_reservations && !protect_wallet && !client_fee_changed) return true;
+        !write_reservations && !protect_wallet && !client_fee_changed) {
+        record_rejection();
+        return true;
+    }
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
     if (!exact_replay && !batch.WritePaymasterResult(result, have_existing)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
@@ -1134,6 +1144,7 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
     if (protect_wallet && !m_wallet.LoadWalletFlags(protected_wallet_flags)) {
         assert(false);
     }
+    record_rejection();
     return true;
 }
 
@@ -1541,6 +1552,10 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
         return false;
     }
     completed = true;
+    std::string outcome_error;
+    if (!RecordProviderOutcome(attempt_id, ReliabilityOutcome::SUCCESS, now, 0, outcome_error)) {
+        LogPrint(BCLog::WALLETDB, "Paymaster confirmed outcome could not be saved: %s\n", outcome_error);
+    }
     return true;
 }
 

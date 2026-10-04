@@ -131,6 +131,22 @@ DDCents PreviewMaximumServiceFee(CWallet& wallet, DDCents requested_limit,
                              available_today})};
 }
 
+// Only a failed provider contact, before transaction authorization, reaches
+// this helper. User cancellation, locked wallets and local connection limits
+// must not produce negative provider history.
+void RecordUnavailableClientProvider(PaymasterStore& store, const PaymentSession& session,
+                                     const ProviderAttempt& attempt, int64_t now)
+{
+    if (session.provider_side || attempt.state != AttemptState::CANDIDATE ||
+        !attempt.signed_quote.empty() || !attempt.user_signed_psbt.empty()) return;
+    std::string error;
+    if (!store.AbandonClientAttemptForFallback(session.request_id, attempt.attempt_id, now, error) ||
+        !store.RecordProviderOutcome(attempt.attempt_id, ReliabilityOutcome::AVAILABILITY_TIMEOUT,
+                                     now, 0, error)) {
+        LogPrint(BCLog::WALLETDB, "Paymaster availability observation could not be saved: %s\n", error);
+    }
+}
+
 } // namespace
 
 RPCHelpMan getpaymasteroffers()
@@ -163,6 +179,7 @@ RPCHelpMan getpaymasteroffers()
                                                                                                                                           {RPCResult::Type::NUM_TIME, "expires_at", "Announcement expiration"},
                                                                                                                                           {RPCResult::Type::BOOL, "reputation_sufficient_data", "Whether enough local observations exist"},
                                                                                                                                           {RPCResult::Type::NUM, "success_rate_basis_points", /*optional=*/true, "Observed success rate when statistically meaningful"},
+                                                                                                                                          {RPCResult::Type::BOOL, "recommendation_deprioritized", "A first failed local attempt lowers automatic preference while other eligible providers exist"},
                                                                                                                                           {RPCResult::Type::NUM, "latency_ewma_ms", "Locally observed latency estimate"},
                                                                                                                                       }}}},
         RPCExamples{HelpExampleCli("getpaymasteroffers", "1000") +
@@ -257,6 +274,7 @@ RPCHelpMan getpaymasteroffers()
                 offer.pushKV("subtract_paymaster_fee_from_amount", subtract_fee);
                 offer.pushKV("expires_at", candidate.announcement_expires_at);
                 offer.pushKV("reputation_sufficient_data", candidate.reliability.sufficient_data);
+                offer.pushKV("recommendation_deprioritized", candidate.IsRecommendationDeprioritized());
                 if (candidate.reliability.sufficient_data) {
                     offer.pushKV("success_rate_basis_points", candidate.reliability.success_rate_basis_points);
                 }
@@ -880,6 +898,7 @@ RPCHelpMan requestpaymasterquote()
             }
 
             if (capacity_request.expires_at <= now && attempt.capacity_snapshot.snapshot_id.IsNull()) {
+                RecordUnavailableClientProvider(store, session, attempt, now);
                 node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CAPACITY_REQUEST_EXPIRED");
             }
@@ -1008,7 +1027,13 @@ RPCHelpMan requestpaymasterquote()
                 bool capacity_queued{false};
                 bool capacity_connection_pending{transport.Pending()};
                 if (peer_id == -1) {
-                    if (!capacity_connection_pending) throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
+                    if (!capacity_connection_pending) {
+                        if (transport.state == DirectState::CONNECT_FAILED || transport.state == DirectState::FAILED ||
+                            transport.state == DirectState::EXPIRED) {
+                            RecordUnavailableClientProvider(store, session, attempt, now);
+                        }
+                        throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
+                    }
                 } else {
                     const uint256 message_id = Hash(attempt.capacity_request);
                     capacity_queued =
@@ -1288,7 +1313,13 @@ RPCHelpMan requestpaymasterquote()
                     peer_id = transport.lease && transport.state == DirectState::READY ? transport.lease->peer_id.load() : -1;
                     if (peer_id == -1) {
                         connection_pending = transport.Pending();
-                        if (!connection_pending) throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
+                        if (!connection_pending) {
+                            if (transport.state == DirectState::CONNECT_FAILED || transport.state == DirectState::FAILED ||
+                                transport.state == DirectState::EXPIRED) {
+                                RecordUnavailableClientProvider(store, session, attempt, now);
+                            }
+                            throw JSONRPCError(RPC_CLIENT_NODE_CAPACITY_REACHED, PaymasterTransportError(transport.state));
+                        }
                     } else {
                         const uint256 message_id = Hash(request_bytes);
                         queued = context.paymaster->HasOutboundDirectMessage(peer_id, message_id) ||
@@ -1699,6 +1730,11 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                                        "PAYMASTER_PERSISTED_INTENT_CORRUPT");
                 }
                 if (persisted_intent.expires_at <= now) {
+                    if (persisted_attempt.signed_quote.empty() &&
+                        (!persisted_attempt.quote_request.empty() ||
+                         (!persisted_attempt.capacity_request.empty() && persisted_attempt.capacity_snapshot.snapshot_id.IsNull()))) {
+                        RecordUnavailableClientProvider(store, persisted_session, persisted_attempt, now);
+                    }
                     std::string abandon_error;
                     if (!store.AbandonClientAttemptForFallback(
                             request_id, attempt_id, now, abandon_error)) {

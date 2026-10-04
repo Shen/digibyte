@@ -212,6 +212,9 @@ std::vector<OfferCandidate> BuildOfferCandidates(
         }
     }
     std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
+        if (lhs.IsRecommendationDeprioritized() != rhs.IsRecommendationDeprioritized()) {
+            return !lhs.IsRecommendationDeprioritized();
+        }
         if (lhs.user_total.value != rhs.user_total.value) return lhs.user_total.value < rhs.user_total.value;
         if (lhs.reliability.sufficient_data && rhs.reliability.sufficient_data &&
             lhs.reliability.success_rate_basis_points != rhs.reliability.success_rate_basis_points) {
@@ -274,6 +277,9 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
         }
     }
     std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
+        if (lhs.IsRecommendationDeprioritized() != rhs.IsRecommendationDeprioritized()) {
+            return !lhs.IsRecommendationDeprioritized();
+        }
         if (lhs.service_fee.value != rhs.service_fee.value) return lhs.service_fee.value < rhs.service_fee.value;
         if (lhs.payment.value != rhs.payment.value) return lhs.payment.value > rhs.payment.value;
         if (lhs.reliability.sufficient_data && rhs.reliability.sufficient_data &&
@@ -318,6 +324,8 @@ std::optional<OfferCandidate> SelectOfferCandidate(
                                 : lowest + privacy_fee_tolerance.value;
     size_t eligible{0};
     while (eligible < sorted_candidates.size()) {
+        if (sorted_candidates[eligible].IsRecommendationDeprioritized() !=
+            sorted_candidates.front().IsRecommendationDeprioritized()) break;
         const int64_t cost = fixed_user_total
                                  ? sorted_candidates[eligible].service_fee.value
                                  : sorted_candidates[eligible].user_total.value;

@@ -247,6 +247,50 @@ BOOST_AUTO_TEST_CASE(cooldown_filters_and_reputation_only_breaks_cost_ties)
     BOOST_CHECK(candidates.front().provider_id == failing_record.provider_id);
 }
 
+
+BOOST_AUTO_TEST_CASE(first_unavailable_attempt_demotes_without_five_samples)
+{
+    constexpr int64_t now = 450000;
+    CKey cheap_key, other_key;
+    const auto cheap = MakeAnnouncement(cheap_key, uint256S("51"), FundingModel::USER_PAID, 50, now);
+    const auto other = MakeAnnouncement(other_key, uint256S("52"), FundingModel::USER_PAID, 100, now);
+    for (auto outcome : {ReliabilityOutcome::PROVIDER_FAILURE, ReliabilityOutcome::AVAILABILITY_TIMEOUT}) {
+        PaymasterReliabilityRecord record;
+        record.provider_id = GetPaymasterId(cheap.identity_key);
+        std::string error;
+        BOOST_REQUIRE(ApplyReliabilityOutcome(record, outcome, now - 90, 0, error));
+        BOOST_CHECK(!SummarizeReliability(record, now).sufficient_data);
+        std::map<PaymasterId, PaymasterReliabilityRecord> history{{record.provider_id, record}};
+        auto offers = BuildOfferCandidates({cheap, other}, DDCents{1000}, FUNDING_MODEL_USER_PAID,
+                                           DDCents{100}, history, now, error);
+        BOOST_REQUIRE_EQUAL(offers.size(), 2U);
+        BOOST_CHECK(offers.front().provider_id == GetPaymasterId(other.identity_key));
+        BOOST_CHECK(offers.back().IsRecommendationDeprioritized());
+        FastRandomContext rng{true};
+        for (int i = 0; i < 20; ++i) {
+            auto selected = SelectOfferCandidate(offers, SelectionMode::PRIVACY_WEIGHTED, DDCents{100}, rng, error);
+            BOOST_REQUIRE(selected);
+            BOOST_CHECK(selected->provider_id == GetPaymasterId(other.identity_key));
+        }
+        const auto gross = BuildGrossOfferCandidates({cheap, other}, DDCents{1010}, FUNDING_MODEL_USER_PAID,
+                                                     DDCents{100}, history, now, error);
+        BOOST_REQUIRE_EQUAL(gross.size(), 2U);
+        BOOST_CHECK(gross.front().provider_id == GetPaymasterId(other.identity_key));
+        // Deprioritization is advisory; a lone provider remains usable.
+        const auto lone = BuildOfferCandidates({cheap}, DDCents{1000}, FUNDING_MODEL_USER_PAID,
+                                                DDCents{100}, history, now, error);
+        BOOST_REQUIRE_EQUAL(lone.size(), 1U);
+        BOOST_REQUIRE(SelectOfferCandidate(lone, SelectionMode::LOWEST_TOTAL_COST, DDCents{0}, rng, error));
+        // A later successful payment restores ordinary price ordering.
+        BOOST_REQUIRE(ApplyReliabilityOutcome(record, ReliabilityOutcome::SUCCESS, now, 10, error));
+        history[record.provider_id] = record;
+        offers = BuildOfferCandidates({cheap, other}, DDCents{1000}, FUNDING_MODEL_USER_PAID,
+                                       DDCents{100}, history, now, error);
+        BOOST_CHECK(offers.front().provider_id == record.provider_id);
+        BOOST_CHECK(!offers.front().IsRecommendationDeprioritized());
+    }
+}
+
 BOOST_AUTO_TEST_CASE(privacy_weighted_never_exceeds_the_authorized_tolerance)
 {
     constexpr int64_t now = 400000;

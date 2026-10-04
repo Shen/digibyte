@@ -61,12 +61,15 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
         case ReliabilityOutcome::SUCCESS:
             return attempt.state == AttemptState::STEMPOOL || attempt.state == AttemptState::MEMPOOL;
         case ReliabilityOutcome::PROVIDER_FAILURE:
-            return attempt.state == AttemptState::REJECTED || attempt.state == AttemptState::CONFLICTED;
+            return attempt.state == AttemptState::REJECTED || attempt.state == AttemptState::CONFLICTED ||
+                   attempt.state == AttemptState::AMBIGUOUS;
         case ReliabilityOutcome::NEUTRAL_FAILURE:
             return attempt.state == AttemptState::REJECTED || attempt.state == AttemptState::QUOTE_EXPIRED ||
                    attempt.state == AttemptState::AMBIGUOUS || attempt.state == AttemptState::CONFLICTED;
         case ReliabilityOutcome::AVAILABILITY_TIMEOUT:
-            return attempt.state == AttemptState::QUOTE_EXPIRED || attempt.state == AttemptState::AMBIGUOUS;
+            return attempt.state == AttemptState::QUOTE_EXPIRED || attempt.state == AttemptState::AMBIGUOUS ||
+                (attempt.state == AttemptState::REJECTED && attempt.signed_quote.empty() &&
+                 attempt.user_signed_psbt.empty() && attempt.final_transaction.empty() && attempt.final_txid.IsNull());
         }
         return false;
     }();
@@ -77,12 +80,20 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
     PaymasterOutcomeMarker existing;
     const DatabaseReadStatus outcome_status{
         batch.ReadPaymasterOutcomeMarkerWithStatus(attempt_id, existing)};
+    bool upgrade_to_success{false};
     if (outcome_status == DatabaseReadStatus::FOUND) {
         if (existing.provider_id == attempt.provider_id && existing.outcome == outcome) return true;
-        error = "PAYMASTER_OUTCOME_ALREADY_RECORDED";
-        return false;
-    }
-    if (outcome_status != DatabaseReadStatus::NOT_FOUND) {
+        // Availability or a signed rejection is advisory, not proof that a
+        // protected payment cannot complete later. Only positive completion
+        // can supersede it; success can never be downgraded by a late reply.
+        upgrade_to_success = existing.provider_id == attempt.provider_id && outcome == ReliabilityOutcome::SUCCESS &&
+            (existing.outcome == ReliabilityOutcome::AVAILABILITY_TIMEOUT ||
+             existing.outcome == ReliabilityOutcome::PROVIDER_FAILURE);
+        if (!upgrade_to_success) {
+            error = "PAYMASTER_OUTCOME_ALREADY_RECORDED";
+            return false;
+        }
+    } else if (outcome_status != DatabaseReadStatus::NOT_FOUND) {
         error = PersistedReadError(
             outcome_status, "PaymasterOutcomeMarker", existing,
             "PAYMASTER_OUTCOME_NOT_FOUND", "PAYMASTER_INVALID_OUTCOME_MARKER");
@@ -100,11 +111,23 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
             "PAYMASTER_INVALID_RELIABILITY_RECORD");
         return false;
     }
+    if (upgrade_to_success && record.last_observation_at == existing.observed_at) {
+        // Replace the latest failed observation. With intervening observations
+        // or a cleared history, its aggregate count cannot be identified safely;
+        // retain historical observations rather than subtract another attempt.
+        for (auto& bucket : record.daily_buckets) {
+            if (bucket.utc_day != existing.observed_at / 86400) continue;
+            auto& count = existing.outcome == ReliabilityOutcome::PROVIDER_FAILURE
+                ? bucket.provider_failures : bucket.availability_timeouts;
+            if (count > 0) --count;
+            break;
+        }
+    }
     if (!ApplyReliabilityOutcome(record, outcome, observed_at, successful_latency_ms, error)) return false;
     const PaymasterOutcomeMarker marker{
         PaymasterOutcomeMarker::CURRENT_VERSION, attempt_id, attempt.provider_id, outcome, observed_at};
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-    if (!batch.WritePaymasterReliability(record) || !batch.WritePaymasterOutcomeMarker(marker, false)) {
+    if (!batch.WritePaymasterReliability(record) || !batch.WritePaymasterOutcomeMarker(marker, upgrade_to_success)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     if (!batch.TxnCommit()) {

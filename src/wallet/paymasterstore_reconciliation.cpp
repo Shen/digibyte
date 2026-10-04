@@ -651,7 +651,16 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                                        session.pending_phase != phase;
             const bool write_attempt = observed_attempt &&
                                        observed_attempt->state != attempt_state;
+            const auto record_success = [&] {
+                if (session.provider_side || state != SessionState::CONFIRMED || !observed_attempt) return;
+                std::string outcome_error;
+                if (!RecordProviderOutcome(observed_attempt->attempt_id, ReliabilityOutcome::SUCCESS,
+                                            now, 0, outcome_error)) {
+                    LogPrint(BCLog::WALLETDB, "Paymaster confirmed outcome could not be saved: %s\n", outcome_error);
+                }
+            };
             if (!write_session && !write_attempt && !client_fee_changed) {
+                record_success();
                 if (final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
                     prune.push_back(session.request_id);
                 }
@@ -679,6 +688,7 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                 error = "PAYMASTER_DATABASE_COMMIT";
                 return false;
             }
+            record_success();
             if (final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
                 prune.push_back(session.request_id);
             }

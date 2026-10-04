@@ -33,6 +33,13 @@ struct OfferCandidate {
     DDCents user_total;
     ReliabilitySummary reliability;
     int64_t latency_ewma_ms{0};
+    // Advisory preference only; a first unsuccessful provider attempt must not
+    // win automatic selection over a provider without that local history.
+    bool IsRecommendationDeprioritized() const
+    {
+        return reliability.successful_attempts == 0 &&
+            (reliability.provider_failures > 0 || reliability.availability_timeouts > 0);
+    }
 };
 
 /** Public, non-secret fields needed to construct the intent before wallet
