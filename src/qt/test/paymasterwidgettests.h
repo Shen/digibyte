@@ -96,6 +96,10 @@ private Q_SLOTS:
     void paymasterClientPreparationRequiresCurrentOffer();
     void paymasterClientFundingBalanceChanges();
     void paymasterFeeAmountsAndPercentages();
+    void paymasterOfferPolicyTypedValues_data();
+    void paymasterOfferPolicyTypedValues();
+    void paymasterOfferFormAlignment_data();
+    void paymasterOfferFormAlignment();
     void paymasterClientReleasedInputsCanBeReservedAgain();
     void paymasterClientUncreatedRequestReturnsToCompose_data();
     void paymasterClientUncreatedRequestReturnsToCompose();

@@ -22,6 +22,7 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/paymasterconfirmation.h>
+#include <qt/paymasteramount.h>
 #include <qt/paymastersendwidget.h>
 #include <qt/paymasterwidget.h>
 #include <qt/paymasteroperation.h>
@@ -63,6 +64,7 @@
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QFile>
+#include <QFocusEvent>
 #include <QFrame>
 #include <QGroupBox>
 #include <QPlainTextEdit>
@@ -252,7 +254,9 @@ UniValue PaymasterOffer(const std::string& display_name,
                         int64_t service_fee_cents,
                         int64_t payment_cents,
                         bool established_reputation,
-                        int64_t expires_at)
+                        int64_t expires_at,
+                        int fee_rate_bps = 50,
+                        int64_t maximum_user_paid_service_fee_cents = 0)
 {
     UniValue offer{UniValue::VOBJ};
     offer.pushKV("display_name", display_name);
@@ -260,6 +264,12 @@ UniValue PaymasterOffer(const std::string& display_name,
     offer.pushKV("offer_id", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
     offer.pushKV("policy_hash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     offer.pushKV("funding_model", funding_model);
+    offer.pushKV("fee_rate_bps",
+                 funding_model == "user_paid" ? fee_rate_bps : 0);
+    offer.pushKV("maximum_user_paid_service_fee_cents",
+                 funding_model == "user_paid"
+                     ? maximum_user_paid_service_fee_cents
+                     : 0);
     offer.pushKV("service_fee_cents", service_fee_cents);
     offer.pushKV("payment_cents", payment_cents);
     offer.pushKV("user_total_cents", payment_cents + service_fee_cents);
@@ -1492,11 +1502,22 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
     // container without altering persisted settings.
     QStackedWidget* operator_tabs = tab.findChild<QStackedWidget*>(
         QStringLiteral("paymasterOperatorPages"));
+    QStackedWidget* settings_pages = tab.findChild<QStackedWidget*>(
+        QStringLiteral("paymasterSettingsPages"));
+    QTimer* status_refresh_timer = tab.findChild<QTimer*>(
+        QStringLiteral("paymasterSetupStatusTimer"));
     QVERIFY(operator_tabs != nullptr);
+    QVERIFY(settings_pages != nullptr);
+    QVERIFY(status_refresh_timer != nullptr);
     for (int index = 0; index < operator_tabs->count(); ++index) {
         operator_tabs->widget(index)->setEnabled(true);
         operator_tabs->widget(index)->setProperty("paymasterPageAvailable", true);
     }
+    status_refresh_timer->start();
+    operator_tabs->setCurrentWidget(settings_pages);
+    QVERIFY(!status_refresh_timer->isActive());
+    operator_tabs->setCurrentIndex(0);
+    QVERIFY(status_refresh_timer->isActive());
 
     QPushButton* create_identity = tab.findChild<QPushButton*>(
         QStringLiteral("paymasterCreateIdentity"));
@@ -1504,6 +1525,8 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
         QStringLiteral("paymasterDisplayName"));
     QPushButton* save_policy = tab.findChild<QPushButton*>(
         QStringLiteral("savePaymasterPolicy"));
+    QSpinBox* provider_fee_cap = tab.findChild<QSpinBox*>(
+        QStringLiteral("paymasterPolicyMaximumUserPaidServiceFeeCents"));
     QPushButton* save_safety = tab.findChild<QPushButton*>(
         QStringLiteral("savePaymasterProviderSafetyPolicy"));
     QPushButton* save_client_safety = tab.findChild<QPushButton*>(
@@ -1519,6 +1542,7 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
     QVERIFY(create_identity != nullptr);
     QVERIFY(display_name != nullptr);
     QVERIFY(save_policy != nullptr);
+    QVERIFY(provider_fee_cap != nullptr);
     QVERIFY(save_safety != nullptr);
     QVERIFY(save_client_safety != nullptr);
     QVERIFY(client_per_transaction != nullptr);
@@ -1537,10 +1561,18 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
 
     commands.clear();
     parameters.clear();
+    provider_fee_cap->setLocale(QLocale(QLocale::German));
+    QLineEdit* provider_fee_cap_editor =
+        provider_fee_cap->findChild<QLineEdit*>();
+    QVERIFY(provider_fee_cap_editor != nullptr);
+    provider_fee_cap_editor->setText(QStringLiteral("1.00 DD"));
     save_policy->setEnabled(true);
     save_policy->click();
     QCOMPARE(commands.value(0), QStringLiteral("setpaymasterpolicy"));
     QVERIFY(parameters.at(0)[0].find_value("funding_models").isArray());
+    QCOMPARE(parameters.at(0)[0].find_value(
+                 "maximum_user_paid_service_fee_cents").getInt<int64_t>(),
+             int64_t{100});
     QCOMPARE(commands.value(1), QStringLiteral("getpaymasteroperatorinfo"));
 
     commands.clear();
@@ -2801,7 +2833,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
                     "<b>Alice & Co</b>",
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "user_paid",
-                    2, 325, true, 2000000000));
+                    1, 325, true, 2000000000, 50, 1));
                 offers.push_back(PaymasterOffer(
                     "Sponsor",
                     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -2849,12 +2881,16 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(preview_options.isObject());
     QCOMPARE(preview_options.find_value(
                  "subtract_paymaster_fee_from_amount").get_bool(), false);
+    QCOMPARE(preview_options.find_value(
+                 "maximum_paymaster_fee_cents").getInt<int64_t>(),
+             int64_t{100});
 
     QCOMPARE(table->rowCount(), 2);
     QCOMPARE(table->item(0, 0)->text(), QStringLiteral("<b>Alice & Co</b>"));
     QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Service fee in $DD"));
-    QCOMPARE(table->item(0, 2)->text(), QStringLiteral("0.02 $DD (≈ 0.62%)"));
-    QCOMPARE(table->item(0, 3)->text(), QStringLiteral("3.27 $DD"));
+    QCOMPARE(table->item(0, 2)->text(),
+             QStringLiteral("0.01 $DD (≈ 0.31%) · max 0.01 $DD"));
+    QCOMPARE(table->item(0, 3)->text(), QStringLiteral("3.26 $DD"));
     QCOMPARE(table->item(0, 4)->text(), QStringLiteral("98.75%"));
     QVERIFY(table->item(0, 5)->text().contains(QStringLiteral("2033")));
     QVERIFY(table->item(0, 0)->toolTip().contains(QString(64, QLatin1Char('b'))));
@@ -5761,6 +5797,9 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
              std::string{"restricted"});
     QCOMPARE(advertised_policy.find_value("fee_rate_bps").getInt<int>(), 0);
     QCOMPARE(advertised_policy.find_value(
+                 "maximum_user_paid_service_fee_cents").getInt<int64_t>(),
+             int64_t{0});
+    QCOMPARE(advertised_policy.find_value(
         "maximum_network_fee_dgb_satoshis").getInt<qint64>(), 10000000);
     const UniValue& final_models =
         advertised_policy.find_value("funding_models");
@@ -7285,12 +7324,12 @@ void PaymasterWidgetTests::paymasterFeeAmountsAndPercentages()
     for (const auto& locale : {QLocale::c(), QLocale(QLocale::German)}) {
         cap->setLocale(locale);
         editor->selectAll();
-        QTest::keyClicks(editor, locale.decimalPoint() == QLatin1Char(',') ? "0,37" : "0.37");
+        QTest::keyClicks(editor, "0.37");
         cap->interpretText();
         QCOMPARE(cap->value(), 37);
         // Invalid precision, grouping or exponential text cannot authorize more.
         for (const QString& invalid : {QStringLiteral("1e3"), QStringLiteral("1,234.56"),
-                                       QString(QStringLiteral("0") + locale.decimalPoint() + QStringLiteral("123"))}) {
+                                       QStringLiteral("0.123"), QStringLiteral("0,37")}) {
             editor->setText(invalid);
             cap->interpretText();
             QCOMPARE(cap->value(), 37);
@@ -7311,17 +7350,30 @@ void PaymasterWidgetTests::paymasterFeeAmountsAndPercentages()
 
     std::unique_ptr<DigiDollarPaymasterWidget> provider{CreatePaymasterWidget(nullptr)};
     auto* rate = provider->findChild<QSpinBox*>("paymasterPolicyFeeBps");
+    auto* service_fee_cap = provider->findChild<QSpinBox*>(
+        "paymasterPolicyMaximumUserPaidServiceFeeCents");
     auto* example = provider->findChild<QSpinBox*>("paymasterFeeExampleAmount");
     auto* result = provider->findChild<QLabel*>("paymasterFeeExampleResult");
     auto* user_paid = provider->findChild<QCheckBox*>("paymasterPolicyUserPaid");
     auto* summary = provider->findChild<QLabel*>("paymasterPolicySummary");
-    QVERIFY(rate && example && result && user_paid && summary);
+    QVERIFY(rate && service_fee_cap && example && result && user_paid && summary);
     user_paid->setChecked(true);
     rate->setValue(50);
-    example->setValue(200);
-    QVERIFY(result->text().contains("0.01 DD"));
-    QVERIFY(result->text().contains("0.50%"));
+    service_fee_cap->setValue(100);
+    QVERIFY(summary->text().contains("Unsaved changes"));
+    auto* save_policy = provider->findChild<QPushButton*>("savePaymasterPolicy");
+    QVERIFY(save_policy);
+    // This display fixture has no selected wallet; its ancestor page retains
+    // the onboarding gate even when the local save control is available.
+    QVERIFY(save_policy->isEnabledTo(save_policy->parentWidget()));
+    example->setValue(50000);
+    QVERIFY(result->text().contains("1.00 DD"));
+    QVERIFY(result->text().contains("0.20%"));
+    QVERIFY(summary->text().contains("maximum 1.00 DD"));
     const QString saved_summary = summary->text();
+    service_fee_cap->setValue(0);
+    QVERIFY(result->text().contains("2.50 DD"));
+    service_fee_cap->setValue(100);
     example->setValue(100);
     QVERIFY(result->text().contains("0.01 DD"));
     QVERIFY(result->text().contains("1.00%")); // Core rounds up to one cent.
@@ -10298,4 +10350,197 @@ void PaymasterWidgetTests::paymasterLiquiditySaveAcrossRefresh()
     QCOMPARE(reopened->findChild<QCheckBox*>("paymasterPaidMaintenanceApproved")->isChecked(), scenario != "unapproved");
     QCOMPARE(reopened->findChild<QLineEdit*>("paymasterMaintenanceFeePerTransaction")->text(), QStringLiteral("0.30000000"));
     QCOMPARE(writes, 1);
+}
+
+void PaymasterWidgetTests::paymasterOfferPolicyTypedValues_data()
+{
+    QTest::addColumn<bool>("german");
+    QTest::addColumn<QString>("outcome");
+    for (bool german : {false, true}) {
+        for (const char* outcome : {"saved", "stale_readback", "rpc_error", "invalid", "partial_draft"}) {
+            QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(german ? "de" : "en", outcome)))
+                << german << QString::fromLatin1(outcome);
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterOfferPolicyTypedValues()
+{
+    QFETCH(bool, german);
+    QFETCH(QString, outcome);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto old_provider = snapshot.find_value("provider");
+    auto old_policy = old_provider.find_value("policy");
+    old_policy.pushKV("maximum_user_paid_service_fee_cents", 0);
+    old_policy.pushKV("policy_hash", std::string(64, 'a'));
+    old_provider.pushKV("policy", old_policy);
+    snapshot.pushKV("provider", old_provider);
+    UniValue written;
+    int writes{0};
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "setpaymasterpolicy") {
+            ++writes;
+            written = params[0];
+            if (outcome == "rpc_error") throw std::runtime_error("injected policy write failure");
+            auto persisted = written;
+            persisted.pushKV("policy_hash", std::string(64, 'b'));
+            if (outcome != "stale_readback") {
+                auto provider = snapshot.find_value("provider");
+                provider.pushKV("policy", persisted);
+                snapshot.pushKV("provider", provider);
+            }
+            return persisted;
+        }
+        return UniValue{UniValue::VOBJ};
+    });
+    panel->refreshStatus();
+    auto* save = panel->findChild<QPushButton*>("savePaymasterPolicy");
+    auto* summary = panel->findChild<QLabel*>("paymasterPolicySummary");
+    auto* status = panel->findChild<QLabel*>("paymasterProviderStatus");
+    QVERIFY(save && summary && status);
+    const QLocale locale = german ? QLocale(QLocale::German) : QLocale::c();
+    if (outcome == "partial_draft") {
+        auto* amount = panel->findChild<QSpinBox*>("paymasterPolicyMinimumCents");
+        QVERIFY(amount);
+        amount->setLocale(locale);
+        auto* editor = amount->findChild<QLineEdit*>();
+        QVERIFY(editor);
+        editor->selectAll();
+        // A below-minimum intermediate value leaves the numeric value at
+        // 100 cents. Text editing alone must mark it as a protected draft.
+        QTest::keyClicks(editor, "0");
+        const QString partial = editor->text();
+        QVERIFY2(!amount->hasAcceptableInput(), qPrintable(partial));
+        QCOMPARE(amount->value(), 100);
+        panel->refreshStatus();
+        QCOMPARE(editor->text(), partial);
+        QVERIFY(summary->text().contains("Unsaved changes"));
+        save->click();
+        QCOMPARE(writes, 0);
+        QCOMPARE(editor->text(), partial);
+        return;
+    }
+    const std::vector<std::pair<const char*, int>> fields{
+        {"paymasterPolicyFeeBps", 80},
+        {"paymasterPolicyMaximumUserPaidServiceFeeCents", 37},
+        {"paymasterPolicyMinimumCents", 125},
+        {"paymasterPolicyMaximumCents", 234567},
+        {"paymasterPolicyMaximumNetworkFee", 12345678},
+    };
+    for (const auto& [name, value] : fields) {
+        auto* field = panel->findChild<QSpinBox*>(name);
+        QVERIFY(field);
+        field->setLocale(locale);
+        auto* editor = field->findChild<QLineEdit*>();
+        QVERIFY(editor);
+        const bool dgb = QString::fromLatin1(name).endsWith("MaximumNetworkFee");
+        QString text = QString::number(value / (dgb ? 100000000.0 : 100.0), 'f', dgb ? 8 : 2);
+        editor->selectAll();
+        QTest::keyClicks(editor, text);
+        QVERIFY2(field->hasAcceptableInput(), qPrintable(QString::fromLatin1(name) + ": " + editor->text()));
+        // Do not manually call interpretText: Save and normal keyboard focus
+        // handling must commit the exact typed limits.
+    }
+    // Background refresh while the form is dirty must preserve all edits.
+    panel->refreshStatus();
+    auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyFeeBps");
+    if (outcome == "invalid") {
+        auto* editor = fee->findChild<QLineEdit*>();
+        const QStringList invalid{"0.801 %", "-0.80 %", "1e3 %", "100.01 %", "0,80 %"};
+        for (const QString& text : invalid) {
+            editor->setText(text);
+            QFocusEvent focus_out(QEvent::FocusOut);
+            QApplication::sendEvent(fee, &focus_out);
+            save->click();
+            QCOMPARE(writes, 0);
+            QVERIFY(status->text().contains("not saved"));
+            QCOMPARE(editor->text(), text);
+            QCOMPARE(fee->value(), 80);
+        }
+        return;
+    }
+    save->click();
+    QCOMPARE(writes, 1);
+    const std::vector<std::pair<const char*, int>> expected{
+        {"fee_rate_bps", 80}, {"maximum_user_paid_service_fee_cents", 37},
+        {"min_amount_cents", 125}, {"max_amount_cents", 234567},
+        {"maximum_network_fee_dgb_satoshis", 12345678},
+    };
+    for (const auto& [name, value] : expected) QCOMPARE(written.find_value(name).getInt<int>(), value);
+    for (const auto& [name, value] : fields) QCOMPARE(panel->findChild<QSpinBox*>(name)->value(), value);
+    if (outcome == "rpc_error") {
+        QVERIFY(summary->text().contains("Unsaved changes"));
+        QVERIFY(panel->findChild<QLabel*>("paymasterPolicySaveStatus")->text().contains("could not be confirmed"));
+    } else if (outcome == "stale_readback") {
+        QVERIFY(summary->text().contains("waiting for the updated policy"));
+        auto provider = snapshot.find_value("provider");
+        written.pushKV("policy_hash", std::string(64, 'b'));
+        provider.pushKV("policy", written);
+        snapshot.pushKV("provider", provider);
+        panel->refreshStatus();
+        QVERIFY(summary->text().contains("currently saved"));
+    } else {
+        QVERIFY(summary->text().contains("currently saved"));
+    }
+}
+
+void PaymasterWidgetTests::paymasterOfferFormAlignment_data()
+{
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("width");
+    for (bool dark : {false, true}) {
+        for (int width : {640, 1200}) {
+            QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(dark ? "dark" : "light").arg(width))) << dark << width;
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterOfferFormAlignment()
+{
+    QFETCH(bool, dark);
+    QFETCH(int, width);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
+    QFile css(dark ? ":/css/dark" : ":/css/light");
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    panel->setOperatorStatusForTesting(GuidedOperatorSnapshot());
+    auto* offer = panel->findChild<QWidget*>("paymasterPolicyFeeBps");
+    auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    QVERIFY(offer && settings && pages);
+    QWidget* page = offer;
+    while (page && settings->indexOf(page) < 0) page = page->parentWidget();
+    QVERIFY(page);
+    pages->setCurrentWidget(settings);
+    settings->setCurrentWidget(page);
+    pages->setEnabled(true);
+    settings->setEnabled(true);
+    page->setEnabled(true);
+    panel->resize(width, 900);
+    panel->show();
+    QTest::qWait(20);
+    const QList<QString> names{"paymasterDisplayName", "paymasterPolicyFeeBps",
+        "paymasterPolicyMaximumUserPaidServiceFeeCents", "paymasterFeeExampleAmount",
+        "paymasterPolicyMinimumCents", "paymasterPolicyMaximumCents"};
+    int left{-1};
+    int right{-1};
+    for (const auto& name : names) {
+        auto* field = panel->findChild<QWidget*>(name);
+        QVERIFY(field && field->isVisible());
+        const QPoint start = field->mapTo(panel.get(), QPoint{});
+        if (left < 0) { left = start.x(); right = start.x() + field->width(); }
+        QCOMPARE(start.x(), left);
+        QCOMPARE(start.x() + field->width(), right);
+    }
+    QVERIFY(panel->width() <= width);
+    const QString screenshot_dir = qEnvironmentVariable("DIGIBYTE_QT_TEST_SCREENSHOT_DIR");
+    if (!screenshot_dir.isEmpty()) {
+        auto* scroll = qobject_cast<QScrollArea*>(page);
+        QVERIFY(scroll && scroll->widget());
+        QVERIFY(scroll->widget()->grab().save(screenshot_dir + QStringLiteral("/offer-%1-%2.png")
+            .arg(dark ? "dark" : "light").arg(width)));
+    }
 }

@@ -6,19 +6,34 @@
 #define DIGIBYTE_QT_PAYMASTERAMOUNT_H
 
 #include <digidollar/amount.h>
+#include <qt/digibyteunits.h>
 
 #include <QLocale>
 #include <QSpinBox>
 #include <QWheelEvent>
 
+/** App-standard monetary display: decimal point and locale-independent thin
+ * space grouping, with integer units throughout. Unit::uDGB has the same two
+ * decimal places as DD cents; only its numeric formatter is reused here. */
+inline QString PaymasterFormatDD(qint64 cents)
+{
+    return DigiByteUnits::format(DigiByteUnits::Unit::uDGB, cents);
+}
+
+inline QString PaymasterFormatDGB(qint64 satoshis)
+{
+    return DigiByteUnits::format(DigiByteUnits::Unit::DGB, satoshis);
+}
+
 /** Display DD while retaining integer-cent values/signals and RPC limits.
- * Locale decimal separators are supported; grouping and extra precision are
+ * The decimal point follows the app's monetary format. Grouping and extra precision are
  * rejected instead of silently interpreting or rounding an authorization. */
 class PaymasterAmountSpinBox final : public QSpinBox
 {
 public:
     explicit PaymasterAmountSpinBox(QWidget* parent) : QSpinBox(parent)
     {
+        setLocale(QLocale::c());
         setRange(0, DigiDollar::MAX_DD_RPC_AMOUNT_CENTS);
         setSuffix(QStringLiteral(" DD"));
     }
@@ -26,8 +41,7 @@ public:
 protected:
     QString textFromValue(int value) const override
     {
-        return QString::fromStdString(DigiDollar::FormatDDAmountDollars(value))
-            .replace(QLatin1Char('.'), locale().decimalPoint());
+        return QString::fromStdString(DigiDollar::FormatDDAmountDollars(value));
     }
 
     int valueFromText(const QString& text) const override
@@ -59,9 +73,7 @@ private:
     {
         text = text.trimmed();
         if (text.endsWith(suffix())) text.chop(suffix().size());
-        // Do not accept a foreign decimal/group separator as a different value.
-        if (locale().decimalPoint() != QLatin1Char('.') && text.contains(QLatin1Char('.'))) return QStringLiteral("invalid");
-        return text.trimmed().replace(locale().decimalPoint(), QLatin1Char('.'));
+        return text.trimmed();
     }
 
     DigiDollar::DDAmountParseResult parse(const QString& text) const

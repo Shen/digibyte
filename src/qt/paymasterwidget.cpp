@@ -32,6 +32,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFont>
+#include <QFocusEvent>
 #include <QFormLayout>
 #include <QElapsedTimer>
 #include <QFrame>
@@ -133,17 +134,10 @@ public:
     {
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-        auto* row = new QHBoxLayout();
-        auto* label = new QLabel(tr("Example recipient amount:"), this);
         m_amount = new PaymasterAmountSpinBox(this);
         m_amount->setObjectName("paymasterFeeExampleAmount");
         m_amount->setMinimum(100);
         m_amount->setValue(200);
-        m_amount->setAccessibleName(label->text());
-        label->setBuddy(m_amount);
-        row->addWidget(label);
-        row->addWidget(m_amount, 1);
-        layout->addLayout(row);
         m_result = new QLabel(this);
         m_result->setObjectName("paymasterFeeExampleResult");
         m_result->setTextFormat(Qt::PlainText);
@@ -153,10 +147,21 @@ public:
         connect(m_amount, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateResult(); });
     }
 
-    void setFeeRate(int basis_points, bool user_paid)
+    void addToForm(QFormLayout* form)
+    {
+        auto* label = new QLabel(tr("Example recipient amount:"), form->parentWidget());
+        m_amount->setAccessibleName(label->text());
+        label->setBuddy(m_amount);
+        form->addRow(label, m_amount);
+        form->addRow(QString{}, this);
+    }
+
+    void setFeeRate(int basis_points, bool user_paid,
+                    qint64 maximum_service_fee_cents = 0)
     {
         m_basis_points = basis_points;
         m_user_paid = user_paid;
+        m_maximum_service_fee_cents = maximum_service_fee_cents;
         updateResult();
     }
 
@@ -169,20 +174,22 @@ private:
             return;
         }
         const auto fee = DigiDollar::Paymaster::ComputePaymasterFee(
-            DigiDollar::Paymaster::DDCents{m_amount->value()}, m_basis_points);
+            DigiDollar::Paymaster::DDCents{m_amount->value()}, m_basis_points,
+            DigiDollar::Paymaster::DDCents{m_maximum_service_fee_cents});
         if (!fee) {
             m_result->setText(tr("No valid fee for this example. Check the rate (0.10% steps) and the maximum total amount."));
             return;
         }
         m_result->setText(tr("Service fee: %1 DD · effective ≈ %2% · total: %3 DD")
-                              .arg(QString::fromStdString(DigiDollar::FormatDDAmountDollars(fee->value)),
+                              .arg(PaymasterFormatDD(fee->value),
                                    PaymasterEffectivePercent(fee->value, m_amount->value()),
-                                   QString::fromStdString(DigiDollar::FormatDDAmountDollars(m_amount->value() + fee->value))));
+                                   PaymasterFormatDD(m_amount->value() + fee->value)));
     }
 
     PaymasterAmountSpinBox* m_amount;
     QLabel* m_result;
     int m_basis_points{0};
+    qint64 m_maximum_service_fee_cents{0};
     bool m_user_paid{false};
 };
 
@@ -213,36 +220,108 @@ protected:
     void wheelEvent(QWheelEvent* event) override { event->ignore(); }
 };
 
+/** Scaled display with exact integer RPC values. Qt's default QSpinBox
+ * validator only accepts whole display values, so parsing and validation must
+ * share the same app-standard decimal representation. */
 class NoWheelScaledSpinBox final : public QSpinBox
 {
 public:
-    NoWheelScaledSpinBox(double scale, int decimals, QWidget* parent)
+    NoWheelScaledSpinBox(int scale, int decimals, QWidget* parent)
         : QSpinBox(parent), m_scale(scale), m_decimals(decimals)
     {
+        setLocale(QLocale::c());
     }
 
 protected:
     QString textFromValue(int value) const override
     {
-        return locale().toString(value / m_scale, 'f', m_decimals);
+        return QString::number(value / m_scale) + QLatin1Char('.') +
+               QString::number(value % m_scale).rightJustified(m_decimals, QLatin1Char('0'));
     }
 
     int valueFromText(const QString& text) const override
     {
-        QString number = text;
-        number.remove(suffix());
-        bool ok{false};
-        const double value = locale().toDouble(number.trimmed(), &ok);
-        if (!ok) return minimum();
-        return qBound(minimum(), qRound(value * m_scale), maximum());
+        const auto parsed = parse(text);
+        return parsed && *parsed >= minimum() ? *parsed : value();
+    }
+
+    QValidator::State validate(QString& text, int&) const override
+    {
+        const QString number = numberText(text);
+        if (number.isEmpty() || number == QLatin1Char('.')) return QValidator::Intermediate;
+        const auto parsed = parse(text);
+        if (!parsed) return QValidator::Invalid;
+        return *parsed < minimum() ? QValidator::Intermediate : QValidator::Acceptable;
+    }
+
+    // Invalid precision or grouping must not be repaired into another limit.
+    void fixup(QString&) const override {}
+
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        const QString draft = lineEdit()->text();
+        const bool invalid = !hasAcceptableInput();
+        QSpinBox::focusOutEvent(event);
+        // Clicking Save changes focus before its clicked handler runs. Keep
+        // malformed text available for that handler to reject and explain.
+        if (invalid) lineEdit()->setText(draft);
     }
 
     void wheelEvent(QWheelEvent* event) override { event->ignore(); }
 
 private:
-    const double m_scale;
+    QString numberText(QString text) const
+    {
+        text = text.trimmed();
+        if (!suffix().isEmpty() && text.endsWith(suffix())) text.chop(suffix().size());
+        return text.trimmed();
+    }
+
+    std::optional<int> parse(const QString& text) const
+    {
+        const QString number = numberText(text);
+        if (number.startsWith(QLatin1Char('-'))) return std::nullopt;
+        const QStringList parts = number.split(QLatin1Char('.'));
+        if (parts.size() > 2 || (parts.size() == 1 && parts.front().isEmpty())) return std::nullopt;
+        bool ok{false};
+        for (const QChar digit : parts.front()) {
+            if (digit < QLatin1Char('0') || digit > QLatin1Char('9')) return std::nullopt;
+        }
+        const qint64 whole = parts.front().isEmpty() ? 0 : parts.front().toLongLong(&ok);
+        if ((!parts.front().isEmpty() && !ok) || whole < 0 || whole > maximum() / m_scale) return std::nullopt;
+        const QString fraction = parts.size() == 2 ? parts.back() : QString{};
+        if (fraction.size() > m_decimals) return std::nullopt;
+        qint64 fractional{0};
+        for (const QChar digit : fraction) {
+            if (digit < QLatin1Char('0') || digit > QLatin1Char('9')) return std::nullopt;
+            fractional = fractional * 10 + digit.digitValue();
+        }
+        for (int i = fraction.size(); i < m_decimals; ++i) fractional *= 10;
+        const qint64 scaled = whole * m_scale + fractional;
+        if (scaled > maximum()) return std::nullopt;
+        return static_cast<int>(scaled);
+    }
+
+    const int m_scale;
     const int m_decimals;
 };
+
+/** Keep independently framed sections on the same label/field columns. */
+void AlignPaymasterFormLabels(const QList<QFormLayout*>& forms)
+{
+    QList<QWidget*> labels;
+    int width{0};
+    for (QFormLayout* form : forms) {
+        for (int row = 0; row < form->rowCount(); ++row) {
+            auto* item = form->itemAt(row, QFormLayout::LabelRole);
+            if (!item || !item->widget()) continue;
+            auto* label = item->widget();
+            labels.push_back(label);
+            width = std::max(width, label->sizeHint().width());
+        }
+    }
+    for (QWidget* label : labels) label->setMinimumWidth(width);
+}
 
 class DgbAmountLineEdit final : public QLineEdit
 {
@@ -618,6 +697,8 @@ bool IsBoundedOptionalString(const UniValue& value, size_t maximum,
 bool IsCompleteProviderPolicy(const UniValue& policy)
 {
     const UniValue& models = policy.find_value("funding_models");
+    const UniValue& maximum_service_fee =
+        policy.find_value("maximum_user_paid_service_fee_cents");
     if (!policy.isObject() || !IsStringArray(models) || models.empty() ||
         models.size() > 2 ||
         !IsEnumString(policy.find_value("sponsorship_scope"),
@@ -631,7 +712,8 @@ bool IsCompleteProviderPolicy(const UniValue& policy)
             return false;
         }
     }
-    return HasIntFields(policy,
+    return (maximum_service_fee.isNull() || maximum_service_fee.isNum()) &&
+        HasIntFields(policy,
                      {"fee_rate_bps", "min_amount_cents",
                       "max_amount_cents", "quote_ttl"}) &&
         HasInt64Fields(policy,
@@ -849,7 +931,8 @@ bool IsExactProviderPolicyAcknowledgement(const UniValue& requested,
         SameStringField(requested, persisted, "sponsorship_scope") &&
         SameNumericFields(
             requested, persisted,
-            {"fee_rate_bps", "min_amount_cents", "max_amount_cents",
+            {"fee_rate_bps", "maximum_user_paid_service_fee_cents",
+             "min_amount_cents", "max_amount_cents",
              "quote_ttl", "maximum_network_fee_dgb_satoshis"});
 }
 
@@ -2499,17 +2582,24 @@ public:
         m_scope->addItem(tr("Restricted — invitation only"), QStringLiteral("restricted"));
         m_scope->setToolTip(tr(
             "Public sponsorship can be offered together with user-paid service. Restricted sponsorship is a sponsored-only invitation mode."));
-        m_fee_bps = scaledSpin(policy_group, 0, 10000, 50, 100.0, 2);
+        m_fee_bps = scaledSpin(policy_group, 0, 10000, 50, 100, 2);
         m_fee_bps->setObjectName("paymasterPolicyFeeBps");
         m_fee_bps->setSingleStep(10);
         m_fee_bps->setSuffix(tr(" %"));
         m_fee_bps->setToolTip(tr(
             "Service fee for user-paid transfers. 100 basis points equal 1%. Sponsored transfers always charge zero DigiDollar service fee."));
-        m_min_amount = scaledSpin(policy_group, 100, 10000000, 100, 100.0, 2);
+        m_maximum_user_paid_service_fee = scaledSpin(
+            policy_group, 0, 10000000, 0, 100, 2);
+        m_maximum_user_paid_service_fee->setObjectName(
+            "paymasterPolicyMaximumUserPaidServiceFeeCents");
+        m_maximum_user_paid_service_fee->setSuffix(tr(" DD"));
+        m_maximum_user_paid_service_fee->setToolTip(tr(
+            "Maximum DD service fee on one user-paid transfer. Enter 0 for no cap."));
+        m_min_amount = scaledSpin(policy_group, 100, 10000000, 100, 100, 2);
         m_min_amount->setObjectName("paymasterPolicyMinimumCents");
         m_min_amount->setSuffix(tr(" DD"));
         m_min_amount->setToolTip(tr("Smallest DigiDollar payment this provider will accept."));
-        m_max_amount = scaledSpin(policy_group, 100, 10000000, 100000, 100.0, 2);
+        m_max_amount = scaledSpin(policy_group, 100, 10000000, 100000, 100, 2);
         m_max_amount->setObjectName("paymasterPolicyMaximumCents");
         m_max_amount->setSuffix(tr(" DD"));
         m_max_amount->setToolTip(tr("Largest DigiDollar payment this provider will accept."));
@@ -2518,7 +2608,7 @@ public:
         m_quote_ttl->setSuffix(tr(" seconds"));
         m_quote_ttl->setToolTip(tr("How long a client may accept a quote before it expires."));
         m_network_fee = scaledSpin(policy_group, 1, 2000000000, 20000000,
-                                   100000000.0, 8);
+                                   100000000, 8);
         m_network_fee->setObjectName("paymasterPolicyMaximumNetworkFee");
         m_network_fee->setSuffix(tr(" DGB"));
         m_network_fee->setToolTip(tr(
@@ -2532,8 +2622,10 @@ public:
         m_sponsorship_label->setBuddy(m_scope);
         policy_form->addRow(m_sponsorship_label, m_scope);
         policy_form->addRow(tr("User-paid service fee:"), m_fee_bps);
+        policy_form->addRow(tr("Maximum user-paid service fee:"),
+                            m_maximum_user_paid_service_fee);
         m_fee_example = new PaymasterFeeExample(policy_group);
-        policy_form->addRow(m_fee_example);
+        m_fee_example->addToForm(policy_form);
         policy_form->addRow(tr("Smallest payment:"), m_min_amount);
         policy_form->addRow(tr("Largest payment:"), m_max_amount);
         auto* offer_details_container = new QWidget(policy_group);
@@ -2552,11 +2644,23 @@ public:
         AddPaymasterDisclosure(offer_details_layout, offer_details_container, offer_details,
                                tr("Quote duration and network-fee ceiling"), tr("Hide technical offer limits"), QStringLiteral("paymasterOfferDetailsToggle"));
         policy_form->addRow(offer_details_container);
+        m_offer_forms = {identity_form, policy_form, offer_details_form};
+        for (QFormLayout* form : m_offer_forms) {
+            form->setHorizontalSpacing(18);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        }
+        AlignPaymasterFormLabels(m_offer_forms);
         m_policy_summary = new QLabel(policy_group);
         m_policy_summary->setObjectName("paymasterPolicySummary");
         m_policy_summary->setProperty("paymasterRole", QStringLiteral("summaryText"));
         m_policy_summary->setWordWrap(true);
         policy_form->addRow(tr("Policy summary:"), m_policy_summary);
+        m_policy_save_status = new QLabel(policy_group);
+        m_policy_save_status->setObjectName("paymasterPolicySaveStatus");
+        m_policy_save_status->setWordWrap(true);
+        m_policy_save_status->hide();
+        policy_form->addRow(QString{}, m_policy_save_status);
         m_save_policy = new QPushButton(tr("Save policy"), policy_group);
         m_save_policy->setObjectName("savePaymasterPolicy");
         m_save_policy->setProperty("paymasterRole", QStringLiteral("primaryAction"));
@@ -3755,6 +3859,7 @@ public:
             m_settings_tabs->addWidget(page);
         };
         connect(m_settings_tabs, &QStackedWidget::currentChanged, this, [this](int) {
+            updateAutomaticRefreshTimer();
             if (m_settings_tabs->currentWidget() == m_connection_page && !m_inline_node_editor && !m_busy)
                 configureOperatorNode();
         });
@@ -3795,6 +3900,7 @@ public:
             const QSignalBlocker select_blocker(m_navigation_select);
             m_navigation->setCurrentRow(index);
             m_navigation_select->setCurrentIndex(index);
+            updateAutomaticRefreshTimer();
         });
         m_navigation->setCurrentRow(0);
         updateNavigationLayout();
@@ -4054,6 +4160,7 @@ public:
             updatePolicyDisplay();
             updateLiquidityDisplay();
             updateProviderButtons();
+            updateAutomaticRefreshTimer();
         });
         connect(m_user_paid, &QCheckBox::toggled, this, [this] {
             if (!m_loading_policy) {
@@ -4063,6 +4170,7 @@ public:
             updatePolicyDisplay();
             updateLiquidityDisplay();
             updateProviderButtons();
+            updateAutomaticRefreshTimer();
         });
         connect(m_scope, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
             if (!m_loading_policy) {
@@ -4071,17 +4179,24 @@ public:
             }
             updatePolicyDisplay();
             updateProviderButtons();
+            updateAutomaticRefreshTimer();
         });
-        for (QSpinBox* control : {m_fee_bps, m_min_amount, m_max_amount,
-                                  m_quote_ttl, m_network_fee}) {
-            connect(control, qOverload<int>(&QSpinBox::valueChanged),
-                    this, [this] {
-                        if (!m_loading_policy) {
-                            m_policy_dirty = true;
-                            invalidatePoolPreviews();
-                        }
-                        updatePolicyDisplay();
-                    });
+        for (QSpinBox* control : {m_fee_bps,
+                                  m_maximum_user_paid_service_fee,
+                                  m_min_amount, m_max_amount,
+                      m_quote_ttl, m_network_fee}) {
+            const auto edited = [this] {
+                if (!m_loading_policy) {
+                    m_policy_dirty = true;
+                    invalidatePoolPreviews();
+                }
+                updatePolicyDisplay();
+                updateAutomaticRefreshTimer();
+            };
+            connect(control, qOverload<int>(&QSpinBox::valueChanged), this, edited);
+            // Empty/partial text can leave the numeric value unchanged. It is
+            // still a draft and must survive status refresh/navigation.
+            connect(control->findChild<QLineEdit*>(), &QLineEdit::textEdited, this, edited);
         }
         for (QSpinBox* control : {m_admission_dgb, m_operational_dgb,
                                   m_admission_carriers, m_operational_carriers}) {
@@ -4133,7 +4248,8 @@ public:
         updateProviderButtons();
 
         m_setup_status_timer = new QTimer(this);
-        m_setup_status_timer->setInterval(10000);
+        m_setup_status_timer->setObjectName("paymasterSetupStatusTimer");
+        m_setup_status_timer->setInterval(30000);
         connect(m_setup_status_timer, &QTimer::timeout, this, [this] {
             if (isVisible() && hasRpcTransport() && !m_busy && !m_setup_wizard_active && !m_node_connection_dialog && !m_privacy)
                 refreshOperatorStatus();
@@ -4160,6 +4276,8 @@ public:
         if (m_refill_approval) m_refill_approval->reject();
         m_operator_snapshot = UniValue{};
         m_operator_report = UniValue{};
+        m_policy_readback_pending = false;
+        m_pending_policy_hash.clear();
         m_last_checked->setText(tr("Status has not been checked yet."));
         m_operator_summary->setText(tr("Reading the selected wallet's operator status…"));
         resetOperatorPresentation();
@@ -4500,6 +4618,7 @@ public:
     void showEvent(QShowEvent* event) override
     {
         DigiDollarPaymasterWidget::showEvent(event);
+        AlignPaymasterFormLabels(m_offer_forms);
         if (m_model && !m_busy && !m_setup_wizard_active && !m_privacy)
             QTimer::singleShot(0, this, [this] { if (m_model && !m_busy && !m_privacy) refreshStatus(); });
     }
@@ -4644,7 +4763,19 @@ public:
             if (display_name.isStr()) {
                 m_display_name->setText(QString::fromStdString(display_name.get_str()));
             }
-            if (policy.isObject() && !m_policy_dirty) loadPolicy(policy);
+            if (policy.isObject() && !m_policy_dirty) {
+                if (m_policy_readback_pending) {
+                    const UniValue& policy_hash =
+                        policy.find_value("policy_hash");
+                    if (policy_hash.isStr() &&
+                        QString::fromStdString(policy_hash.get_str()) ==
+                            m_pending_policy_hash) {
+                        m_policy_readback_pending = false;
+                        m_pending_policy_hash.clear();
+                    }
+                }
+                if (!m_policy_readback_pending) loadPolicy(policy);
+            }
             updateIdentityLabels();
             bool has_pool_entries{false};
             if (pool.isObject()) {
@@ -5247,8 +5378,10 @@ private:
             m_setup_waiting_for_confirmations || hasPassiveExternalWait() ||
             m_maintenance_state == QLatin1String("replenishing_liquidity") ||
             m_maintenance_state == QLatin1String("waiting_for_liquidity_confirmation");
-        m_setup_status_timer->setInterval(pending ? 2000 : 10000);
-        if (hasRpcTransport() && !m_setup_wizard_active && !m_privacy && !m_operation.busy())
+        m_setup_status_timer->setInterval(pending ? 2000 : 30000);
+        if (hasRpcTransport() && !m_setup_wizard_active && !m_privacy &&
+            !m_policy_dirty && m_tabs->currentWidget() != m_settings_tabs &&
+            !m_operation.busy())
             m_setup_status_timer->start();
         else
             m_setup_status_timer->stop();
@@ -7314,6 +7447,7 @@ private:
         m_user_paid->setChecked(true);
         m_sponsored->setChecked(false);
         m_fee_bps->setValue(50);
+        m_maximum_user_paid_service_fee->setValue(0);
         m_min_amount->setValue(100);
         m_max_amount->setValue(100000);
         m_quote_ttl->setValue(60);
@@ -7322,6 +7456,7 @@ private:
         m_policy_loaded = false;
         m_policy_dirty = mark_dirty;
         updatePolicyDisplay();
+        updateAutomaticRefreshTimer();
     }
 
     void setPolicyMutationEnabled(bool enabled)
@@ -7331,13 +7466,16 @@ private:
         m_user_paid->setEnabled(controls_enabled);
         m_scope->setEnabled(controls_enabled && m_sponsored->isChecked());
         for (QSpinBox* control : {
-                 m_fee_bps, m_min_amount, m_max_amount,
+                 m_fee_bps, m_maximum_user_paid_service_fee,
+                 m_min_amount, m_max_amount,
                  m_quote_ttl, m_network_fee}) {
             control->setReadOnly(!controls_enabled);
             control->setProperty("paymasterInvalidPersistedValue",
                                  !enabled);
         }
         m_fee_bps->setEnabled(controls_enabled && m_user_paid->isChecked());
+        m_maximum_user_paid_service_fee->setEnabled(
+            controls_enabled && m_user_paid->isChecked());
         if (m_restore_policy_defaults) {
             m_restore_policy_defaults->setEnabled(controls_enabled);
         }
@@ -7350,18 +7488,26 @@ private:
     {
         if (!IsCompleteProviderPolicy(policy)) return;
         int fee_rate_bps{0};
+        qint64 maximum_user_paid_service_fee{0};
         int min_amount_cents{0};
         int max_amount_cents{0};
         int quote_ttl{0};
         qint64 maximum_network_fee{0};
         const bool representable =
             GetIntField(policy, "fee_rate_bps", fee_rate_bps) &&
+            (policy.find_value(
+                 "maximum_user_paid_service_fee_cents").isNull() ||
+             GetInt64Field(policy,
+                           "maximum_user_paid_service_fee_cents",
+                           maximum_user_paid_service_fee)) &&
             GetIntField(policy, "min_amount_cents", min_amount_cents) &&
             GetIntField(policy, "max_amount_cents", max_amount_cents) &&
             GetIntField(policy, "quote_ttl", quote_ttl) &&
             GetInt64Field(policy, "maximum_network_fee_dgb_satoshis",
                           maximum_network_fee) &&
             spinCanRepresent(m_fee_bps, fee_rate_bps) &&
+            spinCanRepresent(m_maximum_user_paid_service_fee,
+                             maximum_user_paid_service_fee) &&
             spinCanRepresent(m_min_amount, min_amount_cents) &&
             spinCanRepresent(m_max_amount, max_amount_cents) &&
             spinCanRepresent(m_quote_ttl, quote_ttl) &&
@@ -7394,6 +7540,11 @@ private:
             if (spinCanRepresent(m_fee_bps, fee_rate_bps)) {
                 m_fee_bps->setValue(fee_rate_bps);
             }
+            if (spinCanRepresent(m_maximum_user_paid_service_fee,
+                                 maximum_user_paid_service_fee)) {
+                m_maximum_user_paid_service_fee->setValue(
+                    static_cast<int>(maximum_user_paid_service_fee));
+            }
             if (spinCanRepresent(m_min_amount, min_amount_cents)) {
                 m_min_amount->setValue(min_amount_cents);
             }
@@ -7414,6 +7565,10 @@ private:
             if (!spinCanRepresent(m_fee_bps, fee_rate_bps)) {
                 invalid_field = tr("service fee");
                 raw_value = QString::number(fee_rate_bps);
+            } else if (!spinCanRepresent(m_maximum_user_paid_service_fee,
+                                         maximum_user_paid_service_fee)) {
+                invalid_field = tr("maximum user-paid service fee");
+                raw_value = QString::number(maximum_user_paid_service_fee);
             } else if (!spinCanRepresent(m_min_amount,
                                          min_amount_cents)) {
                 invalid_field = tr("minimum payment");
@@ -7433,6 +7588,7 @@ private:
                 "The persisted provider policy contains a %1 value (%2) that this interface cannot represent exactly. The original Core policy is retained and all policy mutation is disabled.")
                 .arg(invalid_field, raw_value));
             updateProviderButtons();
+            updateAutomaticRefreshTimer();
             return;
         }
         const UniValue& funding_models = policy.find_value("funding_models");
@@ -7457,6 +7613,8 @@ private:
             if (scope_index >= 0) m_scope->setCurrentIndex(scope_index);
         }
         m_fee_bps->setValue(fee_rate_bps);
+        m_maximum_user_paid_service_fee->setValue(
+            static_cast<int>(maximum_user_paid_service_fee));
         m_min_amount->setValue(min_amount_cents);
         m_max_amount->setValue(max_amount_cents);
         m_quote_ttl->setValue(quote_ttl);
@@ -7465,12 +7623,17 @@ private:
         m_policy_loaded = true;
         m_policy_dirty = false;
         updatePolicyDisplay();
+        updateAutomaticRefreshTimer();
     }
 
     void updatePolicyDisplay()
     {
         const bool user_paid = m_user_paid->isChecked();
-        if (m_fee_example) m_fee_example->setFeeRate(m_fee_bps->value(), user_paid);
+        if (m_fee_example) {
+            m_fee_example->setFeeRate(
+                m_fee_bps->value(), user_paid,
+                m_maximum_user_paid_service_fee->value());
+        }
         const bool sponsored = m_sponsored->isChecked();
         m_scope->setVisible(sponsored);
         m_sponsorship_label->setVisible(sponsored);
@@ -7483,6 +7646,8 @@ private:
                             sponsored);
         m_fee_bps->setEnabled(!m_busy && m_policy_snapshot_representable &&
                               user_paid);
+        m_maximum_user_paid_service_fee->setEnabled(
+            !m_busy && m_policy_snapshot_representable && user_paid);
 
         QString model_text;
         if (user_paid && sponsored) {
@@ -7506,20 +7671,27 @@ private:
             return;
         }
 
-        const QString minimum = QString::number(m_min_amount->value() / 100.0, 'f', 2);
-        const QString maximum = QString::number(m_max_amount->value() / 100.0, 'f', 2);
-        const QString service_fee = QString::number(m_fee_bps->value() / 100.0, 'f', 2);
-        const QString network_fee = QString::number(m_network_fee->value() / 100000000.0, 'f', 8);
+        const QString minimum = PaymasterFormatDD(m_min_amount->value());
+        const QString maximum = PaymasterFormatDD(m_max_amount->value());
+        const QString service_fee = PaymasterFormatDD(m_fee_bps->value());
+        const QString maximum_service_fee =
+            m_maximum_user_paid_service_fee->value() == 0
+                ? tr("no cap")
+                : PaymasterFormatDD(m_maximum_user_paid_service_fee->value()) + tr(" DD");
+        const QString network_fee = PaymasterFormatDGB(m_network_fee->value());
         const QString persistence = m_policy_dirty
             ? tr("Unsaved changes — save the policy to activate them.")
+            : m_policy_readback_pending
+                ? tr("Save acknowledged — waiting for the updated policy status.")
             : m_policy_loaded
                 ? tr("These are the currently saved settings.")
                 : tr("Recommended starting values — save the policy to activate them.");
-        m_policy_summary->setText(tr(
-            "%1; payments from %2 to %3 DD; user-paid service fee %4%; quotes valid for %5 seconds; DGB network-fee ceiling %6 DGB per transfer. %7")
-            .arg(model_text, minimum, maximum, service_fee)
-            .arg(m_quote_ttl->value())
-            .arg(network_fee, persistence));
+        m_policy_summary->setText(
+            tr("%1; payments from %2 to %3 DD; user-paid service fee %4% (maximum %5); quotes valid for %6 seconds; DGB network-fee ceiling %7 DGB per transfer. %8")
+                .arg(model_text, minimum, maximum, service_fee,
+                     maximum_service_fee)
+                .arg(m_quote_ttl->value())
+                .arg(network_fee, persistence));
     }
 
     QString readinessExplanation(const QString& error) const
@@ -8940,6 +9112,7 @@ private:
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
+        AlignPaymasterFormLabels(m_offer_forms);
         updateNavigationLayout();
     }
 
@@ -10793,7 +10966,7 @@ private:
     }
 
     static QSpinBox* scaledSpin(QWidget* parent, int minimum, int maximum,
-                                int value, double scale, int decimals)
+                                int value, int scale, int decimals)
     {
         auto* result = new NoWheelScaledSpinBox(scale, decimals, parent);
         result->setRange(minimum, maximum);
@@ -11447,8 +11620,30 @@ private:
              });
     }
 
+    void showPolicySaveStatus(const QString& message)
+    {
+        m_policy_save_status->setText(message);
+        m_policy_save_status->setVisible(!message.isEmpty());
+    }
+
     void savePolicy()
     {
+        for (QSpinBox* control : {m_fee_bps, m_maximum_user_paid_service_fee,
+                                  m_min_amount, m_max_amount, m_quote_ttl, m_network_fee}) {
+            if (!control->hasAcceptableInput()) {
+                const QString message = tr("Policy was not saved. Correct the highlighted value; your edits have been kept.");
+                m_status->setText(message);
+                showPolicySaveStatus(message);
+                control->setFocus();
+                return;
+            }
+        }
+        m_fee_bps->interpretText();
+        m_maximum_user_paid_service_fee->interpretText();
+        m_min_amount->interpretText();
+        m_max_amount->interpretText();
+        m_quote_ttl->interpretText();
+        m_network_fee->interpretText();
         if (!m_policy_snapshot_representable) {
             m_status->setText(tr(
                 "Provider policy was not changed: the persisted Core value cannot be represented exactly by this interface."));
@@ -11476,7 +11671,12 @@ private:
         UniValue policy{UniValue::VOBJ};
         policy.pushKV("funding_models", std::move(funding));
         policy.pushKV("sponsorship_scope", m_scope->currentData().toString().toStdString());
-        policy.pushKV("fee_rate_bps", m_fee_bps->value());
+        policy.pushKV("fee_rate_bps",
+                      m_user_paid->isChecked() ? m_fee_bps->value() : 0);
+        policy.pushKV("maximum_user_paid_service_fee_cents",
+                      m_user_paid->isChecked()
+                          ? m_maximum_user_paid_service_fee->value()
+                          : 0);
         policy.pushKV("min_amount_cents", m_min_amount->value());
         policy.pushKV("max_amount_cents", m_max_amount->value());
         policy.pushKV("quote_ttl", m_quote_ttl->value());
@@ -11484,19 +11684,32 @@ private:
         const UniValue requested_policy = policy;
         UniValue params{UniValue::VARR};
         params.push_back(std::move(policy));
+        m_policy_dirty = true;
+        showPolicySaveStatus(tr("Saving policy…"));
         call("setpaymasterpolicy", std::move(params), false, nullptr,
              [this, requested_policy](const UniValue& result) {
                  if (!IsExactProviderPolicyAcknowledgement(
                          requested_policy, result)) {
-                     m_status->setText(tr(
-                         "Core did not confirm the exact provider operating policy. The displayed edit remains unsaved; refresh before retrying."));
+                     const QString message = tr(
+                         "Core did not confirm the exact provider operating policy. The displayed edit remains unsaved; refresh before retrying.");
+                     m_status->setText(message);
+                     showPolicySaveStatus(message);
                      return;
                  }
                  m_policy_loaded = true;
                  m_provider_settings_present = true;
+                 m_pending_policy_hash = QString::fromStdString(
+                     result.find_value("policy_hash").get_str());
+                 m_policy_readback_pending = true;
                  m_policy_dirty = false;
+                 showPolicySaveStatus(tr("Policy saved."));
                  updatePolicyDisplay();
+                 updateAutomaticRefreshTimer();
                  refreshStatus();
+             }, false, [this](const QString& error) {
+                 const QString message = tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying. %1").arg(error);
+                 m_status->setText(message);
+                 showPolicySaveStatus(message);
              });
     }
 
@@ -11839,6 +12052,23 @@ private:
         connect(wizard_user_paid, &QCheckBox::toggled, policy_page,
                 update_wizard_fee_model);
         update_wizard_fee_model(wizard_user_paid->isChecked());
+        QSpinBox* maximum_user_paid_service_fee = scaledSpin(
+            policy_page, 0, 10000000,
+            m_maximum_user_paid_service_fee->value(), 100, 2);
+        maximum_user_paid_service_fee->setObjectName(
+            "paymasterSetupMaximumUserPaidServiceFee");
+        maximum_user_paid_service_fee->setSuffix(tr(" DD"));
+        maximum_user_paid_service_fee->setAccessibleName(
+            tr("Maximum user-paid service fee"));
+        maximum_user_paid_service_fee->setToolTip(
+            tr("Maximum DD service fee for one user-paid transfer. Enter 0 for no cap."));
+        const auto update_wizard_service_fee_cap_model =
+            [maximum_user_paid_service_fee](bool user_paid) {
+                maximum_user_paid_service_fee->setEnabled(user_paid);
+            };
+        connect(wizard_user_paid, &QCheckBox::toggled, policy_page,
+                update_wizard_service_fee_cap_model);
+        update_wizard_service_fee_cap_model(wizard_user_paid->isChecked());
         QSpinBox* minimum = new PaymasterAmountSpinBox(policy_page);
         minimum->setRange(100, 10000000);
         minimum->setValue(std::max(100, m_min_amount->value()));
@@ -11856,7 +12086,7 @@ private:
         lifetime->setSuffix(tr(" seconds"));
         lifetime->setAccessibleName(tr("Quote validity in seconds"));
         QSpinBox* network_fee = scaledSpin(
-            policy_page, 1, 2000000000, m_network_fee->value(), 100000000.0, 8);
+            policy_page, 1, 2000000000, m_network_fee->value(), 100000000, 8);
         network_fee->setObjectName("paymasterSetupNetworkFee");
         network_fee->setSuffix(tr(" DGB"));
         network_fee->setAccessibleName(tr("Maximum DGB network fee per transfer"));
@@ -11874,12 +12104,22 @@ private:
                     : retained_network_fee;
             };
         policy_layout->addRow(tr("User-paid service fee:"), fee);
+        policy_layout->addRow(tr("Maximum user-paid service fee:"),
+                              maximum_user_paid_service_fee);
         auto* fee_example = new PaymasterFeeExample(policy_page);
-        policy_layout->addRow(fee_example);
-        const auto update_fee_example = [fee_example, fee, wizard_user_paid] {
-            fee_example->setFeeRate(qRound(fee->value() * 100.0), wizard_user_paid->isChecked());
+        fee_example->addToForm(policy_layout);
+        const auto update_fee_example = [fee_example, fee,
+                                         maximum_user_paid_service_fee,
+                                         wizard_user_paid] {
+            fee_example->setFeeRate(
+                qRound(fee->value() * 100.0),
+                wizard_user_paid->isChecked(),
+                maximum_user_paid_service_fee->value());
         };
         connect(fee, qOverload<double>(&QDoubleSpinBox::valueChanged), fee_example, update_fee_example);
+        connect(maximum_user_paid_service_fee,
+                qOverload<int>(&QSpinBox::valueChanged), fee_example,
+                update_fee_example);
         connect(wizard_user_paid, &QCheckBox::toggled, fee_example, update_fee_example);
         update_fee_example();
         policy_layout->addRow(tr("Smallest payment:"), minimum);
@@ -11920,45 +12160,61 @@ private:
         field_help_layout->addWidget(field_help_text);
         policy_layout->addRow(field_help);
 
-        const auto update_policy_help = [this, fee, minimum, maximum, lifetime, network_fee,
-                                         field_help_title, field_help_text](QWidget* field) {
-            if (field == fee) {
-                field_help_title->setText(tr("User-paid service fee"));
-                field_help_text->setText(tr(
-                    "For user-paid offers, the provider charges %1% of the transferred $DD amount. "
-                    "Core stores this exactly as %2 basis points. Sponsored transfers always charge 0.00% service fee.")
-                    .arg(QString::number(fee->value(), 'f', 2))
-                    .arg(qRound(fee->value() * 100.0)));
-            } else if (field == minimum) {
-                field_help_title->setText(tr("Smallest supported payment"));
-                field_help_text->setText(tr(
-                    "Your provider will not offer service for payments below %1 $DD. "
-                    "A sensible minimum avoids spending provider resources on very small requests.")
-                    .arg(QString::number(minimum->value() / 100.0, 'f', 2)));
-            } else if (field == maximum) {
-                field_help_title->setText(tr("Largest supported payment"));
-                field_help_text->setText(tr(
-                    "Your provider will reject payments above %1 $DD. Keep this limit aligned with the amount of liquidity and financial exposure you intend to provide.")
-                    .arg(QString::number(maximum->value() / 100.0, 'f', 2)));
-            } else if (field == lifetime) {
-                field_help_title->setText(tr("Quote validity"));
-                field_help_text->setText(tr(
-                    "A client has %1 seconds to accept this provider quote. Shorter validity releases unused reservations sooner; longer validity gives slower clients more time.")
-                    .arg(lifetime->value()));
-            } else if (field == network_fee) {
-                field_help_title->setText(tr("Maximum DGB network fee per transfer"));
-                field_help_text->setText(tr(
-                    "The provider will never fund more than %1 DGB of network fee for one transfer. "
-                    "The wallet safety profile does not lower this individual-transfer ceiling; it limits repeated requests through finite hourly, daily and completed-transfer budgets.")
-                    .arg(QString::number(network_fee->value() / 100000000.0, 'f', 8)));
-            }
-        };
+        const auto update_policy_help =
+            [this, fee, maximum_user_paid_service_fee, minimum, maximum,
+             lifetime, network_fee, field_help_title,
+             field_help_text](QWidget* field) {
+                if (field == fee) {
+                    field_help_title->setText(tr("User-paid service fee"));
+                    field_help_text->setText(tr(
+                        "For user-paid offers, the provider charges %1% of the transferred $DD amount. "
+                        "Core stores this exactly as %2 basis points. Sponsored transfers always charge 0.00% service fee.")
+                        .arg(QString::number(fee->value(), 'f', 2))
+                        .arg(qRound(fee->value() * 100.0)));
+                } else if (field == maximum_user_paid_service_fee) {
+                    field_help_title->setText(
+                        tr("Maximum user-paid service fee"));
+                    field_help_text->setText(
+                        maximum_user_paid_service_fee->value() == 0
+                            ? tr("The percentage fee has no DD ceiling.")
+                            : tr("The service fee never exceeds %1 DD, even when the percentage would be higher.")
+                                  .arg(QString::number(
+                                      maximum_user_paid_service_fee->value() /
+                                          100.0,
+                                      'f', 2)));
+                } else if (field == minimum) {
+                    field_help_title->setText(tr("Smallest supported payment"));
+                    field_help_text->setText(tr(
+                        "Your provider will not offer service for payments below %1 $DD. "
+                        "A sensible minimum avoids spending provider resources on very small requests.")
+                        .arg(PaymasterFormatDD(minimum->value())));
+                } else if (field == maximum) {
+                    field_help_title->setText(tr("Largest supported payment"));
+                    field_help_text->setText(tr(
+                        "Your provider will reject payments above %1 $DD. Keep this limit aligned with the amount of liquidity and financial exposure you intend to provide.")
+                        .arg(PaymasterFormatDD(maximum->value())));
+                } else if (field == lifetime) {
+                    field_help_title->setText(tr("Quote validity"));
+                    field_help_text->setText(tr(
+                        "A client has %1 seconds to accept this provider quote. Shorter validity releases unused reservations sooner; longer validity gives slower clients more time.")
+                        .arg(lifetime->value()));
+                } else if (field == network_fee) {
+                    field_help_title->setText(tr("Maximum DGB network fee per transfer"));
+                    field_help_text->setText(tr(
+                        "The provider will never fund more than %1 DGB of network fee for one transfer. "
+                        "The wallet safety profile does not lower this individual-transfer ceiling; it limits repeated requests through finite hourly, daily and completed-transfer budgets.")
+                        .arg(PaymasterFormatDGB(network_fee->value())));
+                }
+            };
         connect(qApp, &QApplication::focusChanged, policy_page,
-                [policy_page, fee, minimum, maximum, lifetime, network_fee,
+                [policy_page, fee, maximum_user_paid_service_fee, minimum,
+                 maximum, lifetime, network_fee,
                  update_policy_help](QWidget*, QWidget* focused) {
                     QWidget* candidate = focused;
                     while (candidate && candidate != policy_page) {
-                        if (candidate == fee || candidate == minimum || candidate == maximum ||
+                        if (candidate == fee ||
+                            candidate == maximum_user_paid_service_fee ||
+                            candidate == minimum || candidate == maximum ||
                             candidate == lifetime || candidate == network_fee) {
                             update_policy_help(candidate);
                             return;
@@ -11968,8 +12224,14 @@ private:
                 });
         connect(fee, qOverload<double>(&QDoubleSpinBox::valueChanged), policy_page,
                 [fee, update_policy_help] { update_policy_help(fee); });
+        connect(maximum_user_paid_service_fee,
+                qOverload<int>(&QSpinBox::valueChanged), policy_page,
+                [maximum_user_paid_service_fee, update_policy_help] {
+                    update_policy_help(maximum_user_paid_service_fee);
+                });
         connect(restore_policy_defaults, &QPushButton::clicked, policy_page,
-                [fee, minimum, maximum, lifetime, network_fee,
+                [fee, maximum_user_paid_service_fee, minimum, maximum,
+                 lifetime, network_fee,
                  wizard_user_paid, wizard_sponsored, wizard_scope,
                  restore_model_defaults, imported_policy,
                  replace_unrepresentable_policy] {
@@ -11981,11 +12243,14 @@ private:
                         wizard_sponsored->isChecked());
                     restore_model_defaults->setEnabled(true);
                     fee->setEnabled(wizard_user_paid->isChecked());
+                    maximum_user_paid_service_fee->setEnabled(
+                        wizard_user_paid->isChecked());
                     minimum->setEnabled(true);
                     maximum->setEnabled(true);
                     lifetime->setEnabled(true);
                     network_fee->setEnabled(true);
                     fee->setValue(wizard_user_paid->isChecked() ? 0.50 : 0.0);
+                    maximum_user_paid_service_fee->setValue(0);
                     minimum->setValue(100);
                     maximum->setValue(100000);
                     lifetime->setValue(60);
@@ -11997,6 +12262,7 @@ private:
             wizard_scope->setEnabled(false);
             restore_model_defaults->setEnabled(false);
             fee->setEnabled(false);
+            maximum_user_paid_service_fee->setEnabled(false);
             minimum->setEnabled(false);
             maximum->setEnabled(false);
             lifetime->setEnabled(false);
@@ -12004,7 +12270,8 @@ private:
             field_help_text->setText(tr(
                 "The exact persisted Core policy is retained read-only because at least one value is outside this interface's range. You may edit other setup pages without replacing it. Choose Restore defaults explicitly only if you intend the assistant to replace the complete operating policy."));
         }
-        for (QSpinBox* control : {minimum, maximum, lifetime, network_fee}) {
+        for (QSpinBox* control : {maximum_user_paid_service_fee, minimum,
+                      maximum, lifetime, network_fee}) {
             connect(control, qOverload<int>(&QSpinBox::valueChanged), policy_page,
                     [control, update_policy_help] { update_policy_help(control); });
         }
@@ -12774,7 +13041,11 @@ private:
             if (!enabled) start_after_setup->setChecked(false);
         });
         review_layout->addWidget(start_after_setup);
-        const auto proposed_policy = [this, replace_unrepresentable_policy, wizard_sponsored, wizard_user_paid, wizard_scope, fee, minimum, maximum, lifetime, network_fee] {
+        const auto proposed_policy = [this, replace_unrepresentable_policy,
+                          wizard_sponsored, wizard_user_paid,
+                          wizard_scope, fee,
+                          maximum_user_paid_service_fee,
+                          minimum, maximum, lifetime, network_fee] {
             if (!*replace_unrepresentable_policy) {
                 UniValue retained = DigiDollar::Paymaster::SetupDefaultPolicy();
                 for (const auto& key : retained.getKeys()) retained.pushKV(key, m_unrepresentable_policy_snapshot.find_value(key));
@@ -12786,6 +13057,10 @@ private:
             policy.pushKV("funding_models", funding);
             policy.pushKV("sponsorship_scope", wizard_scope->currentData().toString().toStdString());
             policy.pushKV("fee_rate_bps", wizard_user_paid->isChecked() ? qRound(fee->value() * 100.0) : 0);
+            policy.pushKV("maximum_user_paid_service_fee_cents",
+                          wizard_user_paid->isChecked()
+                              ? maximum_user_paid_service_fee->value()
+                              : 0);
             policy.pushKV("min_amount_cents", minimum->value());
             policy.pushKV("max_amount_cents", maximum->value());
             policy.pushKV("quote_ttl", lifetime->value());
@@ -13677,6 +13952,7 @@ private:
     QGroupBox* m_setup_choice{nullptr};
     QWidget* m_setup_content{nullptr};
     QWidget* m_configuration_page{nullptr};
+    QList<QFormLayout*> m_offer_forms;
     QWidget* m_safety_page{nullptr};
     QWidget* m_liquidity_page{nullptr};
     QWidget* m_finance_page{nullptr};
@@ -13798,6 +14074,7 @@ private:
     QComboBox* m_scope;
     QLabel* m_sponsorship_label{nullptr};
     QSpinBox* m_fee_bps;
+    QSpinBox* m_maximum_user_paid_service_fee;
     PaymasterFeeExample* m_fee_example{nullptr};
     QSpinBox* m_min_amount;
     QSpinBox* m_max_amount;
@@ -13809,6 +14086,7 @@ private:
     QPushButton* m_save_provider_safety{nullptr};
     QLabel* m_funding_model_status;
     QLabel* m_policy_summary;
+    QLabel* m_policy_save_status{nullptr};
     QSpinBox* m_admission_dgb;
     QSpinBox* m_operational_dgb;
     QSpinBox* m_admission_carriers;
@@ -13930,6 +14208,8 @@ private:
     bool m_loading_policy{false};
     bool m_policy_loaded{false};
     bool m_policy_dirty{false};
+    bool m_policy_readback_pending{false};
+    QString m_pending_policy_hash;
     bool m_policy_snapshot_representable{true};
     UniValue m_unrepresentable_policy_snapshot{UniValue::VOBJ};
     bool m_provider_safety_configured{false};

@@ -2470,7 +2470,12 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                     const UniValue& service_fee = offer.find_value("service_fee_cents");
                     const UniValue& payment = offer.find_value("payment_cents");
                     const UniValue& total = offer.find_value("user_total_cents");
+                    const UniValue& fee_rate = offer.find_value("fee_rate_bps");
+                    const UniValue& maximum_service_fee =
+                        offer.find_value(
+                            "maximum_user_paid_service_fee_cents");
                     const UniValue& enough = offer.find_value("reputation_sufficient_data");
+                    const UniValue& deprioritized = offer.find_value("recommendation_deprioritized");
                     const UniValue& success_rate = offer.find_value("success_rate_basis_points");
                     const UniValue& expiry = offer.find_value("expires_at");
                     const UniValue& provider_id = offer.find_value("provider_id");
@@ -2480,7 +2485,10 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                         offer.find_value("subtract_paymaster_fee_from_amount");
                     if (!offer.isObject() || !display_name.isStr() ||
                         !funding_model.isStr() || !service_fee.isNum() ||
-                        !payment.isNum() || !total.isNum() || !enough.isBool() ||
+                        !payment.isNum() || !total.isNum() ||
+                        !fee_rate.isNum() || !maximum_service_fee.isNum() ||
+                        !enough.isBool() ||
+                        (!deprioritized.isNull() && !deprioritized.isBool()) ||
                         !expiry.isNum() || !provider_id.isStr() ||
                         !offer_id.isStr() || !policy_hash.isStr() ||
                         !subtract.isBool() ||
@@ -2495,6 +2503,9 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                     const qint64 fee_cents = service_fee.getInt<qint64>();
                     const qint64 payment_cents = payment.getInt<qint64>();
                     const qint64 total_cents = total.getInt<qint64>();
+                    const int fee_rate_bps = fee_rate.getInt<int>();
+                    const qint64 maximum_service_fee_cents =
+                        maximum_service_fee.getInt<qint64>();
                     const qint64 expires_at = expiry.getInt<qint64>();
                     const int success_bps = enough.get_bool()
                         ? success_rate.getInt<int>() : 0;
@@ -2507,6 +2518,11 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                         display_name.get_str().size() > 512 ||
                         fee_cents < 0 || payment_cents <= 0 ||
                         fee_cents > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+                        fee_rate_bps < 0 || fee_rate_bps > 10000 ||
+                        fee_rate_bps % 10 != 0 ||
+                        maximum_service_fee_cents < 0 ||
+                        maximum_service_fee_cents >
+                            DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
                         payment_cents >
                             DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
                         payment_cents >
@@ -2515,7 +2531,9 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                         (subtract_from_amount
                              ? total_cents != amount_cents
                              : payment_cents != amount_cents) ||
-                        (model == "sponsored" && fee_cents != 0) ||
+                                                (model == "sponsored" &&
+                                                 (fee_cents != 0 || fee_rate_bps != 0 ||
+                                                    maximum_service_fee_cents != 0)) ||
                         !IsCanonicalNonNullPaymasterHash(
                             QString::fromStdString(provider)) ||
                         !IsCanonicalNonNullPaymasterHash(
@@ -2543,6 +2561,12 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
                 const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
                 const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
+                const int fee_rate_bps =
+                    offer.find_value("fee_rate_bps").getInt<int>();
+                const qint64 maximum_service_fee_cents =
+                    offer.find_value(
+                        "maximum_user_paid_service_fee_cents")
+                        .getInt<qint64>();
                 if (row == 0) {
                     guard->m_paymasterPreviewRecipientCents = payment;
                     guard->m_paymasterPreviewServiceFeeCents = fee;
@@ -2553,14 +2577,32 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                     ? DigiDollarSendWidget::tr("%1%").arg(offer.find_value("success_rate_basis_points").getInt<int>() / 100.0, 0, 'f', 2)
                     : DigiDollarSendWidget::tr("New provider — not enough history yet");
                 const qint64 expiry = offer.find_value("expires_at").getInt<qint64>();
+                QString fee_display =
+                    DigiDollarSendWidget::tr("%1 (≈ %2%)")
+                        .arg(guard->formatCents(fee),
+                             PaymasterEffectivePercent(
+                                 fee, offer.find_value("payment_cents")
+                                          .getInt<qint64>()));
+                if (maximum_service_fee_cents > 0) {
+                    fee_display += DigiDollarSendWidget::tr(" · max %1")
+                                       .arg(guard->formatCents(
+                                           maximum_service_fee_cents));
+                }
                 const QStringList cells{provider, guard->friendlyFundingModel(model),
-                                        DigiDollarSendWidget::tr("%1 (≈ %2%)").arg(guard->formatCents(fee), PaymasterEffectivePercent(fee, offer.find_value("payment_cents").getInt<qint64>())), guard->formatCents(total), reputation,
+                                        fee_display, guard->formatCents(total), reputation,
                                         QDateTime::fromSecsSinceEpoch(expiry).toLocalTime().toString(Qt::ISODate)};
                 for (int column = 0; column < cells.size(); ++column) {
                     auto* item = new QTableWidgetItem(cells[column]);
                     item->setToolTip(QString::fromStdString(offer.find_value("provider_id").get_str()) +
                                      QStringLiteral("\n") +
-                                     QString::fromStdString(offer.find_value("policy_hash").get_str()));
+                                     QString::fromStdString(offer.find_value("policy_hash").get_str()) +
+                                     DigiDollarSendWidget::tr("\nRate: %1%; maximum service fee: %2")
+                                         .arg(QString::number(fee_rate_bps / 100.0,
+                                                              'f', 2),
+                                              maximum_service_fee_cents == 0
+                                                  ? DigiDollarSendWidget::tr("no cap")
+                                                  : guard->formatCents(
+                                                        maximum_service_fee_cents)));
                     guard->m_offersTable->setItem(row, column, item);
                 }
                 ++row;
