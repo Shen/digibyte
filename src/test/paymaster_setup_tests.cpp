@@ -387,6 +387,108 @@ BOOST_AUTO_TEST_CASE(operator_distinguishes_capacity_wait_from_errors)
         BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_budget");
     }
 }
+BOOST_AUTO_TEST_CASE(operator_work_transitions_preserve_real_errors)
+{
+    auto provider = Snapshot().find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("ready", true);
+    provider.pushKV("service_state", "active");
+    UniValue activity{UniValue::VOBJ}, pool{UniValue::VOBJ}, liquidity{UniValue::VOBJ};
+    for (const auto* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"}) activity.pushKV(key, 0);
+    // Historical committed outputs must not keep a completed payment active.
+    pool.pushKV("reserved", 12);
+    for (const auto* asset : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
+        UniValue slots{UniValue::VOBJ};
+        slots.pushKV("missing", 0);
+        liquidity.pushKV(asset, slots);
+    }
+    provider.pushKV("liquidity", liquidity);
+    const auto observe = [&] {
+        pool.pushKV("activity", activity);
+        provider.pushKV("pool", pool);
+        return OperatorDiagnostics(provider, 0, 100);
+    };
+    auto diagnostics = observe();
+    BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "idle");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "ready");
+    activity.pushKV("capacity_requests", 1);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "capacity");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "payments");
+    activity.pushKV("capacity_requests", 0);
+    activity.pushKV("active_payments", 1);
+    activity.pushKV("reserved_outputs", 2);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "payment");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "wait");
+    liquidity.pushKV("maintenance_state", "ready");
+    liquidity.pushKV("policy", SetupDefaultLiquidity(true));
+    for (const auto* field : {"maintenance_fee_reserved_satoshis", "maintenance_fee_spent_last_hour_satoshis", "maintenance_fee_spent_last_day_satoshis"}) liquidity.pushKV(field, 0);
+    provider.pushKV("liquidity", liquidity);
+    auto snapshot = Snapshot();
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("diagnostics", diagnostics);
+    const auto summary = OperatorSummary(snapshot);
+    BOOST_CHECK(summary.find("Payment work: payment") != std::string::npos);
+    BOOST_CHECK(summary.find("Next action: Wait for the current payment") != std::string::npos);
+    provider.pushKV("ready", false);
+    UniValue errors{UniValue::VARR};
+    errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    provider.pushKV("readiness_errors", errors);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "payments");
+    auto missing = liquidity.find_value("operational_dgb");
+    missing.pushKV("missing", 1);
+    liquidity.pushKV("operational_dgb", missing);
+    provider.pushKV("liquidity", liquidity);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_liquidity");
+    errors.push_back("PAYMASTER_SUBMIT_BINDING_MISMATCH");
+    provider.pushKV("readiness_errors", errors);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+    activity.pushKV("active_payments", 0);
+    activity.pushKV("reserved_outputs", 0);
+    activity.pushKV("pending_confirmations", 2);
+    provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "confirmation");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "liquidity");
+    activity.pushKV("pending_confirmations", 0);
+    provider.pushKV("ready", true);
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "idle");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "ready");
+    // Even a known pending reason must not excuse a faulted scheduler.
+    provider.pushKV("service_state", "error");
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+}
+
+BOOST_AUTO_TEST_CASE(operator_sync_wait_and_activity_validation)
+{
+    auto provider = Snapshot().find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "waiting_for_readiness");
+    for (const auto* code : {"PAYMASTER_PROVIDER_SYNCING", "PAYMASTER_TXINDEX_NOT_READY"}) {
+        provider.pushKV("last_service_error", code);
+        const auto diagnostics = OperatorDiagnostics(provider, 0, 100);
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "node");
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "waiting");
+    }
+    provider.pushKV("service_state", "error");
+    BOOST_CHECK_EQUAL(OperatorDiagnostics(provider, 0, 100)[0].find_value("action").get_str(), "inspect_error");
+    UniValue activity{UniValue::VOBJ}, pool{UniValue::VOBJ};
+    for (const auto* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"}) activity.pushKV(key, 0);
+    for (const auto& invalid : {UniValue{-1}, UniValue{true}, UniValue{"unknown"}, UniValue{}}) {
+        activity.pushKV("active_payments", invalid);
+        pool.pushKV("activity", activity);
+        provider.pushKV("pool", pool);
+        BOOST_CHECK_THROW(OperatorWorkPhase(provider), std::runtime_error);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(setup_waits_for_funding_confirmations_and_actual_start)
 {
     auto snapshot = Snapshot();
@@ -501,7 +603,7 @@ BOOST_AUTO_TEST_CASE(resume_preserves_approved_setup_fee)
     provider.pushKV("preparation", records);
     snapshot.pushKV("provider", provider);
     BOOST_CHECK_EQUAL(SetupFundingFee(snapshot), 123456);
-    const auto plan = BuildSetupPlan(snapshot, Choices());
+    const auto plan = BuildSetupPlan(snapshot, SetupCliDefaults(snapshot));
     for (const auto& step : plan)
         if (step.method == "preparepaymasterpool") BOOST_CHECK_EQUAL(step.params[0].find_value("maximum_fee_satoshis").getInt<int64_t>(), 123456);
     record.pushKV("maximum_fee_satoshis", 222222);

@@ -3353,6 +3353,12 @@ RPCHelpMan getpaymasterinfo()
                                                                         {RPCResult::Type::BOOL, "wallet_locked", "Wallet lock state"},
                                                                         {RPCResult::Type::BOOL, "pool_ready", "Whether the persisted admission and operational pools pass policy checks"},
                                                                         {RPCResult::Type::OBJ, "pool", "Persisted pool summary", {
+                                                                            {RPCResult::Type::OBJ, "activity", "Observed current work; historical committed outputs do not imply an active payment", {
+                                                                                {RPCResult::Type::NUM, "active_payments", "Current reserved payment budgets"},
+                                                                                {RPCResult::Type::NUM, "capacity_requests", "Live pre-intent Capacity admissions"},
+                                                                                {RPCResult::Type::NUM, "reserved_outputs", "Reserved operational outputs"},
+                                                                                {RPCResult::Type::NUM, "pending_confirmations", "Unconfirmed available outputs and pending successors"},
+                                                                            }},
                                                                                                                                      {RPCResult::Type::NUM, "entries", "Total validated entries"},
                                                                                                                                      {RPCResult::Type::NUM, "reserved", "Entries reserved or durably committed to a request"},
                                                                                                                                      {RPCResult::Type::NUM, "admission_dgb", "Confirmed available admission DGB slots"},
@@ -3436,6 +3442,7 @@ RPCHelpMan getpaymasterinfo()
             }
 
             UniValue pool{UniValue::VOBJ};
+            pool.pushKV("activity", ProviderActivityToJSON(readiness, GetTime()));
             pool.pushKV("entries", static_cast<uint64_t>(readiness.pool_entries.size()));
             pool.pushKV("reserved", static_cast<uint64_t>(std::count_if(
                                         readiness.pool_entries.begin(), readiness.pool_entries.end(), [](const auto& entry) {
@@ -3615,6 +3622,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("ready", readiness.ready);
             provider.pushKV("pool_ready", readiness.pool_ready);
             UniValue pool_summary{UniValue::VOBJ};
+            pool_summary.pushKV("activity", ProviderActivityToJSON(readiness, now));
             pool_summary.pushKV("entries", uint64_t(readiness.pool_entries.size()));
             pool_summary.pushKV("reserved", uint64_t(std::count_if(readiness.pool_entries.begin(), readiness.pool_entries.end(),
                 [](const auto& entry) { return entry.state == PoolEntryState::RESERVED || entry.state == PoolEntryState::PENDING_SUCCESSOR || entry.state == PoolEntryState::COMMITTED; })));

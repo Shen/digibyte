@@ -269,6 +269,27 @@ UniValue SetupSafetyBridge(const UniValue& previous, const UniValue& target, int
     }
     return bridge;
 }
+std::string OperatorWorkPhase(const UniValue& provider)
+{
+    const auto& activity = provider.find_value("pool").find_value("activity");
+    if (activity.isNull()) return "idle"; // Additive field; retain older snapshots.
+    if (!activity.isObject()) throw std::runtime_error("PAYMASTER_ACTIVITY_STATUS_INCOMPLETE");
+    const auto count = [&](const char* key) {
+        const auto& value = activity.find_value(key);
+        if (!value.isNum() || value.getInt<int64_t>() < 0)
+            throw std::runtime_error("PAYMASTER_ACTIVITY_STATUS_INCOMPLETE");
+        return value.getInt<int64_t>();
+    };
+    const auto payments = count("active_payments");
+    const auto capacity = count("capacity_requests");
+    const auto reserved = count("reserved_outputs");
+    const auto confirmations = count("pending_confirmations");
+    if (payments > 0) return "payment";
+    if (capacity > 0 || reserved > 0) return "capacity";
+    if (confirmations > 0) return "confirmation";
+    return "idle";
+}
+
 UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, int64_t now)
 {
     UniValue result{UniValue::VARR};
@@ -285,6 +306,12 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         result.push_back(item);
     };
     const UniValue& errors = provider.find_value("readiness_errors");
+    const std::string work_phase = OperatorWorkPhase(provider);
+    bool temporary_capacity = provider.find_value("running").isTrue() && work_phase != "idle";
+    for (const char* asset : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
+        const auto& missing = provider.find_value("liquidity").find_value(asset).find_value("missing");
+        temporary_capacity &= missing.isNum() && missing.getInt<int64_t>() == 0;
+    }
     if (!errors.isArray()) {
         add("PAYMASTER_STATUS_INCOMPLETE", "unknown", "service", "refresh");
         return result;
@@ -326,8 +353,11 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         const std::string code = error.get_str();
         if (code == "PAYMASTER_WALLET_LOCKED")
             add(code, "action_required", "wallet", "unlock");
-        else if (code == "PAYMASTER_NODE_NOT_READY" || code == "PAYMASTER_REQUIRES_READY_TXINDEX" || code == "PAYMASTER_DIGIDOLLAR_NOT_ACTIVE")
+        else if (code == "PAYMASTER_NODE_NOT_READY" || code == "PAYMASTER_REQUIRES_READY_TXINDEX" || code == "PAYMASTER_DIGIDOLLAR_NOT_ACTIVE" ||
+                 code == "PAYMASTER_PROVIDER_SYNCING" || code == "PAYMASTER_TXINDEX_NOT_READY")
             add(code, "waiting", "node", "wait");
+        else if (code == "PAYMASTER_OPERATIONAL_SLOT_MISSING" && temporary_capacity)
+            add(code, "waiting", work_phase == "confirmation" ? "liquidity" : "payments", "wait");
         else if (code == "PAYMASTER_PROVIDER_NOT_ENABLED")
             add(code, "action_required", "service", "enable");
         else if (code.find("LISTENER") != std::string::npos || code.find("ENDPOINT") != std::string::npos || code.find("INBOUND_CAPACITY") != std::string::npos || code.find("REQUIRES_") != std::string::npos || code == "PAYMASTER_DISABLED" || code == "PAYMASTER_MESSAGE_CAPTURE_ENABLED")
@@ -353,13 +383,20 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
     if (service_error.isStr() && !service_error.get_str().empty()) {
         if (service_error.get_str() == "PAYMASTER_POOL_PREPARATION_PENDING") {
             if (!preparation_pending) add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
+        } else if (provider.find_value("service_state").isStr() && provider.find_value("service_state").get_str() != "error" &&
+                  (service_error.get_str() == "PAYMASTER_PROVIDER_SYNCING" ||
+                   service_error.get_str() == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
+                   service_error.get_str() == "PAYMASTER_TXINDEX_NOT_READY" ||
+                   service_error.get_str() == "PAYMASTER_NODE_NOT_READY")) {
+            add(service_error.get_str(), "waiting", "node", "wait");
         } else if (service_error.get_str() == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING" &&
                    provider.find_value("running").isTrue() &&
                    provider.find_value("service_state").isStr() &&
-                   provider.find_value("service_state").get_str() == "waiting_for_liquidity_confirmation") {
+                   provider.find_value("service_state").get_str() != "error") {
             // This scheduler reason also covers capacity reserved by an ongoing
             // payment. It does not imply a failure or a broadcast refill.
-            add(service_error.get_str(), "waiting", "liquidity", "wait");
+            if (!provider.find_value("ready").isTrue() || work_phase != "idle")
+                add(service_error.get_str(), "waiting", work_phase == "payment" || work_phase == "capacity" ? "payments" : "liquidity", "wait");
         } else if (service_error.get_str() == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
                    service_error.get_str() == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED") {
             add(service_error.get_str(), "action_required", "budgets", "review_budget");
@@ -370,6 +407,11 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
             add(service_error.get_str(), "error", "service", "inspect_error");
         }
     }
+    if (provider.find_value("service_state").isStr() && provider.find_value("service_state").get_str() == "error")
+        add("PAYMASTER_PROVIDER_SERVICE_FAULT", "error", "service", "inspect_error");
+    if (provider.find_value("running").isTrue() && work_phase != "idle")
+        add(work_phase == "confirmation" ? "PAYMASTER_RESERVE_CONFIRMATION_PENDING" : "PAYMASTER_PAYMENT_IN_PROGRESS",
+            "waiting", work_phase == "confirmation" ? "liquidity" : "payments", "wait");
     if (errors.empty() && !preparation_pending) add("PAYMASTER_LOCAL_READY", "ready", "service", provider.find_value("running").isTrue() ? "none" : "start");
     add("PAYMASTER_EXTERNAL_REACHABILITY_UNKNOWN", "unknown", "connection", "check_external");
     auto items = result.getValues();
@@ -377,7 +419,8 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         const auto action = item.find_value("action").get_str();
         if (action == "inspect_error" || action == "configure_node") return 0;
         if (action == "setup") return 1;
-        if (action == "wait" || action == "unlock" || action == "review_unlock") return 2;
+        if ((action == "wait" && item.find_value("area").get_str() != "payments") || action == "unlock" || action == "review_unlock") return 2;
+        if (action == "wait") return 3;
         if (action == "review_liquidity" || action == "review_budget") return 3;
         if (action == "enable" || action == "start") return 4;
         if (action == "check_external") return 9;
@@ -493,10 +536,13 @@ std::string OperatorSummary(const UniValue& snapshot)
     const auto& provider = snapshot.find_value("provider");
     std::string result = "Network: " + snapshot.find_value("network").get_str() + "\nWallet: " + snapshot.find_value("wallet").write();
     const auto& diagnostics = snapshot.find_value("diagnostics");
-    const auto explain = [](const std::string& action) -> std::string {
+    const auto explain = [](const UniValue& diagnostic) -> std::string {
+        const auto action = diagnostic.find_value("action").get_str();
         if (action == "configure_node") return "Run -paymastersetup and review node configuration and routing";
         if (action == "setup") return "Continue -paymastersetup in this wallet";
-        if (action == "wait") return "Wait for synchronization, activation or confirmation";
+        if (action == "wait") return diagnostic.find_value("area").get_str() == "payments"
+            ? "Wait for the current payment or capacity reservation; review Activity"
+            : "Wait for synchronization, activation or confirmation";
         if (action == "unlock" || action == "review_unlock") return "Review wallet-wide unlock with -paymastersetup (unlock)";
         if (action == "start" || action == "enable") return "Review the saved policy, then use -paymastersetup (resume)";
         if (action == "review_liquidity") return "Review confirmed funds and pool preparation in -paymastersetup";
@@ -506,8 +552,9 @@ std::string OperatorSummary(const UniValue& snapshot)
         if (action == "none") return "Operation is locally ready";
         return "Inspect the diagnostic; do not treat unknown status as success";
     };
-    if (!diagnostics.empty()) result += "\nNext action: " + explain(diagnostics[0].find_value("action").get_str()) + " (" + diagnostics[0].find_value("code").get_str() + ")";
+    if (!diagnostics.empty()) result += "\nNext action: " + explain(diagnostics[0]) + " (" + diagnostics[0].find_value("code").get_str() + ")";
     result += "\nService: " + provider.find_value("service_state").get_str();
+    result += "\nPayment work: " + OperatorWorkPhase(provider);
     result += "\nLocal ready: " + provider.find_value("ready").write();
     const auto& transport = provider.find_value("transport");
     result += "\nConnection: local listener=" + transport.find_value("listener_ready").write() + "; outgoing=" + transport.find_value("outbound_in_use").write() + "/" + transport.find_value("outbound_limit").write() + "; incoming=" + transport.find_value("inbound_in_use").write() + "/" + transport.find_value("inbound_limit").write() + "; queued=" + transport.find_value("queued").write();
@@ -531,7 +578,7 @@ std::string OperatorSummary(const UniValue& snapshot)
         : "\nUnlock deadline (epoch seconds, 0=no timed unlock): " + snapshot.find_value("unlocked_until").write();
     result += "\nFull-wallet backup reminder: " + provider.find_value("backup_status").find_value("required").write();
     for (const auto& item : diagnostics.getValues())
-        result += "\n" + item.find_value("state").get_str() + ": " + item.find_value("code").get_str() + " -> " + explain(item.find_value("action").get_str());
+        result += "\n" + item.find_value("state").get_str() + ": " + item.find_value("code").get_str() + " -> " + explain(item);
     return result + "\nExternal reachability and payment operation are not established by local readiness.\n";
 }
 void CheckSetupContext(const UniValue& expected, const UniValue& current)

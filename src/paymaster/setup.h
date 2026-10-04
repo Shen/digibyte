@@ -26,6 +26,8 @@ int64_t SetupFundingFee(const UniValue& snapshot);
 bool SetupMatches(const UniValue& expected, const UniValue& actual);
 UniValue SetupSafetyBridge(const UniValue& previous, const UniValue& target, int64_t previous_fee, int64_t target_fee);
 UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, int64_t now);
+/** Observed work only; never grants readiness or spending authority. */
+std::string OperatorWorkPhase(const UniValue& provider);
 struct SetupProgress {
     bool complete{false};
     bool needs_unlock{false};

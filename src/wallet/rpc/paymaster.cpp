@@ -1027,6 +1027,28 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     return result;
 }
 
+UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now)
+{
+    using namespace DigiDollar::Paymaster;
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("active_payments", uint64_t(std::count_if(
+        readiness.budget_ledger.reservations.begin(), readiness.budget_ledger.reservations.end(),
+        [](const auto& reservation) { return reservation.state == BudgetReservationState::RESERVED; })));
+    result.pushKV("capacity_requests", uint64_t(std::count_if(
+        readiness.budget_ledger.capacity_admissions.begin(), readiness.budget_ledger.capacity_admissions.end(),
+        [now](const auto& admission) { return admission.state == CapacityAdmissionState::RESERVED && admission.expires_at > now; })));
+    result.pushKV("reserved_outputs", uint64_t(std::count_if(
+        readiness.pool_entries.begin(), readiness.pool_entries.end(),
+        [](const auto& entry) { return entry.purpose == PoolPurpose::OPERATIONAL && entry.state == PoolEntryState::RESERVED; })));
+    result.pushKV("pending_confirmations", uint64_t(std::count_if(
+        readiness.pool_entries.begin(), readiness.pool_entries.end(),
+        [](const auto& entry) {
+            return entry.state == PoolEntryState::PENDING_SUCCESSOR ||
+                   (entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height <= 0);
+        })));
+    return result;
+}
+
 UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
                                         const ProviderReadiness& readiness)
 {
@@ -1060,10 +1082,36 @@ UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletConte
     } else {
         const auto service = context.paymaster->GetProviderServiceStatus(wallet.GetName());
         reason = service.last_error;
-        if (pending) state = "waiting_confirmation";
+        const bool faulted = service.state == ProviderServiceState::FAULT;
+        if (faulted) {
+            state = "blocked";
+            if (reason.empty()) reason = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
+        } else if (pending) state = "waiting_confirmation";
         else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = "blocked";
         else if (planned) state = "working";
         else if (!readiness.ready) state = "blocked";
+        const auto activity = ProviderActivityToJSON(readiness, GetTime());
+        const bool payment_in_use = activity.find_value("active_payments").getInt<int64_t>() > 0 ||
+            activity.find_value("capacity_requests").getInt<int64_t>() > 0 ||
+            activity.find_value("reserved_outputs").getInt<int64_t>() > 0;
+        const int64_t minimum_operational_dgb = readiness.have_policy
+            ? readiness.policy.maximum_network_fee.value : std::numeric_limits<int64_t>::max();
+        const bool targets_accounted_for =
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB, policy.target_admission_dgb).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, policy.target_admission_carriers).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DGB, policy.target_operational_dgb, minimum_operational_dgb).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, policy.target_operational_carriers).missing == 0;
+        if (!faulted && !pending && !planned && !readiness.ready && payment_in_use && targets_accounted_for &&
+            readiness.errors.size() == 1 && readiness.errors.front() == "PAYMASTER_OPERATIONAL_SLOT_MISSING" &&
+            (reason.empty() || reason == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING")) {
+            state = "paused";
+            reason = "PAYMASTER_PAYMENT_CAPACITY_IN_USE";
+        } else if (!faulted && reason == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") {
+            if (readiness.ready && !pending) reason.clear();
+            else if (activity.find_value("pending_confirmations").getInt<int64_t>() > 0)
+                state = "waiting_confirmation";
+            else if (state == "blocked" && !readiness.errors.empty()) reason = readiness.errors.front();
+        }
         if (state == "blocked" && reason.empty() && !readiness.errors.empty()) reason = readiness.errors.front();
     }
     UniValue result{UniValue::VOBJ};

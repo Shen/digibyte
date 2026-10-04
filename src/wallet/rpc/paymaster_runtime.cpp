@@ -629,7 +629,9 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                 message.isStr() ? message.get_str()
                                 : "PAYMASTER_AUTOMATIC_SERVICE_ERROR");
             if (error == "PAYMASTER_PROVIDER_SERVICE_BUSY") return;
-            if (first_error.empty()) first_error = error;
+            // The reason must describe the state selected by this failed step,
+            // rather than an earlier liquidity wait from the same service tick.
+            first_error = error;
             if (error == "PAYMASTER_WALLET_LOCKED") {
                 state = ProviderServiceState::WAITING_FOR_UNLOCK;
             } else if (error == "PAYMASTER_PROVIDER_SYNCING" ||
@@ -646,9 +648,7 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                 state = ProviderServiceState::FAULT;
             }
         } catch (const std::exception&) {
-            if (first_error.empty()) {
-                first_error = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
-            }
+            first_error = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
             state = ProviderServiceState::FAULT;
         }
     };

@@ -100,6 +100,112 @@ struct RawProviderSettingsV2 {
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(provider_activity_ignores_completed_and_expired_authority)
+{
+    paymaster_rpc::internal::ProviderReadiness readiness;
+    for (const auto state : {BudgetReservationState::RESERVED, BudgetReservationState::SPENT, BudgetReservationState::RELEASED}) {
+        ProviderBudgetReservation reservation;
+        reservation.state = state;
+        readiness.budget_ledger.reservations.push_back(reservation);
+    }
+    for (const auto state : {CapacityAdmissionState::RESERVED, CapacityAdmissionState::PROMOTED, CapacityAdmissionState::RELEASED}) {
+        ProviderCapacityAdmission admission;
+        admission.state = state;
+        admission.expires_at = 101;
+        readiness.budget_ledger.capacity_admissions.push_back(admission);
+    }
+    auto expired = readiness.budget_ledger.capacity_admissions.front();
+    expired.expires_at = 100;
+    readiness.budget_ledger.capacity_admissions.push_back(expired);
+    for (const auto state : {PoolEntryState::RESERVED, PoolEntryState::COMMITTED, PoolEntryState::SPENT,
+                             PoolEntryState::RELEASED, PoolEntryState::PENDING_SUCCESSOR, PoolEntryState::AVAILABLE}) {
+        ProviderPoolEntry entry;
+        entry.state = state;
+        entry.purpose = PoolPurpose::OPERATIONAL;
+        readiness.pool_entries.push_back(entry);
+    }
+    auto confirmed = readiness.pool_entries.back();
+    confirmed.confirmation_height = 1;
+    readiness.pool_entries.push_back(confirmed);
+    auto admission_output = readiness.pool_entries.front();
+    admission_output.purpose = PoolPurpose::ADMISSION;
+    readiness.pool_entries.push_back(admission_output);
+    auto activity = paymaster_rpc::internal::ProviderActivityToJSON(readiness, 100);
+    BOOST_CHECK_EQUAL(activity.find_value("active_payments").getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(activity.find_value("capacity_requests").getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(activity.find_value("reserved_outputs").getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(activity.find_value("pending_confirmations").getInt<int>(), 2);
+    readiness.budget_ledger.reservations.front().state = BudgetReservationState::SPENT;
+    readiness.pool_entries.front().state = PoolEntryState::COMMITTED;
+    readiness.pool_entries[4].state = PoolEntryState::AVAILABLE;
+    readiness.pool_entries[4].confirmation_height = 1;
+    readiness.pool_entries[5].confirmation_height = 1;
+    activity = paymaster_rpc::internal::ProviderActivityToJSON(readiness, 101);
+    for (const auto* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"})
+        BOOST_CHECK_EQUAL(activity.find_value(key).getInt<int>(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(provider_automation_capacity_pause_preserves_approval)
+{
+    using namespace paymaster_rpc::internal;
+    CWallet provider_wallet{m_node.chain.get(), "Automation status", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(provider_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    Manager manager{true};
+    WalletContext context;
+    context.paymaster = &manager;
+    ProviderReadiness readiness;
+    readiness.have_identity = true;
+    readiness.identity.provider_id = uint256::ONE;
+    readiness.have_policy = true;
+    readiness.policy.maximum_network_fee = DGBSatoshis{1000};
+    readiness.settings.enabled = true;
+    readiness.have_liquidity_policy = true;
+    auto& policy = readiness.liquidity_policy;
+    policy.target_admission_dgb = 1;
+    policy.paid_maintenance_approved = true;
+    policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{1000};
+    policy.maximum_maintenance_fee_per_hour = DGBSatoshis{5000};
+    policy.maximum_maintenance_fee_per_day = DGBSatoshis{10000};
+    ProviderPoolEntry entry;
+    entry.dgb_value = DGBSatoshis{1000};
+    entry.confirmation_height = 1;
+    readiness.pool_entries.push_back(entry);
+    entry.purpose = PoolPurpose::OPERATIONAL;
+    entry.state = PoolEntryState::RESERVED;
+    readiness.pool_entries.push_back(entry);
+    readiness.errors = {"PAYMASTER_OPERATIONAL_SLOT_MISSING"};
+    BOOST_REQUIRE(manager.StartProvider(provider_wallet.GetName(), readiness.identity.provider_id));
+    manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION,
+                                    "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    const auto database_before = provider_wallet.GetDatabase().nUpdateCounter.load();
+    auto status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
+    BOOST_CHECK(status.find_value("enabled").isTrue());
+    BOOST_CHECK(status.find_value("paid_maintenance_approved").isTrue());
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "paused");
+    BOOST_CHECK_EQUAL(status.find_value("reason").get_str(), "PAYMASTER_PAYMENT_CAPACITY_IN_USE");
+    // Real missing capital must not be mistaken for temporarily reserved capacity.
+    readiness.pool_entries.front().state = PoolEntryState::SPENT;
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "blocked");
+    BOOST_CHECK_EQUAL(status.find_value("reason").get_str(), "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    readiness.pool_entries.front().state = PoolEntryState::AVAILABLE;
+    readiness.pool_entries.back().state = PoolEntryState::PENDING_SUCCESSOR;
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "waiting_confirmation");
+    readiness.pool_entries.back().state = PoolEntryState::AVAILABLE;
+    readiness.errors.clear();
+    readiness.ready = true;
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "ready");
+    BOOST_CHECK(status.find_value("reason").get_str().empty());
+    manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::FAULT);
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "blocked");
+    BOOST_CHECK_EQUAL(status.find_value("reason").get_str(), "PAYMASTER_AUTOMATIC_SERVICE_ERROR");
+    BOOST_CHECK_EQUAL(provider_wallet.GetDatabase().nUpdateCounter.load(), database_before);
+    BOOST_CHECK(policy.automatic_replenishment && policy.paid_maintenance_approved);
+}
+
 BOOST_AUTO_TEST_CASE(paymaster_dd_reservations_are_owned_but_not_spendable)
 {
     m_wallet.EnsureDDWallet();
