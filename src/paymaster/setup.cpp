@@ -28,6 +28,7 @@ UniValue SetupDefaultPolicy()
     result.pushKV("funding_models", models);
     result.pushKV("sponsorship_scope", "public");
     result.pushKV("fee_rate_bps", 50);
+    result.pushKV("maximum_user_paid_service_fee_cents", 0);
     result.pushKV("min_amount_cents", 100);
     result.pushKV("max_amount_cents", 100000);
     result.pushKV("quote_ttl", 60);
@@ -117,6 +118,7 @@ const std::vector<SetupField>& SetupFields()
 {
     static const std::vector<SetupField> fields{
         {"fee_rate_bps", "Customer service fee", "Your DD income as a share of the payment. 0.50 means 0.50%, rounded up to whole DD cents per payment. Choose in steps of 0.10%. It does not guarantee that DD income covers DGB costs.", "%", 2, 0, MAX_RATE_BPS, 10},
+        {"maximum_user_paid_service_fee_cents", "Maximum user-paid service fee", "Maximum DD service fee charged on one user-paid transfer. Enter 0 for no fee cap.", "DD", 2, 0, MAX_DD_OUTPUT_CENTS},
         {"min_amount_cents", "Smallest accepted payment", "Payments below this DD amount are declined. The protocol minimum is 1.00 DD.", "DD", 2, 100, MAX_DD_OUTPUT_CENTS},
         {"max_amount_cents", "Largest accepted payment", "Payments above this DD amount are declined. Must be at least the smallest payment.", "DD", 2, 100, MAX_DD_OUTPUT_CENTS},
         {"quote_ttl", "Offer lifetime", "Time for a customer to review and accept an offer. 60 seconds gives the maximum supported review time.", "seconds", 0, 1, 60},
@@ -603,6 +605,9 @@ void CheckSetupChoices(const SetupChoices& choices)
     if (scope != "public" && scope != "restricted") throw std::runtime_error("PAYMASTER_INVALID_SPONSORSHIP_SCOPE");
     policy.sponsorship_scope = scope == "public" ? SponsorshipScope::PUBLIC : SponsorshipScope::RESTRICTED;
     policy.fee_rate_bps = choices.policy.find_value("fee_rate_bps").getInt<uint32_t>();
+    policy.maximum_user_paid_service_fee = DDCents{
+        choices.policy.find_value(
+            "maximum_user_paid_service_fee_cents").getInt<int64_t>()};
     policy.min_payment = DDCents{choices.policy.find_value("min_amount_cents").getInt<int64_t>()};
     policy.max_payment = DDCents{choices.policy.find_value("max_amount_cents").getInt<int64_t>()};
     policy.quote_ttl = choices.policy.find_value("quote_ttl").getInt<int64_t>();

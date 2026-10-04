@@ -27,7 +27,8 @@ PaymentIntent SignedIntent(const CKey& user_key,
                            const PaymasterId& provider_id,
                            const uint256& genesis,
                            const uint256& policy_hash,
-                           int64_t now)
+                           int64_t now,
+                           int64_t recipient_amount = 10000)
 {
     PaymentIntent intent;
     intent.genesis_hash = genesis;
@@ -38,7 +39,7 @@ PaymentIntent SignedIntent(const CKey& user_key,
     intent.canonical_request_hash = uint256S("1101");
     intent.user_dd_inputs = {COutPoint{uint256S("12"), 0}};
     intent.recipient_script = P2TRScript(user_key);
-    intent.recipient_amount = DDCents{10000};
+    intent.recipient_amount = DDCents{recipient_amount};
     intent.user_dd_change_script = P2TRScript(user_key);
     intent.offer_id = uint256S("13");
     intent.funding_model = FundingModel::USER_PAID;
@@ -86,7 +87,9 @@ PaymasterQuote SignedQuote(const CKey& provider_key,
     quote.funding_model = intent.funding_model;
     quote.sponsorship_scope = intent.sponsorship_scope;
     quote.fee_rate_bps = policy.fee_rate_bps;
-    quote.service_fee = DDCents{100};
+    quote.service_fee = *ComputePaymasterFee(
+        intent.recipient_amount, policy.fee_rate_bps,
+        policy.maximum_user_paid_service_fee);
     quote.reserved_dgb_inputs.push_back(
         {COutPoint{CTransaction{creating_tx}.GetHash(), 0}, creating_tx, policy.maximum_network_fee});
     quote.provider_fee_script = P2TRScript(provider_key);
@@ -251,6 +254,43 @@ BOOST_AUTO_TEST_CASE(quote_binds_exact_fee_policy_prevouts_and_unsigned_transact
                                         XOnlyPubKey{provider_key.GetPubKey()},
                                         DDCents{100}, now, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_QUOTE_TRANSACTION");
+}
+
+BOOST_AUTO_TEST_CASE(user_paid_service_fee_cap_is_bound_by_provider_and_client)
+{
+    CKey user_key;
+    CKey provider_key;
+    user_key.MakeNewKey(true);
+    provider_key.MakeNewKey(true);
+    const int64_t now{100000};
+    const uint256 genesis = uint256S("30");
+    ProviderPolicy policy = Policy();
+    policy.maximum_user_paid_service_fee = DDCents{150};
+    const auto intent = SignedIntent(
+        user_key, GetPaymasterId(XOnlyPubKey{provider_key.GetPubKey()}),
+        genesis, GetProviderPolicyHash(policy), now, 50000);
+    const auto quote = SignedQuote(provider_key, intent, policy, now);
+    const OfferTerms offer{intent.offer_id, intent.policy_hash,
+                           FundingModel::USER_PAID, SponsorshipScope::PUBLIC,
+                           policy.fee_rate_bps, policy.min_payment,
+                           policy.max_payment,
+                           policy.maximum_user_paid_service_fee};
+    std::string error;
+    BOOST_CHECK_EQUAL(quote.service_fee.value, 150);
+    BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuote(
+                              quote, intent, policy,
+                              XOnlyPubKey{provider_key.GetPubKey()},
+                              DDCents{150}, now, error), error);
+    BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuoteForClient(
+                              quote, intent, offer,
+                              XOnlyPubKey{provider_key.GetPubKey()},
+                              DDCents{150}, now, error), error);
+
+    OfferTerms uncapped_offer = offer;
+    uncapped_offer.maximum_user_paid_service_fee = DDCents{0};
+    BOOST_CHECK(!ValidatePaymasterQuoteForClient(
+        quote, intent, uncapped_offer,
+        XOnlyPubKey{provider_key.GetPubKey()}, DDCents{150}, now, error));
 }
 
 BOOST_AUTO_TEST_CASE(result_requires_complete_consistent_final_artifact_and_monotonic_sequence)

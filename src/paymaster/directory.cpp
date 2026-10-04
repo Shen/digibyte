@@ -43,13 +43,20 @@ PaymasterId GetPaymasterId(const XOnlyPubKey& identity_key)
 
 uint256 GetAnnouncementSignatureHash(const Announcement& announcement)
 {
-    HashWriter hasher = TaggedHash("DigiByte Paymaster Announcement v1");
+    HashWriter hasher = TaggedHash(
+        announcement.version >= 6 ? "DigiByte Paymaster Announcement v2"
+                                 : "DigiByte Paymaster Announcement v1");
     hasher << announcement.version << announcement.genesis_hash << announcement.identity_key
            << announcement.display_name << announcement.sequence << announcement.created_at
            << announcement.expires_at << WithParams(CNetAddr::V2, announcement.endpoint)
            << announcement.offers
            << announcement.min_confirmations << announcement.capability_flags
            << static_cast<uint64_t>(announcement.admission_slots.size());
+    if (announcement.version >= 6) {
+        for (const OfferTerms& offer : announcement.offers) {
+            hasher << offer.maximum_user_paid_service_fee;
+        }
+    }
     for (const AdmissionSlotProof& slot : announcement.admission_slots) {
         // A creating transaction's txid commits all non-witness fields. Admission
         // validation additionally matches that transaction and output to chainstate.
@@ -103,12 +110,15 @@ bool ValidateAnnouncementEnvelope(const Announcement& announcement,
     for (const OfferTerms& offer : announcement.offers) {
         if (offer.offer_id.IsNull() || offer.policy_hash.IsNull() || !offer_ids.insert(offer.offer_id).second ||
             offer.scope != SponsorshipScope::PUBLIC || offer.min_payment.value < 100 ||
-            offer.max_payment.value > MAX_DD_OUTPUT_CENTS || offer.min_payment.value > offer.max_payment.value) {
+            offer.max_payment.value > MAX_DD_OUTPUT_CENTS || offer.min_payment.value > offer.max_payment.value ||
+            offer.maximum_user_paid_service_fee.value < 0 ||
+            offer.maximum_user_paid_service_fee.value > MAX_DD_OUTPUT_CENTS) {
             error = "PAYMASTER_INVALID_OFFER";
             return false;
         }
         if (offer.funding_model == FundingModel::SPONSORED) {
-            if (offer.fee_rate_bps != 0) {
+            if (offer.fee_rate_bps != 0 ||
+                offer.maximum_user_paid_service_fee.value != 0) {
                 error = "PAYMASTER_SPONSORED_FEE";
                 return false;
             }

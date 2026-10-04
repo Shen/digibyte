@@ -155,6 +155,7 @@ RPCHelpMan getpaymasteroffers()
                                                                                                                                           {RPCResult::Type::STR_HEX, "policy_hash", "Bound provider policy"},
                                                                                                                                           {RPCResult::Type::STR, "funding_model", "sponsored or user_paid"},
                                                                                                                                           {RPCResult::Type::NUM, "fee_rate_bps", "Service-fee rate in basis points"},
+                                                                                                                                          {RPCResult::Type::NUM, "maximum_user_paid_service_fee_cents", "Maximum user-paid DD service fee; zero means no cap"},
                                                                                                                                           {RPCResult::Type::NUM, "payment_cents", "Requested recipient amount"},
                                                                                                                                           {RPCResult::Type::NUM, "service_fee_cents", "Exact rounded service fee"},
                                                                                                                                           {RPCResult::Type::NUM, "user_total_cents", "Exact total charged to the user"},
@@ -248,6 +249,8 @@ RPCHelpMan getpaymasteroffers()
                 offer.pushKV("policy_hash", candidate.terms.policy_hash.GetHex());
                 offer.pushKV("funding_model", candidate.terms.funding_model == DigiDollar::Paymaster::FundingModel::SPONSORED ? "sponsored" : "user_paid");
                 offer.pushKV("fee_rate_bps", candidate.terms.fee_rate_bps);
+                offer.pushKV("maximum_user_paid_service_fee_cents",
+                              candidate.terms.maximum_user_paid_service_fee.value);
                 offer.pushKV("payment_cents", candidate.payment.value);
                 offer.pushKV("service_fee_cents", candidate.service_fee.value);
                 offer.pushKV("user_total_cents", candidate.user_total.value);

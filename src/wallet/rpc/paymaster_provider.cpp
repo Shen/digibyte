@@ -114,6 +114,7 @@ RPCHelpMan setpaymasterpolicy()
                                                                                                 {"funding_models", RPCArg::Type::ARR, RPCArg::Optional::NO, "Non-empty funding model allowlist", {{"model", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sponsored or user_paid"}}},
                                                                                                 {"sponsorship_scope", RPCArg::Type::STR, RPCArg::Optional::NO, "public or restricted"},
                                                                                                 {"fee_rate_bps", RPCArg::Type::NUM, RPCArg::Optional::NO, "User-paid rate in basis points"},
+                                                                                                {"maximum_user_paid_service_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Maximum user-paid DD service fee; zero means no cap"},
                                                                                                 {"min_amount_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Minimum recipient amount"},
                                                                                                 {"max_amount_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Maximum recipient amount"},
                                                                                                 {"quote_ttl", RPCArg::Type::NUM, RPCArg::Optional::NO, "Quote lifetime in seconds"},
@@ -124,13 +125,14 @@ RPCHelpMan setpaymasterpolicy()
                                                                                                   {RPCResult::Type::ARR, "funding_models", "Enabled funding models", {{RPCResult::Type::STR, "", "sponsored or user_paid"}}},
                                                                                                   {RPCResult::Type::STR, "sponsorship_scope", "public or restricted"},
                                                                                                   {RPCResult::Type::NUM, "fee_rate_bps", "User-paid rate in basis points"},
+                                                                                                  {RPCResult::Type::NUM, "maximum_user_paid_service_fee_cents", "Maximum user-paid DD service fee; zero means no cap"},
                                                                                                   {RPCResult::Type::NUM, "min_amount_cents", "Minimum recipient amount"},
                                                                                                   {RPCResult::Type::NUM, "max_amount_cents", "Maximum recipient amount"},
                                                                                                   {RPCResult::Type::NUM, "quote_ttl", "Quote lifetime in seconds"},
                                                                                                   {RPCResult::Type::NUM, "maximum_network_fee_dgb_satoshis", "Absolute provider network-fee cap"},
                                                                                                   {RPCResult::Type::STR_HEX, "policy_hash", "Canonical provider policy hash"},
                                                                                               }},
-        RPCExamples{HelpExampleCli("setpaymasterpolicy", "'{\"funding_models\":[\"sponsored\",\"user_paid\"],\"sponsorship_scope\":\"public\",\"fee_rate_bps\":50,\"min_amount_cents\":100,\"max_amount_cents\":100000,\"quote_ttl\":60,\"maximum_network_fee_dgb_satoshis\":20000000}'")},
+        RPCExamples{HelpExampleCli("setpaymasterpolicy", "'{\"funding_models\":[\"sponsored\",\"user_paid\"],\"sponsorship_scope\":\"public\",\"fee_rate_bps\":50,\"maximum_user_paid_service_fee_cents\":100,\"min_amount_cents\":100,\"max_amount_cents\":100000,\"quote_ttl\":60,\"maximum_network_fee_dgb_satoshis\":20000000}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
@@ -3382,6 +3384,7 @@ RPCHelpMan getpaymasterinfo()
                                                                                                                                                     {RPCResult::Type::ARR, "funding_models", "Enabled funding models", {{RPCResult::Type::STR, "", "sponsored or user_paid"}}},
                                                                                                                                                     {RPCResult::Type::STR, "sponsorship_scope", "public or restricted"},
                                                                                                                                                     {RPCResult::Type::NUM, "fee_rate_bps", "User-paid rate in basis points"},
+                                                                                                                                                      {RPCResult::Type::NUM, "maximum_user_paid_service_fee_cents", "Maximum user-paid DD service fee; zero means no cap"},
                                                                                                                                                     {RPCResult::Type::NUM, "min_amount_cents", "Minimum recipient amount"},
                                                                                                                                                     {RPCResult::Type::NUM, "max_amount_cents", "Maximum recipient amount"},
                                                                                                                                                     {RPCResult::Type::NUM, "quote_ttl", "Quote lifetime in seconds"},

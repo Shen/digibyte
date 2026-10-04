@@ -35,6 +35,7 @@ struct OfferTerms {
     uint32_t fee_rate_bps{0};
     DDCents min_payment;
     DDCents max_payment;
+    DDCents maximum_user_paid_service_fee;
 
     SERIALIZE_METHODS(OfferTerms, obj)
     {
@@ -85,8 +86,13 @@ struct Announcement {
         READWRITE(obj.version, obj.genesis_hash, obj.identity_key, obj.display_name,
                   obj.sequence, obj.created_at, obj.expires_at,
                   WithParams(CNetAddr::V2, obj.endpoint), obj.offers,
-                  obj.min_confirmations, obj.capability_flags, obj.admission_slots,
-                  obj.identity_signature);
+                  obj.min_confirmations, obj.capability_flags, obj.admission_slots);
+        if (obj.version >= 6) {
+            for (auto& offer : obj.offers) {
+                READWRITE(offer.maximum_user_paid_service_fee);
+            }
+        }
+        READWRITE(obj.identity_signature);
     }
 };
 

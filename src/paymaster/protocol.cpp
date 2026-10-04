@@ -345,7 +345,9 @@ bool ValidatePaymasterQuoteForClient(const PaymasterQuote& quote,
         return false;
     }
     const uint32_t expected_rate = offer.funding_model == FundingModel::USER_PAID ? offer.fee_rate_bps : 0;
-    const auto computed_fee = ComputePaymasterFee(intent.recipient_amount, expected_rate);
+    const auto computed_fee = ComputePaymasterFee(
+        intent.recipient_amount, expected_rate,
+        offer.maximum_user_paid_service_fee);
     const DDCents expected_fee = offer.funding_model == FundingModel::SPONSORED ? DDCents{0} : computed_fee.value_or(DDCents{-1});
     std::string binding_error;
     if (!computed_fee || quote.fee_rate_bps != expected_rate ||

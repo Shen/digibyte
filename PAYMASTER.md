@@ -66,11 +66,12 @@ documents are not evidence of an upstream merge or a production release.
 ## Current scope and document status
 
 The current RPC integration contract is version 1; Paymaster wire messages use
-V5. These numbers do not version the wallet database. Sessions and tombstones
+V6, which advertises the user-paid DD fee ceiling in signed offers. These
+numbers do not version the wallet database. Sessions and tombstones
 retain their existing encodings. Finite pool setup separately introduced a V4
 maintenance journal that can still read V3 records without granting new setup
-authority. See the implementation reference for this limited exception to the
-otherwise current-only Paymaster record policy.
+authority. Provider policies now read the prior V1 layout with an uncapped
+service fee and write V2; other Paymaster records remain current-version-only.
 
 The Paymaster interfaces support a possible x402 extension; no such extension
 is implemented or committed to a roadmap. The first release does not include

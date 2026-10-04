@@ -244,6 +244,14 @@ BOOST_AUTO_TEST_CASE(fee_output_boundaries_are_exact)
     BOOST_REQUIRE(fee);
     BOOST_CHECK_EQUAL(fee->service_fee.value, 100);
     BOOST_CHECK(fee->output_kind == FeeOutputKind::PROVIDER_OUTPUT);
+
+    policy.fee_rate_bps = 50;
+    policy.maximum_user_paid_service_fee = DDCents{100};
+    fee = EvaluateServiceFee(policy, FundingModel::USER_PAID,
+                             DDCents{50000}, error);
+    BOOST_REQUIRE(fee);
+    BOOST_CHECK_EQUAL(fee->service_fee.value, 100);
+    BOOST_CHECK_EQUAL(fee->total_user_charge.value, 50100);
 }
 
 BOOST_AUTO_TEST_CASE(sponsored_policy_always_charges_zero)
@@ -260,6 +268,9 @@ BOOST_AUTO_TEST_CASE(sponsored_policy_always_charges_zero)
     restricted.sponsorship_scope = SponsorshipScope::RESTRICTED;
     restricted.fee_rate_bps = 0;
     BOOST_CHECK(ValidateProviderPolicy(restricted, error));
+    restricted.maximum_user_paid_service_fee = DDCents{1};
+    BOOST_CHECK(!ValidateProviderPolicy(restricted, error));
+    restricted.maximum_user_paid_service_fee = DDCents{0};
     restricted.funding_models = FUNDING_MODEL_ALL;
     BOOST_CHECK(!ValidateProviderPolicy(restricted, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_RESTRICTED_POLICY");
@@ -276,6 +287,11 @@ BOOST_AUTO_TEST_CASE(policy_and_carrier_limits_fail_closed)
     policy.maximum_network_fee = DGBSatoshis{MAX_MONEY + 1};
     BOOST_CHECK(!ValidateProviderPolicy(policy, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_NETWORK_FEE_CAP");
+
+    policy = UserPaidPolicy(50);
+    policy.maximum_user_paid_service_fee = DDCents{-1};
+    BOOST_CHECK(!ValidateProviderPolicy(policy, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_SERVICE_FEE_CAP");
 
     policy = UserPaidPolicy(11);
     BOOST_CHECK(!ValidateProviderPolicy(policy, error));
@@ -301,6 +317,9 @@ BOOST_AUTO_TEST_CASE(policy_hash_binds_every_operating_limit)
     BOOST_CHECK(original != GetProviderPolicyHash(policy));
     policy.maximum_network_fee.value -= 1;
     policy.quote_ttl -= 1;
+    BOOST_CHECK(original != GetProviderPolicyHash(policy));
+    policy.quote_ttl += 1;
+    policy.maximum_user_paid_service_fee = DDCents{100};
     BOOST_CHECK(original != GetProviderPolicyHash(policy));
 }
 

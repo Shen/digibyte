@@ -23,6 +23,24 @@ BOOST_AUTO_TEST_CASE(fee_rounds_up_to_whole_cent)
     BOOST_CHECK_EQUAL(ComputePaymasterFee(DDCents{1000}, 0)->value, 0);
 }
 
+BOOST_AUTO_TEST_CASE(user_paid_fee_obeys_provider_ceiling)
+{
+    const auto capped_fee =
+        ComputePaymasterFee(DDCents{50000}, 50, DDCents{100});
+    BOOST_REQUIRE(capped_fee);
+    BOOST_CHECK_EQUAL(capped_fee->value, 100);
+    BOOST_CHECK_EQUAL(ComputePaymasterFee(DDCents{50000}, 50)->value, 250);
+    BOOST_CHECK_EQUAL(ComputePaymasterFee(DDCents{50000}, 50,
+                                          DDCents{0})->value, 250);
+
+    const auto capped_payment = ComputePaymasterPaymentFromGross(
+        DDCents{50100}, 50, DDCents{100});
+    BOOST_REQUIRE(capped_payment);
+    BOOST_CHECK_EQUAL(capped_payment->value, 50000);
+    BOOST_CHECK_EQUAL(ComputePaymasterFee(*capped_payment, 50,
+                                          DDCents{100})->value, 100);
+}
+
 BOOST_AUTO_TEST_CASE(fee_rejects_invalid_rate_and_total)
 {
     BOOST_CHECK(!ComputePaymasterFee(DDCents{0}, 10));

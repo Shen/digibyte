@@ -16,7 +16,7 @@ wider release matrix remain open. Wire, consensus and journal formats are unchan
 
 **Source baseline:** `integration/paymaster-v9.26.6rc2` at `1789c803be`.
 **Transport/retry documentation refresh:** 2026-09-27; earlier full reference
-review: 2026-09-23. **Wire protocol:** V5.
+review: 2026-09-23. **Wire protocol:** V6.
 
 This reference describes the inspected implementation and the invariants a
 reviewer should check. It is not a new implementation proposal or a claim that
@@ -50,10 +50,19 @@ or redemption operations and does not add Paymaster batching to
 DD values use integer cents; DGB values use satoshis. For a user-paid offer:
 
 ```text
-service_fee_cents = ceil(recipient_amount_cents * fee_rate_bps / 10000)
+percentage_fee_cents = ceil(recipient_amount_cents * fee_rate_bps / 10000)
+service_fee_cents = maximum_user_paid_service_fee_cents == 0
+   ? percentage_fee_cents
+   : min(percentage_fee_cents, maximum_user_paid_service_fee_cents)
 user_DD_in = recipient_DD + user_DD_change + service_fee_DD
 provider_DGB_in = provider_DGB_change + miner_fee_DGB
 ```
+
+The provider may set `maximum_user_paid_service_fee_cents` to a positive DD
+amount to cap each user-paid fee; zero means uncapped. The value is persisted
+in the provider policy and included in its policy hash and signed V6 offer.
+Clients use the signed cap in offer selection, exact-gross calculations and
+quote validation. Sponsored offers always use zero.
 
 The implementation uses checked integer arithmetic and rejects invalid amounts
 and rates. Each DD output must remain between 100 and 10,000,000 cents. Inputs
@@ -161,7 +170,7 @@ from the durable provider commit.
 
 The [wire records](../src/paymaster/wire.h),
 [protocol records](../src/paymaster/protocol.h), and
-[P2P command names](../src/protocol.cpp) define the actual encoding. V5 is
+[P2P command names](../src/protocol.cpp) define the actual encoding. V6 is
 required; there is no downgrade to earlier Paymaster exchanges. Alternative
 recovery uses `pmrecreq`, `pmrecresp`, `pmrecsub`, and `pmrecresult` on the
 isolated direct connection.
@@ -373,7 +382,7 @@ This does not change the ordinary direct-DGB path. See
 
 | Design area | Current behavior / review implication |
 |---|---|
-| “V1” project label | Refers to the feature milestone; current wire protocol is V5, with individually versioned persistent records. |
+| “V1” project label | Refers to the feature milestone; current wire protocol is V6, with individually versioned persistent records. |
 | Broad same-input fallback after signing | Ordinary provider fallback stops once a user PSBT exists. Signed ambiguity uses exact retry or explicitly authorized cancellation. |
 | General PSBT-based collaboration | Dedicated Paymaster validators, local manifests and role-limited wallet signing enforce the collaborative path. |
 | Basic pools and manual processing | Successor reuse, finite automatic liquidity maintenance, finance reporting, runtime modes and explicit autostart are implemented. |

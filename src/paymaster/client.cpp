@@ -53,7 +53,9 @@ std::optional<PaymentIntent> BuildUnsignedPaymentIntent(
     std::string& error)
 {
     const OfferTerms& terms = offer.terms;
-    const auto expected_fee = ComputePaymasterFee(offer.payment, terms.fee_rate_bps);
+    const auto expected_fee = ComputePaymasterFee(
+        offer.payment, terms.fee_rate_bps,
+        terms.maximum_user_paid_service_fee);
     if (parameters.genesis_hash.IsNull() || offer.provider_id.IsNull() ||
         !IsCanonicalRequestId(parameters.request_id) || parameters.session_id.IsNull() ||
         parameters.client_nonce.IsNull() || parameters.canonical_request_hash.IsNull() ||
@@ -196,7 +198,9 @@ std::vector<OfferCandidate> BuildOfferCandidates(
             const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
             if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC ||
                 payment.value < terms.min_payment.value || payment.value > terms.max_payment.value) continue;
-            const auto fee = ComputePaymasterFee(payment, terms.fee_rate_bps);
+            const auto fee = ComputePaymasterFee(
+                payment, terms.fee_rate_bps,
+                terms.maximum_user_paid_service_fee);
             if (!fee || fee->value > maximum_service_fee.value ||
                 fee->value > std::numeric_limits<int64_t>::max() - payment.value) continue;
             if (terms.funding_model == FundingModel::SPONSORED &&
@@ -251,10 +255,14 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
         for (const OfferTerms& terms : announcement.offers) {
             const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
             if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC) continue;
-            const auto payment = ComputePaymasterPaymentFromGross(gross_amount, terms.fee_rate_bps);
+            const auto payment = ComputePaymasterPaymentFromGross(
+                gross_amount, terms.fee_rate_bps,
+                terms.maximum_user_paid_service_fee);
             if (!payment || payment->value < 100 ||
                 payment->value < terms.min_payment.value || payment->value > terms.max_payment.value) continue;
-            const auto fee = ComputePaymasterFee(*payment, terms.fee_rate_bps);
+            const auto fee = ComputePaymasterFee(
+                *payment, terms.fee_rate_bps,
+                terms.maximum_user_paid_service_fee);
             if (!fee || fee->value > maximum_service_fee.value ||
                 payment->value + fee->value != gross_amount.value) continue;
             if (terms.funding_model == FundingModel::SPONSORED &&

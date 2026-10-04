@@ -32,8 +32,8 @@ namespace {
 
 void initialize_paymaster_wire()
 {
-    assert(DigiDollar::Paymaster::PROTOCOL_VERSION == 5);
-    assert(PaymasterCapacityRequest{}.version == 5);
+    assert(DigiDollar::Paymaster::PROTOCOL_VERSION == 6);
+    assert(PaymasterCapacityRequest{}.version == 6);
     assert(PaymentIntent::CURRENT_VERSION == 2);
     assert(AlternativeRecoveryRequest::CURRENT_VERSION == 2);
     assert(AlternativeRecoveryResultMessage::CURRENT_VERSION == 2);

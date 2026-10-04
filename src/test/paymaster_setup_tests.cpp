@@ -126,6 +126,15 @@ BOOST_AUTO_TEST_CASE(cli_currency_and_percentage_inputs_are_exact_and_retry_inva
     std::ostringstream output;
     std::istringstream dd{"1.001\n0.99\n1,25\n"};
     BOOST_CHECK_EQUAL(SetupReadNumber(dd, output, field("min_amount_cents"), 100), 125);
+    std::istringstream service_fee_cap{"0\n1.00\n"};
+    BOOST_CHECK_EQUAL(SetupReadNumber(
+                          service_fee_cap, output,
+                          field("maximum_user_paid_service_fee_cents"), 0),
+                      0);
+    BOOST_CHECK_EQUAL(SetupReadNumber(
+                          service_fee_cap, output,
+                          field("maximum_user_paid_service_fee_cents"), 0),
+                      100);
     std::istringstream fee{"0.55\n0.60\n"};
     BOOST_CHECK_EQUAL(SetupReadNumber(fee, output, field("fee_rate_bps"), 50), 60);
     std::istringstream dgb{"1e2\n1,000.00\n-1\n0.000000001\n0.00000001\n"};
@@ -190,6 +199,9 @@ BOOST_AUTO_TEST_CASE(setup_checks_core_policy_budgets_and_pool_before_writes)
     bad = good;
     bad.policy.pushKV("quote_ttl", 61);
     rejects(bad, "PAYMASTER_INVALID_QUOTE_TTL");
+    bad = good;
+    bad.policy.pushKV("maximum_user_paid_service_fee_cents", -1);
+    rejects(bad, "PAYMASTER_INVALID_SERVICE_FEE_CAP");
     bad = good;
     bad.safety = SetupDefaultSafety(30000000, true, true, false);
     auto paid = good.safety.find_value("user_paid");

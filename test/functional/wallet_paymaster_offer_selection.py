@@ -39,22 +39,28 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         self.skip_if_no_sqlite()
 
     @staticmethod
-    def provider_policy(fee_rate_bps):
+    def provider_policy(fee_rate_bps, maximum_user_paid_service_fee_cents=0):
         return {
             "funding_models": ["user_paid"],
             "sponsorship_scope": "public",
             "fee_rate_bps": fee_rate_bps,
+            "maximum_user_paid_service_fee_cents": maximum_user_paid_service_fee_cents,
             "min_amount_cents": 100,
             "max_amount_cents": 100_000,
             "quote_ttl": 60,
             "maximum_network_fee_dgb_satoshis": 20_000_000,
         }
 
-    def configure_provider(self, wallet, cli, display_name, fee_rate_bps):
+    def configure_provider(self, wallet, cli, display_name, fee_rate_bps,
+                           maximum_user_paid_service_fee_cents=0):
         identity = wallet.createpaymasteridentity(display_name)
-        policy = self.provider_policy(fee_rate_bps)
+        policy = self.provider_policy(
+            fee_rate_bps, maximum_user_paid_service_fee_cents)
         persisted = cli.setpaymasterpolicy(policy)
         assert_equal(persisted["fee_rate_bps"], fee_rate_bps)
+        assert_equal(
+            persisted["maximum_user_paid_service_fee_cents"],
+            maximum_user_paid_service_fee_cents)
         cli.setpaymastersafetypolicy(provider_safety_policy(["user_paid"]))
         assert_equal(cli.setpaymasterenabled(True)["enabled"], True)
 
@@ -159,7 +165,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
 
         self.log.info("Advertise independent 0.50% and 2.00% USER_PAID offers")
         cheap_identity = self.configure_provider(
-            cheap, cheap_cli, "Cheap Independent Provider", 50)
+            cheap, cheap_cli, "Cheap Independent Provider", 50, 100)
         expensive_identity = self.configure_provider(
             expensive, expensive_cli, "Expensive Independent Provider", 200)
         self.sync_mempools()
@@ -208,6 +214,27 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             [offer["service_fee_cents"] for offer in offers], [5, 20])
         assert_equal(
             [offer["user_total_cents"] for offer in offers], [1_005, 1_020])
+
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 1_000,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
+        capped_amount_offers = [
+            offer for offer in client.getpaymasteroffers(
+                50_000, {"maximum_paymaster_fee_cents": 1_000})
+            if offer["provider_id"] in provider_ids
+        ]
+        assert_equal(len(capped_amount_offers), 2)
+        assert_equal(
+            [offer["service_fee_cents"] for offer in capped_amount_offers],
+            [100, 1_000])
+        assert_equal(
+            [offer["maximum_user_paid_service_fee_cents"]
+             for offer in capped_amount_offers], [100, 0])
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
 
         capped_offers = client.getpaymasteroffers(1_000, {
             "maximum_paymaster_fee_cents": 10,

@@ -2701,6 +2701,41 @@ BOOST_AUTO_TEST_CASE(manager_token_bucket_refill_saturates_near_time_maximum)
                 DirectEnqueueResult::RATE_LIMITED);
 }
 
+BOOST_AUTO_TEST_CASE(announcement_v6_signs_fee_cap_and_v5_keeps_legacy_layout)
+{
+    Announcement announcement;
+    announcement.offers.push_back(
+        {uint256S("61"), uint256S("62"), FundingModel::USER_PAID,
+         SponsorshipScope::PUBLIC, 50, DDCents{100}, DDCents{100000},
+         DDCents{100}});
+    const uint256 original_hash = GetAnnouncementSignatureHash(announcement);
+
+    CDataStream current_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    current_stream << announcement;
+    Announcement current_decoded;
+    current_stream >> current_decoded;
+    BOOST_REQUIRE_EQUAL(current_decoded.offers.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        current_decoded.offers.front().maximum_user_paid_service_fee.value,
+        100);
+    BOOST_CHECK_EQUAL(GetAnnouncementSignatureHash(current_decoded),
+                      original_hash);
+    current_decoded.offers.front().maximum_user_paid_service_fee = DDCents{101};
+    BOOST_CHECK(GetAnnouncementSignatureHash(current_decoded) != original_hash);
+
+    announcement.version = 5;
+    const uint256 legacy_hash = GetAnnouncementSignatureHash(announcement);
+    announcement.offers.front().maximum_user_paid_service_fee = DDCents{101};
+    BOOST_CHECK_EQUAL(GetAnnouncementSignatureHash(announcement), legacy_hash);
+    CDataStream legacy_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+    legacy_stream << announcement;
+    Announcement legacy_decoded;
+    legacy_stream >> legacy_decoded;
+    BOOST_REQUIRE_EQUAL(legacy_decoded.offers.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        legacy_decoded.offers.front().maximum_user_paid_service_fee.value, 0);
+}
+
 BOOST_AUTO_TEST_CASE(manager_announcement_limits_apply_before_expensive_validation)
 {
     Manager manager{true};

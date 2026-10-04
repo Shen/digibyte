@@ -2279,7 +2279,8 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
     if ((effective_models & FUNDING_MODEL_USER_PAID) != 0) {
         announcement.offers.push_back({GetOfferId(identity, policy_hash, FundingModel::USER_PAID), policy_hash,
                                        FundingModel::USER_PAID, SponsorshipScope::PUBLIC, policy.fee_rate_bps,
-                                       policy.min_payment, policy.max_payment});
+                                       policy.min_payment, policy.max_payment,
+                                       policy.maximum_user_paid_service_fee});
     }
     if ((effective_models & FUNDING_MODEL_SPONSORED) != 0 &&
         policy.sponsorship_scope == SponsorshipScope::PUBLIC) {

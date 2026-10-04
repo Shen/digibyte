@@ -283,7 +283,8 @@ struct ClientFeeLedger {
 };
 
 struct ProviderPolicy {
-    static constexpr uint16_t CURRENT_VERSION{1};
+    static constexpr uint16_t LEGACY_VERSION{1};
+    static constexpr uint16_t CURRENT_VERSION{2};
 
     uint16_t version{CURRENT_VERSION};
     uint8_t funding_models{0};
@@ -293,13 +294,16 @@ struct ProviderPolicy {
     DDCents max_payment;
     int64_t quote_ttl{DEFAULT_QUOTE_TTL_SECONDS};
     DGBSatoshis maximum_network_fee;
+    DDCents maximum_user_paid_service_fee;
 
     SERIALIZE_METHODS(ProviderPolicy, obj)
     {
         READWRITE(obj.version, obj.funding_models,
                   Using<EnumByteFormatter<static_cast<uint8_t>(SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),
-                  obj.fee_rate_bps, obj.min_payment, obj.max_payment,
+                  obj.fee_rate_bps);
+        READWRITE(obj.min_payment, obj.max_payment,
                   obj.quote_ttl, obj.maximum_network_fee);
+        if (obj.version >= 2) READWRITE(obj.maximum_user_paid_service_fee);
     }
 };
 

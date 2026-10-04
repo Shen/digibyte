@@ -1,7 +1,7 @@
 # DigiDollar Paymaster design specification
 
 **Source:** `integration/paymaster-v9.26.6rc2` at `a4f17f6315`.
-**Reconciled:** 2026-09-23. **Feature milestone:** V1. **Wire protocol:** V5.
+**Reconciled:** 2026-10-02. **Feature milestone:** V1. **Wire protocol:** V6.
 
 This document replaces the earlier concept draft with the design implemented
 in the inspected branch. The filename is retained for existing references and
@@ -61,13 +61,18 @@ DD uses integer cents; DGB uses integer satoshis. User-paid fees use checked
 integer arithmetic, rounded up to one cent:
 
 ```text
-fee_cents = ceil(recipient_cents * fee_rate_bps / 10000)
+percentage_fee_cents = ceil(recipient_cents * fee_rate_bps / 10000)
+service_fee_cents = maximum_user_paid_service_fee_cents == 0
+	? percentage_fee_cents
+	: min(percentage_fee_cents, maximum_user_paid_service_fee_cents)
 user_DD_in = recipient_DD + user_DD_change + service_fee_DD
 provider_DGB_in = provider_DGB_change + miner_fee_DGB
 ```
 
 Every DD output remains between 100 and 10,000,000 cents and total DD is
-conserved. A 1-to-99-cent fee uses a confirmed provider-owned DD carrier whose
+conserved. A positive maximum user-paid service fee is a per-transfer ceiling;
+zero means uncapped. It is bound into the provider policy hash and signed V6
+offer terms. A 1-to-99-cent fee uses a confirmed provider-owned DD carrier whose
 replacement output returns principal plus fee. A fee of at least 100 cents can
 use a normal provider-fee output. Zero-fee sponsorship needs no unused carrier.
 See the [worked carrier example](doc/digidollar-paymaster-implementation.md#why-a-carrier-is-needed).

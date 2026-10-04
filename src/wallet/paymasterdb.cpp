@@ -1068,9 +1068,16 @@ bool WalletBatch::WritePaymasterPolicy(const DigiDollar::Paymaster::ProviderPoli
 DatabaseReadStatus WalletBatch::ReadPaymasterPolicyWithStatus(
     DigiDollar::Paymaster::ProviderPolicy& policy)
 {
+    policy = DigiDollar::Paymaster::ProviderPolicy{};
     std::string error;
-    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
-        DBKeys::PAYMASTER_POLICY, policy);
+    const DatabaseReadStatus status =
+        m_batch->ReadWithStatus(DBKeys::PAYMASTER_POLICY, policy);
+    if ((status == DatabaseReadStatus::FOUND ||
+         status == DatabaseReadStatus::READ_ERROR) &&
+        policy.version != DigiDollar::Paymaster::ProviderPolicy::LEGACY_VERSION &&
+        policy.version != DigiDollar::Paymaster::ProviderPolicy::CURRENT_VERSION) {
+        return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    }
     if (status != DatabaseReadStatus::FOUND) return status;
     return DigiDollar::Paymaster::ValidateProviderPolicy(policy, error)
                ? DatabaseReadStatus::FOUND

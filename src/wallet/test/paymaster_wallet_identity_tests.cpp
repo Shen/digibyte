@@ -535,6 +535,7 @@ BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
         ProviderPolicy policy;
         policy.funding_models = FUNDING_MODEL_USER_PAID;
         policy.fee_rate_bps = 40;
+        policy.maximum_user_paid_service_fee = DDCents{100};
         policy.min_payment = DDCents{100};
         policy.max_payment = DDCents{100000};
         policy.maximum_network_fee = DGBSatoshis{1000};
@@ -605,6 +606,8 @@ BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
     BOOST_CHECK_EQUAL(restored_finance.events.front().dd_income.value, 3);
     BOOST_CHECK_EQUAL(restored_settings.policy_hash,
                       GetProviderPolicyHash(restored_policy));
+    BOOST_CHECK_EQUAL(
+        restored_policy.maximum_user_paid_service_fee.value, 100);
     BOOST_CHECK(restored_settings.enabled);
     BOOST_CHECK_EQUAL(
         restored_safety.user_paid.maximum_network_fee_per_transaction.value,
@@ -613,6 +616,15 @@ BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
     BOOST_REQUIRE_EQUAL(restored_pool.size(), 1U);
     BOOST_CHECK(restored_pool.front().outpoint == COutPoint(uint256S("33"), 0));
     BOOST_CHECK(ProviderBackupRequired(restored_backup));
+
+    ProviderPolicy legacy_policy = restored_policy;
+    legacy_policy.version = ProviderPolicy::LEGACY_VERSION;
+    legacy_policy.maximum_user_paid_service_fee = DDCents{0};
+    BOOST_REQUIRE(backup_batch.WritePaymasterPolicy(legacy_policy));
+    ProviderPolicy legacy_restored;
+    BOOST_REQUIRE(backup_batch.ReadPaymasterPolicy(legacy_restored));
+    BOOST_CHECK_EQUAL(legacy_restored.version, 1);
+    BOOST_CHECK_EQUAL(legacy_restored.maximum_user_paid_service_fee.value, 0);
 
     BOOST_REQUIRE(MarkPaymasterProviderBackupCompleted(m_wallet, 103, error));
     BOOST_REQUIRE(GetPaymasterProviderBackupStatus(

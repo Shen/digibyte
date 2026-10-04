@@ -5009,6 +5009,8 @@ UniValue ProviderPolicyToJSON(const DigiDollar::Paymaster::ProviderPolicy& polic
     result.pushKV("sponsorship_scope",
                   policy.sponsorship_scope == SponsorshipScope::PUBLIC ? "public" : "restricted");
     result.pushKV("fee_rate_bps", policy.fee_rate_bps);
+    result.pushKV("maximum_user_paid_service_fee_cents",
+                  policy.maximum_user_paid_service_fee.value);
     result.pushKV("min_amount_cents", policy.min_payment.value);
     result.pushKV("max_amount_cents", policy.max_payment.value);
     result.pushKV("quote_ttl", policy.quote_ttl);
@@ -5024,6 +5026,7 @@ DigiDollar::Paymaster::ProviderPolicy ParseProviderPolicy(const UniValue& value)
                     {{"funding_models", UniValueType(UniValue::VARR)},
                      {"sponsorship_scope", UniValueType(UniValue::VSTR)},
                      {"fee_rate_bps", UniValueType(UniValue::VNUM)},
+                     {"maximum_user_paid_service_fee_cents", UniValueType(UniValue::VNUM)},
                      {"min_amount_cents", UniValueType(UniValue::VNUM)},
                      {"max_amount_cents", UniValueType(UniValue::VNUM)},
                      {"quote_ttl", UniValueType(UniValue::VNUM)},
@@ -5052,6 +5055,11 @@ DigiDollar::Paymaster::ProviderPolicy ParseProviderPolicy(const UniValue& value)
     else
         throw JSONRPCError(RPC_INVALID_PARAMETER, "sponsorship_scope must be public or restricted");
     policy.fee_rate_bps = value.find_value("fee_rate_bps").getInt<uint32_t>();
+    if (!value.find_value("maximum_user_paid_service_fee_cents").isNull()) {
+        policy.maximum_user_paid_service_fee = DDCents{
+            value.find_value("maximum_user_paid_service_fee_cents")
+                .getInt<int64_t>()};
+    }
     policy.min_payment = DDCents{value.find_value("min_amount_cents").getInt<int64_t>()};
     policy.max_payment = DDCents{value.find_value("max_amount_cents").getInt<int64_t>()};
     policy.quote_ttl = value.find_value("quote_ttl").getInt<int64_t>();

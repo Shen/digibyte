@@ -98,6 +98,33 @@ BOOST_AUTO_TEST_CASE(offers_are_sorted_by_exact_rounded_total_cost)
     BOOST_CHECK_EQUAL(candidates[2].service_fee.value, 6);
 }
 
+BOOST_AUTO_TEST_CASE(user_paid_offer_cap_controls_displayed_fee_and_gross_split)
+{
+    constexpr int64_t now = 225000;
+    CKey key;
+    Announcement announcement = MakeAnnouncement(
+        key, uint256S("1a"), FundingModel::USER_PAID, 50, now);
+    announcement.offers.front().maximum_user_paid_service_fee = DDCents{100};
+    std::string error;
+
+    const auto additive = BuildOfferCandidates(
+        {announcement}, DDCents{50000}, FUNDING_MODEL_USER_PAID,
+        DDCents{1000}, {}, now, error);
+    BOOST_REQUIRE_MESSAGE(error.empty(), error);
+    BOOST_REQUIRE_EQUAL(additive.size(), 1U);
+    BOOST_CHECK_EQUAL(additive.front().service_fee.value, 100);
+    BOOST_CHECK_EQUAL(additive.front().user_total.value, 50100);
+
+    const auto gross = BuildGrossOfferCandidates(
+        {announcement}, DDCents{50100}, FUNDING_MODEL_USER_PAID,
+        DDCents{1000}, {}, now, error);
+    BOOST_REQUIRE_MESSAGE(error.empty(), error);
+    BOOST_REQUIRE_EQUAL(gross.size(), 1U);
+    BOOST_CHECK_EQUAL(gross.front().payment.value, 50000);
+    BOOST_CHECK_EQUAL(gross.front().service_fee.value, 100);
+    BOOST_CHECK_EQUAL(gross.front().user_total.value, 50100);
+}
+
 BOOST_AUTO_TEST_CASE(gross_offers_maximize_recipient_and_require_exact_split)
 {
     constexpr int64_t now = 250000;

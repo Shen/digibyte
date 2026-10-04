@@ -79,7 +79,9 @@ bool PolicyAllowsFundingModel(const ProviderPolicy& policy, FundingModel model)
 bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
 {
     error.clear();
-    if (policy.version != ProviderPolicy::CURRENT_VERSION || policy.funding_models == 0 ||
+    if ((policy.version != ProviderPolicy::LEGACY_VERSION &&
+         policy.version != ProviderPolicy::CURRENT_VERSION) ||
+        policy.funding_models == 0 ||
         (policy.funding_models & ~FUNDING_MODEL_ALL) != 0) {
         error = "PAYMASTER_INVALID_FUNDING_MODELS";
         return false;
@@ -90,11 +92,15 @@ bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
         return false;
     }
     if (policy.sponsorship_scope == SponsorshipScope::RESTRICTED &&
-        (policy.funding_models != FUNDING_MODEL_SPONSORED || policy.fee_rate_bps != 0)) {
+        (policy.funding_models != FUNDING_MODEL_SPONSORED ||
+         policy.fee_rate_bps != 0 ||
+         policy.maximum_user_paid_service_fee.value != 0)) {
         error = "PAYMASTER_INVALID_RESTRICTED_POLICY";
         return false;
     }
-    if (!PolicyAllowsFundingModel(policy, FundingModel::USER_PAID) && policy.fee_rate_bps != 0) {
+    if (!PolicyAllowsFundingModel(policy, FundingModel::USER_PAID) &&
+        (policy.fee_rate_bps != 0 ||
+         policy.maximum_user_paid_service_fee.value != 0)) {
         error = "PAYMASTER_SPONSORED_FEE";
         return false;
     }
@@ -105,6 +111,13 @@ bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
     if (policy.min_payment.value < 100 || policy.max_payment.value > MAX_DD_OUTPUT_CENTS ||
         policy.min_payment.value > policy.max_payment.value) {
         error = "PAYMASTER_INVALID_PAYMENT_RANGE";
+        return false;
+    }
+    if (policy.maximum_user_paid_service_fee.value < 0 ||
+        policy.maximum_user_paid_service_fee.value > MAX_DD_OUTPUT_CENTS ||
+        (policy.version == ProviderPolicy::LEGACY_VERSION &&
+         policy.maximum_user_paid_service_fee.value != 0)) {
+        error = "PAYMASTER_INVALID_SERVICE_FEE_CAP";
         return false;
     }
     if (policy.quote_ttl <= 0 || policy.quote_ttl > MAX_QUOTE_TTL_SECONDS) {

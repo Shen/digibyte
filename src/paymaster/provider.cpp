@@ -1888,7 +1888,10 @@ ProviderPoolReadiness EvaluateProviderPoolReadiness(
 
 uint256 GetProviderPolicyHash(const ProviderPolicy& policy)
 {
-    HashWriter hasher = TaggedHash("DigiByte Paymaster Policy v1");
+    HashWriter hasher = TaggedHash(
+        policy.version == ProviderPolicy::LEGACY_VERSION
+            ? "DigiByte Paymaster Policy v1"
+            : "DigiByte Paymaster Policy v2");
     hasher << policy;
     return hasher.GetSHA256();
 }
@@ -1917,7 +1920,9 @@ std::optional<ServiceFeePlan> EvaluateServiceFee(const ProviderPolicy& policy,
 
     DDCents fee{0};
     if (model == FundingModel::USER_PAID) {
-        const auto computed = ComputePaymasterFee(payment, policy.fee_rate_bps);
+        const auto computed = ComputePaymasterFee(
+            payment, policy.fee_rate_bps,
+            policy.maximum_user_paid_service_fee);
         if (!computed) {
             error = "PAYMASTER_INVALID_SERVICE_FEE";
             return std::nullopt;

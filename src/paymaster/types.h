@@ -27,9 +27,10 @@ namespace DigiDollar::Paymaster {
 // fewer nor different provider resources than its validated snapshot.
 // Version 5 binds the complete local client order (canonical request,
 // requested fee mode, privacy profile, and provider-selection mode) into the
-// signed payment intent and every derived authorization artifact.
+// signed payment intent and every derived authorization artifact. Version 6
+// adds the provider's maximum user-paid service fee to signed announcements.
 // Recovery messages are never downgraded to the regular quote flow.
-static constexpr uint16_t PROTOCOL_VERSION{5};
+static constexpr uint16_t PROTOCOL_VERSION{6};
 /** SENDPMASTERS capability used by the outbound half of a short-lived
  * paymaster connection. The accepting peer uses it to classify its locally
  * INBOUND half as the same isolated direct channel.
@@ -110,18 +111,21 @@ struct EnumByteFormatter {
     }
 };
 
-/** Return the rounded-up percentage fee, or nullopt for an invalid payment,
- * rate, or arithmetic overflow.
+/** Return the rounded-up percentage fee, limited by a positive maximum;
+ * maximum zero means uncapped. Return nullopt for invalid inputs or overflow.
  */
-std::optional<DDCents> ComputePaymasterFee(DDCents payment, uint32_t fee_rate_bps);
+std::optional<DDCents> ComputePaymasterFee(
+    DDCents payment, uint32_t fee_rate_bps,
+    DDCents maximum_service_fee = DDCents{});
 
-/** Invert the rounded Paymaster fee formula for a fixed total wallet
- * outflow. Returns the unique recipient payment whose rounded service fee
- * makes payment + fee exactly equal gross_amount, or nullopt when the
- * cent-granular rounding leaves no exact solution. */
+/** Invert the capped rounded Paymaster fee formula for a fixed total wallet
+ * outflow. Returns the unique recipient payment whose service fee makes
+ * payment + fee exactly equal gross_amount, or nullopt when no exact cent
+ * split exists. A zero maximum means uncapped. */
 std::optional<DDCents> ComputePaymasterPaymentFromGross(
     DDCents gross_amount,
-    uint32_t fee_rate_bps);
+    uint32_t fee_rate_bps,
+    DDCents maximum_service_fee = DDCents{});
 
 /** V1 request IDs are lowercase RFC 4122 textual UUIDs (8-4-4-4-12). */
 bool IsCanonicalRequestId(std::string_view request_id);

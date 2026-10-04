@@ -10,14 +10,19 @@
 
 #include <paymaster/types.h>
 
+#include <algorithm>
 #include <limits>
 
 namespace DigiDollar::Paymaster {
 
-std::optional<DDCents> ComputePaymasterFee(DDCents payment, uint32_t fee_rate_bps)
+std::optional<DDCents> ComputePaymasterFee(DDCents payment,
+                                         uint32_t fee_rate_bps,
+                                         DDCents maximum_service_fee)
 {
     if (payment.value <= 0 || payment.value > MAX_DD_OUTPUT_CENTS ||
-        fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0) {
+        fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0 ||
+        maximum_service_fee.value < 0 ||
+        maximum_service_fee.value > MAX_DD_OUTPUT_CENTS) {
         return std::nullopt;
     }
 
@@ -26,17 +31,23 @@ std::optional<DDCents> ComputePaymasterFee(DDCents payment, uint32_t fee_rate_bp
     }
     const int64_t numerator = payment.value * fee_rate_bps;
     if (numerator > std::numeric_limits<int64_t>::max() - 9999) return std::nullopt;
-    const int64_t rounded = (numerator + 9999) / 10000;
+    int64_t rounded = (numerator + 9999) / 10000;
+    if (maximum_service_fee.value > 0) {
+        rounded = std::min(rounded, maximum_service_fee.value);
+    }
     if (rounded > MAX_DD_OUTPUT_CENTS - payment.value) return std::nullopt;
     return DDCents{rounded};
 }
 
 std::optional<DDCents> ComputePaymasterPaymentFromGross(
     DDCents gross_amount,
-    uint32_t fee_rate_bps)
+    uint32_t fee_rate_bps,
+    DDCents maximum_service_fee)
 {
     if (gross_amount.value <= 0 || gross_amount.value > MAX_DD_OUTPUT_CENTS ||
-        fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0) {
+        fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0 ||
+        maximum_service_fee.value < 0 ||
+        maximum_service_fee.value > MAX_DD_OUTPUT_CENTS) {
         return std::nullopt;
     }
 
@@ -47,7 +58,8 @@ std::optional<DDCents> ComputePaymasterPaymentFromGross(
     int64_t high{gross_amount.value};
     while (low <= high) {
         const int64_t payment = low + (high - low) / 2;
-        const auto fee = ComputePaymasterFee(DDCents{payment}, fee_rate_bps);
+        const auto fee = ComputePaymasterFee(DDCents{payment}, fee_rate_bps,
+                                            maximum_service_fee);
         // Inputs and rate were prevalidated above. In this bounded domain a
         // null fee at a probe can only mean payment + fee exceeds the global
         // DD-output ceiling, so the exact solution (if any) is lower.

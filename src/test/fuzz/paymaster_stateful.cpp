@@ -53,7 +53,7 @@ void initialize_paymaster_stateful()
 {
     ECC_Start();
     SelectParams(ChainType::REGTEST);
-    assert(DigiDollar::Paymaster::PROTOCOL_VERSION == 5);
+    assert(DigiDollar::Paymaster::PROTOCOL_VERSION == 6);
     assert(PaymentIntent::CURRENT_VERSION == 2);
     assert(ClientAuthorizationManifest::CURRENT_VERSION == 4);
     assert(AlternativeRecoveryRequest::CURRENT_VERSION == 2);
