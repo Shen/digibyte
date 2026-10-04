@@ -18,7 +18,7 @@ from test_framework.paymaster import (
     provider_safety_policy,
 )
 from test_framework.test_framework import DigiByteTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 class PaymasterOfferSelectionTest(DigiByteTestFramework):
@@ -536,6 +536,56 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             expensive_safety_after["completed_last_day"],
             expensive_safety_before["completed_last_day"])
         assert_equal(self.reserved_operational_entries(expensive), [])
+
+        self.log.info("Explicitly choose the more expensive provider without signing")
+        current_offers = client.getpaymasteroffers(1_000)
+        chosen_offer = next(offer for offer in current_offers
+                            if offer["provider_id"] == expensive_identity["provider_id"])
+        assert_equal(chosen_offer["recommendation_deprioritized"], False)
+        chosen_options = dict(options,
+                              request_id="550e8400-e29b-41d4-a716-446655442002",
+                              preferred_provider_id=chosen_offer["provider_id"],
+                              preferred_offer_id=chosen_offer["offer_id"],
+                              prepare_only=True)
+        unavailable_options = dict(chosen_options, preferred_offer_id="00" * 31 + "01")
+        assert_raises_rpc_error(-4, "PAYMASTER_SELECTED_OFFER_UNAVAILABLE",
+                                client.senddigidollar, recipient_address, 1_000,
+                                "", 0, None, "cents", unavailable_options)
+
+        def prepare_chosen():
+            prepared = client.senddigidollar(recipient_address, 1_000, "", 0,
+                                             None, "cents", chosen_options)
+            assert_equal(prepared["provider_id"], expensive_identity["provider_id"])
+            return prepared
+
+        prepare_chosen()
+        cheap_offer = next(offer for offer in current_offers
+                           if offer["provider_id"] == cheap_identity["provider_id"])
+        changed_options = dict(chosen_options,
+                               preferred_provider_id=cheap_offer["provider_id"],
+                               preferred_offer_id=cheap_offer["offer_id"])
+        assert_raises_rpc_error(-4, "PAYMASTER_REQUEST_ID_CONFLICT",
+                                client.senddigidollar, recipient_address, 1_000,
+                                "", 0, None, "cents", changed_options)
+        chosen_quote = {}
+
+        def process_chosen_quote():
+            nonlocal chosen_quote
+            prepare_chosen()
+            assert_equal(cheap.processpaymasterrequests()["processed"], False)
+            response = expensive.processpaymasterrequests()
+            if not response["processed"] or response["message_type"] != "quote":
+                return False
+            assert_equal(response["request_id"], chosen_options["request_id"])
+            chosen_quote = response
+            return True
+
+        self.wait_until(process_chosen_quote)
+        self.wait_until(lambda: prepare_chosen()["attempt_state"] == "QUOTED")
+        client.resolvepaymastersession({"request_id": chosen_options["request_id"]},
+                                      "abandon_unsigned")
+        expensive.cancelpaymasterquote(chosen_quote["attempt_id"])
+        assert_equal(expensive.getpaymasterfinancestatus()["successful_transfers"], 0)
 
         self.log.info("Expire stale announcements and accept a fresh replacement")
         active_announcements = [

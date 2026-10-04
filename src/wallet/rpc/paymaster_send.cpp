@@ -31,6 +31,8 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
         const bool attempts_supplied = !send_options.find_value("maximum_provider_attempts").isNull();
         const bool privacy_supplied = !send_options.find_value("privacy").isNull();
         const bool selection_supplied = !send_options.find_value("selection").isNull();
+        const bool preferred_provider_supplied = !send_options.find_value("preferred_provider_id").isNull();
+        const bool preferred_offer_supplied = !send_options.find_value("preferred_offer_id").isNull();
         const bool restricted_key_supplied = !send_options.find_value("provider_identity_key").isNull();
         const bool restricted_descriptor_supplied =
             !send_options.find_value("restricted_service_descriptor").isNull();
@@ -52,6 +54,8 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
                          {"maximum_provider_attempts", UniValueType(UniValue::VNUM)},
                           {"privacy", UniValueType(UniValue::VSTR)},
                           {"selection", UniValueType(UniValue::VSTR)},
+                          {"preferred_provider_id", UniValueType(UniValue::VSTR)},
+                          {"preferred_offer_id", UniValueType(UniValue::VSTR)},
                           {"provider_identity_key", UniValueType(UniValue::VSTR)},
                           {"restricted_service_descriptor", UniValueType(UniValue::VSTR)},
                           {"sponsorship_capability", UniValueType(UniValue::VSTR)},
@@ -69,6 +73,7 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
         else throw JSONRPCError(RPC_INVALID_PARAMETER, "fee_mode must be dgb, paymaster, or auto");
         if (fee_mode == DigiDollar::Paymaster::FeeMode::DGB &&
             (fee_cap_supplied || attempts_supplied || privacy_supplied || selection_supplied ||
+             preferred_provider_supplied || preferred_offer_supplied ||
              restricted_key_supplied || restricted_descriptor_supplied ||
              restricted_capability_supplied || prepare_only_supplied ||
              authorization_commitment_supplied || subtract_fee_supplied ||
@@ -120,6 +125,17 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
         }
 
         const bool restricted = restricted_context_supplied;
+        if (preferred_provider_supplied != preferred_offer_supplied ||
+            (restricted && preferred_provider_supplied)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "preferred_provider_id and preferred_offer_id must be supplied together for a public offer");
+        }
+        if (preferred_provider_supplied) {
+            if (ParseHashO(send_options, "preferred_provider_id").IsNull() ||
+                ParseHashO(send_options, "preferred_offer_id").IsNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Preferred provider and offer must be non-null");
+            }
+        }
         if (restricted && !(restricted_key_supplied && restricted_descriptor_supplied &&
                             restricted_capability_supplied)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER,

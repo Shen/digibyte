@@ -2215,6 +2215,8 @@ RPCHelpMan senddigidollar()
                             {"maximum_provider_attempts", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Strictly sequential provider-attempt limit (default 3; high privacy requires 1)"},
                              {"privacy", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "standard (default) or high"},
                              {"selection", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "lowest_total_cost (default) or privacy_weighted"},
+                             {"preferred_provider_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional exact first public provider; supply with preferred_offer_id. Unavailability fails rather than silently choosing another provider"},
+                             {"preferred_offer_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact first public offer from getpaymasteroffers; supply with preferred_provider_id"},
                              {"provider_identity_key", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Restricted sponsorship provider x-only identity"},
                              {"restricted_service_descriptor", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Canonical provider-signed restricted descriptor"},
                              {"sponsorship_capability", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Secret one-payment capability; use authenticated RPC, never shell history"},

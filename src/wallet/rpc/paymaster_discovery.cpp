@@ -1431,6 +1431,12 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
     }
 
     const bool have_restricted_key = !options.find_value("provider_identity_key").isNull();
+    std::optional<PaymasterId> preferred_provider;
+    std::optional<uint256> preferred_offer;
+    if (!options.find_value("preferred_provider_id").isNull()) {
+        preferred_provider = ParseHashO(options, "preferred_provider_id");
+        preferred_offer = ParseHashO(options, "preferred_offer_id");
+    }
     const bool have_restricted_descriptor =
         !options.find_value("restricted_service_descriptor").isNull();
     const bool have_restricted_capability =
@@ -1668,6 +1674,27 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
     PaymentSession persisted_session;
     const bool have_persisted_session =
         store.GetSessionByRequestId(request_id, persisted_session);
+    if (preferred_provider && have_persisted_session && !IsTerminal(persisted_session.state) &&
+        !persisted_session.attempt_ids.empty()) {
+        // The initial choice is durably bound by the first attempt. A changed
+        // preference cannot retarget an existing order, including a replay.
+        ProviderAttempt first_attempt;
+        if (!store.GetAttempt(persisted_session.attempt_ids.front(), first_attempt)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
+        }
+        PaymentIntent first_intent;
+        try {
+            SpanReader stream{::PROTOCOL_VERSION, first_attempt.unsigned_intent};
+            stream >> first_intent;
+            if (!stream.empty()) throw std::runtime_error("Trailing intent data");
+        } catch (const std::exception&) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
+        }
+        if (first_attempt.provider_id != *preferred_provider ||
+            first_intent.offer_id != *preferred_offer) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_REQUEST_ID_CONFLICT");
+        }
+    }
     if (have_persisted_session) {
         if (IsTerminal(persisted_session.state)) {
             // After pruning, the current format retains the order hash but
@@ -1778,6 +1805,15 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
                                         [](const OfferCandidate& candidate) { return !candidate.endpoint.IsTor(); }),
                          candidates.end());
+    }
+    if (preferred_provider && persisted_session.attempt_ids.empty()) {
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+            [&](const OfferCandidate& candidate) {
+                return candidate.provider_id != *preferred_provider || candidate.terms.offer_id != *preferred_offer;
+            }), candidates.end());
+        if (candidates.empty()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_SELECTED_OFFER_UNAVAILABLE");
+        }
     }
     std::optional<OfferCandidate> selected;
     if (persisted_selection) {

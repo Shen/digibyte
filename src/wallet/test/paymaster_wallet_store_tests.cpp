@@ -2833,6 +2833,35 @@ BOOST_AUTO_TEST_CASE(unavailable_submit_rejection_and_pool_release_are_atomic)
 
 
 
+BOOST_AUTO_TEST_CASE(send_preferred_public_offer_is_an_explicit_pair)
+{
+    JSONRPCRequest request;
+    const auto set_options = [&](const UniValue& value) {
+        request.params = UniValue{UniValue::VARR};
+        for (int i = 0; i < 6; ++i) request.params.push_back(UniValue{});
+        request.params.push_back(value);
+    };
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("fee_mode", "paymaster");
+    options.pushKV("request_id", "550e8400-e29b-41d4-a716-446655440048");
+    options.pushKV("maximum_paymaster_fee_cents", 100);
+    options.pushKV("preferred_provider_id", std::string(64, 'a'));
+    set_options(options);
+    BOOST_CHECK_THROW(ParsePaymasterSendOptions(request), UniValue);
+    options.pushKV("preferred_offer_id", std::string(64, 'b'));
+    set_options(options);
+    auto parsed = ParsePaymasterSendOptions(request);
+    BOOST_CHECK_EQUAL(parsed.send_options.find_value("preferred_provider_id").get_str(), std::string(64, 'a'));
+    BOOST_CHECK_EQUAL(parsed.send_options.find_value("preferred_offer_id").get_str(), std::string(64, 'b'));
+    options.pushKV("preferred_offer_id", std::string(64, '0'));
+    set_options(options);
+    BOOST_CHECK_THROW(ParsePaymasterSendOptions(request), UniValue);
+    options.pushKV("preferred_offer_id", std::string(64, 'b'));
+    options.pushKV("fee_mode", "dgb");
+    set_options(options);
+    BOOST_CHECK_THROW(ParsePaymasterSendOptions(request), UniValue);
+}
+
 BOOST_AUTO_TEST_CASE(unavailable_unsigned_provider_observation_is_idempotent)
 {
     PaymasterStore store{m_wallet};
