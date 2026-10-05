@@ -14,6 +14,9 @@ testing spent inputs, returning the original confirmed payment instead of prepar
 recovery. The fix applies to Qt and RPC/CLI through shared wallet Core. Accepted
 manifests, all final signatures, atomic fee settlement, normal retention and
 read-only status contracts remain required; no retry authority or payment is created.
+Qt also accepts that validated local confirmation without a provider-result envelope.
+Unknown result states and terminal states without current payment evidence remain
+insufficient to show success.
 
 ## Provider process display
 

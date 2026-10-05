@@ -2127,6 +2127,25 @@ Full builds, complete suites and the multi-process lifecycle test were not run
 for this checkpoint. Use the existing Windows build/run commands in this runbook
 for operator verification; this result is not a release gate completion.
 
+The follow-up Qt completion guard accepts Core-validated local confirmation without
+requiring a provider-result envelope. Eleven focused native Qt cases passed:
+confirmation observation, material-change guard, seven recovery outcomes (including
+`original_confirmed`), bound session RPC actions and fail-closed recovery expiry.
+The existing RPC-action theme test initially failed in both the previous and new
+test executable. Its fixture now switches the application stylesheet consistently,
+polishes the parent and inspects an exposed dialog in both themes. Both theme
+assertions pass; the application theme implementation was not changed.
+
+Run these Qt entries with `DIGIBYTE_QT_TEST_SUITE=PaymasterWidgetTests`,
+`QT_QPA_PLATFORM=windows` and `DIGIBYTE_QT_TEST_FUNCTION` set to the selected name:
+`paymasterClientConfirmationRequiresObservation`,
+`paymasterConfirmationGuardDetectsMaterialChanges`,
+`paymasterClientLiveRecoveryProgresses`,
+`paymasterClientSessionRpcActionsAreBound` or
+`paymasterClientRecoveryExpiryIsFailClosed`. The isolated application candidate
+was installed only after the operator closed both live wallets and its SHA-256
+was verified against the tested candidate; the previous EXE/PDB were backed up.
+
 ### Retry after provider replay-journal pruning (2026-10-01)
 
 The preceding regression covered a retained provider reply, not its removal at

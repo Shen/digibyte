@@ -1447,6 +1447,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   controls, persistent-session presentation, polling, exact-offer confirmation,
   retries and recovery. It reuses `WalletModel::executeRpcAsync` and the existing
   confirmation guards; Core remains authoritative for spending and persistence.
+- `IsValidatedPaymasterCompletion` in `paymasterconfirmation.h` also accepts a
+  confirmed, Core-validated recipient payment with no provider-result envelope.
+  Terminal state alone and unknown result states remain insufficient.
+  `paymasterClientLiveRecoveryProgresses(original_confirmed)` checks that the
+  original payment completes without a recovery review or another recovery call.
 - Main-view public offer cards show exact fees/totals and a preselected cheapest
   suitable recommendation. Manual choices survive refresh; editing compose
   inputs/wallet changes clears them. Paired `senddigidollar` preferences select

@@ -2528,6 +2528,18 @@ void PaymasterWidgetTests::paymasterConfirmationGuardDetectsMaterialChanges()
         QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
         QStringLiteral("success"), QStringLiteral("final_committed"), true, false));
     QVERIFY(IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
+        QStringLiteral("success"), QString{}, true, true));
+    QVERIFY(!IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
+        QStringLiteral("success"), QString{}, true, false));
+    QVERIFY(!IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("CONFIRMED"),
+        QStringLiteral("success"), QStringLiteral("unknown_result"), true, true));
+    QVERIFY(!IsValidatedPaymasterCompletion(
+        QString(64, QLatin1Char('1')), QStringLiteral("PENDING_PROVIDER"),
+        QStringLiteral("success"), QString{}, true, true));
+    QVERIFY(IsValidatedPaymasterCompletion(
         QString(64, QLatin1Char('1')), QString{}, QStringLiteral("success"),
         QString{}));
     QVERIFY(!IsValidatedPaymasterCompletion(
@@ -3900,14 +3912,20 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
     QCOMPARE(exact_retries, 1);
 
     // Recovery messages use the same surface in both application themes.
+    const QString original_stylesheet = qApp->styleSheet();
     for (const auto* theme : {"dark", "light"}) {
         QFile css(QString(":/css/") + theme);
         QVERIFY(css.open(QIODevice::ReadOnly));
-        send_widget.setStyleSheet(QString::fromUtf8(css.readAll()));
+        const QString stylesheet = QString::fromUtf8(css.readAll());
+        qApp->setStyleSheet(stylesheet);
+        send_widget.setStyleSheet(stylesheet);
+        send_widget.ensurePolished();
         QMessageBox message(QMessageBox::Warning, "Exact retry paused",
             "The existing transfer could not be reconciled yet. It may already have completed.",
             QMessageBox::Ok, &send_widget);
         message.ensurePolished();
+        message.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&message));
         QCOMPARE(message.palette().color(QPalette::Window),
                  QColor(QString::fromLatin1(theme) == "dark" ? "#0b2419" : "#eef9f2"));
         const QString capture = qEnvironmentVariable("DIGIBYTE_PAYMASTER_RETRY_SCREENSHOT");
@@ -3917,6 +3935,7 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
             QVERIFY(message.grab().save(capture + "-" + theme + ".png"));
         }
     }
+    qApp->setStyleSheet(original_stylesheet);
 
 }
 
@@ -6957,7 +6976,7 @@ void PaymasterWidgetTests::paymasterClientMutationDialogWalletBinding()
 void PaymasterWidgetTests::paymasterClientLiveRecoveryProgresses_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* value : {"authorized", "cancel_review", "rpc_error", "stop", "wallet_close", "unknown_phase"})
+    for (const char* value : {"authorized", "cancel_review", "rpc_error", "stop", "wallet_close", "unknown_phase", "original_confirmed"})
         QTest::newRow(value) << QString::fromLatin1(value);
 }
 
@@ -6989,6 +7008,12 @@ void PaymasterWidgetTests::paymasterClientLiveRecoveryProgresses()
         if (params[1].get_str() == "refresh") return PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED");
         if (params[1].get_str() != "cancel_to_self") throw std::runtime_error("unexpected recovery action");
         recoveries.push_back(params);
+        if (outcome == QLatin1String("original_confirmed")) {
+            auto result = PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
+            result.pushKV("result_status", UniValue{UniValue::VNULL});
+            result.pushKV("result_sequence", UniValue{UniValue::VNULL});
+            return result;
+        }
         const auto phase = recoveries.size();
         if (phase == 2 && outcome == QLatin1String("rpc_error")) throw std::runtime_error("recovery transport failed");
         auto result = PaymasterSessionView("PENDING_PROVIDER", "alternative_recovery", "USER_SIGNED");
@@ -7021,6 +7046,13 @@ void PaymasterWidgetTests::paymasterClientLiveRecoveryProgresses()
     QVERIFY(QMetaObject::invokeMethod(client, "recoverPaymasterSessionToSelf", Qt::DirectConnection));
     QCOMPARE(recoveries.size(), size_t{1});
     const auto poll = [&] { return QMetaObject::invokeMethod(client, "pollPaymasterSession", Qt::DirectConnection); };
+    if (outcome == QLatin1String("original_confirmed")) {
+        QCOMPARE(form.findChild<QLabel*>("paymasterSessionState")->text(), QStringLiteral("Original payment confirmed"));
+        QCOMPARE(reviews, 0);
+        QVERIFY(poll());
+        QCOMPARE(recoveries.size(), size_t{1});
+        return;
+    }
     if (outcome == QLatin1String("stop") || outcome == QLatin1String("wallet_close") || outcome == QLatin1String("unknown_phase")) {
         if (outcome == QLatin1String("stop")) QVERIFY(QMetaObject::invokeMethod(client, "cancelPaymasterQuote", Qt::DirectConnection));
         if (outcome == QLatin1String("wallet_close")) form.setWalletModel(nullptr);

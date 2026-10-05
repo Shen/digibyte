@@ -733,6 +733,8 @@ already known to the client wallet after 240 confirmations, even when its provid
 reply was lost and its retry deadline has expired. This closes the stale pending
 session without another submit or fee charge. Normal receipt pruning still applies;
 the confirmed transaction remains available through the wallet transaction history.
+Qt recognizes Core's validated local confirmation even without a provider receipt;
+it does not show an unproven terminal state as a successful recipient payment.
 
 An explicit `resolvepaymastersession` `cancel_to_self` call checks the same
 validated original payment before preparing recovery. If that payment is already

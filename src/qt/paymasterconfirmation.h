@@ -60,7 +60,13 @@ inline bool IsValidatedPaymasterCompletion(const QString& txid,
     // `final` is intentionally not an input to this decision. Core uses that
     // field for every terminal session, including FAILED, CANCELED_SAFE and
     // CONFLICTED, none of which proves that the recipient was paid.
-    return direct_success || validated_result;
+    // Core can reconstruct the exact final from the accepted manifest and
+    // USER PSBT after a lost provider reply. Its validated local confirmation
+    // proves payment without inventing a signed provider result.
+    const bool validated_observation =
+        session_state == QStringLiteral("CONFIRMED") && payment_confirmed &&
+        direct_status == QStringLiteral("success") && result_status.isEmpty();
+    return direct_success || validated_result || validated_observation;
 }
 
 /** The exact user-visible fields that must be reviewed before a Paymaster

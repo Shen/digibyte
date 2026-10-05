@@ -72,6 +72,9 @@ and atomic fee settlement, without index waits or network retries. Newly recorde
 evidence survives that maintenance pass; subsequent passes use normal reorg and
 retention handling. Explicit recovery checks for this confirmed original payment
 before checking its spent inputs or preparing another provider's recovery.
+Qt accepts this Core-validated local confirmation without requiring a fabricated
+provider result. A canonical txid, current successful recipient-payment observation
+and confirmed session are still required; terminal state alone is not success.
 
 Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
 releases the original payment lease after durable preparation so the separate
