@@ -758,7 +758,8 @@ RPCHelpMan getpaymasterliquiditystatus()
             if (!wallet) return UniValue::VNULL;
             ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
             auto result = ProviderLiquidityStatusToJSON(readiness, GetTime());
-            result.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness));
+            result.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness,
+                AutomaticProviderStateIsSynchronized(*wallet)));
             return result;
         },
     };
@@ -3421,8 +3422,9 @@ RPCHelpMan getpaymasterinfo()
                                  context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
             ProviderServiceStatus service_status;
             if (context.paymaster) {
-                service_status = context.paymaster->GetProviderServiceStatus(
-                    wallet->GetName());
+                service_status = ProviderServiceStatusForObservation(
+                    context.paymaster->GetProviderServiceStatus(wallet->GetName()), readiness.ready,
+                    AutomaticProviderStateIsSynchronized(*wallet));
             }
             if (!running) {
                 if (readiness.have_settings && readiness.settings.autostart &&
@@ -3599,13 +3601,15 @@ RPCHelpMan getpaymasteroperatorinfo()
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             const auto readiness = GetProviderReadiness(*wallet, context, /*wait_for_sync=*/false, /*reconcile=*/false);
+            const bool synchronized = AutomaticProviderStateIsSynchronized(*wallet);
             const int64_t now = GetTime();
             LOCK(wallet->cs_wallet);
             UniValue result{UniValue::VOBJ}, provider{UniValue::VOBJ}, safety{UniValue::VOBJ};
             const bool running = readiness.have_identity && context.paymaster && context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
             std::string state = "stopped";
             if (running) {
-                const auto service = context.paymaster->GetProviderServiceStatus(wallet->GetName());
+                const auto service = ProviderServiceStatusForObservation(
+                    context.paymaster->GetProviderServiceStatus(wallet->GetName()), readiness.ready, synchronized);
                 state = ProviderServiceStateName(service.state);
                 if (!service.last_error.empty()) provider.pushKV("last_service_error", service.last_error);
             } else if (readiness.settings.enabled && (readiness.settings.autostart || (context.paymaster && context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id))))
@@ -3634,7 +3638,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("pool", pool_summary);
             provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
             auto liquidity = ProviderLiquidityStatusToJSON(readiness, now);
-            liquidity.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness));
+            liquidity.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness, synchronized));
             for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
                 auto counts = liquidity.find_value(key);
                 size_t reserved{0};

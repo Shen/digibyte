@@ -202,8 +202,44 @@ BOOST_AUTO_TEST_CASE(provider_automation_capacity_pause_preserves_approval)
     status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
     BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "blocked");
     BOOST_CHECK_EQUAL(status.find_value("reason").get_str(), "PAYMASTER_AUTOMATIC_SERVICE_ERROR");
+    manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::WAITING_FOR_READINESS,
+                                    "PAYMASTER_PROVIDER_SYNCING");
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness, false);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "paused");
+    BOOST_CHECK_EQUAL(status.find_value("reason").get_str(), "PAYMASTER_PROVIDER_SYNCING");
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness, true);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "ready");
+    BOOST_CHECK(status.find_value("reason").get_str().empty());
+    // Observing a recovered wait must not change the worker or wallet policy.
+    const auto worker = manager.GetProviderServiceStatus(provider_wallet.GetName());
+    BOOST_CHECK(worker.state == ProviderServiceState::WAITING_FOR_READINESS);
+    BOOST_CHECK_EQUAL(worker.last_error, "PAYMASTER_PROVIDER_SYNCING");
+    manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::FAULT,
+                                    "PAYMASTER_PROVIDER_SYNCING");
+    status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness, true);
+    BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "blocked");
     BOOST_CHECK_EQUAL(provider_wallet.GetDatabase().nUpdateCounter.load(), database_before);
     BOOST_CHECK(policy.automatic_replenishment && policy.paid_maintenance_approved);
+}
+
+BOOST_AUTO_TEST_CASE(provider_sync_observation_preserves_unresolved_gates)
+{
+    using namespace paymaster_rpc::internal;
+    for (const auto state : {ProviderServiceState::WAITING_FOR_READINESS, ProviderServiceState::FAULT,
+                            ProviderServiceState::DRAIN_ONLY, ProviderServiceState::WAITING_FOR_UNLOCK}) {
+        for (const auto* error : {"PAYMASTER_PROVIDER_SYNCING", "PAYMASTER_SUBMIT_BINDING_MISMATCH", "PAYMASTER_FUTURE_ERROR"}) {
+            const ProviderServiceStatus worker{state, error};
+            for (const bool ready : {false, true}) {
+                for (const bool synchronized : {false, true}) {
+                    const auto observation = ProviderServiceStatusForObservation(worker, ready, synchronized);
+                    const bool recovered = ready && synchronized && state == ProviderServiceState::WAITING_FOR_READINESS &&
+                        worker.last_error == "PAYMASTER_PROVIDER_SYNCING";
+                    BOOST_CHECK(observation.state == (recovered ? ProviderServiceState::ACTIVE : state));
+                    BOOST_CHECK_EQUAL(observation.last_error, recovered ? "" : error);
+                }
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(paymaster_dd_reservations_are_owned_but_not_spendable)

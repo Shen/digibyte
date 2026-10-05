@@ -245,8 +245,11 @@ UniValue LiquidityPolicyToJSON(
 DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     const ProviderReadiness& readiness,
     int64_t now);
+/** Current observation only; does not change worker state or grant authority. */
+DigiDollar::Paymaster::ProviderServiceStatus ProviderServiceStatusForObservation(
+    DigiDollar::Paymaster::ProviderServiceStatus status, bool ready, bool synchronized);
 UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
-                                        const ProviderReadiness& readiness);
+                                        const ProviderReadiness& readiness, bool synchronized = false);
 UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now);
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
                                        int64_t now);

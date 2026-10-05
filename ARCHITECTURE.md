@@ -1965,6 +1965,14 @@ share one presentation; unsaved offer drafts do not freeze Overview polling.
 Unexpected errors still override these waits; this presentation changes no
 readiness checks, spending limits, reservations or transaction handling.
 
+Read-only provider/automation observations supersede a worker's previous
+`PAYMASTER_PROVIDER_SYNCING` wait only when current readiness passes and the
+chain, wallet and transaction index agree under the existing non-blocking
+synchronization check. The worker state is not rewritten. Unresolved waits,
+faults and unknown errors retain precedence. A remaining synchronization wait
+temporarily pauses the displayed refill execution without changing saved consent.
+Payment handlers independently repeat their execution checks.
+
 `preparepaymasterpool` accepts `preview_policy` for a read-only proposed-policy
 preview before identity/configuration creation. It shares the executable funding
 calculation and cannot be executed or combined with a saved plan. Qt compares

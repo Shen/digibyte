@@ -1049,8 +1049,24 @@ UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now)
     return result;
 }
 
+DigiDollar::Paymaster::ProviderServiceStatus ProviderServiceStatusForObservation(
+    DigiDollar::Paymaster::ProviderServiceStatus status, bool ready, bool synchronized)
+{
+    using namespace DigiDollar::Paymaster;
+    // A scheduler tick can precede wallet/index notifications for a new block.
+    // Retain every genuine fault and unresolved gate. Only this exact, known
+    // transient wait may be superseded by a synchronized, ready observation.
+    // Payment handlers independently recheck synchronization before execution.
+    if (ready && synchronized && status.state == ProviderServiceState::WAITING_FOR_READINESS &&
+        status.last_error == "PAYMASTER_PROVIDER_SYNCING") {
+        status.state = ProviderServiceState::ACTIVE;
+        status.last_error.clear();
+    }
+    return status;
+}
+
 UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
-                                        const ProviderReadiness& readiness)
+                                        const ProviderReadiness& readiness, bool synchronized)
 {
     using namespace DigiDollar::Paymaster;
     const auto& policy = readiness.liquidity_policy;
@@ -1080,13 +1096,15 @@ UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletConte
     } else if (readiness.settings.operation_mode != ProviderOperationMode::AUTOMATIC) {
         state = "paused"; reason = "PAYMASTER_MANUAL_PROCESSING";
     } else {
-        const auto service = context.paymaster->GetProviderServiceStatus(wallet.GetName());
+        const auto service = ProviderServiceStatusForObservation(
+            context.paymaster->GetProviderServiceStatus(wallet.GetName()), readiness.ready, synchronized);
         reason = service.last_error;
         const bool faulted = service.state == ProviderServiceState::FAULT;
         if (faulted) {
             state = "blocked";
             if (reason.empty()) reason = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
-        } else if (pending) state = "waiting_confirmation";
+        } else if (reason == "PAYMASTER_PROVIDER_SYNCING") state = "paused";
+        else if (pending) state = "waiting_confirmation";
         else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = "blocked";
         else if (planned) state = "working";
         else if (!readiness.ready) state = "blocked";
