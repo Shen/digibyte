@@ -8466,6 +8466,161 @@ void PaymasterWidgetTests::paymasterOperatorPollingPreservesDraftsAndThrottlesFi
     QVERIFY(commands.isEmpty());
 }
 
+void PaymasterWidgetTests::paymasterOperatorBackgroundRefresh_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QStringLiteral("dark");
+    QTest::newRow("light") << QStringLiteral("light");
+}
+
+void PaymasterWidgetTests::paymasterOperatorBackgroundRefresh()
+{
+    QFETCH(QString, theme);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
+    QFile css(":/css/" + theme);
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "active");
+    const auto update_snapshot = [&] {
+        snapshot.pushKV("provider", provider);
+        snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, GetTime()));
+    };
+    update_snapshot();
+    QStringList commands;
+    UniValue last_params;
+    DigiDollarPaymasterWidget::RpcCallback pending;
+    panel->setAsyncRpcExecutorForTesting([&](const std::string& command, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback callback) {
+        QVERIFY(!pending); // Never overlap reads or mutations.
+        commands << QString::fromStdString(command);
+        last_params = params;
+        pending = std::move(callback);
+    });
+    const auto reply = [&](const UniValue& result, const QString& error = {}) {
+        QVERIFY(pending);
+        auto callback = std::move(pending);
+        pending = {};
+        callback(result, error);
+    };
+    panel->resize(1100, 850);
+    panel->show();
+    panel->refreshStatus();
+    reply(snapshot);
+    reply(PaymasterOverviewFinance());
+    auto* timer = panel->findChild<QTimer*>("paymasterSetupStatusTimer");
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyFeeBps");
+    auto* autostart = panel->findChild<QCheckBox*>("paymasterProviderAutostart");
+    auto* headline = panel->findChild<QLabel*>("paymasterOperatorHeadline");
+    auto* finance = panel->findChild<QLabel*>("paymasterOverviewFinanceStatus");
+    QVERIFY(timer && pages && fee && autostart && headline && finance);
+    timer->stop();
+    fee->setValue(84);
+    panel->activateWindow();
+    autostart->setFocus();
+    QCoreApplication::processEvents();
+    const bool focused = autostart->hasFocus();
+    const QString confirmed_finance = finance->text();
+    QVERIFY(confirmed_finance.contains("All time"));
+    struct EnabledProbe : QObject {
+        int changes{0};
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::EnabledChange) ++changes;
+            return false;
+        }
+    } probe;
+    for (int i = 0; i < pages->count(); ++i) pages->widget(i)->installEventFilter(&probe);
+    fee->installEventFilter(&probe);
+    const auto tick = [&] {
+        commands.clear();
+        QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+        timer->stop();
+        QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo"}));
+    };
+    for (int i = 0; i < 3; ++i) {
+        tick();
+        QVERIFY(pages->currentWidget()->isEnabled() && fee->isEnabled());
+        QCOMPARE(finance->text(), confirmed_finance);
+        // A timer event during the in-flight read must not enqueue another.
+        QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+        QCOMPARE(commands.size(), 1);
+        snapshot.pushKV("observed_at", GetTime() + i);
+        reply(snapshot);
+        QVERIFY(!pending);
+        QCOMPARE(fee->value(), 84);
+        QCOMPARE(headline->text(), QStringLiteral("Provider is running"));
+        QCOMPARE(finance->text(), confirmed_finance);
+        QCOMPARE(probe.changes, 0);
+        if (focused) QVERIFY(autostart->hasFocus());
+    }
+    // Changed capital requires a finance continuation, also without page gates.
+    auto pool = provider.find_value("pool");
+    pool.pushKV("entries", 9);
+    provider.pushKV("pool", pool);
+    update_snapshot();
+    tick();
+    reply(snapshot);
+    QCOMPARE(commands.back(), QStringLiteral("getpaymasterfinancestatus"));
+    QVERIFY(pages->currentWidget()->isEnabled() && fee->isEnabled());
+    QCOMPARE(finance->text(), confirmed_finance);
+    reply(PaymasterOverviewFinance());
+    QCOMPARE(probe.changes, 0);
+    // Explicit user intent is serialized after the read, exactly once. It
+    // must not save an unrelated offer draft or execute during the observation.
+    tick();
+    autostart->click();
+    QCOMPARE(commands.size(), 1);
+    QVERIFY(!pages->currentWidget()->isEnabled());
+    autostart->click();
+    QCOMPARE(commands.size(), 1);
+    reply(snapshot);
+    QCOMPARE(commands.back(), QStringLiteral("setpaymasterruntimesettings"));
+    QCOMPARE(last_params[0].size(), size_t{1});
+    QVERIFY(last_params[0].find_value("autostart").isTrue());
+    UniValue saved{UniValue::VOBJ};
+    saved.pushKV("autostart", true);
+    saved.pushKV("operation_mode", "automatic");
+    saved.pushKV("running", true);
+    reply(saved);
+    provider.pushKV("autostart", true);
+    update_snapshot();
+    reply(snapshot);
+    reply(PaymasterOverviewFinance());
+    QCOMPARE(commands.count("setpaymasterruntimesettings"), 1);
+    QCOMPARE(fee->value(), 84);
+    QVERIFY(pages->currentWidget()->isEnabled());
+    // Lost reads invalidate readiness; passive refresh never hides a failure.
+    tick();
+    reply({}, QStringLiteral("status response lost"));
+    QVERIFY(headline->text().contains("unavailable", Qt::CaseInsensitive));
+    panel->refreshStatus();
+    reply(snapshot);
+    reply(PaymasterOverviewFinance());
+    tick();
+    panel->setPrivacy(true);
+    const QString private_finance = finance->text();
+    reply(snapshot);
+    QCOMPARE(finance->text(), private_finance);
+    QVERIFY(!pending);
+    panel->setWalletModel(nullptr);
+    QCOMPARE(fee->value(), 50);
+    QVERIFY(!pending);
+    panel->setPrivacy(false);
+    if (pending) {
+        auto late = std::move(pending);
+        pending = {};
+        panel->setWalletModel(nullptr);
+        const QString reset_headline = headline->text();
+        const QString reset_finance = finance->text();
+        late(snapshot, {}); // Discard a completion belonging to the previous load.
+        QCOMPARE(headline->text(), reset_headline);
+        QCOMPARE(finance->text(), reset_finance);
+    }
+}
+
 void PaymasterWidgetTests::paymasterOverviewAutostart_data()
 {
     QTest::addColumn<QString>("scenario");

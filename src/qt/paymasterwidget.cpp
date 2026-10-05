@@ -4275,6 +4275,7 @@ public:
         if (m_refill_approval) m_refill_approval->reject();
         m_operator_snapshot = UniValue{};
         m_overview_finance_age.invalidate();
+        m_overview_finance_observed = false;
         m_operator_report = UniValue{};
         m_policy_readback_pending = false;
         m_pending_policy_hash.clear();
@@ -4308,6 +4309,9 @@ public:
         m_next_rpc_handler_token = 0;
         m_model = model;
         m_busy = false;
+        m_rpc_active = false;
+        m_rpc_chain_foreground = false;
+        m_active_rpc_background = false;
         m_tabs->setEnabled(true);
         m_navigation->setEnabled(true);
         m_navigation_select->setEnabled(true);
@@ -4640,10 +4644,7 @@ public:
                 return;
             }
             m_provider_info_snapshot_available = true;
-            m_status_age.restart();
-            m_last_checked->setText(tr("Network: %1 · Last checked: %2")
-                .arg(QString::fromStdString(Params().GetChainTypeString()),
-                     QLocale().toString(QDateTime::currentDateTime(), QLocale::ShortFormat)));
+            markProviderStatusCurrent();
             const UniValue& settings_present =
                 result.find_value("settings_present");
             m_provider_settings_present = settings_present.isBool() &&
@@ -4722,8 +4723,14 @@ public:
             }
             const UniValue& provider = result.find_value("provider_id");
             m_core_has_identity = provider.isStr() && !provider.get_str().empty();
-            m_provider_id = m_core_has_identity
+            const QString provider_id = m_core_has_identity
                 ? QString::fromStdString(provider.get_str()) : QString{};
+            if (m_provider_id != provider_id) {
+                m_overview_finance_observed = false;
+                m_overview_finance_age.invalidate();
+                clearOverviewCapital();
+            }
+            m_provider_id = provider_id;
             const UniValue& backup_status = result.find_value("backup_status");
             const bool backup_required = backup_status.isObject() &&
                 backup_status.find_value("required").isBool() &&
@@ -4745,12 +4752,12 @@ public:
                             .arg(ddAmount(income), compactDgbAmount(cost))
                             .arg(transfers)),
                     QStringLiteral("ready"));
-            } else if (m_core_has_identity) {
+            } else if (m_core_has_identity && !m_overview_finance_observed) {
                 setStatusLabel(
                     m_overview_finance_status,
                     tr("Loading income and costs…"),
                     QStringLiteral("neutral"));
-            } else {
+            } else if (!m_core_has_identity) {
                 setStatusLabel(
                     m_overview_finance_status,
                     tr("Available after the provider identity is created"),
@@ -4760,7 +4767,7 @@ public:
             m_provider_endpoint = endpoint.isStr()
                 ? QString::fromStdString(endpoint.get_str()) : QString{};
             const UniValue& display_name = result.find_value("display_name");
-            if (display_name.isStr()) {
+            if (display_name.isStr() && !m_policy_dirty) {
                 m_display_name->setText(QString::fromStdString(display_name.get_str()));
             }
             if (policy.isObject() && !m_policy_dirty) {
@@ -5839,6 +5846,7 @@ private:
 
     void overviewFinanceUnavailable()
     {
+        m_overview_finance_observed = true;
         for (const auto* name : {"dgb_available", "dgb_reserved", "dgb_pending", "carrier_base",
                                  "carrier_earned", "carrier_withdrawable", "maintenance_pending", "income", "costs", "transfers"})
             setCapitalMetric(name, tr("Capital value unavailable — refresh to retry"), "neutral");
@@ -5853,6 +5861,7 @@ private:
             return;
         }
         const auto& summary = result.find_value("period_summaries").find_value("all");
+        m_overview_finance_observed = true;
         QString text = tr("All time · confirmed");
         setCapitalMetric("income", tr("Service-fee income: %1 DD").arg(ddAmount(financeNumber(summary, "service_fee_income_cents"))), "neutral");
         setCapitalMetric("costs", tr("Operating costs: %1 DGB").arg(compactDgbAmount(financeNumber(summary, "dgb_operating_cost_satoshis"))), "neutral");
@@ -5871,7 +5880,7 @@ private:
         setCapitalMetric("maintenance_pending", tr("Open maintenance tasks: %1").arg(amount("pending_maintenance_transactions")), amount("pending_maintenance_transactions") > 0 ? "waiting" : "neutral");
     }
 
-    void refreshOverviewFinance()
+    void refreshOverviewFinance(bool background = false)
     {
         if (!m_core_has_identity || m_privacy) return;
         UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
@@ -5882,7 +5891,7 @@ private:
         // generation guard as all other calls. Never signs or sends a payment.
         call("getpaymasterfinancestatus", params, false, nullptr,
              [this](const UniValue& result) { if (!m_privacy) { applyOverviewFinance(result); m_overview_finance_age.start(); } },
-             false, [this](const QString&) { if (!m_privacy) { overviewFinanceUnavailable(); m_overview_finance_age.start(); } });
+             false, [this](const QString&) { if (!m_privacy) { overviewFinanceUnavailable(); m_overview_finance_age.start(); } }, background);
     }
 
     void requestSelectedFinanceStatus()
@@ -7692,6 +7701,8 @@ private:
 
     QString readinessExplanation(const QString& error) const
     {
+        if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
+            return tr("Wallet and transaction index updates are catching up with the node. Processing resumes automatically when they agree.");
         if (error == QLatin1String("PAYMASTER_DISABLED"))
             return tr("Paymaster support is disabled for this node. Enable it and restart DigiByte Core.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_NOT_ENABLED"))
@@ -9132,7 +9143,7 @@ private:
 
     void updateOperatorProgress()
     {
-        const bool reading = m_busy && m_active_rpc_command.rfind("get", 0) == 0;
+        const bool reading = m_rpc_active && m_active_rpc_command.rfind("get", 0) == 0;
         if (!reading) m_operator_read_elapsed.invalidate();
         if (!reading || m_privacy) {
             m_operator_progress_timer->stop();
@@ -9502,9 +9513,18 @@ private:
             toggle->setChecked(true);
     }
 
+    void markProviderStatusCurrent()
+    {
+        m_status_age.restart();
+        const QString text = tr("Network: %1 · Last checked: %2")
+            .arg(QString::fromStdString(Params().GetChainTypeString()),
+                 QLocale().toString(QDateTime::currentDateTime(), QLocale::ShortFormat));
+        if (m_last_checked->text() != text) m_last_checked->setText(text);
+    }
+
     void refreshOperatorStatus(bool background = false)
     {
-        if (!hasRpcTransport() || (m_busy && m_rpc_handler_depth == 0) || m_setup_wizard_active || m_privacy) return;
+        if (!hasRpcTransport() || ((m_busy || (background && m_rpc_active)) && m_rpc_handler_depth == 0) || m_setup_wizard_active || m_privacy) return;
         const QPointer<WalletModel> selected = m_model;
         call("getpaymasteroperatorinfo", {}, false, nullptr, [this, selected, background](const UniValue& snapshot) {
                  if (m_model != selected || m_privacy) return;
@@ -9513,6 +9533,22 @@ private:
                      if (!snapshot.find_value("schema_version").isNum() || snapshot.find_value("schema_version").getInt<int>() != 1 || !snapshot.find_value("diagnostics").isArray() || !provider.find_value("service_state").isStr()) throw std::runtime_error("PAYMASTER_STATUS_INCOMPLETE");
                      if (!m_operator_snapshot.isNull() && m_operator_snapshot.find_value("wallet_generation").write() != snapshot.find_value("wallet_generation").write()) m_operator_report = UniValue{};
                      if (!IsCompleteProviderInfoSnapshot(provider)) throw std::runtime_error("PAYMASTER_PROVIDER_STATUS_INCOMPLETE");
+                     // Refresh freshness on every successful observation, but
+                     // do not reload forms or rebuild presentation for identical
+                     // data. observed_at alone is not a content change.
+                     bool unchanged = !m_operator_snapshot.isNull();
+                     for (const auto* key : {"provider", "safety", "diagnostics", "wallet_generation", "unlocked_until", "encrypted", "node_settings", "node_setting_overrides"})
+                         unchanged &= m_operator_snapshot.find_value(key).write() == snapshot.find_value(key).write();
+                     if (background && unchanged) {
+                         m_operator_snapshot = snapshot;
+                         markProviderStatusCurrent();
+                         m_operation.observe(snapshot, m_wallet_generation, QDateTime::currentSecsSinceEpoch());
+                         renderCurrentTask();
+                         renderOperatorPresentation(snapshot);
+                         if (!m_overview_finance_age.isValid() || m_overview_finance_age.elapsed() >= 30000)
+                             refreshOverviewFinance(/*background=*/true);
+                         return;
+                     }
                      const bool capital_changed = m_operator_snapshot.find_value("provider").find_value("pool").write() != provider.find_value("pool").write() ||
                          m_operator_snapshot.find_value("safety").write() != snapshot.find_value("safety").write();
                      m_operator_snapshot = snapshot;
@@ -9570,7 +9606,7 @@ private:
                      m_operator_summary->setText(lines.join(QLatin1Char('\n')));
                      renderOperatorPresentation(snapshot);
                      if (!background || capital_changed || !m_overview_finance_age.isValid() || m_overview_finance_age.elapsed() >= 30000)
-                         refreshOverviewFinance();
+                         refreshOverviewFinance(background);
                  } catch (const std::exception&) {
                      m_status->setText(tr("Provider status is unavailable. Refresh before acting."));
                      m_operator_summary->setText(tr("Operator status unavailable. Refresh before acting; previous readiness is not current."));
@@ -9595,7 +9631,7 @@ private:
                  m_status->setText(tr("Provider status is unavailable. Refresh before acting."));
                  m_operator_summary->setText(tr("Operator status unknown: %1").arg(error));
                  resetOperatorPresentation();
-             });
+             }, background);
     }
 
     void configureOperatorNode()
@@ -13656,6 +13692,7 @@ private:
         ResultHandler handler;
         bool show_error{true};
         ErrorHandler error_handler;
+        bool background{false};
     };
 
     void setRpcBusyState(bool busy)
@@ -13724,7 +13761,7 @@ private:
         QTimer::singleShot(0, this, [this, generation] {
             // A refresh can start before this event is delivered. Keep the
             // review until that RPC chain finishes instead of losing it.
-            if (generation != m_wallet_generation || m_busy) return;
+            if (generation != m_wallet_generation || m_busy || m_rpc_active) return;
             auto review = std::move(m_pending_guided_review);
             m_pending_guided_review = {};
             if (review) review();
@@ -13785,7 +13822,11 @@ private:
         }
         if (m_rpc_handler_depth == 0) {
             m_active_rpc_command.clear();
-            setRpcBusyState(false);
+            m_rpc_active = false;
+            m_active_rpc_background = false;
+            if (m_rpc_chain_foreground) setRpcBusyState(false);
+            m_rpc_chain_foreground = false;
+            updateOperatorProgress();
             showPendingGuidedReview();
         }
     }
@@ -13793,7 +13834,15 @@ private:
     void dispatchRpcCall(PendingRpcCall request)
     {
         const uint64_t wallet_generation = m_wallet_generation;
+        // Elapsed time belongs to this read, not to an earlier slow step in
+        // the serialized chain. A fresh finance read must not inherit loading.
+        m_operator_read_elapsed.invalidate();
         m_active_rpc_command = request.command;
+        m_active_rpc_background = request.background;
+        if (!request.background && !m_rpc_chain_foreground) {
+            m_rpc_chain_foreground = true;
+            setRpcBusyState(true);
+        }
         showOperatorBusyState();
 
         if (m_async_rpc_executor_for_testing) {
@@ -13888,7 +13937,8 @@ private:
 
     void call(std::string command, UniValue params, bool needs_unlock,
               QPlainTextEdit* output = nullptr, ResultHandler handler = {},
-              bool show_error = true, ErrorHandler error_handler = {})
+              bool show_error = true, ErrorHandler error_handler = {},
+              bool background = false)
     {
         const auto report_not_started =
             [this, output, show_error,
@@ -13918,8 +13968,13 @@ private:
         request.handler = handler;
         request.show_error = show_error;
         request.error_handler = error_handler;
+        // Only these explicitly read-only, wallet-bound observations may run
+        // without disabling pages. Their continuations remain serialized.
+        request.background = background && !needs_unlock &&
+            (request.command == "getpaymasteroperatorinfo" ||
+             request.command == "getpaymasterfinancestatus");
 
-        if (m_busy) {
+        if (m_busy || m_rpc_active) {
             QWidget* const modal = QApplication::activeModalWidget();
             const bool only_setup_wizard_is_modal =
                 !modal || modal == m_setup_wizard.data();
@@ -13930,12 +13985,24 @@ private:
                 m_pending_handler_calls.push_back(std::move(request));
                 return;
             }
+            // A deliberate user action can follow a passive observation. Gate
+            // further actions now, then dispatch it once the read completes;
+            // Core still validates the exact command and any reviewed plan.
+            if (m_rpc_active && m_active_rpc_background && !m_busy &&
+                !request.background && m_pending_handler_calls.empty()) {
+                m_pending_handler_calls.push_back(std::move(request));
+                m_rpc_chain_foreground = true;
+                setRpcBusyState(true);
+                return;
+            }
             report_not_started(tr(
                 "Another Paymaster wallet operation is still running, so this RPC was not started."));
             return;
         }
         m_active_rpc_command = request.command;
-        setRpcBusyState(true);
+        m_rpc_active = true;
+        m_rpc_chain_foreground = !request.background;
+        if (m_rpc_chain_foreground) setRpcBusyState(true);
         dispatchRpcCall(std::move(request));
     }
 
@@ -13946,6 +14013,9 @@ private:
     AsyncRpcExecutor m_async_rpc_executor_for_testing;
     std::string m_active_rpc_command;
     bool m_busy{false};
+    bool m_rpc_active{false};
+    bool m_rpc_chain_foreground{false};
+    bool m_active_rpc_background{false};
     int m_rpc_handler_depth{0};
     std::function<void()> m_pending_guided_review;
     uint64_t m_active_rpc_handler_token{0};
@@ -13995,6 +14065,7 @@ private:
     QStackedWidget* m_settings_tabs{nullptr};
     QElapsedTimer m_status_age;
     QElapsedTimer m_overview_finance_age;
+    bool m_overview_finance_observed{false};
     PaymasterOperationController m_operation;
     QGroupBox* m_task_card{nullptr};
     QLabel* m_task_error_details{nullptr};

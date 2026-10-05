@@ -22,8 +22,10 @@ A sidebar is used from 960 logical pixels; a compact selector opens the same
 pages in narrower windows. Settings categories have a Back to settings action.
 Current task progress stays visible while navigating. Background reads preserve
 the visible pages, including when the window is resized or uncovered. If a read
-takes more than two seconds, its current step and elapsed time are shown;
-conflicting wallet actions remain unavailable until the reply arrives.
+takes more than two seconds, its current step and elapsed time are shown.
+Passive reads leave navigation and draft inputs enabled. A deliberate wallet
+action waits for the in-flight read, then runs once with the usual Core checks;
+further actions are gated until its callback chain completes.
 
 ### Autostart beside Start/Pause
 
@@ -131,6 +133,16 @@ the page is visible; finance summaries refresh less often or when capital and
 budgets change. Manual Refresh always reads both. Unsaved offer changes remain
 in the form and do not stop Overview updates. Genuine errors still take
 precedence over normal payment and confirmation waits.
+
+Unchanged observations update data freshness without reloading the forms.
+Confirmed income and cost figures remain visible between finance reads;
+they do not return to a loading state on every provider poll. Wallet/provider
+changes clear the old figures, and failed reads still invalidate readiness.
+A previous `PAYMASTER_PROVIDER_SYNCING` scheduler wait is superseded only when
+current readiness passes and chain, wallet and transaction index agree.
+While that wait remains, automatic refill is temporarily paused; its saved
+activation and approved limits remain intact. Genuine faults are never cleared
+by this display check. Every payment still performs its own synchronization checks.
 
 After restarting with an existing provider wallet, use **Overview → Start
 provider** (or **Resume provider** after a persistent pause). The setup

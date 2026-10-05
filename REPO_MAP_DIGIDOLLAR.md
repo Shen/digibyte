@@ -1325,6 +1325,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   two seconds; finance summaries stay at thirty seconds unless capital or
   budgets change. Header/hero share the same presentation; offer drafts survive
   polling. Capacity and confirmation waits do not suppress unexpected errors;
+  passive observations preserve enabled pages/inputs and confirmed finance,
+  skip unchanged form reloads and serialize a deliberate action after the read.
+  Shared `ProviderServiceStatusForObservation` supersedes only recovered sync
+  waits, using current readiness and non-blocking chain/wallet/index agreement;
+  worker state and payment execution checks remain unchanged.
   unknown/stale data cannot expose a start action. Technical details, reserve
   counts, additional safety limits and secondary finance views are disclosures.
   The selected finance summary is invalidated on period changes and failures;

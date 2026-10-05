@@ -1,5 +1,56 @@
 # Paymaster build and test runbook
 
+## Passive operator refresh (2026-10-05)
+
+Source base: `cc5e340030`. The previous refresh used the foreground RPC gate
+for every timer read, repeatedly disabling/enabling whole pages. Provider reads
+also reset an already observed finance header to loading. Passive observations
+now preserve enabled pages and drafts, skip unchanged form reloads, retain
+wallet/provider-bound finance presentation and serialize deliberate user actions
+after the in-flight read. Read elapsed time restarts for each serialized step.
+Failures still invalidate readiness. Current synchronized readiness supersedes
+only the known historical scheduler sync wait; worker state, unknown faults,
+saved consent and the strict automatic-submit synchronization guard are unchanged.
+
+Selected MSVC v143 / Qt 5.15.10 compilation and separate incremental
+application/CLI/test links passed. The 23 targeted Core cases passed with 282
+assertions: the small setup suite, non-mutating automation observations, the
+readiness/synchronization/fault matrix and automatic submit deferral. All 70
+targeted native Qt cases passed. They cover asynchronous passive reads in both
+themes, zero page/input enabled-state transitions during polling, preserved
+focus and drafts, unchanged/changed data, throttled finance, serialized single
+autostart writes, late wallet/privacy replies, read failures, foreground gates,
+delayed startup, work transitions, refill, exact offer values and liquidity saves.
+The separately linked CLI passed its version/start check. Logs and local build
+helpers are in `build_msvc/paymaster-refresh-check/` and are not release artifacts.
+
+Run the focused checks from `D:\Digibyte\digibyte-fork` after a full current-source
+build, using the existing toolchain. Runtime is seconds to a few minutes; every
+process must exit zero and Qt must report no failed cases:
+
+```powershell
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_setup_tests:paymaster_wallet_identity_tests/provider_automation_capacity_pause_preserves_approval,provider_sync_observation_preserves_unresolved_gates,automatic_submit_defers_before_wallet_or_index_wait' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Focused Core checks failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:QT_QPA_PLATFORM = 'windows'
+$cases = @('paymasterOperatorBackgroundRefresh', 'paymasterProviderCommandLocksPages', 'paymasterOperatorPollingPreservesDraftsAndThrottlesFinance', 'paymasterOperatorDelayedStartup', 'paymasterOperatorOverviewGuidesAndFailsClosed', 'paymasterOperatorWorkTransitions', 'paymasterOverviewFinanceWalletAndPrivacyBinding', 'paymasterOverviewAutostart', 'paymasterOverviewRefill', 'paymasterOfferPolicyTypedValues', 'paymasterCapitalOverview', 'paymasterLiquiditySaveAcrossRefresh')
+foreach ($case in $cases) {
+    $env:DIGIBYTE_QT_TEST_FUNCTION = $case
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Qt case failed: $case" }
+}
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE, Env:QT_QPA_PLATFORM
+```
+
+A full build and live regtest/provider walkthrough were not performed for this
+change. The full-build and RPC commands below remain operator checks. Finish
+long-running CLI calls and close Qt instances regularly before linking their
+normal executables; a running target can cause `LNK1104`. For live validation,
+watch multiple unchanged polls, edit a draft, change autostart during a slow
+read, switch wallets/privacy, mine confirmations and check actual node waits
+and unknown faults. Genuine ongoing synchronization must still show its wait;
+only a recovered scheduler reason should disappear.
+
 ## Provider work presentation (2026-10-04)
 
 Source base: `6829c063bb`. Current work is derived from the loaded budget,

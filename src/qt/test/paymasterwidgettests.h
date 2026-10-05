@@ -70,6 +70,8 @@ private Q_SLOTS:
     void paymasterOperatorWorkTransitions_data();
     void paymasterOperatorWorkTransitions();
     void paymasterOperatorPollingPreservesDraftsAndThrottlesFinance();
+    void paymasterOperatorBackgroundRefresh_data();
+    void paymasterOperatorBackgroundRefresh();
     void paymasterStopAndRelease_data();
     void paymasterStopAndRelease();
     void paymasterHomeStartIsSeparateFromSettings();

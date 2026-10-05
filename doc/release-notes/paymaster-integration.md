@@ -19,6 +19,14 @@ at thirty seconds or on explicit refresh. Unsaved offer drafts survive polling.
 Temporary reserved capacity no longer describes saved refill consent as a
 configuration failure. No spending authority or payment execution changes.
 
+Passive status/finance reads no longer repeatedly disable and re-enable the
+operator pages. Unchanged observations preserve forms, focus and confirmed
+finance presentation. A deliberate action is serialized after the current read
+and gates further actions. Read-only RPC/CLI observations supersede a previous
+synchronization wait only after current readiness and exact chain/wallet/index
+agreement; unresolved waits and genuine faults remain visible. Saved refill
+consent and the strict checks before payment execution are unchanged.
+
 ## Existing V5 payment artifacts after upgrade
 
 The V6 offer fee-cap update incorrectly rejected unchanged, retained V5

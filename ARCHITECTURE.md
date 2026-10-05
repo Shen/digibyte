@@ -2035,9 +2035,14 @@ payout explanation belongs to the finance card; detailed reserve counts are
 a disclosure. Spending-limit values retain their native DGB unit. This is a
 Qt presentation change and does not alter Core accounting or authorizations.
 
-The provider RPC busy gate disables the common tab container, in addition to
-individual action predicates, until the serialized callback chain drains.
-This prevents child status renders from re-enabling another page command.
+Foreground provider RPC chains gate operator pages and individual actions
+until their serialized callbacks drain. Passive operator/finance observations
+use the same wallet-bound transport without disabling pages or draft fields.
+A deliberate action during a passive read is queued once and activates the
+foreground gate before execution; Core revalidates the command and any plan.
+Unchanged observations update freshness without reloading forms. Confirmed
+finance presentation remains visible between finance reads; wallet/provider
+changes invalidate it. A failed read still invalidates readiness.
 Wallet switches reset the gate; generation checks reject late completions.
 Modal review windows retain their own approval/cancellation controls.
 
@@ -2055,11 +2060,11 @@ review state, while actual saved work retains its wait/confirmation state.
 
 The Qt RPC busy gate keeps operator pages paintable across asynchronous
 status/finance reads, including navigation, resizing and window exposure.
-Conflicting commands remain gated; a poll lasting two seconds shows its
+Foreground commands remain gated; a poll lasting two seconds shows its
 current read and elapsed time without discarding the last validated snapshot.
 Valid snapshots update the existing presentation directly; only invalid status
 uses the full reset. Budget sections change visibility only when their active
-funding models change. Poll intervals, serialization and backend checks are unchanged.
+funding models change. Poll intervals and backend execution checks are unchanged.
 
 Automatic provider submissions preserve the internal scheduler context through
 `submitpaymasterdigidollar`: wallet readiness is checked without waiting, and
