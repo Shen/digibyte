@@ -6,9 +6,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chainparams.h>
 #include <hash.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
+#include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/rpc/paymaster_send.h>
 #include <key.h>
@@ -208,7 +210,8 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
                                      ValidClientResultArtifacts& artifacts,
                                      std::string& error,
                                      const ProviderPolicy* provider_policy = nullptr,
-                                     bool with_dd_output = false)
+                                     bool with_dd_output = false,
+                                     bool rpc_binding = false)
 {
     artifacts.provider_identity_key = CKey{};
     artifacts.attempt = ProviderAttempt{};
@@ -280,7 +283,7 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
     const XOnlyPubKey provider_identity{
         artifacts.provider_identity_key.GetPubKey()};
     const PaymasterId provider_id{GetPaymasterId(provider_identity)};
-    artifacts.genesis_hash = uint256S("53");
+    artifacts.genesis_hash = rpc_binding ? Params().GenesisBlock().GetHash() : uint256S("53");
 
     PaymentIntent intent;
     intent.genesis_hash = artifacts.genesis_hash;
@@ -291,8 +294,10 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
     intent.canonical_request_hash = session.canonical_request_hash;
     intent.requested_fee_mode = session.fee_mode_requested;
     intent.user_dd_inputs = {transaction.vin[0].prevout};
-    intent.user_input_proofs = {
-        {transaction.vin[0].prevout, std::vector<unsigned char>(64, 1)}};
+    if (!rpc_binding) {
+        intent.user_input_proofs = {
+            {transaction.vin[0].prevout, std::vector<unsigned char>(64, 1)}};
+    }
     intent.recipient_script = wallet_script;
     intent.recipient_amount = DDCents{1000};
     intent.user_dd_change_script = wallet_script;
@@ -416,6 +421,7 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
         attempt.quote_id, attempt.template_commitment);
     attempt.capacity_request = capacity_request_bytes;
     attempt.quote_request = SerializePaymasterTestObject(request);
+    if (rpc_binding) attempt.unsigned_intent = SerializePaymasterTestObject(intent);
     attempt.signed_quote = SerializePaymasterTestObject(response);
     attempt.unsigned_transaction = SerializePaymasterTestObject(transaction);
     attempt.unsigned_psbt = SerializePaymasterTestObject(trusted.psbt);
@@ -449,6 +455,38 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
     }
     artifacts.user_input = transaction.vin[0].prevout;
     return true;
+}
+
+void SeedResultlessClientPayment(wallet::CWallet& wallet, const std::string& request_id,
+                                PaymentSession& session, ValidClientResultArtifacts& artifacts)
+{
+    PaymasterStore store{wallet};
+    std::string error;
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256::ONE,
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(BuildValidClientResultArtifacts(wallet, session, request_id,
+        uint256S("98"), 101, artifacts, error, nullptr, true, true), error);
+    session.attempt_ids = {artifacts.attempt.attempt_id};
+    session.user_inputs = {artifacts.user_input};
+    session.state = SessionState::PENDING_PROVIDER;
+    session.pending_phase = PendingPhase::PENDING_NETWORK;
+    session.updated_at = 101;
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{0};
+    policy.maximum_service_fee_per_day = DDCents{0};
+    policy.updated_at = 100;
+    ClientFeeLedger ledger;
+    ledger.accounting_time_high_water = 100;
+    BOOST_REQUIRE_MESSAGE(ReserveClientFee(ledger, policy, artifacts.attempt.commit_key,
+        DDCents{0}, 101, error), error);
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(artifacts.attempt));
+    BOOST_REQUIRE(batch.WritePaymasterTemplate(artifacts.attempt.template_commitment, artifacts.attempt.attempt_id));
+    BOOST_REQUIRE(batch.WritePaymasterUnsignedTx(artifacts.attempt.unsigned_txid, artifacts.attempt.attempt_id));
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.WritePaymasterClientSafetyPolicy(policy));
+    BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(ledger));
 }
 
 } // namespace
@@ -5094,6 +5132,134 @@ BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
     PaymasterReliabilityRecord reliability;
     BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
     BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 1000).successful_attempts, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(client_tip_reconciles_payment_without_provider_reply)
+{
+    ScopedRecoveryMockTime time{1000};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedResultlessClientPayment(m_wallet, "550e8400-e29b-41d4-a716-446655440098", session, artifacts);
+    std::string error;
+    BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.state == SessionState::PENDING_PROVIDER);
+    const auto transaction = MakeTransactionRef(artifacts.final_transaction);
+    {
+        LOCK(m_wallet.cs_wallet);
+        CMutableTransaction different_spender{*transaction};
+        different_spender.vout[2].nValue -= 1;
+        m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a2"));
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(different_spender),
+            TxStateConfirmed{uint256S("a1"), 1, 0}));
+    }
+    BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.final_txid.IsNull());
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(1, uint256S("a1"));
+        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateInMempool{}));
+    }
+    BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConfirmed{uint256S("a1"), 1, 0};
+    }
+    BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.final_txid.IsNull());
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a2"));
+    // The same txid with a tampered final witness is never a payment receipt.
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    CMutableTransaction wrong_witness{*transaction};
+    wrong_witness.vin[0].scriptWitness.stack[0][0] ^= 1;
+    m_wallet.mapWallet.at(transaction->GetHash()).tx = MakeTransactionRef(wrong_witness);
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(1000, error));
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    m_wallet.mapWallet.at(transaction->GetHash()).tx = transaction;
+    // Expired retry authority still permits observing the existing payment.
+    BOOST_CHECK(1000 > artifacts.attempt.retry_until);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(1000, error), error);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.state == SessionState::CONFIRMED);
+    BOOST_CHECK(session.final_txid == transaction->GetHash());
+    PaymasterSessionObservation observation;
+    BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
+    BOOST_CHECK(observation.PaymentConfirmed(session.state));
+    BOOST_CHECK(!WalletBatch{m_wallet.GetDatabase()}.HasPaymasterResult(artifacts.attempt.commit_key));
+    AlternativeRecoveryRecord recovery;
+    BOOST_CHECK(!store.GetAlternativeRecovery(session.request_id, recovery));
+    std::vector<CTransactionRef> broadcasts;
+    BOOST_REQUIRE(store.ListClientDurableFinalTransactions(broadcasts, error));
+    BOOST_CHECK(broadcasts.empty());
+    // Subsequent maintenance retains the normal tombstone/pruning behavior.
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(1001, error), error);
+    IdempotencyTombstone tombstone;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterTombstone(session.request_id, tombstone));
+    BOOST_CHECK(tombstone.final_state == SessionState::CONFIRMED);
+    BOOST_CHECK(tombstone.final_txid == transaction->GetHash());
+    ClientFeeLedger ledger;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
+    BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::SPENT);
+}
+
+BOOST_AUTO_TEST_CASE(client_recovery_reconciles_confirmed_original_payment)
+{
+    ScopedRecoveryMockTime time{1000};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedResultlessClientPayment(m_wallet, "550e8400-e29b-41d4-a716-446655440099", session, artifacts);
+    const auto transaction = MakeTransactionRef(artifacts.final_transaction);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a1"));
+        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
+    }
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.wallets.emplace_back(&m_wallet, [](wallet::CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    request.params = UniValue{UniValue::VARR};
+    UniValue lookup{UniValue::VOBJ};
+    lookup.pushKV("request_id", session.request_id);
+    request.params.push_back(lookup);
+    request.params.push_back("refresh");
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    try {
+        resolvepaymastersession().HandleRequest(request);
+    } catch (const UniValue& error) {
+        BOOST_FAIL(error.write());
+    }
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    request.params = UniValue{UniValue::VARR};
+    request.params.push_back(lookup);
+    request.params.push_back("cancel_to_self");
+    UniValue result;
+    try {
+        result = resolvepaymastersession().HandleRequest(request);
+    } catch (const UniValue& error) {
+        BOOST_FAIL(error.write());
+    }
+    const auto& completed = result.find_value("session");
+    BOOST_CHECK_EQUAL(completed.find_value("session_state").get_str(), "CONFIRMED");
+    BOOST_CHECK(completed.find_value("payment_confirmed").isTrue());
+    BOOST_CHECK_EQUAL(completed.find_value("txid").get_str(), transaction->GetHash().GetHex());
+    BOOST_CHECK(result.find_value("recovery").isNull());
+    BOOST_CHECK(result.find_value("result_status").isNull());
+    BOOST_REQUIRE_EQUAL(result.find_value("allowed_actions").size(), 1U);
+    BOOST_CHECK_EQUAL(result.find_value("allowed_actions")[0].get_str(), "refresh");
+    AlternativeRecoveryRecord recovery;
+    BOOST_CHECK(!store.GetAlternativeRecovery(session.request_id, recovery));
+    BOOST_CHECK_EXCEPTION(resolvepaymastersession().HandleRequest(request), UniValue,
+        [](const UniValue& error) {
+            return error.find_value("message").get_str() == "PAYMASTER_SESSION_ACTION_NOT_ALLOWED";
+        });
 }
 
 BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)

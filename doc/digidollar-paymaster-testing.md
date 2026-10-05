@@ -2099,6 +2099,34 @@ this regression; the subsequent complete run passed. Qt retains unrelated
 QTableWidget icon-property warnings. Test logs and both dialog images are under
 `build_msvc/retry-*`.
 
+### Resultless client observation before recovery (2026-10-05)
+
+The live operator report concerned an old `PENDING_PROVIDER / PENDING_NETWORK`
+session whose exact original transaction was already in the client wallet and
+deeply confirmed. Recovery incorrectly reached `PAYMASTER_RESERVED_INPUT_UNAVAILABLE`.
+Read-only diagnosis confirmed the transaction; no live retry, recovery, signing
+or broadcast was used during investigation.
+
+Targeted MSVC compilation of the two changed wallet files and the store test file
+passed, as did isolated Core-test and Qt-application links. Twelve focused Core
+cases passed with 530 assertions:
+
+- `client_tip_reconciles_payment_without_provider_reply`: absent, different-spender,
+  mempool and shallow observations do not complete; a modified final witness fails
+  without DB writes; the exact deeply confirmed transaction completes after retry
+  expiry, creates no recovery/provider receipt/rebroadcast candidate and follows
+  normal subsequent tombstone retention.
+- `client_recovery_reconciles_confirmed_original_payment`: direct `resolvepaymastersession`
+  refresh stays read-only; explicit recovery returns the original confirmed payment
+  without a recovery object or fabricated result; repeated recovery is not allowed.
+- Existing resultless completion, atomic result persistence/observation, read-only
+  recipient evidence and reorg checks, manifestless replay rejection, and pre/post
+  final conflict/negative-result authority protections.
+
+Full builds, complete suites and the multi-process lifecycle test were not run
+for this checkpoint. Use the existing Windows build/run commands in this runbook
+for operator verification; this result is not a release gate completion.
+
 ### Retry after provider replay-journal pruning (2026-10-01)
 
 The preceding regression covered a retained provider reply, not its removal at

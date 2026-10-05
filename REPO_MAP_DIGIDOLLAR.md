@@ -2095,9 +2095,15 @@ Current oracle/MuSig2 fuzz source inventory:
   fee without fabricating a signed provider result. The shared RPC helper
   `ReconcileConfirmedClientPayment` in `wallet/rpc/paymaster_processing.cpp`
   (declared in `paymaster_internal.h`) recovers a missing wallet transaction from
-  txindex. Result processing, explicit resolve retry, high-level send resumption
+  txindex. Result processing, explicit resolve retry/recovery, high-level send resumption
   and exact signed-PSBT retry use it; `SignedClientPSBTToJSON` preserves the
   signing RPC schema, adding a known confirmed txid without requeueing.
+  `ReconcileFinalSessionsAtTip` also completes resultless signed client attempts
+  from deeply confirmed exact wallet transactions during tip/periodic maintenance;
+  `client_tip_reconciles_payment_without_provider_reply` and
+  `client_recovery_reconciles_confirmed_original_payment` cover passive completion,
+  expiry, altered witnesses, a different spender, read-only refresh and RPC recovery
+  returning the original confirmed payment without creating a recovery.
   `ListClientDurableFinalTransactions` excludes resultless observations
   from rebroadcast. `paymaster_processing.cpp` consumes stale/mismatched submit
   entries without faulting unrelated provider work and retains DB-read faults.

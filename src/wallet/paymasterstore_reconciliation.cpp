@@ -737,6 +737,35 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             return false;
         }
         for (const PaymentSession& session : sessions) {
+            if (!session.provider_side && session.final_txid.IsNull() &&
+                !session.attempt_ids.empty() &&
+                (session.state == SessionState::AUTHORIZED ||
+                 session.state == SessionState::PENDING_PROVIDER)) {
+                ProviderAttempt attempt;
+                const auto status = batch.ReadPaymasterAttemptWithStatus(
+                    session.attempt_ids.back(), attempt);
+                if (status != DatabaseReadStatus::FOUND) {
+                    error = PersistedReadError(status, "ProviderAttempt", attempt,
+                        "PAYMASTER_FINAL_ATTEMPT_MISSING",
+                        "PAYMASTER_INVALID_PERSISTED_ATTEMPT");
+                    return false;
+                }
+                if (!attempt.user_signed_psbt.empty() &&
+                    attempt.final_transaction.empty() && attempt.final_txid.IsNull() &&
+                    (attempt.state == AttemptState::USER_SIGNED ||
+                     attempt.state == AttemptState::USER_PSBT_ACCEPTED ||
+                     attempt.state == AttemptState::AMBIGUOUS)) {
+                    bool completed{false};
+                    // The provider reply may be lost even though the wallet
+                    // observed the exact payment. Reuse full authorization and
+                    // witness validation; a spent input or txid is not proof.
+                    if (!CompleteClientConfirmedPayment(session.request_id,
+                            attempt.attempt_id, now, completed, error)) return false;
+                    // Keep the newly recorded evidence through this pass.
+                    // Subsequent passes apply ordinary final/reorg retention.
+                    if (completed) continue;
+                }
+            }
             if (session.state == SessionState::FAILED ||
                 (session.final_txid.IsNull() && session.recovery_txid.IsNull())) {
                 continue;

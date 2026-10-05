@@ -5,6 +5,16 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Confirmed payments with missing provider replies
+
+Wallet-tip and periodic Paymaster maintenance now complete a signed client session
+from its exact locally known payment after 240 confirmations when the provider
+reply was lost. Explicit recovery performs the same validated observation before
+testing spent inputs, returning the original confirmed payment instead of preparing
+recovery. The fix applies to Qt and RPC/CLI through shared wallet Core. Accepted
+manifests, all final signatures, atomic fee settlement, normal retention and
+read-only status contracts remain required; no retry authority or payment is created.
+
 ## Provider process display
 
 Overview and the provider header now share the current payment/capacity/

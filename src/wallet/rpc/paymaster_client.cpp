@@ -1946,6 +1946,13 @@ RPCHelpMan resolvepaymastersession()
             if (!store.GetAttempt(attempt_id, attempt)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Paymaster attempt not found");
             }
+            if (action == "cancel_to_self" && attempt_id == session.attempt_ids.back() &&
+                ReconcileConfirmedClientPayment(*wallet, session, attempt)) {
+                // A lost provider reply does not make an already confirmed
+                // payment recoverable. Validate and settle that exact payment
+                // before testing its now-spent inputs or preparing recovery.
+                return ClientSessionSnapshotToJSON(store, session, action);
+            }
             if (action == "retry_same" && attempt_id == session.attempt_ids.back() &&
                 context.paymaster && context.paymaster->Enabled()) {
                 if (!attempt.user_signed_psbt.empty() &&

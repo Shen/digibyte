@@ -728,6 +728,21 @@ that action remains available. An exact already-signed
 charges a second service fee or fabricates a provider receipt. Read-only status
 and refresh calls do not acquire signing or retry authority.
 
+Wallet-tip and periodic maintenance now also settle an exact original payment
+already known to the client wallet after 240 confirmations, even when its provider
+reply was lost and its retry deadline has expired. This closes the stale pending
+session without another submit or fee charge. Normal receipt pruning still applies;
+the confirmed transaction remains available through the wallet transaction history.
+
+An explicit `resolvepaymastersession` `cancel_to_self` call checks the same
+validated original payment before preparing recovery. If that payment is already
+deeply confirmed, it returns the original confirmed session and creates no recovery.
+Previously such a call could report `PAYMASTER_RESERVED_INPUT_UNAVAILABLE` because
+the successful payment had spent its original input. An input spent by a different
+transaction is not proof of payment: the existing recovery availability and
+authorization checks remain mandatory. Inspect the exact original transaction and
+session rather than starting a replacement payment based on that error alone.
+
 ### Client retry after an unsigned quote expires
 
 `PAYMASTER_INPUT_ALREADY_RESERVED` means that a required input is already

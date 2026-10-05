@@ -56,7 +56,7 @@ submissions with absent or mismatched bindings are acknowledged individually;
 database read failures remain faults instead of being swallowed as peer errors.
 
 The local confirmed-payment reconciliation is shared by `processpaymasterresult`,
-`resolvepaymastersession retry_same`, authorized `senddigidollar` resumption,
+`resolvepaymastersession retry_same` and `cancel_to_self`, authorized `senddigidollar` resumption,
 and an exact already-signed `walletprocesspaymasterpsbt` call. It does not depend
 on Qt. The result-processing RPC returns the known txid even on later polls
 without another provider envelope, and does not fabricate signed result fields.
@@ -64,6 +64,14 @@ The PSBT RPC returns the existing signed artifact with `queued=false` and the
 confirmed txid instead of re-submitting it. Historical consent permits this
 observation after its signing/retry deadline; it never extends that deadline.
 Read-only session queries remain observational. CLI JSON conversions are unchanged.
+
+Wallet tip and periodic Paymaster maintenance also reconcile resultless signed
+client attempts when the exact transaction is already in the wallet and has
+240 confirmations. They reuse the same full final/manifest/signature validation
+and atomic fee settlement, without index waits or network retries. Newly recorded
+evidence survives that maintenance pass; subsequent passes use normal reorg and
+retention handling. Explicit recovery checks for this confirmed original payment
+before checking its spent inputs or preparing another provider's recovery.
 
 Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
 releases the original payment lease after durable preparation so the separate
