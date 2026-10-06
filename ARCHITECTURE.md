@@ -127,6 +127,11 @@ The v9.26.6rc2 integration keeps the provider panel in
 `src/qt/paymasterwidget.cpp`, behind a small embedding interface. The concrete
 `PaymasterSendWidget` owns fee selection and client-session presentation while
 the original send form retains its editable inputs and ordinary transfer path.
+Send DD reads spendable balances through a read-only `WalletModel` worker,
+retaining the last wallet-bound display while Paymaster holds wallet locks.
+Refreshes are coalesced; wallet generations discard detached replies. Unknown
+or failed balances disable new payment actions. Core rechecks funds and financial
+authorization through the unchanged send paths; the display is not authority.
 Receive DD loads stored payment requests through a separate read-only
 `WalletModel` worker, so wallet-lock contention during Paymaster work does not
 block tab navigation. Refreshes retain the last displayed snapshot and avoid

@@ -1425,6 +1425,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/qt/digidollarsendwidget.cpp/h
 - `DigiDollarSendWidget` owns editable recipient/amount/comment fields,
   coin-control, amount/address validation and direct DGB-funded DD sending.
+- Balance refreshes run asynchronously, retain the displayed wallet snapshot,
+  coalesce pending requests and reject replies after rebinding. Unknown/error
+  snapshots disable new payment actions; Core spending checks remain authoritative.
 - Its concrete Paymaster child reads an immutable form snapshot and calls
   limited presentation hooks for field locking, privacy, messages and completion.
   The form does not retain a second copy of the Paymaster session state.
@@ -1515,6 +1518,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   operations so wallet unlock contexts are not retained across network waits.
 - `getDigiDollarReceiveRequestsAsync()` reads stored receive requests on a worker
   with a shared wallet reference, returning the snapshot on the model's Qt thread.
+- `getDigiDollarBalanceAsync()` reads Core's spendable DD snapshot away from
+  the GUI thread while retaining the shared wallet interface. It requires no
+  RPC server; callbacks run on the model's thread and vanish after destruction.
 - `SerializeDigiDollarHistory()` preserves wallet status, including `expired_mint`,
   across the asynchronous history bridge; both overview and transaction history
   render that upstream status.

@@ -1,5 +1,67 @@
 # Paymaster build and test runbook
 
+## Send DD balance responsiveness (2026-10-06)
+
+Source base: `8bd9d0922f`; implementation: `8fd540b9ea`.
+Send DD still read its spendable balance synchronously during initial binding
+and page refresh. The existing Core summary takes `cs_wallet`, which Paymaster
+session reads and provider work may also hold. An isolated regression with a
+real DD backend reproduces the GUI wait: **509 ms**, until its 500-ms watchdog
+releases the lock. The earlier navigation fixture lacked that backend and
+therefore returned before taking the lock. The updated regression now checks
+that Send DD opens while the lock remains held: **4 ms** in the final run;
+Receive DD also passes (**9 ms**). These are controlled contention tests, not
+measurements of the operator's reported live delay. Read-only live checks found
+zero active client sessions and no multi-second RPC delay; they do not identify
+the particular competing lock holder.
+
+The fix adds a read-only WalletModel worker and a wallet-bound Send DD snapshot.
+Pending refreshes are coalesced, detached replies are discarded, and recipient,
+amount and note drafts survive refresh. Unknown or failed balance reads disable
+new payment actions. Core spending, signing, reservations, RPC/CLI and native DGB
+behavior are unchanged. Four Qt product files and two test files are modified;
+no Core optimization or financial authorization change is needed here.
+
+The preceding product changes were also reviewed for necessity: `7decec7151`
+fixes a reproduced rejection of a validated terminal reservation owner in
+unsigned history; `03309336e5` removes reproduced Receive DD selection waits.
+The accompanying receive-cache identity checks prevent stale writes from
+restoring removed requests. Their before/after evidence is recorded below.
+This review covers those changes and the current fix, not every historical
+change in the integration branch.
+
+Relevant guidance: repository/src instructions, CLAUDE's DigiDollar reading
+order, architecture/maps, contribution rules, developer GUI/locking notes,
+Paymaster wallet contracts, Qt translation policy and Windows/test runbooks.
+Completed verification: selected MSVC 14.43 / static Qt 5.15.10 product/test
+compiles, regenerated MOC, separate incremental application/test links and
+**27 targeted native Qt cases passed** across 15 selected functions, none failed
+or skipped. Coverage includes busy-wallet initial binding/navigation, balance
+loading/error/retry, wallet changes and late replies, preserved drafts, privacy,
+coin control and send validation, inbox failures, new-transfer offer clearing
+and wallet-bound Paymaster dialogs. Test helpers and logs remain excluded under
+`build_msvc/paymaster-refresh-check/send-open/`.
+
+The candidate `build_msvc/x64/Release/digibyte-qt-send-open.exe` has SHA-256
+`91C5AC7BA0C3A3B9DCCE943365F2413B0C79C471CF041646913053301FCAF7E8`.
+Its matching PDB has SHA-256
+`F90C51723E93A840D355E83DFFF2992402B051B63BA57B8FB796A18AFC73A092`.
+The local `ready-artifact.json` binds these hashes to the implementation and
+test result. The normal EXE has not been replaced at this checkpoint: both
+wallet processes still hold it open. No real wallet application or financial
+RPC is started for these tests.
+
+Full solution builds, complete Core/Qt suites, functional lifecycle tests and
+cross-platform checks remain operator work. The prerequisites, full-build
+command and suite commands in the next checkpoint apply; allow minutes and
+require exit codes zero with no failed cases. The previously recorded broad
+dropdown-highlight failures have not been retested by this targeted change.
+Manual acceptance after closing both wallets and installing the verified EXE:
+open Send DD during ordinary Paymaster work, keep an entered draft through
+refresh, switch wallets and verify that the former balance cannot reappear.
+Loading must leave the window responsive and prevent a new payment until the
+balance is known. Exact payment approvals and durable recovery remain intact.
+
 ## Historical reservation owners and Receive DD selection (2026-10-06)
 
 Source base: `471991482d`; shared ownership fix: `7decec7151`.

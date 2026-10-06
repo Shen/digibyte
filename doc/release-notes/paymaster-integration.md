@@ -5,6 +5,16 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Send DD responsiveness
+
+Opening Send DD and refreshing its balance no longer wait for Paymaster wallet
+locks on the GUI thread. Spendable balances are read in the background while
+the last wallet-bound display and editable payment draft are retained. Pending
+refreshes are coalesced; late replies cannot restore a closed or previous
+wallet's balance. Loading failures are shown without treating them as zero
+funds or enabling a payment. Core balance checks, signing, reservations and
+RPC/CLI behavior are unchanged.
+
 ## Saved transfers after a later payment completes
 
 The read-only client inbox accepts a validated later reservation owner even

@@ -821,6 +821,12 @@ the former wallet's request display immediately. Creating, editing and removing
 requests still use the existing wallet persistence interface. This GUI change
 adds no RPC or CLI behavior.
 
+Send DD also reads spendable balances in the background. Its last wallet-bound
+balance remains visible during refresh; changing wallets clears that snapshot.
+Before the first successful read, or after a read failure, new payment actions
+are disabled. Entered recipient, amount and note remain intact. This UI snapshot
+never replaces Core's authoritative balance, reservation or signing checks.
+
 #### Qt mint reject-reason translation (`DD-FA-DOC-010`)
 
 The Qt mint widget calls `WalletModel::mintDigiDollar`. The wallet model
