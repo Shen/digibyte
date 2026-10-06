@@ -8,6 +8,10 @@
 #include <qt/sendcoinsrecipient.h>
 
 #include <QWidget>
+#include <QPointer>
+
+#include <string>
+#include <vector>
 
 class WalletModel;
 class ClientModel;
@@ -36,6 +40,7 @@ QT_END_NAMESPACE
  */
 class DigiDollarReceiveWidget : public QWidget
 {
+    friend class DigiDollarWidgetTests;
     Q_OBJECT
 
 public:
@@ -166,8 +171,17 @@ private:
     QLabel* m_noRequestsLabel;
 
     // Models
-    WalletModel* m_walletModel;
+    QPointer<WalletModel> m_walletModel;
     ClientModel* m_clientModel;
+
+    // Refreshes are serialized per wallet binding. Local writes invalidate a
+    // pending snapshot, without clearing the displayed requests while reading.
+    quint64 m_walletGeneration{0};
+    quint64 m_requestsRevision{0};
+    bool m_refreshInFlight{false};
+    bool m_refreshPending{false};
+    bool m_requestsLoaded{false};
+    std::vector<std::string> m_cachedRequests;
 
     // Current request data
     QString m_currentAddress;

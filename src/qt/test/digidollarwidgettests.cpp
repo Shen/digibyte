@@ -2927,7 +2927,7 @@ void DigiDollarWidgetTests::datesFollowComputerLocale()
     receive.updateRecentRequests();
     auto* requests = receive.findChild<QTableWidget*>("requestsTable");
     QVERIFY(requests);
-    QCOMPARE(requests->rowCount(), 3);
+    QTRY_COMPARE(requests->rowCount(), 3);
     for (const auto order : {Qt::AscendingOrder, Qt::DescendingOrder}) {
         requests->sortItems(0, order);
         receive.updateRecentRequests();
@@ -3209,6 +3209,20 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QVERIFY2(transaction_switch_ms < 200,
              qPrintable(QStringLiteral("Switching from Send DD to DD Transactions waited %1 ms for cs_wallet")
                             .arg(transaction_switch_ms)));
+
+    // Receive DD also refreshes after currentChanged, on a queued GUI event.
+    // Process that event while the wallet remains busy so the test covers the
+    // actual read rather than only measuring how quickly Qt selects the tab.
+    tabs->setCurrentIndex(1);
+    QCoreApplication::processEvents();
+    const qint64 receive_switch_ms = whileWalletBusy([&] {
+        tabs->setCurrentIndex(2);
+        QCoreApplication::processEvents();
+    });
+    QVERIFY2(receive_switch_ms < 200,
+             qPrintable(QStringLiteral("Opening Receive DD blocked the GUI for %1 ms")
+                            .arg(receive_switch_ms)));
+    qInfo("Opening Receive DD with cs_wallet held returned in %lld ms", receive_switch_ms);
 
     // Top-level wallet navigation may still issue a generic refresh after the
     // DigiDollar page has been hidden. It must not refresh the last selected
@@ -5556,6 +5570,7 @@ void DigiDollarWidgetTests::ddReceivePanelFollowsSelectedRow()
     DigiDollarReceiveWidget receive;
     receive.setWalletModel(mini_gui.walletModel.get());
     receive.show();
+    QTRY_VERIFY(receive.m_requestsLoaded);
 
     QTableWidget* table = receive.findChild<QTableWidget*>("m_requestsTable");
     if (!table) {
@@ -5597,6 +5612,83 @@ void DigiDollarWidgetTests::ddReceivePanelFollowsSelectedRow()
     table->selectRow(1);
     QCoreApplication::processEvents();
     QCOMPARE(addressEdit->text(), addrB);
+}
+
+void DigiDollarWidgetTests::ddReceiveRefreshPreservesRequestsAndWalletBinding()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    WalletModel* wallet_model = mini_gui.walletModel.get();
+
+    const QString address = wallet_model->getNewDigiDollarAddress(QStringLiteral("receive-refresh"));
+    QVERIFY(!address.isEmpty());
+    SendCoinsRecipient recipient;
+    recipient.address = address;
+    recipient.label = QStringLiteral("saved request");
+    recipient.amount = 1234;
+    wallet_model->getRecentRequestsTableModel()->addNewRequest(recipient);
+
+    DigiDollarReceiveWidget receive;
+    receive.setWalletModel(wallet_model);
+    QTableWidget* table = receive.findChild<QTableWidget*>("requestsTable");
+    QVERIFY(table != nullptr);
+    QTRY_COMPARE(table->rowCount(), 1);
+    table->selectRow(0);
+    const QTableWidgetItem* const original_item = table->item(0, 3);
+
+    for (int i = 0; i < 20; ++i) receive.updateView();
+    QCOMPARE(table->rowCount(), 1); // The last snapshot remains visible while reading.
+    QCOMPARE(table->item(0, 3), original_item);
+    QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
+    QCOMPARE(table->item(0, 3), original_item); // An unchanged response does not rebuild rows.
+    QCOMPARE(table->currentRow(), 0);
+    QCOMPARE(receive.findChild<QLineEdit*>("addressEdit")->text(), address);
+
+    RecentRequestEntry edited;
+    QVERIFY(FindStoredReceiveRequest(*wallet_model, address, edited));
+    edited.recipient.label = QStringLiteral("updated request");
+    QVERIFY(receive.updateDigiDollarRequest(edited));
+    receive.updateView();
+    QTRY_COMPARE(table->item(0, 1)->text(), QStringLiteral("updated request"));
+    QCOMPARE(table->currentRow(), 0); // Keep selection when the actual data changes.
+    QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
+
+    // A late snapshot must not undo a locally completed removal. Process the
+    // worker reply only after the synchronous write and local row removal.
+    receive.updateView();
+    QVERIFY(QMetaObject::invokeMethod(&receive, "onRemoveRequestClicked", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 0);
+    QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(CountStoredReceiveRequests(*wallet_model, address), 0);
+
+    wallet_model->getRecentRequestsTableModel()->addNewRequest(recipient);
+    receive.updateView();
+    QTRY_COMPARE(table->rowCount(), 1);
+    receive.updateView();
+    receive.setWalletModel(nullptr);
+    QCOMPARE(table->rowCount(), 0);
+    QVERIFY(receive.findChild<QLineEdit*>("addressEdit")->text().isEmpty());
+    receive.setWalletModel(wallet_model); // Rebinding the same pointer is a new generation.
+    QTRY_COMPARE(table->rowCount(), 1);
+    QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
+    QCOMPARE(table->item(0, 1)->text(), recipient.label);
+
+    // Closing the model while a read is outstanding must not block shutdown or
+    // call back into the detached widget. The worker owns its wallet reference.
+    receive.updateView();
+    receive.setWalletModel(nullptr);
+    mini_gui.walletModel.reset();
+    QCoreApplication::processEvents();
+    QCOMPARE(table->rowCount(), 0);
 }
 
 // Regression test for shenger's Apr 20 RC30 UX report: double-clicking a
@@ -5648,7 +5740,7 @@ void DigiDollarWidgetTests::ddReceiveDoubleClickShowsRequestDialog()
         table = receive.findChild<QTableWidget*>();
     }
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE(table->rowCount(), 1);
 
     int existing_dialogs = 0;
     for (QWidget* widget : QApplication::topLevelWidgets()) {
@@ -5742,7 +5834,7 @@ void DigiDollarWidgetTests::ddReceiveHidesCrossNetworkRequests()
 
     QTableWidget* table = receive.findChild<QTableWidget*>("requestsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE(table->rowCount(), 1);
     QCOMPARE(table->item(0, 3)->data(Qt::UserRole).toString(), currentAddress);
 }
 
@@ -5785,7 +5877,7 @@ void DigiDollarWidgetTests::ddReceiveEditPersistsAndKeepsDgbSeparated()
 
     QTableWidget* table = receive.findChild<QTableWidget*>("requestsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE(table->rowCount(), 1);
     table->selectRow(0);
 
     QTimer::singleShot(0, [&]() {
@@ -5839,7 +5931,7 @@ void DigiDollarWidgetTests::ddReceiveEditPersistsAndKeepsDgbSeparated()
     reloaded.updateRecentRequests();
     QTableWidget* reloadedTable = reloaded.findChild<QTableWidget*>("requestsTable");
     QVERIFY(reloadedTable != nullptr);
-    QCOMPARE(reloadedTable->rowCount(), 1);
+    QTRY_COMPARE(reloadedTable->rowCount(), 1);
     QCOMPARE(reloadedTable->item(0, 1)->text(), QStringLiteral("edited label"));
     QCOMPARE(reloadedTable->item(0, 2)->text(), QStringLiteral("45.67 $DD"));
 }
@@ -5884,7 +5976,7 @@ void DigiDollarWidgetTests::ddReceiveEditCancelLeavesRequestUnchanged()
 
     QTableWidget* table = receive.findChild<QTableWidget*>("requestsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE(table->rowCount(), 1);
     table->selectRow(0);
 
     QTimer::singleShot(0, [&]() {
@@ -5983,7 +6075,7 @@ void DigiDollarWidgetTests::ddReceiveRemovePersistsAndKeepsDgbSeparated()
 
     QTableWidget* table = receive.findChild<QTableWidget*>("requestsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE(table->rowCount(), 1);
     QCOMPARE(table->item(0, 3)->data(Qt::UserRole).toString(), ddAddress);
     for (int row = 0; row < table->rowCount(); ++row) {
         for (int column = 0; column < table->columnCount(); ++column) {
@@ -6006,6 +6098,7 @@ void DigiDollarWidgetTests::ddReceiveRemovePersistsAndKeepsDgbSeparated()
     reloaded.updateRecentRequests();
     QTableWidget* reloadedTable = reloaded.findChild<QTableWidget*>("requestsTable");
     QVERIFY(reloadedTable != nullptr);
+    QTRY_VERIFY(reloaded.m_requestsLoaded);
     QCOMPARE(reloadedTable->rowCount(), 0);
 }
 

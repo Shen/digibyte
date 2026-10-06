@@ -47,6 +47,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QTimer>
 
 namespace {
 constexpr CAmount MAX_DD_REQUEST_AMOUNT_CENTS = 100000000LL * 100;
@@ -471,12 +472,22 @@ void DigiDollarReceiveWidget::connectSignals()
 
 void DigiDollarReceiveWidget::setWalletModel(WalletModel* model)
 {
-    m_walletModel = model;
-
-    if (m_walletModel) {
+    if (model && m_walletModel == model) {
         updateRecentRequests();
-        // applyTheme(); // REMOVED: Now handled by CSS files
+        return;
     }
+    m_walletModel = model;
+    ++m_walletGeneration;
+    m_refreshInFlight = false;
+    m_refreshPending = false;
+    m_requestsLoaded = false;
+    m_cachedRequests.clear();
+    clearFields();
+    m_requestsTable->setRowCount(0);
+    m_requestsTable->setVisible(false);
+    m_noRequestsLabel->setText(tr("No recent payment requests"));
+    m_noRequestsLabel->setVisible(true);
+    updateRecentRequests();
 }
 
 void DigiDollarReceiveWidget::setClientModel(ClientModel* model)
@@ -495,9 +506,42 @@ void DigiDollarReceiveWidget::updateView()
 
 void DigiDollarReceiveWidget::updateRecentRequests()
 {
-    // TODO: Implement recent requests from wallet model
-    // For now, keep the table empty
-    populateRecentRequests();
+    if (!m_walletModel) return;
+    if (m_refreshInFlight) {
+        m_refreshPending = true;
+        return;
+    }
+    m_refreshInFlight = true;
+    if (!m_requestsLoaded) m_noRequestsLabel->setText(tr("Loading payment requests…"));
+
+    const quint64 generation = m_walletGeneration;
+    const quint64 revision = m_requestsRevision;
+    QPointer<DigiDollarReceiveWidget> guard{this};
+    m_walletModel->getDigiDollarReceiveRequestsAsync(
+        [guard, generation, revision](std::vector<std::string> requests, QString error) mutable {
+            if (!guard || !guard->m_walletModel || guard->m_walletGeneration != generation) return;
+            guard->m_refreshInFlight = false;
+            if (guard->m_requestsRevision != revision) {
+                // A request was generated, edited or removed after this read
+                // started. Fetch again before replacing the current display.
+                guard->m_refreshPending = true;
+            } else if (!error.isEmpty()) {
+                LogPrintf("DigiDollar Receive: asynchronous request history error - %s\n", error.toStdString());
+                guard->m_noRequestsLabel->setText(tr("Payment requests could not be loaded. Reopen Receive DD to retry."));
+                guard->m_noRequestsLabel->setVisible(true);
+            } else {
+                const bool changed = !guard->m_requestsLoaded || requests != guard->m_cachedRequests;
+                guard->m_cachedRequests = std::move(requests);
+                guard->m_requestsLoaded = true;
+                guard->m_noRequestsLabel->setText(tr("No recent payment requests"));
+                if (changed) guard->populateRecentRequests();
+                guard->m_noRequestsLabel->setVisible(guard->m_requestsTable->rowCount() == 0);
+            }
+            if (guard->m_refreshPending) {
+                guard->m_refreshPending = false;
+                QTimer::singleShot(0, guard, &DigiDollarReceiveWidget::updateRecentRequests);
+            }
+        });
 }
 
 // REMOVED: applyTheme() - All styling now handled by CSS files (light.css/dark.css)
@@ -580,6 +624,7 @@ void DigiDollarReceiveWidget::generateNewAddress()
     // Add to recent requests table model (this persists to wallet.dat)
     if (m_walletModel && m_walletModel->getRecentRequestsTableModel()) {
         m_walletModel->getRecentRequestsTableModel()->addNewRequest(recipient);
+        ++m_requestsRevision;
     }
 
     // Add to UI table for immediate display
@@ -796,6 +841,7 @@ void DigiDollarReceiveWidget::onEditRequestClicked()
 
 void DigiDollarReceiveWidget::populateRecentRequests()
 {
+    const QString selected_address = addressFromRow(selectedRow());
     // Clear existing table entries first
     m_requestsTable->setRowCount(0);
 
@@ -807,11 +853,9 @@ void DigiDollarReceiveWidget::populateRecentRequests()
 
     // Load DD addresses directly from wallet storage (not from RecentRequestsTableModel,
     // which now filters out DD addresses to keep DGB and DD systems separate)
-    std::vector<std::string> requests = m_walletModel->wallet().getAddressReceiveRequests();
+    LogPrint(BCLog::QT, "DigiDollarReceiveWidget: Loading DD requests from %d total wallet requests\n", (int)m_cachedRequests.size());
 
-    LogPrint(BCLog::QT, "DigiDollarReceiveWidget: Loading DD requests from %d total wallet requests\n", (int)requests.size());
-
-    for (const std::string& requestStr : requests) {
+    for (const std::string& requestStr : m_cachedRequests) {
         // Deserialize the entry
         std::vector<uint8_t> data(requestStr.begin(), requestStr.end());
         DataStream ss{data};
@@ -859,6 +903,12 @@ void DigiDollarReceiveWidget::populateRecentRequests()
     } else {
         m_requestsTable->setVisible(true);
         m_noRequestsLabel->setVisible(false);
+    }
+    for (int row = 0; row < m_requestsTable->rowCount(); ++row) {
+        if (!selected_address.isEmpty() && addressFromRow(row) == selected_address) {
+            m_requestsTable->selectRow(row);
+            break;
+        }
     }
 }
 
@@ -1041,6 +1091,7 @@ bool DigiDollarReceiveWidget::updateDigiDollarRequest(const RecentRequestEntry& 
     if (!m_walletModel->wallet().setAddressReceiveRequest(request_dest, ToString(entry.id), ss.str())) {
         return false;
     }
+    ++m_requestsRevision;
     const CTxDestination address_book_dest = DecodeDigiDollarAddress(entry.recipient.address.toStdString());
     return m_walletModel->wallet().setAddressBook(address_book_dest, entry.recipient.label.toStdString(),
                                                   wallet::AddressPurpose::DIGIDOLLAR);
@@ -1053,7 +1104,9 @@ bool DigiDollarReceiveWidget::removeDigiDollarRequest(const QString& address)
         return false;
     }
     const CTxDestination dest = DecodeDigiDollarAddress(entry.recipient.address.toStdString());
-    return m_walletModel->wallet().setAddressReceiveRequest(dest, ToString(entry.id), "");
+    const bool removed = m_walletModel->wallet().setAddressReceiveRequest(dest, ToString(entry.id), "");
+    if (removed) ++m_requestsRevision;
+    return removed;
 }
 
 bool DigiDollarReceiveWidget::editDigiDollarRequest(int row)

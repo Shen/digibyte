@@ -270,6 +270,12 @@ public:
      */
     void getDigiDollarTransactionHistoryAsync(int count, int skip, RpcCallback callback);
 
+    /** Read stored DD receive requests without waiting for cs_wallet on Qt's
+     * event thread. The shared wallet interface remains alive until the read
+     * finishes; the callback runs on this model's thread. */
+    using ReceiveRequestsCallback = std::function<void(std::vector<std::string> requests, QString error)>;
+    void getDigiDollarReceiveRequestsAsync(ReceiveRequestsCallback callback);
+
     /**
      * Return the latest model-owned history snapshot without waiting for
      * cs_wallet. At startup this contains up to 50 persisted rows; a completed

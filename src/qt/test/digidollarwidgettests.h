@@ -83,6 +83,7 @@ private Q_SLOTS:
     void transactionsWidgetRefreshesOnDigiDollarSignal();
     void walletViewRefreshesDigiDollarPageOnOpen();
     void ddReceivePanelFollowsSelectedRow();
+    void ddReceiveRefreshPreservesRequestsAndWalletBinding();
     void ddReceiveDoubleClickShowsRequestDialog();
     void ddReceiveHidesCrossNetworkRequests();
     void ddReceiveEditPersistsAndKeepsDgbSeparated();

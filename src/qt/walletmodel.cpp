@@ -1579,6 +1579,33 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
     thread->start();
 }
 
+void WalletModel::getDigiDollarReceiveRequestsAsync(ReceiveRequestsCallback callback)
+{
+    const std::shared_ptr<interfaces::Wallet> wallet = m_wallet;
+    QPointer<WalletModel> guard{this};
+    QThread* thread = QThread::create([guard, wallet, callback = std::move(callback)]() mutable {
+        std::vector<std::string> requests;
+        QString error;
+        try {
+            requests = wallet->getAddressReceiveRequests();
+        } catch (const std::exception& exception) {
+            error = QString::fromUtf8(exception.what());
+        } catch (...) {
+            error = QStringLiteral("Unknown DigiDollar receive history error");
+        }
+
+        if (!guard) return;
+        QMetaObject::invokeMethod(
+            guard,
+            [guard, callback = std::move(callback), requests = std::move(requests), error = std::move(error)]() mutable {
+                if (guard && callback) callback(std::move(requests), std::move(error));
+            },
+            Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 UniValue WalletModel::getCachedDigiDollarTransactionHistory(int count, int skip)
 {
     if (count < 0 || count > 1000 || skip < 0) return UniValue{UniValue::VARR};
