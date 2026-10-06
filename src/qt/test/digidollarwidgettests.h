@@ -85,6 +85,7 @@ private Q_SLOTS:
     void ddReceivePanelFollowsSelectedRow();
     void ddReceiveRefreshPreservesRequestsAndWalletBinding();
     void ddReceiveDoubleClickShowsRequestDialog();
+    void ddReceiveSelectionDoesNotWaitForBusyWallet();
     void ddReceiveHidesCrossNetworkRequests();
     void ddReceiveEditPersistsAndKeepsDgbSeparated();
     void ddReceiveEditCancelLeavesRequestUnchanged();

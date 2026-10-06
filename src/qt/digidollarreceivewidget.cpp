@@ -638,6 +638,7 @@ void DigiDollarReceiveWidget::generateNewAddress()
     dialog->setModel(m_walletModel);
     dialog->setInfo(recipient);
     dialog->show();
+    updateRecentRequests(); // Load the persisted request id into the read-only snapshot.
 }
 
 void DigiDollarReceiveWidget::updateQRCode()
@@ -766,6 +767,11 @@ void DigiDollarReceiveWidget::onRecentRequestSelected()
         return;
     }
     m_currentAddress = address;
+    RecentRequestEntry entry;
+    const bool found = findDigiDollarRequest(address, entry);
+    m_currentLabel = found ? entry.recipient.label : QString{};
+    m_currentAmount = found && entry.recipient.amount > 0 ? FormatDigiDollarRequestAmount(entry.recipient.amount) : QString{};
+    m_currentMessage = found ? entry.recipient.message : QString{};
     if (m_addressEdit) {
         m_addressEdit->setText(address);
     }
@@ -1054,13 +1060,16 @@ bool DigiDollarReceiveWidget::getSelectedRequest(RecentRequestEntry& entry) cons
     return findDigiDollarRequest(addressFromRow(selectedRow()), entry);
 }
 
-bool DigiDollarReceiveWidget::findDigiDollarRequest(const QString& address, RecentRequestEntry& entry) const
+bool DigiDollarReceiveWidget::findDigiDollarRequest(const QString& address, RecentRequestEntry& entry, bool read_wallet) const
 {
     if (!m_walletModel || address.isEmpty() || !IsCurrentNetworkDigiDollarAddress(address)) {
         return false;
     }
 
-    for (const std::string& requestStr : m_walletModel->wallet().getAddressReceiveRequests()) {
+    // Selection, copying and opening a dialog must use the displayed snapshot,
+    // without waiting for a concurrent wallet operation to release cs_wallet.
+    const auto stored = read_wallet ? m_walletModel->wallet().getAddressReceiveRequests() : std::vector<std::string>{};
+    for (const std::string& requestStr : read_wallet ? stored : m_cachedRequests) {
         std::vector<uint8_t> data(requestStr.begin(), requestStr.end());
         DataStream ss{data};
         RecentRequestEntry candidate;
@@ -1078,12 +1087,38 @@ bool DigiDollarReceiveWidget::findDigiDollarRequest(const QString& address, Rece
     return false;
 }
 
+void DigiDollarReceiveWidget::updateCachedRequest(const RecentRequestEntry& entry, bool removed)
+{
+    for (auto it = m_cachedRequests.begin(); it != m_cachedRequests.end(); ++it) {
+        std::vector<uint8_t> data(it->begin(), it->end());
+        DataStream stream{data};
+        RecentRequestEntry cached;
+        try {
+            stream >> cached;
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (cached.id != entry.id || cached.recipient.address != entry.recipient.address) continue;
+        if (removed) {
+            m_cachedRequests.erase(it);
+        } else {
+            DataStream updated{};
+            updated << entry;
+            *it = updated.str();
+            populateRecentRequests();
+        }
+        return;
+    }
+}
+
 bool DigiDollarReceiveWidget::updateDigiDollarRequest(const RecentRequestEntry& entry)
 {
     if (!m_walletModel || entry.id == 0 ||
         !IsCurrentNetworkDigiDollarAddress(entry.recipient.address)) {
         return false;
     }
+    RecentRequestEntry stored;
+    if (!findDigiDollarRequest(entry.recipient.address, stored, true) || stored.id != entry.id) return false;
 
     DataStream ss{};
     ss << entry;
@@ -1092,6 +1127,7 @@ bool DigiDollarReceiveWidget::updateDigiDollarRequest(const RecentRequestEntry& 
         return false;
     }
     ++m_requestsRevision;
+    updateCachedRequest(entry, false);
     const CTxDestination address_book_dest = DecodeDigiDollarAddress(entry.recipient.address.toStdString());
     return m_walletModel->wallet().setAddressBook(address_book_dest, entry.recipient.label.toStdString(),
                                                   wallet::AddressPurpose::DIGIDOLLAR);
@@ -1103,9 +1139,14 @@ bool DigiDollarReceiveWidget::removeDigiDollarRequest(const QString& address)
     if (!findDigiDollarRequest(address, entry)) {
         return false;
     }
+    RecentRequestEntry stored;
+    if (!findDigiDollarRequest(address, stored, true) || stored.id != entry.id) return false;
     const CTxDestination dest = DecodeDigiDollarAddress(entry.recipient.address.toStdString());
     const bool removed = m_walletModel->wallet().setAddressReceiveRequest(dest, ToString(entry.id), "");
-    if (removed) ++m_requestsRevision;
+    if (removed) {
+        ++m_requestsRevision;
+        updateCachedRequest(entry, true);
+    }
     return removed;
 }
 

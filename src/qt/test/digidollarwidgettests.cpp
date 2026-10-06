@@ -75,6 +75,7 @@
 #include <QAbstractButton>
 #include <QColor>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
@@ -5656,6 +5657,9 @@ void DigiDollarWidgetTests::ddReceiveRefreshPreservesRequestsAndWalletBinding()
     QVERIFY(FindStoredReceiveRequest(*wallet_model, address, edited));
     edited.recipient.label = QStringLiteral("updated request");
     QVERIFY(receive.updateDigiDollarRequest(edited));
+    RecentRequestEntry cached;
+    QVERIFY(receive.findDigiDollarRequest(address, cached));
+    QCOMPARE(cached.recipient.label, edited.recipient.label);
     receive.updateView();
     QTRY_COMPARE(table->item(0, 1)->text(), QStringLiteral("updated request"));
     QCOMPARE(table->currentRow(), 0); // Keep selection when the actual data changes.
@@ -5666,6 +5670,7 @@ void DigiDollarWidgetTests::ddReceiveRefreshPreservesRequestsAndWalletBinding()
     receive.updateView();
     QVERIFY(QMetaObject::invokeMethod(&receive, "onRemoveRequestClicked", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
+    QVERIFY(!receive.findDigiDollarRequest(address, cached));
     QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
     QCOMPARE(table->rowCount(), 0);
     QCOMPARE(CountStoredReceiveRequests(*wallet_model, address), 0);
@@ -5673,6 +5678,13 @@ void DigiDollarWidgetTests::ddReceiveRefreshPreservesRequestsAndWalletBinding()
     wallet_model->getRecentRequestsTableModel()->addNewRequest(recipient);
     receive.updateView();
     QTRY_COMPARE(table->rowCount(), 1);
+    QVERIFY(receive.findDigiDollarRequest(address, cached));
+    QVERIFY(wallet_model->wallet().setAddressReceiveRequest(
+        DecodeDigiDollarAddress(address.toStdString()), ToString(cached.id), ""));
+    QVERIFY(!receive.updateDigiDollarRequest(cached)); // A stale display cannot restore an externally removed request.
+    QVERIFY(!receive.removeDigiDollarRequest(address));
+    QCOMPARE(CountStoredReceiveRequests(*wallet_model, address), 0);
+    wallet_model->getRecentRequestsTableModel()->addNewRequest(recipient);
     receive.updateView();
     receive.setWalletModel(nullptr);
     QCOMPARE(table->rowCount(), 0);
@@ -5781,6 +5793,87 @@ void DigiDollarWidgetTests::ddReceiveDoubleClickShowsRequestDialog()
 
     dialog->close();
     QCoreApplication::processEvents();
+}
+
+void DigiDollarWidgetTests::ddReceiveSelectionDoesNotWaitForBusyWallet()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    SendCoinsRecipient recipient;
+    recipient.address = gui.walletModel->getNewDigiDollarAddress(QStringLiteral("busy-receive"));
+    recipient.label = QStringLiteral("selected label");
+    recipient.message = QStringLiteral("selected message");
+    recipient.amount = 1234;
+    QVERIFY(!recipient.address.isEmpty());
+    gui.walletModel->getRecentRequestsTableModel()->addNewRequest(recipient);
+    DigiDollarReceiveWidget receive;
+    receive.setWalletModel(gui.walletModel.get());
+    receive.show();
+    auto* table = receive.findChild<QTableWidget*>("requestsTable");
+    QVERIFY(table);
+    QTRY_COMPARE(table->rowCount(), 1);
+    QTRY_VERIFY(!receive.m_refreshInFlight && !receive.m_refreshPending);
+
+    std::promise<void> lock_acquired;
+    auto ready = lock_acquired.get_future();
+    std::mutex gate_mutex;
+    std::condition_variable gate;
+    bool release_lock{false};
+    std::thread lock_holder([&] {
+        LOCK(wallet->cs_wallet);
+        lock_acquired.set_value();
+        std::unique_lock<std::mutex> lock{gate_mutex};
+        gate.wait(lock, [&] { return release_lock; });
+    });
+    ready.wait();
+    // Keep failure finite while allowing native dialog/clipboard startup time.
+    std::thread watchdog([&] {
+        std::unique_lock<std::mutex> lock{gate_mutex};
+        if (!gate.wait_for(lock, std::chrono::milliseconds{1500}, [&] { return release_lock; })) {
+            release_lock = true;
+            lock.unlock();
+            gate.notify_all();
+        }
+    });
+    QElapsedTimer elapsed;
+    elapsed.start();
+    table->selectRow(0);
+    RecentRequestEntry selected;
+    const bool found = receive.getSelectedRequest(selected);
+    receive.copyURI();
+    const QString copied_uri = QApplication::clipboard()->text();
+    receive.copyMessage();
+    const QString copied_message = QApplication::clipboard()->text();
+    const bool invoked = QMetaObject::invokeMethod(&receive, "onRecentRequestDoubleClicked",
+        Qt::DirectConnection, Q_ARG(int, 0), Q_ARG(int, 3));
+    const qint64 duration_ms = elapsed.elapsed();
+    bool completed_while_wallet_busy;
+    {
+        std::lock_guard<std::mutex> lock{gate_mutex};
+        completed_while_wallet_busy = !release_lock;
+        release_lock = true;
+    }
+    gate.notify_all();
+    lock_holder.join();
+    watchdog.join();
+    // Check only after joining: an assertion must not leave the lock held.
+    QVERIFY(found && invoked);
+    QCOMPARE(selected.recipient.address, recipient.address);
+    QCOMPARE(selected.recipient.message, recipient.message);
+    QCOMPARE(selected.recipient.amount, recipient.amount);
+    QVERIFY(copied_uri.contains(QStringLiteral("amount=12.34")));
+    QCOMPARE(copied_message, recipient.message);
+    auto* dialog = receive.findChild<DigiDollarReceiveRequestDialog*>();
+    QVERIFY(dialog);
+    dialog->close();
+    qInfo("Receive DD selection and request dialog with cs_wallet held returned in %lld ms", duration_ms);
+    QVERIFY2(completed_while_wallet_busy,
+             qPrintable(QStringLiteral("Selecting/opening a DD request waited for cs_wallet (%1 ms)").arg(duration_ms)));
 }
 
 void DigiDollarWidgetTests::ddReceiveHidesCrossNetworkRequests()

@@ -123,7 +123,8 @@ private:
                        const QString& amount = QString(), const QString& message = QString()) const;
     int selectedRow() const;
     bool getSelectedRequest(RecentRequestEntry& entry) const;
-    bool findDigiDollarRequest(const QString& address, RecentRequestEntry& entry) const;
+    bool findDigiDollarRequest(const QString& address, RecentRequestEntry& entry, bool read_wallet = false) const;
+    void updateCachedRequest(const RecentRequestEntry& entry, bool removed);
     bool updateDigiDollarRequest(const RecentRequestEntry& entry);
     bool removeDigiDollarRequest(const QString& address);
     bool editDigiDollarRequest(int row);
