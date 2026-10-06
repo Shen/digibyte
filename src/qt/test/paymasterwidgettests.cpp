@@ -7636,6 +7636,100 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     QVERIFY(!send->isEnabled()); // Old-wallet signals stay disconnected.
 }
 
+void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers_data()
+{
+    QTest::addColumn<bool>("already_cleared");
+    QTest::addColumn<bool>("automatic");
+    QTest::newRow("cleared-after-success") << true << false;
+    QTest::newRow("filled-entry") << false << false;
+    QTest::newRow("automatic-cleared-after-success") << true << true;
+    QTest::newRow("automatic-filled-entry") << false << true;
+}
+
+void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
+{
+    QFETCH(bool, already_cleared);
+    QFETCH(bool, automatic);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-new-transfer-offers");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    int offer_reads{0};
+    int unexpected{0};
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") {
+            ++offer_reads;
+            UniValue offers{UniValue::VARR};
+            offers.push_back(PaymasterOffer(
+                offer_reads == 1 ? "Previous provider" : "Fresh provider",
+                std::string(64, 'b'), "user_paid", 2, params[0].getInt<int64_t>(),
+                false, QDateTime::currentSecsSinceEpoch() + 60));
+            return offers;
+        }
+        ++unexpected;
+        return UniValue{};
+    });
+    form.setWalletModel(gui.walletModel.get());
+    form.findChild<QRadioButton*>(automatic ? "feeFundingAuto" : "feeFundingPaymaster")->setChecked(true);
+    auto* timer = client->findChild<QTimer*>("paymasterOfferRefreshTimer");
+    auto* expiry = client->findChild<QTimer*>("paymasterOfferExpiryTimer");
+    auto* address = form.findChild<QLineEdit*>("addressEdit");
+    auto* amount = form.findChild<QLineEdit*>("amountEdit");
+    auto* primary = form.findChild<QPushButton*>("paymasterSessionPrimaryAction");
+    auto* table = form.findChild<QTableWidget*>("paymasterOffers");
+    auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
+    auto* status = form.findChild<QLabel*>("paymasterOffersStatus");
+    QVERIFY(timer && expiry && address && amount && primary && table && cards && status);
+    timer->stop();
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    address->setText(recipient);
+    amount->setText(QStringLiteral("3.25"));
+    form.show();
+    QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 1);
+    QCOMPARE(offer_reads, 1);
+
+    client->setPaymasterSessionForTesting(
+        QStringLiteral("CONFIRMED"), QStringLiteral("final_transaction"),
+        true, recipient, 3.25, QStringLiteral("MEMPOOL"));
+    if (already_cleared) {
+        // Successful send clears the form while the durable session still
+        // protects its history. Clearing it again emits no textChanged signal.
+        QVERIFY(QMetaObject::invokeMethod(&form, "onClearClicked", Qt::DirectConnection));
+        QVERIFY(address->text().isEmpty());
+        QVERIFY(amount->text().isEmpty());
+    }
+    QVERIFY(primary->isEnabled());
+    QCOMPARE(primary->text(), QStringLiteral("Start a new transfer"));
+    primary->click();
+    QVERIFY(address->text().isEmpty());
+    QVERIFY(amount->text().isEmpty());
+    QCOMPARE(table->rowCount(), 0);
+    QVERIFY(cards->isHidden());
+    QVERIFY(!expiry->isActive());
+    QVERIFY(!status->text().contains(QStringLiteral("offer found"), Qt::CaseInsensitive));
+    QVERIFY(status->text().contains(QStringLiteral("Enter a valid")));
+    QVERIFY(form.findChild<QLabel*>("feeFundingSummary")->text().contains(QStringLiteral("Enter a recipient")));
+    QVERIFY(!form.findChild<QPushButton*>("sendButton")->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    QCOMPARE(offer_reads, 1); // An empty new entry must not refresh the old offers.
+
+    address->setText(recipient);
+    amount->setText(QStringLiteral("3.50"));
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    QCOMPARE(offer_reads, 2);
+    QCOMPARE(table->rowCount(), 1);
+    QVERIFY(table->item(0, 0)->text().contains(QStringLiteral("Fresh provider")));
+    QCOMPARE(unexpected, 0); // Starting another entry sends no payment RPC.
+}
+
 void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
 {
     TestChain100Setup test;

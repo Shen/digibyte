@@ -1744,6 +1744,13 @@ void PaymasterSendWidget::onPaymasterPrimaryAction()
         m_paymasterCostValue->setText(DigiDollarSendWidget::tr("No service fee authorized yet"));
         m_paymasterExpiryValue->setText(DigiDollarSendWidget::tr("—"));
         m_form.clearInputFields();
+        // Completion may already have cleared the fields while the durable
+        // session still suppressed offer invalidation. Do not rely on another
+        // textChanged signal to discard the previous provider and cost preview.
+        invalidatePaymasterOfferPreview();
+        setOfferCheckStatus(OfferCheckState::NEEDS_AMOUNT,
+                            DigiDollarSendWidget::tr("Enter a valid $DD amount, then check offers."));
+        updateFeeDisplay();
         updatePaymasterFocusMode();
         m_form.updateSendButton();
         break;
@@ -4853,6 +4860,11 @@ void PaymasterSendWidget::updateFeeDisplay()
         m_feeSummary->setToolTip(QString());
     }
 
+    if (!input.amount_valid) {
+        m_feeSummary->setText(DigiDollarSendWidget::tr(
+            "Enter a recipient and a valid $DD amount to compare payment costs."));
+        m_feeSummary->setToolTip(QString{});
+    }
     updateOfferCheckControls();
     QString amountText = input.amount_text;
     if (!amountText.isEmpty()) {
