@@ -17,7 +17,11 @@ whose record is missing or mismatched is a read failure. Found unsigned requests
 use Core's existing cancellation capability, including while a provider is
 paused. No consensus, wire or persisted-record format changes are involved.
 
-The integration includes official PR #452 through `92330d952625` (v9.26.6).
+The integration includes official `release/v9.26.7` through `d7265fb05e26`,
+on top of the preceding PR #452 integration. Official product changes take
+precedence; Paymaster extensions retain their existing authorization boundaries.
+See the [v9.26.7 integration checkpoint](doc/digidollar-paymaster-v9.26.7-integration.md)
+for source bindings, targeted checks and the pending full-build acceptance.
 `DigiDollarWallet::PlanDigiDollarTransfer` retains upstream's DD-only input,
 change and capacity preflight, including its detailed errors. The fork's
 `PlanFundedDigiDollarTransfer` adds concrete DGB fee inputs under the wallet

@@ -5,6 +5,21 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Official v9.26.7 integration
+
+The `integration/paymaster-v9.26.7` branch merges the official release through
+`d7265fb05e26`, preserving the current Paymaster implementation. All official
+product changes are retained: tip-specific difficulty RPCs, unused Qt DD receive
+addresses, the minimum-change tooltip, build-derived overview branding, index
+shutdown handling and the test/CI corrections. The fork's Windows version header
+is regenerated as 9.26.7, and its shared Qt test helper exposes the rescan needed
+by a new official address regression. Both new address regressions also finish
+RPC warmup when run in isolation; their assertions remain unchanged.
+No additional Paymaster product change is
+required by this merge. The official release document is unchanged; its test
+claims do not certify this fork. See the [integration checkpoint](../digidollar-paymaster-v9.26.7-integration.md)
+for targeted results and pending operator checks.
+
 ## Send DD responsiveness
 
 Opening Send DD and refreshing its balance no longer wait for Paymaster wallet

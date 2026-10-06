@@ -1480,6 +1480,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 ### src/rpc/blockchain.cpp / .h
 - RPC commands: `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `getblockchaininfo`, `getchaintips`, `getdifficulty`, `getblockstats`, `gettxoutsetinfo`, `gettxout`, `verifychain`, `preciousblock`, `invalidateblock`, `reconsiderblock`, `waitfornewblock`, `waitforblock`, `waitforblockheight`, `syncwithvalidationinterfacequeue`, `getblockfrompeer`, `dumptxoutset`, `scanblocks`
 - `GetDifficulty()` → calculates human-readable difficulty value, supports per-algo difficulty queries
+- `getblockchaininfo` and `getchainstates` report difficulty from their own tip's target and algorithm. Their scalar value does not scan retired Groestl history; the separate per-algorithm lookup remains available.
 - `blockToJSON()` → converts CBlock to detailed JSON representation
 - `blockheaderToJSON()` → converts block header to JSON
 - `MempoolInfoToJSON()` / `MempoolToJSON()` → mempool state as JSON

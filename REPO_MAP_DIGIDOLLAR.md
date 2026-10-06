@@ -786,6 +786,7 @@ or chain parameters.
 ### src/rpc/digidollar.cpp
 - Full implementation of all DD RPC commands
 - Integrates with wallet, oracle, health monitoring systems
+- `listdigidollaraddresses(include_empty=true)` includes unused wallet-owned Qt DD receive addresses from the address book with their labels. Ordinary DGB destinations, foreign contacts and legacy watch-only entries are excluded from this addition.
 - Adds node `listpaymasters` and the optional seventh
   `senddigidollar` options argument, following upstream `amount_unit` (`fee_mode`, canonical `request_id`, hard
   service-fee cap, privacy profile, selection mode, explicit
@@ -1763,6 +1764,8 @@ present in the tree but not compiled into the current unit-test binary.
 
 The original Qt suite retains DD behavior and boundary integration tests;
 `digidollartestutil.cpp/h` provides the single shared descriptor-wallet fixture.
+Its exported `DigiDollarTest::SyncUpWallet` also retains the official legacy
+watch-only address regression's rescan setup after the helpers were separated.
 `src/wallet/test/paymaster_wallet_load_tests.cpp` owns the seven Paymaster
 maintenance/load regression cases formerly embedded in `walletload_tests.cpp`.
 

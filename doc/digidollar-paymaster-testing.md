@@ -1,5 +1,27 @@
 # Paymaster build and test runbook
 
+## Official v9.26.7 source integration (2026-10-06)
+
+Branch `integration/paymaster-v9.26.7` merges official `d7265fb05e26` with the
+current Paymaster source `2f44ac43c2`; merge commit `e5cfa2da3e`. The preceding
+integration branch remains unchanged. Official product changes take precedence
+and all their hunks are retained. The fork's Windows header is regenerated as
+9.26.7; new official Qt address tests reuse the separated rescan helper and
+finish RPC warmup for isolated execution, retaining their assertions.
+
+Completed: 12 selected MSVC compiles with generated MOC/resources, separate
+incremental Core/Qt test links, **26 targeted cases passed** (six Core/RPC and
+20 Qt; no failures/skips), official product patch retention, unchanged official
+release document, functional Python syntax and diff checks. These checks retain
+the preceding Send/Receive/session corrections; no new Paymaster financial,
+protocol or persistence change is added. Normal wallet/daemon/CLI binaries have
+not been built or installed for this checkpoint.
+
+The [v9.26.7 integration record](digidollar-paymaster-v9.26.7-integration.md)
+contains exact source hashes, scope, test coverage and copyable full-build,
+unit/Qt/functional acceptance commands. Those larger runs and cross-platform
+checks remain operator work; upstream test claims do not certify this fork.
+
 ## Send DD balance responsiveness (2026-10-06)
 
 Source base: `8bd9d0922f`; implementation: `8fd540b9ea`.

@@ -4,7 +4,7 @@
 
 DigiByte Core v9.26 (Bitcoin Core v26.2 lineage), augmented with the **DigiDollar** native USD-denominated token and a multi-oracle DGB/USD price feed using MuSig2 Schnorr signatures.
 
-The v9.26.6 development line is `release/v9.26.6`. Work may use a separate branch and worktree; verify the actual checkout before editing. Upstream main branch: `develop`.
+The current official release line is `release/v9.26.7`. This fork integrates it on `integration/paymaster-v9.26.7`; the preceding `integration/paymaster-v9.26.6rc2` branch remains available. Verify the actual checkout before editing. Upstream main branch: `develop`.
 
 ## Required reading order before any DigiDollar / oracle work
 
