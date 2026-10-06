@@ -23,7 +23,7 @@ using wallet::WalletContext;
 using wallet::WalletRescanReserver;
 
 namespace DigiDollarTest {
-static void SyncUpWallet(const std::shared_ptr<wallet::CWallet>& wallet, interfaces::Node& node)
+void SyncUpWallet(const std::shared_ptr<wallet::CWallet>& wallet, interfaces::Node& node)
 {
     WalletRescanReserver reserver(*wallet);
     reserver.reserve();

@@ -18,6 +18,7 @@ namespace interfaces { class Node; }
 namespace wallet { class CWallet; }
 
 namespace DigiDollarTest {
+void SyncUpWallet(const std::shared_ptr<wallet::CWallet>& wallet, interfaces::Node& node);
 std::shared_ptr<wallet::CWallet> SetupDescriptorsWallet(
     interfaces::Node& node, TestChain100Setup& test, const std::string& wallet_name = "");
 
