@@ -483,24 +483,54 @@ void DigiDollarSendWidget::updateView()
 
 void DigiDollarSendWidget::updateBalance()
 {
-    if (m_walletModel) {
-        // Only confirmed DD is spendable. Pending DD, including wallet-created
-        // transfer change, must confirm before another DD spend can use it.
-        CAmount balanceCents = m_walletModel->getDigiDollarBalance();
-        m_availableBalance = balanceCents / 100.0; // Convert cents to DD
-    } else {
+    if (!m_walletModel) {
         m_availableBalance = 0.0;
+        m_balanceKnown = false;
+        updateBalanceDisplay();
+        return;
     }
+    // Retain the last wallet-bound display while a read waits behind Paymaster
+    // work. Repeated tab/balance refreshes must not create more waiting workers.
+    if (m_balanceRefreshPending) {
+        m_balanceRefreshQueued = true;
+    } else {
+        m_balanceRefreshPending = true;
+        m_balanceRefreshQueued = false;
+        if (!m_balanceKnown) m_balanceError.clear();
+        const uint64_t generation = m_balanceRequestGeneration;
+        QPointer<DigiDollarSendWidget> guard{this};
+        m_walletModel->getDigiDollarBalanceAsync(
+            [guard, generation](CAmount balance, QString error) {
+                if (!guard || generation != guard->m_balanceRequestGeneration) return;
+                guard->m_balanceRefreshPending = false;
+                guard->m_balanceKnown = error.isEmpty();
+                guard->m_balanceError = std::move(error);
+                guard->m_availableBalance = guard->m_balanceKnown ? balance / 100.0 : 0.0;
+                guard->updateBalanceDisplay();
+                guard->m_paymaster->updateFeeDisplay();
+                // A notification after the worker took its snapshot must not
+                // be lost while its result waits in Qt's event queue.
+                if (guard->m_balanceRefreshQueued) guard->updateBalance();
+            });
+    }
+    updateBalanceDisplay();
+}
 
+void DigiDollarSendWidget::updateBalanceDisplay()
+{
+    m_availableBalanceValue->setToolTip(m_balanceError.isEmpty() ? tr("Your current spendable DigiDollar balance") :
+        tr("The DigiDollar balance could not be read. Reopen this page to try again."));
     if (m_privacy) {
         m_availableBalanceValue->setText(maskValue(formatDDAmount(0)));
+    } else if (m_walletModel && !m_balanceKnown) {
+        m_availableBalanceValue->setText(m_balanceError.isEmpty() ? tr("Loading…") : tr("Balance unavailable"));
     } else {
         m_availableBalanceValue->setText(formatDDAmount(m_availableBalance));
     }
 
     // The amount field is the recipient amount. Direct funding uses DGB;
     // an exact Paymaster service fee is validated separately before signing.
-    m_useAvailableBalanceButton->setEnabled(m_availableBalance > 0);
+    m_useAvailableBalanceButton->setEnabled(m_balanceKnown && m_availableBalance > 0 && !m_paymaster->isBusy());
 
     // Re-validate amount against updated balance so the border color
     // refreshes when pending DD confirms (fixes stale yellow warning).
@@ -624,6 +654,12 @@ void DigiDollarSendWidget::onSendClicked()
     }
     const double amount = amount_cents / 100.0;
 
+    if (!m_balanceKnown) {
+        updateBalance();
+        updateSendButton();
+        return;
+    }
+
     // Error: Insufficient balance
     if (!validateBalance()) {
         const bool subtract_fee = m_paymaster->paymasterModeSelected() &&
@@ -717,7 +753,7 @@ void DigiDollarSendWidget::onClearClicked()
 
 void DigiDollarSendWidget::onUseAvailableBalanceClicked()
 {
-    if (m_availableBalance <= 0) return;
+    if (!m_balanceKnown || m_availableBalance <= 0) return;
     if (m_paymaster->paymasterModeSelected() && m_coinControl && m_coinControl->HasSelected()) {
         showWarning(
             tr("Wallet emptying needs automatic input selection"),
@@ -773,7 +809,7 @@ void DigiDollarSendWidget::updateSendButton()
         (m_paymaster->isReady());
 
     const bool funding_ready = m_paymaster->hasFeeFundingCandidate();
-    m_sendButton->setEnabled(!m_paymaster->isBusy() && addressValid && amountValid &&
+    m_sendButton->setEnabled(m_balanceKnown && !m_paymaster->isBusy() && addressValid && amountValid &&
                              balanceValid && paymaster_ready && funding_ready);
     if (m_paymaster->isBusy()) {
         m_sendButton->setToolTip(tr("A Paymaster request is currently being processed"));
@@ -781,6 +817,9 @@ void DigiDollarSendWidget::updateSendButton()
         m_sendButton->setToolTip(tr("Enter a valid DigiDollar recipient address"));
     } else if (!amountValid) {
         m_sendButton->setToolTip(tr("Enter a valid DigiDollar amount greater than zero"));
+    } else if (!m_balanceKnown) {
+        m_sendButton->setToolTip(m_balanceError.isEmpty() ? tr("Waiting for the DigiDollar balance") :
+            tr("The DigiDollar balance could not be read. Reopen this page to try again."));
     } else if (!balanceValid) {
         m_sendButton->setToolTip(tr(
             "Insufficient spendable DigiDollar: this wallet currently has %1 available. A Paymaster supplies only the DGB network fee, not the DigiDollar being sent.")
@@ -834,6 +873,7 @@ bool DigiDollarSendWidget::validateAmount() const
 
 bool DigiDollarSendWidget::validateBalance() const
 {
+    if (!m_balanceKnown) return false;
     QString amountText = m_amountEdit->text();
     if (amountText.isEmpty()) return true; // Empty is valid for enabling/disabling
 
@@ -1159,6 +1199,10 @@ QString DigiDollarSendWidget::amountProblem() const
     if (amount > DD_SEND_MAX_DOLLARS) {
         return tr("The most you can send in one transfer is %1.").arg(formatDDAmount(DD_SEND_MAX_DOLLARS));
     }
+    if (m_walletModel && !m_balanceKnown) {
+        return m_balanceError.isEmpty() ? tr("Waiting for the DigiDollar balance") :
+            tr("The DigiDollar balance could not be read. Reopen this page to try again.");
+    }
     if (amount > m_availableBalance) {
         // Privacy mode hides the balance everywhere else on this form, so it
         // must stay hidden here too.
@@ -1434,12 +1478,14 @@ void DigiDollarSendWidget::setSelectedDigiDollarInputsForTesting(const std::vect
 
 void DigiDollarSendWidget::setAvailableDigiDollarBalanceForTesting(CAmount balance_cents)
 {
+    ++m_balanceRequestGeneration;
+    m_balanceRefreshPending = false;
+    m_balanceRefreshQueued = false;
+    m_balanceKnown = true;
+    m_balanceError.clear();
     m_availableBalance = static_cast<double>(balance_cents) / 100.0;
-    m_availableBalanceValue->setText(formatDDAmount(m_availableBalance));
-    m_useAvailableBalanceButton->setEnabled(balance_cents > 0);
-    updateAmountValidation();
+    updateBalanceDisplay();
     m_paymaster->updateFeeDisplay();
-    updateSendButton();
 }
 
 WalletModel::DigiDollarSendResult DigiDollarSendWidget::sendDigiDollarForTesting(const QString& address, CAmount amount, const QString& comment)
@@ -1550,6 +1596,12 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
     if (m_walletModel != model) {
         if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
         ++m_oraclePriceRequestGeneration;
+        ++m_balanceRequestGeneration;
+        m_balanceRefreshPending = false;
+        m_balanceRefreshQueued = false;
+        m_balanceKnown = false;
+        m_balanceError.clear();
+        m_availableBalance = 0.0;
         if (model) {
             connect(model, &WalletModel::balanceChanged, this, [this] {
                 m_paymaster->updateFeeDisplay();
@@ -1559,7 +1611,7 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
     }
     m_walletModel = model;
     m_paymaster->setWalletModel(model);
-    updateSendButton();
+    updateBalanceDisplay();
 }
 
 DigiDollarSendWidget::PaymentInput DigiDollarSendWidget::paymentInput() const
@@ -1588,7 +1640,7 @@ void DigiDollarSendWidget::setPaymasterFormFocus(bool focus)
     }
     m_pasteAddressButton->setEnabled(!focus);
     m_addressBookButton->setEnabled(!focus);
-    m_useAvailableBalanceButton->setEnabled(!focus);
+    m_useAvailableBalanceButton->setEnabled(!focus && m_balanceKnown && m_availableBalance > 0);
     m_coinControlButton->setEnabled(!focus);
     if (m_clearButton) m_clearButton->setVisible(!focus);
     if (m_sendButton) m_sendButton->setVisible(!focus);

@@ -3140,6 +3140,10 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    // Without this backend Send DD's balance getter returns before taking
+    // cs_wallet, so a navigation-only fixture misses the reported freeze.
+    wallet->EnsureDDWallet();
+    QVERIFY(wallet->GetDDWallet() != nullptr);
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
 
@@ -3153,7 +3157,9 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     tabs->setCurrentIndex(6); // Transactions uses the asynchronous history path.
     QCoreApplication::processEvents();
 
+    bool watchdog_fired{false};
     const auto whileWalletBusy = [&](const std::function<void()>& gui_action) {
+        watchdog_fired = false;
         std::promise<void> lock_acquired;
         std::future<void> ready = lock_acquired.get_future();
         std::mutex gate_mutex;
@@ -3173,6 +3179,7 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
         std::thread watchdog([&] {
             std::unique_lock<std::mutex> lock{gate_mutex};
             if (!gate.wait_for(lock, std::chrono::milliseconds{500}, [&] { return release_lock; })) {
+                watchdog_fired = true;
                 release_lock = true;
                 lock.unlock();
                 gate.notify_all();
@@ -3225,6 +3232,27 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
                             .arg(receive_switch_ms)));
     qInfo("Opening Receive DD with cs_wallet held returned in %lld ms", receive_switch_ms);
 
+    const qint64 send_switch_ms = whileWalletBusy([&] {
+        tabs->setCurrentIndex(1);
+        QCoreApplication::processEvents();
+    });
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("Opening Send DD waited for cs_wallet (%1 ms)").arg(send_switch_ms)));
+    qInfo("Opening Send DD with cs_wallet held returned in %lld ms", send_switch_ms);
+
+    bool cold_balance_pending{false};
+    const qint64 cold_send_ms = whileWalletBusy([&] {
+        DigiDollarSendWidget cold_send(mini_gui.platformStyle.get());
+        cold_send.setWalletModel(mini_gui.walletModel.get());
+        cold_send.updateView();
+        cold_send.updateBalance(); // Coalesce refreshes while the first read waits.
+        cold_balance_pending = cold_send.findChild<QLabel*>("availableBalanceValue")->text() == QStringLiteral("Loading…") &&
+            !cold_send.findChild<QPushButton*>("useAvailableBalanceButton")->isEnabled();
+    });
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("Binding Send DD waited for cs_wallet (%1 ms)").arg(cold_send_ms)));
+    QVERIFY(cold_balance_pending);
+
     // Top-level wallet navigation may still issue a generic refresh after the
     // DigiDollar page has been hidden. It must not refresh the last selected
     // child page or contend with an in-flight wallet operation.
@@ -3246,6 +3274,72 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QVERIFY2(balance_signal_ms < 200,
              qPrintable(QStringLiteral("A DD balance signal blocked the GUI for %1 ms")
                             .arg(balance_signal_ms)));
+}
+
+void DigiDollarWidgetTests::ddSendBalanceRefreshPreservesWalletBinding()
+{
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto old_wallet = SetupDescriptorsWallet(m_node, test, "old-send");
+    const auto new_wallet = SetupDescriptorsWallet(m_node, test, "new-send");
+    old_wallet->EnsureDDWallet();
+    new_wallet->EnsureDDWallet();
+    old_wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 1250);
+    new_wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 2), 8765);
+    DigiDollarMiniGUI old_gui(m_node), new_gui(m_node);
+    old_gui.initModelForWallet(m_node, old_wallet);
+    new_gui.initModelForWallet(m_node, new_wallet);
+    DigiDollarSendWidget send(old_gui.platformStyle.get());
+    send.setWalletModel(old_gui.walletModel.get());
+    auto* balance = send.findChild<QLabel*>("availableBalanceValue");
+    auto* use_balance = send.findChild<QPushButton*>("useAvailableBalanceButton");
+    auto* address = send.findChild<QLineEdit*>("addressEdit");
+    auto* amount = send.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(balance && use_balance && address && amount);
+    QTRY_COMPARE_WITH_TIMEOUT(balance->text(), QStringLiteral("12.50 $DD"), 5000);
+    address->setText(QStringLiteral("recipient-draft"));
+    amount->setText(QStringLiteral("2.00"));
+    {
+        // The GUI owns this lock only to hold the old background read pending.
+        // The independently bound new wallet must still finish its own read.
+        LOCK(old_wallet->cs_wallet);
+        send.updateBalance();
+        QCOMPARE(balance->text(), QStringLiteral("12.50 $DD"));
+        send.setWalletModel(new_gui.walletModel.get());
+        QCOMPARE(balance->text(), QStringLiteral("Loading…"));
+        QVERIFY(!use_balance->isEnabled());
+        QTRY_COMPARE_WITH_TIMEOUT(balance->text(), QStringLiteral("87.65 $DD"), 5000);
+    }
+    bool old_read_finished{false};
+    old_gui.walletModel->getDigiDollarBalanceAsync([&](CAmount, QString) { old_read_finished = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(old_read_finished, 5000);
+    QTest::qWait(50); // Drain the detached widget's old queued completion too.
+    QCOMPARE(balance->text(), QStringLiteral("87.65 $DD"));
+    QCOMPARE(address->text(), QStringLiteral("recipient-draft"));
+    QCOMPARE(amount->text(), QStringLiteral("2.00"));
+
+    const auto uninitialized = SetupDescriptorsWallet(m_node, test, "uninitialized-send");
+    DigiDollarMiniGUI empty_gui(m_node);
+    empty_gui.initModelForWallet(m_node, uninitialized);
+    send.setWalletModel(empty_gui.walletModel.get());
+    QTRY_COMPARE_WITH_TIMEOUT(balance->text(), QStringLiteral("Balance unavailable"), 5000);
+    QVERIFY(!use_balance->isEnabled());
+    uninitialized->EnsureDDWallet();
+    uninitialized->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 3), 999);
+    send.updateBalance();
+    QTRY_COMPARE_WITH_TIMEOUT(balance->text(), QStringLiteral("9.99 $DD"), 5000);
+    QVERIFY(use_balance->isEnabled());
+    send.setPrivacy(true);
+    QVERIFY(!balance->text().contains(QStringLiteral("9.99")));
+    send.setWalletModel(nullptr);
+    QTest::qWait(50);
+    QVERIFY(!use_balance->isEnabled());
+    QVERIFY(!balance->text().contains(QStringLiteral("9.99")));
 }
 
 // A tab may receive its wallet and client models while its WalletView page is

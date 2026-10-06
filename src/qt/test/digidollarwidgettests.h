@@ -78,6 +78,7 @@ private Q_SLOTS:
     void mintValidationUpdatesOnBalanceChange();
     void ddTabRefreshesBalancesOnWalletSignal();
     void ddTabRefreshDoesNotWaitForBusyWallet();
+    void ddSendBalanceRefreshPreservesWalletBinding();
     void ddTabLoadsSelectedPageOnFirstShow();
     void transactionsWidgetShowsStoredHistoryWhileWalletBusy();
     void transactionsWidgetRefreshesOnDigiDollarSignal();

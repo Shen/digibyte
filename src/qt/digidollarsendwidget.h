@@ -141,6 +141,7 @@ private:
     void updateAddressValidation();
     void updateAmountValidation();
     void updateSendButton();
+    void updateBalanceDisplay();
     void updateUSDEquivalent();
     CAmount selectedDigiDollarAmount() const;
 
@@ -231,6 +232,11 @@ private:
     double m_oraclePrice;
     double m_estimatedFee;
     uint64_t m_oraclePriceRequestGeneration{0};
+    uint64_t m_balanceRequestGeneration{0};
+    bool m_balanceRefreshPending{false};
+    bool m_balanceRefreshQueued{false};
+    bool m_balanceKnown{false};
+    QString m_balanceError;
     bool m_settingSweepAmount{false};
     DialogHandlerForTesting m_dialogHandlerForTesting;
 

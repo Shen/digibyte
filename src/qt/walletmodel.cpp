@@ -1331,6 +1331,37 @@ CAmount WalletModel::getTotalDigiDollarBalance() const
     return getDigiDollarBalanceSummary().confirmed_total;
 }
 
+void WalletModel::getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback)
+{
+    const std::shared_ptr<interfaces::Wallet> wallet = m_wallet;
+    QPointer<WalletModel> guard{this};
+    QThread* thread = QThread::create([guard, wallet, callback = std::move(callback)]() mutable {
+        CAmount balance{0};
+        QString error;
+        try {
+            if (!wallet->privateKeysDisabled()) {
+                DigiDollarWallet* const dd_wallet = wallet->getDigiDollarWallet();
+                if (!dd_wallet) throw std::runtime_error("DigiDollar wallet not initialized");
+                balance = dd_wallet->GetDDBalanceSummary().spendable;
+            }
+        } catch (const std::exception& exception) {
+            error = QString::fromUtf8(exception.what());
+        } catch (...) {
+            error = QStringLiteral("Unknown DigiDollar balance error");
+        }
+
+        if (!guard) return;
+        QMetaObject::invokeMethod(
+            guard,
+            [guard, callback = std::move(callback), balance, error = std::move(error)]() mutable {
+                if (guard && callback) callback(balance, std::move(error));
+            },
+            Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 CAmount WalletModel::getPaymasterReservedDigiDollarBalance() const
 {
     return getDigiDollarBalanceSummary().paymaster_reserved;
