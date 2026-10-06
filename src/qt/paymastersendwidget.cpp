@@ -4202,9 +4202,11 @@ void PaymasterSendWidget::cancelUnsignedPaymasterSession(bool confirm)
         });
 }
 
-void PaymasterSendWidget::setPaymasterNotice(const QString& text)
+void PaymasterSendWidget::setPaymasterNotice(const QString& text, DigiDollarStatus::Kind kind)
 {
-    m_paymasterNotice->setText(text);
+    DigiDollarStatus::SetBanner(m_paymasterNotice, kind);
+    const bool warning = kind == DigiDollarStatus::Kind::ACTION || kind == DigiDollarStatus::Kind::ERR;
+    m_paymasterNotice->setText(warning && !text.isEmpty() ? QStringLiteral("! ") + text : text);
     m_paymasterNotice->setAccessibleDescription(text);
     m_paymasterNotice->setVisible(!m_privacy && !text.isEmpty());
 }
@@ -4291,7 +4293,7 @@ void PaymasterSendWidget::clearUnsignedPaymasterSession()
     if (!m_paymasterUnsignedClosed) return;
     clearClosedPaymasterSession();
     setPaymasterNotice(DigiDollarSendWidget::tr(
-        "The unsigned request is closed. No payment was sent for this request and it no longer reserves funds. Recipient and amount were kept."));
+        "The unsigned request is closed. No payment was sent for this request and it no longer reserves funds. Recipient and amount were kept."), DigiDollarStatus::Kind::INFO);
     m_paymasterStateValue->setText(
         DigiDollarSendWidget::tr("Unsigned transfer canceled; reserved $DD is available again"));
     m_paymasterCostValue->setText(DigiDollarSendWidget::tr("No service fee was authorized"));

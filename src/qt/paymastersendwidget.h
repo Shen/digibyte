@@ -5,6 +5,7 @@
 #ifndef DIGIBYTE_QT_PAYMASTERSENDWIDGET_H
 #define DIGIBYTE_QT_PAYMASTERSENDWIDGET_H
 
+#include <qt/digidollarstatus.h>
 #include <qt/paymasterconfirmation.h>
 #include <qt/walletmodel.h>
 
@@ -158,7 +159,7 @@ private:
     /** Clear presentation only after Core confirms absence or unsigned closure. */
     void clearClosedPaymasterSession();
     void closeUnusablePaymasterOffer(const QString& reason, bool allow_cancel = true);
-    void setPaymasterNotice(const QString& text);
+    void setPaymasterNotice(const QString& text, DigiDollarStatus::Kind kind = DigiDollarStatus::Kind::ACTION);
     UniValue buildAlternativePaymasterRecoveryParams() const;
     void executeAlternativePaymasterRecovery(bool allow_unlock);
     PaymasterRecoveryConfirmationSelection paymasterRecoveryConfirmationSelection(
