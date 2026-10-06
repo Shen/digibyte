@@ -1504,6 +1504,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - Authoritative unsigned closure releases form focus after cancellation, even
   without a persisted recipient. Read-only refresh handles a lost cancellation
   reply; missing or contradictory proof cannot enable a new transfer.
+- Starting a new transfer clears the previous provider/offer selection and cost
+  snapshot explicitly; an already-empty form cannot suppress this reset by
+  omitting input-change signals. Empty entries show a payment-input prompt.
 - Paymaster-specific test transports and snapshot injection belong to this child.
 
 ### src/qt/walletmodel.cpp/h

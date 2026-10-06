@@ -1,5 +1,74 @@
 # Paymaster build and test runbook
 
+## Another payment clears the preceding offers (2026-10-06)
+
+Source base: `fc65fa390d`; implementation: `cac7f766b6`. Successful sending clears
+the entry fields while the durable session still protects its presentation.
+Start a new transfer then
+cleared those fields again, relying on input-change signals to invalidate the
+old offer preview. An already-empty form emits no such signal. The new
+`paymasterClientNewTransferClearsOffers` regression reproduces this with the
+previous Qt library: `cleared-after-success` retains one row instead of zero;
+the filled-entry control case passes.
+
+The new-transfer action now explicitly invalidates the provider choice, offer
+cards, preview amounts, expiry and callback generation. It shows the existing
+valid-amount prompt and updates the fee display. An invalid or empty amount uses
+an input prompt instead of a computed payment-cost summary. The test also checks
+that an empty new entry performs no offer read and that a subsequently entered
+valid payment gets a fresh preview. Request reset changes presentation only;
+stored completed payments, wallet-local limits, Core authorization and RPC/CLI
+keep their existing behavior.
+
+Relevant guidance: repository/src instructions, CLAUDE DigiDollar reading order,
+architecture/maps, contribution rules, developer GUI notes, Qt translation policy
+and the existing Windows/test runbooks. The selected diagnostic application and
+test runner are linked separately as `digibyte-qt-new-transfer.exe` and
+`test_digibyte-qt-new-transfer.exe` under `build_msvc/x64/Release/`. Helpers and
+before/after test logs remain locally excluded in
+`build_msvc/paymaster-refresh-check/new-transfer/`.
+
+Completed verification: selected MSVC 14.43 / Qt 5.15.10 compiles for
+`paymastersendwidget.cpp`, the client/provider Qt tests and regenerated test MOC;
+separate incremental application/test links; **15 targeted native Qt cases
+passed**, none failed or skipped. The new regression covers already-cleared and
+filled entries in Paymaster and Automatic modes, empty-entry refresh suppression
+and a fresh preview for the next payment. Existing cases cover exact read-only
+offer RPCs, invalidation and failures, automatic refresh, provider cards in both
+themes at 720/1200 widths, current-offer preparation gates, funding-balance changes
+and exact fee amounts/percentages. This is incremental verification; the previous
+Receive DD checkpoint's unrelated dropdown-highlight failures remain recorded
+below.
+
+The verified application and matching PDB replaced the normal
+`build_msvc/x64/Release/digibyte-qt.exe` / `.pdb` after confirming no Qt wallet was
+running. Installed EXE SHA-256:
+`01BC289A3E1D029CE17A6F0922295E162C849B76A069101147C69B4BF7690333`.
+The previous pair is retained as
+`build_msvc/paymaster-refresh-check/new-transfer/digibyte-qt-before-new-transfer-20261006-074410.exe`
+and `.pdb`. The local `installed-artifact.json` records both pairs' hashes and
+implementation commit. No live payment or real wallet application was started
+for verification.
+
+Full solution builds, complete Qt suites and cross-platform checks remain
+operator work. The full-build command and prerequisites in the next checkpoint
+apply. After building, run the complete client/provider Qt group (minutes) from
+`D:\Digibyte\digibyte-fork`:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+$env:DIGIBYTE_QT_TEST_OUTPUT = "$PWD\build_msvc\x64\Release\new-transfer-full-qt.txt"
+& .\build_msvc\x64\Release\test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
+```
+
+Require exit code zero and no failed Qt cases. For manual acceptance, complete
+a payment, click Start a new transfer and verify that no previous provider,
+recommended offer or price remains. Enter the next recipient and amount, then
+verify the fresh public-offer check and the normal exact-fee approval.
+
 ## Receive DD navigation responsiveness (2026-10-06)
 
 Source base: `271ae55d4f`; implementation: `5d2bc232e0`. Opening Receive DD queued

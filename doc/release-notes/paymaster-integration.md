@@ -5,6 +5,14 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Fresh offers for another payment
+
+After a completed Paymaster payment, Start a new transfer clears the previous
+provider selection, offer cards, expiry and cost preview even when the entry
+fields were already emptied after success. An empty entry shows an input prompt;
+a new valid amount requires a fresh offer check. Saved fee limits, completed
+payment history and Core financial authorization retain their existing behavior.
+
 ## Receive DD responsiveness
 
 Opening Receive DD no longer reads saved payment requests on the GUI thread.

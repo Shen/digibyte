@@ -143,6 +143,9 @@ The normal Send view distinguishes an explicit read-only check of locally known
 offers from automatic peer discovery and the live payment workflow. The visible
 idle compose view also rereads the local directory every ten seconds, with
 coalescing and stale-input/wallet guards; background failures remain inline.
+Starting another transfer explicitly invalidates the previous offer snapshot,
+provider choice and expiry, even if successful completion already cleared the
+entry fields. An empty entry shows an input prompt instead of payment costs.
 Directory reads are timestamped; local expiry invalidates previews without
 network traffic. Signed announcements can outlive a stopped provider until
 600 seconds after creation. Qt distinguishes list updates from live reachability
