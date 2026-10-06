@@ -37,6 +37,7 @@
 #include <paymaster/manager.h>
 #include <paymaster/protocol.h>
 #include <paymaster/reservation.h>
+#include <paymaster/setup.h>
 #include <paymaster/validation.h>
 #include <random.h>
 #include <rpc/request.h>
@@ -996,33 +997,20 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
             1, active_count(PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER));
     }
 
-    const auto include_limits = [&](const FundingSafetyLimits& limits) {
-        const auto lower_positive = [](int64_t current, int64_t candidate) {
-            if (candidate <= 0) return current;
-            return current <= 0 ? candidate : std::min(current, candidate);
-        };
-        result.maximum_maintenance_fee_per_transaction.value = lower_positive(
-            result.maximum_maintenance_fee_per_transaction.value,
-            limits.maximum_network_fee_per_transaction.value);
-        result.maximum_maintenance_fee_per_hour.value = lower_positive(
-            result.maximum_maintenance_fee_per_hour.value,
-            limits.maximum_network_fee_per_hour.value);
-        result.maximum_maintenance_fee_per_day.value = lower_positive(
-            result.maximum_maintenance_fee_per_day.value,
-            limits.maximum_network_fee_per_day.value);
-    };
-    if (readiness.have_policy && readiness.have_safety_policy) {
-        if (PolicyAllowsFundingModel(readiness.policy, FundingModel::USER_PAID)) {
-            include_limits(GetFundingSafetyLimits(
-                readiness.safety_policy, FundingModel::USER_PAID,
-                SponsorshipScope::PUBLIC));
-        }
-        if (PolicyAllowsFundingModel(readiness.policy, FundingModel::SPONSORED)) {
-            include_limits(GetFundingSafetyLimits(
-                readiness.safety_policy, FundingModel::SPONSORED,
-                readiness.policy.sponsorship_scope));
-        }
-    }
+    // Read-only proposals for an unconfigured wallet. Refill transactions
+    // create several reserves, so their limits are independent of customer
+    // payment budgets. Paid maintenance remains unapproved until explicitly saved.
+    const int size = std::max({int(result.target_operational_dgb),
+                               int(result.target_operational_carriers),
+                               int(result.target_admission_dgb) - 2,
+                               int(result.target_admission_carriers) - 2});
+    const auto proposed = SetupLiquidityPreset(result.target_admission_carriers > 0, size);
+    result.maximum_maintenance_fee_per_transaction.value = proposed.find_value(
+        "maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>();
+    result.maximum_maintenance_fee_per_hour.value = proposed.find_value(
+        "maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>();
+    result.maximum_maintenance_fee_per_day.value = proposed.find_value(
+        "maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>();
     result.updated_at = now;
     return result;
 }

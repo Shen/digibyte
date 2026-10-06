@@ -99,6 +99,37 @@ BOOST_AUTO_TEST_CASE(cli_proposals_support_continuous_operation_without_overwrit
     const auto without_autostart = BuildSetupPlan(snapshot, declined);
     BOOST_CHECK(without_autostart[without_autostart.size() - 2].params[0].find_value("autostart").isFalse());
 }
+BOOST_AUTO_TEST_CASE(capacity_presets_pair_reserves_and_keep_spending_explicit)
+{
+    for (bool user_paid : {true, false}) {
+        for (int capacity : {1, 3, 6, 16}) {
+            const auto profile = SetupLiquidityPreset(user_paid, capacity);
+            BOOST_CHECK(profile.find_value("automatic_replenishment").isFalse());
+            BOOST_CHECK(profile.find_value("paid_maintenance_approved").isFalse());
+            BOOST_CHECK_EQUAL(profile.find_value("target_admission_dgb").getInt<int>(), 3);
+            BOOST_CHECK_EQUAL(profile.find_value("target_operational_dgb").getInt<int>(), capacity);
+            BOOST_CHECK_EQUAL(profile.find_value("target_admission_carriers").getInt<int>(), user_paid ? 3 : 0);
+            BOOST_CHECK_EQUAL(profile.find_value("target_operational_carriers").getInt<int>(), user_paid ? capacity : 0);
+            const auto per_transaction = profile.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>();
+            BOOST_CHECK_GE(per_transaction, 50000000);
+            BOOST_CHECK_EQUAL(profile.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>(), 4 * per_transaction);
+            BOOST_CHECK_EQUAL(profile.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>(), 20 * per_transaction);
+            auto choices = Choices();
+            UniValue models{UniValue::VARR};
+            models.push_back(user_paid ? "user_paid" : "sponsored");
+            choices.policy.pushKV("funding_models", models);
+            choices.policy.pushKV("fee_rate_bps", user_paid ? 50 : 0);
+            choices.safety = SetupDefaultSafety(20000000, user_paid, !user_paid, false);
+            choices.liquidity = profile;
+            for (const auto& names : {std::pair{"admission_dgb_slots", "target_admission_dgb"}, {"operational_dgb_slots", "target_operational_dgb"}, {"admission_carrier_slots", "target_admission_carriers"}, {"operational_carrier_slots", "target_operational_carriers"}})
+                choices.pool.pushKV(names.first, profile.find_value(names.second));
+            BOOST_CHECK_NO_THROW(CheckSetupChoices(choices));
+        }
+    }
+    BOOST_CHECK_THROW(SetupLiquidityPreset(true, 0), std::invalid_argument);
+    BOOST_CHECK_THROW(SetupLiquidityPreset(false, 17), std::invalid_argument);
+    BOOST_CHECK(SetupMatches(SetupDefaultLiquidity(true), SetupLiquidityPreset(true, 1)));
+}
 BOOST_AUTO_TEST_CASE(cli_menus_retry_and_confirmation_never_approves_an_empty_answer)
 {
     const std::vector<SetupMenuItem> items{{"automatic", "Automatic", "Processes requests without manual queue steps."}, {"manual", "Manual", "Requires explicit queue processing."}};
@@ -386,6 +417,14 @@ BOOST_AUTO_TEST_CASE(operator_distinguishes_capacity_wait_from_errors)
         diagnostics = OperatorDiagnostics(provider, 0, 100);
         BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_budget");
     }
+    provider.pushKV("service_state", "replenishing_liquidity");
+    provider.pushKV("last_service_error", "PAYMASTER_MAINTENANCE_FEE_EXCEEDED");
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "action_required");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_liquidity");
+    provider.pushKV("last_service_error", "PAYMASTER_MAINTENANCE_FEE_CHANGED");
+    diagnostics = OperatorDiagnostics(provider, 0, 100);
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
 }
 BOOST_AUTO_TEST_CASE(operator_work_transitions_preserve_real_errors)
 {

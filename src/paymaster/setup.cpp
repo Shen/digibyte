@@ -56,19 +56,31 @@ UniValue SetupDefaultSafety(int64_t fee, bool user_paid, bool sponsored, bool re
     result.pushKV("maximum_quote_requests_per_netgroup_per_minute", 10);
     return result;
 }
-UniValue SetupDefaultLiquidity(bool user_paid)
+UniValue SetupLiquidityPreset(bool user_paid, int capacity)
 {
+    if (capacity < 1 || capacity > 16) throw std::invalid_argument("Invalid Paymaster capacity");
+    // Reserve transactions can have several inputs/outputs and a DD fee floor
+    // of 0.10 DGB. Leave room for both DGB and carrier creation; these bounded
+    // proposals are not fee estimates. Fragmentation can still require review.
+    const int64_t per_transaction = capacity == 1 ? 50000000 :
+                                    capacity <= 3 ? 75000000 :
+                                    capacity <= 6 ? 100000000 :
+                                                    200000000;
     UniValue result{UniValue::VOBJ};
     result.pushKV("automatic_replenishment", false);
     result.pushKV("paid_maintenance_approved", false);
     result.pushKV("target_admission_dgb", 3);
-    result.pushKV("target_operational_dgb", 1);
+    result.pushKV("target_operational_dgb", capacity);
     result.pushKV("target_admission_carriers", user_paid ? 3 : 0);
-    result.pushKV("target_operational_carriers", user_paid ? 1 : 0);
-    result.pushKV("maximum_maintenance_fee_per_transaction_satoshis", 20000000);
-    result.pushKV("maximum_maintenance_fee_per_hour_satoshis", 200000000);
-    result.pushKV("maximum_maintenance_fee_per_day_satoshis", 1000000000);
+    result.pushKV("target_operational_carriers", user_paid ? capacity : 0);
+    result.pushKV("maximum_maintenance_fee_per_transaction_satoshis", per_transaction);
+    result.pushKV("maximum_maintenance_fee_per_hour_satoshis", 4 * per_transaction);
+    result.pushKV("maximum_maintenance_fee_per_day_satoshis", 20 * per_transaction);
     return result;
+}
+UniValue SetupDefaultLiquidity(bool user_paid)
+{
+    return SetupLiquidityPreset(user_paid, 1);
 }
 SetupChoices SetupCliDefaults(const UniValue& snapshot)
 {
@@ -105,7 +117,6 @@ SetupChoices SetupCliDefaults(const UniValue& snapshot)
         // approved. Do not silently enable refill on an existing provider.
         result.liquidity.pushKV("automatic_replenishment", true);
         result.liquidity.pushKV("paid_maintenance_approved", true);
-        result.liquidity.pushKV("maximum_maintenance_fee_per_transaction_satoshis", 50000000);
     }
     const auto& preparation = provider.find_value("preparation");
     result.pool.pushKV("maximum_fee_satoshis", existing || (preparation.isArray() && !preparation.empty()) ? SetupFundingFee(snapshot) : 50000000);
@@ -401,7 +412,8 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
                    service_error.get_str() == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED") {
             add(service_error.get_str(), "action_required", "budgets", "review_budget");
         } else if (service_error.get_str() == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
-                   service_error.get_str() == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") {
+                   service_error.get_str() == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" ||
+                   service_error.get_str() == "PAYMASTER_MAINTENANCE_FEE_EXCEEDED") {
             add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
         } else {
             add(service_error.get_str(), "error", "service", "inspect_error");

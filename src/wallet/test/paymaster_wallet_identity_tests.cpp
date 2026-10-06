@@ -100,6 +100,62 @@ struct RawProviderSettingsV2 {
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(refill_suggestions_preserve_saved_limits_and_separate_payment_budgets)
+{
+    using namespace paymaster_rpc::internal;
+    ProviderReadiness readiness;
+    readiness.have_policy = true;
+    readiness.policy.funding_models = FUNDING_MODEL_USER_PAID;
+    readiness.have_safety_policy = true;
+    auto& payment_limits = readiness.safety_policy.user_paid;
+    payment_limits.maximum_network_fee_per_transaction = DGBSatoshis{10000000};
+    payment_limits.maximum_network_fee_per_hour = DGBSatoshis{100000000};
+    payment_limits.maximum_network_fee_per_day = DGBSatoshis{1000000000};
+    const auto check_proposal = [&](int64_t fee) {
+        const auto status = ProviderLiquidityStatusToJSON(readiness, 100);
+        BOOST_CHECK(status.find_value("policy_configured").isFalse());
+        const auto& policy = status.find_value("policy");
+        BOOST_CHECK(policy.find_value("paid_maintenance_approved").isFalse());
+        BOOST_CHECK_EQUAL(policy.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>(), fee);
+        BOOST_CHECK_EQUAL(policy.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>(), 4 * fee);
+        BOOST_CHECK_EQUAL(policy.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>(), 20 * fee);
+        return policy;
+    };
+    auto proposal = check_proposal(50000000);
+    BOOST_CHECK_EQUAL(proposal.find_value("target_admission_carriers").getInt<int>(), 3);
+    BOOST_CHECK_EQUAL(proposal.find_value("target_operational_carriers").getInt<int>(), 1);
+    payment_limits.maximum_network_fee_per_transaction = DGBSatoshis{1};
+    check_proposal(50000000); // A customer-budget edit must not change refill proposals.
+    for (int i = 0; i < 9; ++i) {
+        ProviderPoolEntry entry;
+        entry.purpose = PoolPurpose::ADMISSION;
+        entry.asset = PoolAsset::DGB;
+        entry.state = PoolEntryState::AVAILABLE;
+        readiness.pool_entries.push_back(entry);
+    }
+    check_proposal(200000000); // Extra admission outputs also increase transaction size.
+    readiness.pool_entries.clear();
+    readiness.policy.funding_models = FUNDING_MODEL_SPONSORED;
+    proposal = check_proposal(50000000);
+    BOOST_CHECK_EQUAL(proposal.find_value("target_admission_carriers").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(proposal.find_value("target_operational_carriers").getInt<int>(), 0);
+
+    readiness.have_liquidity_policy = true;
+    readiness.liquidity_policy.automatic_replenishment = false;
+    readiness.liquidity_policy.paid_maintenance_approved = true;
+    readiness.liquidity_policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{12345678};
+    readiness.liquidity_policy.maximum_maintenance_fee_per_hour = DGBSatoshis{23456789};
+    readiness.liquidity_policy.maximum_maintenance_fee_per_day = DGBSatoshis{34567890};
+    const auto status = ProviderLiquidityStatusToJSON(readiness, 101);
+    BOOST_CHECK(status.find_value("policy_configured").isTrue());
+    const auto& saved = status.find_value("policy");
+    BOOST_CHECK(saved.find_value("automatic_replenishment").isFalse());
+    BOOST_CHECK(saved.find_value("paid_maintenance_approved").isTrue());
+    BOOST_CHECK_EQUAL(saved.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>(), 12345678);
+    BOOST_CHECK_EQUAL(saved.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>(), 23456789);
+    BOOST_CHECK_EQUAL(saved.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>(), 34567890);
+}
+
 BOOST_AUTO_TEST_CASE(provider_activity_ignores_completed_and_expired_authority)
 {
     paymaster_rpc::internal::ProviderReadiness readiness;

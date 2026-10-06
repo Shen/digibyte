@@ -19,6 +19,9 @@ struct SetupSafetyLimits {
 SetupSafetyLimits SetupSafetyProfile(bool conservative, int64_t advertised_fee);
 UniValue SetupDefaultPolicy();
 UniValue SetupDefaultSafety(int64_t advertised_fee, bool user_paid, bool sponsored, bool restricted);
+/** Capacity and finite refill ceilings proposed for review, never an approval.
+ * Admission uses three independent proofs; payment reserves scale with capacity. */
+UniValue SetupLiquidityPreset(bool user_paid, int capacity);
 UniValue SetupDefaultLiquidity(bool user_paid);
 UniValue SetupNodePrerequisites(const UniValue& snapshot);
 int64_t SetupFundingFee(const UniValue& snapshot);
