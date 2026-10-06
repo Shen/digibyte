@@ -103,6 +103,14 @@ public:
                 error = QString::fromStdString(code.get_str());
             }
         }
+        // A planned maintenance record may have no journal error yet. The
+        // current service can still be blocked before saving its transaction.
+        const auto& service_error = provider.find_value("last_service_error");
+        if (needs_creation && !blocked && service_error.isStr() &&
+            service_error.get_str() == "PAYMASTER_MAINTENANCE_FEE_EXCEEDED") {
+            blocked = true;
+            error = QString::fromStdString(service_error.get_str());
+        }
         if (!busy() && operations.isArray()) {
             if (!operations.empty() || provider.find_value("start_requested").isTrue()) {
                 if (phase == Phase::Complete) title.clear();

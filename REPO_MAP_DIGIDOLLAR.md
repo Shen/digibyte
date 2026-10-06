@@ -1963,6 +1963,19 @@ Current oracle/MuSig2 fuzz source inventory:
 
 ### Finite pool setup and recovery
 
+- `src/paymaster/setup.{h,cpp}` provides `SetupLiquidityPreset`: review-only
+  1/3/6-payment targets with three admission proofs, paired user-paid reserves
+  and capacity-dependent finite refill ceilings. GUI and CLI fresh defaults use
+  the Small profile; existing policies are retained exactly. Unconfigured RPC
+  liquidity views propose the same limits, sized for existing active reserves,
+  without borrowing customer-payment budgets or granting paid approval. The shared Qt
+  `PaymasterReserveEditor` is used in Funds & reserves and guided setup, with
+  Manual counts, target capital and draft-only refill suggestions. Wizard refill
+  fields are independent of customer-payment safety profiles.
+- `src/paymaster/setup.cpp` and `src/qt/paymasteroperation.h` distinguish a known
+  recurring-refill fee ceiling block from unknown service faults and confirmation
+  waits. Planned work uses the current service error when its journal has no
+  error yet; Qt routes the task to maintenance limits without raising them.
 - `src/wallet/rpc/paymaster_provider.cpp`: `preparepaymasterpool` persists bounded
   setup approvals and explicit legacy mappings; `RunPaymasterPoolPreparation`
   continues exact steps independently of service startup; disabled providers

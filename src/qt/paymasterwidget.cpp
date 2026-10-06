@@ -364,6 +364,185 @@ public:
     }
 };
 
+/** Shared draft editor for operator settings and the setup wizard. Selecting
+ * a preset changes this form only; the owning workflow obtains approval. */
+class PaymasterReserveEditor final : public QWidget
+{
+    Q_DECLARE_TR_FUNCTIONS(PaymasterReserveEditor)
+
+public:
+    PaymasterReserveEditor(QWidget* parent, const QString& prefix,
+                           std::array<QSpinBox*, 4> targets,
+                           std::array<DgbAmountLineEdit*, 3> fees,
+                           std::function<bool()> user_paid,
+                           std::function<qint64()> payment_fee)
+        : QWidget(parent), m_targets(targets), m_fees(fees),
+          m_user_paid(std::move(user_paid)), m_payment_fee(std::move(payment_fee))
+    {
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        auto* form = new QFormLayout;
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        m_preset = new NoWheelComboBox(this);
+        m_preset->setObjectName(prefix + "ReservePreset");
+        m_preset->addItem(tr("Small — 1 payment at a time"), 1);
+        m_preset->addItem(tr("Standard — up to 3 parallel payments"), 3);
+        m_preset->addItem(tr("Higher capacity — up to 6 parallel payments"), 6);
+        m_preset->addItem(tr("Manual — choose reserve counts"), 0);
+        form->addRow(tr("Payment capacity:"), m_preset);
+        layout->addLayout(form);
+        m_summary = new QLabel(this);
+        m_summary->setObjectName(prefix + "ReservePresetSummary");
+        m_summary->setTextFormat(Qt::PlainText);
+        m_summary->setWordWrap(true);
+        layout->addWidget(m_summary);
+        m_manual = new QWidget(this);
+        m_manual->setObjectName(prefix + "ManualReserveTargets");
+        auto* manual_form = new QFormLayout(m_manual);
+        manual_form->setContentsMargins(0, 0, 0, 0);
+        manual_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        manual_form->addRow(tr("DGB capacity-check reserves:"), targets[0]);
+        manual_form->addRow(tr("DGB payment reserves:"), targets[1]);
+        manual_form->addRow(tr("DD capacity-check reserves:"), targets[2]);
+        manual_form->addRow(tr("DD payment reserves:"), targets[3]);
+        auto* explanation = new QLabel(tr("Capacity checks use three separate confirmed reserves. Extra capacity-check reserves bind more capital without increasing parallel payments. Each user-paid payment needs both a DGB reserve and a DD reserve; the smaller payment count determines capacity."), m_manual);
+        explanation->setWordWrap(true);
+        manual_form->addRow(explanation);
+        layout->addWidget(m_manual);
+        m_fee_summary = new QLabel(this);
+        m_fee_summary->setObjectName(prefix + "RefillSuggestion");
+        m_fee_summary->setTextFormat(Qt::PlainText);
+        m_fee_summary->setWordWrap(true);
+        layout->addWidget(m_fee_summary);
+        m_suggest_fees = new QPushButton(tr("Use suggested refill limits"), this);
+        m_suggest_fees->setObjectName(prefix + "SuggestRefillLimits");
+        m_suggest_fees->setToolTip(tr("Replace the three refill fee limits in this draft. Saving and approving them is a separate step."));
+        layout->addWidget(m_suggest_fees, 0, Qt::AlignLeft);
+        connect(m_suggest_fees, &QPushButton::clicked, this, [this] {
+            applyFees(suggestion());
+            synchronize();
+        });
+        connect(m_preset, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+            const int capacity = m_preset->currentData().toInt();
+            m_manual_selected = capacity == 0;
+            if (capacity)
+                applyPreset(capacity);
+            else
+                synchronize();
+        });
+        for (auto* target : m_targets) {
+            connect(target, qOverload<int>(&QSpinBox::valueChanged), this, [this] { synchronize(); });
+        }
+        for (auto* fee : m_fees) {
+            connect(fee, &QLineEdit::textChanged, this, [this] { synchronize(); });
+        }
+        synchronize(true);
+    }
+
+    void applyPreset(int capacity)
+    {
+        const auto values = DigiDollar::Paymaster::SetupLiquidityPreset(m_user_paid(), capacity);
+        m_applying = true;
+        m_manual_selected = false;
+        const std::array<const char*, 4> keys{"target_admission_dgb", "target_operational_dgb", "target_admission_carriers", "target_operational_carriers"};
+        for (size_t i = 0; i < keys.size(); ++i)
+            m_targets[i]->setValue(values.find_value(keys[i]).getInt<int>());
+        applyFees(values);
+        m_applying = false;
+        synchronize(true);
+    }
+
+    QLabel* summaryLabel() const { return m_summary; }
+
+    void addManualHelp(QWidget* widget)
+    {
+        static_cast<QFormLayout*>(m_manual->layout())->addRow(widget);
+    }
+
+    void synchronize(bool classify_saved = false)
+    {
+        if (m_applying) return;
+        if (classify_saved) m_manual_selected = false;
+        const bool paid = m_user_paid();
+        const int operational = m_targets[1]->value();
+        const bool matched = !m_manual_selected && m_targets[0]->value() == 3 &&
+                             m_targets[2]->value() == (paid ? 3 : 0) && m_targets[3]->value() == (paid ? operational : 0) &&
+                             (operational == 1 || operational == 3 || operational == 6);
+        const QSignalBlocker blocker(m_preset);
+        m_preset->setCurrentIndex(m_preset->findData(matched ? operational : 0));
+        m_manual->setVisible(!matched);
+        const int capacity = paid ? std::min(operational, m_targets[3]->value()) : operational;
+        const qint64 admission_capital = 10000000LL * m_targets[0]->value();
+        const qint64 payment_value = std::max<qint64>(10000000, m_payment_fee());
+        const bool capital_fits = payment_value <= (MAX_MONEY - admission_capital) / operational;
+        const QString dgb_capital = capital_fits ? compactDgb(admission_capital + payment_value * operational) : tr("exceeds the supported amount range");
+        QString summary = tr("Target: up to %1 payment(s) at a time.\nMinimum capital: %2 DGB + %3 DD, before fees. Existing usable reserves count toward this target.")
+                              .arg(capacity)
+                              .arg(dgb_capital)
+                              .arg(PaymasterFormatDD(100LL * (m_targets[2]->value() + m_targets[3]->value())));
+        summary += QLatin1Char('\n') + tr("Payments require confirmed reserves and sufficient budgets.");
+        if (paid && (m_targets[2]->value() < 3 || m_targets[3]->value() < 1))
+            summary += QLatin1Char('\n') + tr("User-paid service needs at least three DD capacity checks and one DD payment reserve.");
+        m_summary->setText(summary);
+        m_summary->setToolTip(tr("Lowering a target does not release capital. Use the reserve actions to review and release funds."));
+        const auto values = suggestion();
+        const std::array<const char*, 3> keys{"maximum_maintenance_fee_per_transaction_satoshis", "maximum_maintenance_fee_per_hour_satoshis", "maximum_maintenance_fee_per_day_satoshis"};
+        bool below{false}, same{true};
+        for (size_t i = 0; i < keys.size(); ++i) {
+            qint64 current{0};
+            const bool valid = m_fees[i]->satoshis(current);
+            const auto proposed = values.find_value(keys[i]).getInt<int64_t>();
+            below |= !valid || current < proposed;
+            same &= valid && current == proposed;
+        }
+        QString text = tr("Suggested refill limits: %1 DGB per transaction / %2 DGB per hour / %3 DGB per day.")
+                           .arg(compactDgb(values.find_value(keys[0]).getInt<int64_t>()))
+                           .arg(compactDgb(values.find_value(keys[1]).getInt<int64_t>()))
+                           .arg(compactDgb(values.find_value(keys[2]).getInt<int64_t>()));
+        if (below) text += QLatin1Char('\n') + tr("The displayed limits are below this suggestion. A refill may pause for cost approval; limits never increase automatically.");
+        m_fee_summary->setText(text);
+        m_fee_summary->setVisible(!same);
+        m_suggest_fees->setVisible(!same);
+    }
+
+private:
+    static QString compactDgb(qint64 value)
+    {
+        QString text = PaymasterFormatDGB(value);
+        while (text.endsWith(QLatin1Char('0')))
+            text.chop(1);
+        if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+        return text;
+    }
+
+    UniValue suggestion() const
+    {
+        // Manual admission surpluses also add transaction outputs.
+        const int size = std::max({m_targets[1]->value(), m_targets[3]->value(),
+                                   m_targets[0]->value() - 2, m_targets[2]->value() - 2});
+        return DigiDollar::Paymaster::SetupLiquidityPreset(m_user_paid(), size);
+    }
+
+    void applyFees(const UniValue& values)
+    {
+        const std::array<const char*, 3> keys{"maximum_maintenance_fee_per_transaction_satoshis", "maximum_maintenance_fee_per_hour_satoshis", "maximum_maintenance_fee_per_day_satoshis"};
+        for (size_t i = 0; i < keys.size(); ++i)
+            m_fees[i]->setSatoshis(values.find_value(keys[i]).getInt<int64_t>());
+    }
+
+    std::array<QSpinBox*, 4> m_targets;
+    std::array<DgbAmountLineEdit*, 3> m_fees;
+    std::function<bool()> m_user_paid;
+    std::function<qint64()> m_payment_fee;
+    QComboBox* m_preset;
+    QWidget* m_manual;
+    QLabel* m_summary;
+    QLabel* m_fee_summary;
+    QPushButton* m_suggest_fees;
+    bool m_manual_selected{false};
+    bool m_applying{false};
+};
+
 class PaymasterDisplayNameValidator final : public QValidator
 {
 public:
@@ -1870,6 +2049,7 @@ public:
                     refreshOperatorStatus();
                 }, false, [this](const QString& error) { failGuidedTask(error); });
             } else if (m_operation.error.contains(QLatin1String("WALLET_LOCKED"))) unlockOperatorWallet();
+            else if (m_operation.error == QLatin1String("PAYMASTER_MAINTENANCE_FEE_EXCEEDED")) reviewMaintenanceFeeLimit();
             else if (canReviewPreparationFee()) cancelPoolPreparation(true);
             else if (m_operation.error.contains(QLatin1String("FEE_LIMIT"))) {
                 showOperatorPage(m_liquidity_page);
@@ -2926,15 +3106,14 @@ public:
         liquidity_layout->addWidget(liquidity_steps);
 
         auto* automatic_maintenance = new QGroupBox(
-            tr("Keep reserves ready automatically"), liquidity_column);
+            tr("Payment capacity and automatic refill"), liquidity_column);
         automatic_maintenance->setProperty("paymasterRole", QStringLiteral("card"));
         automatic_maintenance->setObjectName(
             "paymasterAutomaticLiquidityPolicy");
         auto* automatic_maintenance_layout = new QFormLayout(
             automatic_maintenance);
         auto* automatic_maintenance_help = new QLabel(tr(
-            "After a completed transfer, Core first reuses the wallet-owned DGB change and DigiDollar carrier. "
-            "If that is not enough, Core may create a refill transaction only when you have explicitly approved finite fee limits below."),
+            "Choose payment capacity, then review its capital and refill limits before saving. A preset changes this form only."),
             automatic_maintenance);
         automatic_maintenance_help->setWordWrap(true);
         automatic_maintenance_layout->addRow(automatic_maintenance_help);
@@ -2945,20 +3124,22 @@ public:
             "paymasterAutomaticReplenishment");
         m_automatic_replenishment->setChecked(true);
         m_paid_maintenance_approved = new QCheckBox(tr(
-            "Permit paid maintenance within the finite limits below"),
+            "Allow refill transactions within these fee limits"),
             automatic_maintenance);
         m_paid_maintenance_approved->setObjectName(
             "paymasterPaidMaintenanceApproved");
+        m_paid_maintenance_approved->setToolTip(tr("Only the actual network fees of reserve refill are paid. These limits are additional to customer-payment budgets. Fragmented funds can require a higher transaction limit; Core never raises it automatically."));
+        const auto refill_defaults = DigiDollar::Paymaster::SetupDefaultLiquidity(true);
         m_maintenance_fee_per_transaction = new DgbAmountLineEdit(0, automatic_maintenance);
-        m_maintenance_fee_per_transaction->setSatoshis(10000000);
+        m_maintenance_fee_per_transaction->setSatoshis(refill_defaults.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>());
         m_maintenance_fee_per_transaction->setObjectName(
             "paymasterMaintenanceFeePerTransaction");
         m_maintenance_fee_per_hour = new DgbAmountLineEdit(0, automatic_maintenance);
-        m_maintenance_fee_per_hour->setSatoshis(50000000);
+        m_maintenance_fee_per_hour->setSatoshis(refill_defaults.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>());
         m_maintenance_fee_per_hour->setObjectName(
             "paymasterMaintenanceFeePerHour");
         m_maintenance_fee_per_day = new DgbAmountLineEdit(0, automatic_maintenance);
-        m_maintenance_fee_per_day->setSatoshis(200000000);
+        m_maintenance_fee_per_day->setSatoshis(refill_defaults.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>());
         m_maintenance_fee_per_day->setObjectName(
             "paymasterMaintenanceFeePerDay");
         m_liquidity_policy_status = new QLabel(tr(
@@ -2980,7 +3161,11 @@ public:
         maintenance_limits_panel->setObjectName("paymasterMaintenanceLimitsPanel");
         auto* maintenance_limits_form = new QFormLayout(maintenance_limits_panel);
         maintenance_limits_form->setContentsMargins(0, 6, 0, 0);
+        maintenance_limits_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
         maintenance_limits_form->addRow(m_paid_maintenance_approved);
+        auto* refill_help = new QLabel(tr("Core reuses confirmed reserves first. Refill fees are separate from reserve capital and customer-payment fees. Unused allowances are not spent."), maintenance_limits_panel);
+        refill_help->setWordWrap(true);
+        maintenance_limits_form->addRow(refill_help);
         maintenance_limits_form->addRow(
             tr("Maximum fee per transaction (DGB):"),
             m_maintenance_fee_per_transaction);
@@ -3019,19 +3204,12 @@ public:
                 });
         liquidity_layout->addWidget(automatic_maintenance);
 
-        auto* targets = new QGroupBox(tr("Pool targets"), liquidity);
+        auto* targets = new QGroupBox(tr("Reserve target"), liquidity);
         auto* targets_layout = new QVBoxLayout(targets);
-        auto* pool_explanation = new QLabel(tr(
-            "Admission slots are separate, confirmed outputs used to demonstrate provider capacity. Operational slots are the outputs reserved for real transfers. DGB slots fund network fees. DD carrier slots are required only for user-paid service because they carry the provider's DigiDollar fee flow; sponsored-only providers can leave both carrier targets at zero."), targets);
-        pool_explanation->setObjectName("paymasterLiquiditySlotExplanation");
-        pool_explanation->setWordWrap(true);
-        targets_layout->addWidget(pool_explanation);
         m_liquidity_current_status = new QLabel(
             tr("Current confirmed pool: status not loaded yet."), targets);
         m_liquidity_current_status->setObjectName("paymasterLiquidityCurrentStatus");
         m_liquidity_current_status->setWordWrap(true);
-        targets_layout->addWidget(m_liquidity_current_status);
-        auto* pool_form = new QFormLayout();
         m_admission_dgb = spin(liquidity, 3, 16, 3);
         m_admission_dgb->setObjectName("paymasterAdmissionDgbSlots");
         m_operational_dgb = spin(liquidity, 1, 16, 1);
@@ -3044,22 +3222,23 @@ public:
         m_operational_dgb->setToolTip(tr("Each operational DGB slot can support one concurrent transfer."));
         m_admission_carriers->setToolTip(tr("User-paid providers require at least three admission DD carriers; sponsored-only providers need none."));
         m_operational_carriers->setToolTip(tr("User-paid transfers require an operational DD carrier paired with operational DGB liquidity."));
-        pool_form->addRow(tr("Admission DGB slots:"), m_admission_dgb);
-        pool_form->addRow(tr("Operational DGB slots:"), m_operational_dgb);
-        pool_form->addRow(tr("Admission carrier slots:"), m_admission_carriers);
-        pool_form->addRow(tr("Operational carrier slots:"), m_operational_carriers);
-        targets_layout->addLayout(pool_form);
-        m_liquidity_summary = new QLabel(targets);
+        m_reserve_editor = new PaymasterReserveEditor(targets, QStringLiteral("paymaster"),
+            {m_admission_dgb, m_operational_dgb, m_admission_carriers, m_operational_carriers},
+            {m_maintenance_fee_per_transaction, m_maintenance_fee_per_hour, m_maintenance_fee_per_day},
+            [this] { return confirmedUserPaid(); }, [this] { return confirmedPaymentFee(); });
+        targets_layout->addWidget(m_reserve_editor);
+        m_reserve_editor->addManualHelp(m_liquidity_current_status);
+        m_liquidity_summary = m_reserve_editor->summaryLabel();
         m_liquidity_summary->setObjectName("paymasterLiquidityTargetSummary");
-        m_liquidity_summary->setWordWrap(true);
-        targets_layout->addWidget(m_liquidity_summary);
         m_liquidity_target_save_status = new QLabel(targets);
         m_liquidity_target_save_status->setObjectName(
             "paymasterLiquidityTargetSaveStatus");
         m_liquidity_target_save_status->setProperty(
             "paymasterRole", QStringLiteral("statusText"));
         m_liquidity_target_save_status->setWordWrap(true);
-        targets_layout->addWidget(m_liquidity_target_save_status);
+        // The combined policy status below covers the whole form. Retain the
+        // target-specific text for diagnostics without a duplicate banner.
+        m_liquidity_target_save_status->hide();
         m_save_liquidity_policy = new QPushButton(
             tr("Save liquidity targets and refill policy"), targets);
         m_save_liquidity_policy->setObjectName(
@@ -3069,7 +3248,7 @@ public:
         m_save_liquidity_policy->setToolTip(tr(
             "Save the displayed slot targets, automatic-refill setting and finite maintenance limits. A running provider may immediately refill within the approved limits; saving does not start a stopped provider."));
         m_restore_liquidity_defaults = new QPushButton(
-            tr("Restore recommended liquidity defaults"), targets);
+            tr("Reset to Small and clear fee approval"), targets);
         m_restore_liquidity_defaults->setObjectName("paymasterRestoreLiquidityDefaults");
         m_restore_liquidity_defaults->setToolTip(tr(
             "Reset the displayed targets and finite maintenance limits, and disable paid maintenance approval. This does not save the policy or create, spend or retire any wallet output."));
@@ -3177,7 +3356,7 @@ public:
         preparation_help->setWordWrap(true);
         preparation_layout->addWidget(preparation_help);
         auto* preparation_fee_form = new QFormLayout();
-        m_preparation_fee = new DgbAmountLineEdit(20000000, preparation);
+        m_preparation_fee = new DgbAmountLineEdit(50000000, preparation);
         m_preparation_fee->setObjectName("paymasterPoolPreparationFee");
         preparation_fee_form->addRow(tr("Maximum fee per setup transaction (DGB):"), m_preparation_fee);
         preparation_layout->addLayout(preparation_fee_form);
@@ -3819,7 +3998,6 @@ public:
         AddPaymasterPageHeading(automation_layout, automation_column, tr("Automation"),
             tr("Choose how requests are processed and whether missing reserves may be refilled within your approved limits."),
             QStringLiteral("paymasterAutomation"));
-        liquidity_layout->addWidget(automatic_maintenance);
         auto* refill_settings_link = new QPushButton(tr("Reserve targets and refill costs…"), automation_column);
         automation_layout->addWidget(refill_settings_link, 0, Qt::AlignLeft);
         connect(refill_settings_link, &QPushButton::clicked, this, [this] { showOperatorPage(m_liquidity_page); });
@@ -6650,6 +6828,7 @@ private:
 
     void setLiquidityPolicyMutationEnabled(bool enabled)
     {
+        if (m_reserve_editor) m_reserve_editor->setEnabled(enabled && !m_busy);
         const bool controls_enabled = enabled && !m_busy;
         m_automatic_replenishment->setEnabled(controls_enabled);
         m_paid_maintenance_approved->setEnabled(controls_enabled);
@@ -6709,6 +6888,7 @@ private:
                     "maximum_maintenance_fee_per_hour_satoshis");
         load_amount(m_maintenance_fee_per_day,
                     "maximum_maintenance_fee_per_day_satoshis");
+        m_reserve_editor->synchronize(true);
         m_loading_liquidity_policy = false;
         m_liquidity_policy_configured = configured;
         m_liquidity_policy_dirty = false;
@@ -6722,7 +6902,7 @@ private:
                 ? tr("Saved: automatic refill is off. The displayed fee approval is retained; enable automatic refill and save to use it.")
                 : tr("Saved: automatic refill is off and paid refill is not approved. Enable automatic refill, review the fee limits and save to keep reserves ready.");
         } else if (!approved.isTrue()) {
-            status = tr("Saved: automatic refill is selected, but paid refill is not approved. Enable 'Permit paid maintenance', review the limits and save to allow new reserves to be created.");
+            status = tr("Saved: automatic refill is selected, but paid refill is not approved. Select 'Allow refill transactions within these fee limits', review the costs and save to allow new reserves to be created.");
         } else if (poolNumber(policy, "maximum_maintenance_fee_per_transaction_satoshis") == 0 ||
                    poolNumber(policy, "maximum_maintenance_fee_per_hour_satoshis") == 0 ||
                    poolNumber(policy, "maximum_maintenance_fee_per_day_satoshis") == 0) {
@@ -6743,11 +6923,30 @@ private:
         if (m_liquidity_policy_status) {
             QString status = tr("Unsaved changes. Save to apply the displayed reserve settings and limits.");
             if (m_automatic_replenishment->isChecked() && !m_paid_maintenance_approved->isChecked())
-                status += tr(" Automatic refill also needs 'Permit paid maintenance' and approved fee limits to create new reserves.");
+                status += tr(" Automatic refill also needs permission for refill transactions and approved fee limits to create new reserves.");
             m_liquidity_policy_status->setText(status);
         }
         updateLiquidityDisplay();
         updateProviderButtons();
+    }
+
+    bool confirmedUserPaid() const
+    {
+        const auto& models = m_operator_snapshot.find_value("provider").find_value("policy").find_value("funding_models");
+        if (!models.isArray()) return true; // Fresh setup proposal.
+        return std::any_of(models.getValues().begin(), models.getValues().end(), [](const UniValue& model) {
+            return model.isStr() && model.get_str() == "user_paid";
+        });
+    }
+
+    qint64 confirmedPaymentFee() const
+    {
+        qint64 value{0};
+        const auto& policy = m_operator_snapshot.find_value("provider").find_value("policy");
+        if (GetInt64Field(policy, "maximum_network_fee_dgb_satoshis", value) && value > 0 && MoneyRange(value)) return value;
+        // Before an offer has been saved, show the setup proposal. Never use
+        // an unrelated, unsaved offer draft to describe a reserve approval.
+        return DigiDollar::Paymaster::SetupDefaultPolicy().find_value("maximum_network_fee_dgb_satoshis").getInt<qint64>();
     }
 
     QString liquidityApprovalText(
@@ -6756,10 +6955,11 @@ private:
         const qint64 admission_value =
             DigiDollar::Paymaster::MIN_ADMISSION_DGB_SATOSHIS;
         const qint64 operational_value = std::max<qint64>(
-            admission_value, m_network_fee->value());
-        const qint64 bound_dgb =
-            admission_value * values.admission_dgb +
-            operational_value * values.operational_dgb;
+            admission_value, confirmedPaymentFee());
+        const qint64 admission_capital = admission_value * values.admission_dgb;
+        const QString bound_dgb = operational_value <= (MAX_MONEY - admission_capital) / values.operational_dgb
+            ? dgbAmount(admission_capital + operational_value * values.operational_dgb)
+            : tr("exceeds the supported amount range");
         const qint64 bound_carriers =
             100LL * (values.admission_carriers +
                      values.operational_carriers);
@@ -6776,7 +6976,7 @@ private:
             .arg(values.operational_dgb)
             .arg(values.admission_carriers)
             .arg(values.operational_carriers)
-            .arg(dgbAmount(bound_dgb))
+            .arg(bound_dgb)
             .arg(PaymasterFormatDD(bound_carriers))
             .arg(dgbAmount(values.fee_per_transaction))
             .arg(dgbAmount(values.fee_per_hour))
@@ -8522,9 +8722,19 @@ private:
             explanation->setWordWrap(true);
             explanation->setMaximumWidth(620);
             form->addRow(explanation);
-            auto* transaction = new DgbAmountLineEdit(poolNumber(saved, "maximum_maintenance_fee_per_transaction_satoshis"), &review);
-            auto* hour = new DgbAmountLineEdit(poolNumber(saved, "maximum_maintenance_fee_per_hour_satoshis"), &review);
-            auto* day = new DgbAmountLineEdit(poolNumber(saved, "maximum_maintenance_fee_per_day_satoshis"), &review);
+            const auto suggested = DigiDollar::Paymaster::SetupLiquidityPreset(
+                poolNumber(saved, "target_admission_carriers") > 0,
+                std::max({1, static_cast<int>(poolNumber(saved, "target_operational_dgb")),
+                          static_cast<int>(poolNumber(saved, "target_operational_carriers")),
+                          static_cast<int>(poolNumber(saved, "target_admission_dgb")) - 2,
+                          static_cast<int>(poolNumber(saved, "target_admission_carriers")) - 2}));
+            const auto review_limit = [&](const char* key) {
+                const qint64 value = poolNumber(saved, key);
+                return value > 0 ? value : suggested.find_value(key).getInt<qint64>();
+            };
+            auto* transaction = new DgbAmountLineEdit(review_limit("maximum_maintenance_fee_per_transaction_satoshis"), &review);
+            auto* hour = new DgbAmountLineEdit(review_limit("maximum_maintenance_fee_per_hour_satoshis"), &review);
+            auto* day = new DgbAmountLineEdit(review_limit("maximum_maintenance_fee_per_day_satoshis"), &review);
             transaction->setObjectName("paymasterQuickRefillFeeTransaction");
             hour->setObjectName("paymasterQuickRefillFeeHour");
             day->setObjectName("paymasterQuickRefillFeeDay");
@@ -10280,6 +10490,7 @@ private:
         m_task_continue->setText((needs_reserves || m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
             m_operation.error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE")) ? tr("Restore required reserves…") :
             m_operation.error.contains(QLatin1String("WALLET_LOCKED")) ? tr("Unlock wallet…") :
+            m_operation.error == QLatin1String("PAYMASTER_MAINTENANCE_FEE_EXCEEDED") ? tr("Review refill cost limit") :
             m_operation.error.contains(QLatin1String("FEE_LIMIT")) ? tr("Review fee limit…") :
             m_operation.error.contains(QLatin1String("PROVIDER_DISABLED")) ? tr("Resume approved task…") :
             carrierReleaseNeedsReview() ? tr("Refresh reserves") : tr("Check current status"));
@@ -11049,19 +11260,12 @@ private:
 
     void restoreLiquidityDefaults(bool announce = true)
     {
-        const bool needs_carriers = m_user_paid->isChecked();
         if (announce && !m_liquidity_policy_dirty) m_liquidity_edit_revision = m_saved_liquidity_policy.find_value("updated_at");
         m_loading_liquidity_policy = true;
         m_automatic_replenishment->setChecked(IsCompleteLiquidityPolicy(m_saved_liquidity_policy)
             ? m_saved_liquidity_policy.find_value("automatic_replenishment").isTrue() : true);
         m_paid_maintenance_approved->setChecked(false);
-        m_admission_dgb->setValue(3);
-        m_operational_dgb->setValue(1);
-        m_admission_carriers->setValue(needs_carriers ? 3 : 0);
-        m_operational_carriers->setValue(needs_carriers ? 1 : 0);
-        m_maintenance_fee_per_transaction->setSatoshis(10000000);
-        m_maintenance_fee_per_hour->setSatoshis(50000000);
-        m_maintenance_fee_per_day->setSatoshis(200000000);
+        m_reserve_editor->applyPreset(1);
         m_loading_liquidity_policy = false;
         m_liquidity_policy_dirty = announce;
         invalidatePoolPreviews();
@@ -11069,7 +11273,7 @@ private:
         updateLiquidityDisplay();
         if (announce) {
             m_liquidity_policy_status->setText(tr(
-                "Recommended targets and conservative finite maintenance limits restored in the form. Paid maintenance is disabled until you review, approve and save these values."));
+                "Small preset proposed in the form. Paid refill is disabled until you review, approve and save these values."));
             m_liquidity_output->setPlainText(tr(
                 "Recommended target fields restored. No wallet output was created or retired. Save the automatic liquidity policy, then preview pool preparation only if you are using manual expert operation."));
         } else {
@@ -11081,33 +11285,7 @@ private:
     void updateLiquidityDisplay()
     {
         if (!m_liquidity_summary || !m_liquidity_preview_status) return;
-        const bool needs_carriers = m_user_paid->isChecked();
-        const bool sponsored = m_sponsored->isChecked();
-        QString summary = tr(
-            "Displayed targets: %1 admission DGB, %2 operational DGB, %3 admission carrier and %4 operational carrier slots.")
-            .arg(m_admission_dgb->value())
-            .arg(m_operational_dgb->value())
-            .arg(m_admission_carriers->value())
-            .arg(m_operational_carriers->value());
-        if (!needs_carriers && !sponsored) {
-            summary += tr(
-                " No payment model is selected; choose and save an operating policy before preparing liquidity.");
-        } else if (needs_carriers &&
-            (m_admission_carriers->value() < 3 ||
-             m_operational_carriers->value() < 1)) {
-            summary += tr(
-                " User paid is selected, so at least three admission and one operational carrier slots are required.");
-        } else if (!needs_carriers &&
-                   (m_admission_carriers->value() > 0 ||
-                    m_operational_carriers->value() > 0)) {
-            summary += tr(
-                " User paid is not selected; these carrier targets are optional and can be reset to zero.");
-        } else if (needs_carriers) {
-            summary += tr(" These targets satisfy the minimum user-paid pool shape.");
-        } else {
-            summary += tr(" These targets satisfy the minimum sponsored-only pool shape.");
-        }
-        m_liquidity_summary->setText(summary);
+        m_reserve_editor->synchronize();
 
         if (m_liquidity_target_save_status) {
             if (m_liquidity_policy_dirty) {
@@ -12443,16 +12621,17 @@ private:
         const bool have_existing_liquidity =
             m_liquidity_policy_configured &&
             readLiquidityPolicy(existing_liquidity);
+        const auto refill_defaults = DigiDollar::Paymaster::SetupDefaultLiquidity(wizard_user_paid->isChecked());
         auto* custom_maintenance_per_transaction = new DgbAmountLineEdit(
-            have_existing_liquidity ? existing_liquidity.fee_per_transaction : 20000000,
+            have_existing_liquidity ? existing_liquidity.fee_per_transaction : refill_defaults.find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>(),
             custom_safety);
         custom_maintenance_per_transaction->setObjectName("paymasterSetupCustomMaintenancePerTransaction");
         auto* custom_maintenance_per_hour = new DgbAmountLineEdit(
-            have_existing_liquidity ? existing_liquidity.fee_per_hour : 200000000,
+            have_existing_liquidity ? existing_liquidity.fee_per_hour : refill_defaults.find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>(),
             custom_safety);
         custom_maintenance_per_hour->setObjectName("paymasterSetupCustomMaintenancePerHour");
         auto* custom_maintenance_per_day = new DgbAmountLineEdit(
-            have_existing_liquidity ? existing_liquidity.fee_per_day : 1000000000,
+            have_existing_liquidity ? existing_liquidity.fee_per_day : refill_defaults.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>(),
             custom_safety);
         custom_maintenance_per_day->setObjectName("paymasterSetupCustomMaintenancePerDay");
         custom_safety_form->addRow(tr("Network-fee budget per transfer (DGB):"), custom_per_transaction);
@@ -12465,9 +12644,6 @@ private:
         custom_safety_form->addRow(tr("Active quotes per netgroup:"), custom_max_active_quotes_per_netgroup);
         custom_safety_form->addRow(tr("Active quotes per recipient bucket:"), custom_max_active_quotes_per_recipient);
         custom_safety_form->addRow(tr("Quote requests per netgroup/minute:"), custom_max_quote_requests_per_netgroup);
-        custom_safety_form->addRow(tr("Paid maintenance per transaction (DGB):"), custom_maintenance_per_transaction);
-        custom_safety_form->addRow(tr("Paid maintenance per rolling hour (DGB):"), custom_maintenance_per_hour);
-        custom_safety_form->addRow(tr("Paid maintenance per rolling day (DGB):"), custom_maintenance_per_day);
         const auto safety_matches = [](const FundingSafetyValues& values,
                                        const GuidedPaymasterSafetyLimits& limits) {
             return values.per_transaction == limits.per_transaction &&
@@ -12504,23 +12680,15 @@ private:
             initial_max_active_quotes_per_netgroup == 4 &&
             initial_max_active_quotes_per_recipient == 2 &&
             initial_max_quote_requests_per_netgroup == 10;
-        if (have_existing_safety || have_existing_liquidity) {
-            const bool conservative_maintenance = !have_existing_liquidity ||
-                (existing_liquidity.fee_per_transaction == 10000000 &&
-                 existing_liquidity.fee_per_hour == 50000000 &&
-                 existing_liquidity.fee_per_day == 200000000);
-            const bool recommended_maintenance = !have_existing_liquidity ||
-                (existing_liquidity.fee_per_transaction == 20000000 &&
-                 existing_liquidity.fee_per_hour == 200000000 &&
-                 existing_liquidity.fee_per_day == 1000000000);
+        if (have_existing_safety) {
             initial_safety_profile =
                 (!have_existing_safety ||
                  selected_models_match_safety(conservative_safety)) &&
-                    conservative_maintenance && default_quote_limits
+                    default_quote_limits
                 ? QStringLiteral("conservative")
                 : (!have_existing_safety ||
                    selected_models_match_safety(recommended_safety)) &&
-                      recommended_maintenance && default_quote_limits
+                      default_quote_limits
                     ? QStringLiteral("recommended")
                     : QStringLiteral("custom");
         }
@@ -12618,12 +12786,6 @@ private:
                         update_safety_summary();
                     });
         }
-        for (QLineEdit* control : {custom_maintenance_per_transaction,
-                                   custom_maintenance_per_hour,
-                                   custom_maintenance_per_day}) {
-            connect(control, &QLineEdit::textChanged, safety_page,
-                    [update_safety_summary] { update_safety_summary(); });
-        }
         for (QSpinBox* control : {custom_max_active_quotes_total,
                                   custom_max_active_quotes_per_netgroup,
                                   custom_max_active_quotes_per_recipient,
@@ -12638,8 +12800,7 @@ private:
                 [safety_profile, network_fee, custom_per_transaction,
                  custom_reserved, custom_per_hour,
                  custom_per_day, custom_completed_per_hour,
-                 custom_completed_per_day, custom_maintenance_per_transaction,
-                 custom_maintenance_per_hour, custom_maintenance_per_day,
+                 custom_completed_per_day,
                  custom_max_active_quotes_total,
                  custom_max_active_quotes_per_netgroup,
                  custom_max_active_quotes_per_recipient,
@@ -12659,9 +12820,6 @@ private:
                     custom_max_active_quotes_per_netgroup->setValue(4);
                     custom_max_active_quotes_per_recipient->setValue(2);
                     custom_max_quote_requests_per_netgroup->setValue(10);
-                    custom_maintenance_per_transaction->setSatoshis(20000000);
-                    custom_maintenance_per_hour->setSatoshis(200000000);
-                    custom_maintenance_per_day->setSatoshis(1000000000);
                     safety_profile->setCurrentIndex(
                         safety_profile->findData(QStringLiteral("recommended")));
                 });
@@ -12677,7 +12835,7 @@ private:
         auto* pool_page = new QWizardPage(&wizard);
         pool_page->setObjectName("paymasterSetupLiquidityPage");
         pool_page->setTitle(tr("Reserves and operation"));
-        pool_page->setSubTitle(tr("Choose how many reserve and immediately usable payment slots to prepare."));
+        pool_page->setSubTitle(tr("Choose payment capacity and review its capital and refill limits."));
         auto* pool_page_layout = new QVBoxLayout(pool_page);
         auto* pool_scroll = new QScrollArea(pool_page);
         pool_scroll->setObjectName("paymasterSetupLiquidityScroll");
@@ -12691,12 +12849,12 @@ private:
         ConfigureScrollArea(pool_scroll, pool_content);
         pool_page_layout->addWidget(pool_scroll);
         auto* automatic_replenishment = new QCheckBox(
-            tr("Automatically replenish missing liquidity"), pool_page);
+            tr("Automatically refill missing reserves"), pool_page);
         automatic_replenishment->setObjectName("paymasterSetupAutomaticReplenishment");
         automatic_replenishment->setChecked(
             have_existing_liquidity ? existing_liquidity.automatic_replenishment : true);
         auto* paid_maintenance_approved = new QCheckBox(
-            tr("Allow paid automatic liquidity maintenance within the selected limits"),
+            tr("Allow refill transactions within these fee limits"),
             pool_page);
         paid_maintenance_approved->setObjectName("paymasterSetupPaidMaintenanceApproved");
         paid_maintenance_approved->setChecked(
@@ -12764,12 +12922,24 @@ private:
         };
         connect(wizard_user_paid, &QCheckBox::toggled, pool_page, update_carrier_targets);
         update_carrier_targets(wizard_user_paid->isChecked());
-        pool_layout->addRow(tr("Reserve DGB slots for network admission:"), admission_dgb);
-        pool_layout->addRow(tr("Immediately usable DGB slots:"), operational_dgb);
-        pool_layout->addRow(tr("Reserve DigiDollar carrier slots:"), admission_carriers);
-        pool_layout->addRow(tr("Immediately usable carrier slots:"), operational_carriers);
+        auto* reserve_editor = new PaymasterReserveEditor(pool_content, QStringLiteral("paymasterSetup"),
+            {admission_dgb, operational_dgb, admission_carriers, operational_carriers},
+            {custom_maintenance_per_transaction, custom_maintenance_per_hour, custom_maintenance_per_day},
+            [wizard_user_paid] { return wizard_user_paid->isChecked(); }, selected_network_fee);
+        pool_layout->addRow(reserve_editor);
+        connect(wizard_user_paid, &QCheckBox::toggled, reserve_editor, [reserve_editor] { reserve_editor->synchronize(true); });
+        connect(network_fee, qOverload<int>(&QSpinBox::valueChanged), reserve_editor, [reserve_editor] { reserve_editor->synchronize(); });
+        pool_layout->setRowWrapPolicy(QFormLayout::WrapLongRows);
         pool_layout->addRow(automatic_replenishment);
         pool_layout->addRow(paid_maintenance_approved);
+        auto* refill_limits = new QWidget(pool_content);
+        auto* refill_form = new QFormLayout(refill_limits);
+        refill_form->setContentsMargins(0, 0, 0, 0);
+        refill_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        refill_form->addRow(tr("Maximum refill fee per transaction (DGB):"), custom_maintenance_per_transaction);
+        refill_form->addRow(tr("Maximum refill fees per rolling hour (DGB):"), custom_maintenance_per_hour);
+        refill_form->addRow(tr("Maximum refill fees per rolling day (DGB):"), custom_maintenance_per_day);
+        pool_layout->addRow(refill_limits);
         pool_layout->addRow(tr("Provider operation:"), operation_mode);
         pool_layout->addRow(autostart);
         pool_layout->addRow(provider_enabled);
@@ -12778,14 +12948,10 @@ private:
         restore_liquidity_defaults->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
         pool_layout->addRow(restore_liquidity_defaults);
         connect(restore_liquidity_defaults, &QPushButton::clicked, pool_page,
-                [wizard_user_paid, admission_dgb, operational_dgb,
-                 admission_carriers, operational_carriers,
+                [reserve_editor,
                  automatic_replenishment, paid_maintenance_approved,
                  operation_mode, autostart, provider_enabled, this] {
-                    admission_dgb->setValue(3);
-                    operational_dgb->setValue(1);
-                    admission_carriers->setValue(wizard_user_paid->isChecked() ? 3 : 0);
-                    operational_carriers->setValue(wizard_user_paid->isChecked() ? 1 : 0);
+                    reserve_editor->applyPreset(1);
                     automatic_replenishment->setChecked(true);
                     paid_maintenance_approved->setChecked(true);
                     if (!m_core_running) {
@@ -12809,7 +12975,7 @@ private:
         liquidity_help_text->setTextInteractionFlags(Qt::TextSelectableByMouse);
         liquidity_help_layout->addWidget(liquidity_help_title);
         liquidity_help_layout->addWidget(liquidity_help_text);
-        pool_layout->addRow(liquidity_help);
+        reserve_editor->addManualHelp(liquidity_help);
 
         const auto update_liquidity_help = [this, wizard_user_paid, admission_dgb,
                                             operational_dgb, admission_carriers,
@@ -13174,14 +13340,9 @@ private:
             liquidity.operational_dgb = operational_dgb->value();
             liquidity.admission_carriers = admission_carriers->value();
             liquidity.operational_carriers = operational_carriers->value();
-            const bool conservative = safety_profile->currentData().toString() == QLatin1String("conservative");
-            liquidity.fee_per_transaction = conservative ? 10000000 : 20000000;
-            liquidity.fee_per_hour = conservative ? 50000000 : 200000000;
-            liquidity.fee_per_day = conservative ? 200000000 : 1000000000;
-            if (safety_profile->currentData().toString() == QLatin1String("custom") &&
-                (!custom_maintenance_per_transaction->satoshis(liquidity.fee_per_transaction) ||
+            if (!custom_maintenance_per_transaction->satoshis(liquidity.fee_per_transaction) ||
                  !custom_maintenance_per_hour->satoshis(liquidity.fee_per_hour) ||
-                 !custom_maintenance_per_day->satoshis(liquidity.fee_per_day)))
+                 !custom_maintenance_per_day->satoshis(liquidity.fee_per_day))
                 throw std::runtime_error("PAYMASTER_INVALID_LIQUIDITY_POLICY");
             choices.liquidity = liquidityPolicyToJSON(liquidity);
             CheckSetupChoices(choices);
@@ -13293,22 +13454,12 @@ private:
                         .arg(custom_max_active_quotes_per_netgroup->value())
                         .arg(custom_max_active_quotes_per_recipient->value())
                         .arg(custom_max_quote_requests_per_netgroup->value());
-                    const bool conservative =
-                        safety_profile->currentData().toString() ==
-                        QLatin1String("conservative");
-                    qint64 maintenance_per_transaction =
-                        conservative ? 10000000 : 20000000;
-                    qint64 maintenance_per_hour =
-                        conservative ? 50000000 : 200000000;
-                    qint64 maintenance_per_day =
-                        conservative ? 200000000 : 1000000000;
-                    if (safety_profile->currentData().toString() ==
-                        QLatin1String("custom")) {
-                        custom_maintenance_per_transaction->satoshis(
-                            maintenance_per_transaction);
-                        custom_maintenance_per_hour->satoshis(maintenance_per_hour);
-                        custom_maintenance_per_day->satoshis(maintenance_per_day);
-                    }
+                    qint64 maintenance_per_transaction{0};
+                    qint64 maintenance_per_hour{0};
+                    qint64 maintenance_per_day{0};
+                    custom_maintenance_per_transaction->satoshis(maintenance_per_transaction);
+                    custom_maintenance_per_hour->satoshis(maintenance_per_hour);
+                    custom_maintenance_per_day->satoshis(maintenance_per_day);
                     review_text += tr(
                         "\nAutomatic replenishment: %1; paid maintenance: %2, limited to %3 DGB per maintenance transaction, %4 DGB per rolling hour and %5 DGB per rolling day")
                         .arg(automatic_replenishment->isChecked() ? tr("enabled") : tr("disabled"),
@@ -13360,10 +13511,10 @@ private:
             qint64 custom_maintenance_transaction{0};
             qint64 custom_maintenance_hour{0};
             qint64 custom_maintenance_day{0};
-            const bool custom_maintenance_valid = !custom_profile ||
-                (custom_maintenance_per_transaction->satoshis(custom_maintenance_transaction) &&
+            const bool custom_maintenance_valid =
+                custom_maintenance_per_transaction->satoshis(custom_maintenance_transaction) &&
                  custom_maintenance_per_hour->satoshis(custom_maintenance_hour) &&
-                 custom_maintenance_per_day->satoshis(custom_maintenance_day));
+                 custom_maintenance_per_day->satoshis(custom_maintenance_day);
             if (!m_core_has_identity &&
                 !DigiDollar::Paymaster::IsValidPaymasterDisplayName(
                     display->text().toStdString())) {
@@ -14170,6 +14321,7 @@ private:
     QLabel* m_funding_model_status;
     QLabel* m_policy_summary;
     QLabel* m_policy_save_status{nullptr};
+    PaymasterReserveEditor* m_reserve_editor{nullptr};
     QSpinBox* m_admission_dgb;
     QSpinBox* m_operational_dgb;
     QSpinBox* m_admission_carriers;

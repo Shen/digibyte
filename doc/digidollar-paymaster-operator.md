@@ -816,6 +816,14 @@ result/error handling and queued follow-up reads complete. Review dialogs
 remain usable. A blockchain confirmation wait is a separate task state;
 its allowed actions are still determined by Core and the task controller.
 
+Saving larger reserve targets does not raise the approved refill fee ceiling.
+If Core reports `PAYMASTER_MAINTENANCE_FEE_EXCEEDED`, recurring refill is blocked
+before a transaction is saved or broadcast. The current task stops showing a progress bar and
+offers **Review refill cost limit**. Review the separate finite maintenance
+limits and explicitly save any change; targets alone do not approve higher fees.
+The same operator diagnostic directs RPC/CLI users to liquidity review. An
+already saved transaction continues to show its confirmation progress.
+
 For a wholly uncreated setup plan blocked by `PAYMASTER_POOL_FEE_LIMIT`, use
 **Review setup fee and continue** on Overview. The dialog displays the saved
 fee ceiling and diagnostics, accepts a new finite DGB ceiling and an explicit
@@ -860,9 +868,48 @@ Preview/Save; edit the BAT/configuration source and restart to change them.
 
 ### Saving automatic refill settings
 
+Choose a **Payment capacity** preset in **Funds & reserves** or the setup
+assistant. The same editor offers these draft targets and finite refill limits:
+
+| Preset | Parallel payment target | DGB reserves (capacity checks / payments) | DD reserves for user-paid service | Refill ceiling per transaction / rolling hour / rolling day |
+|---|---:|---|---|---|
+| Small | 1 | 3 / 1 | 3 / 1 | 0.50 / 2 / 10 DGB |
+| Standard | 3 | 3 / 3 | 3 / 3 | 0.75 / 3 / 15 DGB |
+| Higher capacity | 6 | 3 / 6 | 3 / 6 | 1 / 4 / 20 DGB |
+
+Sponsored-only presets need no DD reserves. Three separate admission reserves
+prove capacity; extra admission reserves do not increase parallel payments.
+For user-paid service, the smaller DGB/DD payment-reserve count determines
+prepared capacity. Confirmation, available payment budgets and other operating
+limits still apply. **Manual** exposes the four independent reserve counts.
+Saved combinations that do not match a preset open as Manual without alteration.
+
+The editor shows minimum target capital before fees: 0.10 DGB per admission
+reserve, the larger of 0.10 DGB and the offer's network-fee ceiling per DGB
+payment reserve, and 1 DD per DD reserve. Existing usable reserves count toward
+the target. Lowering a target does not release funds; use the reviewed capital
+actions for that.
+
+Selecting a preset proposes its targets **and** refill ceilings in the form;
+it does not save, enable refill or grant spending permission. Existing positive
+limits remain exact when opening or refreshing the editor. **Use suggested
+refill limits** replaces only the three draft fee limits. The limits allow
+room for several inputs/outputs and the DD fee floor, but are not fee estimates
+or a guarantee for fragmented funds. Core still pauses if an actual fee exceeds
+the approved transaction, hour or day allowance. Larger manual configurations
+receive a larger bounded suggestion. The setup assistant keeps refill limits
+independent of the customer-payment safety profile; restoring that profile
+does not replace refill limits.
+
+For wallets without saved refill rules, the liquidity RPC proposes these same
+finite limits based on existing active reserve counts. It does not derive refill
+limits from customer-payment budgets, save a policy or approve spending. Saved
+policies always retain their original limits.
+
 Automatic refill and permission to pay refill fees are separate saved settings.
 To enable paid automatic replenishment, select **Automatically refill missing
-reserves**, review the limits that open below it, select **Permit paid maintenance**,
+reserves** on Overview or under Operation & automation, review the reserve
+settings, select **Allow refill transactions within these fee limits**,
 and choose **Save settings and approve bounded refill**. The confirmation lists
 the automatic-refill choice, target capital and each DGB fee ceiling. Turning on
 the first checkbox alone does not approve spending. A zero ceiling blocks paid

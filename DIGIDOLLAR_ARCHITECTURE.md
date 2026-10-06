@@ -1748,6 +1748,11 @@ transaction machinery, so the CLI can link them without server dependencies.
 CLI and Qt use this common plan through their existing RPC adapters; the Qt
 wizard constructs preview and execution from the same choices. Core alone owns
 validation, signatures, reservations and existing journal persistence.
+The shared reserve draft editor offers 1/3/6-payment capacity presets and Manual
+counts, with three separate admission proofs and paired DGB/DD payment reserves
+for user-paid service. `SetupLiquidityPreset` supplies finite refill suggestions
+without granting authority. The wizard reviews refill limits independently of
+customer-payment budgets; loading existing values never reapplies a preset.
 `getpaymasteroperatorinfo` uses a non-reconciling, non-blocking readiness view;
 existing callers retain normal reconciliation. `stoppaymaster` can atomically
 persist autostart off and enabled false under ProviderWorkGuard before stopping.
