@@ -814,6 +814,13 @@ Registered in `RegisterDigiDollarRPCCommands()` at `src/rpc/digidollar.cpp`:
 
 DigiByte Core ships a DD lifecycle tab plus Qt widgets/dialogs/helpers: `digidollartab`, `digidollaroverviewwidget`, `digidollarsendwidget`, `digidollarreceivewidget`, `digidollarmintwidget`, `digidollarredeemwidget`, `digidollarpositionswidget`, `digidollartransactionswidget`, `digidollarcoincontroldialog`, `digidollarreceiverequest`, `ddaddressbookpage`, and `digidollar_qt_translate`. `DigiDollarTab` exposes the tabs `$DD Overview`, `Send $DD`, `Receive $DD`, `Mint $DD`, `Redeem $DD`, `$DD Vault`, and `$DD Transactions`, with an activation overlay until the buried DigiDollar height is reached. The Qt mint flow uses an HD-derived owner key and the wallet capability checks described above. Key storage is requested before wallet commit; that sequence alone does not establish durable recovery. See `REPO_MAP_DIGIDOLLAR.md` (Qt GUI section) for individual widget responsibilities.
 
+Receive DD refreshes its saved requests in the background. A busy wallet may
+delay those requests, but tab navigation remains responsive and the last loaded
+list stays visible. Unchanged lists keep their selection; changing wallets clears
+the former wallet's request display immediately. Creating, editing and removing
+requests still use the existing wallet persistence interface. This GUI change
+adds no RPC or CLI behavior.
+
 #### Qt mint reject-reason translation (`DD-FA-DOC-010`)
 
 The Qt mint widget calls `WalletModel::mintDigiDollar`. The wallet model

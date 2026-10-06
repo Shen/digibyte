@@ -1,5 +1,75 @@
 # Paymaster build and test runbook
 
+## Receive DD navigation responsiveness (2026-10-06)
+
+Source base: `271ae55d4f`; implementation: `5d2bc232e0`. Opening Receive DD queued
+its refresh on Qt's event thread, where `getAddressReceiveRequests()` then waited
+for `cs_wallet`.
+Paymaster work may contend for that lock, but this checkpoint does not identify
+the operator's particular live lock holder. The existing busy-wallet Qt
+regression now processes the queued Receive DD refresh while a worker holds the
+lock. Against the preceding Qt library it failed at **511 ms**; the corrected
+tab returned in **13 ms** while the wallet remained locked. The watchdog limits
+the pre-fix failure to 500 ms; it is not a live-wallet benchmark.
+
+The DD receive widget now requests an asynchronous wallet snapshot through the
+existing model-owned worker pattern. Refresh requests are coalesced; unchanged
+rows, selection and the last successful display survive passive reads. Wallet
+rebinding and local request revisions invalidate late replies. Request writes,
+original DGB receive code, Core locking, RPC/CLI and financial authority keep
+their existing behavior. Relevant guidance: repository/src instructions,
+CLAUDE's DigiDollar reading order, architecture/maps, contribution and developer
+GUI/locking notes, Qt translation policy and Windows/test runbooks.
+
+The diagnostic application and Qt test runner are separately linked as
+`digibyte-qt-receive.exe` and `test_digibyte-qt-receive.exe` under
+`build_msvc/x64/Release/`. Local build/test helpers and the before/after logs are
+under `build_msvc/paymaster-refresh-check/receive/`, excluded from Git locally.
+This is an incremental diagnostic build, not full release verification.
+
+Completed verification: selected MSVC 14.43 / Qt 5.15.10 compiles for the DD
+receive widget, wallet model, tab caller, DD Qt tests and regenerated test MOC;
+separate incremental Qt application/test links; **17 targeted native Qt cases
+passed**, none skipped. They cover the busy-wallet tab switch, coalesced refresh,
+unchanged rows/selection, late replies after removal and rebinding, model closure,
+request edit/cancel/remove persistence and DGB separation, network filtering,
+request dialogs/validation, computer-locale dates and existing tab/history refresh.
+
+The additional `digiDollarControlsStayReadableInBothThemes` check failed two
+dropdown-highlight assertions (light and dark). The unchanged preceding
+`test_digibyte-qt-recovery.exe` reproduces both failures, recorded separately in
+`theme-baseline.txt`. No stylesheet changes are part of this fix. The broad theme
+check is therefore an existing outstanding issue, not a passing acceptance result.
+
+With both wallet windows closed and no process using the target, the normal
+`build_msvc/x64/Release/digibyte-qt.exe` and PDB were replaced with the candidate.
+Both installed hashes match their candidate files. The EXE SHA-256 is
+`55CBC3DFBA38C7032BAC868C4D20F418C0B6E1F8C2DDF74CB57A13A334112724`.
+The previous EXE/PDB are retained under the local `receive/` artifact folder as
+`digibyte-qt-before-receive-20261006-072646.*`; `installed-artifact.json` records
+the source commit, checks and both hashes. No live wallet was force-terminated.
+
+Full solution rebuild, complete Qt suites and cross-platform checks remain
+operator work (minutes or longer). From `D:\Digibyte\digibyte-fork`, use the
+existing MSVC v143, static Qt 5.15.10 and installed vcpkg dependencies, with
+wallet windows closed and CLI polling stopped before linking normal binaries:
+
+```powershell
+$builder = 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe'
+& $builder .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Full solution build failed' }
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'DigiDollarWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+$env:DIGIBYTE_QT_TEST_OUTPUT = "$PWD\build_msvc\x64\Release\receive-dd-full-qt.txt"
+& .\build_msvc\x64\Release\test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw 'DigiDollar Qt tests failed' }
+```
+
+Require build/test exit codes zero and no failed Qt cases. For manual acceptance,
+switch between Send DD and Receive DD during ordinary Paymaster processing;
+navigation should respond immediately even if the request list arrives later.
+
 ## Passive operator refresh (2026-10-05)
 
 Source base: `cc5e340030`. The previous refresh used the foreground RPC gate

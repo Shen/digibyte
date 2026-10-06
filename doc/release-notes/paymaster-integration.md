@@ -5,6 +5,14 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Receive DD responsiveness
+
+Opening Receive DD no longer reads saved payment requests on the GUI thread.
+The DigiDollar Qt extension loads them in the background, preserving displayed
+rows during refresh and rejecting late snapshots after a wallet change or local
+request edit/removal. The original DGB receive page, Core wallet locks, payment
+authorization and RPC/CLI are unchanged.
+
 ## Confirmed payments with missing provider replies
 
 Wallet-tip and periodic Paymaster maintenance now complete a signed client session
