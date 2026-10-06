@@ -1032,7 +1032,8 @@ or chain parameters.
 - `paymasterstore_client.cpp` owns client sessions, reservations, Capacity
   snapshots, intent state, and safe fallback transitions. Its read-only live
   reservation query recognizes a proven unsigned failed session's historical
-  inputs when a different active client session is the validated current owner;
+  inputs when a different client session is the validated current owner,
+  including terminal owners that still retain protected reservations;
   it never releases that owner's reservation or coin lock.
 - `paymasterstore_provider.cpp` owns provider quote admission, authorization,
   expiry, capacity lifecycle, and quote-equivocation state.
@@ -1523,6 +1524,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - Automatic receive-history refreshes are asynchronous and coalesced. Unchanged
   snapshots preserve rows and selection; local writes and wallet rebinding
   invalidate late replies. Explicit request persistence keeps its existing path.
+- Selection, copying and request dialogs read the displayed snapshot without
+  taking a wallet lock. Edits/removals recheck the stored request identity before
+  writing and update the cache immediately. Selected QR metadata follows its row.
 
 ### src/qt/digidollarreceiverequest.cpp/h
 - `DigiDollarReceiveRequest` → DD payment request generation

@@ -5,6 +5,15 @@ These fork-specific changes are unreleased and are separate from the official
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
 
+## Saved transfers after a later payment completes
+
+The read-only client inbox accepts a validated later reservation owner even
+after that owner becomes terminal. A harmless unsigned old session no longer
+causes `PAYMASTER_RESERVATION_SESSION_CONFLICT` solely because a later payment
+finished while its input reservations still await reconciliation. The shared
+wallet lookup applies to Qt and RPC/CLI. Unsigned-history proof, ownership
+bindings, signed recovery protection, reservations and coin locks are preserved.
+
 ## Fresh offers for another payment
 
 After a completed Paymaster payment, Start a new transfer clears the previous
@@ -20,6 +29,10 @@ The DigiDollar Qt extension loads them in the background, preserving displayed
 rows during refresh and rejecting late snapshots after a wallet change or local
 request edit/removal. The original DGB receive page, Core wallet locks, payment
 authorization and RPC/CLI are unchanged.
+Selecting or opening a stored DD address, copying its request and preparing its
+QR code also use the displayed snapshot. Local edits/removals update that cache
+and recheck the stored request identity before writing, so an externally removed
+request cannot be restored by a stale display.
 
 ## Confirmed payments with missing provider replies
 

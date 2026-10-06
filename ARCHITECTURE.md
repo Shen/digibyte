@@ -133,10 +133,15 @@ block tab navigation. Refreshes retain the last displayed snapshot and avoid
 rebuilding unchanged rows. Wallet generations and local request revisions prevent
 late reads from restoring detached or removed requests. The ordinary DGB receive
 page, wallet locking and request-write interface are unchanged.
+Request selection, copying and dialogs use that displayed snapshot as well.
+Successful local edits/removals update it immediately; explicit writes first
+recheck the stored request identity so a stale display cannot restore a removed
+request. Selected QR metadata follows the selected request.
 The saved-session inbox exposes loading progress and concrete read failures;
 manual retries report repeated errors, while automatic startup reads stay inline.
 The ownership query distinguishes a proven unsigned FAILED session's historical
-inputs from reservations validated against a later active client owner. It
+inputs from reservations validated against a later client owner, including a
+terminal owner whose inputs remain protected until reconciliation. It
 changes no reservation, lock or persisted session. Ambiguous authorization,
 recovery and inconsistent owner bindings continue to fail closed.
 The normal Send view distinguishes an explicit read-only check of locally known

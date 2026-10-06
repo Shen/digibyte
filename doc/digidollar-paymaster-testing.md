@@ -1,5 +1,91 @@
 # Paymaster build and test runbook
 
+## Historical reservation owners and Receive DD selection (2026-10-06)
+
+Source base: `471991482d`; shared ownership fix: `7decec7151`.
+Receive snapshot fix: `03309336e5`.
+The client inbox rejected a released unsigned session's historical input when
+the later validated reservation owner became terminal. The extended
+`paymasterClientReleasedInputsCanBeReservedAgain` regression reproduces the
+reported `PAYMASTER_RESERVATION_SESSION_CONFLICT` before the fix. The read-only
+query now accepts that later owner regardless of its state, retaining the old
+unsigned-history proof and exact current request/session/input/index bindings.
+Both active-only and full-history RPC lists are tested for confirmed, canceled,
+conflicted and failed owners; reservations and ordinary coin locks stay intact.
+This shared Core path applies to Qt and RPC/CLI; the CLI client needs no separate
+logic change. Signing, recovery, pruning, fee policy and record formats are
+unchanged. The concrete operator database remains unverified while its running
+wallet holds the SQLite lock; no attempt is made to bypass that lock or manually
+release its inputs.
+
+Receive DD's background list refresh still left selection-related lookups on
+the GUI thread calling `getAddressReceiveRequests()` again. Selection, copying
+and request dialogs now use the displayed wallet-bound snapshot. Selected QR
+metadata follows its request. Completed local edits/removals update the cache;
+explicit writes reread the stored identity and reject a removed/replaced request.
+Existing revision/generation checks still discard late worker replies.
+The new busy-wallet regression reproduces the old dialog/lookup wait until its
+1.5-second watchdog releases `cs_wallet` (**1525 ms**). With the fix, selection,
+copying and dialog creation finish while the lock is still held (**317 ms**).
+This includes native Windows clipboard/dialog startup, not a live-wallet
+performance benchmark. Opening Receive DD also passes the existing tab-switch
+test with the lock held (**14 ms**).
+
+Relevant guidance: repository/src instructions, CLAUDE's DigiDollar reading
+order, architecture/maps, contribution rules, developer GUI/locking notes,
+Paymaster persistence/integration contracts, Qt translation policy and existing
+Windows/test runbooks. Selected MSVC 14.43 / static Qt 5.15.10 product and test
+compiles, regenerated test MOC and separate incremental application/test links
+are used. Local helpers/logs are excluded under
+`build_msvc/paymaster-refresh-check/receive-selection/`; diagnostic binaries are
+`digibyte-qt-receive-selection.exe` and `test_digibyte-qt-receive-selection.exe`.
+No real wallet application or live financial RPC is started by these checks.
+
+Completed verification: **26 targeted native Qt/Core/RPC cases passed** across
+16 selected functions, none failed or skipped. They cover terminal current
+owners and unchanged reservation/coin locks, active-only/full-history RPC lists,
+eight inbox loading/failure/wallet-change scenarios, all four new-transfer reset
+variants, bound session RPC actions, busy-wallet Receive selection/dialog/copy,
+local/external removals, edit/cancel persistence and DGB separation, late replies
+and wallet rebinding, cross-network filtering, URI/amount validation and tab
+navigation. Full Core unit/Qt suites and functional runs have not been executed
+for this checkpoint.
+
+The candidate EXE SHA-256 is
+`407F54F5AEA0A52336D30080C35E69166095A7191CF642045A7653EAB14D0031`.
+The local `ready-artifact.json` binds the candidate EXE/PDB hashes to the source
+commits and test result. Installation is pending while both normal Qt wallet
+processes still use `digibyte-qt.exe`; they are not force-terminated. The installed
+application still has the preceding new-transfer checkpoint's hash until the
+operator closes both windows and the verified pair can be installed.
+
+Full solution builds, complete Core/Qt suites, functional lifecycle tests and
+cross-platform checks remain operator work. The full-build prerequisites/command
+in the Receive DD navigation checkpoint below apply: close wallets and stop CLI
+polling before linking normal executables. After that build, from
+`D:\Digibyte\digibyte-fork`, run these groups (minutes):
+
+```powershell
+& .\build_msvc\x64\Release\test_digibyte.exe --run_test=paymaster_wallet_store_tests
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster store tests failed' }
+$env:QT_QPA_PLATFORM = 'windows'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+foreach ($suite in @('DigiDollarWidgetTests', 'PaymasterWidgetTests')) {
+    $env:DIGIBYTE_QT_TEST_SUITE = $suite
+    $env:DIGIBYTE_QT_TEST_OUTPUT = "$PWD\build_msvc\x64\Release\selection-$suite.txt"
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "$suite failed" }
+}
+```
+
+Require exit codes zero and no failed cases; the previously recorded broad
+dropdown-highlight failures remain an outstanding issue outside this change.
+Manual acceptance: reopen the existing client, inspect the session inbox and
+select/open/copy a stored Receive DD request during ordinary Paymaster work.
+Completed history must not become an active transfer because another session
+retains a validated input reservation. A genuine broken binding must still
+pause new Paymaster payments.
+
 ## Another payment clears the preceding offers (2026-10-06)
 
 Source base: `fc65fa390d`; implementation: `cac7f766b6`. Successful sending clears
