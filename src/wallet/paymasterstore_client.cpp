@@ -346,12 +346,14 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
         if (!released_unsigned || reservation.request_id == session.request_id || reservation.session_id == session.session_id ||
             batch.ReadPaymasterSessionWithStatus(reservation.request_id, owner) != DatabaseReadStatus::FOUND ||
             owner.provider_side || owner.request_id != reservation.request_id || owner.session_id != reservation.session_id ||
-            IsTerminal(owner.state) || std::find(owner.user_inputs.begin(), owner.user_inputs.end(), outpoint) == owner.user_inputs.end() ||
+            std::find(owner.user_inputs.begin(), owner.user_inputs.end(), outpoint) == owner.user_inputs.end() ||
             batch.ReadPaymasterSessionIdWithStatus(owner.session_id, indexed_owner) != DatabaseReadStatus::FOUND || indexed_owner != owner.request_id) {
             error = "PAYMASTER_RESERVATION_SESSION_CONFLICT";
             return false;
         }
-        // Read-only: do not erase, unlock or reassign the current owner's input.
+        // Terminal owners can still hold reservations until reconciliation at
+        // the safety depth. Their validated ownership is unrelated to this
+        // released unsigned history; never erase, unlock or reassign the input.
     }
     return true;
 }

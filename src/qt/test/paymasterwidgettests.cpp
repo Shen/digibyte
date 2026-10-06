@@ -6656,12 +6656,36 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
     QVERIFY(old_session.state == SessionState::FAILED);
     QVERIFY(store.GetSessionByRequestId(new_id, new_session));
     QVERIFY(new_session.state == SessionState::INPUTS_RESERVED);
-    LOCK(wallet->cs_wallet);
-    InputReservation retained;
-    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.ReadPaymasterReservation(input, retained));
-    QCOMPARE(retained.request_id, new_id);
-    QVERIFY(retained.session_id == new_session.session_id);
-    QVERIFY(wallet->IsLockedCoin(input));
+    // A terminal owner can retain its reservations until safe-depth/recovery
+    // reconciliation. This must not turn the older unsigned history into a
+    // conflict or let this read-only query release the newer owner's input.
+    for (const auto state : {SessionState::CONFIRMED, SessionState::CANCELED_SAFE,
+                             SessionState::CONFLICTED, SessionState::FAILED}) {
+        new_session.state = state;
+        {
+            LOCK(wallet->cs_wallet);
+            QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterSession(new_session));
+        }
+        QVERIFY2(store.ClientSessionHasLiveReservations(old_session, live, error), error.c_str());
+        QVERIFY(!live);
+        QVERIFY2(store.ClientSessionHasLiveReservations(new_session, live, error), error.c_str());
+        QVERIFY(live);
+        const auto terminal_list = gui.walletModel->executeRpc("listdigidollarsendsessions", UniValue{UniValue::VARR});
+        QCOMPARE(terminal_list.find_value("count").getInt<int>(),
+                 state == SessionState::CONFIRMED || state == SessionState::CANCELED_SAFE ? 1 : 2);
+        UniValue options{UniValue::VOBJ};
+        options.pushKV("active_only", false);
+        UniValue params{UniValue::VARR};
+        params.push_back(options);
+        const auto history = gui.walletModel->executeRpc("listdigidollarsendsessions", params);
+        QCOMPARE(history.find_value("count").getInt<int>(), 3);
+        LOCK(wallet->cs_wallet);
+        InputReservation retained;
+        QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.ReadPaymasterReservation(input, retained));
+        QCOMPARE(retained.request_id, new_id);
+        QVERIFY(retained.session_id == new_session.session_id);
+        QVERIFY(wallet->IsLockedCoin(input));
+    }
 }
 
 void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose_data()
