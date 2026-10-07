@@ -10730,6 +10730,161 @@ void PaymasterWidgetTests::paymasterReservePresets_data()
     QTest::newRow("light") << QStringLiteral("light");
 }
 
+void PaymasterWidgetTests::paymasterReserveReduction_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::addColumn<QString>("decision");
+    for (const auto* theme : {"dark", "light"}) {
+        for (const auto* decision : {"cancel", "approve", "blocked", "changed", "bad_receipt", "lost_reply", "wallet_change", "privacy"})
+            QTest::newRow(qPrintable(QString::fromLatin1(theme) + '-' + decision)) << QString::fromLatin1(theme) << QString::fromLatin1(decision);
+    }
+}
+
+void PaymasterWidgetTests::paymasterReserveReduction()
+{
+    QFETCH(QString, theme);
+    QFETCH(QString, decision);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
+    QFile css(":/css/" + theme);
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto liquidity = provider.find_value("liquidity");
+    auto saved = liquidity.find_value("policy");
+    saved.pushKV("paid_maintenance_approved", false);
+    saved.pushKV("updated_at", 100);
+    int available{3};
+    const auto update = [&](const UniValue& policy) {
+        liquidity.pushKV("policy", policy);
+        liquidity.pushKV("policy_configured", true);
+        for (const auto& pair : {std::pair{"admission_dgb", "target_admission_dgb"}, {"operational_dgb", "target_operational_dgb"},
+                                {"admission_carriers", "target_admission_carriers"}, {"operational_carriers", "target_operational_carriers"}}) {
+            auto slot = liquidity.find_value(pair.first);
+            const int ready = QString::fromLatin1(pair.first).startsWith("admission") ? available * 3 : available;
+            slot.pushKV("ready", ready);
+            slot.pushKV("target", policy.find_value(pair.second));
+            slot.pushKV("counted_toward_target", ready);
+            liquidity.pushKV(pair.first, slot);
+        }
+        auto pool = provider.find_value("pool");
+        pool.pushKV("complete_operational_slots", available);
+        pool.pushKV("admission_dgb", available * 3); pool.pushKV("admission_carriers", available * 3);
+        pool.pushKV("operational_dgb", available); pool.pushKV("operational_carriers", available);
+        provider.pushKV("pool", pool);
+        provider.pushKV("liquidity", liquidity);
+        snapshot.pushKV("provider", provider);
+    };
+    for (const auto* key : {"target_admission_dgb", "target_admission_carriers"}) saved.pushKV(key, 9);
+    for (const auto* key : {"target_operational_dgb", "target_operational_carriers"}) saved.pushKV(key, 3);
+    update(saved);
+    int saves{0}, previews{0}, executions{0};
+    bool exact_binding{false};
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "getpaymasterliquiditystatus") return liquidity;
+        if (method == "getpaymasterfinancestatus") {
+            auto finance = PaymasterOverviewFinance();
+            auto capital = finance.find_value("pool_capital");
+            capital.pushKV("dgb_available_satoshis", available == 3 ? 150000000 : 50000000);
+            capital.pushKV("carrier_base_cents", available == 3 ? 1200 : 400);
+            capital.pushKV("dgb_reserved_satoshis", 0); capital.pushKV("dgb_pending_satoshis", 0);
+            capital.pushKV("pending_maintenance_transactions", 0);
+            finance.pushKV("pool_capital", capital);
+            return finance;
+        }
+        if (method == "setpaymasterliquiditypolicy") {
+            ++saves;
+            saved = params[0]; saved.pushKV("updated_at", 101); update(saved);
+            return saved;
+        }
+        if (method == "rebalancepaymasterpool") {
+            const auto& options = params[0];
+            const bool execute = options.find_value("execute").isTrue();
+            execute ? ++executions : ++previews;
+            exact_binding = options.find_value("expected_liquidity_updated_at").getInt<int>() == 101 &&
+                options.find_value("admission_dgb_slots").getInt<int>() == 3 && options.find_value("operational_dgb_slots").getInt<int>() == 1 &&
+                options.find_value("admission_carrier_slots").getInt<int>() == 3 && options.find_value("operational_carrier_slots").getInt<int>() == 1 &&
+                options.find_value("dgb_only").isFalse() && options.find_value("maximum_fee_satoshis").getInt<int64_t>() == 50000000;
+            if (decision == "blocked") throw std::runtime_error("PAYMASTER_REBALANCE_ACTIVE_RESERVATIONS");
+            if (execute && decision == "changed") throw std::runtime_error("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+            UniValue result;
+            result.read(R"({"executed":false,"retired_admission_dgb_slots":6,"retired_operational_dgb_slots":2,
+                "retired_admission_carrier_slots":6,"retired_operational_carrier_slots":2,"retired_dgb_satoshis":100000000,
+                "retired_carrier_cents":800,"maximum_network_fee_satoshis":50000000,"maximum_total_fee_satoshis":100000000})");
+            result.pushKV("plan_id", std::string(64, 'c'));
+            if (execute) {
+                if (options.find_value("plan_id").get_str() != std::string(64, 'c')) throw std::runtime_error("Wrong release plan");
+                available = 1; update(saved);
+                if (decision == "lost_reply") throw std::runtime_error("Lost response after execution");
+                result.pushKV("executed", true);
+                result.pushKV("dd_txid", std::string(64, 'd')); result.pushKV("dgb_txid", std::string(64, 'e'));
+                result.pushKV("dd_network_fee_satoshis", 12000000); result.pushKV("network_fee_satoshis", 100000);
+                if (decision == "bad_receipt") result.pushKV("plan_id", std::string(64, 'f'));
+            }
+            return result;
+        }
+        throw std::runtime_error("Unexpected reserve reduction RPC");
+    });
+    panel->refreshStatus();
+    auto* preset = panel->findChild<QComboBox*>("paymasterReservePreset");
+    auto* save = panel->findChild<QPushButton*>("paymasterSaveLiquidityPolicyPrimary");
+    auto* state = panel->findChild<QLabel*>("paymasterReserveState");
+    auto* overview_target = panel->findChild<QLabel*>("paymasterCapital_refill_target");
+    auto* overview_available = panel->findChild<QLabel*>("paymasterCapital_complete_slots");
+    auto* release = panel->findChild<QPushButton*>("paymasterReviewExcessReserves");
+    QVERIFY(preset && save && state && overview_target && overview_available && release);
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    pages->setCurrentWidget(panel->findChild<QWidget*>("paymasterLiquidityPage"));
+    panel->resize(1000, 800);
+    panel->show();
+    preset->setCurrentIndex(preset->findData(1));
+    bool reviewed{false};
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, panel.get(), [&] {
+        if (auto* review = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            reviewed = review->text().contains("8.00 DD") && review->text().contains("1.00000000 DGB total") &&
+                review->text().contains("Cancel keeps the smaller target");
+            if (decision == "wallet_change") panel->setWalletModel(nullptr);
+            if (decision == "privacy") panel->setPrivacy(true);
+            review->done(decision == "cancel" ? QMessageBox::No : QMessageBox::Yes);
+        }
+    });
+    answer.start(10);
+    save->click();
+    QTRY_COMPARE(previews, 1);
+    if (decision != "blocked") QTRY_VERIFY(reviewed);
+    QCoreApplication::processEvents();
+    answer.stop();
+    QCOMPARE(saves, 1);
+    QVERIFY(exact_binding);
+    const bool executed = decision != "cancel" && decision != "blocked" && decision != "wallet_change" && decision != "privacy";
+    QCOMPARE(executions, executed ? 1 : 0);
+    if (decision != "wallet_change" && decision != "privacy") {
+        QCOMPARE(preset->currentData().toInt(), 1);
+        QVERIFY(overview_target->text().contains("1 payment(s)"));
+        QVERIFY(state->text().contains("Saved refill target: 1 payment(s)"));
+        QVERIFY(overview_available->text().contains(QString::number(available)));
+        QCOMPARE(release->isHidden(), available == 1);
+        if (available == 3) QVERIFY(state->text().contains("Extra reserves remain"));
+    }
+    if (decision == "cancel") {
+        if (const auto path = qEnvironmentVariable("DIGIBYTE_PAYMASTER_REDUCTION_SCREENSHOT"); !path.isEmpty()) {
+            panel->findChild<QGroupBox*>("paymasterAutomaticLiquidityPolicy")->grab().save(path + "-funds-" + theme + ".png");
+            pages->setCurrentWidget(panel->findChild<QWidget*>("paymasterOverviewPage"));
+            panel->findChild<QWidget*>("paymasterOverviewLiquidityCard")->grab().save(path + "-overview-" + theme + ".png");
+        }
+        answer.start(10);
+        release->click();
+        QTRY_COMPARE(previews, 2);
+        QCoreApplication::processEvents();
+        answer.stop();
+        QCOMPARE(executions, 0);
+        QCOMPARE(saves, 1); // A later release review does not save any settings.
+    }
+}
+
 void PaymasterWidgetTests::paymasterReservePresets()
 {
     QFETCH(QString, theme);

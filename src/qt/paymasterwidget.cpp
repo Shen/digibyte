@@ -385,11 +385,11 @@ public:
         form->setRowWrapPolicy(QFormLayout::WrapLongRows);
         m_preset = new NoWheelComboBox(this);
         m_preset->setObjectName(prefix + "ReservePreset");
-        m_preset->addItem(tr("Small — 1 payment at a time"), 1);
-        m_preset->addItem(tr("Standard — up to 3 parallel payments"), 3);
-        m_preset->addItem(tr("Higher capacity — up to 6 parallel payments"), 6);
+        m_preset->addItem(tr("Small — reserves for 1 payment"), 1);
+        m_preset->addItem(tr("Standard — reserves for 3 payments"), 3);
+        m_preset->addItem(tr("Higher capacity — reserves for 6 payments"), 6);
         m_preset->addItem(tr("Manual — choose reserve counts"), 0);
-        form->addRow(tr("Payment capacity:"), m_preset);
+        form->addRow(tr("Automatic refill target:"), m_preset);
         layout->addLayout(form);
         m_summary = new QLabel(this);
         m_summary->setObjectName(prefix + "ReservePresetSummary");
@@ -476,7 +476,7 @@ public:
         const qint64 payment_value = std::max<qint64>(10000000, m_payment_fee());
         const bool capital_fits = payment_value <= (MAX_MONEY - admission_capital) / operational;
         const QString dgb_capital = capital_fits ? compactDgb(admission_capital + payment_value * operational) : tr("exceeds the supported amount range");
-        QString summary = tr("Target: up to %1 payment(s) at a time.\nMinimum capital: %2 DGB + %3 DD, before fees. Existing usable reserves count toward this target.")
+        QString summary = tr("Refill target: keep reserves for %1 payment(s).\nMinimum target capital: %2 DGB + %3 DD, before fees. Existing usable reserves count toward this target.")
                               .arg(capacity)
                               .arg(dgb_capital)
                               .arg(PaymasterFormatDD(100LL * (m_targets[2]->value() + m_targets[3]->value())));
@@ -484,7 +484,7 @@ public:
         if (paid && (m_targets[2]->value() < 3 || m_targets[3]->value() < 1))
             summary += QLatin1Char('\n') + tr("User-paid service needs at least three DD capacity checks and one DD payment reserve.");
         m_summary->setText(summary);
-        m_summary->setToolTip(tr("Lowering a target does not release capital. Use the reserve actions to review and release funds."));
+        m_summary->setToolTip(tr("This target controls refill, not the maximum number of payments. Lowering it offers a separate review of excess reserves before capital is released."));
         const auto values = suggestion();
         const std::array<const char*, 3> keys{"maximum_maintenance_fee_per_transaction_satoshis", "maximum_maintenance_fee_per_hour_satoshis", "maximum_maintenance_fee_per_day_satoshis"};
         bool below{false}, same{true};
@@ -1200,6 +1200,28 @@ bool IsCompletePoolRebalanceResult(const UniValue& result)
              "retired_admission_carrier_slots",
              "retired_operational_carrier_slots",
              "retired_dgb_satoshis", "retired_carrier_cents"});
+}
+
+bool IsBoundedReserveReductionResult(const UniValue& result, const UniValue& options, const UniValue& reviewed = {})
+{
+    if (!IsCompletePoolRebalanceResult(result)) return false;
+    for (const auto* key : {"retired_admission_dgb_slots", "retired_operational_dgb_slots", "retired_admission_carrier_slots", "retired_operational_carrier_slots", "retired_dgb_satoshis", "retired_carrier_cents"}) {
+        const auto value = result.find_value(key).getInt<qint64>();
+        if (value < 0 || value > MAX_MONEY || (!reviewed.isNull() && result.find_value(key).write() != reviewed.find_value(key).write())) return false;
+    }
+    qint64 fee{0}, per_transaction{0}, total{0};
+    if (!GetInt64Field(options, "maximum_fee_satoshis", fee) || fee <= 0 || fee > MAX_MONEY / 2 ||
+        !GetInt64Field(result, "maximum_network_fee_satoshis", per_transaction) || per_transaction != fee ||
+        !GetInt64Field(result, "maximum_total_fee_satoshis", total)) return false;
+    const bool dgb = result.find_value("retired_dgb_satoshis").getInt<qint64>() > 0;
+    const bool dd = result.find_value("retired_carrier_cents").getInt<qint64>() > 0;
+    if (total != fee * (int(dgb) + int(dd))) return false;
+    if (result.find_value("executed").isTrue()) {
+        qint64 actual{0};
+        if (dgb && (!IsHex256Field(result, "dgb_txid") || !GetInt64Field(result, "network_fee_satoshis", actual) || actual <= 0 || actual > fee)) return false;
+        if (dd && (!IsHex256Field(result, "dd_txid") || !GetInt64Field(result, "dd_network_fee_satoshis", actual) || actual <= 0 || actual > fee)) return false;
+    }
+    return true;
 }
 
 bool IsCompleteProviderPool(const UniValue& pool)
@@ -2488,6 +2510,8 @@ public:
         };
         add_heading(capital_layout, m_overview_capital_details, tr("Payment capacity"));
         add_metric(capital_layout, m_overview_capital_details, "complete_slots");
+        add_metric(capital_layout, m_overview_capital_details, "refill_target");
+        add_metric(capital_layout, m_overview_capital_details, "surplus");
         add_metric(capital_layout, m_overview_capital_details, "maintenance_pending");
         capital_layout->addSpacing(10);
         add_heading(capital_layout, m_overview_capital_details, tr("Network-fee reserve"));
@@ -3230,6 +3254,14 @@ public:
         m_reserve_editor->addManualHelp(m_liquidity_current_status);
         m_liquidity_summary = m_reserve_editor->summaryLabel();
         m_liquidity_summary->setObjectName("paymasterLiquidityTargetSummary");
+        m_reserve_state = new QLabel(targets);
+        m_reserve_state->setObjectName("paymasterReserveState");
+        m_reserve_state->setWordWrap(true);
+        targets_layout->addWidget(m_reserve_state);
+        m_release_excess_reserves = new QPushButton(tr("Review excess reserves…"), targets);
+        m_release_excess_reserves->setObjectName("paymasterReviewExcessReserves");
+        targets_layout->addWidget(m_release_excess_reserves, 0, Qt::AlignLeft);
+        connect(m_release_excess_reserves, &QPushButton::clicked, this, [this] { beginGuidedTask("reduce_reserves"); });
         m_liquidity_target_save_status = new QLabel(targets);
         m_liquidity_target_save_status->setObjectName(
             "paymasterLiquidityTargetSaveStatus");
@@ -6002,9 +6034,35 @@ private:
         const auto& pool = m_operator_snapshot.find_value("provider").find_value("pool");
         qint64 complete_slots{0};
         if (GetInt64Field(pool, "complete_operational_slots", complete_slots) && complete_slots >= 0)
-            setCapitalMetric("complete_slots", tr("Ready for %1 simultaneous payment(s)").arg(complete_slots), complete_slots > 0 ? "ready" : "neutral");
+            setCapitalMetric("complete_slots", tr("Available payment reserves: %1").arg(complete_slots), complete_slots > 0 ? "ready" : "neutral");
         else
             setCapitalMetric("complete_slots", tr("Payment capacity unavailable"), "neutral");
+        const auto target = savedRefillCapacity();
+        setCapitalMetric("refill_target", target ? tr("Saved refill target: %1 payment(s)").arg(*target) : tr("Refill target not configured"), "neutral");
+        const bool surplus = hasExcessSavedReserves();
+        setCapitalMetric("surplus", surplus ? tr("Extra reserves remain. Review their release in Funds & reserves.") : QString{}, "neutral");
+        findChild<QLabel*>("paymasterCapital_surplus")->setVisible(surplus && !m_privacy);
+    }
+
+    std::optional<qint64> savedRefillCapacity() const
+    {
+        if (!m_overview_liquidity_snapshot.find_value("policy_configured").isTrue()) return std::nullopt;
+        const auto& policy = m_overview_liquidity_snapshot.find_value("policy");
+        qint64 dgb{0}, dd{0};
+        if (!GetInt64Field(policy, "target_operational_dgb", dgb) || dgb < 1 ||
+            (confirmedUserPaid() && (!GetInt64Field(policy, "target_operational_carriers", dd) || dd < 0))) return std::nullopt;
+        return confirmedUserPaid() ? std::min(dgb, dd) : dgb;
+    }
+
+    bool hasExcessSavedReserves() const
+    {
+        if (!m_overview_liquidity_snapshot.find_value("policy_configured").isTrue()) return false;
+        for (const auto* key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
+            qint64 ready{0}, target{0};
+            const auto& slot = m_overview_liquidity_snapshot.find_value(key);
+            if (GetInt64Field(slot, "ready", ready) && GetInt64Field(slot, "target", target) && target >= 0 && ready > target) return true;
+        }
+        return false;
     }
 
     bool savedPoolTargetsReady() const
@@ -7020,35 +7078,55 @@ private:
             if (answer != QMessageBox::Yes || m_privacy) return;
         }
         const UniValue requested_policy = liquidityPolicyToJSON(values);
+        bool reduced_targets{false};
+        if (m_liquidity_policy_configured) {
+            for (const auto* key : {"target_admission_dgb", "target_operational_dgb", "target_admission_carriers", "target_operational_carriers"})
+                reduced_targets |= poolNumber(requested_policy, key) < poolNumber(m_saved_liquidity_policy, key);
+        }
         UniValue params{UniValue::VARR};
         params.push_back(requested_policy);
         const auto revision = m_liquidity_policy_dirty ? m_liquidity_edit_revision : m_saved_liquidity_policy.find_value("updated_at");
         if (revision.isNum()) params.push_back(revision);
         call("setpaymasterliquiditypolicy", std::move(params), false,
-             nullptr, [this, requested_policy](const UniValue& result) {
+             nullptr, [this, requested_policy, reduced_targets](const UniValue& result) {
                  if (!IsExactLiquidityPolicyAcknowledgement(requested_policy, result)) {
                      reconcileLiquidityPolicySave(requested_policy,
-                         tr("Core did not confirm the exact settings in its save response."));
+                         tr("Core did not confirm the exact settings in its save response."), reduced_targets);
                      return;
                  }
-                 liquidityPolicySaved(result);
-             }, false, [this, requested_policy](const QString& error) {
+                 liquidityPolicySaved(result, reduced_targets);
+             }, false, [this, requested_policy, reduced_targets](const QString& error) {
                  // A lost reply is not proof that the write failed. Read the
                  // saved policy before asking for another spending approval.
-                 reconcileLiquidityPolicySave(requested_policy, error);
+                 reconcileLiquidityPolicySave(requested_policy, error, reduced_targets);
              });
     }
 
-    void liquidityPolicySaved(const UniValue& policy)
+    void liquidityPolicySaved(const UniValue& policy, bool reduced_targets = false)
     {
         m_saved_liquidity_policy = policy;
         loadLiquidityPolicy(policy, /*configured=*/true);
         m_liquidity_policy_status->setText(tr("Liquidity settings saved successfully. ") + m_liquidity_policy_status->text());
         invalidateCarrierWithdrawalPreviews();
-        refreshStatus();
+        if (!reduced_targets) { refreshStatus(); return; }
+        // Saving the smaller refill goal does not authorize a transfer. Read
+        // its confirmed revision before opening the separate release preview.
+        call("getpaymasterliquiditystatus", {}, false, nullptr,
+            [this, policy](const UniValue& status) {
+                if (!IsCompleteLiquidityStatus(status) || !status.find_value("policy_configured").isTrue() ||
+                    !IsExactLiquidityPolicyAcknowledgement(policy, status.find_value("policy")) ||
+                    policy.find_value("updated_at").write() != status.find_value("policy").find_value("updated_at").write()) {
+                    m_liquidity_policy_status->setText(tr("The smaller target was saved, but its current revision could not be verified. Refresh before reviewing excess reserves."));
+                    return;
+                }
+                applyLiquidityStatus(status);
+                beginGuidedTask("reduce_reserves");
+            }, false, [this](const QString& error) {
+                m_liquidity_policy_status->setText(tr("The smaller target was saved. Excess reserves were not released; refresh to review them.\n%1").arg(error));
+            });
     }
 
-    void reconcileLiquidityPolicySave(const UniValue& requested, const QString& reason)
+    void reconcileLiquidityPolicySave(const UniValue& requested, const QString& reason, bool reduced_targets = false)
     {
         const auto unconfirmed = [this, reason](const QString& read_error = {}) {
             m_liquidity_policy_dirty = true;
@@ -7059,12 +7137,12 @@ private:
             updateLiquidityDisplay();
         };
         call("getpaymasterliquiditystatus", {}, false, nullptr,
-            [this, requested, unconfirmed](const UniValue& status) {
+            [this, requested, unconfirmed, reduced_targets](const UniValue& status) {
                 const auto& policy = status.find_value("policy");
                 if (IsCompleteLiquidityPolicy(policy)) m_saved_liquidity_policy = policy;
                 if (status.find_value("policy_configured").isTrue() &&
                     IsExactLiquidityPolicyAcknowledgement(requested, policy)) {
-                    liquidityPolicySaved(policy);
+                    liquidityPolicySaved(policy, reduced_targets);
                 } else {
                     unconfirmed();
                 }
@@ -10581,6 +10659,7 @@ private:
         if (m_privacy || (m_busy && m_rpc_handler_depth == 0) || !hasRpcTransport()) return;
         const QString title = task == QLatin1String("preparepaymasterpool")
             ? (start_after ? tr("Restore reserves and start provider") : tr("Restore reserves"))
+            : task == QLatin1String("reduce_reserves") ? tr("Release excess reserves")
             : task == QLatin1String("all_excess") ? tr("Withdraw earnings") : task == QLatin1String("rebalancepaymasterpool") ? tr("Release excess DGB") : tr("Release one DD reserve");
         if (!m_operation.begin(title, m_wallet_generation)) return;
         const auto generation = m_wallet_generation;
@@ -10639,14 +10718,15 @@ private:
             m_release_carrier_select->setCurrentIndex(m_release_carrier_select->findData(selected_reserve));
         }
         const bool preparation = task == QLatin1String("preparepaymasterpool");
-        const bool rebalance = task == QLatin1String("rebalancepaymasterpool");
+        const bool reduction = task == QLatin1String("reduce_reserves");
+        const bool rebalance = task == QLatin1String("rebalancepaymasterpool") || reduction;
         const UniValue context = m_operator_snapshot;
         UniValue params, proposed_policy;
         bool repair_targets{false};
         try {
             params = preparation ? poolOptions(false, {}, true) : rebalance ? poolOptions(false) : carrierWithdrawalOptions(task, false);
             if (rebalance) {
-                const auto& saved = context.find_value("provider").find_value("liquidity").find_value("policy");
+                const auto& saved = reduction ? m_saved_liquidity_policy : context.find_value("provider").find_value("liquidity").find_value("policy");
                 UniValue options{UniValue::VOBJ};
                 options.pushKV("admission_dgb_slots", saved.find_value("target_admission_dgb"));
                 options.pushKV("operational_dgb_slots", saved.find_value("target_operational_dgb"));
@@ -10655,7 +10735,8 @@ private:
                 qint64 fee{0};
                 if (!m_preparation_fee->satoshis(fee) || fee <= 0) throw std::runtime_error("PAYMASTER_RETIREMENT_FEE_LIMIT");
                 options.pushKV("maximum_fee_satoshis", fee);
-                options.pushKV("dgb_only", true);
+                options.pushKV("dgb_only", !reduction);
+                if (reduction) options.pushKV("expected_liquidity_updated_at", saved.find_value("updated_at"));
                 options.pushKV("execute", false);
                 params.clear(); params.setArray(); params.push_back(options);
             }
@@ -10682,15 +10763,15 @@ private:
             }
         } catch (const std::exception& e) { failGuidedTask(QString::fromUtf8(e.what())); return; }
         const std::string command = preparation ? "preparepaymasterpool" : rebalance ? "rebalancepaymasterpool" : "withdrawpaymastercarrier";
-        call(command, params, false, nullptr, [this, generation, task, params, command, preparation, rebalance, context, proposed_policy, repair_targets](const UniValue& preview) {
+        call(command, params, false, nullptr, [this, generation, task, params, command, preparation, rebalance, reduction, context, proposed_policy, repair_targets](const UniValue& preview) {
             if (generation != m_wallet_generation || m_privacy || m_guided_task != task) return;
-            const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : rebalance ? IsCompletePoolRebalanceResult(preview) && poolNumber(preview, "retired_carrier_cents") == 0 && preview.find_value("maximum_network_fee_satoshis").isNum() && preview.find_value("maximum_network_fee_satoshis").write() == params[0].find_value("maximum_fee_satoshis").write() : IsCompleteCarrierWithdrawalResult(preview, task, false, {});
+            const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : reduction ? IsBoundedReserveReductionResult(preview, params[0]) : rebalance ? IsCompletePoolRebalanceResult(preview) && poolNumber(preview, "retired_carrier_cents") == 0 && preview.find_value("maximum_network_fee_satoshis").isNum() && preview.find_value("maximum_network_fee_satoshis").write() == params[0].find_value("maximum_fee_satoshis").write() : IsCompleteCarrierWithdrawalResult(preview, task, false, {});
             if (!valid || preview.find_value("executed").isTrue() || preview.find_value("accepted").isTrue()) {
                 failGuidedTask(tr("Core did not return a complete current preview. No task was approved.")); return;
             }
-            if (rebalance && poolNumber(preview, "retired_dgb_satoshis") == 0) {
+            if (rebalance && poolNumber(preview, "retired_dgb_satoshis") == 0 && (!reduction || poolNumber(preview, "retired_carrier_cents") == 0)) {
                 m_operation.phase = PaymasterOperationController::Phase::Complete;
-                m_operation.title = tr("No excess DGB is available above the saved targets");
+                m_operation.title = reduction ? tr("No excess reserves are available above the saved targets") : tr("No excess DGB is available above the saved targets");
                 m_guided_task.clear(); renderCurrentTask(); return;
             }
             m_operation.review(preview);
@@ -10700,6 +10781,9 @@ private:
                          PaymasterFormatDD(poolNumber(preview, "total_carrier_cents")),
                          dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
                          dgbAmount(poolNumber(preview, "maximum_fee_satoshis")))
+                : reduction ? tr("The smaller refill target is saved. Release the following excess reserves?\n\nReturn %1 DGB and %2 DD to ordinary wallet funds, before network fees.\nMaximum network fee: %3 DGB per transaction, %4 DGB total. These are one-time release fees; refill approval is unchanged.\n\nOnly excess available, confirmed reserves are selected. The saved target remains prepared. Cancel keeps the smaller target and the existing reserves.")
+                    .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), PaymasterFormatDD(poolNumber(preview, "retired_carrier_cents")),
+                         dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")), dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")))
                 : rebalance ? tr("Return %1 DGB to ordinary wallet funds, less a network fee of at most %2 DGB. Saved targets, DD reserves and refill approval remain unchanged.")
                     .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")))
                 : task == QLatin1String("all_excess")
@@ -10729,7 +10813,9 @@ private:
                 if (generation != m_wallet_generation) return;
                 setRpcBusyState(false);
                 if (answer != QMessageBox::Yes || m_privacy) {
-                    m_operation.reset(m_wallet_generation); m_guided_task.clear(); renderCurrentTask(); return;
+                    m_operation.reset(m_wallet_generation); m_guided_task.clear(); renderCurrentTask();
+                    if (task == QLatin1String("reduce_reserves") && !m_privacy) refreshStatus();
+                    return;
                 }
                 UniValue execution{UniValue::VARR};
                 UniValue options = params[0];
@@ -10827,9 +10913,9 @@ private:
         const bool preparation = command == "preparepaymasterpool";
         const QString task = m_guided_task;
         const UniValue reviewed = m_operation.reviewed;
-        call(command, params, preparation || task == QLatin1String("all_excess") || task == QLatin1String("rebalancepaymasterpool"), nullptr,
-            [this, preparation, task, reviewed](const UniValue& result) {
-                const bool valid = preparation ? IsCompletePoolPreparationResult(result) : task == QLatin1String("rebalancepaymasterpool") ? IsCompletePoolRebalanceResult(result) && poolNumber(result, "retired_carrier_cents") == 0 : IsCompleteCarrierWithdrawalResult(result, task, true, QString::fromStdString(reviewed.find_value("plan_id").get_str()));
+        call(command, params, preparation || task == QLatin1String("all_excess") || task == QLatin1String("rebalancepaymasterpool") || task == QLatin1String("reduce_reserves"), nullptr,
+            [this, preparation, task, reviewed, params](const UniValue& result) {
+                const bool valid = preparation ? IsCompletePoolPreparationResult(result) : task == QLatin1String("reduce_reserves") ? IsBoundedReserveReductionResult(result, params[0], reviewed) : task == QLatin1String("rebalancepaymasterpool") ? IsCompletePoolRebalanceResult(result) && poolNumber(result, "retired_carrier_cents") == 0 : IsCompleteCarrierWithdrawalResult(result, task, true, QString::fromStdString(reviewed.find_value("plan_id").get_str()));
                 if (!valid || result.find_value("plan_id").write() != reviewed.find_value("plan_id").write() ||
                     !(preparation ? result.find_value("accepted").isTrue() : result.find_value("executed").isTrue())) {
                     failGuidedTask(tr("The response did not confirm this exact task. Current saved work will be checked before another attempt.")); return;
@@ -10847,7 +10933,11 @@ private:
                     }, false, [this](const QString& error) { failGuidedTask(error); });
                 } else if (preparation && m_guided_start_after) requestReviewedStart();
                 else refreshStatus();
-            }, false, [this](const QString& error) { failGuidedTask(error); });
+            }, false, [this, task](const QString& error) {
+                failGuidedTask(task == QLatin1String("reduce_reserves")
+                    ? tr("The release was not fully confirmed. Some funds may already have been returned. Check wallet activity before reviewing a fresh plan; do not repeat the old execution.\n%1").arg(error)
+                    : error);
+            });
     }
 
     void startProvider()
@@ -11286,6 +11376,17 @@ private:
     {
         if (!m_liquidity_summary || !m_liquidity_preview_status) return;
         m_reserve_editor->synchronize();
+        if (m_reserve_state) {
+            const auto target = savedRefillCapacity();
+            qint64 available{0};
+            const bool known = GetInt64Field(m_operator_snapshot.find_value("provider").find_value("pool"), "complete_operational_slots", available) && available >= 0;
+            QString state = target ? tr("Saved refill target: %1 payment(s).").arg(*target) : tr("Refill target not configured.");
+            state += known ? tr(" Available payment reserves: %1.").arg(available) : tr(" Current payment reserves are unavailable.");
+            if (hasExcessSavedReserves()) state += tr("\nExtra reserves remain above the saved target. Release requires a separate preview and confirmation.");
+            m_reserve_state->setText(maskNumericText(state));
+            m_release_excess_reserves->setVisible(hasExcessSavedReserves() && !m_privacy);
+            m_release_excess_reserves->setEnabled(!m_busy && !m_liquidity_policy_dirty && hasCompleteMutationSnapshots());
+        }
 
         if (m_liquidity_target_save_status) {
             if (m_liquidity_policy_dirty) {
@@ -14322,6 +14423,8 @@ private:
     QLabel* m_policy_summary;
     QLabel* m_policy_save_status{nullptr};
     PaymasterReserveEditor* m_reserve_editor{nullptr};
+    QLabel* m_reserve_state{nullptr};
+    QPushButton* m_release_excess_reserves{nullptr};
     QSpinBox* m_admission_dgb;
     QSpinBox* m_operational_dgb;
     QSpinBox* m_admission_carriers;

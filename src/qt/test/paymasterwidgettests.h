@@ -48,6 +48,8 @@ private Q_SLOTS:
     void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
     void paymasterReservePresets_data();
     void paymasterReservePresets();
+    void paymasterReserveReduction_data();
+    void paymasterReserveReduction();
     void paymasterRefillPresetsCoverCarrierFees();
     void paymasterLiquidityPolicySavePersistsVisibleValues();
     void paymasterLiquiditySaveAcrossRefresh_data();

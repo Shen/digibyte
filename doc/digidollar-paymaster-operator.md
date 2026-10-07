@@ -868,7 +868,7 @@ Preview/Save; edit the BAT/configuration source and restart to change them.
 
 ### Saving automatic refill settings
 
-Choose a **Payment capacity** preset in **Funds & reserves** or the setup
+Choose an **Automatic refill target** preset in **Funds & reserves** or the setup
 assistant. The same editor offers these draft targets and finite refill limits:
 
 | Preset | Parallel payment target | DGB reserves (capacity checks / payments) | DD reserves for user-paid service | Refill ceiling per transaction / rolling hour / rolling day |
@@ -880,15 +880,26 @@ assistant. The same editor offers these draft targets and finite refill limits:
 Sponsored-only presets need no DD reserves. Three separate admission reserves
 prove capacity; extra admission reserves do not increase parallel payments.
 For user-paid service, the smaller DGB/DD payment-reserve count determines
-prepared capacity. Confirmation, available payment budgets and other operating
-limits still apply. **Manual** exposes the four independent reserve counts.
+prepared capacity. The preset sets the refill goal, not a maximum payment count.
+Overview and the editor show the saved refill goal separately from currently
+available payment reserves. Confirmation, available payment budgets and other
+operating limits still apply. **Manual** exposes the four independent reserve counts.
 Saved combinations that do not match a preset open as Manual without alteration.
 
 The editor shows minimum target capital before fees: 0.10 DGB per admission
 reserve, the larger of 0.10 DGB and the offer's network-fee ceiling per DGB
 payment reserve, and 1 DD per DD reserve. Existing usable reserves count toward
-the target. Lowering a target does not release funds; use the reviewed capital
-actions for that.
+the target. After saving a smaller target, a separate preview offers to return
+excess available DGB and DD reserves to ordinary wallet funds. Review the amounts
+and maximum network fees per transaction and in total before confirming. Cancel
+keeps the smaller saved target and the existing reserves. **Review excess
+reserves** can reopen this flow later; extra reserves remain usable until released.
+Active payments and unconfirmed pool work block retirement. Core binds the plan
+to the current saved liquidity revision, targets, exact inputs and fee ceiling.
+Changed targets or inputs require a fresh preview. Release fees are one-time
+costs; customer-payment budgets and recurring refill approvals are unchanged.
+An incomplete reply requires checking wallet activity before another reviewed
+plan; it is not proof that no transaction was sent.
 
 Selecting a preset proposes its targets **and** refill ceilings in the form;
 it does not save, enable refill or grant spending permission. Existing positive

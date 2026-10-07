@@ -100,9 +100,12 @@ Offer inputs validate the same scaled decimal format they display and convert
 typed values to integer cents, basis points and satoshis. Invalid drafts remain
 editable without a policy RPC; acknowledgement/readback preserve saved edits.
 Offer sections share label columns, and fee examples use their parent form.
-Capital actions and target/cost forms live in Funds & reserves; the operational
-hero excludes backup reminders. getpaymasternodeconfig supplies nodewide
-effective source, editability/conflicts and pending restart changes to the
+Capital actions and target/cost forms live in Funds & reserves. The saved
+refill goal is shown separately from the actual reserve capacity. Saving a lower
+goal offers a separate DD/DGB excess-retirement preview. Core binds its saved
+target revision, inputs and finite fees; cancellation retains existing reserves.
+The operational hero excludes backup reminders. getpaymasternodeconfig supplies
+nodewide effective source, editability/conflicts and pending restart changes to the
 shared inline/setup editor. Config writes retain file-bound preview/backup/
 atomic replacement. DGB-only rebalance binds its finite fee cap into the plan
 and preserves DD reserves. No wallet migration or consensus change is involved.

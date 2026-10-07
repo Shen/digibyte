@@ -1972,6 +1972,14 @@ Current oracle/MuSig2 fuzz source inventory:
   `PaymasterReserveEditor` is used in Funds & reserves and guided setup, with
   Manual counts, target capital and draft-only refill suggestions. Wizard refill
   fields are independent of customer-payment safety profiles.
+- `src/qt/paymasterwidget.cpp` separates the saved refill goal from available
+  payment reserves. A smaller saved goal opens a separate mixed DD/DGB retirement
+  preview; cancellation keeps both the goal and existing capital. The explicit
+  excess-reserve action can reopen it later. `rebalancepaymasterpool` in
+  `src/wallet/rpc/paymaster_provider.cpp` optionally binds the saved liquidity
+  revision and exact targets, plus finite per-transaction/total fee ceilings.
+  Both transaction fee checks precede the first commit; reservation gates and
+  plan/input binding remain authoritative. Legacy unbound calls retain their shape.
 - `src/paymaster/setup.cpp` and `src/qt/paymasteroperation.h` distinguish a known
   recurring-refill fee ceiling block from unknown service faults and confirmation
   waits. Planned work uses the current service error when its journal has no
