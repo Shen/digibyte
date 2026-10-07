@@ -34,6 +34,7 @@
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
+#include <scheduler.h>
 #include <streams.h>
 #include <version.h>
 #include <wallet/coincontrol.h>
@@ -64,6 +65,120 @@
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_rpc::internal;
+
+namespace {
+constexpr auto PAYMASTER_MAINTENANCE_INTERVAL{std::chrono::seconds{30}};
+constexpr auto PAYMASTER_PROVIDER_SERVICE_INTERVAL{std::chrono::seconds{1}};
+} // namespace
+
+void InitializePaymasterWallet(CWallet& wallet)
+{
+    // Older Paymaster clients could persist only the wallet-owned DD
+    // change row because collaborative sends bypassed the ordinary direct
+    // send history path. Rebuild those display rows from successful,
+    // durable sessions without changing transaction authority or funds.
+    std::string client_history_error;
+    if (!ReconcilePaymasterClientHistory(wallet,
+                                         client_history_error)) {
+        wallet.WalletLogPrintf(
+            "Paymaster client-history startup reconciliation failed: %s\n",
+            client_history_error);
+    }
+    // Reconstruct free, wallet-owned successor liquidity before automatic
+    // service starts. This is idempotent and creates no transaction; paid
+    // replenishment remains gated by the persisted maintenance policy.
+    size_t recovered_successors{0};
+    std::string successor_error;
+    if (!PaymasterStore{wallet}.ReconcileProviderPoolSuccessors(
+            recovered_successors, successor_error)) {
+        wallet.WalletLogPrintf(
+            "Paymaster pool-successor startup reconciliation failed: %s\n",
+            successor_error);
+    } else if (recovered_successors != 0) {
+        wallet.WalletLogPrintf(
+            "Recovered %u historical Paymaster pool successor(s) at wallet startup\n",
+            static_cast<unsigned int>(recovered_successors));
+    }
+    size_t recovered_maintenance{0};
+    std::string maintenance_error;
+    if (!ReconcilePaymasterProviderMaintenance(
+            wallet, recovered_maintenance, maintenance_error)) {
+        wallet.WalletLogPrintf(
+            "Paymaster maintenance startup reconciliation failed: %s\n",
+            maintenance_error);
+    }
+}
+
+void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
+{
+    // Reconcile durable observations and continue explicitly authorized finite
+    // setup. Elapsed time never authorizes discarding a signature, releasing an
+    // ambiguous reservation, or exceeding an approved fee limit.
+    bool all_equivocation_scans_succeeded{true};
+    for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
+        std::string error;
+        if (!DrainPaymasterEquivocationInbox(context, *wallet, error)) {
+            all_equivocation_scans_succeeded = false;
+            wallet->WalletLogPrintf(
+                "Paymaster equivocation-inbox maintenance failed: %s\n",
+                error);
+            error.clear();
+        }
+        if (!PaymasterStore{*wallet}.ReconcileFinalSessionsAtTip(now, error)) {
+            wallet->WalletLogPrintf("Paymaster periodic maintenance failed: %s\n",
+                                    error);
+        }
+        size_t recovered_maintenance{0};
+        error.clear();
+        if (!ReconcilePaymasterProviderMaintenance(
+                *wallet, recovered_maintenance, error)) {
+            wallet->WalletLogPrintf(
+                "Paymaster liquidity maintenance reconciliation failed: %s\n",
+                error);
+        } else {
+            RunPaymasterPoolPreparation(context, *wallet);
+        }
+    }
+    // The manager is shared by all wallets. Expired signed artifacts can be
+    // discarded only after every loaded wallet had an opportunity to persist
+    // evidence; pruning inside the per-wallet loop could lose a conflict that
+    // belongs to a later wallet.
+    if (all_equivocation_scans_succeeded && context.paymaster) {
+        context.paymaster->PruneDirectMessages(now);
+    }
+}
+
+void SchedulePeriodicPaymasterMaintenance(WalletContext& context,
+                                          CScheduler& scheduler)
+{
+    scheduler.scheduleEvery(
+        [&context] { RunPeriodicPaymasterMaintenance(context, GetTime()); },
+        PAYMASTER_MAINTENANCE_INTERVAL);
+}
+
+void RunPaymasterProviderServices(WalletContext& context)
+{
+    // Each wallet owns independent identity, liquidity, and ledgers. Iterating
+    // loaded wallets here must not merge provider state merely because several
+    // wallets share one node-level Paymaster transport manager.
+    const auto wallets = GetWallets(context);
+    if (wallets.empty()) return;
+    // Each cycle processes at most one request and one submit. Bound the
+    // node-wide scheduled work to four messages per tick, rotating wallets.
+    const size_t count = std::min(size_t{2}, wallets.size());
+    for (size_t i = 0; i < count; ++i) {
+        context.paymaster_service_cursor %= wallets.size();
+        RunPaymasterProviderServiceCycle(context, *wallets[context.paymaster_service_cursor++]);
+    }
+}
+
+void SchedulePaymasterProviderServices(WalletContext& context,
+                                       CScheduler& scheduler)
+{
+    scheduler.scheduleEvery(
+        [&context] { RunPaymasterProviderServices(context); },
+        PAYMASTER_PROVIDER_SERVICE_INTERVAL);
+}
 
 bool ReconcilePaymasterProviderMaintenance(CWallet& wallet,
                                            size_t& recovered,

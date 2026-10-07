@@ -12,9 +12,11 @@
 #include <primitives/transaction.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+class CScheduler;
 class JSONRPCRequest;
 class RPCHelpMan;
 struct RPCResult;
@@ -58,6 +60,25 @@ bool ReconcilePaymasterProviderFinances(CWallet& wallet,
  * by older wallet versions. This changes display history only; authoritative
  * session, transaction, reservation, and accounting records are untouched. */
 bool ReconcilePaymasterClientHistory(CWallet& wallet, std::string& error);
+
+/** Restore display history and previously authorized maintenance before service starts. */
+void InitializePaymasterWallet(CWallet& wallet);
+
+//! Reconcile expired Paymaster authority and durable final state for every
+//! loaded wallet. Individual quote/capacity releases are atomic in
+//! PaymasterStore; one wallet failure does not prevent maintenance of another.
+void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now);
+
+//! Register the recurring Paymaster wallet-maintenance task.
+void SchedulePeriodicPaymasterMaintenance(WalletContext& context,
+                                          CScheduler& scheduler);
+
+//! Run one bounded automatic provider-service cycle for every loaded wallet.
+void RunPaymasterProviderServices(WalletContext& context);
+
+//! Register the short, bounded automatic Paymaster provider worker.
+void SchedulePaymasterProviderServices(WalletContext& context,
+                                       CScheduler& scheduler);
 
 /** Continue explicitly authorized setup even while service is stopped. */
 void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet);

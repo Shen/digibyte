@@ -21,6 +21,7 @@
 #include <wallet/context.h>
 #include <wallet/load.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/rpc/paymaster.h>
 
 #include <boost/test/unit_test.hpp>
 
