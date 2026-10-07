@@ -8,6 +8,7 @@
 #include <qt/digidollarstatus.h>
 
 #include <qt/walletmodel.h>
+#include <qt/paymasterwallet.h>
 #include <qt/guiutil.h>
 #include <qt/guiconstants.h>
 #include <consensus/amount.h>
@@ -2912,7 +2913,7 @@ void PaymasterSendWidget::executePaymasterRpcAsync(
     // Preserve deterministic injected transports; the real signing bridge is
     // tested separately with encrypted wallets and actual Core lock contention.
     if (needs_unlock && (m_paymasterAsyncRpcExecutorForTesting || m_paymasterRpcExecutorForTesting) && m_walletModel) {
-        auto unlock = m_walletModel->requestUnlockForAsync();
+        auto unlock = PaymasterQt::RequestUnlock(*m_walletModel);
         if (!guard || guard->m_paymasterWalletGeneration != wallet_generation) return;
         if (!unlock->isValid()) {
             wallet_bound_callback(UniValue{}, QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED"));
@@ -2959,7 +2960,7 @@ void PaymasterSendWidget::executePaymasterRpcAsync(
         return;
     }
     if (needs_unlock) {
-        m_walletModel->executePaymasterSigningRpcAsync(std::move(command), std::move(params),
+        PaymasterQt::ExecuteSigningRpcAsync(*m_walletModel, std::move(command), std::move(params),
             [guard, wallet_generation] { return guard && guard->m_walletModel && guard->m_paymasterWalletGeneration == wallet_generation; },
             std::move(wallet_bound_callback));
     } else {

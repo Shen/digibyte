@@ -186,6 +186,7 @@ DIGIBYTE_QT_H = \
   qt/paymasteramount.h \
   qt/paymasterconfirmation.h \
   qt/paymasterwidget.h \
+  qt/paymasterwallet.h \
   qt/paymasteroperation.h \
   qt/digidollar_qt_translate.h \
   qt/digidollarstatus.h \
@@ -316,6 +317,7 @@ DIGIBYTE_QT_WALLET_CPP = \
   qt/ddaddressbookpage.cpp \
   qt/digidollartab.cpp \
   qt/paymasterwidget.cpp \
+  qt/paymasterwallet.cpp \
   qt/digidollarmintwidget.cpp \
   qt/digidollaroverviewwidget.cpp \
   qt/digidollarpositionswidget.cpp \

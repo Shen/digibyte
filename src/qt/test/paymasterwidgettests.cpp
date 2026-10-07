@@ -30,6 +30,7 @@
 #include <paymaster/manager.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
+#include <qt/paymasterwallet.h>
 #include <script/standard.h>
 #include <rpc/server.h>
 #include <support/allocators/secure.h>
@@ -4437,7 +4438,7 @@ void PaymasterWidgetTests::paymasterClientUnlockLeaseSurvivesWalletModelClose()
                      });
 
     std::shared_ptr<WalletModel::UnlockContext> unlock =
-        mini_gui.walletModel->requestUnlockForAsync();
+        PaymasterQt::RequestUnlock(*mini_gui.walletModel);
     QVERIFY(unlock_succeeded);
     QVERIFY(unlock->isValid());
     QVERIFY(!wallet->IsLocked());
@@ -4486,7 +4487,7 @@ void PaymasterWidgetTests::paymasterSigningWaitKeepsGuiResponsive()
     elapsed.start();
     bool completed{false};
     QString error;
-    gui.walletModel->executePaymasterSigningRpcAsync("getwalletinfo", UniValue{UniValue::VARR}, [] { return true; },
+    PaymasterQt::ExecuteSigningRpcAsync(*gui.walletModel, "getwalletinfo", UniValue{UniValue::VARR}, [] { return true; },
         [&](UniValue result, QString failure) {
             completed = true;
             error = failure;
@@ -4521,7 +4522,7 @@ void PaymasterWidgetTests::paymasterSigningWaitKeepsGuiResponsive()
         current = true;
         completed = false;
         const int before = prompts;
-        gui.walletModel->executePaymasterSigningRpcAsync(outcome == "rpc_error" ? "unknown-paymaster-test-rpc" : "getwalletinfo",
+        PaymasterQt::ExecuteSigningRpcAsync(*gui.walletModel, outcome == "rpc_error" ? "unknown-paymaster-test-rpc" : "getwalletinfo",
             UniValue{UniValue::VARR}, [&] { return current; },
             [&](UniValue, QString failure) {
                 QVERIFY(wallet->IsLocked()); // Relock precedes delivery, including errors.

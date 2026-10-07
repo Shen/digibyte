@@ -16,6 +16,7 @@
 #include <qt/digidollarpositionswidget.h>
 #include <qt/digidollartransactionswidget.h>
 #include <qt/walletmodel.h>
+#include <qt/paymasterwallet.h>
 #include <qt/clientmodel.h>
 #include <qt/guiutil.h>
 #include <qt/platformstyle.h>
@@ -14296,7 +14297,7 @@ private:
                     std::move(result), std::move(error));
             };
         if (request.needs_unlock) {
-            request_model->executePaymasterSigningRpcAsync(std::move(request.command), std::move(request.params),
+            PaymasterQt::ExecuteSigningRpcAsync(*request_model, std::move(request.command), std::move(request.params),
                 [guard, request_model, wallet_generation] {
                     return guard && guard->m_model == request_model && guard->m_wallet_generation == wallet_generation;
                 }, std::move(callback));

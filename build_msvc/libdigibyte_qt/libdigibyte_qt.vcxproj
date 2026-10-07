@@ -76,6 +76,7 @@
     <ClCompile Include="..\..\src\qt\digidollarsendwidget.cpp" />
     <ClCompile Include="..\..\src\qt\digidollartransactionswidget.cpp" />
     <ClCompile Include="..\..\src\qt\paymasterwidget.cpp" />
+    <ClCompile Include="..\..\src\qt\paymasterwallet.cpp" />
     <ClCompile Include="..\..\src\qt\paymastersendwidget.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addressbookpage.cpp" />
     <ClCompile Include="$(GeneratedFilesOutDir)\moc\moc_addresstablemodel.cpp" />

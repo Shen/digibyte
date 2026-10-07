@@ -139,8 +139,6 @@ public:
     };
 
     UnlockContext requestUnlock();
-    /** Keep an unlock alive only for one asynchronous signing operation. */
-    std::shared_ptr<UnlockContext> requestUnlockForAsync();
 
     bool bumpFee(uint256 hash, uint256& new_hash);
     bool displayAddress(std::string sAddress) const;
@@ -149,6 +147,8 @@ public:
 
     interfaces::Node& node() const { return m_node; }
     interfaces::Wallet& wallet() const { return *m_wallet; }
+    /** Retain the interface while a bounded background operation completes. */
+    std::shared_ptr<interfaces::Wallet> walletShared() const { return m_wallet; }
     ClientModel& clientModel() const { return *m_client_model; }
     void setClientModel(ClientModel* client_model);
 
@@ -231,12 +231,6 @@ public:
     using DigiDollarBalanceCallback = std::function<void(CAmount balance, QString error)>;
     void getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback);
 
-    // Get all confirmed DigiDollar owned by the wallet, including Paymaster reservations.
-    CAmount getTotalDigiDollarBalance() const;
-
-    // Get confirmed DigiDollar protected by Paymaster sessions or provider pools.
-    CAmount getPaymasterReservedDigiDollarBalance() const;
-
     // Get a consistent balance breakdown for overview display.
     DigiDollarBalanceSummary getDigiDollarBalanceSummary() const;
 
@@ -270,11 +264,6 @@ public:
      */
     using RpcCallback = std::function<void(UniValue result, QString error)>;
     void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
-    /** Paymaster signing bridge. Inspect/relock the wallet off the GUI thread,
-     * preserving the normal unlock dialog and relocking before delivery.
-     * is_current runs on Qt before the dialog and before dispatch. */
-    void executePaymasterSigningRpcAsync(std::string command, UniValue params,
-                                        std::function<bool()> is_current, RpcCallback callback);
 
     /**
      * Build the DigiDollar transaction-history view away from Qt's event
@@ -305,9 +294,9 @@ public:
     DigiDollarWallet* getDigiDollarWallet() const;
 
 private:
-    // Background Qt jobs keep a shared interface reference while reading a
-    // wallet snapshot. The public constructor still accepts unique ownership;
-    // no wallet is shared outside WalletModel and its bounded worker jobs.
+    // Bounded Qt jobs retain the interface while reading snapshots or releasing
+    // temporary signing authority, even if this model closes first. The public
+    // constructor still accepts unique ownership.
     std::shared_ptr<interfaces::Wallet> m_wallet;
     std::unique_ptr<interfaces::Handler> m_handler_unload;
     std::unique_ptr<interfaces::Handler> m_handler_status_changed;
