@@ -68,6 +68,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTextStream>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -89,6 +90,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -4483,6 +4485,8 @@ public:
 
     }
 
+    ~PaymasterWidgetImpl() override { cancelFinanceWrite(); }
+
     /**
      * Install the application-level full-wallet backup action.
      *
@@ -4497,6 +4501,7 @@ public:
 
     void setWalletModel(WalletModel* model) override
     {
+        cancelFinanceWrite();
         if (m_node_connection_dialog) m_node_connection_dialog->reject();
         if (m_refill_approval) m_refill_approval->reject();
         m_operator_snapshot = UniValue{};
@@ -4715,6 +4720,10 @@ public:
     {
         if (m_privacy == privacy) return;
         m_privacy = privacy;
+        if (privacy && m_finance_write_phase) {
+            cancelFinanceWrite();
+            setFinanceLoading(false, /*exporting=*/true);
+        }
         if (privacy && m_node_connection_dialog) m_node_connection_dialog->reject();
         if (privacy && m_refill_approval) m_refill_approval->reject();
         if (privacy && m_inline_node_editor) {
@@ -5279,6 +5288,7 @@ private:
         std::set<QString> requested_cursors;
         std::set<QString> event_ids;
     };
+    enum class FinanceWritePhase { WRITING, CANCELLED, COMMITTING };
 
     enum class OracleState {
         UNKNOWN,
@@ -6706,9 +6716,7 @@ private:
                      return;
                  }
 
-                 setFinanceLoading(false, /*exporting=*/true);
-                 writeFinanceCsv(state->filename, state->summary,
-                                 state->events);
+                 writeFinanceCsv(state);
              }, /*show_error=*/false,
              [this](const QString& error) {
                  finishFinanceExportFailure(tr(
@@ -6723,26 +6731,66 @@ private:
         m_finance_history_status->setText(message);
     }
 
-    void writeFinanceCsv(const QString& filename, const UniValue& summary,
-                         const std::vector<UniValue>& events)
+    void cancelFinanceWrite()
     {
-        QSaveFile file(filename);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            m_finance_history_status->setText(tr(
-                "Complete export could not be opened for writing. No destination file was replaced."));
-            showPlainTextWarning(
-                this, tr("Export failed"),
-                tr("Could not open %1 for writing.").arg(filename));
-            return;
-        }
+        if (!m_finance_write_phase) return;
+        auto expected = FinanceWritePhase::WRITING;
+        m_finance_write_phase->compare_exchange_strong(expected, FinanceWritePhase::CANCELLED);
+        m_finance_write_phase.reset();
+    }
+
+    void writeFinanceCsv(const std::shared_ptr<FinanceExportState>& state)
+    {
+        // The paged RPC reads already yield. Serialization, file writes and
+        // atomic replacement must not put the final unbounded step back on Qt.
+        auto phase = std::make_shared<std::atomic<FinanceWritePhase>>(FinanceWritePhase::WRITING);
+        m_finance_write_phase = phase;
+        m_finance_history_status->setText(tr("Writing complete export…"));
+        const auto generation = m_wallet_generation;
+        QPointer<PaymasterWidgetImpl> guard{this};
+        QThread* writer = QThread::create([guard, state, phase, generation] {
+            QString failure;
+            try {
+                failure = writeFinanceFile(*state, *phase);
+            } catch (const std::exception& error) {
+                failure = tr("Export failed: %1").arg(QString::fromUtf8(error.what()));
+            }
+            if (!guard) return;
+            QMetaObject::invokeMethod(guard, [guard, state, phase, generation, failure] {
+                if (!guard || guard->m_wallet_generation != generation || guard->m_finance_write_phase != phase) return;
+                guard->m_finance_write_phase.reset();
+                guard->setFinanceLoading(false, /*exporting=*/true);
+                if (!failure.isEmpty()) {
+                    guard->finishFinanceExportFailure(failure);
+                    showPlainTextWarning(guard, tr("Export failed"), failure);
+                    return;
+                }
+                guard->m_finance_history_status->setText(tr("Complete export written: %1 booking(s).")
+                    .arg(static_cast<qulonglong>(state->events.size())));
+                if (guard->m_finance_export_filename_for_testing.isEmpty())
+                    QMessageBox::information(guard, tr("Export complete"), tr("The selected accounting period was exported successfully."));
+            }, Qt::QueuedConnection);
+        });
+        connect(writer, &QThread::finished, writer, &QObject::deleteLater);
+        writer->start();
+    }
+
+    static QString writeFinanceFile(const FinanceExportState& data, std::atomic<FinanceWritePhase>& phase)
+    {
+        const auto cancelled = [] { return tr("Export stopped before file replacement. No destination file was replaced."); };
+        if (phase.load() == FinanceWritePhase::CANCELLED) return cancelled();
+        QSaveFile file(data.filename);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+            return tr("Could not open %1 for writing. No destination file was replaced.").arg(data.filename);
         QTextStream stream(&file);
         stream.setCodec("UTF-8");
-        const UniValue& oracle = summary.find_value("oracle_price_micro_usd");
+        const UniValue& oracle = data.summary.find_value("oracle_price_micro_usd");
         const bool include_valuation = oracle.isNum();
         stream << "utc_time,booking,status,dd_income,dgb_cost,payment_model";
         if (include_valuation) stream << ",current_value_usd";
         stream << "\n";
-        for (const UniValue& event : events) {
+        for (const UniValue& event : data.events) {
+            if (phase.load() == FinanceWritePhase::CANCELLED) return cancelled();
             const qint64 created_at = financeNumber(event, "created_at");
             const qint64 dd_income = financeNumber(event, "dd_income_cents");
             const qint64 dgb_cost = financeNumber(event, "dgb_cost_satoshis");
@@ -6769,22 +6817,15 @@ private:
             }
             stream << '\n';
         }
-        if (!file.commit()) {
-            m_finance_history_status->setText(tr(
-                "Complete export could not be committed atomically. No partial destination file was accepted."));
-            showPlainTextWarning(
-                this, tr("Export failed"),
-                tr("Could not finish writing %1.").arg(filename));
-            return;
-        }
-        m_finance_history_status->setText(
-            tr("Complete export written: %1 booking(s).")
-                .arg(static_cast<qulonglong>(events.size())));
-        if (m_finance_export_filename_for_testing.isEmpty()) {
-            QMessageBox::information(
-                this, tr("Export complete"),
-                tr("The selected accounting period was exported successfully."));
-        }
+        stream.flush();
+        if (stream.status() != QTextStream::Ok)
+            return tr("Export could not be written completely. No destination file was replaced.");
+        // Cancellation wins until atomic replacement starts. Once committing,
+        // the already authorized export finishes without blocking navigation.
+        auto expected = FinanceWritePhase::WRITING;
+        if (!phase.compare_exchange_strong(expected, FinanceWritePhase::COMMITTING)) return cancelled();
+        if (!file.commit()) return tr("Could not finish writing %1. No partial destination file was accepted.").arg(data.filename);
+        return {};
     }
 
     void openLiquidityFinanceControl(QWidget* control)
@@ -14578,6 +14619,7 @@ private:
     bool m_finance_loaded{false};
     bool m_finance_loading{false};
     bool m_finance_export_loading{false};
+    std::shared_ptr<std::atomic<FinanceWritePhase>> m_finance_write_phase;
     QString m_finance_export_filename_for_testing;
     QString m_provider_id;
     QString m_provider_endpoint;

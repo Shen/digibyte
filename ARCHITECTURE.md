@@ -139,6 +139,14 @@ retaining the last wallet-bound display while Paymaster holds wallet locks.
 Refreshes are coalesced; wallet generations discard detached replies. Unknown
 or failed balances disable new payment actions. Core rechecks funds and financial
 authorization through the unchanged send paths; the display is not authority.
+Paymaster signing uses a dedicated `WalletModel` bridge: lock-state inspection,
+RPC execution and temporary relocking run on workers. The existing unlock dialog
+stays on Qt; wallet generation is checked before prompting and dispatch. The
+retained wallet is relocked before a result handler runs, including RPC failure
+or model closure. Other wallet actions retain their original unlock interface.
+Paymaster accounting export also writes and atomically replaces its CSV on a
+worker. Wallet/privacy changes cancel writing until replacement starts; an
+already committing export finishes, and detached results do not update the UI.
 DD Overview also reads its Paymaster-aware balance breakdown, collateral and
 wallet mint capability through a read-only worker. Refreshes coalesce and retain
 the last successful wallet-bound display; rebinding rejects old replies. Hidden

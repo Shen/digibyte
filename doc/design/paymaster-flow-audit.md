@@ -4,6 +4,56 @@ Scope: the working `feature/paymaster-ux-navigation` candidate, including the
 subsequent client fixes. This is a regression review of GUI/Core transitions,
 not release acceptance or proof that every Paymaster workflow is defect-free.
 
+## UI blocking audit (2026-10-07)
+
+This follow-up reviews `integration/paymaster-v9.26.7` after `b5f9395301`,
+covering all provider destinations, setup and client Paymaster paths. Scope is
+UI-thread lock/I/O waits, not a new payment-protocol audit or proof that every
+live pause is gone. Changes concentrate on Paymaster Qt code; the only shared
+model addition is a Paymaster-specific signing bridge. No Core lock, consensus,
+payment authorization or RPC/CLI semantics change.
+
+| Surface | Inspection/result |
+|---|---|
+| Provider Overview, Start/Pause and automation | RPCs use the serialized asynchronous dispatcher. Rendering uses saved snapshots, without wallet reads. |
+| Funds & reserves, preparation, withdrawal, release and retirement | Preview/execution RPCs already run off Qt. Signing preflight/relocking used to wait on Qt; they now use the dedicated worker bridge. |
+| Activity, manual processing and recovery | Queries/commands use the same dispatcher. Busy retries use bounded timers, not sleeps or thread joins. Reservation rendering remains local. |
+| Income & costs | RPC history is paged at 250 rows. Final CSV serialization and `QSaveFile::commit()` previously ran synchronously; both now run on a worker. |
+| Settings and setup assistant | Identity, policy, safety, refill and node-config operations use asynchronous calls. Exact reviews and wallet-bound continuation remain mandatory. |
+| Client offers, safety and saved sessions | Reads use the asynchronous client wrapper, generation checks and cached balances. Visible offers are bounded to 100. `getAvailableDGBBalance()` is a cached read. |
+| Client exact send and alternative recovery | The new signing bridge keeps lock-state inspection and temporary relocking off Qt. The ordinary modal unlock dialog is retained. |
+| DD Overview / Send / Receive / transaction history | Existing worker reads and cached snapshots avoid automatic wallet-lock waits. Hidden page refresh guards remain. The preceding overview regression is recorded in the runbook. |
+| Confirmations and progress | Modal Qt dialogs process events; disabled competing actions are deliberate. No production Paymaster `wait()`, blocking queued connection or sleeping retry loop was found. |
+
+Remaining shared/native synchronous boundaries, retained to avoid a broad
+rewrite of original DigiByte/DD behavior:
+
+- `WalletView::backupWallet()` performs the full backup synchronously. Paymaster
+  Wallet & backup currently delegates to it. The native unlock dialog also
+  checks encryption status and decrypts synchronously; the new bridge does not
+  replace that dialog. Both can still wait for Core or slow storage.
+- Creating/persisting DD receive requests, ordinary own-DGB sending, coin-control
+  queries and visible Mint/Redeem/Vault operations still contain synchronous
+  wallet/chain reads or writes. Hidden-page guards protect Paymaster navigation,
+  but explicitly using those native actions can encounter Paymaster-held locks.
+- Initial DD activation reads `cs_main`; initial-download checks can also take
+  it before their completed-sync latch is set. These are separate startup/sync
+  boundaries, not normal provider polling.
+- The explicitly selected operator-report import reads at most 64 KiB on Qt.
+  Native file pickers and this small read can wait on a slow/disconnected file
+  location. Large list rendering remains GUI work; its worst-case latency has
+  not been benchmarked across all supported machines.
+
+The encrypted-wallet preflight regression reproduced **502 ms** of blocking
+before the correction, until a 500-ms watchdog released `cs_wallet`. The worker
+version returned in **0 ms** in the same controlled test. Disposable encrypted
+Core-wallet tests also cover unlock, cancellation, RPC error, wallet switch and model close;
+results are delivered only after temporary relocking. The 10,251-booking export
+checks both complete CSV rows and Qt heartbeats during final writing. See the
+[test runbook](../digidollar-paymaster-testing.md) for targeted results and
+operator build/full-suite commands. The normal EXE and live workload acceptance
+remain separate from these checks.
+
 ## Corrected transitions
 
 | Trigger | Defect | Corrected behavior / regression |

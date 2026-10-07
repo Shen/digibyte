@@ -2439,6 +2439,13 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     commands.clear();
     parameters.clear();
     bool event_loop_yielded{false};
+    int writing_heartbeats{0};
+    QTimer heartbeat;
+    heartbeat.setInterval(1);
+    QObject::connect(&heartbeat, &QTimer::timeout, [&] {
+        if (history_status->text().contains(QStringLiteral("Writing complete export"))) ++writing_heartbeats;
+    });
+    heartbeat.start();
     QTimer::singleShot(0, &tab,
                        [&event_loop_yielded] { event_loop_yielded = true; });
     finance_export->click();
@@ -2447,6 +2454,8 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
             QStringLiteral("10251 booking(s)")),
         30000);
     QVERIFY(event_loop_yielded);
+    QVERIFY2(writing_heartbeats > 0, "Qt must process events during final CSV serialization and writing");
+    heartbeat.stop();
     QCOMPARE(commands.count(QStringLiteral("getpaymasterfinancestatus")),
              42);
     QCOMPARE(commands.size(), static_cast<int>(parameters.size()));

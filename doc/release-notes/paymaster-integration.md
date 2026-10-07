@@ -38,6 +38,14 @@ in the background. Existing balances remain visible during refresh; wallet chang
 discard old replies, and privacy masking applies to asynchronous results. Core
 locking, financial authorization, RPC/CLI and ordinary DGB pages are unchanged.
 
+The Paymaster signing paths now inspect wallet lock state and release temporary
+unlock authority on workers as well. This covers client sending/recovery and
+provider signing actions. The normal passphrase dialog, exact approval, wallet
+binding and relocking before result dialogs are retained. Large accounting CSV
+exports no longer serialize or write the complete file on Qt's event thread.
+Shared native backup/password dialogs and other original DD actions still contain
+synchronous work; see the [broader audit](../design/paymaster-flow-audit.md#ui-blocking-audit-2026-10-07).
+
 ## Send DD responsiveness
 
 Opening Send DD and refreshing its balance no longer wait for Paymaster wallet

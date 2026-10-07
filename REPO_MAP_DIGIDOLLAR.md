@@ -1376,8 +1376,12 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   The operator navigation includes a green-theme Finances page with native DD
   income, DGB operating costs, current-price result estimate, model breakdown,
   wallet-owned pool capital, 250-row cursor pages, privacy-limited asynchronous
-  complete CSV export with atomic file replacement,
-  and links to the existing preview-first liquidity controls. Overview includes
+  complete CSV export with atomic file replacement and links to the existing
+  preview-first liquidity controls. CSV serialization/writes run on a worker.
+  Wallet/privacy changes cancel
+  the writer before atomic replacement begins; committing exports finish without
+  delaying navigation. Detached completions cannot update another wallet's view.
+  Overview includes
   a compact finance summary. Backup controls in Settings → Wallet & backup and a newly
   completed identity setup invoke WalletView's existing full-wallet backup
   dialog or explicitly acknowledge another full-wallet backup flow; no path is
@@ -1522,6 +1526,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/qt/walletmodel.cpp/h
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
   operations so wallet unlock contexts are not retained across network waits.
+- `executePaymasterSigningRpcAsync()` additionally reads encryption state and
+  releases temporary unlock authority off Qt. Wallet-bound predicates guard the
+  existing unlock dialog and dispatch; relocking precedes result delivery and
+  survives model closure. Native non-Paymaster unlock behavior is unchanged.
 - `getDigiDollarReceiveRequestsAsync()` reads stored receive requests on a worker
   with a shared wallet reference, returning the snapshot on the model's Qt thread.
 - `getDigiDollarBalanceAsync()` reads Core's spendable DD snapshot away from

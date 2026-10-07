@@ -1,5 +1,64 @@
 # Paymaster build and test runbook
 
+## Paymaster-wide UI wait audit (2026-10-07)
+
+The [scope and findings](design/paymaster-flow-audit.md#ui-blocking-audit-2026-10-07)
+cover every provider destination, setup, client offers/send/recovery, and shared
+DD/native boundaries. Two further Paymaster-owned waits were corrected: signing
+preflight/temporary relocking and final accounting CSV serialization/file I/O.
+The only shared model addition is `executePaymasterSigningRpcAsync`; existing
+native wallet operations, Core locks and financial authorization are unchanged.
+
+The encrypted-wallet preflight blocked Qt for **502 ms** before the fix, until
+the regression's 500-ms watchdog released `cs_wallet`. It returned in **0 ms**
+afterward. The test uses disposable wallets and verifies an already unlocked
+wallet, normal unlock, cancellation, RPC error, rebinding and model destruction.
+Temporary relocking must finish before results reach Qt. Deterministic injected
+widget transports retain their existing unlock test path; the new bridge is
+tested separately with real Core RPCs and wallet locks.
+
+Selected MSVC compiles and an isolated native Qt link passed. **61 targeted Qt
+cases passed**, excluding initialization/cleanup:
+
+| Test function | Cases |
+|---|---:|
+| `paymasterSigningWaitKeepsGuiResponsive` | 1 |
+| `paymasterClientAuthorizationIsTwoStageAndFailClosed` | 1 |
+| `paymasterClientReviewCancellation` | 20 |
+| `paymasterFinancesAndBackupWorkflow` | 1 |
+| `paymasterProviderCommandLocksPages` | 1 |
+| `paymasterOperatorBackgroundRefresh` | 2 |
+| `paymasterClientLiveRecoveryProgresses` | 7 |
+| `paymasterOperatorConfirmationWalletBinding` | 4 |
+| `paymasterGuidedCapitalTasks` | 24 |
+
+The finance case validates all 10,251 exported bookings and a Qt timer heartbeat
+during final writing, beyond the existing page-fetch event-loop check. The
+writer retains atomic replacement. Wallet/privacy changes or widget destruction
+cancel before replacement starts; a commit already in progress finishes without
+waiting on Qt, and its result cannot populate a detached view.
+
+No full build, full suite, live wallet action or normal EXE replacement was run.
+Repository/src, CLAUDE/DigiDollar architecture/maps, developer locking notes,
+Qt/test, translation and formatting guidance were followed. For the operator,
+close Client, Paymaster and active CLI calls normally, then run the existing
+workspace helper using the installed MSVC 14.43, Qt 5.15.10 and cached static
+dependencies:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+Allow minutes for the incremental build and several minutes for the full
+Paymaster suite. Success requires exit 0 and zero failed cases in
+`build_msvc/paymaster-refresh-check/reserve-presets/full-paymaster-qt.txt`.
+The DD full-suite command and navigation checks below still apply. For this
+follow-up also exercise an encrypted provider/client signing action, cancelled
+unlock, wallet closure during unlock and a large accounting export. Shared
+native backup/password work remains a separately documented possible source of
+UI waits; these targeted results do not establish that all live hangs are gone.
+
 ## DD Overview contention after Paymaster actions (2026-10-07)
 
 DD Overview still called the Paymaster-aware balance summary, locked-collateral
