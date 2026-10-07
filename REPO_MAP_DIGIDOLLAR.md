@@ -1980,6 +1980,10 @@ Current oracle/MuSig2 fuzz source inventory:
   revision and exact targets, plus finite per-transaction/total fee ceilings.
   Both transaction fee checks precede the first commit; reservation gates and
   plan/input binding remain authoritative. Legacy unbound calls retain their shape.
+  Preview-only `recommend_fee` uses existing wallet fee planners to propose a
+  bounded one-time release approval without modifying recurring refill limits.
+  Qt offers a fresh fee review and bounded retries only for an exact pre-work
+  `PAYMASTER_PROVIDER_BUSY` rejection, never for an unknown execution result.
 - `src/paymaster/setup.cpp` and `src/qt/paymasteroperation.h` distinguish a known
   recurring-refill fee ceiling block from unknown service faults and confirmation
   waits. Planned work uses the current service error when its journal has no

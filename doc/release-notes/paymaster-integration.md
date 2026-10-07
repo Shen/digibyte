@@ -20,6 +20,15 @@ required by this merge. The official release document is unchanged; its test
 claims do not certify this fork. See the [integration checkpoint](../digidollar-paymaster-v9.26.7-integration.md)
 for targeted results and pending operator checks.
 
+## Excess reserve release
+
+Reserve reduction now previews estimated DGB/DD release fees and proposes a
+finite one-time ceiling for explicit approval. A fee-limit rejection links
+directly to a fresh calculation and review. Recurring refill allowances remain
+separate. Busy-provider rejections receive a short bounded retry of the same
+plan; the UI identifies these attempts as not started. Lost execution replies
+remain uncertain and are not retried automatically.
+
 ## Send DD responsiveness
 
 Opening Send DD and refreshing its balance no longer wait for Paymaster wallet

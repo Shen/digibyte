@@ -898,6 +898,16 @@ Active payments and unconfirmed pool work block retirement. Core binds the plan
 to the current saved liquidity revision, targets, exact inputs and fee ceiling.
 Changed targets or inputs require a fresh preview. Release fees are one-time
 costs; customer-payment budgets and recurring refill approvals are unchanged.
+The release preview estimates both transaction fees and proposes a separate,
+finite ceiling with 10% headroom rounded up to 0.01 DGB, retaining a larger
+entered one-time ceiling within the wallet-wide maximum. It does not reserve
+funds, allocate receiving addresses, sign or grant approval. **Recalculate fees
+and review release** offers a fresh confirmation if the one-time ceiling was
+too low. Raising the automatic-refill limits does not raise this release limit.
+When Core reports **PAYMASTER_PROVIDER_BUSY**, this attempt has not released
+reserves. Qt waits briefly and retries up to three times, using the same
+approved plan and ceiling. Core rechecks the plan on each attempt. A changed
+plan requires a fresh review; wallet changes and privacy mode stop the retry.
 An incomplete reply requires checking wallet activity before another reviewed
 plan; it is not proof that no transaction was sent.
 

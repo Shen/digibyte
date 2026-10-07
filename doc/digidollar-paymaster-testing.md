@@ -1,5 +1,37 @@
 # Paymaster build and test runbook
 
+## Excess-reserve fee proposal and busy retry (2026-10-07)
+
+Selected MSVC compiles and isolated native links passed for the Paymaster RPC,
+widget and its tests. **74 targeted Qt cases passed**, excluding initialization
+and cleanup: reserve reduction (36, both themes), guided capital actions (24),
+setup-fee recovery (1), and guided restoration/approval (13). Reduction cases
+cover increased/invalid fee proposals, a fresh confirmation after a fee-limit
+rejection, a separate wallet-wide limit, bounded busy retries, changed plans,
+wallet/privacy changes, cancellation, malformed receipts and lost replies.
+Native release dialogs were inspected in both light and dark themes.
+
+`wallet_paymaster_provider.py --pool-reduction-only` passed against an isolated
+daemon and the real CLI in disposable regtest wallets. It checks read-only
+recommendations (including keypool, pool and saved policy), exact fee rounding,
+recommendation-only versus execution, plan/revision/cap binding, actual fees,
+unchanged legacy calls and idempotent finance reconciliation. This is a targeted
+test, not a full functional-suite result.
+
+The normal application EXE and the full Qt suite remain operator work. In this
+workspace, after closing Client, Paymaster and active CLI calls normally:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+The local helper uses the installed MSVC 14.43, Qt 5.15.10 and cached static
+dependencies. Allow minutes for the incremental solution build and roughly
+ten minutes for the complete Paymaster Qt suite. Success requires exit 0 and
+zero failed cases in `build_msvc/paymaster-refresh-check/reserve-presets/full-paymaster-qt.txt`.
+The helper and binary/log artifacts are workspace-local and are not committed.
+
 ## Reserve UI full-suite follow-up (2026-10-07)
 
 At `1559fccd72`, the operator's full Windows solution build succeeded. The

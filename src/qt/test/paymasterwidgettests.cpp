@@ -10746,7 +10746,8 @@ void PaymasterWidgetTests::paymasterReserveReduction_data()
     QTest::addColumn<QString>("theme");
     QTest::addColumn<QString>("decision");
     for (const auto* theme : {"dark", "light"}) {
-        for (const auto* decision : {"cancel", "approve", "blocked", "changed", "bad_receipt", "lost_reply", "wallet_change", "privacy"})
+        for (const auto* decision : {"cancel", "approve", "blocked", "changed", "bad_receipt", "lost_reply", "wallet_change", "privacy",
+                                    "increased_fee", "bad_fee", "fee_limit", "wallet_limit", "busy", "busy_preview", "busy_timeout", "busy_changed", "busy_wallet", "busy_privacy"})
             QTest::newRow(qPrintable(QString::fromLatin1(theme) + '-' + decision)) << QString::fromLatin1(theme) << QString::fromLatin1(decision);
     }
 }
@@ -10791,7 +10792,7 @@ void PaymasterWidgetTests::paymasterReserveReduction()
     for (const auto* key : {"target_operational_dgb", "target_operational_carriers"}) saved.pushKV(key, 3);
     update(saved);
     int saves{0}, previews{0}, executions{0};
-    bool exact_binding{false};
+    bool exact_binding{true};
     panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) {
         if (method == "getpaymasteroperatorinfo") return snapshot;
         if (method == "getpaymasterliquiditystatus") return liquidity;
@@ -10814,17 +10815,33 @@ void PaymasterWidgetTests::paymasterReserveReduction()
             const auto& options = params[0];
             const bool execute = options.find_value("execute").isTrue();
             execute ? ++executions : ++previews;
-            exact_binding = options.find_value("expected_liquidity_updated_at").getInt<int>() == 101 &&
+            const int64_t proposed_fee = decision == "increased_fee" || (decision == "fee_limit" && previews > 1) ? 75000000 : 50000000;
+            exact_binding &= options.find_value("expected_liquidity_updated_at").getInt<int>() == 101 &&
                 options.find_value("admission_dgb_slots").getInt<int>() == 3 && options.find_value("operational_dgb_slots").getInt<int>() == 1 &&
                 options.find_value("admission_carrier_slots").getInt<int>() == 3 && options.find_value("operational_carrier_slots").getInt<int>() == 1 &&
-                options.find_value("dgb_only").isFalse() && options.find_value("maximum_fee_satoshis").getInt<int64_t>() == 50000000;
+                options.find_value("dgb_only").isFalse() && options.find_value("maximum_fee_satoshis").getInt<int64_t>() == (execute ? proposed_fee : 50000000) &&
+                options.find_value("recommend_fee").isTrue() == !execute;
             if (decision == "blocked") throw std::runtime_error("PAYMASTER_REBALANCE_ACTIVE_RESERVATIONS");
             if (execute && decision == "changed") throw std::runtime_error("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+            if (!execute && decision == "busy_preview" && previews == 1) throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+            if (execute && decision.startsWith("busy") && decision != "busy_preview" && (executions == 1 || decision == "busy_timeout")) {
+                if (decision == "busy_wallet") QTimer::singleShot(50, panel.get(), [&] { panel->setWalletModel(nullptr); });
+                if (decision == "busy_privacy") QTimer::singleShot(50, panel.get(), [&] { panel->setPrivacy(true); });
+                throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+            }
+            if (execute && decision == "busy_changed") throw std::runtime_error("PAYMASTER_POOL_PLAN_CHANGED");
+            if (execute && decision == "fee_limit" && executions == 1) throw std::runtime_error("PAYMASTER_RETIREMENT_FEE_LIMIT");
+            if (execute && decision == "wallet_limit") throw std::runtime_error("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
             UniValue result;
             result.read(R"({"executed":false,"retired_admission_dgb_slots":6,"retired_operational_dgb_slots":2,
                 "retired_admission_carrier_slots":6,"retired_operational_carrier_slots":2,"retired_dgb_satoshis":100000000,
                 "retired_carrier_cents":800,"maximum_network_fee_satoshis":50000000,"maximum_total_fee_satoshis":100000000})");
             result.pushKV("plan_id", std::string(64, 'c'));
+            result.pushKV("maximum_network_fee_satoshis", proposed_fee);
+            result.pushKV("maximum_total_fee_satoshis", 2 * proposed_fee);
+            result.pushKV("estimated_dgb_fee_satoshis", 100000);
+            result.pushKV("estimated_dd_fee_satoshis", decision == "bad_fee" ? 90000000 : proposed_fee == 75000000 ? 60000000 : 12000000);
+            result.pushKV("wallet_maximum_fee_satoshis", 1000000000);
             if (execute) {
                 if (options.find_value("plan_id").get_str() != std::string(64, 'c')) throw std::runtime_error("Wrong release plan");
                 available = 1; update(saved);
@@ -10852,11 +10869,17 @@ void PaymasterWidgetTests::paymasterReserveReduction()
     panel->show();
     preset->setCurrentIndex(preset->findData(1));
     bool reviewed{false};
+    int approvals{0};
     QTimer answer;
     connect(&answer, &QTimer::timeout, panel.get(), [&] {
         if (auto* review = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
-            reviewed = review->text().contains("8.00 DD") && review->text().contains("1.00000000 DGB total") &&
+            ++approvals;
+            const bool higher = decision == "increased_fee" || (decision == "fee_limit" && approvals > 1);
+            reviewed = review->text().contains("8.00 DD") && review->text().contains(higher ? "1.50000000 DGB total" : "1.00000000 DGB total") &&
+                review->text().contains("Estimated fees:") && review->text().contains("one-time release fees") &&
                 review->text().contains("Cancel keeps the smaller target");
+            if (const auto path = qEnvironmentVariable("DIGIBYTE_PAYMASTER_RELEASE_REVIEW_SCREENSHOT"); !path.isEmpty() && decision == "increased_fee")
+                review->grab().save(path + "-" + theme + ".png");
             if (decision == "wallet_change") panel->setWalletModel(nullptr);
             if (decision == "privacy") panel->setPrivacy(true);
             review->done(decision == "cancel" ? QMessageBox::No : QMessageBox::Yes);
@@ -10864,21 +10887,53 @@ void PaymasterWidgetTests::paymasterReserveReduction()
     });
     answer.start(10);
     save->click();
-    QTRY_COMPARE(previews, 1);
-    if (decision != "blocked") QTRY_VERIFY(reviewed);
+    QTRY_COMPARE(previews, decision == "busy_preview" ? 2 : 1);
+    if (decision != "blocked" && decision != "bad_fee") QTRY_VERIFY(reviewed);
+    if (decision == "busy" || decision == "busy_changed") QTRY_COMPARE(executions, 2);
+    if (decision == "busy_timeout") QTRY_COMPARE(executions, 4);
+    if (decision == "busy_wallet" || decision == "busy_privacy") QTest::qWait(900);
     QCoreApplication::processEvents();
     answer.stop();
     QCOMPARE(saves, 1);
     QVERIFY(exact_binding);
-    const bool executed = decision != "cancel" && decision != "blocked" && decision != "wallet_change" && decision != "privacy";
-    QCOMPARE(executions, executed ? 1 : 0);
-    if (decision != "wallet_change" && decision != "privacy") {
+    const bool executed = decision != "cancel" && decision != "blocked" && decision != "bad_fee" && decision != "wallet_change" && decision != "privacy";
+    QCOMPARE(executions, decision == "busy_timeout" ? 4 : (decision == "busy" || decision == "busy_changed") ? 2 : executed ? 1 : 0);
+    QCOMPARE(approvals, decision == "blocked" || decision == "bad_fee" ? 0 : 1);
+    if (decision != "wallet_change" && decision != "privacy" && decision != "busy_wallet" && decision != "busy_privacy") {
         QCOMPARE(preset->currentData().toInt(), 1);
         QVERIFY(overview_target->text().contains("1 payment(s)"));
         QVERIFY(state->text().contains("Saved refill target: 1 payment(s)"));
         QVERIFY(overview_available->text().contains(QString::number(available)));
         QCOMPARE(release->isHidden(), available == 1);
         if (available == 3) QVERIFY(state->text().contains("Extra reserves remain"));
+    }
+    if (decision == "fee_limit" || decision == "busy_timeout" || decision == "busy_changed") {
+        auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
+        auto* next = panel->findChild<QPushButton*>("paymasterContinueTask");
+        QVERIFY(status && next);
+        QVERIFY(status->text().contains("No reserves were released by this attempt"));
+        QVERIFY(next->text().contains("Recalculate fees"));
+        if (decision == "fee_limit") {
+            answer.start(10);
+            next->click();
+            QTRY_COMPARE(executions, 2);
+            answer.stop();
+            QVERIFY(reviewed);
+            QCOMPARE(approvals, 2);
+            QCOMPARE(previews, 2);
+            QCOMPARE(saves, 1);
+            QVERIFY(exact_binding);
+        }
+    }
+    if (decision == "wallet_limit") {
+        auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
+        auto* next = panel->findChild<QPushButton*>("paymasterContinueTask");
+        QVERIFY(status && next);
+        QVERIFY(status->text().contains("wallet-wide transaction limit"));
+        QCOMPARE(next->text(), QStringLiteral("Check current status"));
+        next->click();
+        QCOMPARE(executions, 1);
+        QCOMPARE(saves, 1);
     }
     if (decision == "cancel") {
         if (const auto path = qEnvironmentVariable("DIGIBYTE_PAYMASTER_REDUCTION_SCREENSHOT"); !path.isEmpty()) {

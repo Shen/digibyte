@@ -504,6 +504,11 @@ omitted/false, the returned ceiling and the exact reviewed plan; combining
 recommendation and execution is rejected. Existing calls remain compatible.
 The provider work guard still serializes both preview and execution. Explicit
 busy and retirement fee-limit rejections precede the first transaction commit.
+Qt retries only the exact `PAYMASTER_PROVIDER_BUSY` rejection, up to three
+times at 750 ms, bound to the same wallet, task generation, plan and ceiling.
+Unknown or lost replies never trigger execution retries. An explicit retirement
+fee-limit rejection offers a new fee calculation and review; it does not
+authorize an increased fee or change recurring maintenance budgets.
 
 
 Regression details and runtime acceptance are tracked in

@@ -1225,6 +1225,18 @@ bool IsBoundedReserveReductionResult(const UniValue& result, const UniValue& opt
     return true;
 }
 
+bool IsReserveReductionFeeProposal(const UniValue& result)
+{
+    qint64 fee{0}, wallet_limit{0}, dgb{0}, dd{0}, dgb_value{0}, dd_value{0};
+    if (!GetInt64Field(result, "maximum_network_fee_satoshis", fee) || fee <= 0 || fee > MAX_MONEY / 2 ||
+        !GetInt64Field(result, "wallet_maximum_fee_satoshis", wallet_limit) || wallet_limit < fee || wallet_limit > MAX_MONEY ||
+        !GetInt64Field(result, "estimated_dgb_fee_satoshis", dgb) || dgb < 0 || dgb > fee ||
+        !GetInt64Field(result, "estimated_dd_fee_satoshis", dd) || dd < 0 || dd > fee ||
+        !GetInt64Field(result, "retired_dgb_satoshis", dgb_value) ||
+        !GetInt64Field(result, "retired_carrier_cents", dd_value)) return false;
+    return (dgb_value > 0 ? dgb > 0 : dgb == 0) && (dd_value > 0 ? dd > 0 : dd == 0);
+}
+
 bool IsCompleteProviderPool(const UniValue& pool)
 {
     return HasIntFields(
@@ -2054,7 +2066,9 @@ public:
             tr("Show technical details"), tr("Hide technical details"), QStringLiteral("paymasterTaskErrorToggle"));
         m_task_error_toggle->hide();
         connect(m_task_continue, &QPushButton::clicked, this, [this] {
-            if (m_operation.error == QLatin1String("PAYMASTER_POOL_PREPARATION_REQUIRED") ||
+            if (canReviewReserveReduction()) {
+                beginGuidedTask("reduce_reserves");
+            } else if (m_operation.error == QLatin1String("PAYMASTER_POOL_PREPARATION_REQUIRED") ||
                 m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
                 m_operation.error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE")) {
                 beginGuidedTask("preparepaymasterpool", m_guided_start_after ||
@@ -2073,6 +2087,7 @@ public:
                 }, false, [this](const QString& error) { failGuidedTask(error); });
             } else if (m_operation.error.contains(QLatin1String("WALLET_LOCKED"))) unlockOperatorWallet();
             else if (m_operation.error == QLatin1String("PAYMASTER_MAINTENANCE_FEE_EXCEEDED")) reviewMaintenanceFeeLimit();
+            else if (m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT")) refreshStatus();
             else if (canReviewPreparationFee()) cancelPoolPreparation(true);
             else if (m_operation.error.contains(QLatin1String("FEE_LIMIT"))) {
                 showOperatorPage(m_liquidity_page);
@@ -4506,6 +4521,7 @@ public:
         ++m_wallet_generation;
         m_operation.reset(m_wallet_generation);
         m_guided_task.clear();
+        m_failed_guided_task.clear();
         if (m_task_card) m_task_card->hide();
         m_task_error_details->clear();
         m_task_error_toggle->setChecked(false);
@@ -4711,6 +4727,7 @@ public:
         if (privacy) {
             m_operation.reset(m_wallet_generation);
             m_guided_task.clear();
+            m_failed_guided_task.clear();
             m_pending_guided_review = {};
             if (m_task_card) m_task_card->hide();
             m_task_error_details->clear();
@@ -10566,18 +10583,24 @@ private:
         m_task_continue->setVisible(m_operation.phase == Phase::Blocked && !canReviewPreparationFee() &&
             !(needs_reserves && m_operator_next_action == QLatin1String("review_liquidity")));
         m_task_continue->setEnabled(!m_busy && !m_privacy);
-        m_task_continue->setText((needs_reserves || m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
+        m_task_continue->setText(canReviewReserveReduction() ? tr("Recalculate fees and review release…") :
+            (needs_reserves || m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
             m_operation.error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE")) ? tr("Restore required reserves…") :
             m_operation.error.contains(QLatin1String("WALLET_LOCKED")) ? tr("Unlock wallet…") :
             m_operation.error == QLatin1String("PAYMASTER_MAINTENANCE_FEE_EXCEEDED") ? tr("Review refill cost limit") :
+            m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT") ? tr("Check current status") :
             m_operation.error.contains(QLatin1String("FEE_LIMIT")) ? tr("Review fee limit…") :
             m_operation.error.contains(QLatin1String("PROVIDER_DISABLED")) ? tr("Resume approved task…") :
             carrierReleaseNeedsReview() ? tr("Refresh reserves") : tr("Check current status"));
         QString message;
         switch (m_operation.phase) {
-        case Phase::Checking: message = tr("1/5 · Checking the current wallet and preparing the review…"); break;
+        case Phase::Checking: message = m_guided_waiting_for_provider
+            ? tr("Waiting briefly for the current provider task. This release has not started.")
+            : tr("1/5 · Checking the current wallet and preparing the review…"); break;
         case Phase::Review: message = tr("2/5 · Review the amounts and limits. Nothing has been authorized yet."); break;
-        case Phase::Executing: message = tr("3/5 · Applying the approved task. Please wait…"); break;
+        case Phase::Executing: message = m_guided_waiting_for_provider
+            ? tr("Waiting briefly for the current provider task. This release has not started. Core will recheck the same approved plan and fee limit.")
+            : tr("3/5 · Applying the approved task. Please wait…"); break;
         case Phase::Waiting:
             message = m_operation.required_confirmations > 0
                 ? tr("4/5 · Waiting for confirmations: %1/%2. Continuation is automatic.")
@@ -10588,6 +10611,16 @@ private:
             break;
         case Phase::Complete: message = tr("✓ 5/5 · Task complete."); break;
         case Phase::Blocked:
+            if (canReviewReserveReduction()) {
+                message = m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_FEE_LIMIT")
+                    ? tr("No reserves were released by this attempt. Its one-time fee limit was too low. Recalculate the release fees and approve a fresh preview. Changing automatic refill limits does not change release fees.")
+                    : tr("No reserves were released by this attempt. Another provider task was busy, or the reviewed reserve plan changed. Review a fresh release plan when the current task has finished.");
+                break;
+            }
+            if (m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT")) {
+                message = tr("No reserves were released by this attempt. The estimated fee exceeds the wallet-wide transaction limit. Review that limit or wait for lower fees; increasing refill limits cannot solve this.");
+                break;
+            }
             if (needs_reserves) {
                 message = tr("The start is waiting for missing reserves. No reserve transaction is pending. Choose 'Restore reserves and start' to review the capital and fees; after approval, preparation and start continue automatically.");
                 break;
@@ -10629,9 +10662,41 @@ private:
     {
         m_operation.fail(error);
         m_task_error_toggle->setChecked(false);
+        m_failed_guided_task = m_guided_task;
         m_guided_task.clear();
+        m_guided_waiting_for_provider = false;
         renderCurrentTask();
         refreshOperatorStatus();
+    }
+
+    bool canReviewReserveReduction() const
+    {
+        return m_failed_guided_task == QLatin1String("reduce_reserves") &&
+            (m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_FEE_LIMIT") ||
+             m_operation.error == QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
+             m_operation.error == QLatin1String("PAYMASTER_POOL_PLAN_CHANGED") ||
+             m_operation.error == QLatin1String("PAYMASTER_LIQUIDITY_POLICY_CHANGED"));
+    }
+
+    bool waitForReserveReduction(const QString& error, std::function<void()> retry)
+    {
+        // Only this exact Core rejection proves no transaction was started.
+        // Never repeat an execution after a missing or ambiguous response.
+        if (m_guided_task != QLatin1String("reduce_reserves") ||
+            error != QLatin1String("PAYMASTER_PROVIDER_BUSY") || m_guided_busy_retries >= 3) return false;
+        ++m_guided_busy_retries;
+        m_guided_waiting_for_provider = true;
+        renderCurrentTask();
+        const auto generation = m_wallet_generation;
+        const auto task_generation = m_guided_generation;
+        const auto phase = m_operation.phase;
+        QTimer::singleShot(750, this, [this, generation, task_generation, phase, retry] {
+            if (generation != m_wallet_generation || task_generation != m_guided_generation || m_privacy ||
+                m_guided_task != QLatin1String("reduce_reserves") || m_operation.phase != phase) return;
+            m_guided_waiting_for_provider = false;
+            retry();
+        });
+        return true;
     }
 
     void requestReviewedStart()
@@ -10665,6 +10730,10 @@ private:
         if (!m_operation.begin(title, m_wallet_generation)) return;
         const auto generation = m_wallet_generation;
         m_guided_task = task;
+        ++m_guided_generation;
+        m_failed_guided_task.clear();
+        m_guided_busy_retries = 0;
+        m_guided_waiting_for_provider = false;
         m_guided_start_after = start_after;
         renderCurrentTask();
         if (!hasCompleteMutationSnapshots()) {
@@ -10737,7 +10806,10 @@ private:
                 if (!m_preparation_fee->satoshis(fee) || fee <= 0) throw std::runtime_error("PAYMASTER_RETIREMENT_FEE_LIMIT");
                 options.pushKV("maximum_fee_satoshis", fee);
                 options.pushKV("dgb_only", !reduction);
-                if (reduction) options.pushKV("expected_liquidity_updated_at", saved.find_value("updated_at"));
+                if (reduction) {
+                    options.pushKV("expected_liquidity_updated_at", saved.find_value("updated_at"));
+                    options.pushKV("recommend_fee", true);
+                }
                 options.pushKV("execute", false);
                 params.clear(); params.setArray(); params.push_back(options);
             }
@@ -10764,8 +10836,17 @@ private:
             }
         } catch (const std::exception& e) { failGuidedTask(QString::fromUtf8(e.what())); return; }
         const std::string command = preparation ? "preparepaymasterpool" : rebalance ? "rebalancepaymasterpool" : "withdrawpaymastercarrier";
-        call(command, params, false, nullptr, [this, generation, task, params, command, preparation, rebalance, reduction, context, proposed_policy, repair_targets](const UniValue& preview) {
+        call(command, params, false, nullptr, [this, generation, task, params, command, preparation, rebalance, reduction, context, proposed_policy, repair_targets](const UniValue& preview) mutable {
             if (generation != m_wallet_generation || m_privacy || m_guided_task != task) return;
+            if (reduction) {
+                if (!IsReserveReductionFeeProposal(preview)) {
+                    failGuidedTask(tr("Core did not return a complete, bounded release fee proposal. No release was approved.")); return;
+                }
+                auto options = params[0];
+                options.pushKV("maximum_fee_satoshis", preview.find_value("maximum_network_fee_satoshis"));
+                options.pushKV("recommend_fee", false);
+                params.clear(); params.setArray(); params.push_back(options);
+            }
             const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : reduction ? IsBoundedReserveReductionResult(preview, params[0]) : rebalance ? IsCompletePoolRebalanceResult(preview) && poolNumber(preview, "retired_carrier_cents") == 0 && preview.find_value("maximum_network_fee_satoshis").isNum() && preview.find_value("maximum_network_fee_satoshis").write() == params[0].find_value("maximum_fee_satoshis").write() : IsCompleteCarrierWithdrawalResult(preview, task, false, {});
             if (!valid || preview.find_value("executed").isTrue() || preview.find_value("accepted").isTrue()) {
                 failGuidedTask(tr("Core did not return a complete current preview. No task was approved.")); return;
@@ -10782,9 +10863,10 @@ private:
                          PaymasterFormatDD(poolNumber(preview, "total_carrier_cents")),
                          dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
                          dgbAmount(poolNumber(preview, "maximum_fee_satoshis")))
-                : reduction ? tr("The smaller refill target is saved. Release the following excess reserves?\n\nReturn %1 DGB and %2 DD to ordinary wallet funds, before network fees.\nMaximum network fee: %3 DGB per transaction, %4 DGB total. These are one-time release fees; refill approval is unchanged.\n\nOnly excess available, confirmed reserves are selected. The saved target remains prepared. Cancel keeps the smaller target and the existing reserves.")
+                : reduction ? tr("The smaller refill target is saved. Release the following excess reserves?\n\nReturn %1 DGB and %2 DD to ordinary wallet funds, before network fees.\nEstimated fees: %5 DGB for the DGB release and %6 DGB for the DD release.\nProposed maximum network fee: %3 DGB per transaction, %4 DGB total. These are one-time release fees; refill approval is unchanged. Only actual transaction fees are spent.\n\nOnly excess available, confirmed reserves are selected. The saved target remains prepared. Cancel keeps the smaller target and the existing reserves.")
                     .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), PaymasterFormatDD(poolNumber(preview, "retired_carrier_cents")),
-                         dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")), dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")))
+                         dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")), dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
+                         dgbAmount(poolNumber(preview, "estimated_dgb_fee_satoshis")), dgbAmount(poolNumber(preview, "estimated_dd_fee_satoshis")))
                 : rebalance ? tr("Return %1 DGB to ordinary wallet funds, less a network fee of at most %2 DGB. Saved targets, DD reserves and refill approval remain unchanged.")
                     .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")))
                 : task == QLatin1String("all_excess")
@@ -10839,7 +10921,10 @@ private:
                 }
             };
             showPendingGuidedReview();
-        }, false, [this](const QString& error) { failGuidedTask(error); });
+        }, false, [this, task](const QString& error) {
+            if (!waitForReserveReduction(error, [this, task] { previewGuidedTask(task); }))
+                failGuidedTask(error);
+        });
     }
 
     void applyReviewedReserveRepair(const UniValue& context, const UniValue& proposed, const UniValue& preview_params)
@@ -10934,8 +11019,12 @@ private:
                     }, false, [this](const QString& error) { failGuidedTask(error); });
                 } else if (preparation && m_guided_start_after) requestReviewedStart();
                 else refreshStatus();
-            }, false, [this, task](const QString& error) {
-                failGuidedTask(task == QLatin1String("reduce_reserves")
+            }, false, [this, task, command, params](const QString& error) {
+                if (waitForReserveReduction(error, [this, command, params] { executeGuidedTask(command, params); })) return;
+                const bool rejected_before_release = error == QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
+                    error == QLatin1String("PAYMASTER_RETIREMENT_FEE_LIMIT") || error == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT") ||
+                    error == QLatin1String("PAYMASTER_POOL_PLAN_CHANGED") || error == QLatin1String("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+                failGuidedTask(task == QLatin1String("reduce_reserves") && !rejected_before_release
                     ? tr("The release was not fully confirmed. Some funds may already have been returned. Check wallet activity before reviewing a fresh plan; do not repeat the old execution.\n%1").arg(error)
                     : error);
             });
@@ -14331,6 +14420,10 @@ private:
     QPushButton* m_release_task{nullptr};
     QPushButton* m_task_continue{nullptr};
     QString m_guided_task;
+    QString m_failed_guided_task;
+    uint64_t m_guided_generation{0};
+    int m_guided_busy_retries{0};
+    bool m_guided_waiting_for_provider{false};
     QString m_guided_review_text;
     bool m_guided_start_after{false};
     QWidget* m_connection_page{nullptr};
