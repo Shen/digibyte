@@ -4,13 +4,66 @@ Scope: the working `feature/paymaster-ux-navigation` candidate, including the
 subsequent client fixes. This is a regression review of GUI/Core transitions,
 not release acceptance or proof that every Paymaster workflow is defect-free.
 
+## Original-code boundary review (2026-10-07)
+
+Comparison: local `upstream/release/v9.26.7` at `d7265fb05e` against the
+integration tree after `e05f4aa3ce`. This is a source-boundary review; upstream
+release/portability changes are not presumed to be Paymaster changes. In
+particular `init.cpp` has different line endings in that upstream blob: use
+`git diff --ignore-space-at-eol` to distinguish line-ending churn from logic.
+
+Three self-contained implementations now live in Paymaster-owned files:
+
+| Previous location | Current boundary | Preserved behavior |
+|---|---|---|
+| `digibyte-cli.cpp`: operator menus, setup, status and monitoring | `paymaster/cli.cpp/h`, invoked with explicit arguments, RPC host and a per-invocation transport callback | Existing HTTP transport, argument conversion, secret cleansing, wallet/node binding, confirmations, finite budgets and monitoring. No second RPC client or global callback. |
+| `qt/walletmodel.cpp`: Paymaster signing orchestration | `qt/paymasterwallet.cpp/h`, shared by the provider and client | Worker lock inspection/relocking, native unlock dialog, generation checks and shared `UnlockContext`. The generic model exposes only a retained-interface accessor; its DD async readers remain shared. |
+| `wallet/load.cpp/h`: Paymaster startup reconciliation and recurring service implementation | Existing `wallet/rpc/paymaster_integration.cpp` and `paymaster.h`; loader retains initialization and scheduler calls | Same per-wallet startup order, 30-second maintenance and 1-second provider tick, two-wallet/four-message service bound and evidence pruning only after all wallets succeed. |
+
+The CLI helper/workflow bodies were compared after accounting for indentation
+and explicit instance context; the four maintenance/scheduler function bodies
+were also compared unchanged. These are moves with narrow adapters, not copied
+implementations. The generic `wallet/load.h` matches the upstream base again.
+Two unused synchronous balance convenience getters were removed from
+`WalletModel`; current views already consume the shared balance snapshot.
+
+The remaining shared-code modifications were reviewed by boundary:
+
+- **Coin selection, balance and rebroadcast** (`wallet/spend.cpp`,
+  `digidollarwallet.cpp`, `wallet.cpp`): ordinary sends must respect Paymaster
+  reservations and durable commits too. A check only in the Paymaster UI/RPC
+  would leave ordinary wallet callers unprotected.
+- **Wallet lifetime and database** (`walletmodel`, `walletdb`, database backends):
+  shared ownership keeps asynchronous reads/unlock leases alive after model
+  closure; wallet-batch hooks preserve atomic ordinary-wallet/Paymaster writes.
+  Record implementations are already in `paymasterdb.cpp`. Duplicating batch or
+  unlock implementations would increase drift and risk.
+- **DD read/display paths** (Overview, Send, Receive, history): their coalesced
+  background reads prevent the demonstrated lock waits even when the Paymaster
+  page is hidden. Moving one copy into each Paymaster widget would reintroduce
+  scans, blocked original pages or inconsistent wallet snapshots.
+- **Transport and registration** (`net*`, protocol, init, RPC registration):
+  dedicated connection admission, dispatch, privacy/deadline policy and lifecycle
+  need hooks into the existing transport. Reusing it avoids a second SOCKS/P2P
+  implementation. Wire versions, limits and authorization were not changed.
+- **Native UI integration** (options, wallet view, RPC console, theme): existing
+  settings/backup paths, connection labels and secret-history filtering remain
+  centralized. A separate Paymaster copy would behave differently from the app.
+- **Compiler/release integration**: existing platform compatibility and upstream
+  DD/consensus/oracle changes are outside this extraction; no blanket reversion
+  was made based only on filenames or diff size.
+
+Targeted verification and the operator's full-build command are recorded in the
+[test runbook](../digidollar-paymaster-testing.md). No live wallet was modified.
+
 ## UI blocking audit (2026-10-07)
 
 This follow-up reviews `integration/paymaster-v9.26.7` after `b5f9395301`,
 covering all provider destinations, setup and client Paymaster paths. Scope is
 UI-thread lock/I/O waits, not a new payment-protocol audit or proof that every
-live pause is gone. Changes concentrate on Paymaster Qt code; the only shared
-model addition is a Paymaster-specific signing bridge. No Core lock, consensus,
+live pause is gone. Changes concentrate on Paymaster Qt code; the signing bridge
+originally added to `WalletModel` now lives in `qt/paymasterwallet.cpp` (see the
+boundary review above). No Core lock, consensus,
 payment authorization or RPC/CLI semantics change.
 
 | Surface | Inspection/result |

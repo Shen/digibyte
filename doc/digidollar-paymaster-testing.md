@@ -1,13 +1,64 @@
 # Paymaster build and test runbook
 
+## Original-code boundary extraction (2026-10-07)
+
+The [boundary review](design/paymaster-flow-audit.md#original-code-boundary-review-2026-10-07)
+compares the integration against local upstream `release/v9.26.7`. CLI operator
+workflows, Qt signing orchestration and wallet-maintenance implementation moved
+to Paymaster modules. Shared validation, transport, unlock leases and atomic
+wallet protection were retained; two unused balance convenience getters were
+removed. No RPC contract, fee limit, record version or consensus rule changed.
+
+Validation on the completed implementation:
+
+- Selected MSVC compilation of the affected CLI, Qt, wallet and test translation
+  units passed, with isolated CLI/Core-test/Qt-test links. The CLI project was
+  regenerated from its Makefile source list; the tracked Qt project was updated.
+- `paymaster_setup_tests`: **23 cases passed**, including real CLI adapter
+  dispatch, exact wallet selection, read-only status, forbidden input modes and
+  no retry after a failed status reply.
+- `paymaster_wallet_load_tests`: **7 cases passed**. Together the two Core groups
+  passed **434 assertions**; no other Core groups were run.
+- **52 targeted Qt cases passed**: signing contention/lifecycle (1), unlock lease
+  after model close (1), two-stage authorization (1), review cancellation (20),
+  command page locks (1), confirmation wallet binding (4), guided capital tasks
+  (24). The signing preflight again returned in **0 ms** with `cs_wallet` held.
+- **8 isolated CLI smoke checks passed** against a loopback fixture: Paymaster
+  status over the existing HTTP path with an encoded wallet name, ordinary RPC
+  dispatch, missing wallet, forbidden named mode, nonterminal setup, standalone
+  watch, conflicting modes and help. No operator node or real wallet was used.
+- Mechanical comparison preserved the CLI helper/workflow bodies after explicit
+  context routing and indentation, and the four scheduling/maintenance bodies.
+  `git diff --check` passed.
+
+Reports are the workspace-local `original-code-*` files under
+`build_msvc/paymaster-refresh-check/reserve-presets/`. The normal application EXE
+was not rebuilt/replaced, and full builds/suites remain delegated to the operator.
+Using the installed MSVC 14.43, Qt 5.15.10 and cached static dependencies, close
+the applications and active CLI calls normally, then run:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+if ($LASTEXITCODE -ne 0) { throw 'Build or full Paymaster Qt suite failed' }
+.\build_msvc\x64\Release\test_digibyte.exe --run_test=paymaster_setup_tests,paymaster_wallet_load_tests
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster boundary regressions failed' }
+```
+
+Allow minutes for the incremental build and several minutes for the full Qt
+group. Success requires build/test exit 0, zero Qt failures and both Core groups
+passing. Repository/src, architecture/maps, contribution, developer locking,
+Qt/test, build, translation and formatting guidance were applied.
+
 ## Paymaster-wide UI wait audit (2026-10-07)
 
 The [scope and findings](design/paymaster-flow-audit.md#ui-blocking-audit-2026-10-07)
 cover every provider destination, setup, client offers/send/recovery, and shared
 DD/native boundaries. Two further Paymaster-owned waits were corrected: signing
 preflight/temporary relocking and final accounting CSV serialization/file I/O.
-The only shared model addition is `executePaymasterSigningRpcAsync`; existing
-native wallet operations, Core locks and financial authorization are unchanged.
+The signing bridge initially added as `executePaymasterSigningRpcAsync` now
+lives in `qt/paymasterwallet.cpp` as `PaymasterQt::ExecuteSigningRpcAsync`.
+Existing native wallet operations, Core locks and financial authorization are unchanged.
 
 The encrypted-wallet preflight blocked Qt for **502 ms** before the fix, until
 the regression's 500-ms watchdog released `cs_wallet`. It returned in **0 ms**

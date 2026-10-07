@@ -336,9 +336,10 @@ explains why these still require separate equivalence review.
 | Recovery, reconciliation and pruning | [recovery.cpp](../src/paymaster/recovery.cpp), [paymasterstore_recovery.cpp](../src/wallet/paymasterstore_recovery.cpp), [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
 | Provider policies, budgets and liquidity | [provider.cpp](../src/paymaster/provider.cpp), [paymasterprovider.cpp](../src/wallet/paymasterprovider.cpp), [paymaster_provider.cpp](../src/wallet/rpc/paymaster_provider.cpp) |
 | Request/submit/result handlers and runtime | [paymaster_processing.cpp](../src/wallet/rpc/paymaster_processing.cpp), [paymaster_runtime.cpp](../src/wallet/rpc/paymaster_runtime.cpp), [paymaster_integration.cpp](../src/wallet/rpc/paymaster_integration.cpp) |
+| CLI operator workflow | [cli.cpp](../src/paymaster/cli.cpp), per-invocation transport callback from `digibyte-cli.cpp`; shared forms/validation remain in `paymaster/setup.cpp` |
 | Wallet signing bridge | [paymasterpsbt.cpp](../src/wallet/paymasterpsbt.cpp), [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp) |
 | Existing wallet integration and protection | [digidollarwallet.cpp](../src/wallet/digidollarwallet.cpp), [spend.cpp](../src/wallet/spend.cpp), [load.cpp](../src/wallet/load.cpp) |
-| Qt | [paymastersendwidget.cpp](../src/qt/paymastersendwidget.cpp), embedded by [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), embedded through [paymasterwidget.h](../src/qt/paymasterwidget.h), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
+| Qt | [paymastersendwidget.cpp](../src/qt/paymastersendwidget.cpp), embedded by [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), shared signing adapter in [paymasterwallet.cpp](../src/qt/paymasterwallet.cpp), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
 
 The high-level entry is `senddigidollar` in
 [src/rpc/digidollar.cpp](../src/rpc/digidollar.cpp); the optional seventh `options`

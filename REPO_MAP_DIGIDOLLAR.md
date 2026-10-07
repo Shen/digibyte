@@ -826,9 +826,9 @@ or chain parameters.
   acknowledgement, and provider status.
 - `paymaster_processing.cpp` owns the bounded provider handlers for result,
   submit, Capacity, quote, and recovery messages.
-- `paymaster_runtime.cpp` owns provider start/stop and the automatic service
-  scheduler; `paymaster_integration.cpp` owns wallet reconciliation and durable
-  equivocation-inbox maintenance.
+- `paymaster_runtime.cpp` owns provider start/stop and automatic service cycles;
+  `paymaster_integration.cpp` owns startup reconciliation, bounded recurring
+  maintenance/service scheduling and durable equivocation-inbox maintenance.
 - Client RPCs expose offers, bounded persistent-session listing and exact
   status/resolution, reputation, quote advancement, role-limited PSBT
   processing, submit, and result handling. Refresh responses include one
@@ -1525,11 +1525,8 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/qt/walletmodel.cpp/h
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
-  operations so wallet unlock contexts are not retained across network waits.
-- `executePaymasterSigningRpcAsync()` additionally reads encryption state and
-  releases temporary unlock authority off Qt. Wallet-bound predicates guard the
-  existing unlock dialog and dispatch; relocking precedes result delivery and
-  survives model closure. Native non-Paymaster unlock behavior is unchanged.
+  and DD reads. `walletShared()` retains the wallet interface for bounded jobs.
+  Paymaster-specific signing orchestration lives in `qt/paymasterwallet.cpp`.
 - `getDigiDollarReceiveRequestsAsync()` reads stored receive requests on a worker
   with a shared wallet reference, returning the snapshot on the model's Qt thread.
 - `getDigiDollarBalanceAsync()` reads Core's spendable DD snapshot away from
@@ -1541,6 +1538,14 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `SerializeDigiDollarHistory()` preserves wallet status, including `expired_mint`,
   across the asynchronous history bridge; both overview and transaction history
   render that upstream status.
+
+### src/qt/paymasterwallet.cpp/h
+- `PaymasterQt::ExecuteSigningRpcAsync()` reads encryption state, signs through
+  the existing RPC path and releases temporary unlock authority off Qt.
+  Wallet-bound predicates guard the native unlock dialog and dispatch; relocking
+  precedes result delivery and survives model closure. Both client and provider
+  reuse this adapter and `WalletModel::UnlockContext`.
+- `RequestUnlock()` preserves the deterministic injected test transport path.
 
 ### src/qt/digidollarreceivewidget.cpp/h
 - `DigiDollarReceiveWidget` → generate/display DD receive addresses
@@ -2045,10 +2050,12 @@ Current oracle/MuSig2 fuzz source inventory:
 - `src/qt/test/paymasterwidgettests.cpp`: actual shared diagnostic-to-Qt coverage
   for fee/funding/confirmation/policy/unknown waits, cancellation confirmation,
   privacy, wallet switching and a concurrent saved-transaction result.
-- `src/digibyte-cli.cpp`: interactive `-paymastersetup`, explicit wallet selection,
+- `src/paymaster/cli.cpp/h`: interactive `-paymastersetup`, explicit wallet selection,
   local no-echo operating unlock, optional DGB/DD funding addresses and a
   wallet-bound funding/start monitor, operational actions, `-paymasterstatus`
-  and `-watch`. `InspectSetupProgress` in `paymaster/setup.cpp` classifies
+  and `-watch`. `digibyte-cli.cpp` supplies the existing transport through a
+  per-invocation callback; there is no second HTTP/RPC client or global callback.
+  `InspectSetupProgress` in `paymaster/setup.cpp` classifies
   funding, confirmed reserves, blocked requirements and actual start completion.
 - `src/qt/paymasterwidget.cpp`: common setup adapter, operator overview, node
   configuration review, persistent pause/resume, continuous-by-default or timed

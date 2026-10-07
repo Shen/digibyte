@@ -46,6 +46,11 @@ exports no longer serialize or write the complete file on Qt's event thread.
 Shared native backup/password dialogs and other original DD actions still contain
 synchronous work; see the [broader audit](../design/paymaster-flow-audit.md#ui-blocking-audit-2026-10-07).
 
+Paymaster CLI workflows, Qt signing orchestration and wallet-maintenance
+scheduling have been moved to Paymaster-owned modules. Existing RPC transport,
+setup validation, unlock leases and wallet lifecycle hooks are reused; no
+payment policy, wire format or wallet-data migration changes.
+
 ## Send DD responsiveness
 
 Opening Send DD and refreshing its balance no longer wait for Paymaster wallet

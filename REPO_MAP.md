@@ -228,9 +228,9 @@ forwards explicit `retry_transport` requests without changing financial authorit
 - Standalone utility that loads and validates the blockchain database without full node functionality
 
 ### src/digibyte-cli.cpp
-- Paymaster setup: seven guided stages, explained selections and human currency
-  units, reviewed 24/7 defaults for new providers, preserved saved settings and
-  bounded funding/start monitoring; shared form logic lives in `paymaster/setup`.
+- Dispatches Paymaster modes to `paymaster/cli.cpp`, reusing the existing RPC
+  transport and argument conversion. Guided stages, approvals and monitoring
+  live there; shared form/validation logic stays in `paymaster/setup`.
 - Command-line RPC client that sends JSON-RPC requests to a running digibyted node
 
 ### src/digibyted.cpp
@@ -1917,6 +1917,9 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 
 ### src/wallet/load.cpp / .h
 - `LoadWallets()`, `StartWallets()`, `FlushWallets()`, `StopWallets()` → wallet lifecycle hooks called from `init.cpp`
+- `StartWallets()` invokes Paymaster initialization and scheduler registration;
+  their implementation/declarations live in `wallet/rpc/paymaster_integration.cpp`
+  and `wallet/rpc/paymaster.h`, not in the generic wallet loader.
 
 ### src/wallet/receive.cpp / .h
 - `IsMine()`, `GetCredit()`, `GetDebit()`, `GetChange()`, `CachedTxIs*` → balance/ownership accounting for received UTXOs

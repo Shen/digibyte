@@ -139,11 +139,13 @@ retaining the last wallet-bound display while Paymaster holds wallet locks.
 Refreshes are coalesced; wallet generations discard detached replies. Unknown
 or failed balances disable new payment actions. Core rechecks funds and financial
 authorization through the unchanged send paths; the display is not authority.
-Paymaster signing uses a dedicated `WalletModel` bridge: lock-state inspection,
+Paymaster signing uses the adapter in `qt/paymasterwallet.cpp`: lock-state inspection,
 RPC execution and temporary relocking run on workers. The existing unlock dialog
 stays on Qt; wallet generation is checked before prompting and dispatch. The
 retained wallet is relocked before a result handler runs, including RPC failure
-or model closure. Other wallet actions retain their original unlock interface.
+or model closure. It reuses `WalletModel::UnlockContext` and a retained wallet
+interface instead of adding another unlock implementation. Other wallet actions
+retain their original unlock interface.
 Paymaster accounting export also writes and atomically replaces its CSV on a
 worker. Wallet/privacy changes cancel writing until replacement starts; an
 already committing export finishes, and detached results do not update the UI.
@@ -1979,6 +1981,14 @@ There is no consensus, wire-protocol or wallet-format change. See the
 [operator guide and open acceptance](doc/digidollar-paymaster-operator.md).
 
 ## Paymaster guided operator tasks
+
+Operator CLI orchestration is owned by `paymaster/cli.cpp`; `digibyte-cli.cpp`
+passes its existing authenticated transport into the per-invocation adapter.
+Both front ends continue using the same setup validation and finite profiles.
+Wallet startup reconciliation and recurring maintenance/service scheduling live
+in `wallet/rpc/paymaster_integration.cpp`. The generic wallet loader calls these
+at the original lifecycle points, preserving startup order, intervals and bounds.
+See the [original-code boundary review](doc/design/paymaster-flow-audit.md#original-code-boundary-review-2026-10-07).
 
 The Qt provider panel has Operation, Activity & finances and Settings.
 Provider-wallet backup controls live only in Settings / Wallet & backup;
