@@ -482,6 +482,15 @@ the existing public response schemas. Before retirement execution, reconcile
 the maintenance journal so already-confirmed setup steps do not incorrectly
 block retirement as pending; genuinely pending setup still blocks it.
 
+`rebalancepaymasterpool` accepts an optional positive `maximum_fee_satoshis`
+for mixed DD/DGB retirement as well as DGB-only retirement. The plan binds this
+per-transaction ceiling and reports the combined maximum for the selected asset
+transactions. Both signed transaction fees are checked before the first commit.
+Optional `expected_liquidity_updated_at` requires that saved liquidity revision
+and its exact four targets under the wallet lock. A changed revision or target
+requires a fresh preview. Calls without these options retain their existing
+behavior; retirement does not change recurring refill authorization.
+
 
 Regression details and runtime acceptance are tracked in
 [the edge-case review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).

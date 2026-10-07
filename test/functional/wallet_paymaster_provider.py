@@ -122,6 +122,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
     def add_options(self, parser):
         self.add_wallet_options(parser, legacy=False)
+        parser.add_argument("--pool-reduction-only", action="store_true",
+                            help="Run setup and bounded pool-retirement checks, then stop")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -162,6 +164,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "funding_models": ["sponsored"],
             "sponsorship_scope": "public",
             "fee_rate_bps": 0,
+            "maximum_user_paid_service_fee_cents": 0,
             "min_amount_cents": 100,
             "max_amount_cents": 100000,
             "quote_ttl": 60,
@@ -427,11 +430,40 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         dgb_larger_cap = cli.rebalancepaymasterpool(dict(dgb_target, maximum_fee_satoshis=1000000))
         assert dgb_larger_cap["plan_id"] != dgb_preview["plan_id"]
         assert_raises_rpc_error(-8, "PAYMASTER_RETIREMENT_FEE_LIMIT",
-                                cli.rebalancepaymasterpool, dict(minimum_target, maximum_fee_satoshis=1))
+                                cli.rebalancepaymasterpool, dict(minimum_target, maximum_fee_satoshis=0))
         assert_raises_rpc_error(-4, "PAYMASTER_RETIREMENT_FEE_LIMIT",
                                 cli.rebalancepaymasterpool,
                                 dict(dgb_target, execute=True, plan_id=dgb_preview["plan_id"]))
         assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
+
+        # Mixed DD/DGB retirement has the same explicit transaction fee cap.
+        # No part of the pool may be committed when that cap is too small.
+        mixed_tiny = cli.rebalancepaymasterpool(dict(minimum_target, maximum_fee_satoshis=1))
+        assert_equal(mixed_tiny["maximum_total_fee_satoshis"], 2)
+        assert_raises_rpc_error(-4, "PAYMASTER_RETIREMENT_FEE_LIMIT", cli.rebalancepaymasterpool,
+                                dict(minimum_target, maximum_fee_satoshis=1, execute=True, plan_id=mixed_tiny["plan_id"]))
+        assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
+
+        target_values = {
+            "automatic_replenishment": False, "paid_maintenance_approved": False,
+            "target_admission_dgb": 3, "target_operational_dgb": 1,
+            "target_admission_carriers": 3, "target_operational_carriers": 1,
+            "maximum_maintenance_fee_per_transaction_satoshis": 50000000,
+            "maximum_maintenance_fee_per_hour_satoshis": 200000000,
+            "maximum_maintenance_fee_per_day_satoshis": 1000000000,
+        }
+        saved_target = cli.setpaymasterliquiditypolicy(target_values)
+        bounded_target = dict(minimum_target, maximum_fee_satoshis=50000000,
+                              expected_liquidity_updated_at=saved_target["updated_at"])
+        bounded_preview = cli.rebalancepaymasterpool(bounded_target)
+        assert_equal(bounded_preview["maximum_total_fee_satoshis"], 100000000)
+        assert cli.rebalancepaymasterpool(dict(bounded_target, maximum_fee_satoshis=75000000))["plan_id"] != bounded_preview["plan_id"]
+        target_values["maximum_maintenance_fee_per_hour_satoshis"] = 300000000
+        revised_target = cli.setpaymasterliquiditypolicy(target_values, saved_target["updated_at"])
+        assert_raises_rpc_error(-8, "PAYMASTER_LIQUIDITY_POLICY_CHANGED", cli.rebalancepaymasterpool,
+                                dict(bounded_target, execute=True, plan_id=bounded_preview["plan_id"]))
+        assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
+        bounded_target["expected_liquidity_updated_at"] = revised_target["updated_at"]
 
         rebalance_preview = cli.rebalancepaymasterpool(minimum_target)
         assert_equal(rebalance_preview["executed"], False)
@@ -442,13 +474,14 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(rebalance_preview["retired_dgb_satoshis"], 40000000)
         assert_equal(rebalance_preview["retired_carrier_cents"], 200)
 
-        minimum_target["execute"] = True
-        minimum_target["plan_id"] = rebalance_preview["plan_id"]
-        rebalanced = cli.rebalancepaymasterpool(minimum_target)
+        bounded_preview = cli.rebalancepaymasterpool(bounded_target)
+        rebalanced = cli.rebalancepaymasterpool(dict(bounded_target, execute=True, plan_id=bounded_preview["plan_id"]))
         assert_equal(rebalanced["executed"], True)
         assert_equal(len(rebalanced["dd_txid"]), 64)
         assert_equal(len(rebalanced["dgb_txid"]), 64)
         assert_equal(rebalanced["network_fee_satoshis"] > 0, True)
+        assert 0 < rebalanced["dd_network_fee_satoshis"] <= 50000000
+        assert 0 < rebalanced["network_fee_satoshis"] <= 50000000
         self.generatetoaddress(node, 1, wallet.getnewaddress())
 
         # Both asset steps keep their finance-recovery marker in the wallet
@@ -480,12 +513,13 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(minimum_ready["pool"]["operational_carriers"], 1)
         assert_equal(minimum_ready["pool"]["complete_operational_slots"], 1)
 
-        minimum_target.pop("execute")
-        minimum_target.pop("plan_id")
         rebalance_retry = cli.rebalancepaymasterpool(minimum_target)
         assert_equal(rebalance_retry["executed"], False)
         assert_equal(rebalance_retry["retired_dgb_satoshis"], 0)
         assert_equal(rebalance_retry["retired_carrier_cents"], 0)
+
+        if self.options.pool_reduction_only:
+            return
 
         self.log.info("Complete a discovered USER_PAID transfer from a client without DGB")
         policy["funding_models"] = ["user_paid"]
