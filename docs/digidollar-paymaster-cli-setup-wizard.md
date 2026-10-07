@@ -1,7 +1,8 @@
 # DigiDollar Paymaster CLI Setup Wizard
 
 > **Historical proposal, preserved 2026-10-01.** The current integration branch
-> implements `digibyte-cli -paymastersetup` in `src/digibyte-cli.cpp`.
+> implements `digibyte-cli -paymastersetup` in `src/paymaster/cli.cpp`, called
+> through the existing transport in `src/digibyte-cli.cpp`.
 > Use the [current operator guide](../doc/digidollar-paymaster.md) for supported
 > behavior. The implementation-status statements and design below describe the
 > earlier source revisions explicitly named there, not the current branch.

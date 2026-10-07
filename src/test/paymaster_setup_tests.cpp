@@ -1,8 +1,11 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
 #include <boost/test/unit_test.hpp>
+#include <common/args.h>
+#include <paymaster/cli.h>
 #include <paymaster/setup.h>
 #include <consensus/amount.h>
+#include <iostream>
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
@@ -36,6 +39,64 @@ SetupChoices Choices()
 }
 } // namespace
 BOOST_AUTO_TEST_SUITE(paymaster_setup_tests)
+BOOST_AUTO_TEST_CASE(cli_status_uses_the_selected_wallet_without_mutations)
+{
+    ArgsManager args;
+    args.ForceSetArg("-rpcwallet", "provider");
+    std::ostringstream output;
+    struct CaptureOutput {
+        std::streambuf* previous;
+        explicit CaptureOutput(std::ostream& target) : previous(std::cout.rdbuf(target.rdbuf())) {}
+        ~CaptureOutput() { std::cout.rdbuf(previous); }
+    } capture{output};
+    int calls{0};
+    auto snapshot = Snapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("service_state", "stopped");
+    UniValue liquidity{UniValue::VOBJ};
+    liquidity.pushKV("maintenance_state", "ready");
+    liquidity.pushKV("policy", SetupDefaultLiquidity(true));
+    for (const auto* key : {"maintenance_fee_reserved_satoshis", "maintenance_fee_spent_last_hour_satoshis", "maintenance_fee_spent_last_day_satoshis"})
+        liquidity.pushKV(key, 0);
+    provider.pushKV("liquidity", liquidity);
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("diagnostics", UniValue{UniValue::VARR});
+    const CliRpc rpc = [&](const std::string& method, const UniValue& params, const std::optional<std::string>& wallet) {
+        ++calls;
+        BOOST_CHECK_EQUAL(method, "getpaymasteroperatorinfo");
+        BOOST_CHECK(params.isArray() && params.empty());
+        BOOST_REQUIRE(wallet.has_value());
+        BOOST_CHECK_EQUAL(*wallet, "provider");
+        return snapshot;
+    };
+    BOOST_CHECK_EQUAL(RunCli(false, args, "127.0.0.1", rpc), 0);
+    BOOST_CHECK_EQUAL(calls, 1);
+    BOOST_CHECK_EQUAL(output.str(), "RPC node: 127.0.0.1 (configured RPC port)\n" + OperatorSummary(snapshot));
+}
+
+BOOST_AUTO_TEST_CASE(cli_rejects_ambiguous_input_and_does_not_retry_failed_status)
+{
+    ArgsManager args;
+    int calls{0};
+    const CliRpc rpc = [&](const std::string&, const UniValue&, const std::optional<std::string>&) -> UniValue {
+        ++calls;
+        throw std::runtime_error("status reply unavailable");
+    };
+    BOOST_CHECK_EXCEPTION(RunCli(false, args, "127.0.0.1", rpc), std::runtime_error,
+        [](const auto& error) { return std::string{error.what()} == "Select the wallet explicitly with -rpcwallet"; });
+    args.ForceSetArg("-rpcwallet", "provider");
+    for (const auto* option : {"-named", "-stdin", "-stdinwalletpassphrase"}) {
+        args.ForceSetArg(option, "1");
+        BOOST_CHECK_EXCEPTION(RunCli(false, args, "127.0.0.1", rpc), std::runtime_error,
+            [](const auto& error) { return std::string{error.what()}.find("cannot be combined") != std::string::npos; });
+        args.ForceSetArg(option, "0");
+    }
+    BOOST_CHECK_EQUAL(calls, 0);
+    BOOST_CHECK_EXCEPTION(RunCli(false, args, "127.0.0.1", rpc), std::runtime_error,
+        [](const auto& error) { return std::string{error.what()} == "status reply unavailable"; });
+    BOOST_CHECK_EQUAL(calls, 1);
+}
+
 BOOST_AUTO_TEST_CASE(finite_profiles_do_not_authorize_maintenance)
 {
     const auto ordinary = SetupSafetyProfile(false, 20000000);
