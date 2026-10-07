@@ -1,5 +1,26 @@
 # Paymaster build and test runbook
 
+## Reserve UI full-suite follow-up (2026-10-07)
+
+At `1559fccd72`, the operator's full Windows solution build succeeded. The
+Paymaster Qt suite reported 369 passed and six failed entries. Five failures
+used the former 0.20-DGB setup proposal in their RPC fixtures or expectations;
+the sixth still expected the old settings destination and reserve-repair text.
+Those tests now check the 0.50-DGB proposal, Funds & reserves navigation and
+the current requirement for explicit restoration approval.
+
+A new regression also reproduced an actual UI inconsistency: switching wallets
+reset the one-time setup draft to 0.20 DGB. Construction and wallet reset now
+share the 0.50-DGB proposal. This does not approve spending or alter saved limits.
+
+Selected MSVC compiles and a separate native Qt test link passed. All 39 focused
+cases passed (excluding initialization/cleanup), covering guided restoration,
+preparation across refresh, external readiness, default/approval guards,
+existing fee recovery, reserve reduction and presets. The wallet-reset assertion
+failed before the product fix and passed afterward. A complete suite rerun
+after this correction remains operator work; the earlier six failures are not
+reported as a passing full-suite result.
+
 ## Official v9.26.7 source integration (2026-10-06)
 
 Branch `integration/paymaster-v9.26.7` merges official `d7265fb05e26` with the

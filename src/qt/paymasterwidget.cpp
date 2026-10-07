@@ -104,6 +104,7 @@ constexpr size_t MAX_PAYMASTER_RPC_TEXT_BYTES{1024};
 constexpr size_t MAX_PAYMASTER_POOL_ENTRIES{8192};
 constexpr size_t MAX_PAYMASTER_FINANCE_DAYS{366};
 constexpr size_t MAX_PAYMASTER_FINANCE_PAGE_EVENTS{250};
+constexpr qint64 DEFAULT_PAYMASTER_PREPARATION_FEE{50000000};
 
 enum class PaymasterSetupMode {
     UNDECIDED,
@@ -3388,7 +3389,7 @@ public:
         preparation_help->setWordWrap(true);
         preparation_layout->addWidget(preparation_help);
         auto* preparation_fee_form = new QFormLayout();
-        m_preparation_fee = new DgbAmountLineEdit(50000000, preparation);
+        m_preparation_fee = new DgbAmountLineEdit(DEFAULT_PAYMASTER_PREPARATION_FEE, preparation);
         m_preparation_fee->setObjectName("paymasterPoolPreparationFee");
         preparation_fee_form->addRow(tr("Maximum fee per setup transaction (DGB):"), m_preparation_fee);
         preparation_layout->addLayout(preparation_fee_form);
@@ -4619,7 +4620,7 @@ public:
         m_pool_preparation_status->clear();
         m_pool_preparation_status->hide();
         m_cancel_preparation->hide();
-        m_preparation_fee->setSatoshis(20000000);
+        m_preparation_fee->setSatoshis(DEFAULT_PAYMASTER_PREPARATION_FEE);
         m_activity_action_result->setText(
             tr("No manual operation has been run for this wallet."));
         m_activity_summary->setText(

@@ -541,6 +541,16 @@ void PaymasterWidgetTests::paymasterLiquidityPolicyDefaultsAndApprovalGuard()
     QVERIFY(save->toolTip().contains(QStringLiteral("does not start a stopped provider")));
     QVERIFY(primary_save->toolTip().contains(
         QStringLiteral("may immediately refill")));
+
+    // The one-time setup draft must use the same proposal after a wallet
+    // change, without carrying the previous wallet's draft or fee approval.
+    auto* preparation_fee = tab.findChild<QLineEdit*>("paymasterPoolPreparationFee");
+    QVERIFY(preparation_fee);
+    QCOMPARE(preparation_fee->text(), QStringLiteral("0.50000000"));
+    preparation_fee->setText(QStringLiteral("0.12500000"));
+    tab.setWalletModel(nullptr);
+    QCOMPARE(preparation_fee->text(), QStringLiteral("0.50000000"));
+    QVERIFY(!approved->isChecked());
 }
 
 void PaymasterWidgetTests::paymasterLiquidityPolicySavePersistsVisibleValues()
@@ -1076,8 +1086,7 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
         };
         verify_start_action(liquidity_action);
         operation_action->click();
-        QCOMPARE(operator_tabs->currentWidget()->objectName(), QStringLiteral("paymasterSettingsPages"));
-        QCOMPARE(tab.findChild<QStackedWidget*>("paymasterSettingsPages")->currentWidget()->objectName(), QStringLiteral("paymasterAutomationPage"));
+        QCOMPARE(operator_tabs->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
         operator_tabs->setCurrentIndex(0);
     }
 
@@ -1155,8 +1164,9 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
     tab.setPaymasterReadinessStatusForTesting(incomplete_targets);
     QVERIFY(provider_status->text().contains(
         QStringLiteral("liquidity change")));
-    QVERIFY(next_step->text().contains(
-        QStringLiteral("saved liquidity targets")));
+    QVERIFY2(next_step->text().contains(
+        QStringLiteral("saved DD reserve capacity is too low")), qPrintable(next_step->text()));
+    QVERIFY(next_step->text().contains(QStringLiteral("only with your approval")));
     QVERIFY(operation->text().contains(
         QStringLiteral("payment-carrier target")));
     QVERIFY(!operation_action->text().startsWith(QStringLiteral("Start")));
@@ -9644,7 +9654,7 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
             throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
         UniValue result;
         result.read(R"({"accepted":false,"cancelled":false,"executed":false,"preparation":[],
-            "maximum_fee_satoshis":20000000,"maximum_total_fee_satoshis":20000000,
+            "maximum_fee_satoshis":50000000,"maximum_total_fee_satoshis":50000000,
             "admission_dgb_slots":3,"operational_dgb_slots":1,"admission_carrier_slots":3,"operational_carrier_slots":1,
             "missing_admission_dgb_slots":0,"missing_operational_dgb_slots":0,
             "missing_admission_carrier_slots":0,"missing_operational_carrier_slots":1,
@@ -9659,7 +9669,7 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
         result.pushKV("accepted", execute);
         if (execute) {
             if (params[0].find_value("plan_id").get_str() != plan ||
-                params[0].find_value("maximum_fee_satoshis").getInt<int64_t>() != 20000000)
+                params[0].find_value("maximum_fee_satoshis").getInt<int64_t>() != 50000000)
                 throw std::runtime_error("Reviewed scope changed");
             UniValue pending;
             pending.read(R"([{"state":"pending_creation","error":"","confirmations":0,"required_confirmations":1}])");
@@ -9688,6 +9698,7 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
         ++confirmations;
         const QString review = dialog->text();
         const bool amounts_visible = review.contains("1.00 DD");
+        QVERIFY(review.contains("0.50000000 DGB"));
         if (repair) {
             QVERIFY(review.contains(QString::fromUtf8("Payment reserves: 0 → 1")));
             QVERIFY(review.contains("Unchanged maintenance limits"));
@@ -10625,7 +10636,7 @@ void PaymasterWidgetTests::paymasterPreparationContinuesAfterRefresh()
     }
     QCOMPARE(previews, 1);
     QVERIFY(!params[0].find_value("execute").isTrue());
-    const int64_t ceiling = scenario == "start_only" ? 20000000 : 50000000;
+    const int64_t ceiling{50000000};
     QCOMPARE(params[0].find_value("maximum_fee_satoshis").getInt<int64_t>(), ceiling);
     UniValue preview;
     QVERIFY(preview.read(R"({"accepted":false,"cancelled":false,"executed":false,"preparation":[],
