@@ -2894,7 +2894,7 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
 }
 
 void PaymasterSendWidget::executePaymasterRpcAsync(
-    std::string command, UniValue params, WalletModel::RpcCallback callback)
+    std::string command, UniValue params, WalletModel::RpcCallback callback, bool needs_unlock)
 {
     const uint64_t wallet_generation = m_paymasterWalletGeneration;
     QPointer<PaymasterSendWidget> guard{this};
@@ -2909,6 +2909,20 @@ void PaymasterSendWidget::executePaymasterRpcAsync(
             }
             callback(std::move(result), std::move(error));
         };
+    // Preserve deterministic injected transports; the real signing bridge is
+    // tested separately with encrypted wallets and actual Core lock contention.
+    if (needs_unlock && (m_paymasterAsyncRpcExecutorForTesting || m_paymasterRpcExecutorForTesting) && m_walletModel) {
+        auto unlock = m_walletModel->requestUnlockForAsync();
+        if (!guard || guard->m_paymasterWalletGeneration != wallet_generation) return;
+        if (!unlock->isValid()) {
+            wallet_bound_callback(UniValue{}, QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED"));
+            return;
+        }
+        wallet_bound_callback = [unlock = std::move(unlock), callback = std::move(wallet_bound_callback)](UniValue result, QString error) mutable {
+            unlock.reset();
+            callback(std::move(result), std::move(error));
+        };
+    }
     if (m_paymasterAsyncRpcExecutorForTesting) {
         try {
             m_paymasterAsyncRpcExecutorForTesting(
@@ -2944,9 +2958,13 @@ void PaymasterSendWidget::executePaymasterRpcAsync(
         wallet_bound_callback(UniValue{}, DigiDollarSendWidget::tr("Wallet is not available"));
         return;
     }
-    m_walletModel->executeRpcAsync(
-        std::move(command), std::move(params),
-        std::move(wallet_bound_callback));
+    if (needs_unlock) {
+        m_walletModel->executePaymasterSigningRpcAsync(std::move(command), std::move(params),
+            [guard, wallet_generation] { return guard && guard->m_walletModel && guard->m_paymasterWalletGeneration == wallet_generation; },
+            std::move(wallet_bound_callback));
+    } else {
+        m_walletModel->executeRpcAsync(std::move(command), std::move(params), std::move(wallet_bound_callback));
+    }
 }
 
 void PaymasterSendWidget::executePaymasterTransfer(
@@ -2969,20 +2987,9 @@ void PaymasterSendWidget::executePaymasterTransfer(
             DigiDollarSendWidget::tr("no durable request is selected"));
         return;
     }
-    const uint64_t wallet_generation = m_paymasterWalletGeneration;
     // Reserve the operation before a wallet-unlock dialog can re-enter the
     // event loop. No Paymaster button or poll may start a second operation.
     setPaymasterBusy(true);
-    std::shared_ptr<WalletModel::UnlockContext> unlock;
-    if (allow_unlock) {
-        unlock = m_walletModel->requestUnlockForAsync();
-        if (wallet_generation != m_paymasterWalletGeneration || !m_walletModel) return;
-        if (!unlock->isValid()) {
-            m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
-            setPaymasterBusy(false);
-            return;
-        }
-    }
     m_paymasterSessionFrame->show();
     m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Contacting Paymaster Network…"));
     QPointer<PaymasterSendWidget> guard{this};
@@ -2996,16 +3003,17 @@ void PaymasterSendWidget::executePaymasterTransfer(
     if (retry_transport) initial_options.pushKV("retry_transport", true);
     initial_params.push_back(std::move(initial_options));
     executePaymasterRpcAsync("senddigidollar", std::move(initial_params),
-                             [guard, address, amount_cents, unlock = std::move(unlock)](UniValue result, QString error) mutable {
-                                 // Relock before result handling: that path may open confirmation or
-                                 // error dialogs and must never extend the signing unlock across a
-                                 // user-controlled modal wait.
-                                 unlock.reset();
+                             [guard, address, amount_cents](UniValue result, QString error) {
                                  if (guard) {
+                                     if (error == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED")) {
+                                         guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
+                                         guard->setPaymasterBusy(false);
+                                         return;
+                                     }
                                      guard->handlePaymasterResult(result, error, address,
                                                                   amount_cents);
                                  }
-                             });
+                             }, allow_unlock);
 }
 
 void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QString& error,
@@ -4377,19 +4385,7 @@ void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
                                          DigiDollarSendWidget::tr("no durable session is selected"));
         return;
     }
-    const uint64_t wallet_generation = m_paymasterWalletGeneration;
     setPaymasterBusy(true);
-    std::shared_ptr<WalletModel::UnlockContext> unlock;
-    if (allow_unlock) {
-        unlock = m_walletModel->requestUnlockForAsync();
-        if (wallet_generation != m_paymasterWalletGeneration || !m_walletModel) return;
-        if (!unlock->isValid()) {
-            m_paymasterStateValue->setText(DigiDollarSendWidget::tr("RECOVERY_AWAITING_WALLET_UNLOCK"));
-            m_paymasterRecoveryActive = false;
-            setPaymasterBusy(false);
-            return;
-        }
-    }
     m_paymasterStateValue->setText(
         m_paymasterRecoveryAuthorizationCommitment.isEmpty()
             ? DigiDollarSendWidget::tr("Preparing authenticated alternative recovery…")
@@ -4398,12 +4394,16 @@ void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
     if (!m_paymasterActiveRecoveryStarted.isValid()) m_paymasterActiveRecoveryStarted.start();
     executePaymasterRpcAsync(
         "resolvepaymastersession", m_paymasterActiveRecoveryParams,
-        [guard = QPointer<PaymasterSendWidget>(this), unlock = std::move(unlock)](
-            UniValue result, QString error) mutable {
-            unlock.reset();
+        [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, QString error) {
             if (!guard) return;
+            if (error == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED")) {
+                guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("RECOVERY_AWAITING_WALLET_UNLOCK"));
+                guard->m_paymasterRecoveryActive = false;
+                guard->setPaymasterBusy(false);
+                return;
+            }
             guard->handleAlternativePaymasterRecoveryResult(result, error);
-        });
+        }, allow_unlock);
 }
 
 PaymasterRecoveryConfirmationSelection

@@ -270,6 +270,11 @@ public:
      */
     using RpcCallback = std::function<void(UniValue result, QString error)>;
     void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
+    /** Paymaster signing bridge. Inspect/relock the wallet off the GUI thread,
+     * preserving the normal unlock dialog and relocking before delivery.
+     * is_current runs on Qt before the dialog and before dispatch. */
+    void executePaymasterSigningRpcAsync(std::string command, UniValue params,
+                                        std::function<bool()> is_current, RpcCallback callback);
 
     /**
      * Build the DigiDollar transaction-history view away from Qt's event

@@ -14236,45 +14236,32 @@ private:
             return;
         }
 
-        std::shared_ptr<WalletModel::UnlockContext> unlock;
-        if (request.needs_unlock) {
-            unlock = request_model->requestUnlockForAsync();
-            if (!unlock || !unlock->isValid()) {
-                unlock.reset();
-                finishRpcCall(
-                    wallet_generation, request.output,
-                    std::move(request.handler), request.show_error,
-                    std::move(request.error_handler), UniValue{},
-                    tr("The wallet was not unlocked, so the signing operation was not started."));
-                return;
-            }
-            if (m_model != request_model ||
-                m_wallet_generation != wallet_generation) {
-                unlock.reset();
-                return;
-            }
-        }
-
         QPointer<PaymasterWidgetImpl> guard{this};
-        request_model->executeRpcAsync(
-            std::move(request.command), std::move(request.params),
+        WalletModel::RpcCallback callback =
             [guard, request_model, wallet_generation,
              output = request.output, handler = std::move(request.handler),
-             unlock = std::move(unlock), show_error = request.show_error,
+             show_error = request.show_error,
              error_handler = std::move(request.error_handler)](
                 UniValue result, QString error) mutable {
-                // Signing authority is always released before a handler can
-                // update controls or open a result/error dialog.
-                unlock.reset();
                 if (!guard || guard->m_model != request_model ||
                     guard->m_wallet_generation != wallet_generation) {
                     return;
                 }
+                if (error == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED"))
+                    error = tr("The wallet was not unlocked, so the signing operation was not started.");
                 guard->finishRpcCall(
                     wallet_generation, output, std::move(handler),
                     show_error, std::move(error_handler),
                     std::move(result), std::move(error));
-            });
+            };
+        if (request.needs_unlock) {
+            request_model->executePaymasterSigningRpcAsync(std::move(request.command), std::move(request.params),
+                [guard, request_model, wallet_generation] {
+                    return guard && guard->m_model == request_model && guard->m_wallet_generation == wallet_generation;
+                }, std::move(callback));
+        } else {
+            request_model->executeRpcAsync(std::move(request.command), std::move(request.params), std::move(callback));
+        }
     }
 
     void call(std::string command, UniValue params, bool needs_unlock,

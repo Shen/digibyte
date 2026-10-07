@@ -94,6 +94,7 @@
 #include <QListWidget>
 #include <QWizard>
 #include <QTimer>
+#include <QThread>
 #include <QTemporaryDir>
 #include <QtTest/QtTestWidgets>
 #include <QtWidgets/qtestsupport_widgets.h>
@@ -4438,6 +4439,97 @@ void PaymasterWidgetTests::paymasterClientUnlockLeaseSurvivesWalletModelClose()
     mini_gui.walletModel.reset();
     unlock.reset();
     QVERIFY(wallet->IsLocked());
+}
+
+void PaymasterWidgetTests::paymasterSigningWaitKeepsGuiResponsive()
+{
+    TestChain100Setup test;
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-paymaster-signing-wait");
+    loader->registerRpcs();
+    auto& context = *loader->context();
+    struct Cleanup {
+        wallet::WalletContext& context;
+        const std::shared_ptr<wallet::CWallet>& wallet;
+        ~Cleanup() { RemoveWallet(context, wallet, std::nullopt); }
+    } cleanup{context, wallet};
+    const SecureString passphrase{"qt-paymaster-signing-wait"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->Unlock(passphrase));
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    AddWallet(context, wallet);
+
+    std::promise<void> held, release;
+    auto ready = held.get_future();
+    auto release_signal = release.get_future();
+    bool timed_out{false};
+    std::thread holder([&] {
+        LOCK(wallet->cs_wallet);
+        held.set_value();
+        timed_out = release_signal.wait_for(std::chrono::milliseconds(500)) == std::future_status::timeout;
+    });
+    ready.wait();
+    QElapsedTimer elapsed;
+    elapsed.start();
+    bool completed{false};
+    QString error;
+    gui.walletModel->executePaymasterSigningRpcAsync("getwalletinfo", UniValue{UniValue::VARR}, [] { return true; },
+        [&](UniValue result, QString failure) {
+            completed = true;
+            error = failure;
+            if (failure.isEmpty()) QCOMPARE(result.find_value("walletname").get_str(), wallet->GetName());
+        });
+    QCoreApplication::processEvents();
+    const bool completed_while_locked = completed;
+    const auto duration = elapsed.elapsed();
+    release.set_value();
+    holder.join();
+    QVERIFY(!completed_while_locked);
+    QVERIFY2(!timed_out, qPrintable(QStringLiteral("Signing preflight blocked Qt for %1 ms").arg(duration)));
+    qInfo("Paymaster signing preflight returned in %lld ms with cs_wallet held", duration);
+    QTRY_VERIFY(completed);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!wallet->IsLocked()); // Do not relock a wallet that was already unlocked.
+
+    QString outcome;
+    bool current{true};
+    int prompts{0};
+    QObject::connect(gui.walletModel.get(), &WalletModel::requireUnlock, [&] {
+        ++prompts;
+        QCOMPARE(QThread::currentThread(), QCoreApplication::instance()->thread());
+        if (outcome == "cancel") return;
+        QVERIFY(wallet->Unlock(passphrase));
+        if (outcome == "switch") current = false;
+        if (outcome == "close") gui.walletModel.reset();
+    });
+    for (const QString& next : {QStringLiteral("success"), QStringLiteral("rpc_error"), QStringLiteral("cancel"), QStringLiteral("switch"), QStringLiteral("close")}) {
+        outcome = next;
+        QVERIFY(wallet->Lock());
+        current = true;
+        completed = false;
+        const int before = prompts;
+        gui.walletModel->executePaymasterSigningRpcAsync(outcome == "rpc_error" ? "unknown-paymaster-test-rpc" : "getwalletinfo",
+            UniValue{UniValue::VARR}, [&] { return current; },
+            [&](UniValue, QString failure) {
+                QVERIFY(wallet->IsLocked()); // Relock precedes delivery, including errors.
+                error = failure;
+                completed = true;
+            });
+        QTRY_COMPARE(prompts, before + 1);
+        if (outcome == "switch" || outcome == "close") {
+            QTRY_VERIFY(wallet->IsLocked());
+            QVERIFY(!completed);
+        } else {
+            QTRY_VERIFY(completed);
+            if (outcome == "success") QVERIFY2(error.isEmpty(), qPrintable(error));
+            if (outcome == "rpc_error") QVERIFY(!error.isEmpty());
+            if (outcome == "cancel") QCOMPARE(error, QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED"));
+        }
+    }
 }
 
 void PaymasterWidgetTests::paymasterClientDatabaseReadErrorIsActionable()

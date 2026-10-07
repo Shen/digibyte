@@ -128,7 +128,7 @@ private:
     Q_SLOT void refreshPaymasterOffers();
     UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
     void executePaymasterRpcAsync(
-        std::string command, UniValue params, WalletModel::RpcCallback callback);
+        std::string command, UniValue params, WalletModel::RpcCallback callback, bool needs_unlock = false);
     void executePaymasterTransfer(
         const QString& address, CAmount amount_cents, bool allow_unlock, bool retry_transport = false);
     void handlePaymasterResult(const UniValue& result, const QString& error,

@@ -131,6 +131,7 @@ private Q_SLOTS:
     void paymasterClientLiveRecoveryProgresses();
     void paymasterClientDelayedCallbackIgnoresWalletClose();
     void paymasterClientUnlockLeaseSurvivesWalletModelClose();
+    void paymasterSigningWaitKeepsGuiResponsive();
     void paymasterClientDatabaseReadErrorIsActionable();
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();
