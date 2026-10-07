@@ -1,5 +1,57 @@
 # Paymaster build and test runbook
 
+## DD Overview contention after Paymaster actions (2026-10-07)
+
+DD Overview still called the Paymaster-aware balance summary, locked-collateral
+read and wallet mint-capability check on Qt's event thread. An incoming-transfer
+timer could invoke its balance refresh after navigating to Paymaster Network.
+The lock-contention regression reproduced a **529-ms** wait before the fix,
+until its 500-ms watchdog released `cs_wallet`. After the correction, the visible
+overview refresh returned in **19 ms** while that lock was held; the hidden
+overview callback on Paymaster Network returned in **0 ms**. These are controlled
+regression measurements, not a benchmark of the operator's complete workflow.
+
+The read-only overview worker retains the shared wallet and returns values on
+the GUI thread. Refreshes coalesce, retain the last successful balance, reject
+detached replies and respect privacy. Oracle and network-health RPCs also run
+on workers with bounded in-flight queries and client-generation guards. The
+contention regression additionally holds `cs_main` during those refreshes.
+Core locks, financial authorization, RPC/CLI and ordinary DGB views are unchanged.
+
+Selected MSVC compiles and an isolated native Qt test link passed. **12 targeted
+Qt cases passed**, excluding initialization and cleanup: nine DigiDollar cases
+(contention, wallet rebinding/privacy, conditional reserved-balance display,
+mint availability, overview smoke, masking, USD suffix, health polling and first
+page activation) and three Paymaster cases (background refresh in both themes
+and command/page locking). The mint-availability fixture now finishes RPC warmup
+when run alone and waits for the asynchronous results; its network eligibility
+assertions are preserved. No complete suite or normal application EXE was built
+for this checkpoint.
+
+Guidance: repository/src instructions, CLAUDE's DigiDollar reading order,
+contribution rules, architecture/maps, developer locking/Qt notes, Qt/test
+guidance, English translation strings and C++ formatting conventions.
+
+Operator verification, after closing Client, Paymaster and active CLI calls
+normally, with the existing MSVC 14.43/Qt 5.15.10/static dependencies:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+$env:QT_QPA_PLATFORM = 'windows'
+$env:DIGIBYTE_QT_TEST_SUITE = 'DigiDollarWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+$env:DIGIBYTE_QT_TEST_OUTPUT = Join-Path $PWD 'build_msvc/paymaster-refresh-check/reserve-presets/full-digidollar-qt.txt'
+& .\build_msvc\x64\Release\test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw "DigiDollar Qt tests failed: $LASTEXITCODE; report: $env:DIGIBYTE_QT_TEST_OUTPUT" }
+```
+
+Allow minutes for the incremental build and several minutes per full suite.
+Success requires build/test exit 0 and zero failed cases in both suite reports.
+Then repeat the reported payment/reserve/settings actions and switch between DD
+Overview and Paymaster Network in both wallets. Navigation must remain usable
+while balances refresh. Also check wallet changes and masking during a refresh.
+
 ## Excess-reserve fee proposal and busy retry (2026-10-07)
 
 Selected MSVC compiles and isolated native links passed for the Paymaster RPC,

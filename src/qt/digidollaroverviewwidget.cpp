@@ -24,6 +24,7 @@
 #include <rpc/util.h>
 
 #include <algorithm>
+#include <functional>
 
 #include <QLabel>
 #include <QVBoxLayout>
@@ -48,6 +49,7 @@
 #include <QLocale>
 #include <QStatusTipEvent>
 #include <QFontMetrics>
+#include <QThread>
 
 namespace {
 static const QString MAX_EXPECTED_BLOCKCHAIN_DD_SUPPLY = QStringLiteral("11,000,000,000.00 $DD");
@@ -67,6 +69,34 @@ enum RecentTransactionRole {
     RecentConfirmationsRole,
     RecentNoteRole,
 };
+
+// The node outlives its GUI models, as in WalletModel's asynchronous RPC bridge.
+// Only value results cross back to Qt; no widget is touched by this worker.
+void ReadOverviewRpc(ClientModel* model, std::string command, std::function<void(UniValue, QString)> callback)
+{
+    QPointer<ClientModel> guard{model};
+    auto* node = &model->node();
+    QThread* thread = QThread::create([guard, node, command = std::move(command), callback = std::move(callback)]() mutable {
+        if (!guard) return;
+        UniValue result;
+        QString error;
+        try {
+            result = node->executeRpc(command, UniValue{UniValue::VARR}, "");
+        } catch (const UniValue& e) {
+            error = QString::fromStdString(e.write());
+        } catch (const std::exception& e) {
+            error = QString::fromUtf8(e.what());
+        } catch (...) {
+            error = QStringLiteral("Unknown overview status error");
+        }
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback), result = std::move(result), error = std::move(error)]() mutable {
+            if (guard) callback(std::move(result), std::move(error));
+        }, Qt::QueuedConnection);
+    });
+    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
 } // namespace
 
 DigiDollarOverviewWidget::DigiDollarOverviewWidget(QWidget *parent) :
@@ -600,6 +630,13 @@ void DigiDollarOverviewWidget::setWalletModel(WalletModel* model)
     if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
 
     m_walletModel = model;
+    ++m_balanceGeneration;
+    m_balanceRefreshInFlight = m_balanceRefreshPending = m_balanceSnapshotShown = false;
+    m_balanceError.clear();
+    m_mintWalletError.clear();
+    m_lastBalanceUpdateTime = 0;
+    m_ddBalance = m_ddWalletTotal = m_ddPaymasterReserved = m_ddPending = m_dgbCollateral = 0.0;
+    renderBalance();
     m_recentSnapshotShown = false;
     m_recentRefreshInFlight = false;
     m_recentRefreshPending = false;
@@ -637,6 +674,9 @@ void DigiDollarOverviewWidget::setWalletModel(WalletModel* model)
 
 void DigiDollarOverviewWidget::setClientModel(ClientModel* model)
 {
+    ++m_nodeGeneration;
+    m_oracleRefreshInFlight = m_healthRefreshInFlight = false;
+    m_healthSnapshot = UniValue{};
     m_clientModel = model;
 
     if (m_clientModel) {
@@ -723,8 +763,14 @@ void DigiDollarOverviewWidget::incomingDDTransaction(const QString& date, const 
 
 void DigiDollarOverviewWidget::updateBalance()
 {
+    if (!isVisible() || !m_walletModel) return;
     // Skip updates during Initial Block Download - balance only matters when synced
     if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+        return;
+    }
+
+    if (m_balanceRefreshInFlight) {
+        m_balanceRefreshPending = true;
         return;
     }
 
@@ -736,30 +782,48 @@ void DigiDollarOverviewWidget::updateBalance()
     }
     m_lastBalanceUpdateTime = now;
 
-    // Get actual DigiDollar balance from wallet
-    if (m_walletModel) {
-        // "Available" is ordinary spendable DD. The total remains useful for
-        // ownership/accounting but is only exposed as a separate row when a
-        // Paymaster reservation actually exists.
-        const WalletModel::DigiDollarBalanceSummary balances =
-            m_walletModel->getDigiDollarBalanceSummary();
-        m_ddBalance = balances.available / 100.0;
-        m_ddWalletTotal = balances.confirmed_total / 100.0;
-        m_ddPaymasterReserved = balances.paymaster_reserved / 100.0;
-        m_ddPending = balances.pending / 100.0;
+    m_balanceRefreshInFlight = true;
+    const auto generation = m_balanceGeneration;
+    QPointer<DigiDollarOverviewWidget> guard{this};
+    QPointer<WalletModel> model{m_walletModel};
+    m_walletModel->getDigiDollarOverviewAsync([guard, model, generation](WalletModel::DigiDollarBalanceSummary balances, CAmount collateral, QString mint_error, QString error) {
+        if (!guard || !model || guard->m_walletModel != model || guard->m_balanceGeneration != generation) return;
+        guard->m_balanceRefreshInFlight = false;
+        guard->m_balanceError = error;
+        if (error.isEmpty()) {
+            guard->m_ddBalance = balances.available / 100.0;
+            guard->m_ddWalletTotal = balances.confirmed_total / 100.0;
+            guard->m_ddPaymasterReserved = balances.paymaster_reserved / 100.0;
+            guard->m_ddPending = balances.pending / 100.0;
+            guard->m_dgbCollateral = collateral / 100000000.0;
+            guard->m_mintWalletError = mint_error;
+            guard->m_balanceSnapshotShown = true;
+        }
+        guard->renderBalance();
+        if (!guard->m_privacy && guard->m_healthSnapshot.isObject())
+            guard->applySystemHealth(guard->m_healthSnapshot, {});
+        if (guard->m_balanceRefreshPending) {
+            guard->m_balanceRefreshPending = false;
+            guard->m_lastBalanceUpdateTime = 0;
+            QTimer::singleShot(0, guard, &DigiDollarOverviewWidget::updateBalance);
+        }
+    });
+}
 
-        // Get locked collateral from wallet positions (in satoshis)
-        CAmount collateralSats = m_walletModel->getLockedCollateral();
-        m_dgbCollateral = collateralSats / 100000000.0; // Convert satoshis to DGB
-    } else {
-        // No wallet connected
-        m_ddBalance = 0.0;
-        m_ddWalletTotal = 0.0;
-        m_ddPaymasterReserved = 0.0;
-        m_ddPending = 0.0;
-        m_dgbCollateral = 0.0;
+void DigiDollarOverviewWidget::renderBalance()
+{
+    if (m_walletModel && !m_balanceSnapshotShown) {
+        const QString text = m_privacy ? maskValue({}) : m_balanceError.isEmpty() ? tr("Loading…") : tr("Unavailable");
+        for (auto* value : {m_ddBalanceValue, m_ddWalletTotalValue, m_ddPaymasterReservedValue, m_ddPendingValue, m_dgbCollateralValue, m_usdValueValue})
+            value->setText(text);
+        updateBalanceLayout(false);
+        m_ddPendingLabel->hide();
+        m_ddPendingValue->hide();
+        return;
     }
-
+    m_ddBalanceValue->setToolTip(m_balanceError.isEmpty()
+        ? tr("Your confirmed, spendable DigiDollar balance")
+        : tr("The balance could not be updated. The last successfully read balance is shown; another update will be attempted."));
     updateBalanceLayout(m_ddPaymasterReserved > 0.0);
 
     // Update display — Available (confirmed only)
@@ -817,28 +881,30 @@ void DigiDollarOverviewWidget::updateOraclePrice()
         // Convert micro-USD to dollars
         m_oraclePrice = priceMicroUsd / 1000000.0;
     } else if (m_clientModel) {
-        // Get actual oracle price from RPC
-        try {
-            UniValue params(UniValue::VARR);
-            UniValue result = m_clientModel->node().executeRpc("getoracleprice", params, "");
-
-            // Price is returned in micro-USD (1,000,000 = $1.00)
-            int64_t priceMicroUsd = result.find_value("price_micro_usd").getInt<int64_t>();
-            m_oraclePrice = priceMicroUsd / 1000000.0; // Convert micro-USD to dollars
-        } catch (const UniValue& e) {
-            LogPrintf("DigiDollar: updateOraclePrice RPC error - %s\n", e.write());
-            m_oraclePrice = 0.0;
-        } catch (const std::exception& e) {
-            LogPrintf("DigiDollar: updateOraclePrice error - %s\n", e.what());
-            m_oraclePrice = 0.0;
-        } catch (...) {
-            LogPrintf("DigiDollar: updateOraclePrice unknown error\n");
-            m_oraclePrice = 0.0;
-        }
+        if (m_oracleRefreshInFlight) return;
+        m_oracleRefreshInFlight = true;
+        const auto generation = m_nodeGeneration;
+        QPointer<DigiDollarOverviewWidget> guard{this};
+        ReadOverviewRpc(m_clientModel, "getoracleprice", [guard, generation](UniValue result, QString error) {
+            if (!guard || guard->m_nodeGeneration != generation) return;
+            guard->m_oracleRefreshInFlight = false;
+            try {
+                guard->m_oraclePrice = error.isEmpty() ? result.find_value("price_micro_usd").getInt<int64_t>() / 1000000.0 : 0.0;
+            } catch (const std::exception&) {
+                guard->m_oraclePrice = 0.0;
+            }
+            guard->renderOraclePrice();
+        });
+        return;
     } else {
         m_oraclePrice = 0.0; // No client model available
     }
 
+    renderOraclePrice();
+}
+
+void DigiDollarOverviewWidget::renderOraclePrice()
+{
     if (m_oraclePrice > 0) {
         DigiDollarStatus::SetText(m_oraclePriceValue, DigiDollarStatus::Kind::SUCCESS);
         m_oraclePriceValue->setText(QString("%1 $USD").arg(QString::number(m_oraclePrice, 'f', 6)));
@@ -871,11 +937,21 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         return;
     }
 
-    try {
-        // Execute RPC call to get blockchain-wide system health
-        UniValue params(UniValue::VARR); // No parameters needed
-        UniValue result = m_clientModel->node().executeRpc("getdigidollarstats", params, "");
+    if (m_healthRefreshInFlight) return;
+    m_healthRefreshInFlight = true;
+    const auto generation = m_nodeGeneration;
+    QPointer<DigiDollarOverviewWidget> guard{this};
+    ReadOverviewRpc(m_clientModel, "getdigidollarstats", [guard, generation](UniValue result, QString error) {
+        if (!guard || guard->m_nodeGeneration != generation) return;
+        guard->m_healthRefreshInFlight = false;
+        if (!guard->m_privacy) guard->applySystemHealth(result, error);
+    });
+}
 
+void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const QString& error)
+{
+    try {
+        if (!error.isEmpty()) throw std::runtime_error(error.toStdString());
         // Use the node's next-block decision, including the activation rules.
         // A missing quote also prevents a health check; name the missing price first.
         const auto& quote = result.find_value("mint_volatility").find_value("quote_available");
@@ -890,11 +966,10 @@ void DigiDollarOverviewWidget::updateSystemHealth()
             m_mintStatusLabel->setText(tr("Minting is paused because the network health check is unavailable."));
         } else if (reason == "err_active") {
             m_mintStatusLabel->setText(tr("Minting is paused because the network has too little collateral."));
-        } else if (reason == "none" && m_walletModel) {
-            const QString walletError = m_walletModel->getDigiDollarMintWalletError();
-            m_mintStatusLabel->setText(walletError.isEmpty()
+        } else if (reason == "none" && m_walletModel && m_balanceSnapshotShown && m_balanceError.isEmpty()) {
+            m_mintStatusLabel->setText(m_mintWalletError.isEmpty()
                 ? tr("Minting is available. Check collateral and fees on Mint $DD.")
-                : tr("Minting is unavailable: %1").arg(walletError));
+                : tr("Minting is unavailable: %1").arg(m_mintWalletError));
         } else {
             m_mintStatusLabel->setText(tr("Mint availability is unknown. Check Mint $DD before continuing."));
         }
@@ -978,8 +1053,10 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         int barValue = std::min(100, static_cast<int>((healthPercent * 100) / 500));
         m_systemHealthBar->setValue(barValue);
         m_systemHealthBar->setFormat(QString("%1% Collateralization").arg(QString::number(healthPercent, 'f', 1)));
+        m_healthSnapshot = result;
 
     } catch (const UniValue& e) {
+        m_healthSnapshot = UniValue{};
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.write());
         m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
@@ -992,6 +1069,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         m_errLevelValue->setText("Loading...");
         m_systemHealthBar->setValue(0);
     } catch (const std::exception& e) {
+        m_healthSnapshot = UniValue{};
         m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
         DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::ERR);
         DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::ERR);
@@ -1378,6 +1456,8 @@ void DigiDollarOverviewWidget::setPrivacy(bool privacy)
         // Refresh blockchain stats
         updateSystemHealth();
     }
+
+    renderBalance();
 
     // Hide recent transactions list when masked
     m_transactionsList->setVisible(!m_privacy);

@@ -1367,6 +1367,42 @@ CAmount WalletModel::getPaymasterReservedDigiDollarBalance() const
     return getDigiDollarBalanceSummary().paymaster_reserved;
 }
 
+void WalletModel::getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback)
+{
+    const auto wallet = m_wallet;
+    QPointer<WalletModel> guard{this};
+    QThread* thread = QThread::create([guard, wallet, callback = std::move(callback)]() mutable {
+        DigiDollarBalanceSummary balances;
+        CAmount collateral{0};
+        QString mint_error, error;
+        try {
+            auto* dd_wallet = wallet->getDigiDollarWallet();
+            if (dd_wallet && !wallet->privateKeysDisabled()) {
+                const auto summary = dd_wallet->GetDDBalanceSummary();
+                balances.available = summary.spendable;
+                balances.confirmed_total = summary.confirmed_total;
+                balances.paymaster_reserved = summary.paymaster_reserved;
+                balances.pending = summary.pending;
+            }
+            if (dd_wallet) collateral = dd_wallet->GetLockedCollateral();
+            const auto* core_wallet = wallet->wallet();
+            if (!core_wallet) throw std::runtime_error("Wallet not available");
+            mint_error = QString::fromStdString(wallet::GetDigiDollarMintWalletError(*core_wallet).translated);
+        } catch (const std::exception& exception) {
+            error = QString::fromUtf8(exception.what());
+        } catch (...) {
+            error = QStringLiteral("Unknown DigiDollar overview error");
+        }
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard,
+            [guard, callback = std::move(callback), balances, collateral, mint_error = std::move(mint_error), error = std::move(error)]() mutable {
+                if (guard && callback) callback(balances, collateral, std::move(mint_error), std::move(error));
+            }, Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 WalletModel::DigiDollarBalanceSummary WalletModel::getDigiDollarBalanceSummary() const
 {
     DigiDollarBalanceSummary result;

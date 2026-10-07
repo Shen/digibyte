@@ -240,6 +240,11 @@ public:
     // Get a consistent balance breakdown for overview display.
     DigiDollarBalanceSummary getDigiDollarBalanceSummary() const;
 
+    /** Read the Paymaster-aware balance breakdown and collateral off the GUI
+     * thread. Errors do not represent a zero balance. */
+    using DigiDollarOverviewCallback = std::function<void(DigiDollarBalanceSummary balances, CAmount collateral, QString mint_error, QString error)>;
+    void getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback);
+
     // Get pending (unconfirmed but trusted) DigiDollar balance
     CAmount getPendingDigiDollarBalance() const;
 

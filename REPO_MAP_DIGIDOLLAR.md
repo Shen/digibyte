@@ -1417,6 +1417,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   temporarily splits the display into ordinary available, Paymaster-reserved,
   and gross wallet total; wallet USD valuation continues to use the gross
   wallet-owned amount.
+  Balance, collateral and wallet mint-capability reads run on a worker, coalesce
+  pending refreshes and discard replies from a detached wallet. Hidden balance
+  callbacks return without reading Core; oracle and network-health queries also
+  run asynchronously with bounded in-flight requests and client-generation guards.
 
 ### src/qt/digidollarmintwidget.cpp/h
 - `DigiDollarMintWidget` → mint DD interface with tier selection and collateral calculator
@@ -1523,6 +1527,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `getDigiDollarBalanceAsync()` reads Core's spendable DD snapshot away from
   the GUI thread while retaining the shared wallet interface. It requires no
   RPC server; callbacks run on the model's thread and vanish after destruction.
+- `getDigiDollarOverviewAsync()` reads the full DD balance breakdown, locked
+  collateral and shared mint-capability check on a worker. Failed reads are
+  distinct from zero balances; the overview retains its last successful display.
 - `SerializeDigiDollarHistory()` preserves wallet status, including `expired_mint`,
   across the asynchronous history bridge; both overview and transaction history
   render that upstream status.

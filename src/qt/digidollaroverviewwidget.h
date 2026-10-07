@@ -76,11 +76,14 @@ private:
     void setupBalanceSection();
     /** Keep the legacy balance layout unless a Paymaster reservation exists. */
     void updateBalanceLayout(bool show_paymaster_breakdown);
+    void renderBalance();
     void setupSystemHealthSection();
     void setupRecentTransactionsSection();
     void connectSignals();
     void addDemoTransactions(); // For demo purposes only
     void updateSystemHealthIfDue(bool force);
+    void applySystemHealth(const UniValue& result, const QString& error);
+    void renderOraclePrice();
     void populateRecentTransactions(const UniValue& result);
 
     QString formatDDAmount(double amount) const;
@@ -157,6 +160,16 @@ private:
     bool m_recentSnapshotShown{false};
     bool m_recentRefreshInFlight{false};
     bool m_recentRefreshPending{false};
+    uint64_t m_balanceGeneration{0};
+    bool m_balanceRefreshInFlight{false};
+    bool m_balanceRefreshPending{false};
+    bool m_balanceSnapshotShown{false};
+    QString m_balanceError;
+    QString m_mintWalletError;
+    uint64_t m_nodeGeneration{0};
+    bool m_oracleRefreshInFlight{false};
+    bool m_healthRefreshInFlight{false};
+    UniValue m_healthSnapshot;
     QString m_lastRecentTransactionsFingerprint;
 
     // Throttling - minimum 5 seconds between updates during sync

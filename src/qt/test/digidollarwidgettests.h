@@ -81,6 +81,7 @@ private Q_SLOTS:
     void ddTabRefreshesBalancesOnWalletSignal();
     void ddTabRefreshDoesNotWaitForBusyWallet();
     void ddSendBalanceRefreshPreservesWalletBinding();
+    void ddOverviewRefreshPreservesWalletBinding();
     void ddTabLoadsSelectedPageOnFirstShow();
     void transactionsWidgetShowsStoredHistoryWhileWalletBusy();
     void transactionsWidgetRefreshesOnDigiDollarSignal();

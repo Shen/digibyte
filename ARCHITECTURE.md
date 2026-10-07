@@ -139,6 +139,12 @@ retaining the last wallet-bound display while Paymaster holds wallet locks.
 Refreshes are coalesced; wallet generations discard detached replies. Unknown
 or failed balances disable new payment actions. Core rechecks funds and financial
 authorization through the unchanged send paths; the display is not authority.
+DD Overview also reads its Paymaster-aware balance breakdown, collateral and
+wallet mint capability through a read-only worker. Refreshes coalesce and retain
+the last successful wallet-bound display; rebinding rejects old replies. Hidden
+overview callbacks do not read balances after navigation to Paymaster Network.
+Oracle and network-health RPCs run outside the GUI thread with one in-flight
+request per view and query, so Core lock contention cannot stall these refreshes.
 Receive DD loads stored payment requests through a separate read-only
 `WalletModel` worker, so wallet-lock contention during Paymaster work does not
 block tab navigation. Refreshes retain the last displayed snapshot and avoid

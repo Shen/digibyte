@@ -29,6 +29,15 @@ separate. Busy-provider rejections receive a short bounded retry of the same
 plan; the UI identifies these attempts as not started. Lost execution replies
 remain uncertain and are not retried automatically.
 
+## DD Overview responsiveness
+
+DD Overview no longer reads wallet balances, locked collateral or mint capability
+on the GUI thread. A delayed overview refresh after switching to Paymaster Network
+also returns without taking the wallet lock. Oracle and network-health reads run
+in the background. Existing balances remain visible during refresh; wallet changes
+discard old replies, and privacy masking applies to asynchronous results. Core
+locking, financial authorization, RPC/CLI and ordinary DGB pages are unchanged.
+
 ## Send DD responsiveness
 
 Opening Send DD and refreshing its balance no longer wait for Paymaster wallet

@@ -558,6 +558,8 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
     mini_gui.initModelForWallet(m_node, wallet);
     DigiDollarOverviewWidget overview;
     overview.setWalletModel(mini_gui.walletModel.get());
+    overview.show();
+    overview.updateBalance();
 
     QLabel* available_value = overview.findChild<QLabel*>("ddBalanceValue");
     QLabel* reserved_label = overview.findChild<QLabel*>("ddPaymasterReservedLabel");
@@ -572,7 +574,7 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
 
     // No reservation means the legacy overview remains byte-for-byte in
     // structure: no additional balance rows are exposed.
-    QCOMPARE(available_value->text(), QStringLiteral("100.00 $DD"));
+    QTRY_COMPARE(available_value->text(), QStringLiteral("100.00 $DD"));
     QVERIFY(reserved_label->isHidden());
     QVERIFY(reserved_value->isHidden());
     QVERIFY(total_label->isHidden());
@@ -599,6 +601,8 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
     // not mask the state transition under test.
     DigiDollarOverviewWidget reserved_overview;
     reserved_overview.setWalletModel(mini_gui.walletModel.get());
+    reserved_overview.show();
+    reserved_overview.updateBalance();
     available_value = reserved_overview.findChild<QLabel*>("ddBalanceValue");
     reserved_label = reserved_overview.findChild<QLabel*>("ddPaymasterReservedLabel");
     reserved_value = reserved_overview.findChild<QLabel*>("ddPaymasterReservedValue");
@@ -609,7 +613,7 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
     QVERIFY(reserved_value != nullptr);
     QVERIFY(total_label != nullptr);
     QVERIFY(total_value != nullptr);
-    QCOMPARE(available_value->text(), QStringLiteral("96.00 $DD"));
+    QTRY_COMPARE(available_value->text(), QStringLiteral("96.00 $DD"));
     QCOMPARE(reserved_value->text(), QStringLiteral("4.00 $DD"));
     QCOMPARE(total_value->text(), QStringLiteral("100.00 $DD"));
     QVERIFY(!reserved_label->isHidden());
@@ -3134,6 +3138,7 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     }
 #endif
     TestChain100Setup test;
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     for (int i = 0; i < 5; ++i) {
         test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
     }
@@ -3160,7 +3165,7 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QCoreApplication::processEvents();
 
     bool watchdog_fired{false};
-    const auto whileWalletBusy = [&](const std::function<void()>& gui_action) {
+    const auto whileWalletBusy = [&](const std::function<void()>& gui_action, RecursiveMutex* mutex = nullptr) {
         watchdog_fired = false;
         std::promise<void> lock_acquired;
         std::future<void> ready = lock_acquired.get_future();
@@ -3169,7 +3174,7 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
         bool release_lock{false};
 
         std::thread lock_holder([&] {
-            LOCK(wallet->cs_wallet);
+            LOCK(mutex ? *mutex : wallet->cs_wallet);
             lock_acquired.set_value();
             std::unique_lock<std::mutex> lock{gate_mutex};
             gate.wait(lock, [&] { return release_lock; });
@@ -3254,6 +3259,41 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QVERIFY2(!watchdog_fired,
              qPrintable(QStringLiteral("Binding Send DD waited for cs_wallet (%1 ms)").arg(cold_send_ms)));
     QVERIFY(cold_balance_pending);
+
+    // Overview still receives balance invalidations after Paymaster actions.
+    // Exercise the visible refresh, not just the queued tab-selection signal.
+    const qint64 overview_switch_ms = whileWalletBusy([&] {
+        tabs->setCurrentIndex(0);
+        Q_EMIT mini_gui.walletModel->digiDollarChanged();
+        QCoreApplication::processEvents();
+    });
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("Refreshing DD Overview waited for cs_wallet (%1 ms)").arg(overview_switch_ms)));
+    qInfo("Refreshing DD Overview with cs_wallet held returned in %lld ms", overview_switch_ms);
+
+    const qint64 health_refresh_ms = whileWalletBusy([&] {
+        auto* overview = tab.findChild<DigiDollarOverviewWidget*>();
+        overview->updateSystemHealth();
+        overview->updateOraclePrice();
+        QCoreApplication::processEvents();
+    }, &cs_main);
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("Refreshing DD network status waited for cs_main (%1 ms)").arg(health_refresh_ms)));
+
+    // An incoming-transaction timer can target the overview after navigating
+    // to Paymaster Network. A hidden overview must not block that page either.
+    tab.setPaymasterOperatorVisible(true);
+    tabs->setCurrentIndex(tabs->count() - 1);
+    QCoreApplication::processEvents();
+    const qint64 hidden_overview_ms = whileWalletBusy([&] {
+        Q_EMIT mini_gui.walletModel->digiDollarChanged();
+        tab.findChild<DigiDollarOverviewWidget*>()->updateBalance();
+    });
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("An overview callback blocked Paymaster Network (%1 ms)").arg(hidden_overview_ms)));
+    qInfo("The hidden overview callback on Paymaster Network returned in %lld ms", hidden_overview_ms);
+    tabs->setCurrentIndex(1);
+    QCoreApplication::processEvents();
 
     // Top-level wallet navigation may still issue a generic refresh after the
     // DigiDollar page has been hidden. It must not refresh the last selected
@@ -3342,6 +3382,64 @@ void DigiDollarWidgetTests::ddSendBalanceRefreshPreservesWalletBinding()
     QTest::qWait(50);
     QVERIFY(!use_balance->isEnabled());
     QVERIFY(!balance->text().contains(QStringLiteral("9.99")));
+}
+
+void DigiDollarWidgetTests::ddOverviewRefreshPreservesWalletBinding()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto old_wallet = SetupDescriptorsWallet(m_node, test, "old-overview");
+    const auto new_wallet = SetupDescriptorsWallet(m_node, test, "new-overview");
+    old_wallet->EnsureDDWallet();
+    new_wallet->EnsureDDWallet();
+    old_wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 1250);
+    new_wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 2), 8765);
+    DigiDollarMiniGUI old_gui(m_node), new_gui(m_node);
+    old_gui.initModelForWallet(m_node, old_wallet);
+    new_gui.initModelForWallet(m_node, new_wallet);
+    DigiDollarOverviewWidget overview;
+    overview.show();
+    overview.setWalletModel(old_gui.walletModel.get());
+    auto* balance = overview.findChild<QLabel*>("ddBalanceValue");
+    QVERIFY(balance);
+    QTRY_COMPARE(balance->text(), QStringLiteral("12.50 $DD"));
+    {
+        LOCK(old_wallet->cs_wallet);
+        for (int i = 0; i < 20; ++i) Q_EMIT old_gui.walletModel->digiDollarChanged();
+        QCOMPARE(balance->text(), QStringLiteral("12.50 $DD"));
+        overview.setWalletModel(new_gui.walletModel.get());
+        QCOMPARE(balance->text(), QStringLiteral("Loading…"));
+        QTRY_COMPARE(balance->text(), QStringLiteral("87.65 $DD"));
+    }
+    QTest::qWait(100); // Deliver the old generation's queued completion.
+    QCOMPARE(balance->text(), QStringLiteral("87.65 $DD"));
+    {
+        LOCK(new_wallet->cs_wallet);
+        overview.setPrivacy(true);
+        new_wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 3), 100);
+        Q_EMIT new_gui.walletModel->digiDollarChanged();
+        QVERIFY(balance->text().contains('#'));
+    }
+    // Wait for the asynchronous balance, then unmask without a synchronous read.
+    bool completed{false};
+    new_gui.walletModel->getDigiDollarOverviewAsync([&](WalletModel::DigiDollarBalanceSummary, CAmount, QString, QString) { completed = true; });
+    QTRY_VERIFY(completed);
+    QTest::qWait(100);
+    QVERIFY(balance->text().contains('#'));
+    overview.setPrivacy(false);
+    QTRY_COMPARE(balance->text(), QStringLiteral("88.65 $DD"));
+    overview.setWalletModel(nullptr);
+    QCOMPARE(balance->text(), QStringLiteral("0.00 $DD"));
+    {
+        LOCK(old_wallet->cs_wallet);
+        auto closing = std::make_unique<DigiDollarOverviewWidget>();
+        closing->show();
+        closing->setWalletModel(old_gui.walletModel.get());
+        closing.reset(); // No wait or callback into the destroyed widget.
+    }
+    QTest::qWait(100);
 }
 
 // A tab may receive its wallet and client models while its WalletView page is
@@ -7832,6 +7930,7 @@ void DigiDollarWidgetTests::overviewExplainsMintAvailability()
 {
     TestChain100Setup test(ChainType::REGTEST,
         {"-digidollaractivationheight=100", "-ddthawdayheight=109", "-digidollarstatsindex=0"});
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     struct ResetOracleState {
         std::chrono::seconds mock_time{GetMockTime()};
         ~ResetOracleState()
@@ -7862,24 +7961,25 @@ void DigiDollarWidgetTests::overviewExplainsMintAvailability()
     overview.setClientModel(gui.clientModel.get());
     overview.show();
     overview.updateSystemHealth();
+    overview.updateBalance();
     auto* status = overview.findChild<QLabel*>("mintStatusLabel");
     QVERIFY2(status, "Overview must show whether new mints are available");
-    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+    QTRY_VERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
 
     DigiDollar::Volatility::VolatilityMonitor::TriggerFreeze(false, 106);
     overview.updateSystemHealth();
-    QVERIFY2(status->text().contains("paused"), qPrintable(status->text()));
+    QTRY_VERIFY2(status->text().contains("paused"), qPrintable(status->text()));
     QVERIFY(status->text().contains("price protection"));
 
     // The next block reaches Thaw Day. The old freeze no longer applies.
     CreateAndProcessOracleQuoteBlock(test, 1000000);
     CreateAndProcessOracleQuoteBlock(test, 1000000);
     overview.updateSystemHealth();
-    QVERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
+    QTRY_VERIFY2(status->text().contains("Minting is available"), qPrintable(status->text()));
 
     SetMockTime(GetTime() + ORACLE_MAX_AGE_SECONDS + 60);
     overview.updateSystemHealth();
-    QVERIFY2(status->text().contains("oracle price"), qPrintable(status->text()));
+    QTRY_VERIFY2(status->text().contains("oracle price"), qPrintable(status->text()));
     QVERIFY(status->text().contains("paused"));
 
     DigiDollarMintWidget mint;
