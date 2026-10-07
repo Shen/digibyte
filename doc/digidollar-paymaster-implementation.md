@@ -491,6 +491,20 @@ and its exact four targets under the wallet lock. A changed revision or target
 requires a fresh preview. Calls without these options retain their existing
 behavior; retirement does not change recurring refill authorization.
 
+The optional preview-only `recommend_fee` estimates the selected DGB retirement
+with the wallet's signed-size/fee estimator and the DD retirement with the
+existing funded DD planner. No addresses or signatures are created; pool
+confirmation refresh is non-persistent for previews. The response adds
+`estimated_dgb_fee_satoshis`, `estimated_dd_fee_satoshis` and
+`wallet_maximum_fee_satoshis`. The proposed per-transaction ceiling covers the
+larger estimate plus 10%, rounded up to 0.01 DGB, retains any larger explicit
+draft ceiling, and never exceeds the unchanged wallet-wide limit. The total
+bound covers both selected asset transactions. Execute with `recommend_fee`
+omitted/false, the returned ceiling and the exact reviewed plan; combining
+recommendation and execution is rejected. Existing calls remain compatible.
+The provider work guard still serializes both preview and execution. Explicit
+busy and retirement fee-limit rejections precede the first transaction commit.
+
 
 Regression details and runtime acceptance are tracked in
 [the edge-case review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).

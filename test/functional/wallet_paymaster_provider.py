@@ -474,14 +474,38 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(rebalance_preview["retired_dgb_satoshis"], 40000000)
         assert_equal(rebalance_preview["retired_carrier_cents"], 200)
 
+        # A current fee proposal is read-only, including keypool and approvals.
+        # A tiny draft limit must produce a usable bound rather than a failed
+        # release or an implicit change to recurring refill authorization.
+        before_proposal = wallet.getwalletinfo()
+        proposed = cli.rebalancepaymasterpool(dict(bounded_target, maximum_fee_satoshis=1, recommend_fee=True))
+        proposed_fee = proposed["maximum_network_fee_satoshis"]
+        assert_equal(proposed["executed"], False)
+        assert 0 < proposed["estimated_dgb_fee_satoshis"] <= proposed_fee
+        assert 0 < proposed["estimated_dd_fee_satoshis"] <= proposed_fee
+        assert proposed_fee <= proposed["wallet_maximum_fee_satoshis"]
+        estimate = max(proposed["estimated_dgb_fee_satoshis"], proposed["estimated_dd_fee_satoshis"])
+        expected_fee = ((estimate + (estimate + 9) // 10 + 999999) // 1000000) * 1000000
+        assert_equal(proposed_fee, min(expected_fee, proposed["wallet_maximum_fee_satoshis"]))
+        assert_equal(cli.rebalancepaymasterpool(dict(minimum_target, recommend_fee=True))["maximum_network_fee_satoshis"], proposed_fee)
+        assert_equal(proposed["maximum_total_fee_satoshis"], 2 * proposed_fee)
+        after_proposal = wallet.getwalletinfo()
+        for field in ("txcount", "keypoolsize", "keypoolsize_hd_internal"):
+            assert_equal(after_proposal.get(field), before_proposal.get(field))
+        assert_equal(wallet.getpaymasterpoolinfo(), user_paid_ready)
+        assert_equal(cli.getpaymasterliquiditystatus()["policy"], revised_target)
+        assert_raises_rpc_error(-8, "PAYMASTER_RETIREMENT_FEE_PREVIEW_ONLY", cli.rebalancepaymasterpool,
+                                dict(bounded_target, recommend_fee=True, execute=True, plan_id=proposed["plan_id"]))
+        bounded_target["maximum_fee_satoshis"] = proposed_fee
         bounded_preview = cli.rebalancepaymasterpool(bounded_target)
-        rebalanced = cli.rebalancepaymasterpool(dict(bounded_target, execute=True, plan_id=bounded_preview["plan_id"]))
+        assert_equal(bounded_preview["plan_id"], proposed["plan_id"])
+        rebalanced = cli.rebalancepaymasterpool(dict(bounded_target, execute=True, plan_id=proposed["plan_id"]))
         assert_equal(rebalanced["executed"], True)
         assert_equal(len(rebalanced["dd_txid"]), 64)
         assert_equal(len(rebalanced["dgb_txid"]), 64)
         assert_equal(rebalanced["network_fee_satoshis"] > 0, True)
-        assert 0 < rebalanced["dd_network_fee_satoshis"] <= 50000000
-        assert 0 < rebalanced["network_fee_satoshis"] <= 50000000
+        assert 0 < rebalanced["dd_network_fee_satoshis"] <= proposed_fee
+        assert 0 < rebalanced["network_fee_satoshis"] <= proposed_fee
         self.generatetoaddress(node, 1, wallet.getnewaddress())
 
         # Both asset steps keep their finance-recovery marker in the wallet

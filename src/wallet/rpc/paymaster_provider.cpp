@@ -41,6 +41,7 @@
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/fees.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
@@ -2427,6 +2428,7 @@ RPCHelpMan rebalancepaymasterpool()
                                                                                                                     {"operational_carrier_slots", RPCArg::Type::NUM, RPCArg::Default{0}, "Remaining operational carriers"},
                                                                                                                     {"dgb_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Preserve every DD carrier; retire only excess DGB"},
                                                                                                                      {"maximum_fee_satoshis", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Explicit positive fee ceiling per retirement transaction"},
+                                                                                                                     {"recommend_fee", RPCArg::Type::BOOL, RPCArg::Default{false}, "Preview only: propose a finite fee ceiling from current transaction estimates; does not approve spending or change refill limits"},
                                                                                                                      {"expected_liquidity_updated_at", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Require this saved liquidity revision and its exact targets"},
                                                                                                                      {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Commit the reviewed retirement transactions"},
                                                                                                                     {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
@@ -2443,6 +2445,9 @@ RPCHelpMan rebalancepaymasterpool()
                                                                                     {RPCResult::Type::NUM, "retired_carrier_cents", "DD returned to ordinary wallet liquidity"},
                                                                                     {RPCResult::Type::NUM, "maximum_network_fee_satoshis", /*optional=*/true, "Reviewed fee ceiling per retirement transaction"},
                                                                                     {RPCResult::Type::NUM, "maximum_total_fee_satoshis", /*optional=*/true, "Maximum combined retirement fees"},
+                                                                                    {RPCResult::Type::NUM, "estimated_dgb_fee_satoshis", /*optional=*/true, "Estimated DGB retirement fee when recommend_fee is requested"},
+                                                                                    {RPCResult::Type::NUM, "estimated_dd_fee_satoshis", /*optional=*/true, "Estimated DD retirement fee when recommend_fee is requested"},
+                                                                                    {RPCResult::Type::NUM, "wallet_maximum_fee_satoshis", /*optional=*/true, "Unchanged wallet-wide fee ceiling"},
                                                                                     {RPCResult::Type::NUM, "dd_network_fee_satoshis", /*optional=*/true, "DD retirement transaction fee"},
                                                                                      {RPCResult::Type::STR_HEX, "dd_txid", /*optional=*/true, "DD carrier retirement transaction"},
                                                                                     {RPCResult::Type::STR_HEX, "dgb_txid", /*optional=*/true, "DGB retirement transaction"},
@@ -2488,14 +2493,16 @@ RPCHelpMan rebalancepaymasterpool()
                              {"operational_carrier_slots", UniValueType(UniValue::VNUM)},
                              {"dgb_only", UniValueType(UniValue::VBOOL)},
                              {"maximum_fee_satoshis", UniValueType(UniValue::VNUM)},
+                             {"recommend_fee", UniValueType(UniValue::VBOOL)},
                              {"expected_liquidity_updated_at", UniValueType(UniValue::VNUM)},
                              {"execute", UniValueType(UniValue::VBOOL)},
                              {"plan_id", UniValueType(UniValue::VSTR)}},
                             /*fAllowNull=*/true, /*fStrict=*/true);
             const bool dgb_only = options.find_value("dgb_only").isTrue();
             const auto& fee_option = options.find_value("maximum_fee_satoshis");
-            const CAmount maximum_fee = fee_option.isNull() ? wallet->m_default_max_tx_fee : fee_option.getInt<int64_t>();
-            const bool bounded = dgb_only || !fee_option.isNull();
+            const bool recommend_fee = options.find_value("recommend_fee").isTrue();
+            CAmount maximum_fee = fee_option.isNull() ? wallet->m_default_max_tx_fee : fee_option.getInt<int64_t>();
+            const bool bounded = recommend_fee || dgb_only || !fee_option.isNull();
             if (bounded && (maximum_fee <= 0 || !MoneyRange(maximum_fee)))
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_RETIREMENT_FEE_LIMIT");
             const int admission = options.find_value("admission_dgb_slots").getInt<int>();
@@ -2504,6 +2511,8 @@ RPCHelpMan rebalancepaymasterpool()
             const int operational_carriers = options.find_value("operational_carrier_slots").isNull() ? 0 : options.find_value("operational_carrier_slots").getInt<int>();
             const bool execute = !options.find_value("execute").isNull() &&
                                  options.find_value("execute").get_bool();
+            if (recommend_fee && execute)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_RETIREMENT_FEE_PREVIEW_ONLY");
             const auto& expected_revision = options.find_value("expected_liquidity_updated_at");
             if (!expected_revision.isNull()) {
                 ProviderLiquidityPolicy saved;
@@ -2535,7 +2544,7 @@ RPCHelpMan rebalancepaymasterpool()
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOLS_NOT_PREPARED");
             }
             std::string refresh_error;
-            if (!RefreshPoolConfirmationHeights(*wallet, entries, refresh_error)) {
+            if (!RefreshPoolConfirmationHeights(*wallet, entries, refresh_error, /*persist=*/execute)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, refresh_error);
             }
             if (std::any_of(entries.begin(), entries.end(), [](const ProviderPoolEntry& entry) {
@@ -2632,6 +2641,61 @@ RPCHelpMan rebalancepaymasterpool()
                     "PAYMASTER_REBALANCE_VALUE_OUT_OF_RANGE");
             }
 
+            CAmount estimated_dgb_fee{0}, estimated_dd_fee{0};
+            if (recommend_fee) {
+                // Estimate the same output shapes without reserving destinations,
+                // signing, or changing either the pool or a spending approval.
+                if (!retire_dgb.empty()) {
+                    CCoinControl coin_control;
+                    coin_control.m_allow_other_inputs = false;
+                    coin_control.m_allow_paymaster_pool_inputs = true;
+                    coin_control.m_min_depth = 1;
+                    CMutableTransaction transaction;
+                    for (const auto* entry : retire_dgb) {
+                        coin_control.Select(entry->outpoint);
+                        transaction.vin.emplace_back(entry->outpoint);
+                    }
+                    transaction.vout.emplace_back(*retired_dgb_value, GetScriptForDestination(WitnessV1Taproot{}));
+                    LOCK(wallet->cs_wallet);
+                    const auto size = CalculateMaximumSignedTxSize(CTransaction{transaction}, wallet.get(), &coin_control);
+                    if (size.vsize <= 0 || size.vsize > std::numeric_limits<unsigned int>::max())
+                        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_ESTIMATE_FAILED");
+                    estimated_dgb_fee = GetMinimumFee(*wallet, static_cast<unsigned int>(size.vsize), coin_control, nullptr);
+                }
+                if (!retire_dd.empty()) {
+                    auto* dd_wallet = wallet->GetDDWallet();
+                    if (!dd_wallet) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DD_WALLET_UNAVAILABLE");
+                    std::vector<COutPoint> inputs;
+                    std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
+                    for (const auto* entry : retire_dd) {
+                        CTxDestination destination;
+                        if (!ExtractDestination(entry->script_pub_key, destination))
+                            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_ADDRESS_UNAVAILABLE");
+                        CDigiDollarAddress address{EncodeDigiDollarAddress(destination)};
+                        if (!address.IsValid()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_ADDRESS_UNAVAILABLE");
+                        inputs.push_back(entry->outpoint);
+                        recipients.emplace_back(std::move(address), entry->carrier_value.value);
+                    }
+                    DDTransferPlan plan;
+                    std::string error;
+                    if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, plan, error, &inputs, /*allow_paymaster_pool_inputs=*/true))
+                        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_ESTIMATE_FAILED: " + error);
+                    estimated_dd_fee = plan.estimated_fee;
+                }
+                if (!MoneyRange(estimated_dgb_fee) || !MoneyRange(estimated_dd_fee) ||
+                    (!retire_dgb.empty() && estimated_dgb_fee == 0) || (!retire_dd.empty() && estimated_dd_fee == 0))
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_ESTIMATE_FAILED");
+                const CAmount estimate = std::max(estimated_dgb_fee, estimated_dd_fee);
+                const CAmount wallet_limit = wallet->m_default_max_tx_fee;
+                if (wallet_limit <= 0 || !MoneyRange(wallet_limit) || estimate > wallet_limit)
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
+                // Ten percent headroom, rounded up to 0.01 DGB. This proposed
+                // bound still requires a separate exact-plan execution approval.
+                constexpr CAmount increment{COIN / 100};
+                const CAmount proposed = ((estimate + (estimate + 9) / 10 + increment - 1) / increment) * increment;
+                maximum_fee = std::min(wallet_limit, std::max(fee_option.isNull() ? CAmount{0} : maximum_fee, std::max(increment, proposed)));
+            }
+
             HashWriter plan_hasher = TaggedHash(
                 "DigiByte Paymaster Pool Rebalance Plan v1");
             plan_hasher << Params().GenesisBlock().GetHash()
@@ -2661,6 +2725,11 @@ RPCHelpMan rebalancepaymasterpool()
             result.pushKV("retired_operational_carrier_slots", retired_operational_dd);
             result.pushKV("retired_dgb_satoshis", *retired_dgb_value);
             result.pushKV("retired_carrier_cents", *retired_dd_value);
+            if (recommend_fee) {
+                result.pushKV("estimated_dgb_fee_satoshis", estimated_dgb_fee);
+                result.pushKV("estimated_dd_fee_satoshis", estimated_dd_fee);
+                result.pushKV("wallet_maximum_fee_satoshis", wallet->m_default_max_tx_fee);
+            }
             if (bounded) {
                 const int transactions = int(!retire_dgb.empty()) + int(!retire_dd.empty());
                 if (transactions > 0 && maximum_fee > MAX_MONEY / transactions)
@@ -2748,8 +2817,11 @@ RPCHelpMan rebalancepaymasterpool()
                 }
                 dd_tx = MakeTransactionRef(std::move(transaction));
                 const auto fee = GetProviderFinanceTransactionFee(*wallet, dd_tx);
-                if (!fee || fee->value <= 0 || fee->value > transfer_plan.estimated_fee ||
-                    fee->value > wallet->m_default_max_tx_fee || (bounded && fee->value > maximum_fee)) {
+                if (!fee || fee->value <= 0 || fee->value > transfer_plan.estimated_fee)
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_ESTIMATE_FAILED");
+                if (fee->value > wallet->m_default_max_tx_fee)
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
+                if (bounded && fee->value > maximum_fee) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_RETIREMENT_FEE_LIMIT");
                 }
                 // The marker and signed bytes share the existing wallet write.
