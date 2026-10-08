@@ -3142,9 +3142,10 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
             else if (expired) reason = DigiDollarSendWidget::tr("The provider offer expired before the payment could continue.");
             else if (error.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER")))
                 reason = DigiDollarSendWidget::tr("No usable provider offer remains for this attempt.");
-            else if (error.contains(QStringLiteral("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE")) ||
-                     error.contains(QStringLiteral("PAYMASTER_DIRECT_CONNECTION_FAILED")))
-                reason = DigiDollarSendWidget::tr("The provider could not be reached. Its public announcement may still be listed after it goes offline.");
+            else if (error.contains(QStringLiteral("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE")))
+                reason = DigiDollarSendWidget::tr("The provider endpoint or your configured proxy could not be reached.");
+            else if (error.contains(QStringLiteral("PAYMASTER_DIRECT_CONNECTION_FAILED")))
+                reason = DigiDollarSendWidget::tr("The provider did not complete the offer exchange. It may be busy, an admission limit may have been reached, or the connection may have been interrupted.");
             else if (error.contains(QStringLiteral("PAYMASTER_INPUT_ALREADY_RESERVED")))
                 reason = DigiDollarSendWidget::tr("The required funds are locked or reserved by another request. Check existing transfers before retrying.");
             // A database-read failure is not evidence of an unusable offer.
@@ -4320,7 +4321,7 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                 guard->clearUnsignedPaymasterSession();
                 guard->m_paymasterClosureReason.clear();
                 guard->setPaymasterNotice(DigiDollarSendWidget::tr(
-                    "%1 The unsigned request is closed. No payment was sent for this request and it no longer reserves funds. Recipient and amount were kept; prepare a new offer when ready.").arg(reason));
+                    "%1 The unsigned request is closed. No payment was sent and your wallet funds are available again. The provider may keep its offer reservation until expiry. Recipient and amount were kept; prepare a new offer when ready.").arg(reason));
                 return;
             }
             if (guard->m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
@@ -4359,7 +4360,7 @@ void PaymasterSendWidget::clearUnsignedPaymasterSession()
     if (!m_paymasterUnsignedClosed) return;
     clearClosedPaymasterSession();
     setPaymasterNotice(DigiDollarSendWidget::tr(
-        "The unsigned request is closed. No payment was sent for this request and it no longer reserves funds. Recipient and amount were kept."), DigiDollarStatus::Kind::INFO);
+        "The unsigned request is closed. No payment was sent and your wallet funds are available again. The provider may keep its offer reservation until expiry. Recipient and amount were kept."), DigiDollarStatus::Kind::INFO);
     m_paymasterStateValue->setText(
         DigiDollarSendWidget::tr("Unsigned transfer canceled; reserved $DD is available again"));
     m_paymasterCostValue->setText(DigiDollarSendWidget::tr("No service fee was authorized"));
@@ -5606,8 +5607,8 @@ bool PaymasterSendWidget::DescribeBackendError(
     } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_DIRECT_CONNECTION_FAILED"))) {
         errorTitle = DigiDollarSendWidget::tr("Paymaster connection failed");
         errorMessage = DigiDollarSendWidget::tr(
-            "The secure connection to the provider could not be completed. "
-            "A listed announcement does not confirm that the provider is currently reachable.\n\n"
+            "The provider exchange did not complete. The provider may be busy, "
+            "an admission limit may have been reached, or the connection may have been interrupted.\n\n"
             "Try again later or use another provider. Check the current transfer's status "
             "for safe retry or cancellation options.\n\nTechnical details: %1").arg(reasonFailed);
     } else if (reasonFailed.startsWith(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: "))) {

@@ -6398,7 +6398,7 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
         waiting.pushKV("provider", provider);
         waiting.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
         panel->setOperatorStatusForTesting(waiting);
-        QCOMPARE(headline->text(), reserved ? QStringLiteral("Payment in progress") : QStringLiteral("Waiting for reserve confirmations"));
+        QCOMPARE(headline->text(), reserved ? QStringLiteral("Payment reserves in use") : QStringLiteral("Waiting for reserve confirmations"));
         QVERIFY(hint->text().contains(QStringLiteral("automatically")));
         QVERIFY(!action->text().contains(QStringLiteral("Start")));
         QCOMPARE(card->property("statusKind").toString(), QStringLiteral("waiting"));
@@ -6842,7 +6842,7 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
 void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* outcome : {"input_selection", "small_change", "legacy_input_error", "provider_unreachable", "legacy_absence", "read_failure", "unsupported_version"}) {
+    for (const char* outcome : {"input_selection", "small_change", "legacy_input_error", "provider_unreachable", "exchange_incomplete", "legacy_absence", "read_failure", "unsupported_version"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
 }
@@ -6891,6 +6891,7 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
             request_ids.push_back(QString::fromStdString(params[6].find_value("request_id").get_str()));
             last_subtract_fee = params[6].find_value("subtract_paymaster_fee_from_amount").isTrue();
             if (outcome == QLatin1String("provider_unreachable")) throw std::runtime_error("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE");
+            if (outcome == QLatin1String("exchange_incomplete")) throw std::runtime_error("PAYMASTER_DIRECT_CONNECTION_FAILED");
             if (outcome == QLatin1String("legacy_input_error")) throw std::runtime_error("Insufficient confirmed DigiDollar inputs");
             if (outcome == QLatin1String("small_change")) throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Selected DD input change is below minimum DigiDollar output. Change: 1 cents, Minimum: 100 cents");
             throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Insufficient confirmed DD balance");
@@ -6944,6 +6945,10 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
     } else {
         QVERIFY(notice.contains("No Paymaster transfer was created"));
         if (outcome == QLatin1String("input_selection")) QVERIFY(notice.contains("Insufficient confirmed DD balance"));
+        if (outcome == QLatin1String("exchange_incomplete")) {
+            QVERIFY(notice.contains("admission limit"));
+            QVERIFY(!notice.contains("offline"));
+        }
         if (outcome == QLatin1String("input_selection") || outcome == QLatin1String("small_change")) {
             QVERIFY(!last_subtract_fee);
             if (outcome == QLatin1String("small_change")) {
@@ -7050,6 +7055,7 @@ void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
     QVERIFY(!client->isBusy());
     QVERIFY(!form.findChild<QLineEdit*>("addressEdit")->isReadOnly());
     QVERIFY(form.findChild<QLabel*>("paymasterSessionState")->text().contains("canceled"));
+    QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().contains("provider may keep its offer reservation until expiry"));
 }
 
 void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding_data()
@@ -8835,11 +8841,18 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     activity.pushKV("capacity_requests", 0);
     activity.pushKV("active_payments", 1);
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
+    QVERIFY(hint->text().contains("until the offer expires"));
+    QVERIFY(hint->text().contains("Open-offer limit per recipient: 2"));
+    provider.pushKV("service_state", "drain_only");
+    provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
+    QVERIFY(!hint->text().contains("Synchronization"));
     provider.pushKV("service_state", "waiting_for_readiness");
     provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
     provider.pushKV("last_service_error", "PAYMASTER_PROVIDER_SYNCING");
     observe();
     QCOMPARE(headline->text(), QStringLiteral("Waiting for the node"));
@@ -8868,7 +8881,7 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     provider.pushKV("last_service_error", "");
     activity.pushKV("active_payments", 1);
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment in progress"));
+    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
     QVERIFY(hint->text().contains("manual processing"));
     QVERIFY(!hint->text().contains("continues automatically"));
     provider.pushKV("service_state", "error");

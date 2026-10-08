@@ -366,3 +366,11 @@ Liquidity settings now keep their approval and save protected from background
 refreshes, preserve unconfirmed edits and reconcile lost save replies against
 the wallet's stored policy. The form explicitly distinguishes automatic refill
 from permission to pay refill fees and opens the fee controls when needed.
+
+Repeated unsigned cancellations no longer turn a recipient-specific quote limit
+into a provider-wide drain. Limited requests wait within their original expiry;
+expired or invalid requests do not fault the provider. The overview explains
+open-offer reservations and the per-recipient limit. Client notices distinguish
+an incomplete exchange from an unreachable endpoint and explain that provider
+reservations can remain until expiry after local cancellation. Presets, approved
+fees, wire messages and signature/reservation safety rules are unchanged.

@@ -1173,6 +1173,20 @@ a new unsigned request to select those inputs without reloading the wallet.
 A failed write or commit retains the locks. A user- or provider-signed
 authorization is never unlocked merely because its original TTL elapsed.
 
+Canceling an unsigned request on the client releases the client's DD; it does
+not immediately notify the provider. Open offers can therefore keep provider
+reserves occupied until expiry (normally 60 seconds). The reserve target and the
+open-offer limit per recipient are separate: three prepared payment slots do
+not override a limit of two open offers for one recipient. This does not require
+higher refill fees. The overview shows reserved payment capacity and the saved
+per-recipient limit, rather than treating an open offer as a completed payment.
+
+An individual admission-limit failure waits within the original request lifetime
+without draining the entire provider. Manual `processpaymasterrequests` returns
+`deferred=true` and a `deferral_reason`; automatic mode retries the same request
+while continuing other eligible work. If transport or request expiry ends the
+exchange first, the client needs a fresh offer. No fee or safety limit is raised.
+
 Generation-bound, reference-counted RAII leases protect inbox messages across
 the persistence decision. TTL pruning and both generic and specific dequeue
 operations skip an active lease. An exception or failed write releases only

@@ -9707,6 +9707,10 @@ private:
             headline = tr("New payments temporarily paused");
             hint = tr("Core is only completing existing work. It checks readiness again automatically and resumes new requests when the saved limits and prerequisites allow it.");
             button = tr("Check current status");
+        } else if (action == QLatin1String("wait") && area == QLatin1String("payments")) {
+            headline = tr("Payment reserves in use");
+            hint = tr("Open offers and payments reserve capacity. After a client cancels an unsigned request, the provider may keep its reservation until the offer expires. Core checks this automatically; no refill or higher fee limit is needed for reserved capacity.");
+            button = tr("View payment activity");
         } else if (action == QLatin1String("wait")) {
             headline = area == QLatin1String("liquidity") ? tr("Waiting for confirmations") : tr("Waiting for the node");
             hint = tr("Synchronization or confirmations are still pending. Review progress; no new approval is needed to wait.");
@@ -9777,10 +9781,10 @@ private:
             kind = QStringLiteral("waiting");
             if (payment_in_progress) {
                 area = QStringLiteral("payments");
-                headline = work_phase == "capacity" ? tr("Payment capacity reserved") : tr("Payment in progress");
+                headline = work_phase == "capacity" ? tr("Payment capacity reserved") : tr("Payment reserves in use");
                 hint = state == QLatin1String("manual")
                     ? tr("Operating capital is reserved for a payment. Review the current request in Activity; manual processing remains enabled.")
-                    : tr("Operating capital is reserved for an ongoing payment. Core continues automatically as the payment progresses or the reservation is released. No action is needed here.");
+                    : tr("Open offers and payments reserve capacity. After a client cancels an unsigned request, the provider may keep its reservation until the offer expires. Core continues automatically within the saved limits. A reservation is not a completed payment or a refill expense.");
                 button = tr("View payment activity");
                 setStatusLabel(m_overview_liquidity_status, tr("In use · capacity is reserved for a payment"), QStringLiteral("waiting"));
             } else {
@@ -9791,6 +9795,12 @@ private:
                 setStatusLabel(m_overview_liquidity_status, tr("Waiting · reserves need blockchain confirmation"), QStringLiteral("waiting"));
             }
             m_overview_liquidity_action->setText(tr("View progress"));
+        }
+        if (action == QLatin1String("wait") && area == QLatin1String("payments")) {
+            const auto& recipient_limit = snapshot.find_value("safety").find_value("policy").find_value("maximum_active_quotes_per_recipient");
+            if (recipient_limit.isNum() && recipient_limit.getInt<int64_t>() > 0) {
+                hint += tr(" Open-offer limit per recipient: %1.").arg(recipient_limit.getInt<int64_t>());
+            }
         }
         if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
         m_operator_next_action = action;

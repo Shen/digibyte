@@ -3037,3 +3037,14 @@ $env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
 $env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
 python -X utf8 test/functional/wallet_paymaster_provider.py --descriptors --cancel-burst-only
 ```
+
+The companion Qt change passed four focused functions with 13 data cases
+(21 results including setup/cleanup): `paymasterOperatorWorkTransitions`,
+`paymasterOperatorOverviewGuidesAndFailsClosed`,
+`paymasterClientCoreCancellationRoundTrip`, and
+`paymasterClientUncreatedRequestReturnsToCompose`. They cover both themes,
+reserved offers versus node synchronization, the per-recipient limit, preserved
+fault precedence, safe cancellation with a lost reply, and incomplete exchange
+wording. Updated Qt units and isolated test/application links passed. Reports
+are `cancel-<function>.txt` in the same local check directory. These are targeted
+checks, not the complete Qt suite.
