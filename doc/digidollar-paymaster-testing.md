@@ -2934,3 +2934,18 @@ $env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
 $env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
 python -X utf8 test/functional/wallet_paymaster_provider.py --descriptors --drain-recovery-only
 ```
+
+## 2026-10-08: Routine provider synchronization logging
+
+Only `WAITING_FOR_READINESS` with `PAYMASTER_PROVIDER_SYNCING` moves from the
+normal pause log to opt-in `bench` logging. No service-state or payment checks
+change. The provider-runtime translation unit compiled and the isolated daemon,
+Qt application and Core test executable linked successfully. The same three Core
+cases and focused two-node `--drain-recovery-only` regression above passed.
+Other pause messages and automatic drain recovery remained present in the test
+log; this run did not force the short synchronization window itself.
+
+Local reports: `build_msvc/paymaster-refresh-check/reserve-presets/`
+`sync-log-core-tests.txt` and `sync-log-functional.txt`. `git diff --check`
+passed. No full build, complete suite or cross-platform run was performed;
+the operator commands and prerequisites above still apply.

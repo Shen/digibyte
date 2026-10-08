@@ -28,6 +28,11 @@ rechecks readiness before resuming, preserves all existing approvals and limits,
 and refreshes its offer. GUI and RPC diagnostics now distinguish a drain from an
 active provider even when local prerequisites are ready and no last error remains.
 
+Routine `PAYMASTER_PROVIDER_SYNCING` waits now use opt-in `bench` logging,
+avoiding repeated normal-log pause messages during frequent block arrivals.
+GUI/RPC waiting status, synchronization checks, other pause reasons and drain
+recovery logs are unchanged.
+
 ## Operator income and costs
 
 The finance page now leads with period income, operating costs and successful

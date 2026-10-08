@@ -690,9 +690,17 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     }
     if (!first_error.empty() &&
         (previous.state != state || previous.last_error != first_error)) {
-        wallet.WalletLogPrintf(
-            "Paymaster automatic provider service paused: %s\n",
-            first_error);
+        // New blocks briefly put wallet/index notifications behind the tip.
+        // Keep this expected wait observable without flooding the normal log.
+        if (state == ProviderServiceState::WAITING_FOR_READINESS &&
+            first_error == "PAYMASTER_PROVIDER_SYNCING") {
+            LogPrint(BCLog::BENCH, "%s Paymaster automatic provider service waiting for synchronization: %s\n",
+                     wallet.GetDisplayName(), first_error);
+        } else {
+            wallet.WalletLogPrintf(
+                "Paymaster automatic provider service paused: %s\n",
+                first_error);
+        }
     }
     if (previous.state == ProviderServiceState::DRAIN_ONLY &&
         state == ProviderServiceState::ACTIVE && first_error.empty()) {

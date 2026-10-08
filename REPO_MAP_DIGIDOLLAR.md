@@ -827,8 +827,10 @@ or chain parameters.
 - `paymaster_processing.cpp` owns the bounded provider handlers for result,
   submit, Capacity, quote, and recovery messages.
 - `paymaster_runtime.cpp` owns provider start/stop and automatic service cycles,
-  including guarded readiness rechecks and offer refresh after temporary drain;
-  `paymaster_integration.cpp` owns startup reconciliation, bounded recurring
+  including guarded readiness rechecks and offer refresh after temporary drain.
+  Routine synchronization transitions use opt-in `bench` logging; other pause
+  reasons retain the normal log.
+- `paymaster_integration.cpp` owns startup reconciliation, bounded recurring
   maintenance/service scheduling and durable equivocation-inbox maintenance.
 - Client RPCs expose offers, bounded persistent-session listing and exact
   status/resolution, reputation, quote advancement, role-limited PSBT

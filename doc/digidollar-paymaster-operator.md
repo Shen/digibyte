@@ -184,6 +184,14 @@ While that wait remains, automatic refill is temporarily paused; its saved
 activation and approved limits remain intact. Genuine faults are never cleared
 by this display check. Every payment still performs its own synchronization checks.
 
+Routine `PAYMASTER_PROVIDER_SYNCING` transitions are written only when `bench`
+debug logging is enabled, with the wording "waiting for synchronization".
+Frequent new blocks therefore do not fill the normal log with pause messages.
+The current wait, including a prolonged wait, remains visible in GUI/RPC status.
+Safety-limit failures, other errors and recovery from a temporary drain retain
+their normal log messages. Enable the extra records with `logging ["bench"] []`
+and disable them with `logging [] ["bench"]` if the category was previously off.
+
 After restarting with an existing provider wallet, use **Overview → Start
 provider** (or **Resume provider** after a persistent pause). The setup
 assistant is optional when the saved settings are unchanged. Wallet unlock,
