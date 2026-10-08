@@ -78,6 +78,7 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QProgressBar>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -430,6 +431,90 @@ UniValue PaymasterAuthorizationResult(bool authorization_required,
     result.pushKV("authorization_required", authorization_required);
     result.pushKV("authorization_commitment", commitment);
     return result;
+}
+
+UniValue FinanceTestSnapshot()
+{
+    const auto summary = [](qint64 income, qint64 cost,
+                            qint64 transfers) {
+        UniValue value{UniValue::VOBJ};
+        value.pushKV("service_fee_income_cents", income);
+        value.pushKV("dgb_operating_cost_satoshis", cost);
+        value.pushKV("successful_transfers", transfers);
+        return value;
+    };
+    const std::string provider_id(64, 'a');
+    UniValue finance{UniValue::VOBJ};
+    finance.pushKV("provider_id", provider_id);
+    finance.pushKV("period", "30d");
+    finance.pushKV("service_fee_income_cents", 125);
+    finance.pushKV("dgb_operating_cost_satoshis", 100000);
+    finance.pushKV("successful_transfers", 5);
+    finance.pushKV("average_service_fee_cents", 25);
+    finance.pushKV("user_paid_transfers", 3);
+    finance.pushKV("public_sponsored_transfers", 1);
+    finance.pushKV("restricted_sponsored_transfers", 1);
+    const auto model_summary = [](qint64 transfers, qint64 income,
+                                  qint64 cost) {
+        UniValue value{UniValue::VOBJ};
+        value.pushKV("successful_transfers", transfers);
+        value.pushKV("service_fee_income_cents", income);
+        value.pushKV("dgb_operating_cost_satoshis", cost);
+        return value;
+    };
+    UniValue model_breakdown{UniValue::VOBJ};
+    model_breakdown.pushKV("user_paid", model_summary(3, 125, 60000));
+    model_breakdown.pushKV("public_sponsored", model_summary(1, 0, 20000));
+    model_breakdown.pushKV("restricted_sponsored",
+                           model_summary(1, 0, 20000));
+    finance.pushKV("model_breakdown", std::move(model_breakdown));
+    UniValue summaries{UniValue::VOBJ};
+    summaries.pushKV("today", summary(25, 10000, 1));
+    summaries.pushKV("7d", summary(75, 50000, 3));
+    summaries.pushKV("30d", summary(125, 100000, 5));
+    summaries.pushKV("all", summary(250, 200000, 10));
+    finance.pushKV("period_summaries", std::move(summaries));
+    finance.pushKV("history_partially_reconstructable", false);
+    finance.pushKV("history_complete_from", 100);
+    finance.pushKV("backup_required", true);
+    finance.pushKV("last_successful_backup_at", 0);
+    finance.pushKV("external_backup_acknowledged_at", 0);
+    finance.pushKV("oracle_price_micro_usd", 500000);
+    finance.pushKV("valuation_time", 200);
+    finance.pushKV("estimated_result_usd", 1.2495);
+    UniValue capital{UniValue::VOBJ};
+    capital.pushKV("dgb_available_satoshis", 500000000);
+    capital.pushKV("dgb_reserved_satoshis", 100000000);
+    capital.pushKV("dgb_pending_satoshis", 50000000);
+    capital.pushKV("carrier_base_cents", 400);
+    capital.pushKV("carrier_earned_cents", 25);
+    capital.pushKV("carrier_withdrawable_cents", 20);
+    capital.pushKV("pending_maintenance_transactions", 1);
+    finance.pushKV("pool_capital", std::move(capital));
+    UniValue daily_totals{UniValue::VARR};
+    UniValue day{UniValue::VOBJ};
+    day.pushKV("day_start", 86400);
+    day.pushKV("service_fee_income_cents", 25);
+    day.pushKV("dgb_operating_cost_satoshis", 10000);
+    day.pushKV("successful_transfers", 1);
+    day.pushKV("maintenance_transactions", 2);
+    daily_totals.push_back(std::move(day));
+    finance.pushKV("daily_totals", std::move(daily_totals));
+    UniValue events{UniValue::VARR};
+    UniValue event{UniValue::VOBJ};
+    event.pushKV("event_id", std::string(64, 'b'));
+    event.pushKV("kind", "transfer");
+    event.pushKV("state", "confirmed");
+    event.pushKV("dd_income_cents", 25);
+    event.pushKV("dgb_cost_satoshis", 10000);
+    event.pushKV("created_at", 150);
+    event.pushKV("confirmed_at", 160);
+    event.pushKV("funding_model", "user_paid");
+    event.pushKV("transaction_id", std::string(64, 'c'));
+    events.push_back(std::move(event));
+    finance.pushKV("events", std::move(events));
+
+    return finance;
 }
 
 } // namespace
@@ -1924,84 +2009,8 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     QStringList commands;
     std::vector<UniValue> parameters;
 
-    const auto summary = [](qint64 income, qint64 cost,
-                            qint64 transfers) {
-        UniValue value{UniValue::VOBJ};
-        value.pushKV("service_fee_income_cents", income);
-        value.pushKV("dgb_operating_cost_satoshis", cost);
-        value.pushKV("successful_transfers", transfers);
-        return value;
-    };
     const std::string provider_id(64, 'a');
-    UniValue finance{UniValue::VOBJ};
-    finance.pushKV("provider_id", provider_id);
-    finance.pushKV("period", "30d");
-    finance.pushKV("service_fee_income_cents", 125);
-    finance.pushKV("dgb_operating_cost_satoshis", 100000);
-    finance.pushKV("successful_transfers", 5);
-    finance.pushKV("average_service_fee_cents", 25);
-    finance.pushKV("user_paid_transfers", 3);
-    finance.pushKV("public_sponsored_transfers", 1);
-    finance.pushKV("restricted_sponsored_transfers", 1);
-    const auto model_summary = [](qint64 transfers, qint64 income,
-                                  qint64 cost) {
-        UniValue value{UniValue::VOBJ};
-        value.pushKV("successful_transfers", transfers);
-        value.pushKV("service_fee_income_cents", income);
-        value.pushKV("dgb_operating_cost_satoshis", cost);
-        return value;
-    };
-    UniValue model_breakdown{UniValue::VOBJ};
-    model_breakdown.pushKV("user_paid", model_summary(3, 125, 60000));
-    model_breakdown.pushKV("public_sponsored", model_summary(1, 0, 20000));
-    model_breakdown.pushKV("restricted_sponsored",
-                           model_summary(1, 0, 20000));
-    finance.pushKV("model_breakdown", std::move(model_breakdown));
-    UniValue summaries{UniValue::VOBJ};
-    summaries.pushKV("today", summary(25, 10000, 1));
-    summaries.pushKV("7d", summary(75, 50000, 3));
-    summaries.pushKV("30d", summary(125, 100000, 5));
-    summaries.pushKV("all", summary(250, 200000, 10));
-    finance.pushKV("period_summaries", std::move(summaries));
-    finance.pushKV("history_partially_reconstructable", false);
-    finance.pushKV("history_complete_from", 100);
-    finance.pushKV("backup_required", true);
-    finance.pushKV("last_successful_backup_at", 0);
-    finance.pushKV("external_backup_acknowledged_at", 0);
-    finance.pushKV("oracle_price_micro_usd", 500000);
-    finance.pushKV("valuation_time", 200);
-    finance.pushKV("estimated_result_usd", 1.2495);
-    UniValue capital{UniValue::VOBJ};
-    capital.pushKV("dgb_available_satoshis", 500000000);
-    capital.pushKV("dgb_reserved_satoshis", 100000000);
-    capital.pushKV("dgb_pending_satoshis", 50000000);
-    capital.pushKV("carrier_base_cents", 400);
-    capital.pushKV("carrier_earned_cents", 25);
-    capital.pushKV("carrier_withdrawable_cents", 20);
-    capital.pushKV("pending_maintenance_transactions", 1);
-    finance.pushKV("pool_capital", std::move(capital));
-    UniValue daily_totals{UniValue::VARR};
-    UniValue day{UniValue::VOBJ};
-    day.pushKV("day_start", 86400);
-    day.pushKV("service_fee_income_cents", 25);
-    day.pushKV("dgb_operating_cost_satoshis", 10000);
-    day.pushKV("successful_transfers", 1);
-    day.pushKV("maintenance_transactions", 2);
-    daily_totals.push_back(std::move(day));
-    finance.pushKV("daily_totals", std::move(daily_totals));
-    UniValue events{UniValue::VARR};
-    UniValue event{UniValue::VOBJ};
-    event.pushKV("event_id", std::string(64, 'b'));
-    event.pushKV("kind", "transfer");
-    event.pushKV("state", "confirmed");
-    event.pushKV("dd_income_cents", 25);
-    event.pushKV("dgb_cost_satoshis", 10000);
-    event.pushKV("created_at", 150);
-    event.pushKV("confirmed_at", 160);
-    event.pushKV("funding_model", "user_paid");
-    event.pushKV("transaction_id", std::string(64, 'c'));
-    events.push_back(std::move(event));
-    finance.pushKV("events", std::move(events));
+    UniValue finance = FinanceTestSnapshot();
 
     UniValue finance_without_oracle{UniValue::VOBJ};
     UniValue finance_partial_history{UniValue::VOBJ};
@@ -2183,10 +2192,11 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
         QStringLiteral("paymasterFinancePeriodIncome2"));
     QLabel* result_estimate = tab.findChild<QLabel*>(
         QStringLiteral("paymasterFinanceResultEstimate"));
-    QLabel* model_breakdown_label = tab.findChild<QLabel*>(
-        QStringLiteral("paymasterFinanceModelBreakdown"));
+    QLabel* user_paid_costs = tab.findChild<QLabel*>("paymasterFinance_user_paid_costs");
+    QLabel* user_paid_transfers = tab.findChild<QLabel*>("paymasterFinance_user_paid_transfers");
+    QLabel* income = tab.findChild<QLabel*>("paymasterFinance_income");
     QLabel* pool_dgb = tab.findChild<QLabel*>(
-        QStringLiteral("paymasterFinancePoolDgb"));
+        QStringLiteral("paymasterFinance_dgb_available"));
     QGroupBox* history_notice = tab.findChild<QGroupBox*>(
         QStringLiteral("paymasterFinanceHistoryNotice"));
     QLabel* history_notice_text = tab.findChild<QLabel*>(
@@ -2217,7 +2227,9 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
         QStringLiteral("paymasterFinanceHistoryStatus"));
     auto* selected_summary = tab.findChild<QLabel*>(QStringLiteral("paymasterFinanceSelectedSummary"));
     QVERIFY(selected_summary);
-    QVERIFY(selected_summary->text().contains(QStringLiteral("1.25 DD")));
+    QVERIFY(income);
+    QCOMPARE(income->text(), QStringLiteral("1.25 DD"));
+    QVERIFY(selected_summary->text().contains(QStringLiteral("Last 30 days")));
     auto* overview_finance = tab.findChild<QLabel*>("paymasterOverviewFinanceStatus");
     QVERIFY(overview_finance);
     // The detail page is 30d, but the overview stays explicitly all-time.
@@ -2227,7 +2239,8 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     QVERIFY(overview_income->text().contains("2.50 DD"));
     QVERIFY(period_income != nullptr);
     QVERIFY(result_estimate != nullptr);
-    QVERIFY(model_breakdown_label != nullptr);
+    QVERIFY(user_paid_costs);
+    QVERIFY(user_paid_transfers);
     QVERIFY(pool_dgb != nullptr);
     QVERIFY(history_notice != nullptr);
     QVERIFY(history_notice_text != nullptr);
@@ -2252,13 +2265,11 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     QCOMPARE(parameters.front()[0].find_value("include_events").get_bool(),
              true);
     QCOMPARE(parameters.front()[0].find_value("limit").getInt<int>(), 250);
-    QVERIFY(period_income->text().contains(QStringLiteral("Service fees")));
+    QCOMPARE(period_income->text(), QStringLiteral("1.25"));
     QVERIFY(result_estimate->text().contains(QStringLiteral("USD")));
-    QVERIFY(model_breakdown_label->text().contains(
-        QStringLiteral("User paid: 3 transfer")));
-    QVERIFY(model_breakdown_label->text().contains(
-        QStringLiteral("0.00060000 DGB cost")));
-    QVERIFY(pool_dgb->text().contains(QStringLiteral("available")));
+    QCOMPARE(user_paid_transfers->text(), QStringLiteral("3"));
+    QCOMPARE(user_paid_costs->text(), QStringLiteral("0.0006"));
+    QCOMPARE(pool_dgb->text(), QStringLiteral("5 DGB"));
     QVERIFY(history_notice->isHidden());
     QCOMPARE(booking_table->rowCount(), 1);
     QCOMPARE(booking_table->columnCount(), 6);
@@ -2308,7 +2319,7 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     QVERIFY(backup_provider->toolTip().isEmpty());
     QVERIFY(backup_provider->accessibleName().isEmpty());
     QVERIFY(backup_provider->accessibleDescription().isEmpty());
-    QVERIFY(!selected_summary->text().contains(QStringLiteral("1.25")));
+    QVERIFY(!income->text().contains(QStringLiteral("1.25")));
     QVERIFY(booking_table->isHidden());
     QVERIFY(daily_table->isHidden());
     QVERIFY(!finance_export->isEnabled());
@@ -2354,8 +2365,7 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
 
     oracle_available = false;
     finance_refresh->click();
-    QVERIFY(result_estimate->text().contains(
-        QStringLiteral("No current Oracle price")));
+    QCOMPARE(result_estimate->text(), QStringLiteral("Estimate unavailable"));
     partial_history = true;
     finance_refresh->click();
     QVERIFY(!history_notice->isHidden());
@@ -2381,7 +2391,7 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
                  parameters.at(1)[0].find_value("period").get_str()),
              QStringLiteral("today"));
     QCOMPARE(period->currentData().toString(), QStringLiteral("today"));
-    QVERIFY(selected_summary->text().contains(QStringLiteral("0.25 DD")));
+    QCOMPARE(income->text(), QStringLiteral("0.25 DD"));
     malformed_finance = true;
     finance_refresh->click();
     QVERIFY(selected_summary->text().contains(QStringLiteral("incomplete")));
@@ -10111,6 +10121,146 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
         panel->refreshStatus();
         QVERIFY(status->text().contains("Task complete"));
     }
+}
+
+void PaymasterWidgetTests::paymasterFinanceOperatorPresentation_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::addColumn<int>("width");
+    for (const char* theme : {"dark", "light"})
+        for (int width : {760, 1360})
+            QTest::newRow((std::string(theme) + "-" + std::to_string(width)).c_str()) << QString::fromLatin1(theme) << width;
+}
+
+void PaymasterWidgetTests::paymasterFinanceOperatorPresentation()
+{
+    QFETCH(QString, theme);
+    QFETCH(int, width);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
+    QFile css(":/css/" + theme);
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    if (width == 760) {
+        QFont font = panel->font(); font.setPointSize(17); panel->setFont(font);
+    }
+    UniValue finance = FinanceTestSnapshot();
+    // Reproduce the operator's example: most costs belong to reserves, not
+    // customer payments. Every displayed total must reconcile in native units.
+    UniValue totals;
+    QVERIFY(totals.read(R"({"service_fee_income_cents":42,"dgb_operating_cost_satoshis":743065000,"successful_transfers":14})"));
+    for (const auto& key : totals.getKeys()) finance.pushKV(key, totals.find_value(key));
+    finance.pushKV("average_service_fee_cents", 3);
+    finance.pushKV("user_paid_transfers", 14);
+    finance.pushKV("public_sponsored_transfers", 0);
+    finance.pushKV("restricted_sponsored_transfers", 0);
+    finance.pushKV("estimated_result_usd", -3.295325);
+    finance.pushKV("valuation_time", 1791468248);
+    UniValue models;
+    QVERIFY(models.read(R"({"user_paid":{"successful_transfers":14,"service_fee_income_cents":42,"dgb_operating_cost_satoshis":140000000},"public_sponsored":{"successful_transfers":0,"service_fee_income_cents":0,"dgb_operating_cost_satoshis":0},"restricted_sponsored":{"successful_transfers":0,"service_fee_income_cents":0,"dgb_operating_cost_satoshis":0}})"));
+    finance.pushKV("model_breakdown", models);
+    auto summaries = finance.find_value("period_summaries");
+    UniValue today_totals, week_totals;
+    QVERIFY(today_totals.read(R"({"service_fee_income_cents":0,"dgb_operating_cost_satoshis":38600000,"successful_transfers":0})"));
+    QVERIFY(week_totals.read(R"({"service_fee_income_cents":36,"dgb_operating_cost_satoshis":460305000,"successful_transfers":12})"));
+    summaries.pushKV("today", today_totals);
+    summaries.pushKV("7d", week_totals);
+    summaries.pushKV("30d", totals);
+    summaries.pushKV("all", totals);
+    finance.pushKV("period_summaries", summaries);
+    int finance_calls{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasterfinancestatus") {
+            ++finance_calls;
+            auto result = finance;
+            result.pushKV("period", params[0].find_value("period"));
+            return result;
+        }
+        return GuidedOperatorSnapshot();
+    });
+    panel->refreshStatus();
+    auto* tabs = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    auto* page = panel->findChild<QScrollArea*>("paymasterFinancesPage");
+    auto* period = panel->findChild<QComboBox*>("paymasterFinancePeriod");
+    QVERIFY(tabs && page && period);
+    tabs->setCurrentWidget(page);
+    panel->resize(width, 940);
+    panel->show();
+    QVERIFY(QTest::qWaitForWindowExposed(panel.get()));
+    const auto value = [&](const char* key) { return panel->findChild<QLabel*>(QStringLiteral("paymasterFinance_") + QLatin1String(key)); };
+    for (const char* key : {"income", "costs", "transfers", "average", "maintenance_costs", "user_paid_costs", "total_costs", "carrier_base", "carrier_withdrawable"}) QVERIFY(value(key));
+    QCOMPARE(value("income")->text(), QStringLiteral("0.42 DD"));
+    QCOMPARE(value("costs")->text(), QStringLiteral("7.43065 DGB"));
+    QCOMPARE(value("transfers")->text(), QStringLiteral("14"));
+    QVERIFY(value("average")->text().contains("0.03 DD"));
+    QCOMPARE(value("user_paid_costs")->text(), QStringLiteral("1.4"));
+    QCOMPARE(value("maintenance_costs")->text(), QStringLiteral("6.03065"));
+    QCOMPARE(value("total_costs")->text(), QStringLiteral("7.43065"));
+    QCOMPARE(value("carrier_base")->text(), QStringLiteral("4.00 DD"));
+    QCOMPARE(value("carrier_withdrawable")->text(), QStringLiteral("0.20 DD"));
+    auto* estimate = panel->findChild<QLabel*>("paymasterFinanceResultEstimate");
+    QVERIFY(estimate);
+    QCOMPARE(estimate->text(), QStringLiteral("≈ -3.30 USD"));
+    auto* comparison = panel->findChild<QPushButton*>("paymasterFinanceCompareToggle");
+    auto* valuation = panel->findChild<QPushButton*>("paymasterFinanceValuationToggle");
+    QVERIFY(comparison && valuation);
+    const int calls_before_disclosure = finance_calls;
+    comparison->setFocus();
+    QTest::keyClick(comparison, Qt::Key_Space);
+    QVERIFY(comparison->isChecked());
+    valuation->click();
+    QVERIFY(valuation->isChecked());
+    QCoreApplication::processEvents();
+    QCOMPARE(finance_calls, calls_before_disclosure); // Disclosure never polls Core.
+    QCOMPARE(page->horizontalScrollBar()->maximum(), 0);
+    for (auto* label : page->findChildren<QLabel*>()) {
+        if (!label->isVisible()) continue;
+        if (label->wordWrap()) QVERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(label->objectName() + ": " + label->text()));
+    }
+    const QString screenshot = qEnvironmentVariable("DIGIBYTE_PAYMASTER_FINANCE_LAYOUT_SCREENSHOT");
+    if (!screenshot.isEmpty()) QVERIFY(page->widget()->grab().save(screenshot + "-" + QTest::currentDataTag() + ".png"));
+
+    // New-period replies must not show the old figures under the new heading.
+    DigiDollarPaymasterWidget::RpcCallback pending;
+    panel->setAsyncRpcExecutorForTesting([&](const std::string& command, const UniValue&, DigiDollarPaymasterWidget::RpcCallback callback) {
+        if (command == "getpaymasterfinancestatus") pending = std::move(callback);
+        else callback(GuidedOperatorSnapshot(), {});
+    });
+    period->setCurrentIndex(period->findData("today"));
+    QVERIFY(pending);
+    QCOMPARE(value("income")->text(), QStringLiteral("—"));
+    QCOMPARE(value("maintenance_costs")->text(), QStringLiteral("—"));
+    QCOMPARE(estimate->text(), QStringLiteral("No estimate loaded"));
+    auto today = finance;
+    today.pushKV("period", "today");
+    today.pushKV("service_fee_income_cents", 0);
+    today.pushKV("dgb_operating_cost_satoshis", 38600000);
+    today.pushKV("successful_transfers", 0);
+    for (const auto& key : models.getKeys()) {
+        UniValue empty;
+        QVERIFY(empty.read(R"({"successful_transfers":0,"service_fee_income_cents":0,"dgb_operating_cost_satoshis":0})"));
+        models.pushKV(key, empty);
+    }
+    today.pushKV("model_breakdown", models);
+    for (const auto* key : {"oracle_price_micro_usd", "valuation_time", "estimated_result_usd"}) today.pushKV(key, UniValue{});
+    auto finish = std::move(pending);
+    finish(today, {});
+    QTRY_COMPARE(value("income")->text(), QStringLiteral("0.00 DD"));
+    QCOMPARE(value("maintenance_costs")->text(), QStringLiteral("0.386"));
+    QVERIFY(value("average")->text().contains("No confirmed payments"));
+    QCOMPARE(estimate->text(), QStringLiteral("Estimate unavailable"));
+    QCOMPARE(value("carrier_base")->text(), QStringLiteral("4.00 DD")); // Current capital is independent of period.
+    QCOMPARE(value("carrier_withdrawable")->text(), QStringLiteral("0.20 DD"));
+    panel->setPrivacy(true);
+    for (auto* label : page->findChildren<QLabel*>()) {
+        if (!label->objectName().startsWith("paymasterFinance_")) continue;
+        QVERIFY2(!label->text().contains(QRegularExpression("[0-9]")), qPrintable(label->objectName()));
+        QVERIFY(label->toolTip().isEmpty());
+        QVERIFY(label->accessibleName().isEmpty());
+    }
+    panel->setWalletModel(nullptr);
+    QCOMPARE(value("income")->text(), QStringLiteral("—"));
+    QCOMPARE(value("carrier_base")->text(), QStringLiteral("—"));
 }
 
 void PaymasterWidgetTests::paymasterGuidedTaskLayout_data()

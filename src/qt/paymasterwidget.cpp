@@ -49,6 +49,7 @@
 #include <QSignalBlocker>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMap>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -3505,22 +3506,22 @@ public:
         auto* finance_column = CreatePaymasterPageColumn(finance, finance_layout);
         AddPaymasterPageHeading(
             finance_layout, finance_column, tr("Income & costs"),
-            tr("Track DigiDollar service-fee income, DigiByte operating costs and wallet-owned pool capital without treating reserved liquidity as an expense."),
+            tr("See what your service earned, what it spent and which funds are available now."),
             QStringLiteral("paymasterFinances"));
 
         auto* finance_toolbar = new QGroupBox(
             tr("Reporting period"), finance_column);
         finance_toolbar->setProperty(
             "paymasterRole", QStringLiteral("card"));
-        auto* finance_toolbar_layout = new QHBoxLayout(finance_toolbar);
+        auto* finance_toolbar_layout = new QGridLayout(finance_toolbar);
         auto* finance_period_help = new QLabel(tr(
-                                                   "Choose the period for income, costs, bookings and CSV export. Operating capital remains separate from expenses."),
+                                                   "Income, costs and CSV export use this period. Today starts at midnight UTC; 7 and 30 days are rolling periods."),
                                                finance_toolbar);
         finance_period_help->setWordWrap(true);
-        finance_toolbar_layout->addWidget(finance_period_help, 1);
+        finance_toolbar_layout->addWidget(finance_period_help, 1, 0, 1, 3);
         m_finance_period_select = new NoWheelComboBox(finance_toolbar);
         m_finance_period_select->setObjectName("paymasterFinancePeriod");
-        m_finance_period_select->addItem(tr("Today"), QStringLiteral("today"));
+        m_finance_period_select->addItem(tr("Today (UTC)"), QStringLiteral("today"));
         m_finance_period_select->addItem(tr("Last 7 days"), QStringLiteral("7d"));
         m_finance_period_select->addItem(tr("Last 30 days"), QStringLiteral("30d"));
         m_finance_period_select->addItem(tr("All recorded history"), QStringLiteral("all"));
@@ -3530,9 +3531,10 @@ public:
         m_finance_export = new QPushButton(tr("Export CSV…"), finance_toolbar);
         m_finance_export->setObjectName("paymasterFinanceExport");
         m_finance_export->setEnabled(false);
-        finance_toolbar_layout->addWidget(m_finance_period_select);
-        finance_toolbar_layout->addWidget(m_finance_refresh);
-        finance_toolbar_layout->addWidget(m_finance_export);
+        finance_toolbar_layout->addWidget(m_finance_period_select, 0, 0);
+        finance_toolbar_layout->addWidget(m_finance_refresh, 0, 1);
+        finance_toolbar_layout->addWidget(m_finance_export, 0, 2);
+        finance_toolbar_layout->setColumnStretch(0, 1);
         finance_layout->addWidget(finance_toolbar);
 
         // Legacy provider commits may predate the manifest-bound finance
@@ -3559,102 +3561,149 @@ public:
         m_finance_history_notice->hide();
         finance_layout->addWidget(m_finance_history_notice);
 
-        auto* finance_period_cards = new PaymasterResponsiveCards(finance_column);
-        finance_period_cards->setObjectName("paymasterFinancePeriodCards");
-        const std::array<QString, 4> period_titles{
-            tr("Today"), tr("7 days"), tr("30 days"), tr("Total")};
-        for (size_t index = 0; index < period_titles.size(); ++index) {
-            auto* card = new QFrame(finance_period_cards);
-            card->setProperty("paymasterRole", QStringLiteral("statusCard"));
-            card->setMinimumHeight(154);
-            auto* card_layout = new QVBoxLayout(card);
-            card_layout->setContentsMargins(16, 14, 16, 14);
-            auto* title = new QLabel(period_titles.at(index), card);
-            title->setProperty("paymasterRole", QStringLiteral("cardHeading"));
-            m_finance_period_income.at(index) = new QLabel(
-                tr("Service fees: — DD"), card);
-            m_finance_period_income.at(index)->setObjectName(
-                QStringLiteral("paymasterFinancePeriodIncome%1").arg(index));
-            m_finance_period_income.at(index)->setProperty(
-                "paymasterRole", QStringLiteral("statusText"));
-            m_finance_period_cost.at(index) = new QLabel(
-                tr("Operating costs: — DGB"), card);
-            m_finance_period_cost.at(index)->setObjectName(
-                QStringLiteral("paymasterFinancePeriodCost%1").arg(index));
-            m_finance_period_transfers.at(index) = new QLabel(
-                tr("Successful transfers: —"), card);
-            m_finance_period_transfers.at(index)->setObjectName(
-                QStringLiteral("paymasterFinancePeriodTransfers%1").arg(index));
-            card_layout->addWidget(title);
-            card_layout->addWidget(m_finance_period_income.at(index));
-            card_layout->addWidget(m_finance_period_cost.at(index));
-            card_layout->addWidget(m_finance_period_transfers.at(index));
-            card_layout->addStretch();
-            finance_period_cards->addCard(card);
-        }
-        m_finance_selected_summary = new QLabel(tr("Choose a period to load recorded income and costs."), finance_column);
+        // Keep each metric in one presentation surface. These grids only
+        // consume the existing finance RPC snapshot; they never query Core.
+        const auto finance_label = [](const QString& text, QWidget* parent, const char* role) {
+            auto* label = new QLabel(text, parent);
+            label->setTextFormat(Qt::PlainText);
+            label->setWordWrap(true);
+            label->setMinimumWidth(0);
+            label->setProperty("paymasterRole", QString::fromLatin1(role));
+            return label;
+        };
+        const auto finance_value = [&](const QString& key, QWidget* parent, const QString& accessible_name, const char* role = "financeValue") {
+            auto* value = finance_label(QStringLiteral("—"), parent, role);
+            value->setObjectName(QStringLiteral("paymasterFinance_") + key);
+            value->setAccessibleName(accessible_name);
+            value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            m_finance_values.insert(key, value);
+            return value;
+        };
+        const auto finance_group = [&](const QString& title) {
+            auto* group = new QGroupBox(title, finance_column);
+            group->setProperty("paymasterRole", QStringLiteral("card"));
+            return group;
+        };
+        const auto grid_headers = [&](QGridLayout* grid, const QStringList& headers) {
+            grid->setHorizontalSpacing(20);
+            grid->setVerticalSpacing(4);
+            for (int column = 0; column < headers.size(); ++column) {
+                auto* label = finance_label(headers.at(column), grid->parentWidget(), "financeColumnHeading");
+                label->setAlignment((column ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter);
+                grid->addWidget(label, 0, column);
+                grid->setColumnStretch(column, column ? 2 : 3);
+            }
+        };
+
+        m_finance_selected_summary = finance_label(tr("Choose a period to load recorded income and costs."), finance_column, "cardHeading");
         m_finance_selected_summary->setObjectName("paymasterFinanceSelectedSummary");
-        m_finance_selected_summary->setWordWrap(true);
-        m_finance_selected_summary->setProperty("paymasterRole", QStringLiteral("statusText"));
         finance_layout->addWidget(m_finance_selected_summary);
-        AddPaymasterDisclosure(finance_layout, finance_column, finance_period_cards,
+        auto* finance_metrics = new PaymasterResponsiveCards(finance_column, 3);
+        finance_metrics->setObjectName("paymasterFinanceMetrics");
+        const std::array<QString, 3> metric_titles{tr("Service-fee income"), tr("Operating costs"), tr("Successful payments")};
+        const std::array<QString, 3> metric_keys{QStringLiteral("income"), QStringLiteral("costs"), QStringLiteral("transfers")};
+        const std::array<QString, 3> metric_help{tr("DD earned in this period"), tr("DGB network fees, including reserves"), tr("Confirmed customer transfers")};
+        for (size_t index = 0; index < metric_keys.size(); ++index) {
+            auto* card = new QFrame(finance_metrics);
+            card->setProperty("paymasterRole", QStringLiteral("statusCard"));
+            auto* layout = new QVBoxLayout(card);
+            layout->setContentsMargins(16, 14, 16, 14);
+            layout->addWidget(finance_label(metric_titles.at(index), card, "financeRowTitle"));
+            layout->addWidget(finance_value(metric_keys.at(index), card, metric_titles.at(index), "financeAmount"));
+            layout->addWidget(finance_label(metric_help.at(index), card, "mutedText"));
+            if (index == 2) layout->addWidget(finance_value(QStringLiteral("average"), card, tr("Average service fee per successful payment"), "mutedText"));
+            layout->addStretch();
+            finance_metrics->addCard(card);
+        }
+        finance_layout->addWidget(finance_metrics);
+
+        auto* breakdown = finance_group(tr("Income and costs by source"));
+        breakdown->setObjectName("paymasterFinanceCostBreakdown");
+        auto* breakdown_layout = new QVBoxLayout(breakdown);
+        auto* breakdown_grid = new QGridLayout;
+        breakdown_layout->addLayout(breakdown_grid);
+        grid_headers(breakdown_grid, {tr("Source"), tr("Payments"), tr("Income (DD)"), tr("Costs (DGB)")});
+        const std::array<QString, 5> source_titles{tr("Customer-paid payments"), tr("Public sponsorship"), tr("Restricted sponsorship"), tr("Reserve maintenance"), tr("Total")};
+        const std::array<QString, 5> source_keys{QStringLiteral("user_paid"), QStringLiteral("public_sponsored"), QStringLiteral("restricted_sponsored"), QStringLiteral("maintenance"), QStringLiteral("total")};
+        const std::array<QString, 3> source_columns{QStringLiteral("transfers"), QStringLiteral("income"), QStringLiteral("costs")};
+        const std::array<QString, 3> source_column_titles{tr("Payments"), tr("Income (DD)"), tr("Costs (DGB)")};
+        for (int row = 0; row < 5; ++row) {
+            breakdown_grid->addWidget(finance_label(source_titles.at(row), breakdown, row == 4 ? "financeTotal" : "financeRowTitle"), row + 1, 0);
+            for (int column = 0; column < 3; ++column) {
+                auto* value = finance_value(source_keys.at(row) + QLatin1Char('_') + source_columns.at(column), breakdown,
+                    source_titles.at(row) + QStringLiteral(" · ") + source_column_titles.at(column), row == 4 ? "financeTotal" : "financeValue");
+                value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                breakdown_grid->addWidget(value, row + 1, column + 1);
+            }
+        }
+        breakdown_layout->addWidget(finance_label(tr("Reserve maintenance includes setup, refill, withdrawal and release fees. Capital held in reserves is not an expense."), breakdown, "mutedText"));
+        finance_layout->addWidget(breakdown);
+
+        auto* comparison = finance_group(tr("Reporting periods compared"));
+        comparison->setObjectName("paymasterFinancePeriodCards");
+        auto* comparison_layout = new QVBoxLayout(comparison);
+        auto* comparison_grid = new QGridLayout;
+        comparison_layout->addLayout(comparison_grid);
+        grid_headers(comparison_grid, {tr("Period"), tr("Income (DD)"), tr("Costs (DGB)"), tr("Payments")});
+        const std::array<QString, 4> period_titles{tr("Today (UTC)"), tr("Last 7 days"), tr("Last 30 days"), tr("All recorded history")};
+        for (size_t index = 0; index < period_titles.size(); ++index) {
+            comparison_grid->addWidget(finance_label(period_titles.at(index), comparison, "financeRowTitle"), index + 1, 0);
+            const std::array<std::pair<QLabel**, QString>, 3> cells{{
+                {&m_finance_period_income.at(index), QStringLiteral("paymasterFinancePeriodIncome%1").arg(index)},
+                {&m_finance_period_cost.at(index), QStringLiteral("paymasterFinancePeriodCost%1").arg(index)},
+                {&m_finance_period_transfers.at(index), QStringLiteral("paymasterFinancePeriodTransfers%1").arg(index)}}};
+            for (int column = 0; column < 3; ++column) {
+                auto* value = finance_label(QStringLiteral("—"), comparison, "financeValue");
+                value->setObjectName(cells.at(column).second);
+                value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                *cells.at(column).first = value;
+                comparison_grid->addWidget(value, index + 1, column + 1);
+            }
+        }
+        comparison_layout->addWidget(finance_label(tr("Periods overlap; do not add these rows together. Only confirmed bookings are included."), comparison, "mutedText"));
+        AddPaymasterDisclosure(finance_layout, finance_column, comparison,
                                tr("Compare reporting periods"), tr("Hide period comparison"), QStringLiteral("paymasterFinanceCompareToggle"));
 
-        auto* finance_result_group = new QGroupBox(
-            tr("Optional valuation at the current price"), finance_column);
-        finance_result_group->setProperty(
-            "paymasterRole", QStringLiteral("card"));
-        auto* finance_result_layout = new QVBoxLayout(finance_result_group);
-        m_finance_result_estimate = new QLabel(
-            tr("Load finance data to calculate the current estimate."),
-            finance_result_group);
-        m_finance_result_estimate->setObjectName(
-            "paymasterFinanceResultEstimate");
-        m_finance_result_estimate->setWordWrap(true);
-        m_finance_model_breakdown = new QLabel(finance_result_group);
-        m_finance_model_breakdown->setObjectName(
-            "paymasterFinanceModelBreakdown");
-        m_finance_model_breakdown->setWordWrap(true);
-        auto* finance_valuation_note = new QLabel(tr(
-            "Native DD income and DGB costs are the accounting source of truth. Any USD result uses only the current Oracle price and is not a historical exchange-rate calculation."),
-            finance_result_group);
-        finance_valuation_note->setProperty(
-            "paymasterRole", QStringLiteral("mutedText"));
-        finance_valuation_note->setWordWrap(true);
-        finance_result_layout->addWidget(m_finance_result_estimate);
-        finance_result_layout->addWidget(m_finance_model_breakdown);
-        finance_result_layout->addWidget(finance_valuation_note);
-        AddPaymasterDisclosure(finance_layout, finance_column, finance_result_group,
-                               tr("View current-price estimate"), tr("Hide current-price estimate"), QStringLiteral("paymasterFinanceValuationToggle"));
+        auto* valuation = finance_group(tr("Estimate at the current DGB price"));
+        auto* valuation_layout = new QVBoxLayout(valuation);
+        valuation_layout->addWidget(finance_label(tr("Estimated income minus costs"), valuation, "financeRowTitle"));
+        m_finance_result_estimate = finance_label(tr("No estimate loaded"), valuation, "financeAmount");
+        m_finance_result_estimate->setObjectName("paymasterFinanceResultEstimate");
+        valuation_layout->addWidget(m_finance_result_estimate);
+        valuation_layout->addWidget(finance_value(QStringLiteral("valuation_price"), valuation, tr("DGB valuation price")));
+        valuation_layout->addWidget(finance_value(QStringLiteral("valuation_time"), valuation, tr("Valuation timestamp"), "mutedText"));
+        valuation_layout->addWidget(finance_label(tr("DD income is valued at its USD denomination; DGB costs use the current oracle price. This is an estimate, not historical profit or loss."), valuation, "mutedText"));
+        AddPaymasterDisclosure(finance_layout, finance_column, valuation,
+                               tr("Estimate result in USD"), tr("Hide USD estimate"), QStringLiteral("paymasterFinanceValuationToggle"));
 
-        auto* finance_pool_group = new QGroupBox(
-            tr("Wallet-owned pool capital"), finance_column);
-        finance_pool_group->setProperty(
-            "paymasterRole", QStringLiteral("card"));
+        auto* finance_pool_group = finance_group(tr("Currently held in reserves"));
+        finance_pool_group->setObjectName("paymasterFinanceCurrentCapital");
         auto* finance_pool_layout = new QVBoxLayout(finance_pool_group);
-        auto* finance_pool_help = new QLabel(tr(
-            "Prepared DGB and the 1.00 DD base of each carrier remain your wallet's operating capital. They are shown separately from income and expenses."),
-            finance_pool_group);
-        finance_pool_help->setWordWrap(true);
-        m_finance_pool_dgb = new QLabel(
-            tr("DGB capacity has not been loaded yet."), finance_pool_group);
-        m_finance_pool_dgb->setObjectName("paymasterFinancePoolDgb");
-        m_finance_pool_dgb->setWordWrap(true);
-        m_finance_pool_carrier = new QLabel(
-            tr("DD carrier capital has not been loaded yet."),
-            finance_pool_group);
-        m_finance_pool_carrier->setObjectName("paymasterFinancePoolCarrier");
-        m_finance_pool_carrier->setWordWrap(true);
-        m_finance_pending_maintenance = new QLabel(finance_pool_group);
-        m_finance_pending_maintenance->setObjectName(
-            "paymasterFinancePendingMaintenance");
-        m_finance_pending_maintenance->setWordWrap(true);
-        finance_pool_layout->addWidget(finance_pool_help);
-        finance_pool_layout->addWidget(m_finance_pool_dgb);
-        finance_pool_layout->addWidget(m_finance_pool_carrier);
+        finance_pool_layout->addWidget(finance_label(tr("Current wallet balances, independent of the reporting period. Reserve capital remains yours; accumulated fees are part of the income already recorded."), finance_pool_group, "mutedText"));
+        auto* capital_columns = new PaymasterResponsiveCards(finance_pool_group);
+        finance_pool_layout->addWidget(capital_columns);
+        for (int asset = 0; asset < 2; ++asset) {
+            auto* column = new QWidget(capital_columns);
+            auto* layout = new QGridLayout(column);
+            layout->setContentsMargins(0, 8, 0, 8);
+            layout->setHorizontalSpacing(20);
+            layout->setColumnStretch(0, 3);
+            layout->setColumnStretch(1, 2);
+            layout->addWidget(finance_label(asset ? tr("DigiDollar reserves") : tr("DGB network-fee reserves"), column, "financeColumnHeading"), 0, 0, 1, 2);
+            const QStringList titles = asset ? QStringList{tr("Base capital"), tr("Accumulated service fees"), tr("Fees available to withdraw")} : QStringList{tr("Available reserve funds"), tr("Reserved or committed"), tr("Awaiting confirmation")};
+            const QStringList keys = asset ? QStringList{QStringLiteral("carrier_base"), QStringLiteral("carrier_earned"), QStringLiteral("carrier_withdrawable")} : QStringList{QStringLiteral("dgb_available"), QStringLiteral("dgb_reserved"), QStringLiteral("dgb_pending")};
+            for (int row = 0; row < 3; ++row) {
+                layout->addWidget(finance_label(titles.at(row), column, "financeRowTitle"), row + 1, 0);
+                auto* value = finance_value(keys.at(row), column, titles.at(row));
+                value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                layout->addWidget(value, row + 1, 1);
+            }
+            capital_columns->addCard(column);
+        }
+        m_finance_pending_maintenance = finance_label({}, finance_pool_group, "mutedText");
+        m_finance_pending_maintenance->setObjectName("paymasterFinancePendingMaintenance");
         finance_pool_layout->addWidget(m_finance_pending_maintenance);
-        AddPaymasterDisclosure(finance_layout, finance_column, finance_pool_group,
-                               tr("View capital breakdown"), tr("Hide capital breakdown"), QStringLiteral("paymasterFinanceCapitalToggle"));
+        finance_layout->addWidget(finance_pool_group);
 
         auto* finance_actions_group = new QGroupBox(tr("Manage funds and reserves"), liquidity_column);
         finance_actions_group->setObjectName("paymasterCapitalActions");
@@ -3678,7 +3727,7 @@ public:
         liquidity_layout->insertWidget(2, finance_actions_group);
         auto* funds_link = new QPushButton(tr("Manage funds and reserves…"), finance_column);
         funds_link->setObjectName("paymasterFinanceFundsLink");
-        finance_layout->addWidget(funds_link, 0, Qt::AlignLeft);
+        finance_pool_layout->addWidget(funds_link, 0, Qt::AlignLeft);
         connect(funds_link, &QPushButton::clicked, this, [this] { showOperatorPage(m_liquidity_page); });
 
         auto* finance_details = new QWidget(finance_column);
@@ -4631,9 +4680,7 @@ public:
         updateFinanceControls();
         m_finance_history_status->setText(
             tr("Finance history has not been loaded yet."));
-        m_finance_result_estimate->setText(
-            tr("Load finance data to calculate the current estimate."));
-        m_finance_model_breakdown->clear();
+        clearFinanceValues();
         m_activity_output->clear();
         if (m_activity_reservations) m_activity_reservations->setRowCount(0);
         if (m_activity_tasks) m_activity_tasks->clear();
@@ -6159,6 +6206,20 @@ private:
              false, [this](const QString&) { if (!m_privacy) { overviewFinanceUnavailable(); m_overview_finance_age.start(); } }, background);
     }
 
+    void clearFinanceValues()
+    {
+        for (auto* value : m_finance_values) value->setText(QStringLiteral("—"));
+        for (size_t index = 0; index < m_finance_period_income.size(); ++index) {
+            m_finance_period_income.at(index)->setText(QStringLiteral("—"));
+            m_finance_period_cost.at(index)->setText(QStringLiteral("—"));
+            m_finance_period_transfers.at(index)->setText(QStringLiteral("—"));
+        }
+        m_finance_result_estimate->setText(tr("No estimate loaded"));
+        m_finance_pending_maintenance->clear();
+        m_finance_history_notice->hide();
+        m_finance_history_notice_text->clear();
+    }
+
     void requestSelectedFinanceStatus()
     {
         m_finance_selected_summary->setText(tr("Loading the selected reporting period…"));
@@ -6177,6 +6238,7 @@ private:
                 m_finance_page_index = -1;
                 m_finance_loaded = false;
                 m_finance_last_result = UniValue{UniValue::VOBJ};
+                clearFinanceValues();
                 m_finance_daily_totals->setRowCount(0);
                 m_finance_events->setRowCount(0);
             }
@@ -6399,92 +6461,83 @@ private:
         if (!result.isObject()) return;
         m_finance_last_result = result;
         applyOverviewFinance(result);
+        const auto set_value = [this](const QString& key, const QString& text) {
+            m_finance_values.value(key)->setText(maskNumericText(text));
+        };
         const UniValue& summaries = result.find_value("period_summaries");
         const std::array<const char*, 4> keys{{"today", "7d", "30d", "all"}};
         for (size_t index = 0; index < keys.size(); ++index) {
             const UniValue& summary = summaries.find_value(keys.at(index));
-            const qint64 income = financeNumber(summary, "service_fee_income_cents");
-            const qint64 cost = financeNumber(summary, "dgb_operating_cost_satoshis");
-            const qint64 transfers = financeNumber(summary, "successful_transfers");
-            m_finance_period_income.at(index)->setText(maskNumericText(
-                tr("Service fees: %1 DD").arg(ddAmount(income))));
-            m_finance_period_cost.at(index)->setText(maskNumericText(
-                tr("Operating costs: %1 DGB").arg(dgbAmount(cost))));
-            m_finance_period_transfers.at(index)->setText(maskNumericText(
-                tr("Successful transfers: %1").arg(transfers)));
+            m_finance_period_income.at(index)->setText(maskNumericText(ddAmount(financeNumber(summary, "service_fee_income_cents"))));
+            m_finance_period_cost.at(index)->setText(maskNumericText(compactDgbAmount(financeNumber(summary, "dgb_operating_cost_satoshis"))));
+            m_finance_period_transfers.at(index)->setText(maskNumericText(QString::number(financeNumber(summary, "successful_transfers"))));
         }
 
         const qint64 income = financeNumber(result, "service_fee_income_cents");
         const qint64 cost = financeNumber(result, "dgb_operating_cost_satoshis");
         const qint64 transfers = financeNumber(result, "successful_transfers");
         m_finance_selected_summary->setText(m_privacy ? tr("Financial summary hidden by privacy mode") :
-                                                        tr("%1\nService-fee income: %2 DD\nOperating costs: %3 DGB\nSuccessful transfers: %4")
-                                                            .arg(m_finance_period_select->currentText(), ddAmount(income), compactDgbAmount(cost))
-                                                            .arg(transfers));
-        const qint64 average = financeNumber(result, "average_service_fee_cents");
+            tr("%1 · confirmed bookings").arg(m_finance_period_select->currentText()));
+        set_value(QStringLiteral("income"), tr("%1 DD").arg(ddAmount(income)));
+        set_value(QStringLiteral("costs"), tr("%1 DGB").arg(compactDgbAmount(cost)));
+        set_value(QStringLiteral("transfers"), QString::number(transfers));
+        set_value(QStringLiteral("average"), transfers > 0 ? tr("Average fee: %1 DD / payment").arg(ddAmount(financeNumber(result, "average_service_fee_cents"))) : tr("No confirmed payments in this period"));
+
+        // Model totals contain only transfer fees; the remainder of the same
+        // selected-period total is reserve maintenance, not locked capital.
+        // Subtract with bounds checks so incomplete/inconsistent replies cannot
+        // produce a plausible negative expense or overflow a display total.
+        const UniValue& models = result.find_value("model_breakdown");
+        qint64 maintenance_cost = cost;
+        bool breakdown_known = cost >= 0;
+        for (const auto* key : {"user_paid", "public_sponsored", "restricted_sponsored"}) {
+            const UniValue& model = models.find_value(key);
+            qint64 model_cost{0};
+            if (!GetInt64Field(model, "dgb_operating_cost_satoshis", model_cost) || model_cost < 0 || model_cost > maintenance_cost) {
+                breakdown_known = false;
+            } else {
+                maintenance_cost -= model_cost;
+            }
+            const QString prefix = QString::fromLatin1(key) + QLatin1Char('_');
+            set_value(prefix + QStringLiteral("transfers"), QString::number(financeNumber(model, "successful_transfers")));
+            set_value(prefix + QStringLiteral("income"), ddAmount(financeNumber(model, "service_fee_income_cents")));
+            set_value(prefix + QStringLiteral("costs"), compactDgbAmount(model_cost));
+        }
+        set_value(QStringLiteral("maintenance_transfers"), QStringLiteral("—"));
+        set_value(QStringLiteral("maintenance_income"), QStringLiteral("—"));
+        set_value(QStringLiteral("maintenance_costs"), breakdown_known ? compactDgbAmount(maintenance_cost) : tr("Unavailable"));
+        set_value(QStringLiteral("total_transfers"), QString::number(transfers));
+        set_value(QStringLiteral("total_income"), ddAmount(income));
+        set_value(QStringLiteral("total_costs"), compactDgbAmount(cost));
+
         const UniValue& estimate = result.find_value("estimated_result_usd");
         const UniValue& oracle = result.find_value("oracle_price_micro_usd");
         const UniValue& valuation_time = result.find_value("valuation_time");
-        if (estimate.isNum() && oracle.isNum()) {
-            const QString time = valuation_time.isNum()
-                ? QDateTime::fromSecsSinceEpoch(
-                      valuation_time.getInt<qint64>(), Qt::UTC)
-                      .toString(Qt::ISODate)
-                : tr("now");
-            m_finance_result_estimate->setText(maskNumericText(tr(
-                "Selected period: %1 DD income minus %2 DGB cost ≈ %3 USD "
-                "at %4 USD/DGB (valuation %5).")
-                .arg(ddAmount(income), dgbAmount(cost))
-                .arg(estimate.get_real(), 0, 'f', 2)
-                .arg(oracle.getInt<qint64>() / 1000000.0, 0, 'f', 6)
-                .arg(time)));
+        if (estimate.isNum() && oracle.isNum() && oracle.getInt<qint64>() > 0) {
+            m_finance_result_estimate->setText(maskNumericText(tr("≈ %1 USD").arg(estimate.get_real(), 0, 'f', 2)));
+            set_value(QStringLiteral("valuation_price"), tr("1 DGB = %1 USD").arg(oracle.getInt<qint64>() / 1000000.0, 0, 'f', 6));
+            set_value(QStringLiteral("valuation_time"), valuation_time.isNum()
+                ? tr("Valued at: %1 UTC").arg(GUIUtil::dateTimeStr(QDateTime::fromSecsSinceEpoch(valuation_time.getInt<qint64>(), Qt::UTC)))
+                : tr("Valuation timestamp unavailable"));
         } else {
-            m_finance_result_estimate->setText(maskNumericText(tr(
-                "Selected period: %1 DD income and %2 DGB cost. No current "
-                "Oracle price is available, so no USD estimate is shown.")
-                .arg(ddAmount(income), dgbAmount(cost))));
+            m_finance_result_estimate->setText(tr("Estimate unavailable"));
+            set_value(QStringLiteral("valuation_price"), tr("No current Oracle price is available."));
+            set_value(QStringLiteral("valuation_time"), QString{});
         }
-        const UniValue& model_breakdown = result.find_value(
-            "model_breakdown");
-        const auto model_line = [&](const QString& title,
-                                    const char* key) {
-            const UniValue& model = model_breakdown.find_value(key);
-            return tr("%1: %2 transfer(s) · %3 DD income · %4 DGB cost")
-                .arg(title)
-                .arg(financeNumber(model, "successful_transfers"))
-                .arg(ddAmount(financeNumber(
-                    model, "service_fee_income_cents")))
-                .arg(dgbAmount(financeNumber(
-                    model, "dgb_operating_cost_satoshis")));
-        };
-        m_finance_model_breakdown->setText(maskNumericText(
-            tr("%1 successful transfer(s) · average service-fee income %2 DD\n%3\n%4\n%5")
-                .arg(transfers)
-                .arg(ddAmount(average))
-                .arg(model_line(tr("User paid"), "user_paid"))
-                .arg(model_line(tr("Public sponsored"),
-                                "public_sponsored"))
-                .arg(model_line(tr("Restricted sponsored"),
-                                "restricted_sponsored"))));
 
         const UniValue& pool = result.find_value("pool_capital");
-        m_finance_pool_dgb->setText(maskNumericText(tr(
-            "DGB capacity: %1 available · %2 reserved or committed · %3 pending confirmation")
-            .arg(dgbAmount(financeNumber(pool, "dgb_available_satoshis")),
-                 dgbAmount(financeNumber(pool, "dgb_reserved_satoshis")),
-                 dgbAmount(financeNumber(pool, "dgb_pending_satoshis")))));
-        m_finance_pool_carrier->setText(maskNumericText(tr(
-            "DD carriers: %1 DD base capital · %2 DD earned above the base · %3 DD currently withdrawable")
-            .arg(ddAmount(financeNumber(pool, "carrier_base_cents")),
-                 ddAmount(financeNumber(pool, "carrier_earned_cents")),
-                 ddAmount(financeNumber(pool, "carrier_withdrawable_cents")))));
-        const qint64 pending = financeNumber(
-            pool, "pending_maintenance_transactions");
-        m_finance_pending_maintenance->setText(maskNumericText(
-            pending == 0
-                ? tr("No pool-maintenance or withdrawal transaction is pending.")
-                : tr("%1 pool-maintenance or withdrawal transaction(s) are pending.")
-                      .arg(pending)));
+        for (const auto* key : {"dgb_available", "dgb_reserved", "dgb_pending"}) {
+            const std::string field = std::string(key) + "_satoshis";
+            set_value(QString::fromLatin1(key), tr("%1 DGB").arg(compactDgbAmount(financeNumber(pool, field.c_str()))));
+        }
+        for (const auto* key : {"carrier_base", "carrier_earned", "carrier_withdrawable"}) {
+            const std::string field = std::string(key) + "_cents";
+            set_value(QString::fromLatin1(key), tr("%1 DD").arg(ddAmount(financeNumber(pool, field.c_str()))));
+        }
+        const qint64 pending = financeNumber(pool, "pending_maintenance_transactions");
+        m_finance_pending_maintenance->setText(maskNumericText(pending == 0
+            ? tr("No reserve transaction is awaiting completion.")
+            : tr("Reserve transactions awaiting completion: %1").arg(pending)));
 
         const bool partial = result.find_value(
             "history_partially_reconstructable").isBool() &&
@@ -14597,9 +14650,7 @@ private:
     std::array<QLabel*, 4> m_finance_period_cost{};
     std::array<QLabel*, 4> m_finance_period_transfers{};
     QLabel* m_finance_result_estimate{nullptr};
-    QLabel* m_finance_model_breakdown{nullptr};
-    QLabel* m_finance_pool_dgb{nullptr};
-    QLabel* m_finance_pool_carrier{nullptr};
+    QMap<QString, QLabel*> m_finance_values;
     QLabel* m_finance_pending_maintenance{nullptr};
     QPushButton* m_finance_withdraw_fees{nullptr};
     QPushButton* m_finance_release_carrier{nullptr};
