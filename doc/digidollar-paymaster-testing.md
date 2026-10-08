@@ -3048,3 +3048,25 @@ fault precedence, safe cancellation with a lost reply, and incomplete exchange
 wording. Updated Qt units and isolated test/application links passed. Reports
 are `cancel-<function>.txt` in the same local check directory. These are targeted
 checks, not the complete Qt suite.
+
+### Offer and spending-limit review (2026-10-08)
+
+The Paymaster Qt editor now provides a draft-only review after
+`PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT`. Targeted MSVC compilation, test MOC
+generation and isolated Qt application/test linking passed.
+`paymasterOfferSpendingLimitsReview` passed 11 data cases, including public and
+restricted sponsorship, lower/higher advertised fee caps, preserved manual
+edits, discard, failed/malformed acknowledgements, wallet change and privacy.
+Its RPC adapter uses the real RPC parsers and Core policy validator to check
+each proposed budget against the saved offer before validating the replacement
+offer. No write occurs on review and no offer activation occurs on budget save.
+The public review was also rendered and inspected in both themes.
+
+The existing `paymasterOfferPolicyTypedValues` passed all 10 English/German cases.
+Reports are `<function>-final.txt` under
+`build_msvc/paymaster-refresh-check/reserve-presets/`. The existing Core cases
+`provider_policy_update_preserves_safety_policy_liveness` and
+`public_sponsorship_requires_explicit_finite_safety_limits` passed 58 assertions.
+`git diff --check` passed. Core/RPC product code was unchanged; no live wallet
+settings were written. No full build, full suite, new end-to-end node test or
+cross-platform run was performed for this UI correction.

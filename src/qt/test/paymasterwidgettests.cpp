@@ -11803,6 +11803,194 @@ void PaymasterWidgetTests::paymasterOfferPolicyTypedValues()
     }
 }
 
+void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const char* scenario : {"public", "public_light", "restricted", "lower_fee", "higher_fee", "dirty_limits",
+                                 "discard_limits", "safety_error", "bad_ack", "wallet_switch", "privacy"}) {
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+    }
+}
+
+void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
+    QFile css(scenario == "public_light" ? ":/css/light" : ":/css/dark");
+    QVERIFY(css.open(QIODevice::ReadOnly));
+    panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    auto snapshot = GuidedOperatorSnapshot();
+    const auto original_policy = snapshot.find_value("provider").find_value("policy");
+    const auto original_safety = snapshot.find_value("safety").find_value("policy");
+    int offer_writes{0};
+    int safety_writes{0};
+    UniValue written_safety;
+    UniValue saved_safety{UniValue::VOBJ};
+    for (const auto& key : original_safety.getKeys()) {
+        if (key != "updated_at") saved_safety.pushKV(key, original_safety.find_value(key));
+    }
+    auto saved_offer = original_policy;
+    saved_offer.pushKV("maximum_user_paid_service_fee_cents", 0);
+    const auto compatible = [](const UniValue& offer, const UniValue& limits) {
+        using namespace wallet::paymaster_rpc::internal;
+        auto safety = ParseProviderSafetyPolicy(limits);
+        safety.updated_at = 1;
+        std::string error;
+        return DigiDollar::Paymaster::ValidateProviderSafetyPolicy(safety, ParseProviderPolicy(offer), error);
+    };
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "getpaymastersafetystatus") return snapshot.find_value("safety");
+        if (method == "setpaymasterpolicy") {
+            ++offer_writes;
+            if (!compatible(params[0], saved_safety)) throw std::runtime_error("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
+            saved_offer = params[0];
+            auto persisted = params[0];
+            persisted.pushKV("policy_hash", std::string(64, 'b'));
+            auto provider = snapshot.find_value("provider");
+            provider.pushKV("policy", persisted);
+            snapshot.pushKV("provider", provider);
+            return persisted;
+        }
+        if (method == "setpaymastersafetypolicy") {
+            ++safety_writes;
+            written_safety = params[0];
+            if (!compatible(saved_offer, written_safety)) throw std::runtime_error("incompatible proposed safety limits");
+            if (scenario == "safety_error") throw std::runtime_error("injected safety save failure");
+            if (scenario == "bad_ack") return UniValue{UniValue::VOBJ};
+            saved_safety = written_safety;
+            auto persisted = written_safety;
+            persisted.pushKV("updated_at", 2);
+            auto safety = snapshot.find_value("safety");
+            safety.pushKV("policy", persisted);
+            snapshot.pushKV("safety", safety);
+            return persisted;
+        }
+        return UniValue{UniValue::VOBJ};
+    });
+    panel->refreshStatus();
+    auto* sponsored = panel->findChild<QCheckBox*>("paymasterPolicySponsored");
+    auto* scope = panel->findChild<QComboBox*>("paymasterPolicySponsorshipScope");
+    auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyMaximumNetworkFee");
+    auto* save_offer = panel->findChild<QPushButton*>("savePaymasterPolicy");
+    auto* review = panel->findChild<QPushButton*>("paymasterReviewPolicyLimits");
+    auto* save_limits = panel->findChild<QPushButton*>("savePaymasterProviderSafetyPolicy");
+    auto* hint = panel->findChild<QLabel*>("paymasterPolicyLimitsHint");
+    auto* tabs = panel->findChild<QTabWidget*>("paymasterFundingSafetyModels");
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+    auto* public_hour = panel->findChild<QLineEdit*>("paymasterSafetyPublicSponsoredMaxNetworkFeePerHour");
+    QVERIFY(sponsored && scope && fee && save_offer && review && save_limits && hint && tabs && pages && public_hour);
+    QVERIFY(review->isHidden());
+    if (scenario != "lower_fee") sponsored->setChecked(true);
+    if (scenario == "restricted") {
+        panel->findChild<QCheckBox*>("paymasterPolicyUserPaid")->setChecked(false);
+        scope->setCurrentIndex(scope->findData("restricted"));
+    }
+    if (scenario == "lower_fee") fee->setValue(10000000);
+    if (scenario == "higher_fee") fee->setValue(150000000);
+    if (scenario == "dirty_limits") {
+        public_hour->setFocus();
+        public_hour->selectAll();
+        QTest::keyClicks(public_hour, "0.07");
+    }
+    const QString draft_hour = public_hour->text();
+    save_offer->click();
+    QCOMPARE(offer_writes, 1);
+    QCOMPARE(safety_writes, 0);
+    QVERIFY(!review->isHidden());
+    auto* status = panel->findChild<QLabel*>("paymasterPolicySaveStatus");
+    QVERIFY(status->text().contains("Offer not saved"));
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("action"));
+    if (scenario == "privacy") {
+        panel->setPrivacy(true);
+        review->click();
+        QCOMPARE(public_hour->text(), draft_hour);
+        QVERIFY(hint->parentWidget()->isHidden());
+        QCOMPARE(safety_writes, 0);
+        return;
+    }
+    review->click();
+    QCOMPARE(offer_writes, 1);
+    QCOMPARE(safety_writes, 0); // A review grants no spending authority.
+    QCOMPARE(snapshot.find_value("provider").find_value("policy").write(), original_policy.write());
+    QCOMPARE(snapshot.find_value("safety").find_value("policy").write(), original_safety.write());
+    QCOMPARE(pages->currentWidget()->objectName(), QStringLiteral("paymasterSafetyPolicyPage"));
+    QCOMPARE(tabs->currentIndex(), scenario == "lower_fee" ? 0 : scenario == "restricted" ? 2 : 1);
+    if (scenario == "public" || scenario == "public_light") {
+        panel->resize(1100, 900);
+        panel->show();
+        QTest::qWait(20);
+        QVERIFY(hint->isVisible());
+        const QString screenshot_dir = qEnvironmentVariable("DIGIBYTE_QT_TEST_SCREENSHOT_DIR");
+        if (!screenshot_dir.isEmpty()) {
+            auto* scroll = qobject_cast<QScrollArea*>(pages->currentWidget());
+            QVERIFY(scroll && scroll->widget());
+            QVERIFY(scroll->widget()->grab().save(screenshot_dir + "/offer-limits-" + scenario + ".png"));
+        }
+    }
+    if (scenario == "dirty_limits") {
+        QCOMPARE(public_hour->text(), draft_hour);
+        QCOMPARE(panel->findChild<QLineEdit*>("paymasterSafetyPublicSponsoredMaxNetworkFeePerTransaction")->text(), QStringLiteral("0.00000000"));
+        QVERIFY(hint->text().contains("unsaved spending limits have been kept"));
+        return;
+    }
+    panel->refreshStatus(); // Polling must keep the proposed limits and offer draft.
+    if (scenario == "wallet_switch") {
+        panel->setWalletModel(nullptr);
+        QVERIFY(review->isHidden());
+        QVERIFY(hint->parentWidget()->isHidden());
+        QCOMPARE(safety_writes, 0);
+        return;
+    }
+    if (scenario == "discard_limits") {
+        panel->findChild<QPushButton*>("paymasterDiscardSafety")->click();
+        QCOMPARE(public_hour->text(), draft_hour);
+        QVERIFY(sponsored->isChecked());
+        QCOMPARE(safety_writes, 0);
+        return;
+    }
+    if (scenario == "safety_error") QTimer::singleShot(0, panel.get(), [] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->accept();
+    });
+    save_limits->click();
+    QCOMPARE(safety_writes, 1);
+    QCOMPARE(offer_writes, 1); // Saving limits must not activate the offer.
+    if (scenario == "safety_error" || scenario == "bad_ack") {
+        QVERIFY(!hint->text().contains("Spending limits saved"));
+        QCOMPARE(snapshot.find_value("safety").find_value("policy").write(), original_safety.write());
+        return;
+    }
+    auto expected_user_paid = original_safety.find_value("user_paid");
+    if (scenario == "lower_fee") expected_user_paid.pushKV("maximum_network_fee_per_transaction_satoshis", 10000000);
+    QCOMPARE(written_safety.find_value("user_paid").write(), expected_user_paid.write());
+    const std::string selected = scenario == "restricted" ? "restricted_sponsored" : "public_sponsored";
+    const std::string other = scenario == "restricted" ? "public_sponsored" : "restricted_sponsored";
+    QCOMPARE(written_safety.find_value(other).write(), original_safety.find_value(other).write());
+    if (scenario == "lower_fee") {
+        QCOMPARE(written_safety.find_value(selected).write(), original_safety.find_value(selected).write());
+    } else {
+        const auto& limits = written_safety.find_value(selected);
+        QCOMPARE(limits.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int>(), 20000000);
+        QCOMPARE(limits.find_value("maximum_reserved_network_fee_satoshis").getInt<int>(), 100000000);
+        QCOMPARE(limits.find_value("maximum_network_fee_per_hour_satoshis").getInt<int>(), 200000000);
+        QCOMPARE(limits.find_value("maximum_network_fee_per_day_satoshis").getInt<int>(), 1000000000);
+        QCOMPARE(limits.find_value("maximum_completed_per_hour").getInt<int>(), 10);
+        QCOMPARE(limits.find_value("maximum_completed_per_day").getInt<int>(), 100);
+    }
+    for (const char* key : {"maximum_active_quotes_total", "maximum_active_quotes_per_netgroup",
+                            "maximum_active_quotes_per_recipient", "maximum_quote_requests_per_netgroup_per_minute"}) {
+        QCOMPARE(written_safety.find_value(key).write(), original_safety.find_value(key).write());
+    }
+    QVERIFY(hint->text().contains("Spending limits saved"));
+    panel->findChild<QPushButton*>("paymasterReturnToOffer")->click();
+    save_offer->click();
+    QCOMPARE(offer_writes, 2);
+    QCOMPARE(safety_writes, 1);
+    QVERIFY(review->isHidden());
+    QVERIFY(panel->findChild<QLabel*>("paymasterPolicySummary")->text().contains("currently saved"));
+}
+
 void PaymasterWidgetTests::paymasterOfferFormAlignment_data()
 {
     QTest::addColumn<bool>("dark");

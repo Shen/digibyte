@@ -33,6 +33,14 @@ avoiding repeated normal-log pause messages during frequent block arrivals.
 GUI/RPC waiting status, synchronization checks, other pause reasons and drain
 recovery logs are unchanged.
 
+## Review spending limits for an offer change
+
+Provider offer saves that conflict with spending limits now explain why and
+offer a direct budget review. Disabled selected models receive finite draft
+suggestions; incompatible per-transfer caps can be lowered for review. Existing
+custom limits and unsaved edits are preserved. Budgets and offer activation
+still require separate explicit saves; RPC/CLI validation is unchanged.
+
 ## Client funding feedback
 
 Send payment now checks the selected public offer's total against the cached DD

@@ -2881,9 +2881,15 @@ public:
         policy_form->addRow(tr("Policy summary:"), m_policy_summary);
         m_policy_save_status = new QLabel(policy_group);
         m_policy_save_status->setObjectName("paymasterPolicySaveStatus");
+        m_policy_save_status->setProperty("paymasterRole", QStringLiteral("statusText"));
         m_policy_save_status->setWordWrap(true);
         m_policy_save_status->hide();
         policy_form->addRow(QString{}, m_policy_save_status);
+        m_review_policy_limits = new QPushButton(tr("Prepare and review spending limits…"), policy_group);
+        m_review_policy_limits->setObjectName("paymasterReviewPolicyLimits");
+        m_review_policy_limits->hide();
+        policy_form->addRow(QString{}, m_review_policy_limits);
+        connect(m_review_policy_limits, &QPushButton::clicked, this, [this] { reviewPolicySpendingLimits(); });
         m_save_policy = new QPushButton(tr("Save policy"), policy_group);
         m_save_policy->setObjectName("savePaymasterPolicy");
         m_save_policy->setProperty("paymasterRole", QStringLiteral("primaryAction"));
@@ -2941,6 +2947,21 @@ public:
         safety_instructions->setWordWrap(true);
         safety_layout->addWidget(safety_instructions);
 
+        m_policy_limits_review = new QWidget(safety_column);
+        auto* limits_review_layout = new QVBoxLayout(m_policy_limits_review);
+        limits_review_layout->setContentsMargins(0, 0, 0, 0);
+        m_policy_limits_hint = new QLabel(m_policy_limits_review);
+        m_policy_limits_hint->setObjectName("paymasterPolicyLimitsHint");
+        m_policy_limits_hint->setProperty("paymasterRole", QStringLiteral("statusText"));
+        m_policy_limits_hint->setWordWrap(true);
+        limits_review_layout->addWidget(m_policy_limits_hint);
+        auto* return_to_offer = new QPushButton(tr("Return to offer settings"), m_policy_limits_review);
+        return_to_offer->setObjectName("paymasterReturnToOffer");
+        limits_review_layout->addWidget(return_to_offer, 0, Qt::AlignLeft);
+        connect(return_to_offer, &QPushButton::clicked, this, [this] { showOperatorPage(m_configuration_page); });
+        m_policy_limits_review->hide();
+        safety_layout->addWidget(m_policy_limits_review);
+
         auto* provider_safety = new QGroupBox(tr("Budgets by payment model"), safety_column);
         provider_safety->setProperty("paymasterRole", QStringLiteral("card"));
         auto* provider_safety_layout = new QVBoxLayout(provider_safety);
@@ -2956,7 +2977,7 @@ public:
         provider_limits_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
         provider_limits_help->setWordWrap(true);
         provider_safety_layout->addWidget(provider_limits_help);
-        auto* funding_tabs = new QTabWidget(provider_safety);
+        auto* funding_tabs = m_funding_safety_tabs = new QTabWidget(provider_safety);
         funding_tabs->setObjectName("paymasterFundingSafetyModels");
         m_user_paid_safety = createFundingSafetyControls(
             funding_tabs, tr("User paid"), QStringLiteral("paymasterSafetyUserPaid"),
@@ -3075,6 +3096,9 @@ public:
             if (!m_busy && m_operator_snapshot.find_value("safety").isObject()) {
                 m_provider_safety_dirty = false;
                 applyProviderSafetyStatus(m_operator_snapshot.find_value("safety"));
+                if (!m_policy_limits_review->isHidden()) {
+                    setStatusLabel(m_policy_limits_hint, tr("Limit edits discarded. The saved limits remain active; your offer edits are still unsaved."), QStringLiteral("action"));
+                }
             }
         });
         safety_layout->addStretch();
@@ -7838,6 +7862,8 @@ private:
 
     void applyRecommendedPolicyDefaults(bool mark_dirty)
     {
+        if (m_review_policy_limits) showPolicySaveStatus({});
+        if (m_policy_limits_review) m_policy_limits_review->hide();
         m_loading_policy = true;
         m_scope->setCurrentIndex(m_scope->findData(QStringLiteral("public")));
         m_user_paid->setChecked(true);
@@ -7878,11 +7904,14 @@ private:
         if (m_save_policy) {
             m_save_policy->setEnabled(enabled && !m_busy);
         }
+        if (m_review_policy_limits) m_review_policy_limits->setEnabled(controls_enabled);
     }
 
     void loadPolicy(const UniValue& policy)
     {
         if (!IsCompleteProviderPolicy(policy)) return;
+        showPolicySaveStatus({});
+        m_policy_limits_review->hide();
         int fee_rate_bps{0};
         qint64 maximum_user_paid_service_fee{0};
         int min_amount_cents{0};
@@ -8446,6 +8475,9 @@ private:
     void markProviderSafetyDirty()
     {
         m_provider_safety_dirty = true;
+        if (!m_policy_limits_review->isHidden()) {
+            setStatusLabel(m_policy_limits_hint, tr("Spending limits have unsaved changes. Review and save them, then return to save the offer."), QStringLiteral("action"));
+        }
         m_provider_safety_status->setText(tr(
             "Unsaved provider safety changes — the previously saved limits remain active until these values are saved."));
         updateProviderButtons();
@@ -11212,6 +11244,12 @@ private:
                      return;
                  }
                  m_provider_safety_dirty = false;
+                 if (!m_policy_limits_review->isHidden()) {
+                     showPolicySaveStatus(tr("Spending limits saved. Review your offer edits and save the policy to activate them."));
+                     setStatusLabel(m_policy_limits_hint,
+                         tr("Spending limits saved. Return to offer settings and save the policy to activate your offer changes."),
+                         QStringLiteral("ready"));
+                 }
                  refreshProviderSafetyStatus();
              });
     }
@@ -12153,8 +12191,61 @@ private:
 
     void showPolicySaveStatus(const QString& message)
     {
-        m_policy_save_status->setText(message);
+        setStatusLabel(m_policy_save_status, message, QStringLiteral("info"));
         m_policy_save_status->setVisible(!message.isEmpty());
+        m_review_policy_limits->hide();
+    }
+
+    void reviewPolicySpendingLimits()
+    {
+        if (m_busy || m_privacy || !m_policy_dirty) return;
+        showOperatorPage(m_safety_page);
+        m_policy_limits_review->show();
+        const bool restricted = m_scope->currentData().toString() == QLatin1String("restricted");
+        m_funding_safety_tabs->setCurrentIndex(m_sponsored->isChecked() ? (restricted ? 2 : 1) : 0);
+        qint64 saved_fee{0};
+        if (!m_policy_snapshot_representable || !m_provider_safety_snapshot_available ||
+            !m_provider_safety_snapshot_representable || !m_provider_safety_configured ||
+            !m_network_fee->hasAcceptableInput() ||
+            !GetInt64Field(m_operator_snapshot.find_value("provider").find_value("policy"),
+                           "maximum_network_fee_dgb_satoshis", saved_fee) || saved_fee <= 0) {
+            setStatusLabel(m_policy_limits_hint, tr("Refresh the current offer and spending limits before preparing changes."), QStringLiteral("action"));
+            return;
+        }
+        // Never overwrite a manually edited budget, including incomplete text.
+        if (m_provider_safety_dirty) {
+            setStatusLabel(m_policy_limits_hint,
+                tr("Your unsaved spending limits have been kept. Every selected payment model needs six positive limits; each per-transfer limit must fit both the saved and edited offer's network-fee ceiling. Save the limits, then return to save the offer."),
+                QStringLiteral("action"));
+            return;
+        }
+        m_network_fee->interpretText();
+        const qint64 fee_cap = std::min(saved_fee, qint64{m_network_fee->value()});
+        const std::array<FundingSafetyControls, 3> controls{
+            m_user_paid_safety, m_public_sponsored_safety, m_restricted_sponsored_safety};
+        const std::array<bool, 3> required{
+            m_user_paid->isChecked(), m_sponsored->isChecked() && !restricted, m_sponsored->isChecked() && restricted};
+        bool changed{false};
+        for (size_t i = 0; i < controls.size(); ++i) {
+            FundingSafetyValues values;
+            if (!readFundingSafety(controls[i], values)) return;
+            if (required[i] && values.allZero()) {
+                restoreFundingSafetyDefaults(controls[i], true);
+                // A suggestion must be valid under the still-active offer,
+                // even when its replacement raises the advertised ceiling.
+                static_cast<DgbAmountLineEdit*>(controls[i].per_transaction)->setSatoshis(
+                    std::min(fee_cap, qint64{20000000}));
+                changed = true;
+            } else if (values.per_transaction > fee_cap) {
+                static_cast<DgbAmountLineEdit*>(controls[i].per_transaction)->setSatoshis(fee_cap);
+                changed = true;
+            }
+            updateFundingSafetyDisplay(controls[i]);
+        }
+        if (changed) markProviderSafetyDirty();
+        setStatusLabel(m_policy_limits_hint,
+            tr("Review these limits before saving: finite starting limits were filled only for selected models with zero limits, and per-transfer caps were lowered where needed to fit both offers. Other limits were kept. Sponsored payments spend your DGB without a DD service fee. Nothing is saved yet. Save the limits below, then return to save the offer."),
+            QStringLiteral("action"));
     }
 
     void savePolicy()
@@ -12238,9 +12329,16 @@ private:
                  updateAutomaticRefreshTimer();
                  refreshStatus();
              }, false, [this](const QString& error) {
-                 const QString message = tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying. %1").arg(error);
+                 const bool safety_conflict = error.contains(QStringLiteral("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT"));
+                 const QString message = safety_conflict
+                     ? tr("Offer not saved: the selected payment models or network-fee ceiling do not match the saved spending limits. Your saved offer is unchanged. Review and save compatible limits first, then save this offer. %1").arg(error)
+                     : tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying. %1").arg(error);
                  m_status->setText(message);
                  showPolicySaveStatus(message);
+                 if (safety_conflict) {
+                     setStatusLabel(m_policy_save_status, message, QStringLiteral("action"));
+                     m_review_policy_limits->show();
+                 }
              });
     }
 
@@ -14618,6 +14716,10 @@ private:
     QLabel* m_funding_model_status;
     QLabel* m_policy_summary;
     QLabel* m_policy_save_status{nullptr};
+    QPushButton* m_review_policy_limits{nullptr};
+    QWidget* m_policy_limits_review{nullptr};
+    QLabel* m_policy_limits_hint{nullptr};
+    QTabWidget* m_funding_safety_tabs{nullptr};
     PaymasterReserveEditor* m_reserve_editor{nullptr};
     QLabel* m_reserve_state{nullptr};
     QPushButton* m_release_excess_reserves{nullptr};

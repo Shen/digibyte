@@ -1303,6 +1303,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and can be enabled independently in the Qt wallet options.
 
 ### src/qt/paymasterwidget.cpp/h
+
+- Offer/safety conflicts open the existing spending-limit editor with explicit
+  draft proposals and a return to the offer. Budget and offer saves remain
+  separate, exact-acknowledgement-checked RPC actions; Core guards are unchanged.
 - Settings and guided setup include a local recipient-amount fee example using
   `ComputePaymasterFee`; the effective percentage reflects Core cent rounding.
   Changing the example never edits provider policy or budgets.

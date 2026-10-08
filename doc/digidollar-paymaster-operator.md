@@ -27,6 +27,25 @@ Passive reads leave navigation and draft inputs enabled. A deliberate wallet
 action waits for the in-flight read, then runs once with the usual Core checks;
 further actions are gated until its callback chain completes.
 
+### Change payment models and spending limits
+
+An offer and its private spending limits must agree. For example, selecting
+**Sponsored** cannot activate public sponsorship while its six limits are zero.
+The rejected save leaves the saved offer unchanged, including its service fee.
+
+**Prepare and review spending limits…** opens the relevant budget tab. For a
+selected model with all limits zero it proposes finite starting limits; it lowers
+per-transfer caps if necessary to fit both the saved and edited offer. Other
+limits and any existing unsaved budget edits are preserved. These are form edits
+only: review the DGB amounts and save the provider safety policy explicitly.
+Sponsored payments spend your DGB without earning a DD service fee.
+
+Then use **Return to offer settings** and **Save policy** to activate the offer
+changes. Saving budgets alone does not activate sponsorship. You can discard the
+limit edits without changing the saved budgets. Core applies the same compatibility
+check to RPC/CLI: save compatible finite limits with `setpaymastersafetypolicy`
+before the new `setpaymasterpolicy` call.
+
 ### Read income and costs
 
 Choose a reporting period in **Income & costs**. The three headline figures are

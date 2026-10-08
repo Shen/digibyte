@@ -115,6 +115,8 @@ private Q_SLOTS:
     void paymasterFeeAmountsAndPercentages();
     void paymasterOfferPolicyTypedValues_data();
     void paymasterOfferPolicyTypedValues();
+    void paymasterOfferSpendingLimitsReview_data();
+    void paymasterOfferSpendingLimitsReview();
     void paymasterOfferFormAlignment_data();
     void paymasterOfferFormAlignment();
     void paymasterClientReleasedInputsCanBeReservedAgain();
