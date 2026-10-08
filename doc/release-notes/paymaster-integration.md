@@ -33,6 +33,14 @@ avoiding repeated normal-log pause messages during frequent block arrivals.
 GUI/RPC waiting status, synchronization checks, other pause reasons and drain
 recovery logs are unchanged.
 
+## Client funding feedback
+
+Send payment now checks the selected public offer's total against the cached DD
+balance before preparation, with a visible shortfall warning. Fee deduction uses
+the total including the fee; Automatic with own DGB retains its direct path.
+Editing a safely closed/uncreated payment draft clears its obsolete error notice.
+No wallet-input, minimum-change or RPC/CLI spending rules change.
+
 ## Operator income and costs
 
 The finance page now leads with period income, operating costs and successful

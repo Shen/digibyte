@@ -6903,6 +6903,7 @@ QLabel[digidollarRole="statusBanner"][statusKind="waiting"] {
     border-left-color: #f0c94b;
 }
 
+DigiDollarSendWidget QLabel#feeFundingSummary[statusKind="action"],
 QFrame[digidollarRole="statusBanner"][statusKind="action"],
 QLabel[digidollarRole="statusBanner"][statusKind="action"] {
     background-color: #332f1c;

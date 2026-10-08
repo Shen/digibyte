@@ -109,6 +109,7 @@ def default_provider_policy(funding_models=None):
         "funding_models": models,
         "sponsorship_scope": "public",
         "fee_rate_bps": 50 if "user_paid" in models else 0,
+        "maximum_user_paid_service_fee_cents": 0,
         "min_amount_cents": 100,
         "max_amount_cents": 100_000,
         "quote_ttl": 60,

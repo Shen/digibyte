@@ -279,6 +279,43 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client.listdigidollarsendsessions()["count"], 0)
         assert_equal(client.listpaymasterreservations(), [])
         assert_snapshot_equal(before_failed_prepare, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
+
+        self.log.info("RPC and CLI preserve fee deduction after insufficient funds and one-cent change")
+        for transport_index, rpc in enumerate((client, client_cli)):
+            for mode_index, fee_mode in enumerate(("paymaster", "auto")):
+                lookup = {"request_id": f"550e8400-e29b-41d4-a716-{449010 + transport_index * 2 + mode_index:012d}"}
+                deducted_options = {
+                    **lookup,
+                    "fee_mode": fee_mode,
+                    "maximum_paymaster_fee_cents": 300,
+                    "subtract_paymaster_fee_from_amount": True,
+                    "prepare_only": True,
+                }
+                assert_raises_rpc_error(
+                    -6 if fee_mode == "paymaster" else -4,
+                    "below minimum DigiDollar output. Change: 1 cents, Minimum: 100 cents",
+                    rpc.senddigidollar, recipient, 1_499, "", 0, None, "cents", deducted_options)
+                assert_raises_rpc_error(
+                    -4, "PAYMASTER_SESSION_NOT_FOUND",
+                    rpc.getdigidollarsendsession, lookup)
+                # Change the amount after an uncreated request. Exact full
+                # outflow must prepare successfully, without adding the fee.
+                preview = rpc.getpaymasteroffers(1_500, {
+                    "subtract_paymaster_fee_from_amount": True,
+                    "maximum_paymaster_fee_cents": 300,
+                })
+                assert_equal(preview[0]["payment_cents"] + preview[0]["service_fee_cents"], 1_500)
+                prepared = rpc.senddigidollar(recipient, 1_500, "", 0, None, "cents", deducted_options)
+                assert_equal(prepared["requested_amount_cents"], 1_500)
+                assert_equal(prepared["subtract_paymaster_fee_from_amount"], True)
+                session = rpc.resolvepaymastersession(lookup, "refresh")
+                assert_equal(session["session"]["requested_amount_cents"], 1_500)
+                assert_equal(session["session"]["subtract_paymaster_fee_from_amount"], True)
+                assert_equal(session["artifact"], "none")
+                assert "abandon_unsigned" in session["allowed_actions"]
+                rpc.resolvepaymastersession(lookup, "abandon_unsigned")
+                assert_equal(client.listpaymasterreservations(), [])
+        assert_snapshot_equal(before_failed_prepare, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
         client.setpaymasterclientsafetypolicy({
             "maximum_service_fee_per_transaction_cents": 100,
             "maximum_service_fee_per_day_cents": 10_000,

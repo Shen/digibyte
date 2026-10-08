@@ -2949,3 +2949,42 @@ Local reports: `build_msvc/paymaster-refresh-check/reserve-presets/`
 `sync-log-core-tests.txt` and `sync-log-functional.txt`. `git diff --check`
 passed. No full build, complete suite or cross-platform run was performed;
 the operator commands and prerequisites above still apply.
+
+## 2026-10-08: Offer funding and obsolete client errors
+
+The GUI gates new preparation on the selected offer's total and cached DD balance.
+Editing a safely closed/uncreated draft clears its previous attempt's notice.
+The fee-deduction flag and Core's minimum-change rule are unchanged.
+
+Targeted Windows/MSVC verification:
+
+- Changed Qt units and resource compiled; isolated Qt test/application links passed.
+- Four targeted Qt functions passed all 14 data cases (22 results including
+  fixture setup/cleanup): `paymasterClientPreparationRequiresCurrentOffer`,
+  `paymasterClientFundingBalanceChanges`, `paymasterClientOfferCards` and
+  `paymasterClientUncreatedRequestReturnsToCompose`. Cases cover exact coverage,
+  one-cent shortage, subtraction, own-DGB Automatic, provider changes, privacy,
+  expiry and obsolete error notices. Dark/light previews were inspected.
+- `wallet_paymaster_rpc.py --descriptors --client-preparation-only` passed using
+  actual RPC and CLI in both fee modes: extra-fee shortage and 1-cent change are
+  rejected without creating a session; subsequent exact-total subtraction
+  prepares an unsigned request, preserves its flag and can be safely canceled.
+  Balances, budgets and mempool are unchanged. This is a preparation test, not
+  a new complete-payment run.
+- Python compilation and `git diff --check` passed. The shared test fixture now
+  includes the already-required zero/no-cap `maximum_user_paid_service_fee_cents`.
+  The first test attempts exposed that missing fixture field and the existing
+  distinct AUTO/Paymaster error codes; the final assertions cover both.
+
+Reports are in `build_msvc/paymaster-refresh-check/reserve-presets/`:
+`offer-funding-final-*.txt` and `offer-funding-rpc3.txt`. The installed Qt build
+uses the Windows platform plugin; an initial `offscreen` attempt was unsupported.
+No full build, complete suite or cross-platform run was performed. The operator
+build command above applies; after building, run the focused RPC/CLI check from
+the repository root (under a minute; exit 0 and `Tests successful`):
+
+```powershell
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python -X utf8 test/functional/wallet_paymaster_rpc.py --descriptors --client-preparation-only
+```

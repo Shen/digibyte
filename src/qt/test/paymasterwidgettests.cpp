@@ -6842,7 +6842,7 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
 void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* outcome : {"input_selection", "legacy_input_error", "provider_unreachable", "legacy_absence", "read_failure", "unsupported_version"}) {
+    for (const char* outcome : {"input_selection", "small_change", "legacy_input_error", "provider_unreachable", "legacy_absence", "read_failure", "unsupported_version"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
 }
@@ -6871,17 +6871,28 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
     auto* client = form.findChild<PaymasterSendWidget*>();
     QStringList request_ids;
     QStringList actions;
+    bool last_subtract_fee{false};
     client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) -> UniValue {
         if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
-        if (command == "getpaymasteroffers") return PaymasterPublicOffers();
+        if (command == "getpaymasteroffers") {
+            if (!params[1].find_value("subtract_paymaster_fee_from_amount").isTrue()) return PaymasterPublicOffers();
+            auto offer = PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 2,
+                323, false, QDateTime::currentSecsSinceEpoch() + 600);
+            offer.pushKV("subtract_paymaster_fee_from_amount", true);
+            UniValue offers{UniValue::VARR};
+            offers.push_back(offer);
+            return offers;
+        }
         if (command == "senddigidollar") {
             if (!params[6].find_value("prepare_only").isTrue() ||
                 !params[6].find_value("authorization_commitment").isNull()) {
                 throw std::runtime_error("unexpected signing authority");
             }
             request_ids.push_back(QString::fromStdString(params[6].find_value("request_id").get_str()));
+            last_subtract_fee = params[6].find_value("subtract_paymaster_fee_from_amount").isTrue();
             if (outcome == QLatin1String("provider_unreachable")) throw std::runtime_error("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE");
             if (outcome == QLatin1String("legacy_input_error")) throw std::runtime_error("Insufficient confirmed DigiDollar inputs");
+            if (outcome == QLatin1String("small_change")) throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Selected DD input change is below minimum DigiDollar output. Change: 1 cents, Minimum: 100 cents");
             throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Insufficient confirmed DD balance");
         }
         if (command == "resolvepaymastersession") {
@@ -6933,8 +6944,21 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
     } else {
         QVERIFY(notice.contains("No Paymaster transfer was created"));
         if (outcome == QLatin1String("input_selection")) QVERIFY(notice.contains("Insufficient confirmed DD balance"));
+        if (outcome == QLatin1String("input_selection") || outcome == QLatin1String("small_change")) {
+            QVERIFY(!last_subtract_fee);
+            if (outcome == QLatin1String("small_change")) {
+                QVERIFY(notice.contains("Change: 1 cents"));
+                amount->setText("3.26");
+                QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().isEmpty());
+                amount->setText("3.25");
+            }
+            form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(true);
+            QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().isEmpty());
+            QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+        }
         client->send(recipient, 325);
         QCOMPARE(request_ids.size(), 2);
+        if (outcome == QLatin1String("input_selection") || outcome == QLatin1String("small_change")) QVERIFY(last_subtract_fee);
         QVERIFY(request_ids[0] != request_ids[1]);
         QCOMPARE(actions, (QStringList{"refresh", "refresh"}));
         QVERIFY(database.m_records == before);
@@ -7684,6 +7708,45 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     client->send(recipient, 326);  // Different amount cannot reuse the preview.
     QCOMPARE(unexpected, 0);
 
+    // The recipient amount fits, but the displayed fee must fit too. Neither
+    // a button click nor direct invocation may create an unfundable request.
+    auto* summary = form.findChild<QLabel*>("feeFundingSummary");
+    QVERIFY(summary);
+    form.setAvailableDigiDollarBalanceForTesting(325);
+    QVERIFY(!prepare->isEnabled());
+    QVERIFY(prepare->toolTip().contains("Not enough $DD"));
+    QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("action"));
+    QVERIFY(summary->text().contains("Total: 3.27 $DD; available: 3.25 $DD; missing: 0.02 $DD"));
+    prepare->click();
+    client->send(recipient, 325);
+    QVERIFY(QMetaObject::invokeMethod(&form, "onSendClicked", Qt::DirectConnection));
+    QCOMPARE(unexpected, 0);
+    form.setAvailableDigiDollarBalanceForTesting(326);
+    QVERIFY(!prepare->isEnabled()); // One cent short is still insufficient.
+    form.setAvailableDigiDollarBalanceForTesting(327);
+    QVERIFY(prepare->isEnabled()); // Exact coverage, not the larger fee cap.
+    QVERIFY(!summary->text().contains("Not enough $DD"));
+    form.setAvailableDigiDollarBalanceForTesting(325);
+
+    auto* subtract = form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount");
+    subtract->setChecked(true);
+    QVERIFY(!prepare->isEnabled()); // Deduction needs its own bound preview.
+    QVERIFY(tick());
+    auto deducted_offer = PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 2,
+        323, false, QDateTime::currentSecsSinceEpoch() + 600);
+    deducted_offer.pushKV("subtract_paymaster_fee_from_amount", true);
+    UniValue deducted{UniValue::VARR};
+    deducted.push_back(deducted_offer);
+    reply(deducted);
+    QVERIFY(prepare->isEnabled()); // 3.23 recipient + 0.02 fee = 3.25 total.
+    QVERIFY(!summary->text().contains("Not enough $DD"));
+    subtract->setChecked(false);
+    QVERIFY(tick());
+    reply(PaymasterPublicOffers());
+    QVERIFY(!prepare->isEnabled());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    QVERIFY(prepare->isEnabled());
+
     amount->setText("3.26");
     QVERIFY(!prepare->isEnabled());
     QVERIFY(!client->hasCurrentPaymasterOffer());
@@ -7777,13 +7840,21 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     QVERIFY(!balances.isEmpty());
     QVERIFY(send->isEnabled()); // The balance signal updates the untouched form.
     QCOMPARE(send->text(), QStringLiteral("Send payment"));
+    form.setAvailableDigiDollarBalanceForTesting(325);
+    QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+    QVERIFY(send->isEnabled()); // Automatic can still use its own DGB.
+    QVERIFY(!form.findChild<QLabel*>("feeFundingSummary")->text().contains("Not enough $DD"));
     select("dgb");
     QVERIFY(send->isEnabled());
     QCOMPARE(send->text(), QStringLiteral("Send payment"));
     select("paymaster");
     QVERIFY(!send->isEnabled()); // Own DGB does not enable explicit Paymaster.
+    QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+    QVERIFY(!send->isEnabled()); // The selected Paymaster still needs its DD fee.
+    QVERIFY(send->toolTip().contains("Not enough $DD"));
     select("auto");
     QVERIFY(send->isEnabled());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
 
     // Empty only the isolated fixture ledger, then use the real balance poll.
     {
@@ -11803,7 +11874,20 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     QVERIFY(refresh());
     QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'e'));
     QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
+    form.setAvailableDigiDollarBalanceForTesting(327);
+    auto* funding_summary = form.findChild<QLabel*>("feeFundingSummary");
+    auto* funding_send = form.findChild<QPushButton*>("sendButton");
+    QVERIFY(!funding_send->isEnabled()); // Explicit higher-fee choice costs 3.30.
+    QVERIFY(funding_summary->text().contains("Not enough $DD"));
+    QCOMPARE(funding_summary->property("statusKind").toString(), QStringLiteral("action"));
+    form.findChild<QRadioButton*>("paymasterOfferChoice0")->click();
+    QVERIFY(funding_send->isEnabled()); // The sponsored offer costs only 3.25.
+    QVERIFY(!funding_summary->text().contains("Not enough $DD"));
+    form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
+    QVERIFY(!funding_send->isEnabled());
     client->setPrivacy(true);
+    QVERIFY(!funding_send->toolTip().contains("3.30"));
+    QVERIFY(!funding_summary->text().contains("3.30"));
     QVERIFY(cards->isHidden());
     QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
     client->setPrivacy(false);
@@ -11816,6 +11900,8 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     if (!screenshots.isEmpty()) {
         QVERIFY(form.findChild<QFrame*>("feeFrame")->grab().save(screenshots + "/offer-cards-" + theme + "-" + QString::number(width) + ".png"));
     }
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    QVERIFY(funding_send->isEnabled());
     // Editing the amount invalidates both the cost preview and selection.
     auto* amount = form.findChild<QLineEdit*>("amountEdit");
     amount->setText("3.26");

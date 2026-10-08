@@ -588,6 +588,23 @@ spendable DGB even if a provider is listed. Wallet balance changes update the
 button automatically. A positive DGB balance is only a preliminary check: Core
 still verifies suitable fee inputs and the actual fee before sending.
 
+The selected offer's total DD cost must also fit the displayed spendable DD
+balance. If it does not, **Send payment** stays disabled and the cost summary
+highlights the total, available balance and missing amount. Reduce the amount,
+select fee deduction or choose a cheaper offer. For example, 28.50 DD cannot
+fund a 28.50-DD payment plus a 0.15-DD fee. This check uses the selected offer's
+price, not the maximum fee allowance. It also applies to Automatic without own
+DGB; Automatic with own DGB can still attempt direct funding. Updated balances,
+offer selections and fresh fee-deduction previews update the button. Core's
+input checks and exact authorization remain authoritative.
+
+After Core confirms that a failed request was never created or is safely closed,
+editing its amount or fee settings clears the old attempt's notice. It must not
+contradict the new offer. Fee deduction makes the entered amount the total DD
+outflow; it does not waive the minimum DD change rule. A 1-cent change output
+still fails Core's input selection, while an exact spend with zero change is
+allowed. GUI, RPC and CLI retain these same backend checks.
+
 A Send payment click in Automatic without own DGB is bound to Paymaster funding for that
 request, including when DGB arrives later; it does not authorize a direct spend.
 Existing-session actions are unaffected by these compose checks.

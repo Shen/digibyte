@@ -39,6 +39,12 @@ first reply is reconciled by UUID. Explicitly initiated alternative recovery
 also advances its bound preparation and accepted signature through bounded
 polling; restored sessions remain read-only. These changes add no durable journal.
 
+The Paymaster compose gate compares the selected current public offer's total
+with the cached DD balance, including fee deduction. It adds no wallet reads or
+authority and preserves Automatic's own-DGB path. Errors from a safely closed
+or uncreated attempt clear when its amount or fee settings change; active-session
+diagnostics remain protected. Core still validates inputs and minimum change.
+
 Explicit same-provider retry collects an already received signed result before
 rechecking spent Capacity. If a restarted client has lost that inbox, Core may
 requeue its unchanged USER PSBT only after validating a locally observed exact

@@ -831,11 +831,7 @@ void DigiDollarSendWidget::updateSendButton()
             ? tr("Set positive wallet-local Paymaster service-fee limits before sending")
             : tr("Waiting for the wallet's Paymaster service-fee limits"));
     } else if (!funding_ready) {
-        m_sendButton->setToolTip(!m_paymaster->paymasterModeSelected()
-            ? tr("No spendable DGB for the network fee. Add DGB or select Paymaster funding.")
-            : m_paymaster->paymasterOnlySelected()
-                ? tr("Wait for a current Paymaster offer or check offers again. Preparation becomes available automatically when an offer is found.")
-                : tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically."));
+        m_sendButton->setToolTip(m_paymaster->feeFundingProblem());
     } else {
         m_sendButton->setToolTip(m_paymaster->preparesPaymasterPayment()
             ? tr("Contact a provider and verify the exact offer. Preparation may temporarily reserve $DD; you approve the provider and fee before signing.")
