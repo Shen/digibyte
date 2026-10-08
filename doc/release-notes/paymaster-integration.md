@@ -20,6 +20,17 @@ required by this merge. The official release document is unchanged; its test
 claims do not certify this fork. See the [integration checkpoint](../digidollar-paymaster-v9.26.7-integration.md)
 for targeted results and pending operator checks.
 
+## Operator income and costs
+
+The finance page now leads with period income, operating costs and successful
+payments. An aligned breakdown explains the difference between transfer costs
+and reserve-maintenance fees. Period comparison is compact, USD estimates are
+explicitly optional current-price valuations, and current reserve capital and
+withdrawable fees appear separately from period earnings. All views reuse the
+existing finance snapshot; Core accounting, RPC/CLI and spending authorization
+are unchanged. Dark/light styling, app number formatting and privacy apply to
+the new readouts. Old values clear when switching wallets or reporting periods.
+
 ## Excess reserve release
 
 Reserve reduction now previews estimated DGB/DD release fees and proposes a

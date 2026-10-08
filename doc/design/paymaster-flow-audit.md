@@ -4,6 +4,22 @@ Scope: the working `feature/paymaster-ux-navigation` candidate, including the
 subsequent client fixes. This is a regression review of GUI/Core transitions,
 not release acceptance or proof that every Paymaster workflow is defect-free.
 
+## Operator finance presentation (2026-10-08)
+
+The old period cards repeated totals while the valuation paragraph mixed payment
+models with the current-price estimate. Reserve fees were included in operating
+costs but absent from that model breakdown, leaving the difference unexplained.
+The new view leads with selected-period metrics and a source grid; reserve
+maintenance is the bounded remainder after transfer-model costs. Native monetary
+units remain authoritative. Comparison, optional USD valuation and current
+reserve capital have separate sections. Period/wallet reset clears every metric.
+
+Only Paymaster presentation/theme code changed; the existing finance RPC, ledger,
+CSV workflow and polling remain shared. Eleven targeted Qt cases passed and
+native dark/light captures were inspected. See the
+[checkpoint](../digidollar-paymaster-testing.md#operator-finance-presentation-2026-10-08)
+for scope and remaining normal-build checks. The HTML preview uses example data.
+
 ## DD Vault first-open contention (2026-10-08)
 
 The Vault still reconciled positions and read wallet signing state, oracle/chain

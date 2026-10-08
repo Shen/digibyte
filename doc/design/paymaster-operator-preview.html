@@ -20,11 +20,12 @@ nav{display:flex;flex-direction:column;gap:8px}nav button{text-align:left;border
 details{border-top:1px solid var(--line);padding-top:12px;margin-top:15px}summary{cursor:pointer}.compact{display:none;margin-bottom:16px;width:100%}
 #task{border-left:4px solid #ffd27a}dialog{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:24px;width:min(640px,90vw)}
 dialog::backdrop{background:#0009}[hidden]{display:none!important}progress{width:100%;accent-color:var(--accent)}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid var(--line);padding:10px}
-@media(max-width:959px){.layout{display:block}nav{display:none}.compact{display:block}.grid{grid-template-columns:1fr}main{padding:16px}}
+#finance th:not(:first-child),#finance td:not(:first-child){text-align:right;font-variant-numeric:tabular-nums}#finance .metrics{grid-template-columns:repeat(3,minmax(0,1fr))}#finance table{font-size:14px}#finance td,#finance th{overflow-wrap:anywhere}
+@media(max-width:959px){.layout{display:block}nav{display:none}.compact{display:block}.grid,#finance .metrics{grid-template-columns:1fr}main{padding:16px}}
 </style>
 </head>
 <body>
-<div class="demo"><span>Bedienentwurf · 04.10.2026 · Beispieldaten, keine Wallet-Verbindung</span>
+<div class="demo"><span>Bedienentwurf · 08.10.2026 · Beispieldaten, keine Wallet-Verbindung</span>
 <label>Beispielzustand <select id="scenario"><option value="ready">Bereit</option><option value="running">Läuft</option><option value="capacity">Zahlungskapazität reserviert</option><option value="payment">Zahlung läuft</option><option value="locked">Wallet gesperrt</option><option value="pending">Bestätigung ausstehend</option><option value="unknown">Status unbekannt</option><option value="new">Neue Einrichtung</option></select></label></div>
 <main>
 <header><h1>Paymaster betreiben</h1><p class="muted">Wallet: Beispielanbieter · Netzwerk: Testnet · Status: Beispieldaten</p></header>
@@ -61,9 +62,14 @@ dialog::backdrop{background:#0009}[hidden]{display:none!important}progress{width
 <div class="card"><h3>Reserveziele und Auffüllkosten</h3><p>Gemeinsames Formular mit Speichern und Verwerfen. Änderungen bei aktiver Auffüllung können unmittelbar gebundenes Kapital und Gebühren auslösen.</p><button data-review="Reserveziele und Kosten prüfen">Grenzen prüfen…</button></div>
 <div class="card"><h3>Betrieb beenden und Kapital freigeben</h3><p>Pausieren, offene Vorgänge prüfen, vollständige Freigabe bestätigen und Wallet sichern. Die vollständige Freigabe widerruft Auffüllautomatik und Kostenfreigabe.</p><button data-review="Betrieb beenden">Betrieb beenden…</button></div></section>
 <section id="activity" hidden><h2>Aktivität</h2><div class="card"><h3>Keine offene Zahlung im Beispiel</h3><p>Offene Aufgaben und Wiederherstellung bleiben auch vor abgeschlossener Einrichtung erreichbar.</p><details><summary>Manuelle Verarbeitung und Diagnosen</summary><p>Die Anwendung zeigt manuelle Verarbeitung nur im entsprechenden Expertenmodus.</p></details></div></section>
-<section id="finance" hidden><h2>Einnahmen &amp; Kosten</h2><label>Zeitraum <select id="period"><option>Heute</option><option>Letzte 7 Tage</option><option>Letzte 30 Tage</option></select></label>
-<div class="grid"><div class="card"><h3>DD-Einnahmen</h3><p class="value">1,25 DD</p></div><div class="card"><h3>DGB-Kosten</h3><p class="value">0,04 DGB</p></div></div>
-<p class="muted">Statische Beispielbeträge. Unterschiedliche Währungen werden nicht direkt voneinander abgezogen.</p><details><summary>Verlauf und Export</summary><p>Die echte Anwendung lädt den gewählten Zeitraum und exportiert den vollständigen verfügbaren Verlauf. Dieser Entwurf exportiert keine Daten.</p></details></section>
+<section id="finance" hidden><h2>Einnahmen &amp; Kosten</h2><p>Erträge, Betriebskosten und aktuell verfügbare Reserven auf einen Blick.</p>
+<div class="card"><label>Zeitraum <select id="period"><option value="today">Heute (UTC)</option><option value="7d">Letzte 7 Tage</option><option value="30d" selected>Letzte 30 Tage</option><option value="all">Gesamter erfasster Verlauf</option></select></label><p class="muted">Bestätigte Buchungen. Heute beginnt um Mitternacht UTC; 7 und 30 Tage sind gleitende Zeiträume. Statische Beispieldaten.</p></div>
+<div class="grid metrics"><div class="card"><h3>Servicegebühren</h3><p class="value" id="finance-income"></p><small>DD-Einnahmen im Zeitraum</small></div><div class="card"><h3>Betriebskosten</h3><p class="value" id="finance-cost"></p><small>DGB-Netzwerkgebühren einschließlich Reserven</small></div><div class="card"><h3>Erfolgreiche Zahlungen</h3><p class="value" id="finance-count"></p><small id="finance-average"></small></div></div>
+<div class="card"><h3>Woher kommen Einnahmen und Kosten?</h3><table><thead><tr><th>Quelle</th><th>Zahlungen</th><th>Einnahmen (DD)</th><th>Kosten (DGB)</th></tr></thead><tbody id="finance-sources"></tbody></table><p class="muted">Reservepflege umfasst Einrichtung, Auffüllung, Entnahme und Freigabe. Gebundenes Kapital ist keine Ausgabe.</p></div>
+<details><summary>Zeiträume vergleichen</summary><table><thead><tr><th>Zeitraum</th><th>Einnahmen (DD)</th><th>Kosten (DGB)</th><th>Zahlungen</th></tr></thead><tbody id="finance-periods"></tbody></table><p class="muted">Die Zeiträume überschneiden sich; Zeilen nicht addieren.</p></details>
+<details><summary>Ergebnis in USD schätzen</summary><p class="value" id="finance-usd"></p><p>1 DGB = 0.500000 USD · Beispielbewertung</p><p class="muted">DD-Einnahmen zum USD-Nennwert, DGB-Kosten zum aktuellen Oracle-Preis. Keine historische Gewinn-/Verlustrechnung.</p></details>
+<div class="card"><h3>Aktuell in Reserven gebunden</h3><p class="muted">Aktueller Wallet-Stand, unabhängig vom Zeitraum. Angesammelte Gebühren sind Teil der bereits erfassten Einnahmen.</p><div class="grid"><div><h3>DGB-Reserven</h3><p>Verfügbar: 0.5 DGB<br>Reserviert: 0 DGB<br>Wartet auf Bestätigung: 0 DGB</p></div><div><h3>DigiDollar-Reserven</h3><p>Grundkapital: 4.00 DD<br>Angesammelte Gebühren: 0.00 DD<br>Entnehmbare Gebühren: 0.00 DD</p></div></div><button data-page="capital">Guthaben und Reserven verwalten…</button></div>
+<details><summary>Buchungen und CSV-Export</summary><p>Die Anwendung zeigt einzelne Buchungen und exportiert den vollständigen verfügbaren Verlauf des gewählten Zeitraums. Der Entwurf exportiert keine Daten.</p></details></section>
 <section id="settings" hidden><h2>Einstellungen</h2><p>Wähle, was du ändern möchtest.</p><div id="settings-home" class="card"></div>
 <div id="settings-detail" class="card" hidden><button id="back-settings">Zurück zu Einstellungen</button><h3 id="category-title"></h3><p id="category-help"></p><button id="startup-link" data-page="overview" hidden>Autostart bei Start/Pause ändern</button></div></section>
 </div></div></main>
@@ -73,6 +79,18 @@ dialog::backdrop{background:#0009}[hidden]{display:none!important}progress{width
 "use strict";
 const $=id=>document.getElementById(id);
 let saved=false, refill=false, approved=false, state="ready", reviewed="", step=0;
+const financePeriods={today:["Heute (UTC)",0,0.386,0,0],"7d":["Letzte 7 Tage",0.36,4.60305,12,1.2],"30d":["Letzte 30 Tage",0.42,7.43065,14,1.4],all:["Gesamter Verlauf",0.42,7.43065,14,1.4]};
+const dd=n=>n.toFixed(2), dgb=n=>n.toFixed(8).replace(/\.?0+$/,"");
+function financePreview(){
+ const [,income,cost,count,paymentCost]=financePeriods[$("period").value];
+ $("finance-income").textContent=dd(income)+" DD";$("finance-cost").textContent=dgb(cost)+" DGB";$("finance-count").textContent=count;
+ $("finance-average").textContent=count?"Ø "+dd(income/count)+" DD je Zahlung":"Keine bestätigten Zahlungen";
+ $("finance-sources").innerHTML=[["Kundengebühren",count,dd(income),dgb(paymentCost)],["Öffentlich gesponsert",0,"0.00","0"],["Beschränkt gesponsert",0,"0.00","0"],["Reservepflege","—","—",dgb(cost-paymentCost)],["Gesamt",count,dd(income),dgb(cost)]].map(row=>"<tr>"+row.map(x=>"<td>"+x+"</td>").join("")+"</tr>").join("");
+ $("finance-usd").textContent="≈ "+dd(income-cost*0.5)+" USD";
+}
+$("finance-periods").innerHTML=Object.values(financePeriods).map(([name,income,cost,count])=>"<tr><td>"+name+"</td><td>"+dd(income)+"</td><td>"+dgb(cost)+"</td><td>"+count+"</td></tr>").join("");
+$("period").onchange=financePreview;financePreview();
+
 const areas=["overview","capital","activity","finance","settings"];
 const categories={
 "Offer":["Angebot","Zahlungsmodell, Preis, Zahlungsbereich und öffentlicher Name."],

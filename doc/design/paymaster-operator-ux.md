@@ -33,6 +33,19 @@ refresh at thirty seconds or when capital/budgets change; an explicit refresh
 reads both. Open offer drafts are preserved and do not freeze Overview polling.
 Temporary capacity use pauses refill execution without changing saved consent.
 
+### Finance information hierarchy
+
+The selected period governs confirmed DD income, DGB costs, payment count,
+average fee, source breakdown and booking export. Headline metrics precede the
+aligned source table. Reserve maintenance is separate from payment-model costs;
+its checked remainder makes the total explainable without another RPC. Period
+comparison is a compact table behind a disclosure. USD valuation is optional,
+uses the current oracle price and is not historical profit. Current reserve
+capital and withdrawable earnings remain visible in their own section, with the
+link to Funds & reserves. They are independent of the reporting period and are
+not added to income. Native app formatting, masked values and responsive layouts
+apply throughout. See the operator guide for the accounting boundaries.
+
 ## Three independent automation choices
 
 Autostart and automatic reserve refill have immediate-save checkboxes on

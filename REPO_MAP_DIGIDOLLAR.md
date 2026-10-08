@@ -1335,8 +1335,12 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   worker state and payment execution checks remain unchanged.
   unknown/stale data cannot expose a start action. Technical details, reserve
   counts, additional safety limits and secondary finance views are disclosures.
-  The selected finance summary is invalidated on period changes and failures;
-  privacy and wallet changes clear the operator presentation. See
+  Finance headline metrics and a source grid reconcile customer-payment costs
+  with reserve-maintenance costs from the same RPC snapshot. A compact period
+  comparison and optional USD estimate stay separate from current reserve capital.
+  Period/wallet changes clear all displayed figures; a failed same-period refresh
+  retains the last complete figures beneath its error notice. Privacy masks values
+  and removes accessibility/tooltip disclosures. See
   `doc/design/paymaster-operator-ux.md` and its standalone HTML preview.
 - `DigiDollarPaymasterWidget` exposes the small embedding interface used by the
   DigiDollar tab; `CreatePaymasterWidget` constructs the private implementation.

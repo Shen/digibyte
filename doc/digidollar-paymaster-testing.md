@@ -1,5 +1,55 @@
 # Paymaster build and test runbook
 
+## Operator finance presentation (2026-10-08)
+
+The finance page now separates selected-period results, payment/reserve costs,
+optional period/current-price comparisons and current reserve capital. All values
+use the existing wallet-bound finance snapshot. Core/RPC/CLI, fee authority and
+polling frequency are unchanged; no additional wallet reads were introduced.
+
+Selected MSVC compiles (widget, resources, tests and MOC) and isolated Qt linking
+passed. **11 targeted Qt cases passed**, excluding fixture setup/cleanup:
+
+- `paymasterFinanceOperatorPresentation`: four native dark/light rows at 760
+  and 1360 logical pixels, with larger inherited fonts in narrow windows. Checks
+  cost reconciliation (7.43065 = 1.4 + 6.03065 DGB), optional negative USD estimate,
+  keyboard disclosure without extra RPC, wrapping/no horizontal scroll, pending
+  period changes, missing price, zero payments, current capital, privacy and reset.
+- `paymasterFinancesAndBackupWorkflow`: source/period values, missing oracle,
+  partial/malformed history, stale period replies, privacy, backup and complete
+  paginated CSV export, including the existing 10,251-event responsiveness case.
+- `paymasterOverviewFinanceWalletAndPrivacyBinding`,
+  `paymasterOperatorPollingPreservesDraftsAndThrottlesFinance`,
+  `paymasterFiveDestinationsAndVisibleTasks`, `paymasterAppNumberFormat` and both
+  theme rows of `paymasterOperatorBackgroundRefresh`.
+
+Reports are workspace-local `finance-layout-*.txt` under
+`build_msvc/paymaster-refresh-check/reserve-presets/`. The four
+`finance-layout-{dark,light}-{760,1360}.png` files show native Qt example data;
+wide dark and narrow light captures were inspected after the final style change.
+The HTML design preview has corresponding example sections; duplicate IDs and
+literal script targets were checked. `git diff --check` passed.
+
+Relevant guidance: repository/src instructions and CLAUDE, contribution rules,
+DigiDollar architecture/maps, Qt/test guidance, translation policy, developer
+threading rules and C++ formatting. Product edits are confined to the Paymaster
+widget and scoped theme rules. No original DigiByte product code was changed.
+
+The normal EXE was not rebuilt/replaced. The complete build and full suite remain
+operator checks. With MSVC 14.43, Qt 5.15.10 and cached static dependencies installed,
+close Client, Paymaster and active CLI calls normally, then run:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+Allow minutes for the incremental solution build and several minutes for the
+full suite. Success requires exit 0 and zero failed cases. In the normal wallet,
+compare period totals with booking export, open/close both comparisons, toggle
+privacy and review current capital in Funds & reserves. No financial action is
+required to check the new layout.
+
 ## DD Vault first-open contention (2026-10-08)
 
 The Vault's original synchronous reads reproduced a 525-ms first-open stall

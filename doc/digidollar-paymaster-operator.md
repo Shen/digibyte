@@ -27,6 +27,31 @@ Passive reads leave navigation and draft inputs enabled. A deliberate wallet
 action waits for the in-flight read, then runs once with the usual Core checks;
 further actions are gated until its callback chain completes.
 
+### Read income and costs
+
+Choose a reporting period in **Income & costs**. The three headline figures are
+confirmed DD service-fee income, DGB operating costs and successful payments.
+The average service fee belongs to those successful payments. The source table
+separates customer-paid and sponsored payments from reserve maintenance; its
+cost rows add up to the headline total. Maintenance includes reserve setup,
+refill, fee withdrawal and release transaction fees, not the capital in reserves.
+
+**Compare reporting periods** shows the same measures in aligned columns.
+Today begins at midnight UTC; seven and thirty days are rolling periods. These
+periods overlap and must not be added together. **Estimate result in USD** values
+DD income at its denomination and DGB costs at the current oracle price. This is
+an optional current-price estimate, not historical profit or loss. Native DD/DGB
+amounts remain the accounting record; missing prices do not imply a zero result.
+
+**Currently held in reserves** is a current wallet snapshot, independent of the
+selected period. DD base capital, accumulated service fees and fees available to
+withdraw are shown separately. Accumulated fees are not additional income to add
+to the period totals. Use **Manage funds and reserves…** to review a withdrawal
+or release. Booking details and complete CSV export still use the selected period.
+Privacy masks these values, and changing the period clears old figures until the
+replacement snapshot arrives. Decimal points and thin-space grouping match the app;
+DGB summaries omit trailing zeroes without reducing precision.
+
 ### Autostart beside Start/Pause
 
 Changing **Automatically start Paymaster when this wallet is ready** saves

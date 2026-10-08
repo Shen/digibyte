@@ -1995,9 +1995,16 @@ in `wallet/rpc/paymaster_integration.cpp`. The generic wallet loader calls these
 at the original lifecycle points, preserving startup order, intervals and bounds.
 See the [original-code boundary review](doc/design/paymaster-flow-audit.md#original-code-boundary-review-2026-10-07).
 
-The Qt provider panel has Operation, Activity & finances and Settings.
-Provider-wallet backup controls live only in Settings / Wallet & backup;
-the Operation reminder navigates there, and Finances has no duplicate panel.
+The Qt provider panel has Overview, Funds & reserves, Activity, Income & costs
+and Settings. Provider-wallet backup controls live only in Settings / Wallet &
+backup; the Overview reminder navigates there, and Income & costs has no duplicate
+panel. Finance presentation uses one existing `getpaymasterfinancestatus` snapshot:
+selected-period headline metrics and an aligned source breakdown separate transfer
+fees from reserve-maintenance costs (the checked remainder of total costs after
+all funding models). Current reserve capital is a separate period-independent
+section. Period comparison and current-price USD valuation are optional views of
+that same response, with no additional reads. Privacy and wallet/period changes
+mask or clear every metric; CSV and ledger accounting are unchanged.
 `src/qt/paymasteroperation.h` owns wallet-generation-bound phases, current operation
 observations, explicit restoration target proposals and approved funding-scope
 comparisons; the widget renders that state and adapts the existing RPC transport.
