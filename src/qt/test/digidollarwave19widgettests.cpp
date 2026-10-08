@@ -421,7 +421,7 @@ void DigiDollarWave19WidgetTests::positionsWidgetTierZeroTooltipIsCanonical()
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
     QTableWidgetItem* tierItem = table->item(0, DigiDollarPositionsWidget::COL_LOCK_TIER);
     QVERIFY(tierItem != nullptr);
     QCOMPARE(tierItem->text(), QString("1 hour + 100 block buffer"));
@@ -634,7 +634,7 @@ void DigiDollarWave19WidgetTests::positionsWidgetMissingOracleHealthIsUnavailabl
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
     QWidget* healthWidget = table->cellWidget(0, DigiDollarPositionsWidget::COL_HEALTH);
     QVERIFY(healthWidget != nullptr);
     QProgressBar* healthBar = healthWidget->findChild<QProgressBar*>();

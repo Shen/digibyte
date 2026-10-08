@@ -31,6 +31,13 @@ remain uncertain and are not retried automatically.
 
 ## DD Overview responsiveness
 
+DD Vault now loads and refreshes its positions on a single background worker.
+Concurrent refresh signals coalesce and signing-state badges use the same
+snapshot, so opening or repainting the Vault no longer waits on a busy wallet
+on Qt's event thread. Empty vaults also avoid an unnecessary transaction-history
+scan. Wallet changes, privacy and closing during a refresh reject old results.
+The existing Core reconciliation and redemption rules are retained.
+
 DD Overview no longer reads wallet balances, locked collateral or mint capability
 on the GUI thread. A delayed overview refresh after switching to Paymaster Network
 also returns without taking the wallet lock. Oracle and network-health reads run

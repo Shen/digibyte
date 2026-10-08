@@ -127,6 +127,7 @@
 #include <QWheelEvent>
 #include <QWizard>
 #include <QTimer>
+#include <QThread>
 #include <QTemporaryDir>
 #include <QToolTip>
 #include <QtTest/QtTestWidgets>
@@ -1410,6 +1411,115 @@ void DigiDollarWidgetTests::positionsWidgetHiddenDoesNotPollWallet()
     QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 }
 
+void DigiDollarWidgetTests::positionsWidgetRefreshLifecycle_data()
+{
+    QTest::addColumn<QString>("action");
+    for (const auto* action : {"refresh", "privacy", "hide", "rebind", "detach", "destroy", "chain"}) {
+        QTest::newRow(action) << QString::fromLatin1(action);
+    }
+}
+
+void DigiDollarWidgetTests::positionsWidgetRefreshLifecycle()
+{
+    QFETCH(QString, action);
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) {
+        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    }
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "vault-old");
+    AddMockDigiDollarPosition(wallet, uint256::ONE, 10000, 300 * COIN, 1, 100);
+    const auto other_wallet = SetupDescriptorsWallet(m_node, test, "vault-new");
+    const uint256 other_id = uint256S("02");
+    AddMockDigiDollarPosition(other_wallet, other_id, 20000, 600 * COIN, 1, 100);
+    DigiDollarMiniGUI gui(m_node), other_gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    other_gui.initModelForWallet(m_node, other_wallet);
+    auto vault = std::make_unique<DigiDollarPositionsWidget>();
+    vault->setWalletModel(gui.walletModel.get());
+    vault->setClientModel(gui.clientModel.get());
+    auto* table = vault->findChild<QTableWidget*>("positionsTable");
+    QVERIFY(table);
+
+    // Hold a real Core lock across first show, repeated refreshes and the
+    // lifecycle change. A watchdog bounds a regression without hanging CI.
+    std::promise<void> acquired, release;
+    auto released = release.get_future();
+    bool timed_out{false};
+    std::thread holder([&] {
+        LOCK(action == "chain" ? cs_main : wallet->cs_wallet);
+        acquired.set_value();
+        timed_out = released.wait_for(std::chrono::milliseconds{1000}) != std::future_status::ready;
+    });
+    acquired.get_future().wait();
+    QElapsedTimer elapsed;
+    elapsed.start();
+    vault->show();
+    vault->updateView();
+    QPointer<QThread> worker = vault->m_refresh_thread;
+    // No assertions until the held Core lock has been released and joined.
+    auto finished = worker ? std::make_unique<QSignalSpy>(worker, &QThread::finished) : nullptr;
+    for (int i = 0; i < 20; ++i) vault->invalidatePositions();
+    const bool same_worker = worker && vault->m_refresh_thread == worker;
+    bool heartbeat{false};
+    QTimer::singleShot(0, [&] { heartbeat = true; });
+    QCoreApplication::processEvents();
+    if (action == "privacy") vault->setPrivacy(true);
+    if (action == "hide") vault->hide();
+    if (action == "rebind") vault->setWalletModel(other_gui.walletModel.get());
+    if (action == "detach" || action == "destroy") {
+        vault->setWalletModel(nullptr);
+        gui.walletModel.reset();
+    }
+    if (action == "destroy") vault.reset();
+    const qint64 duration = elapsed.elapsed();
+    release.set_value();
+    holder.join();
+    QVERIFY2(!timed_out, qPrintable(QStringLiteral("Vault %1 blocked Qt for %2 ms").arg(action).arg(duration)));
+    QVERIFY(heartbeat);
+    QVERIFY(same_worker);
+    QVERIFY(finished);
+    QTRY_COMPARE_WITH_TIMEOUT(finished->count(), 1, 5000);
+    qInfo("Vault %s remained responsive with Core locked (%lld ms)", qPrintable(action), duration);
+    if (action == "destroy") return;
+    QTRY_VERIFY_WITH_TIMEOUT(!vault->m_refresh_thread, 5000);
+    if (action == "detach") {
+        QCOMPARE(table->rowCount(), 0);
+        return;
+    }
+    if (action == "privacy" || action == "hide") {
+        QCOMPARE(table->rowCount(), 0);
+        if (action == "privacy") {
+            QVERIFY(!table->isVisible());
+            QVERIFY(vault->m_statusLabel->text().contains("Privacy mode"));
+            vault->setPrivacy(false);
+        } else {
+            vault->show();
+            vault->updateView();
+        }
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
+    QCOMPARE(table->item(0, DigiDollarPositionsWidget::COL_POSITION_ID)->text(),
+             QString::fromStdString((action == "rebind" ? other_id : uint256::ONE).GetHex()));
+    QTRY_VERIFY_WITH_TIMEOUT(!vault->m_refresh_thread, 5000);
+
+    // Rendering an existing snapshot must not re-read signing state per row.
+    std::promise<void> paint_acquired, paint_release;
+    auto paint_released = paint_release.get_future();
+    std::thread paint_holder([&] {
+        LOCK(action == "rebind" ? other_wallet->cs_wallet : wallet->cs_wallet);
+        paint_acquired.set_value();
+        timed_out = paint_released.wait_for(std::chrono::milliseconds{1000}) != std::future_status::ready;
+    });
+    paint_acquired.get_future().wait();
+    vault->populatePositionsTable();
+    paint_release.set_value();
+    paint_holder.join();
+    QVERIFY2(!timed_out, "Vault row rendering re-entered the wallet");
+}
+
 void DigiDollarWidgetTests::positionsWidgetInitialLoadNotThrottled()
 {
 #ifdef Q_OS_MACOS
@@ -1441,7 +1551,7 @@ void DigiDollarWidgetTests::positionsWidgetInitialLoadNotThrottled()
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 }
 
 void DigiDollarWidgetTests::positionsWidgetHealthUsesMicroUsdOraclePrice()
@@ -1478,7 +1588,7 @@ void DigiDollarWidgetTests::positionsWidgetHealthUsesMicroUsdOraclePrice()
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 
     QWidget* healthWidget = table->cellWidget(0, DigiDollarPositionsWidget::COL_HEALTH);
     QVERIFY(healthWidget != nullptr);
@@ -1521,7 +1631,7 @@ void DigiDollarWidgetTests::positionsWidgetDisablesRedeemForPrivateKeyDisabledWa
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 
     QPushButton* redeemButton = qobject_cast<QPushButton*>(
         table->cellWidget(0, DigiDollarPositionsWidget::COL_ACTIONS));
@@ -1572,7 +1682,7 @@ void DigiDollarWidgetTests::positionsWidgetEnablesRedeemForLockedEncryptedWallet
 
     QTableWidget* table = positionsWidget.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table != nullptr);
-    QCOMPARE(table->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 5000);
 
     QPushButton* redeemButton = qobject_cast<QPushButton*>(
         table->cellWidget(0, DigiDollarPositionsWidget::COL_ACTIONS));
@@ -3259,6 +3369,14 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QVERIFY2(!watchdog_fired,
              qPrintable(QStringLiteral("Binding Send DD waited for cs_wallet (%1 ms)").arg(cold_send_ms)));
     QVERIFY(cold_balance_pending);
+
+    const qint64 vault_switch_ms = whileWalletBusy([&] {
+        tabs->setCurrentIndex(5);
+        QCoreApplication::processEvents();
+    });
+    qInfo("Opening DD Vault with cs_wallet held returned in %lld ms", vault_switch_ms);
+    QVERIFY2(!watchdog_fired,
+             qPrintable(QStringLiteral("Opening DD Vault waited for cs_wallet (%1 ms)").arg(vault_switch_ms)));
 
     // Overview still receives balance invalidations after Paymaster actions.
     // Exercise the visible refresh, not just the queued tab-selection signal.
@@ -5638,6 +5756,7 @@ void DigiDollarWidgetTests::privacyPositionsMaskTests()
 
     // The positions table should be visible again (not explicitly hidden)
     QVERIFY2(!table->isHidden(), "Positions table should not be hidden when privacy is disabled");
+    QTRY_VERIFY_WITH_TIMEOUT(!positionsWidget.m_refresh_thread, 5000);
 }
 
 void DigiDollarWidgetTests::privacyTransactionsMaskTests()
@@ -7468,6 +7587,7 @@ void DigiDollarWidgetTests::positionsWidgetLockTierColumnFitsLongestLabel()
                         .arg(actualWidth)
                         .arg(requiredWidth)
                         .arg(QStringLiteral("10 years"))));
+    QTRY_VERIFY_WITH_TIMEOUT(!positionsWidget.m_refresh_thread, 5000);
 }
 
 void DigiDollarWidgetTests::positionsWidgetSortingKeepsHealthAndActionsOnSameRow()
@@ -8058,11 +8178,11 @@ void DigiDollarWidgetTests::failedMintsKeepTheirWalletStatus()
     DigiDollarPositionsWidget vaults;
     vaults.setWalletModel(gui.walletModel.get());
     vaults.setClientModel(gui.clientModel.get());
-    vaults.loadPositionsFromWallet();
-    vaults.populatePositionsTable();
+    vaults.show();
+    vaults.updateView();
     auto* table = vaults.findChild<QTableWidget*>("positionsTable");
     QVERIFY(table);
-    QCOMPARE(table->rowCount(), 5);
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 5, 5000);
     for (int row = 0; row < table->rowCount(); ++row) {
         const QString id = table->item(row, DigiDollarPositionsWidget::COL_POSITION_ID)->text();
         QCOMPARE(table->item(row, DigiDollarPositionsWidget::COL_TIME_REMAINING)->text(), expected.at(id));
@@ -8085,6 +8205,16 @@ void DigiDollarWidgetTests::failedMintsKeepTheirWalletStatus()
     auto* history_table = transactions.findChild<QTableWidget*>();
     QVERIFY(history_table);
     QTRY_COMPARE_WITH_TIMEOUT(history_table->rowCount(), 5, 5000);
+    // The persisted history cache can already have all five rows before the
+    // live status refresh completes. Wait for the status, not just the count.
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        for (int row = 0; row < history_table->rowCount(); ++row) {
+            if (history_table->item(row, 5)->data(Qt::UserRole).toString() == QString::fromStdString(expired_id.GetHex())) {
+                return history_table->item(row, 6)->text() == QString("Expired mint");
+            }
+        }
+        return false;
+    }(), 5000);
     int expired_row = -1;
     for (int row = 0; row < history_table->rowCount(); ++row) {
         if (history_table->item(row, 5)->data(Qt::UserRole).toString() == QString::fromStdString(expired_id.GetHex())) {

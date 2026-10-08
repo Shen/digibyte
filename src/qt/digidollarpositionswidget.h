@@ -6,6 +6,7 @@
 #define DIGIBYTE_QT_DIGIDOLLARPOSITIONSWIDGET_H
 
 #include <QWidget>
+#include <QPointer>
 #include <consensus/amount.h>
 #include <wallet/digidollarwallet.h>
 
@@ -13,6 +14,9 @@
 
 class WalletModel;
 class ClientModel;
+namespace interfaces {
+class Wallet;
+}
 
 QT_BEGIN_NAMESPACE
 class QTableWidget;
@@ -23,6 +27,7 @@ class QHBoxLayout;
 class QLabel;
 class QHeaderView;
 class QProgressBar;
+class QThread;
 QT_END_NAMESPACE
 
 struct DigiDollarPosition {
@@ -86,7 +91,8 @@ private:
     void connectWalletSignals();
     void connectClientSignals();
     void populatePositionsTable();
-    void loadPositionsFromWallet();
+    static QList<DigiDollarPosition> loadPositionsFromWallet(interfaces::Wallet& wallet, int currentHeight, bool isWatchOnly, bool isWalletLocked);
+    void invalidatePositions();
     void applyTheme();
     void addPositionToTable(const DigiDollarPosition& position, int row);
     // Wallet-state badges keep matured vaults from looking redeemable when
@@ -100,10 +106,10 @@ private:
     QWidget* createHealthWidget(double health) const;
 
     // Backend integration helpers
-    CAmount GetMockOraclePrice() const;
-    std::vector<WalletCollateralPosition> GetWalletPositions() const;
-    std::set<uint256> GetPendingRedeemPositionIds() const;
-    double CalculatePositionHealth(CAmount ddAmount, CAmount dgbCollateral, CAmount oraclePrice) const;
+    static CAmount GetMockOraclePrice();
+    static std::vector<WalletCollateralPosition> GetWalletPositions(interfaces::Wallet& wallet, bool walletCannotSign);
+    static std::set<uint256> GetPendingRedeemPositionIds(interfaces::Wallet& wallet);
+    static double CalculatePositionHealth(CAmount ddAmount, CAmount dgbCollateral, CAmount oraclePrice);
     int getLockTierBlocks(int tier) const;
 
     // UI components
@@ -114,11 +120,16 @@ private:
     QLabel* m_statusLabel;
 
     // Models
-    WalletModel* m_walletModel;
-    ClientModel* m_clientModel;
+    QPointer<WalletModel> m_walletModel;
+    QPointer<ClientModel> m_clientModel;
 
     // Data
     QList<DigiDollarPosition> m_positions;
+    bool m_watch_only{false};
+    bool m_wallet_locked{false};
+    QPointer<QThread> m_refresh_thread;
+    uint64_t m_refresh_generation{0};
+    bool m_refresh_again{false};
 
     // Privacy
     bool m_privacy{false};

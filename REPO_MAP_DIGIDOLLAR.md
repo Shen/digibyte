@@ -1431,6 +1431,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/qt/digidollarpositionswidget.cpp/h
 - `DigiDollarPositionsWidget` → displays DDTimeLock positions with lock status and health
+- One background worker performs the existing reconciliation and wallet/chain
+  reads; repeated invalidations coalesce and rows use the resulting signing-state
+  snapshot. The pending-redemption history scan is skipped when no inactive
+  collateral position needs it. Wallet changes clear old rows; detached, hidden
+  or privacy-invalidated results cannot populate the view.
 
 ### src/qt/digidollarsendwidget.cpp/h
 - `DigiDollarSendWidget` owns editable recipient/amount/comment fields,

@@ -1,5 +1,65 @@
 # Paymaster build and test runbook
 
+## DD Vault first-open contention (2026-10-08)
+
+The Vault's original synchronous reads reproduced a 525-ms first-open stall
+under `cs_wallet`, until the 500-ms test watchdog released the lock. With the
+single-worker snapshot the same navigation returned in 13 ms while the lock
+remained held. The worker reuses existing Core position reconciliation and
+retains the wallet; row rendering does not query signing state again. No Core,
+RPC/CLI, fee authorization or consensus behavior was changed.
+
+Selected MSVC compiles and isolated Qt-library/test linking passed. **22 targeted
+Qt cases passed**, excluding fixture initialization/cleanup:
+
+- Seven new lifecycle rows: repeated invalidations, privacy, hiding, rebinding,
+  model detachment, widget/model destruction and `cs_main` contention. They also
+  verify row rendering under `cs_wallet` and unchanged worker identity during
+  refresh bursts.
+- One actual DD tab-navigation contention test, including Receive, Send,
+  Overview and the first Vault activation.
+- Twelve existing Vault/status regressions: hidden/first load, oracle units,
+  watch-only and locked wallets, pending mint/redeem states, timelock tooltip,
+  sorting, column layout, privacy and failed-mint status.
+- Two Wave19 cases: canonical tier-zero tooltip and unavailable oracle health.
+
+The failed-mint history assertion now waits for the live status instead of
+assuming that a complete persisted row count means its background refresh has
+finished. Expected statuses and financial checks are unchanged. Reports are
+workspace-local `vault-*` files under
+`build_msvc/paymaster-refresh-check/reserve-presets/`; `vault-before.txt` records
+the deliberately reproduced pre-fix failure. `git diff --check` passed.
+
+Guidance: repository/src instructions, CLAUDE and DigiDollar architecture/maps,
+contribution rules, developer locking notes, Qt/test guidance, translation policy
+and C++ formatting. The change is confined to the native Vault view and tests;
+a second implementation in Paymaster would duplicate the original view without
+removing its blocking reads.
+
+The normal EXE was not rebuilt or replaced. Full builds/suites remain operator
+work. With installed MSVC 14.43, Qt 5.15.10 and cached static dependencies, close
+Client, Paymaster and active CLI calls normally, then run:
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+if ($LASTEXITCODE -ne 0) { throw 'Build or Paymaster Qt tests failed' }
+$env:QT_QPA_PLATFORM = 'windows'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+foreach ($suite in @('DigiDollarWidgetTests', 'DigiDollarWave19WidgetTests')) {
+    $env:DIGIBYTE_QT_TEST_SUITE = $suite
+    $env:DIGIBYTE_QT_TEST_OUTPUT = Join-Path $PWD "build_msvc/paymaster-refresh-check/reserve-presets/full-vault-$suite.txt"
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Qt tests failed: $suite; report: $env:DIGIBYTE_QT_TEST_OUTPUT" }
+}
+```
+
+Allow minutes for the incremental build and several minutes per full suite.
+Success requires exit 0 and zero failed cases in each report. In both wallets,
+open Vault for the first time during Paymaster activity, switch away/back and
+toggle masking. Navigation must remain responsive while the data loads. These
+targeted results do not establish that every native DD action is asynchronous.
+
 ## Original-code boundary extraction (2026-10-07)
 
 The [boundary review](design/paymaster-flow-audit.md#original-code-boundary-review-2026-10-07)

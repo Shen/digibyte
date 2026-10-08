@@ -4,6 +4,29 @@ Scope: the working `feature/paymaster-ux-navigation` candidate, including the
 subsequent client fixes. This is a regression review of GUI/Core transitions,
 not release acceptance or proof that every Paymaster workflow is defect-free.
 
+## DD Vault first-open contention (2026-10-08)
+
+The Vault still reconciled positions and read wallet signing state, oracle/chain
+state, transactions and mint status synchronously on Qt. It also queried signing
+state again for every rendered row. A held-`cs_wallet` regression reproduced a
+525-ms navigation stall, ended only by the test's 500-ms watchdog. This proves
+lock contention can freeze the view; it does not identify the lock holder in an
+operator's live session.
+
+`DigiDollarPositionsWidget` now performs those existing backend calls in a single
+retained-wallet worker. Refresh bursts coalesce, wallet/privacy generations reject
+late results, and row rendering uses the captured signing state. Empty/active-only
+vaults skip the pending-redemption transaction scan. No Core locking, reconciliation,
+financial authorization, RPC or consensus rules were changed. The change belongs
+in this native DD view: moving only Paymaster polling cannot prevent the Vault's
+own synchronous reads from waiting, and a second Paymaster Vault would duplicate it.
+
+The same navigation test now returns in 13 ms while the wallet remains locked.
+Lifecycle coverage includes refresh bursts, masking, hiding, wallet replacement,
+model/widget destruction, chain-lock contention and row painting under a wallet
+lock. These are controlled regression measurements, not a full UI benchmark.
+See the [test checkpoint](../digidollar-paymaster-testing.md#dd-vault-first-open-contention-2026-10-08).
+
 ## Original-code boundary review (2026-10-07)
 
 Comparison: local `upstream/release/v9.26.7` at `d7265fb05e` against the
@@ -86,9 +109,10 @@ rewrite of original DigiByte/DD behavior:
   checks encryption status and decrypts synchronously; the new bridge does not
   replace that dialog. Both can still wait for Core or slow storage.
 - Creating/persisting DD receive requests, ordinary own-DGB sending, coin-control
-  queries and visible Mint/Redeem/Vault operations still contain synchronous
+  queries and visible Mint/Redeem operations still contain synchronous
   wallet/chain reads or writes. Hidden-page guards protect Paymaster navigation,
   but explicitly using those native actions can encounter Paymaster-held locks.
+  Vault reads were subsequently moved off Qt as recorded above.
 - Initial DD activation reads `cs_main`; initial-download checks can also take
   it before their completed-sync latch is set. These are separate startup/sync
   boundaries, not normal provider polling.

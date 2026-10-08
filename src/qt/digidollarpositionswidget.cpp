@@ -19,6 +19,7 @@
 #include <shutdown.h>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -38,6 +39,7 @@
 #include <QPalette>
 #include <QMenu>
 #include <QAction>
+#include <QThread>
 
 DigiDollarPositionsWidget::DigiDollarPositionsWidget(QWidget *parent) :
     QWidget(parent),
@@ -211,11 +213,9 @@ void DigiDollarPositionsWidget::connectWalletSignals()
 
     // Connect to wallet balance changes (indicates new transactions)
     connect(m_walletModel, &WalletModel::balanceChanged,
-            this, &DigiDollarPositionsWidget::updatePositions);
-    connect(m_walletModel, &WalletModel::encryptionStatusChanged, this, [this]() {
-        m_lastUpdateTime = 0;
-        updatePositions();
-    });
+            this, &DigiDollarPositionsWidget::invalidatePositions);
+    connect(m_walletModel, &WalletModel::encryptionStatusChanged,
+            this, &DigiDollarPositionsWidget::invalidatePositions);
 }
 
 void DigiDollarPositionsWidget::connectClientSignals()
@@ -232,9 +232,22 @@ void DigiDollarPositionsWidget::connectClientSignals()
 
 void DigiDollarPositionsWidget::setWalletModel(WalletModel* model)
 {
+    if (m_walletModel == model) return;
+    if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
+    ++m_refresh_generation;
     m_walletModel = model;
+    m_lastUpdateTime = 0;
+    m_positions.clear();
+    m_positionsTable->setRowCount(0);
+    m_watch_only = false;
+    m_wallet_locked = false;
+    if (!m_privacy) {
+        m_statusLabel->setText(tr("Loading vaults..."));
+        m_statusLabel->show();
+    }
 
     if (m_walletModel) {
+        m_autoRefreshTimer->start();
         // Connect wallet model signals for real-time updates
         connectWalletSignals();
         updatePositions();
@@ -247,6 +260,9 @@ void DigiDollarPositionsWidget::setWalletModel(WalletModel* model)
 
 void DigiDollarPositionsWidget::setClientModel(ClientModel* model)
 {
+    if (m_clientModel == model) return;
+    ++m_refresh_generation;
+    m_lastUpdateTime = 0;
     m_clientModel = model;
 
     if (m_clientModel) {
@@ -265,17 +281,12 @@ void DigiDollarPositionsWidget::updateView()
 
 void DigiDollarPositionsWidget::updatePositions()
 {
-    if (!isVisible()) {
+    if (!isVisible() || m_privacy || m_refresh_thread) {
         return;
     }
 
     // Bail out during shutdown to prevent deadlock on cs_dd_wallet (Bug #23)
     if (ShutdownRequested() || !m_walletModel || !m_clientModel) {
-        return;
-    }
-
-    // Skip updates during Initial Block Download - DD data only matters when synced
-    if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
         return;
     }
 
@@ -286,8 +297,64 @@ void DigiDollarPositionsWidget::updatePositions()
     }
     m_lastUpdateTime = now;
 
-    loadPositionsFromWallet();
-    populatePositionsTable();
+    // One retained-wallet read per view. No wallet/chain reads (including row
+    // badges) run on Qt, and refresh signals cannot start overlapping scans.
+    const auto wallet = m_walletModel->walletShared();
+    auto* node = &m_clientModel->node();
+    const uint64_t generation = m_refresh_generation;
+    struct Snapshot {
+        QList<DigiDollarPosition> positions;
+        bool watch_only{false};
+        bool locked{false};
+        bool syncing{false};
+        bool failed{false};
+    };
+    const auto snapshot = std::make_shared<Snapshot>();
+    m_refresh_again = false;
+    QThread* thread = QThread::create([wallet, node, snapshot] {
+        try {
+            snapshot->syncing = node->isInitialBlockDownload();
+            if (snapshot->syncing || ShutdownRequested()) return;
+            const int height = node->getNumBlocks();
+            snapshot->watch_only = wallet->privateKeysDisabled();
+            snapshot->locked = wallet->isLocked();
+            snapshot->positions = loadPositionsFromWallet(*wallet, height, snapshot->watch_only, snapshot->locked);
+        } catch (...) {
+            snapshot->failed = true;
+        }
+    });
+    m_refresh_thread = thread;
+    connect(thread, &QThread::finished, this, [this, generation, snapshot] {
+        m_refresh_thread = nullptr;
+        if (ShutdownRequested() || !m_walletModel || !m_clientModel) return;
+        if (generation != m_refresh_generation || !isVisible() || m_privacy) {
+            m_lastUpdateTime = 0;
+            updatePositions();
+            return;
+        }
+        if (snapshot->failed || snapshot->syncing) {
+            m_statusLabel->setText(snapshot->failed ? tr("Vaults could not be refreshed. The next update will retry.") : tr("Waiting for synchronization..."));
+            m_statusLabel->show();
+        } else {
+            m_positions = std::move(snapshot->positions);
+            m_watch_only = snapshot->watch_only;
+            m_wallet_locked = snapshot->locked;
+            populatePositionsTable();
+        }
+        if (m_refresh_again) {
+            m_lastUpdateTime = 0;
+            updatePositions();
+        }
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
+void DigiDollarPositionsWidget::invalidatePositions()
+{
+    m_lastUpdateTime = 0;
+    m_refresh_again = true;
+    updatePositions();
 }
 
 void DigiDollarPositionsWidget::onPositionClicked(int row, int column)
@@ -451,29 +518,26 @@ void DigiDollarPositionsWidget::showContextMenu(const QPoint& point)
     contextMenu.exec(m_positionsTable->mapToGlobal(point));
 }
 
-void DigiDollarPositionsWidget::loadPositionsFromWallet()
+QList<DigiDollarPosition> DigiDollarPositionsWidget::loadPositionsFromWallet(interfaces::Wallet& wallet, int currentHeight, bool isWatchOnly, bool isWalletLocked)
 {
-    m_positions.clear();
-
-    if (!m_walletModel || !m_clientModel) {
-        return;
-    }
-
-    // Get current blockchain height for timelock calculations
-    int currentHeight = m_clientModel->getNumBlocks();
+    QList<DigiDollarPosition> positions;
 
     // Get current oracle price in micro-USD; regtest can use mock helpers,
     // while testnet/mainnet use the live oracle price.
     CAmount oraclePrice = GetMockOraclePrice();
-    const bool isWatchOnly = m_walletModel->wallet().privateKeysDisabled();
     // A locked wallet still holds its keys. The Redeem tab asks for the
     // passphrase when the user clicks Redeem there. Only a wallet with no
     // private keys can never redeem, so only that one case blocks the button.
     const bool walletCanSign = !isWatchOnly;
 
     // Get positions from wallet backend
-    std::vector<WalletCollateralPosition> walletPositions = GetWalletPositions();
-    const std::set<uint256> pendingRedeemPositions = GetPendingRedeemPositionIds();
+    std::vector<WalletCollateralPosition> walletPositions = GetWalletPositions(wallet, isWatchOnly || isWalletLocked);
+    // An empty vault needs no transaction-history scan. Active positions cannot
+    // be pending redemptions; only inactive collateral positions need that scan.
+    const bool needsPendingRedeems = std::any_of(walletPositions.begin(), walletPositions.end(),
+        [](const WalletCollateralPosition& position) { return position.dgb_collateral > 0 && !position.is_active; });
+    const std::set<uint256> pendingRedeemPositions = needsPendingRedeems ? GetPendingRedeemPositionIds(wallet) : std::set<uint256>{};
+    const auto* ddWallet = wallet.getDigiDollarWallet();
 
     for (const auto& wp : walletPositions) {
         // Skip positions with 0 collateral - these are RECEIVED DD, not minted vaults
@@ -521,7 +585,6 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
         pos.canRedeem = walletCanSign && (pos.blocksRemaining == 0) && wp.is_active;
 
         // The wallet already distinguishes failed attempts from mints awaiting confirmation.
-        const auto* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
         const auto state = ddWallet->GetMintAttemptState(wp.dd_timelock_id);
         using MintState = DigiDollarWallet::MintAttemptState;
         pos.isPendingMint = state == MintState::Local || state == MintState::InMempool;
@@ -539,7 +602,7 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
         // Get the mint transaction timestamp from the wallet
         pos.mintTime = 0;  // Default to 0 (will show current time if not found)
         try {
-            interfaces::WalletTx wtx = m_walletModel->wallet().getWalletTx(wp.dd_timelock_id);
+            interfaces::WalletTx wtx = wallet.getWalletTx(wp.dd_timelock_id);
             if (wtx.tx) {
                 pos.mintTime = wtx.time;
             }
@@ -547,14 +610,15 @@ void DigiDollarPositionsWidget::loadPositionsFromWallet()
             // If transaction lookup fails, leave mintTime at 0
         }
 
-        m_positions.append(pos);
+        positions.append(pos);
     }
 
     // Sort positions by mintTime descending (most recent mint first)
-    std::sort(m_positions.begin(), m_positions.end(),
+    std::sort(positions.begin(), positions.end(),
               [](const DigiDollarPosition& a, const DigiDollarPosition& b) {
                   return a.mintTime > b.mintTime;
               });
+    return positions;
 }
 
 void DigiDollarPositionsWidget::populatePositionsTable()
@@ -841,12 +905,8 @@ void DigiDollarPositionsWidget::addPositionToTable(const DigiDollarPosition& pos
     m_positionsTable->setCellWidget(row, COL_HEALTH, healthWidget);
 
     // Actions (Redeem button)
-    const bool isWatchOnly =
-        m_walletModel ? m_walletModel->wallet().privateKeysDisabled() : false;
-    const bool isWalletLocked =
-        m_walletModel ? m_walletModel->getEncryptionStatus() == WalletModel::Locked : false;
     QPushButton* redeemButton = createRedeemButton(
-        position.positionId, position.isPendingMint, position.isPendingRedeem, position.isRedeemed, position.canRedeem, isWatchOnly, isWalletLocked, position.blocksRemaining);
+        position.positionId, position.isPendingMint, position.isPendingRedeem, position.isRedeemed, position.canRedeem, m_watch_only, m_wallet_locked, position.blocksRemaining);
     if (!position.failedMintStatus.isEmpty()) {
         redeemButton->setText(position.failedMintStatus);
         redeemButton->setEnabled(false);
@@ -1187,12 +1247,21 @@ QString DigiDollarPositionsWidget::formatHealthStatus(double health) const
 
 void DigiDollarPositionsWidget::setPrivacy(bool privacy)
 {
+    if (m_privacy == privacy) return;
+    ++m_refresh_generation;
+    m_lastUpdateTime = 0;
     m_privacy = privacy;
     m_positionsTable->setVisible(!m_privacy);
     if (m_privacy) {
         m_statusLabel->setText(tr("Privacy mode activated for the $DD Vault tab. To unmask the values, uncheck Settings->Mask values."));
         m_statusLabel->show();
     } else {
+        if (m_positions.isEmpty()) {
+            m_statusLabel->setText(tr("Loading vaults..."));
+            m_statusLabel->show();
+        } else {
+            populatePositionsTable();
+        }
         updatePositions();
     }
 }
@@ -1208,7 +1277,7 @@ void DigiDollarPositionsWidget::applyTheme()
 // Backend Integration Helper Functions
 // =============================================================================
 
-CAmount DigiDollarPositionsWidget::GetMockOraclePrice() const
+CAmount DigiDollarPositionsWidget::GetMockOraclePrice()
 {
     // RegTest only: use MockOracleManager for testing
     if (Params().GetChainType() == ChainType::REGTEST && MockOracleManager::GetInstance().IsEnabled()) {
@@ -1223,20 +1292,13 @@ CAmount DigiDollarPositionsWidget::GetMockOraclePrice() const
     return 0;
 }
 
-std::vector<WalletCollateralPosition> DigiDollarPositionsWidget::GetWalletPositions() const
+std::vector<WalletCollateralPosition> DigiDollarPositionsWidget::GetWalletPositions(interfaces::Wallet& wallet, bool walletCannotSign)
 {
     std::vector<WalletCollateralPosition> positions;
 
-    if (!m_walletModel) {
-        return positions;
-    }
-
     // Access DigiDollarWallet directly from wallet model
-    DigiDollarWallet* ddWallet = m_walletModel->wallet().getDigiDollarWallet();
+    DigiDollarWallet* ddWallet = wallet.getDigiDollarWallet();
     if (ddWallet) {
-        const bool walletCannotSign =
-            m_walletModel->wallet().privateKeysDisabled() ||
-            m_walletModel->getEncryptionStatus() == WalletModel::Locked;
         if (!walletCannotSign) {
             ddWallet->ReconcilePositionStates();
         }
@@ -1246,16 +1308,12 @@ std::vector<WalletCollateralPosition> DigiDollarPositionsWidget::GetWalletPositi
     return positions;
 }
 
-std::set<uint256> DigiDollarPositionsWidget::GetPendingRedeemPositionIds() const
+std::set<uint256> DigiDollarPositionsWidget::GetPendingRedeemPositionIds(interfaces::Wallet& wallet)
 {
     std::set<uint256> pendingPositions;
 
-    if (!m_walletModel) {
-        return pendingPositions;
-    }
-
     try {
-        for (const interfaces::WalletTx& wtx : m_walletModel->wallet().getWalletTxs()) {
+        for (const interfaces::WalletTx& wtx : wallet.getWalletTxs()) {
             if (!wtx.tx || DigiDollar::GetDigiDollarTxType(*wtx.tx) != DigiDollar::DD_TX_REDEEM) {
                 continue;
             }
@@ -1264,7 +1322,7 @@ std::set<uint256> DigiDollarPositionsWidget::GetPendingRedeemPositionIds() const
             interfaces::WalletOrderForm orderForm;
             bool inMempool = false;
             int numBlocks = 0;
-            interfaces::WalletTx details = m_walletModel->wallet().getWalletTxDetails(
+            interfaces::WalletTx details = wallet.getWalletTxDetails(
                 wtx.tx->GetHash(), status, orderForm, inMempool, numBlocks);
             if (!details.tx) {
                 continue;
@@ -1286,7 +1344,7 @@ std::set<uint256> DigiDollarPositionsWidget::GetPendingRedeemPositionIds() const
     return pendingPositions;
 }
 
-double DigiDollarPositionsWidget::CalculatePositionHealth(CAmount ddAmount, CAmount dgbCollateral, CAmount oraclePrice) const
+double DigiDollarPositionsWidget::CalculatePositionHealth(CAmount ddAmount, CAmount dgbCollateral, CAmount oraclePrice)
 {
     if (ddAmount == 0) {
         return 0.0; // No DD = no health to display

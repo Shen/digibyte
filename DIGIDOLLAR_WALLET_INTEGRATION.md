@@ -827,6 +827,12 @@ Before the first successful read, or after a read failure, new payment actions
 are disabled. Entered recipient, amount and note remain intact. This UI snapshot
 never replaces Core's authoritative balance, reservation or signing checks.
 
+DD Vault also refreshes in the background, with at most one running query per
+view. Opening it can show "Loading vaults..." while the wallet is busy without
+blocking navigation. Existing rows remain during refresh; wallet changes clear
+them immediately. Masking, hiding or closing the view prevents late results from
+restoring its display. Position reconciliation and redemption rules are unchanged.
+
 #### Qt mint reject-reason translation (`DD-FA-DOC-010`)
 
 The Qt mint widget calls `WalletModel::mintDigiDollar`. The wallet model

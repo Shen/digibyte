@@ -155,6 +155,11 @@ the last successful wallet-bound display; rebinding rejects old replies. Hidden
 overview callbacks do not read balances after navigation to Paymaster Network.
 Oracle and network-health RPCs run outside the GUI thread with one in-flight
 request per view and query, so Core lock contention cannot stall these refreshes.
+The DD Vault widget likewise uses one retained-wallet worker for its existing
+position reconciliation, oracle/chain reads and transaction status lookup.
+Refresh invalidations coalesce; wallet/privacy generations reject stale results.
+Rows, including signing-state badges, render from that snapshot without wallet
+reads. Core reconciliation and redemption authorization remain authoritative.
 Receive DD loads stored payment requests through a separate read-only
 `WalletModel` worker, so wallet-lock contention during Paymaster work does not
 block tab navigation. Refreshes retain the last displayed snapshot and avoid
