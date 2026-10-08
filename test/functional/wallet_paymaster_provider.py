@@ -122,12 +122,82 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
     def add_options(self, parser):
         self.add_wallet_options(parser, legacy=False)
+        parser.add_argument("--drain-recovery-only", action="store_true",
+                            help="Run setup and automatic recovery after unsigned quote cancellation")
         parser.add_argument("--pool-reduction-only", action="store_true",
                             help="Run setup and bounded pool-retirement checks, then stop")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
+
+    def check_drain_recovery(self, provider, client, recipient, policy):
+        """A temporary drain must recover without restarting or changing limits."""
+        safety = provider_safety_policy(policy["funding_models"], policy["sponsorship_scope"])
+        for field in ("maximum_active_quotes_total", "maximum_active_quotes_per_netgroup",
+                      "maximum_active_quotes_per_recipient"):
+            safety[field] = 1
+        saved_safety = provider.setpaymastersafetypolicy(safety)
+        saved_liquidity = provider.getpaymasterinfo()["liquidity"]["policy"]
+        balance_before = client.getdigidollarbalance()["total"]
+        mempool_before = set(self.nodes[0].getrawmempool())
+
+        for attempt in range(2):
+            request_id = f"550e8400-e29b-41d4-a716-44665544900{attempt}"
+            options = {
+                "fee_mode": "paymaster", "request_id": request_id,
+                "maximum_paymaster_fee_cents": 1,
+                "privacy": "standard", "selection": "lowest_total_cost",
+            }
+            authorization = {}
+            poll_at = 0
+
+            def prepare_unsigned():
+                nonlocal authorization, poll_at
+                if time.monotonic() - poll_at < 0.5:
+                    return False
+                poll_at = time.monotonic()
+                authorization = client.senddigidollar(
+                    recipient, 100, "", 0, None, "cents", options)
+                return authorization.get("authorization_required", False)
+
+            self.wait_until(prepare_unsigned, timeout=30)
+            assert_equal(authorization["authorization_accepted"], False)
+            # Re-entering a running provider while its sole quote allowance is
+            # reserved exercises the same DRAIN_ONLY state as a safety-limit
+            # error. Only the first iteration may explicitly start it.
+            if attempt == 0:
+                started = provider.startpaymaster()
+                assert_equal(started["service_state"], "drain_only")
+
+            self.log.info("Abandon unsigned request and let its provider reservation expire")
+            canceled = client.resolvepaymastersession(
+                {"request_id": request_id}, "abandon_unsigned")
+            assert_equal(canceled["session"]["session_state"], "FAILED")
+            assert_equal(client.getpaymasterclientsafetystatus()["active_reservations"], 0)
+            # The client intent can expire slightly before the provider quote,
+            # which is issued during a later scheduler tick.
+            expiry = authorization["expires_at"] + policy["quote_ttl"] + 1
+            for node in self.nodes:
+                node.setmocktime(expiry)
+
+            def resumed():
+                info = provider.getpaymasterinfo()
+                return info["ready"] and info["service_state"] == "active"
+
+            self.wait_until(lambda: provider.getpaymasterinfo()["ready"], timeout=15)
+            self.wait_until(resumed, timeout=15)
+            current = provider.getpaymasterinfo()
+            assert_equal(current.get("last_service_error", ""), "")
+            assert_equal(current["liquidity"]["policy"], saved_liquidity)
+            status = provider.getpaymastersafetystatus()
+            assert_equal(status["policy"], saved_safety)
+            assert_equal(status["user_paid"]["active_quotes"], 0)
+            assert_equal(status["user_paid"]["reserved_network_fee_satoshis"], 0)
+            assert_equal(status["user_paid"]["spent_network_fee_last_day_satoshis"], 0)
+            assert_equal(client.getdigidollarbalance()["total"], balance_before)
+            assert_equal(set(self.nodes[0].getrawmempool()), mempool_before)
+        self.log.info("Provider automatically accepted another request with unchanged limits")
 
     def run_test(self):
         node = self.nodes[0]
@@ -642,6 +712,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(offers[0]["service_fee_cents"], 1)
 
         recipient = wallet.getdigidollaraddress()
+        if self.options.drain_recovery_only:
+            self.check_drain_recovery(wallet, client, recipient, policy)
+            return
         self.log.info("Reject unsafe high-privacy selection before session creation")
         high_privacy_request_id = "550e8400-e29b-41d4-a716-446655440106"
         high_privacy_options = {

@@ -254,6 +254,16 @@ BOOST_AUTO_TEST_CASE(provider_automation_capacity_pause_preserves_approval)
     status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
     BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "ready");
     BOOST_CHECK(status.find_value("reason").get_str().empty());
+    for (const auto* reason : {"", "PAYMASTER_SAFETY_LIMIT_EXHAUSTED"}) {
+        manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::DRAIN_ONLY, reason);
+        status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness, true);
+        BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "paused");
+        BOOST_CHECK_EQUAL(status.find_value("reason").get_str(),
+                          *reason ? reason : "PAYMASTER_PROVIDER_DRAIN_ONLY");
+        BOOST_CHECK(status.find_value("enabled").isTrue());
+        BOOST_CHECK(status.find_value("paid_maintenance_approved").isTrue());
+        BOOST_CHECK(manager.GetProviderServiceStatus(provider_wallet.GetName()).state == ProviderServiceState::DRAIN_ONLY);
+    }
     manager.SetProviderServiceStatus(provider_wallet.GetName(), ProviderServiceState::FAULT);
     status = ProviderAutomationStatusToJSON(provider_wallet, context, readiness);
     BOOST_CHECK_EQUAL(status.find_value("state").get_str(), "blocked");

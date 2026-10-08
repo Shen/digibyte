@@ -364,6 +364,7 @@ BASE_SCRIPTS = [
     'wallet_paymaster_readiness.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors',
     'wallet_paymaster_provider.py --descriptors',
+    'wallet_paymaster_provider.py --descriptors --drain-recovery-only',
     'wallet_paymaster_operator.py --descriptors',
     'wallet_paymaster_pool_setup.py --descriptors',
     'wallet_paymaster_offer_selection.py --descriptors',

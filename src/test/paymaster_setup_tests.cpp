@@ -511,6 +511,20 @@ BOOST_AUTO_TEST_CASE(operator_work_transitions_preserve_real_errors)
     auto diagnostics = observe();
     BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "idle");
     BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "ready");
+    // Local readiness alone must not disguise a scheduler admission pause.
+    provider.pushKV("service_state", "drain_only");
+    provider.pushKV("last_service_error", "");
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("code").get_str(), "PAYMASTER_PROVIDER_DRAIN_ONLY");
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "wait");
+    provider.pushKV("last_service_error", "PAYMASTER_SAFETY_LIMIT_EXHAUSTED");
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_budget");
+    provider.pushKV("last_service_error", "PAYMASTER_UNKNOWN_FAILURE");
+    diagnostics = observe();
+    BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    provider.pushKV("service_state", "active");
+    provider.pushKV("last_service_error", "");
     activity.pushKV("capacity_requests", 1);
     diagnostics = observe();
     BOOST_CHECK_EQUAL(OperatorWorkPhase(provider), "capacity");
@@ -531,6 +545,11 @@ BOOST_AUTO_TEST_CASE(operator_work_transitions_preserve_real_errors)
     const auto summary = OperatorSummary(snapshot);
     BOOST_CHECK(summary.find("Payment work: payment") != std::string::npos);
     BOOST_CHECK(summary.find("Next action: Wait for the current payment") != std::string::npos);
+    provider.pushKV("service_state", "drain_only");
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("diagnostics", observe());
+    BOOST_CHECK(OperatorSummary(snapshot).find("New requests are paused; Core automatically rechecks readiness within the saved limits") != std::string::npos);
+    provider.pushKV("service_state", "active");
     provider.pushKV("ready", false);
     UniValue errors{UniValue::VARR};
     errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");

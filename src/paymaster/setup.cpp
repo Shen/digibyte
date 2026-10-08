@@ -408,7 +408,10 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
             // payment. It does not imply a failure or a broadcast refill.
             if (!provider.find_value("ready").isTrue() || work_phase != "idle")
                 add(service_error.get_str(), "waiting", work_phase == "payment" || work_phase == "capacity" ? "payments" : "liquidity", "wait");
-        } else if (service_error.get_str() == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
+        } else if (service_error.get_str() == "PAYMASTER_PROVIDER_DRAIN_ONLY") {
+            add(service_error.get_str(), "waiting", "service", "wait");
+        } else if (service_error.get_str() == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
+                   service_error.get_str() == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
                    service_error.get_str() == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED") {
             add(service_error.get_str(), "action_required", "budgets", "review_budget");
         } else if (service_error.get_str() == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
@@ -419,6 +422,9 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
             add(service_error.get_str(), "error", "service", "inspect_error");
         }
     }
+    if (provider.find_value("service_state").isStr() && provider.find_value("service_state").get_str() == "drain_only" &&
+        (!service_error.isStr() || service_error.get_str().empty()))
+        add("PAYMASTER_PROVIDER_DRAIN_ONLY", "waiting", "service", "wait");
     if (provider.find_value("service_state").isStr() && provider.find_value("service_state").get_str() == "error")
         add("PAYMASTER_PROVIDER_SERVICE_FAULT", "error", "service", "inspect_error");
     if (provider.find_value("running").isTrue() && work_phase != "idle")
@@ -552,6 +558,8 @@ std::string OperatorSummary(const UniValue& snapshot)
         const auto action = diagnostic.find_value("action").get_str();
         if (action == "configure_node") return "Run -paymastersetup and review node configuration and routing";
         if (action == "setup") return "Continue -paymastersetup in this wallet";
+        if (action == "wait" && diagnostic.find_value("area").get_str() == "service")
+            return "New requests are paused; Core automatically rechecks readiness within the saved limits";
         if (action == "wait") return diagnostic.find_value("area").get_str() == "payments"
             ? "Wait for the current payment or capacity reservation; review Activity"
             : "Wait for synchronization, activation or confirmation";

@@ -466,6 +466,22 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     std::string first_error;
     bool accept_new_requests{state != ProviderServiceState::DRAIN_ONLY};
 
+    if (!accept_new_requests) {
+        ProviderWorkGuard drain_guard{*manager, wallet.GetName(), identity.provider_id};
+        if (!drain_guard.Acquired()) return;
+        // Drain-only is a temporary admission gate, not an operator policy.
+        // Expiry/cancellation and rolling limits can restore readiness without
+        // another start RPC. Reconcile and check the full current prerequisites
+        // before resuming; every request still checks its own persisted limits.
+        const auto readiness = GetProviderReadiness(wallet, context, /*wait_for_sync=*/false);
+        if (readiness.ready && AutomaticProviderStateIsSynchronized(wallet)) {
+            state = ProviderServiceState::ACTIVE;
+            accept_new_requests = true;
+        } else {
+            first_error = readiness.errors.empty() ? "PAYMASTER_PROVIDER_SYNCING" : readiness.errors.front();
+        }
+    }
+
     if (accept_new_requests) {
         ProviderWorkGuard maintenance_guard{
             *manager, wallet.GetName(), identity.provider_id};
@@ -592,6 +608,7 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     }
 
     const bool announcement_refresh_required =
+        previous.state == ProviderServiceState::DRAIN_ONLY ||
         previous.state == ProviderServiceState::WAITING_FOR_UNLOCK ||
         previous.state == ProviderServiceState::WAITING_FOR_READINESS ||
         previous.state == ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL ||
@@ -676,6 +693,10 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         wallet.WalletLogPrintf(
             "Paymaster automatic provider service paused: %s\n",
             first_error);
+    }
+    if (previous.state == ProviderServiceState::DRAIN_ONLY &&
+        state == ProviderServiceState::ACTIVE && first_error.empty()) {
+        wallet.WalletLogPrintf("Paymaster automatic provider service resumed after temporary drain\n");
     }
     manager->SetProviderServiceStatus(wallet.GetName(), state,
                                       std::move(first_error));

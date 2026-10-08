@@ -1091,6 +1091,9 @@ UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletConte
         if (faulted) {
             state = "blocked";
             if (reason.empty()) reason = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
+        } else if (service.state == ProviderServiceState::DRAIN_ONLY) {
+            state = "paused";
+            if (reason.empty()) reason = "PAYMASTER_PROVIDER_DRAIN_ONLY";
         } else if (reason == "PAYMASTER_PROVIDER_SYNCING") state = "paused";
         else if (pending) state = "waiting_confirmation";
         else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = "blocked";

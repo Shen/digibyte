@@ -284,7 +284,13 @@ resources.
 
 Provider operation requires explicit wallet configuration and start. Automatic
 queue processing and optional autostart are separate settings. Wallet locking
-pauses signing; automatic service does not authorize client payments. Provider
+pauses signing; automatic service does not authorize client payments. Temporary
+`DRAIN_ONLY` admission gates are re-evaluated under the provider work guard on
+service ticks, including quote/capacity expiry reconciliation. Full readiness
+and synchronized wallet/index state are required before resuming new requests;
+per-request safety checks remain authoritative. Recovery republishes the current
+validated offer without changing saved policy. RPC diagnostics distinguish this
+gate from local `ready=true`, including when no last error is present. Provider
 finance records keep DD income, DGB costs, pool principal, and optional oracle
 valuation separate. A backup acknowledgement records an operator action, not
 proof that a backup is usable.
