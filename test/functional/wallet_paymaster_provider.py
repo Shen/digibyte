@@ -124,6 +124,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         self.add_wallet_options(parser, legacy=False)
         parser.add_argument("--drain-recovery-only", action="store_true",
                             help="Run setup and automatic recovery after unsigned quote cancellation")
+        parser.add_argument("--cancel-burst-only", action="store_true",
+                            help="Run setup and two cancellations followed by a limited third request")
         parser.add_argument("--pool-reduction-only", action="store_true",
                             help="Run setup and bounded pool-retirement checks, then stop")
 
@@ -198,6 +200,95 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             assert_equal(client.getdigidollarbalance()["total"], balance_before)
             assert_equal(set(self.nodes[0].getrawmempool()), mempool_before)
         self.log.info("Provider automatically accepted another request with unchanged limits")
+
+    def check_cancel_burst(self, provider, client, recipient, policy):
+        """A recipient limit defers one request, without draining the provider."""
+        provider.stoppaymaster()
+        target = {
+            "admission_dgb_slots": 3, "operational_dgb_slots": 3,
+            "admission_carrier_slots": 3, "operational_carrier_slots": 3,
+            "maximum_fee_satoshis": 50_000_000,
+        }
+        preview = provider.preparepaymasterpool(target)
+        target.update(execute=True, plan_id=preview["plan_id"])
+        prepared = provider.preparepaymasterpool(target)
+        confirm_pool_preparation(self, self.nodes[0], provider, target, prepared)
+        liquidity = provider.getpaymasterinfo()["liquidity"]["policy"]
+        # Read-only status includes descriptive fields; submit only policy inputs.
+        liquidity = {key: value for key, value in liquidity.items() if key != "updated_at"}
+        liquidity.update(target_operational_dgb=3, target_operational_carriers=3)
+        saved_liquidity = provider.setpaymasterliquiditypolicy(liquidity)
+        safety = provider_safety_policy(policy["funding_models"], policy["sponsorship_scope"])
+        safety["maximum_active_quotes_per_recipient"] = 2
+        saved_safety = provider.setpaymastersafetypolicy(safety)
+        provider.startpaymaster()
+        balance = client.getdigidollarbalance()["total"]
+        mempool = set(self.nodes[0].getrawmempool())
+        clock = max(int(time.time()), self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"] + 1)
+        authorizations = []
+
+        for index in range(3):
+            for node in self.nodes:
+                node.setmocktime(clock + index * 10)
+            request_id = f"550e8400-e29b-41d4-a716-44665544910{index}"
+            options = {"fee_mode": "paymaster", "request_id": request_id,
+                       "maximum_paymaster_fee_cents": 1, "privacy": "standard",
+                       "selection": "lowest_total_cost"}
+            authorization = {}
+
+            def prepare():
+                nonlocal authorization
+                authorization = client.senddigidollar(recipient, 100, "", 0, None, "cents", options)
+                return authorization.get("authorization_required", False)
+
+            if index < 2:
+                self.wait_until(prepare, timeout=20)
+                authorizations.append(authorization)
+                canceled = client.resolvepaymastersession({"request_id": request_id}, "abandon_unsigned")
+                assert_equal(canceled["session"]["session_state"], "FAILED")
+                assert_equal(client.getpaymasterclientsafetystatus()["active_reservations"], 0)
+            else:
+                self.log.info("Third request waits for the recipient allowance without draining the service")
+                observed_at = None
+
+                def deferred():
+                    nonlocal observed_at
+                    assert not prepare()
+                    info = provider.getpaymasterinfo()
+                    assert info["service_state"] not in ("drain_only", "error"), info
+                    if (info["pool"]["activity"]["capacity_requests"] != 1 or
+                            info["service_queue"]["waiting_requests"] != 1):
+                        return False
+                    if observed_at is None:
+                        observed_at = time.monotonic()
+                    # Keep the request limited across several one-second worker
+                    # ticks; merely observing the inbox before processing could
+                    # miss the original transition into DRAIN_ONLY.
+                    return time.monotonic() - observed_at >= 3
+
+                self.wait_until(deferred, timeout=20)
+                # The CLI must observe the same unchanged guard and reservations.
+                status = self.nodes[0].cli("-rpcwallet=paymaster").getpaymastersafetystatus()
+                assert_equal(status["policy"], saved_safety)
+                assert_equal(status["user_paid"]["active_quotes"], 3)
+                for node in self.nodes:
+                    node.setmocktime(authorizations[0]["expires_at"] + 1)
+                self.wait_until(prepare, timeout=20)
+                assert_equal(authorization["authorization_accepted"], False)
+                client.resolvepaymastersession({"request_id": request_id}, "abandon_unsigned")
+                for node in self.nodes:
+                    node.setmocktime(authorization["expires_at"] + policy["quote_ttl"] + 1)
+
+        self.wait_until(lambda: provider.getpaymasterinfo()["service_state"] == "active", timeout=15)
+        current = provider.getpaymasterinfo()
+        assert_equal(current["pool"]["complete_operational_slots"], 3)
+        assert_equal(current["liquidity"]["policy"], saved_liquidity)
+        status = provider.getpaymastersafetystatus()
+        assert_equal(status["policy"], saved_safety)
+        assert_equal(status["user_paid"]["active_quotes"], 0)
+        assert_equal(status["user_paid"]["reserved_network_fee_satoshis"], 0)
+        assert_equal(client.getdigidollarbalance()["total"], balance)
+        assert_equal(set(self.nodes[0].getrawmempool()), mempool)
 
     def run_test(self):
         node = self.nodes[0]
@@ -712,6 +803,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(offers[0]["service_fee_cents"], 1)
 
         recipient = wallet.getdigidollaraddress()
+        if self.options.cancel_burst_only:
+            self.check_cancel_burst(wallet, client, recipient, policy)
+            return
         if self.options.drain_recovery_only:
             self.check_drain_recovery(wallet, client, recipient, policy)
             return

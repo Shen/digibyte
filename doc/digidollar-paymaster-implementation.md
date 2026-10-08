@@ -249,7 +249,10 @@ current Core-derived `allowed_actions`:
 - `fallback` is allowed only **before a user PSBT exists**, preserving the
   reserved DD input set when moving to a new provider attempt.
 - `abandon_unsigned` releases only a session for which no transaction
-  authorization can exist.
+  authorization can exist. This is a local client action, not a Direct-protocol
+  cancellation notice. The provider can retain its unsigned offer reservation
+  until expiry; repeated local cancellations still count against its open-offer
+  limits during that interval.
 - `retry_same` creates no new quote, attempt, reservation or signature.
 - After signing, timeout does not release inputs. `cancel_to_self` prepares or
   resumes one exact same-input return transaction. A distinct eligible
@@ -294,6 +297,16 @@ gate from local `ready=true`, including when no last error is present. Provider
 finance records keep DD income, DGB costs, pool principal, and optional oracle
 valuation separate. A backup acknowledgement records an operator action, not
 proof that a backup is usable.
+
+`processpaymasterrequests` defers temporary capacity/quote admission-limit
+failures in the fair inbox (`deferred`, `deferral_reason`) without putting the
+whole service into drain-only mode. Every retry repeats the existing checks;
+request expiry and all saved limits remain unchanged. A throttled capacity
+request does not prevent processing an already admitted quote or recovery.
+Invalid/expired envelopes and permanently invalid capacity continuations are
+consumed as rejected requests. No signature or financial reservation is released
+by this inbox acknowledgement. The client may still need a fresh offer if the
+connection or original request expires while waiting.
 
 Eligible completed records are reduced to idempotency tombstones after the
 240-block reorganization safety depth. Ambiguous/unconfirmed/unreadable records

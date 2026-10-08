@@ -1497,6 +1497,9 @@ before v2 setup. Only a routed request promotes a dedicated-listener socket;
 old unadmitted handshakes can be replaced under pressure. Incoming work,
 locally expected replies and recovery replies have separate bounded quotas.
 Financial journals retain ownership across socket failure.
+Request admission limits defer individual capacity/quote requests in the fair
+inbox without imposing a provider-wide drain. Client unsigned cancellation is
+local; provider reservations retain their existing expiry and signing guards.
 See [capacity and migration](doc/digidollar-paymaster-connection-capacity.md)
 for total connection/FD budgets, source map and verification limits.
 

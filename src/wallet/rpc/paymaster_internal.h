@@ -138,9 +138,13 @@ public:
     ProviderInboundMessageGuard& operator=(
         const ProviderInboundMessageGuard&) = delete;
 
+    // A temporary admission limit leaves this exact request in the fair inbox.
+    // No response, reservation release, or extension of its expiry is implied.
+    void Defer() noexcept { m_deferred = true; }
+
     ~ProviderInboundMessageGuard()
     {
-        if (std::uncaught_exceptions() != m_uncaught_exceptions) return;
+        if (m_deferred || std::uncaught_exceptions() != m_uncaught_exceptions) return;
         if (!m_manager.AcknowledgeDirectMessagesIfPresent({m_message_id})) {
             LogPrintf("Paymaster provider inbox acknowledgement failed\n");
         }
@@ -150,6 +154,7 @@ private:
     DigiDollar::Paymaster::Manager& m_manager;
     const uint256 m_message_id;
     const int m_uncaught_exceptions;
+    bool m_deferred{false};
 };
 
 struct RecoveryQueueState {

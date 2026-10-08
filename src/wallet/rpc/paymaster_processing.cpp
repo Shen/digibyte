@@ -1079,6 +1079,8 @@ RPCHelpMan processpaymasterrequests()
         RPCResult{RPCResult::Type::OBJ, "", "Provider quote processing result", {
                                                                                     {RPCResult::Type::BOOL, "processed", "Whether a request was available"},
                                                                                     {RPCResult::Type::BOOL, "queued", "Whether the signed response was queued"},
+                                                                                    {RPCResult::Type::BOOL, "deferred", /*optional=*/true, "Whether this request is waiting within its original expiry for admission limits to recover"},
+                                                                                    {RPCResult::Type::STR, "deferral_reason", /*optional=*/true, "Request admission limit; other eligible requests and submissions may continue"},
                                                                                     {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether a permanently invalid inbound continuation was discarded"},
                                                                                     {RPCResult::Type::STR, "rejection_reason", /*optional=*/true, "Stable reason for discarding a permanently invalid continuation"},
                                                                                     {RPCResult::Type::STR, "message_type", /*optional=*/true, "capacity, recovery_request, or quote"},
@@ -1135,6 +1137,7 @@ RPCHelpMan processpaymasterrequests()
                                    "PAYMASTER_PROVIDER_SERVICE_BUSY");
             }
             UniValue result{UniValue::VOBJ};
+            UniValue deferred_capacity;
             result.pushKV("queued", false);
             const int64_t now = GetTime();
             std::string error;
@@ -1169,9 +1172,9 @@ RPCHelpMan processpaymasterrequests()
                                 *context.paymaster, direct, error)) {
                             throw JSONRPCError(RPC_WALLET_ERROR, error);
                         }
-                        throw JSONRPCError(
-                            RPC_INVALID_PARAMETER,
-                            error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error);
+                        result.pushKV("rejected", true);
+                        result.pushKV("rejection_reason", error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error);
+                        return result;
                     }
                     if (wallet->IsLocked()) {
                         throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
@@ -1217,21 +1220,36 @@ RPCHelpMan processpaymasterrequests()
                             tip_height, /*minimum_confirmations=*/1,
                             capacity_messages.front().canonical_netgroup, now,
                             proof, reserved, error)) {
-                        throw JSONRPCError(RPC_WALLET_ERROR, error);
+                        if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
+                            error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
+                            message_guard.Defer();
+                            result.pushKV("deferred", true);
+                            result.pushKV("deferral_reason", error);
+                        } else {
+                            throw JSONRPCError(RPC_WALLET_ERROR, error);
+                        }
+                    } else {
+                        const std::vector<unsigned char> proof_bytes =
+                            SerializeCapacityProof(proof);
+                        const uint256 message_id = Hash(proof_bytes);
+                        const bool queued = context.paymaster->QueueCapacityProof(
+                            capacity_messages.front().peer_id, message_id,
+                            proof_bytes.size(), proof, now);
+                        if (queued && node->connman) node->connman->WakeMessageHandler();
+                        result.pushKV("queued", queued);
+                        result.pushKV("provider_id", proof.provider_id.GetHex());
+                        result.pushKV("client_nonce", proof.client_nonce.GetHex());
+                        result.pushKV("capacity_snapshot_id", proof.snapshot_id.GetHex());
+                        return result;
                     }
-                    const std::vector<unsigned char> proof_bytes =
-                        SerializeCapacityProof(proof);
-                    const uint256 message_id = Hash(proof_bytes);
-                    const bool queued = context.paymaster->QueueCapacityProof(
-                        capacity_messages.front().peer_id, message_id,
-                        proof_bytes.size(), proof, now);
-                    if (queued && node->connman) node->connman->WakeMessageHandler();
-                    result.pushKV("queued", queued);
-                    result.pushKV("provider_id", proof.provider_id.GetHex());
-                    result.pushKV("client_nonce", proof.client_nonce.GetHex());
-                    result.pushKV("capacity_snapshot_id", proof.snapshot_id.GetHex());
-                    return result;
                 }
+            }
+
+            if (result.find_value("deferred").isTrue()) {
+                // Capacity throttling must not starve already admitted work.
+                deferred_capacity = result;
+                result = UniValue{UniValue::VOBJ};
+                result.pushKV("queued", false);
             }
 
             const auto recovery_lease =
@@ -1662,7 +1680,7 @@ RPCHelpMan processpaymasterrequests()
                 readiness.identity.provider_id, 1);
             const auto& messages = quote_lease.Messages();
             result.pushKV("processed", !messages.empty());
-            if (messages.empty()) return result;
+            if (messages.empty()) return deferred_capacity.isNull() ? result : deferred_capacity;
             result.pushKV("message_type", "quote");
             const DirectMessage& direct = messages.front();
             ProviderInboundMessageGuard message_guard{*context.paymaster,
@@ -1684,7 +1702,9 @@ RPCHelpMan processpaymasterrequests()
                         *context.paymaster, direct, error)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, error);
                 }
-                throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+                result.pushKV("rejected", true);
+                result.pushKV("rejection_reason", error);
+                return result;
             }
             std::optional<SponsorshipAuthorizationRecord> sponsorship;
             const bool restricted = quote_request->intent.funding_model == FundingModel::SPONSORED &&
@@ -1817,6 +1837,42 @@ RPCHelpMan processpaymasterrequests()
             }
             const ServiceFeePlan* const fee_plan{&quote_preflight.fee_plan};
             const bool needs_carrier = fee_plan->output_kind == FeeOutputKind::CARRIER_SUCCESSOR;
+            const CAmount network_fee{COIN / 10};
+            if (!store.CheckProviderQuoteAdmission(
+                    *quote_request, Hash(redacted_request),
+                    messages.front().canonical_netgroup, needs_carrier,
+                    DGBSatoshis{network_fee}, now,
+                    provider_netgroup_bucket, error)) {
+                if (IsPermanentCapacityContinuationError(error)) {
+                    // The exact quote can no longer be authorized because its
+                    // preceding Capacity reservation is absent, expired, or
+                    // conflicts with the persisted proof. Consume only this
+                    // invalid inbox entry and leave the provider's maintenance
+                    // state intact; a remote peer must not be able to turn a
+                    // safely rejected continuation into a provider fault.
+                    const std::string rejection_reason{error};
+                    if (!AcknowledgeRejectedDirectMessage(
+                            *context.paymaster, direct, error)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, error);
+                    }
+                    result.pushKV("rejected", true);
+                    result.pushKV("rejection_reason", rejection_reason);
+                    return result;
+                }
+                if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED") {
+                    // A recipient/netgroup or proposed-fee limit is a decision
+                    // about this request, not a provider-wide drain command.
+                    // Keep the exact continuation in the fair inbox and repeat
+                    // all admission checks next time, within its original TTL.
+                    message_guard.Defer();
+                    result.pushKV("deferred", true);
+                    result.pushKV("deferral_reason", error);
+                    return result;
+                }
+                throw JSONRPCError(
+                    RPC_WALLET_ERROR,
+                    error.empty() ? "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" : error);
+            }
             std::vector<ProviderPoolEntry> available;
             if (!GetPaymasterProviderPoolEntries(*wallet, available)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POOLS_NOT_PREPARED");
@@ -1840,35 +1896,9 @@ RPCHelpMan processpaymasterrequests()
             if (dgb_it == available.end() || (needs_carrier && carrier_it == available.end())) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
             }
-            const CAmount network_fee{COIN / 10};
             if (readiness.policy.maximum_network_fee.value < network_fee ||
                 dgb_it->dgb_value.value < network_fee) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_NETWORK_FEE_CAP_TOO_LOW");
-            }
-            if (!store.CheckProviderQuoteAdmission(
-                    *quote_request, Hash(redacted_request),
-                    messages.front().canonical_netgroup, needs_carrier,
-                    DGBSatoshis{network_fee}, now,
-                    provider_netgroup_bucket, error)) {
-                if (IsPermanentCapacityContinuationError(error)) {
-                    // The exact quote can no longer be authorized because its
-                    // preceding Capacity reservation is absent, expired, or
-                    // conflicts with the persisted proof. Consume only this
-                    // invalid inbox entry and leave the provider's maintenance
-                    // state intact; a remote peer must not be able to turn a
-                    // safely rejected continuation into a provider fault.
-                    const std::string rejection_reason{error};
-                    if (!AcknowledgeRejectedDirectMessage(
-                            *context.paymaster, direct, error)) {
-                        throw JSONRPCError(RPC_WALLET_ERROR, error);
-                    }
-                    result.pushKV("rejected", true);
-                    result.pushKV("rejection_reason", rejection_reason);
-                    return result;
-                }
-                throw JSONRPCError(
-                    RPC_WALLET_ERROR,
-                    error.empty() ? "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" : error);
             }
             CTransactionRef dgb_creating_tx;
             CTransactionRef carrier_creating_tx;

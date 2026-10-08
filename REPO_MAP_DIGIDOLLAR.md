@@ -706,6 +706,9 @@ or chain parameters.
 - Its wallet-scoped work guard serializes automatic scheduler work with manual
   expert RPCs and exposes stopped, unlock/readiness wait, active, manual,
   drain-only, and error service states without persisting a passphrase.
+- Wallet `rpc/paymaster_processing.cpp` defers transient admission-limit failures
+  in that fair queue without draining unrelated provider work; expired/invalid
+  envelopes are consumed without releasing financial reservations.
 - Protocol V6 makes `PMCAPREQ`/`PMCAPRESP` mandatory before intent disclosure
   and carries the maximum user-paid DD service fee in signed public offers,
   requires V6 announcements/direct-channel negotiation, persists semantic replays

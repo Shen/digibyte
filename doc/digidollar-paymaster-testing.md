@@ -3004,3 +3004,36 @@ The focused RPC/CLI preparation test passed again in both fee modes. Reports:
 `change-gate-{preparation,balances,cards,uncreated,rpc}.txt` under the same local
 check directory. `git diff --check` passed. No full build, complete suite or
 cross-platform run was performed; the operator commands above still apply.
+
+## 2026-10-08: Cancellation bursts and request admission
+
+`wallet_paymaster_provider.py --descriptors --cancel-burst-only` passed using
+isolated Windows nodes and actual RPC/P2P/CLI. It prepares three operational
+slots, keeps the per-recipient limit at two, cancels two unsigned requests, then
+holds the third request at the limit across multiple service ticks. Expiring
+the first offer allows that same third request to proceed without a provider
+restart. Final expiry restores all three slots. Saved safety/refill policies,
+client balance and mempool are unchanged. Mock time advances protocol expiry;
+this does not test an arbitrarily long live transport wait.
+
+Targeted MSVC compilation and isolated wallet/daemon linking passed. Three
+existing Core cases also passed (62 assertions):
+`stale_submit_is_consumed_without_faulting_provider`,
+`provider_automation_capacity_pause_preserves_approval`, and
+`unsigned_quote_cancellation_atomically_releases_provider_pool`.
+Python compilation and `git diff --check` passed. The functional report is
+`build_msvc/paymaster-refresh-check/reserve-presets/cancel-burst-functional.txt`.
+An initial test attempted a runtime-mode change while running and correctly
+hit `PAYMASTER_STOP_PROVIDER_BEFORE_MODE_CHANGE`; the final test keeps automatic
+mode throughout and observes its unchanged limits through the CLI.
+
+No full build, complete suite or cross-platform run was performed. The operator
+can run the focused check after the full build from the repository root
+(existing MSVC/Qt prerequisites; typically under a minute; exit 0 and
+`Tests successful`):
+
+```powershell
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python -X utf8 test/functional/wallet_paymaster_provider.py --descriptors --cancel-burst-only
+```
