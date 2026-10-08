@@ -2988,3 +2988,19 @@ $env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
 $env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
 python -X utf8 test/functional/wallet_paymaster_rpc.py --descriptors --client-preparation-only
 ```
+
+## 2026-10-08: Minimum-change compose feedback
+
+The Paymaster compose check now also rejects a positive remaining DD balance
+below the network's minimum output. The amount hint, cost summary and send gate
+share that check, including fee deduction. This uses the existing cached balance;
+Core's input-selection and RPC/CLI rules are unchanged.
+
+Targeted MSVC compilation and isolated application/test linking passed. The same
+four Qt functions above passed all 14 data cases, including the added 28.49-DD
+gross / 28.50-DD balance regression, zero/1/99/100-cent remainder boundaries,
+wallet emptying, matching amount warnings, privacy and provider changes.
+The focused RPC/CLI preparation test passed again in both fee modes. Reports:
+`change-gate-{preparation,balances,cards,uncreated,rpc}.txt` under the same local
+check directory. `git diff --check` passed. No full build, complete suite or
+cross-platform run was performed; the operator commands above still apply.

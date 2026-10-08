@@ -7711,12 +7711,14 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     // The recipient amount fits, but the displayed fee must fit too. Neither
     // a button click nor direct invocation may create an unfundable request.
     auto* summary = form.findChild<QLabel*>("feeFundingSummary");
-    QVERIFY(summary);
+    auto* amount_hint = form.findChild<QLabel*>("amountValidationLabel");
+    QVERIFY(summary && amount_hint);
     form.setAvailableDigiDollarBalanceForTesting(325);
     QVERIFY(!prepare->isEnabled());
     QVERIFY(prepare->toolTip().contains("Not enough $DD"));
     QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("action"));
     QVERIFY(summary->text().contains("Total: 3.27 $DD; available: 3.25 $DD; missing: 0.02 $DD"));
+    QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
     prepare->click();
     client->send(recipient, 325);
     QVERIFY(QMetaObject::invokeMethod(&form, "onSendClicked", Qt::DirectConnection));
@@ -7726,6 +7728,10 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     form.setAvailableDigiDollarBalanceForTesting(327);
     QVERIFY(prepare->isEnabled()); // Exact coverage, not the larger fee cap.
     QVERIFY(!summary->text().contains("Not enough $DD"));
+    QVERIFY(amount_hint->text().contains("within the send limits"));
+    form.setAvailableDigiDollarBalanceForTesting(328);
+    QVERIFY(!prepare->isEnabled()); // Adding a cent cannot produce valid change.
+    QVERIFY(amount_hint->text().contains("below the minimum $DD change"));
     form.setAvailableDigiDollarBalanceForTesting(325);
 
     auto* subtract = form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount");
@@ -7740,6 +7746,58 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     reply(deducted);
     QVERIFY(prepare->isEnabled()); // 3.23 recipient + 0.02 fee = 3.25 total.
     QVERIFY(!summary->text().contains("Not enough $DD"));
+
+    // Gross amounts include the fee. Zero and minimum change are allowed;
+    // any smaller positive remainder must block preparation in both modes.
+    for (const CAmount remainder : {1, 99, 100, 0}) {
+        form.setAvailableDigiDollarBalanceForTesting(325 + remainder);
+        const bool blocked = remainder > 0 && remainder < 100;
+        QCOMPARE(prepare->isEnabled(), !blocked);
+        QCOMPARE(summary->property("statusKind").toString(), blocked ? QStringLiteral("action") : QStringLiteral("info"));
+        if (blocked) {
+            QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
+            QVERIFY(summary->text().contains("below the minimum $DD change"));
+        } else {
+            QVERIFY(amount_hint->text().contains("within the send limits"));
+        }
+    }
+    // Reproduce the operator's 28.49 gross / 28.50 balance example. Editing
+    // the amount and then using the sweep button must clear obsolete warnings.
+    form.setAvailableDigiDollarBalanceForTesting(2850);
+    amount->setText("28.49");
+    QVERIFY(tick());
+    const auto gross_offer = [&](int recipient_cents) {
+        auto offer = PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 15,
+            recipient_cents, false, QDateTime::currentSecsSinceEpoch() + 600);
+        offer.pushKV("subtract_paymaster_fee_from_amount", true);
+        UniValue result{UniValue::VARR};
+        result.push_back(offer);
+        reply(result);
+    };
+    gross_offer(2834);
+    QVERIFY(!prepare->isEnabled());
+    QVERIFY(prepare->toolTip().contains("would leave 0.01 $DD"));
+    QVERIFY(prepare->toolTip().contains("Reduce the total by at least 0.99 $DD"));
+    QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
+    prepare->click();
+    client->send(recipient, 2849);
+    QVERIFY(QMetaObject::invokeMethod(&form, "onSendClicked", Qt::DirectConnection));
+    QCOMPARE(unexpected, 0);
+    client->setPrivacy(true);
+    QVERIFY(!amount_hint->text().contains("0.01"));
+    QVERIFY(!prepare->toolTip().contains("0.99"));
+    client->setPrivacy(false);
+    QVERIFY(amount_hint->text().contains("would leave 0.01 $DD"));
+    QVERIFY(QMetaObject::invokeMethod(&form, "onUseAvailableBalanceClicked", Qt::DirectConnection));
+    QCOMPARE(amount->text(), QStringLiteral("28.50"));
+    QVERIFY(subtract->isChecked());
+    QVERIFY(tick());
+    gross_offer(2835);
+    QVERIFY(prepare->isEnabled());
+    QVERIFY(amount_hint->text().contains("within the send limits"));
+    QVERIFY(!summary->text().contains("below the minimum $DD change"));
+    amount->setText("3.25");
+    form.setAvailableDigiDollarBalanceForTesting(325);
     subtract->setChecked(false);
     QVERIFY(tick());
     reply(PaymasterPublicOffers());
@@ -11874,15 +11932,18 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     QVERIFY(refresh());
     QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'e'));
     QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
-    form.setAvailableDigiDollarBalanceForTesting(327);
+    form.setAvailableDigiDollarBalanceForTesting(325);
     auto* funding_summary = form.findChild<QLabel*>("feeFundingSummary");
     auto* funding_send = form.findChild<QPushButton*>("sendButton");
     QVERIFY(!funding_send->isEnabled()); // Explicit higher-fee choice costs 3.30.
     QVERIFY(funding_summary->text().contains("Not enough $DD"));
+    auto* amount_hint = form.findChild<QLabel*>("amountValidationLabel");
+    QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
     QCOMPARE(funding_summary->property("statusKind").toString(), QStringLiteral("action"));
     form.findChild<QRadioButton*>("paymasterOfferChoice0")->click();
     QVERIFY(funding_send->isEnabled()); // The sponsored offer costs only 3.25.
     QVERIFY(!funding_summary->text().contains("Not enough $DD"));
+    QVERIFY(amount_hint->text().contains("within the send limits"));
     form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
     QVERIFY(!funding_send->isEnabled());
     client->setPrivacy(true);

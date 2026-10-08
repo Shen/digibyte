@@ -1219,7 +1219,10 @@ void DigiDollarSendWidget::updateAmountValidation()
     QString warningColor = isDarkTheme ? "#ffd166" : "#805500";
     QString errorColor = isDarkTheme ? "#ff9090" : "#b42318";
 
-    const QString problem = amountProblem();
+    QString problem = amountProblem();
+    const QString fundingProblem = m_paymaster ? m_paymaster->paymentAmountProblem() : QString{};
+    const bool fundingWarning = problem.isEmpty() && !fundingProblem.isEmpty();
+    if (fundingWarning) problem = fundingProblem;
 
     if (amountText.trimmed().isEmpty()) {
         // Nothing typed yet: say what the box will accept.
@@ -1242,9 +1245,9 @@ void DigiDollarSendWidget::updateAmountValidation()
     // is shown as an error. Having less than you asked to send is shown as a
     // warning, because the balance can change and then the same amount is fine.
     const bool overBalance = validateAmount() && !validateBalance();
-    const QString colour = overBalance ? warningColor : errorColor;
+    const QString colour = (overBalance || fundingWarning) ? warningColor : errorColor;
     m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(colour));
-    m_amountValidationLabel->setText(QStringLiteral("✗ ") + problem);
+    m_amountValidationLabel->setText((fundingWarning ? QStringLiteral("! ") : QStringLiteral("✗ ")) + problem);
     m_amountValidationLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 11px; font-weight: bold; }").arg(colour));
 }
 

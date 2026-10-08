@@ -601,9 +601,11 @@ input checks and exact authorization remain authoritative.
 After Core confirms that a failed request was never created or is safely closed,
 editing its amount or fee settings clears the old attempt's notice. It must not
 contradict the new offer. Fee deduction makes the entered amount the total DD
-outflow; it does not waive the minimum DD change rule. A 1-cent change output
-still fails Core's input selection, while an exact spend with zero change is
-allowed. GUI, RPC and CLI retain these same backend checks.
+outflow; it does not waive the minimum DD change rule. With 28.50 DD available,
+entering 28.49 DD with fee deduction leaves 0.01 DD. The GUI disables preparation
+and warns at both the amount field and cost summary. Reduce the total to leave
+at least 1.00 DD, or use **Empty wallet with Paymaster** to leave zero change.
+GUI, RPC and CLI retain Core's authoritative input and minimum-change checks.
 
 A Send payment click in Automatic without own DGB is bound to Paymaster funding for that
 request, including when DGB arrives later; it does not authorize a direct spend.

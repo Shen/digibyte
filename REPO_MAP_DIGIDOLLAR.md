@@ -1483,7 +1483,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   inputs/wallet changes clears them. Paired `senddigidollar` preferences select
   the exact first public offer, retaining the explicit signing/fallback review.
 - The compose funding gate compares the selected current offer's total with the
-  cached DD balance before preparation. The cost summary explains shortfalls;
+  cached DD balance before preparation. `paymentAmountProblem` reports shortages
+  and a positive balance remainder below the network's minimum DD output to the
+  amount hint, cost summary and send gate;
   Automatic with own DGB retains its direct path. No additional RPC/lock reads
   or spending authority are introduced.
 - Wallet-generation guards and Qt lifetime guards discard stale callbacks.

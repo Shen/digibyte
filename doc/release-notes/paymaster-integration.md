@@ -36,7 +36,9 @@ recovery logs are unchanged.
 ## Client funding feedback
 
 Send payment now checks the selected public offer's total against the cached DD
-balance before preparation, with a visible shortfall warning. Fee deduction uses
+balance before preparation, with a visible shortfall warning. A positive remainder
+below the minimum DD output also disables preparation, including with fee deduction.
+The amount hint and cost summary show the same warning. Fee deduction uses
 the total including the fee; Automatic with own DGB retains its direct path.
 Editing a safely closed/uncreated payment draft clears its obsolete error notice.
 No wallet-input, minimum-change or RPC/CLI spending rules change.

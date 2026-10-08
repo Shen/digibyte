@@ -41,7 +41,10 @@ polling; restored sessions remain read-only. These changes add no durable journa
 
 The Paymaster compose gate compares the selected current public offer's total
 with the cached DD balance, including fee deduction. It adds no wallet reads or
-authority and preserves Automatic's own-DGB path. Errors from a safely closed
+authority and preserves Automatic's own-DGB path. A positive remainder below
+the network's minimum DD output also blocks preparation: no separate valid
+input could remain unspent within that remainder. The amount hint, cost summary
+and send gate use the same Paymaster check. Errors from a safely closed
 or uncreated attempt clear when its amount or fee settings change; active-session
 diagnostics remain protected. Core still validates inputs and minimum change.
 

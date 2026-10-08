@@ -59,6 +59,7 @@ public:
     bool hasOwnDgbForFees() const;
     bool preparesPaymasterPayment() const;
     bool hasFeeFundingCandidate() const;
+    QString paymentAmountProblem() const;
     QString feeFundingProblem() const;
     bool subtractFee() const;
     static bool DescribeBackendError(const QString& reasonFailed, QString& title, QString& message);
@@ -100,7 +101,6 @@ protected:
 
 private:
     bool hasMatchingPaymasterOffer() const;
-    qint64 paymasterBalanceShortfall() const;
     void updateFeeChoiceLayout();
     void setupFeeSection();
     Q_SLOT void onFeeModeChanged();

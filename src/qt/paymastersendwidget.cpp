@@ -11,6 +11,7 @@
 #include <qt/paymasterwallet.h>
 #include <qt/guiutil.h>
 #include <qt/guiconstants.h>
+#include <chainparams.h>
 #include <consensus/amount.h>
 #include <logging.h>
 #include <pubkey.h>
@@ -2282,7 +2283,7 @@ bool PaymasterSendWidget::preparesPaymasterPayment() const
 bool PaymasterSendWidget::hasFeeFundingCandidate() const
 {
     return m_walletModel && ((!paymasterOnlySelected() && hasOwnDgbForFees()) ||
-                            (paymasterModeSelected() && hasMatchingPaymasterOffer() && paymasterBalanceShortfall() == 0));
+                            (paymasterModeSelected() && hasMatchingPaymasterOffer() && paymentAmountProblem().isEmpty()));
 }
 
 bool PaymasterSendWidget::hasMatchingPaymasterOffer() const
@@ -2294,28 +2295,42 @@ bool PaymasterSendWidget::hasMatchingPaymasterOffer() const
                           : m_paymasterPreviewRecipientCents == input.amount_cents);
 }
 
-qint64 PaymasterSendWidget::paymasterBalanceShortfall() const
+QString PaymasterSendWidget::paymentAmountProblem() const
 {
     // Compose-only, using the cached wallet balance and the selected public
     // offer. Core still checks the actual inputs and authenticates the quote.
     // Automatic with own DGB must retain its direct-payment path.
     if (!m_paymasterRequestId.isEmpty() || !m_form.m_balanceKnown ||
-        !preparesPaymasterPayment() || !hasMatchingPaymasterOffer()) return 0;
+        !preparesPaymasterPayment() || !hasMatchingPaymasterOffer()) return {};
     const qint64 available = std::llround(m_form.paymentInput().available_balance * 100);
-    return std::max<qint64>(0, m_paymasterPreviewTotalCents - available);
-}
-
-QString PaymasterSendWidget::feeFundingProblem() const
-{
-    const qint64 shortfall = paymasterBalanceShortfall();
+    const qint64 shortfall = m_paymasterPreviewTotalCents - available;
     if (shortfall > 0) {
         if (m_privacy) return DigiDollarSendWidget::tr("Not enough $DD for the selected offer. Disable privacy mode to review payment costs.");
         return DigiDollarSendWidget::tr(
             "Not enough $DD for the selected offer. Total: %1; available: %2; missing: %3. "
             "Reduce the amount, deduct the service fee from the amount, or choose a cheaper offer.")
-            .arg(formatCents(m_paymasterPreviewTotalCents),
-                 formatCents(std::llround(m_form.paymentInput().available_balance * 100)), formatCents(shortfall));
+            .arg(formatCents(m_paymasterPreviewTotalCents), formatCents(available), formatCents(shortfall));
     }
+    const qint64 remaining = available - m_paymasterPreviewTotalCents;
+    const CAmount minimum = Params().GetDigiDollarParams().minOutputAmount;
+    // Every spendable DD output is at least the consensus minimum. If the
+    // entire remaining balance is smaller, leaving a separate input unspent
+    // cannot avoid sub-minimum change. No coin selection or wallet lock is
+    // needed for this necessary (not sufficient) funding check.
+    if (remaining > 0 && remaining < minimum) {
+        if (m_privacy) return DigiDollarSendWidget::tr("This payment would leave $DD change below the minimum. Disable privacy mode to review payment costs.");
+        return DigiDollarSendWidget::tr(
+            "This payment would leave %1, below the minimum $DD change of %2. "
+            "Reduce the total by at least %3, or use \"Empty wallet with Paymaster\" to leave no change.")
+            .arg(formatCents(remaining), formatCents(minimum), formatCents(minimum - remaining));
+    }
+    return {};
+}
+
+QString PaymasterSendWidget::feeFundingProblem() const
+{
+    const QString problem = paymentAmountProblem();
+    if (!problem.isEmpty()) return problem;
     return !paymasterModeSelected()
         ? DigiDollarSendWidget::tr("No spendable DGB for the network fee. Add DGB or select Paymaster funding.")
         : paymasterOnlySelected()
@@ -4905,10 +4920,10 @@ void PaymasterSendWidget::updateFeeDisplay()
             "Enter a recipient and a valid $DD amount to compare payment costs."));
         m_feeSummary->setToolTip(QString{});
     }
-    const bool insufficient = paymasterBalanceShortfall() > 0;
-    DigiDollarStatus::SetBanner(m_feeSummary, insufficient ? DigiDollarStatus::Kind::ACTION : DigiDollarStatus::Kind::INFO);
-    if (insufficient) {
-        m_feeSummary->setText(m_feeSummary->text() + QStringLiteral("<p><b>! %1</b></p>").arg(feeFundingProblem().toHtmlEscaped()));
+    const QString amount_problem = paymentAmountProblem();
+    DigiDollarStatus::SetBanner(m_feeSummary, amount_problem.isEmpty() ? DigiDollarStatus::Kind::INFO : DigiDollarStatus::Kind::ACTION);
+    if (!amount_problem.isEmpty()) {
+        m_feeSummary->setText(m_feeSummary->text() + QStringLiteral("<p><b>! %1</b></p>").arg(amount_problem.toHtmlEscaped()));
     }
     updateOfferCheckControls();
     QString amountText = input.amount_text;
@@ -4926,7 +4941,8 @@ void PaymasterSendWidget::updateFeeDisplay()
         m_totalValue->setText(m_form.maskValue(m_totalValue->text()));
         m_feeSummary->setText(m_form.maskValue(m_feeSummary->text()));
     }
-
+    // Offer, fee-mode and privacy changes must update the amount hint too.
+    m_form.updateAmountValidation();
 }
 
 QString PaymasterSendWidget::formatCents(qint64 cents) const
