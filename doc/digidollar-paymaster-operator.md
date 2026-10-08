@@ -52,6 +52,21 @@ Privacy masks these values, and changing the period clears old figures until the
 replacement snapshot arrives. Decimal points and thin-space grouping match the app;
 DGB summaries omit trailing zeroes without reducing precision.
 
+### Temporary admission pauses
+
+`running` means the provider runtime is registered; `ready` describes its local
+prerequisites. `service_state=drain_only` still blocks new requests while allowing
+existing authorized submissions to finish. The overview shows **New payments
+temporarily paused**, or the specific limit/prerequisite needing attention.
+**Check current status** reads the current snapshot without changing settings.
+
+Core rechecks a temporary drain on subsequent service ticks. Once reservations
+expire or are released and all current readiness and safety checks pass, it
+resumes automatically and refreshes its offer. It retains the saved budgets,
+refill approvals and quote-rate accounting. Do not raise limits merely to clear
+an old runtime state. Persistent Pause/Stop remains an explicit operator action
+and is not undone by this recovery.
+
 ### Autostart beside Start/Pause
 
 Changing **Automatically start Paymaster when this wallet is ready** saves

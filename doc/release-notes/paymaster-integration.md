@@ -20,6 +20,14 @@ required by this merge. The official release document is unchanged; its test
 claims do not certify this fork. See the [integration checkpoint](../digidollar-paymaster-v9.26.7-integration.md)
 for targeted results and pending operator checks.
 
+## Recovery after interrupted Paymaster requests
+
+A temporary safety-limit pause no longer leaves the automatic provider permanently
+in `drain_only` after its reservations and limits recover. Core reconciles and
+rechecks readiness before resuming, preserves all existing approvals and limits,
+and refreshes its offer. GUI and RPC diagnostics now distinguish a drain from an
+active provider even when local prerequisites are ready and no last error remains.
+
 ## Operator income and costs
 
 The finance page now leads with period income, operating costs and successful

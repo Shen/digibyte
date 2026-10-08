@@ -2883,3 +2883,54 @@ quote response; it now captures the client preparation reply. The initial
 multi-file MSBuild argument was also rejected before compilation; selecting the
 two units separately succeeded. No full build, complete suite or cross-platform
 run was performed; those remain operator-run under repository guidance.
+
+
+## 2026-10-08: Recover temporary provider admission drains
+
+A provider could retain `service_state=drain_only` after a safety-limit failure
+while reporting local `ready=true`, losing its last error and never processing
+new requests. The service now reconciles and rechecks current prerequisites under
+its existing work guard, resumes only when fully ready and synchronized, and
+refreshes the validated offer. Saved limits and per-request checks are unchanged.
+Shared RPC diagnostics, CLI status prose and the Qt overview expose admission
+pauses independently of local readiness.
+
+Targeted Windows/MSVC verification:
+
+- `wallet_paymaster_provider.py --descriptors --drain-recovery-only`: passed
+  against the isolated corrected daemon. Two unsigned preparations are abandoned;
+  provider reservations expire, automatic admission resumes without another
+  start, and safety/refill policies, client balance and mempool remain unchanged.
+  The prior normal daemon fails the same regression: readiness returns, but
+  `service_state` never becomes active within the bounded wait.
+- Three Core cases passed: `operator_work_transitions_preserve_real_errors`,
+  `provider_automation_capacity_pause_preserves_approval` and
+  `provider_sync_observation_preserves_unresolved_gates`.
+- `PaymasterWidgetTests::paymasterOperatorWorkTransitions` passed in dark and
+  light themes (four Qt results including fixture setup/cleanup), including the
+  read-only status button, safety-limit action and unknown-error precedence.
+- Changed translation units compiled; diagnostic Qt/daemon/CLI links succeeded.
+  `git diff --check` passed. No consensus or ordinary DigiByte product source changed.
+
+Local reports are under `build_msvc/paymaster-refresh-check/reserve-presets/`:
+`drain-before-final.log`, `drain-after-final.log`, `drain-core-tests-final.log`
+and `drain-qt-tests-final.log`. The functional case is registered separately in
+`test_runner.py`; it does not run the complete provider contract suite.
+
+Full build, complete Paymaster suites and cross-platform checks remain operator
+work. From the repository root, with the existing MSVC/Qt dependencies installed
+and applications/CLI calls closed, the local operator helper runs the incremental
+solution build plus all Paymaster Qt cases (minutes; build exit 0 and zero failures):
+
+```powershell
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+After that build, the focused two-node RPC regression is also directly runnable
+(typically under a minute; success ends with `Tests successful`):
+
+```powershell
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python -X utf8 test/functional/wallet_paymaster_provider.py --descriptors --drain-recovery-only
+```

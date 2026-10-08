@@ -9682,6 +9682,10 @@ private:
                 area = code.contains(QLatin1String("MAINTENANCE")) ? QStringLiteral("liquidity") : QString::fromStdString(item.find_value("area").get_str());
             }
         }
+        if (action.isEmpty() && state == QLatin1String("drain_only")) {
+            action = QStringLiteral("wait");
+            area = QStringLiteral("service");
+        }
         if (action.isEmpty()) action = ready && !running ? QStringLiteral("start") : QStringLiteral("activity");
         if (locked && action != QLatin1String("inspect_error")) action = QStringLiteral("unlock");
         if (state == QLatin1String("error")) action = QStringLiteral("inspect_error");
@@ -9699,6 +9703,10 @@ private:
             headline = locked ? tr("Waiting for wallet unlock") : tr("Wallet will lock soon");
             hint = tr("Choose continuous operation until manual lock or restart, or a timed unlock. Access applies to the whole wallet; the passphrase is never saved.");
             button = tr("Unlock wallet…");
+        } else if (action == QLatin1String("wait") && area == QLatin1String("service") && state == QLatin1String("drain_only")) {
+            headline = tr("New payments temporarily paused");
+            hint = tr("Core is only completing existing work. It checks readiness again automatically and resumes new requests when the saved limits and prerequisites allow it.");
+            button = tr("Check current status");
         } else if (action == QLatin1String("wait")) {
             headline = area == QLatin1String("liquidity") ? tr("Waiting for confirmations") : tr("Waiting for the node");
             hint = tr("Synchronization or confirmations are still pending. Review progress; no new approval is needed to wait.");
@@ -9758,7 +9766,7 @@ private:
             service_error.isStr() && service_error.get_str() == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING" &&
             preparation_details.isEmpty();
         const std::string work_phase = DigiDollar::Paymaster::OperatorWorkPhase(provider);
-        const bool observed_work = running && work_phase != "idle" && preparation_details.isEmpty() &&
+        const bool observed_work = running && state != QLatin1String("drain_only") && work_phase != "idle" && preparation_details.isEmpty() &&
             (action == QLatin1String("activity") || (action == QLatin1String("wait") &&
              (area == QLatin1String("liquidity") || area == QLatin1String("payments"))));
         if (capacity_wait || observed_work) {
@@ -9900,7 +9908,9 @@ private:
             else if (m_operation.phase == PaymasterOperationController::Phase::Blocked) m_task_continue->click();
             else if (m_operation.phase == PaymasterOperationController::Phase::Waiting) m_task_card->setFocus();
             else beginGuidedTask("preparepaymasterpool", !m_core_running);
-        } else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("payments"))
+        } else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("service"))
+            refreshStatus();
+        else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("payments"))
             showOperatorPage(m_activity_page);
         else if (action == QLatin1String("wait") && m_operator_next_area == QLatin1String("liquidity")) {
             if (m_task_card->isHidden()) showOperatorPage(m_liquidity_page);
