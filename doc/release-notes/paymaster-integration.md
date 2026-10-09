@@ -40,6 +40,9 @@ offer a direct budget review. Disabled selected models receive finite draft
 suggestions; incompatible per-transfer caps can be lowered for review. Existing
 custom limits and unsaved edits are preserved. Budgets and offer activation
 still require separate explicit saves; RPC/CLI validation is unchanged.
+The actionable conflict notice omits the internal error code. Offer settings
+also explain that User paid with a 0% tariff charges no DD fee and that switching
+models does not restore a previous tariff.
 
 ## Client funding feedback
 

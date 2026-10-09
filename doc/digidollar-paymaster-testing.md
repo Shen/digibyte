@@ -3070,3 +3070,16 @@ Reports are `<function>-final.txt` under
 `git diff --check` passed. Core/RPC product code was unchanged; no live wallet
 settings were written. No full build, full suite, new end-to-end node test or
 cross-platform run was performed for this UI correction.
+
+### Offer notice clarity (2026-10-09)
+
+Targeted Qt compilation and isolated application/test links passed.
+`paymasterOfferSpendingLimitsReview` passed its 11 cases with assertions that
+the known conflict code is absent from the visible notice and provider status.
+`paymasterFeeAmountsAndPercentages` passed, including the 0%-tariff explanation.
+The existing Core case
+`provider_user_authorization_honors_exact_reserved_safety_binding` passed all
+48 assertions, including rejection of a new authorization under a replaced
+advertised policy. Reports use the `-notices-20261009.txt` suffix in the local
+reserve-presets check directory. No Core/RPC behavior changed; no full build or
+complete suite was run.

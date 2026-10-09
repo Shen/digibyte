@@ -7618,7 +7618,11 @@ void PaymasterWidgetTests::paymasterFeeAmountsAndPercentages()
     QCOMPARE(summary->text(), saved_summary);  // Example creates no policy edit.
     rate->setValue(0);
     QVERIFY(result->text().contains("0.00 DD"));
+    auto* model_explanation = provider->findChild<QLabel*>("paymasterFundingModelExplanation");
+    QVERIFY(model_explanation);
+    QVERIFY(model_explanation->text().contains("clients pay no DD service fee"));
     rate->setValue(1);
+    QVERIFY(!model_explanation->text().contains("User paid is set to 0%"));
     QVERIFY(result->text().contains("No valid fee")); // Core rejects sub-step rate.
     rate->setValue(10000);
     example->setValue(10000000);
@@ -11901,6 +11905,8 @@ void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview()
     QVERIFY(!review->isHidden());
     auto* status = panel->findChild<QLabel*>("paymasterPolicySaveStatus");
     QVERIFY(status->text().contains("Offer not saved"));
+    QVERIFY(!status->text().contains("PAYMASTER_"));
+    QVERIFY(!panel->findChild<QLabel*>("paymasterProviderStatus")->text().contains("PAYMASTER_"));
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("action"));
     if (scenario == "privacy") {
         panel->setPrivacy(true);

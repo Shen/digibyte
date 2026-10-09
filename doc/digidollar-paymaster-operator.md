@@ -131,6 +131,13 @@ configured payment range or budgets. For example, a 0.50% tariff on 1.00 DD
 costs 0.01 DD, effectively 1.00%. Client fee ceilings remain absolute DD limits;
 the client percentage is a comparison, not a provider price.
 
+**User paid** with a **0%** tariff is valid and charges no DD service fee. It is
+still accounted as `user_paid`, not `sponsored`. Switching models does not
+restore an earlier nonzero tariff; review the displayed rate before saving.
+A saved advertised-policy change blocks a new authorization of an old quote.
+Already durable authorized/committed work has separate replay/recovery handling;
+changing settings cannot retroactively alter a signed payment's agreed amounts.
+
 Across Paymaster settings, setup and payment dialogs, enter percentages and
 amounts using the app's decimal point (for example, `0.80 %` and `1.25 DD`,
 including with German system settings). Large readouts use thin-space grouping,

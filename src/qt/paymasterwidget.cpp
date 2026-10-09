@@ -8095,6 +8095,10 @@ private:
                 "No payment model selected. Select at least one model before saving."));
             return;
         }
+        if (user_paid && m_fee_bps->value() == 0) {
+            m_funding_model_status->setText(m_funding_model_status->text() + QLatin1Char('\n') + tr(
+                "User paid is set to 0%: clients pay no DD service fee. Choose a positive rate to charge a fee; switching payment models does not restore a previous rate."));
+        }
 
         const QString minimum = PaymasterFormatDD(m_min_amount->value());
         const QString maximum = PaymasterFormatDD(m_max_amount->value());
@@ -12331,7 +12335,7 @@ private:
              }, false, [this](const QString& error) {
                  const bool safety_conflict = error.contains(QStringLiteral("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT"));
                  const QString message = safety_conflict
-                     ? tr("Offer not saved: the selected payment models or network-fee ceiling do not match the saved spending limits. Your saved offer is unchanged. Review and save compatible limits first, then save this offer. %1").arg(error)
+                     ? tr("Offer not saved: the selected payment models or network-fee ceiling do not match the saved spending limits. Your saved offer is unchanged. Review and save compatible limits first, then save this offer.")
                      : tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying. %1").arg(error);
                  m_status->setText(message);
                  showPolicySaveStatus(message);
