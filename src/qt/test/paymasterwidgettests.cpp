@@ -3358,7 +3358,7 @@ void PaymasterWidgetTests::paymasterClientAuthorizationIsTwoStageAndFailClosed()
 void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* outcome : {"cancel_review", "empty_preview", "authorized", "stop", "rpc_error", "endpoint_unreachable", "session_disappeared", "quote_expires", "wallet_close", "auto_cancel", "auto_prepare", "privacy_prepare", "review_wallet_switch", "unlock_wallet_switch", "review_changed_controls"}) {
+    for (const char* outcome : {"cancel_review", "empty_preview", "authorized", "completed", "stop", "rpc_error", "endpoint_unreachable", "session_disappeared", "quote_expires", "wallet_close", "auto_cancel", "auto_prepare", "privacy_prepare", "review_wallet_switch", "unlock_wallet_switch", "review_changed_controls"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
 }
@@ -3377,7 +3377,8 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
     auto* client = send_widget.findChild<PaymasterSendWidget*>();
     QVERIFY(client);
-    const bool approves = outcome == QStringLiteral("authorized") || outcome == QStringLiteral("review_changed_controls") || outcome == QStringLiteral("unlock_wallet_switch");
+    QSignalSpy history_changed(mini_gui.walletModel.get(), &WalletModel::digiDollarChanged);
+    const bool approves = outcome == QStringLiteral("authorized") || outcome == QStringLiteral("completed") || outcome == QStringLiteral("review_changed_controls") || outcome == QStringLiteral("unlock_wallet_switch");
     const SecureString passphrase{"qt-paymaster-unlock-switch"};
     if (outcome == QStringLiteral("unlock_wallet_switch")) {
         QVERIFY(wallet->EncryptWallet(passphrase));
@@ -3482,6 +3483,16 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
             if (phase == 6) {
                 result.pushKV("txid", std::string(64, 'e'));
                 result.pushKV("broadcast_state", "accepted_mempool");
+                if (outcome == QStringLiteral("completed")) {
+                    result.pushKV("session_state", "CONFIRMED");
+                    result.pushKV("broadcast_state", "confirmed");
+                    result.pushKV("confirmation_state", "payment_confirmed");
+                    result.pushKV("payment_confirmed", true);
+                    result.pushKV("status", "success");
+                    result.pushKV("result_status", "final_committed");
+                    result.pushKV("result_sequence", 1);
+                    result.pushKV("final", true);
+                }
             }
             // Match the real send RPC: artifact classification is supplied by
             // the authoritative refresh envelope, not the initial send reply.
@@ -3631,6 +3642,7 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
         QVERIFY(sends[i][6].find_value("retry_transport").isNull());
     }
     if (approves) {
+        QCOMPARE(history_changed.count(), 0); // Authorization alone is not a payment.
         QCOMPARE(sends.size(), size_t{5});
         QCOMPARE(sends[4][6].find_value("fee_mode").get_str(), std::string{"paymaster"});
         QCOMPARE(sends[4][6].find_value("maximum_paymaster_fee_cents").write(), sends[0][6].find_value("maximum_paymaster_fee_cents").write());
@@ -3638,8 +3650,10 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
         QVERIFY(poll());
         QCOMPARE(sends.size(), size_t{6});
         QCOMPARE(sends[5].write(), sends[4].write());
+        QVERIFY2(history_changed.count() == 1, qPrintable(failure_message)); // Accepted transactions appear before confirmation.
         QVERIFY(poll()); // After submission, observe only; never repeat the send.
         QCOMPARE(sends.size(), size_t{6});
+        QCOMPARE(history_changed.count(), 1);
     } else {
         QCOMPARE(sends.size(), size_t{4});
         QVERIFY(!send_widget.findChild<QLineEdit*>("addressEdit")->isReadOnly());
@@ -3893,6 +3907,7 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
 
     auto* paymaster = send_widget.findChild<PaymasterSendWidget*>();
     int exact_retries{0};
+    QSignalSpy history_changed(mini_gui.walletModel.get(), &WalletModel::digiDollarChanged);
     bool completed{false};
     bool retry_error{false};
     paymaster->setPaymasterRpcExecutorForTesting(
@@ -3907,7 +3922,7 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
                     throw std::runtime_error("retry changed the durable request");
                 completed = ++exact_retries == 2;
             }
-            return completed ? PaymasterSessionView("CONFIRMED", "final_transaction", "CONFIRMED") :
+            return completed ? PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL") :
                                PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED");
         });
     paymaster->setPaymasterSessionForTesting(
@@ -3919,11 +3934,14 @@ void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
     QCOMPARE(exact_retries, 0);
     QVERIFY(QMetaObject::invokeMethod(paymaster, "retryPaymasterSession", Qt::DirectConnection));
     QCOMPARE(exact_retries, 1);
+    QCOMPARE(history_changed.count(), 0);
     QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
     QCOMPARE(exact_retries, 2);
     QVERIFY(completed);
+    QVERIFY2(history_changed.count() == 1, qPrintable(action_warning));
     QVERIFY(QMetaObject::invokeMethod(paymaster, "pollPaymasterSession", Qt::DirectConnection));
     QCOMPARE(exact_retries, 2);
+    QCOMPARE(history_changed.count(), 1); // Re-observation does not trigger another refresh.
 
     completed = false;
     exact_retries = 0;

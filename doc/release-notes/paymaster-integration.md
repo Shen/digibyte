@@ -22,6 +22,14 @@ for targeted results and pending operator checks.
 
 ## Recovery after interrupted Paymaster requests
 
+First mempool acceptance and validated Paymaster completions now notify
+DigiDollar displays immediately; unconfirmed payments remain shown as pending.
+Repeated durable recovery of an unchanged transaction preserves wallet caches
+and avoids duplicate UI events, while retaining exact-byte and chain/pool checks
+and reconciliation of changed state/metadata. Opt-in `bench` timing distinguishes
+durable recovery from slow DD history worker/read/Qt-delivery phases. This does
+not establish that every reported live-wallet pause has been resolved.
+
 A temporary safety-limit pause no longer leaves the automatic provider permanently
 in `drain_only` after its reservations and limits recover. Core reconciles and
 rechecks readiness before resuming, preserves all existing approvals and limits,

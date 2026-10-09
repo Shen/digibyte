@@ -1,5 +1,59 @@
 # Paymaster build and test runbook
 
+## DD transaction refresh after Paymaster payments (2026-10-09)
+
+First accepted-mempool observation and validated payment completion now emit
+the existing DD update signal. Repeated identical observations do not. Exact
+durable recovery skips unchanged wallet updates after checking transaction
+bytes, state and metadata; authorization and chain/pool preflights remain.
+Opt-in `bench` logs measure durable recovery and slow shared DD history reads,
+separating worker startup, wallet read/serialization and queued Qt delivery.
+The latter is the only change to shared non-Paymaster product code.
+
+Selected MSVC compilation and isolated Core/Qt/app linking passed. Three Core
+cases passed with **384 assertions**:
+
+- `paymaster_wallet_security_tests/durable_observation_skips_only_unchanged_wallet_state`
+  checks unchanged confirmed transactions, changed block/height/position,
+  inactive wallet state, missing durable metadata and conflicting witness bytes.
+  Changed wallet states are injected; this is not an end-to-end chain reorg test.
+- `paymaster_wallet_security_tests/provider_final_commit_spends_budget_atomically`
+  also checks repeated real durable recovery while the exact final is in mempool.
+- `paymaster_wallet_security_tests/provider_user_authorization_honors_exact_reserved_safety_binding`.
+
+Six final targeted Qt cases passed, excluding fixture setup/cleanup:
+
+- `paymasterClientLiveSendProgressesAcrossAsyncPhases` rows `completed`,
+  `authorized`, and `review_changed_controls`: completion and first mempool
+  acceptance refresh once; authorization alone does not.
+- `paymasterClientSessionRpcActionsAreBound`: successful explicit retry refreshes
+  once. Its old mock provider attempt incorrectly used session-only `CONFIRMED`;
+  the fixture now uses the valid attempt state `MEMPOOL` and checks UI completion.
+- `transactionsWidgetShowsStoredHistoryWhileWalletBusy` and
+  `transactionsWidgetRefreshesOnDigiDollarSignal`.
+
+The first async-flow matrix run passed the other cancellation/error/wallet-switch
+rows; its new completion row initially used incomplete confirmation/result
+metadata, correctly rejected by the unchanged response decoder. The corrected
+row and affected mempool rows were rerun as listed above. Reports are local
+`build_msvc/paymaster-refresh-check/reserve-presets/history-*.txt` files.
+
+Guidance applied: repository/src instructions, CLAUDE reading order, DigiDollar
+architecture/maps, contribution and Qt/test guidance, developer threading/logging
+rules and C++ formatting. Full solution/full Qt suites and live-wallet reproduction
+of the earlier long pause remain operator checks; these targeted results do not
+prove that every source of latency is resolved. To run the full Windows check,
+close the wallet applications and active CLI calls normally, then use the cached
+MSVC 14.43 / Qt 5.15.10 environment from `D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+Allow several minutes; require exit 0 and no failed tests. For a remaining live
+pause, follow the opt-in benchmark instructions in the operator guide; do not
+cancel payments or release reservations for diagnosis.
+
 ## Operator finance presentation (2026-10-08)
 
 The finance page now separates selected-period results, payment/reserve costs,

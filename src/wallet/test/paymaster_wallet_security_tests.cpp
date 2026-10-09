@@ -2711,6 +2711,15 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     BOOST_CHECK_EQUAL(recovery.recovered, 1U);
     BOOST_CHECK(recovery.errors.empty());
     BOOST_CHECK(m_wallet.IsLocked());
+    size_t recovery_notifications{0};
+    boost::signals2::scoped_connection recovery_connection =
+        m_wallet.NotifyTransactionChanged.connect([&](const uint256&, ChangeType) {
+            ++recovery_notifications;
+        });
+    const auto repeat_recovery = RecoverDurablePaymasterCommits(m_wallet, commit.committed_at);
+    BOOST_CHECK(repeat_recovery.errors.empty());
+    BOOST_CHECK_EQUAL(repeat_recovery.recovered, 1U);
+    BOOST_CHECK_EQUAL(recovery_notifications, 0U);
     ProviderCommitRecord promoted_commit;
     BOOST_REQUIRE(store.GetProviderCommit(
         provider_signed.commit_key, promoted_commit));
@@ -2805,6 +2814,84 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
             BOOST_REQUIRE(coins.SpendCoin(input.prevout));
         }
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(durable_observation_skips_only_unchanged_wallet_state,
+                        TestChain100Setup)
+{
+    BOOST_REQUIRE(!g_txindex);
+    struct IndexCleanup {
+        ~IndexCleanup()
+        {
+            SyncWithValidationInterfaceQueue();
+            if (g_txindex) g_txindex->Stop();
+            g_txindex.reset();
+        }
+    } index_cleanup;
+    g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(m_node), 1 << 20, true);
+    BOOST_REQUIRE(g_txindex->Init());
+    BOOST_REQUIRE(g_txindex->StartBackgroundSync());
+    IndexWaitSynced(*g_txindex);
+    wallet::CWallet wallet{m_node.chain.get(), "durable-observation", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    const auto transaction = m_coinbase_txns.back();
+    size_t notifications{0};
+    boost::signals2::scoped_connection connection =
+        wallet.NotifyTransactionChanged.connect([&](const uint256&, ChangeType) { ++notifications; });
+    bool confirmed{false};
+    std::string error;
+    const auto observe = [&] {
+        notifications = 0;
+        return InsertAndBroadcastExactPaymasterTransaction(wallet, transaction, confirmed, error);
+    };
+    BOOST_REQUIRE_MESSAGE(observe(), error);
+    BOOST_CHECK(confirmed);
+    BOOST_CHECK_EQUAL(notifications, 1U);
+    const TxStateConfirmed original = WITH_LOCK(wallet.cs_wallet,
+        return *wallet.mapWallet.at(transaction->GetHash()).state<TxStateConfirmed>());
+    const auto unchanged_database = GetMockableDatabase(wallet).m_records;
+    BOOST_REQUIRE_MESSAGE(observe(), error);
+    BOOST_CHECK(confirmed);
+    BOOST_CHECK_EQUAL(notifications, 0U);
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == unchanged_database);
+
+    // Reconcile changed observations, including another block, a stale height,
+    // a different position, and an inactive/abandoned transaction after a reorg.
+    for (const TxState& changed : std::vector<TxState>{
+             TxStateConfirmed{uint256S("dead"), original.confirmed_block_height, original.position_in_block},
+             TxStateConfirmed{original.confirmed_block_hash, original.confirmed_block_height - 1, original.position_in_block},
+             TxStateConfirmed{original.confirmed_block_hash, original.confirmed_block_height, original.position_in_block + 1},
+             TxStateInactive{true}}) {
+        WITH_LOCK(wallet.cs_wallet, wallet.mapWallet.at(transaction->GetHash()).m_state = changed);
+        BOOST_REQUIRE_MESSAGE(observe(), error);
+        BOOST_CHECK_GT(notifications, 0U);
+        LOCK(wallet.cs_wallet);
+        const auto* restored = wallet.mapWallet.at(transaction->GetHash()).state<TxStateConfirmed>();
+        BOOST_REQUIRE(restored);
+        BOOST_CHECK(restored->confirmed_block_hash == original.confirmed_block_hash);
+        BOOST_CHECK_EQUAL(restored->confirmed_block_height, original.confirmed_block_height);
+        BOOST_CHECK_EQUAL(restored->position_in_block, original.position_in_block);
+    }
+    // Identical chain state must still repair missing durable-wallet metadata.
+    for (int field = 0; field < 3; ++field) {
+        {
+            LOCK(wallet.cs_wallet);
+            auto& entry = wallet.mapWallet.at(transaction->GetHash());
+            if (field == 0) entry.mapValue.erase("paymaster_durable_commit");
+            if (field == 1) entry.fFromMe = false;
+            if (field == 2) entry.fTimeReceivedIsTxTime = false;
+        }
+        BOOST_REQUIRE_MESSAGE(observe(), error);
+        BOOST_CHECK_EQUAL(notifications, 1U);
+        BOOST_REQUIRE_MESSAGE(observe(), error);
+        BOOST_CHECK_EQUAL(notifications, 0U);
+    }
+    CMutableTransaction altered{*transaction};
+    altered.vin.front().scriptWitness.stack.push_back({1});
+    WITH_LOCK(wallet.cs_wallet, wallet.mapWallet.at(transaction->GetHash()).tx = MakeTransactionRef(altered));
+    BOOST_CHECK(!observe());
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_WITNESS_CONFLICT");
+    BOOST_CHECK_EQUAL(notifications, 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

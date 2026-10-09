@@ -1036,9 +1036,14 @@ logging ["bench"] []
 Reproduce the short pause and note its time, wallet and tab. The node's
 `debug.log` includes `ReconcileFinalSessionsAtTip`,
 `ReconcileProviderMaintenance` and `ReconcileProviderFinances` durations.
-Those durations cover the whole call, including any lock wait; they are not a
-measurement of GUI paint latency. These added records contain function names
-and elapsed time, not payment details. Other existing benchmark records may
+`RecoverDurablePaymasterCommits` additionally measures durable recovery.
+`Slow DigiDollar history refresh` reports refreshes lasting at least one second,
+separating worker startup, wallet read/serialization (including lock waits), and
+queued Qt delivery. The history diagnostic includes wallet name and row count,
+but no addresses, amounts or transaction IDs. It does not measure table painting.
+Recovery/reconciliation durations cover the whole call, including any lock wait;
+they are not a measurement of GUI paint latency. These added records contain
+timing and diagnostic context, not payment details. Other benchmark records may
 also be emitted. Disable the category after collecting the observation if it
 was previously off:
 
@@ -1049,3 +1054,11 @@ logging [] ["bench"]
 Do not release reservations or cancel a payment to diagnose a slow tab switch.
 A measured improvement in the bounded scan regression does not by itself prove
 that every pause in a live wallet has been eliminated.
+
+Paymaster payments request the existing DD display refresh when first accepted
+into the mempool, while still shown as pending, and when confirmed. Successful
+direct payments and completions found during session reconciliation also refresh.
+Pending or canceled requests do not announce a successful payment. The history
+page still loads in the background and uses its existing periodic refresh for
+incoming payments and confirmations. Repeated recovery of an unchanged exact
+transaction no longer invalidates wallet caches or sends duplicate wallet events.

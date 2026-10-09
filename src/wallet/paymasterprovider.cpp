@@ -15,6 +15,7 @@
 #include <hash.h>
 #include <index/txindex.h>
 #include <key.h>
+#include <logging/timer.h>
 #include <node/context.h>
 #include <node/transaction.h>
 #include <paymaster/psbt.h>
@@ -506,11 +507,22 @@ bool AddExactDurableTransactionToWallet(CWallet& wallet,
         if (!MatchDurableFinalTransaction(existing->tx, transaction, error)) {
             return false;
         }
-        if (existing->m_state.index() == state.index() &&
-            (TxStateSerializedBlockHash(existing->m_state) !=
-                 TxStateSerializedBlockHash(state) ||
-             TxStateSerializedIndex(existing->m_state) !=
-                 TxStateSerializedIndex(state))) {
+        const bool same_type = existing->m_state.index() == state.index();
+        bool same_state = same_type &&
+            TxStateSerializedBlockHash(existing->m_state) == TxStateSerializedBlockHash(state) &&
+            TxStateSerializedIndex(existing->m_state) == TxStateSerializedIndex(state);
+        if (same_state && std::holds_alternative<TxStateConfirmed>(state)) {
+            same_state = existing->state<TxStateConfirmed>()->confirmed_block_height ==
+                         std::get<TxStateConfirmed>(state).confirmed_block_height;
+        }
+        const auto marker = existing->mapValue.find("paymaster_durable_commit");
+        if (same_state && existing->fTimeReceivedIsTxTime && existing->fFromMe &&
+            marker != existing->mapValue.end() && marker->second == "1") {
+            // Recovery still checks exact bytes and current chain/pool presence.
+            // An unchanged observation needs no cache invalidation or UI event.
+            return true;
+        }
+        if (same_type && !same_state) {
             require_intermediate_state = true;
             if (std::holds_alternative<TxStateInactive>(existing->m_state)) {
                 intermediate_state = TxStateInMempool{};
@@ -1076,6 +1088,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
     CWallet& wallet,
     int64_t now)
 {
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster durable transaction recovery", BCLog::BENCH);
     DurablePaymasterRecoveryReport report;
     PaymasterStore store{wallet};
     std::vector<ProviderCommitRecord> commits;

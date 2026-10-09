@@ -3239,6 +3239,7 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
                 payment_cents <= DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS
             ? payment_cents / 100.0
             : amount_cents / 100.0;
+        if (m_walletModel) Q_EMIT m_walletModel->digiDollarChanged();
         m_form.showSuccess(txid_text, recipient_amount);
         m_form.onClearClicked();
         m_form.updateBalance();
@@ -3506,6 +3507,14 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
     }
     updatePaymasterFocusMode();
     applyPaymasterPrivacy();
+    if (m_walletModel && previous_state != m_paymasterSessionState &&
+        m_paymasterSessionState == QStringLiteral("MEMPOOL") &&
+        m_paymasterBroadcastState == QStringLiteral("accepted_mempool") &&
+        IsCanonicalNonNullPaymasterHash(m_paymasterTransactionId)) {
+        // The payment is visible as pending before it confirms. Repeated
+        // observations must not restart the same history read every poll.
+        Q_EMIT m_walletModel->digiDollarChanged();
+    }
     return true;
 }
 
@@ -3570,6 +3579,7 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
             m_paymasterTerminalNoticeShown = true;
             return true;
         }
+        if (m_walletModel) Q_EMIT m_walletModel->digiDollarChanged();
         m_form.showSuccess(m_paymasterTransactionId, recipient_cents / 100.0);
         m_form.onClearClicked();
         m_paymasterStateValue->setText(

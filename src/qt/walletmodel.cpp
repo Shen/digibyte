@@ -55,6 +55,7 @@
 #include <utility>
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QSet>
@@ -1573,6 +1574,9 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
     if (m_digi_dollar_history_refresh_in_flight) return;
     m_digi_dollar_history_refresh_in_flight = true;
 
+    QElapsedTimer history_timer;
+    history_timer.start();
+
     // Capturing the shared interface keeps CWallet and DigiDollarWallet alive
     // until the worker has finished, even if the user closes or unloads the
     // wallet while history reconstruction is in progress.
@@ -1580,7 +1584,8 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
     QPointer<WalletModel> guard{this};
 
     QThread* thread = QThread::create(
-        [guard, wallet]() mutable {
+        [guard, wallet, history_timer]() mutable {
+            const qint64 worker_started_ms = history_timer.elapsed();
             UniValue result;
             QString error;
             try {
@@ -1596,11 +1601,24 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
                 error = QStringLiteral("Unknown DigiDollar history error");
             }
 
+            const qint64 read_finished_ms = history_timer.elapsed();
+            const std::string wallet_name = wallet ? wallet->getWalletName() : std::string{};
             if (!guard) return;
             QMetaObject::invokeMethod(
                 guard,
-                [guard, result = std::move(result), error = std::move(error)]() mutable {
+                [guard, result = std::move(result), error = std::move(error),
+                 history_timer, worker_started_ms, read_finished_ms, wallet_name]() mutable {
                     if (!guard) return;
+
+                    const qint64 delivered_ms = history_timer.elapsed();
+                    if (delivered_ms >= 1000) {
+                        LogPrint(BCLog::BENCH,
+                                 "[%s] Slow DigiDollar history refresh: worker start=%d ms, wallet read/serialization=%d ms, Qt delivery=%d ms, rows=%u, failed=%d\n",
+                                 wallet_name, worker_started_ms,
+                                 read_finished_ms - worker_started_ms,
+                                 delivered_ms - read_finished_ms,
+                                 result.isArray() ? result.size() : 0, !error.isEmpty());
+                    }
 
                     guard->m_digi_dollar_history_refresh_in_flight = false;
                     if (error.isEmpty() && result.isArray()) {

@@ -89,6 +89,17 @@ Qt accepts this Core-validated local confirmation without requiring a fabricated
 provider result. A canonical txid, current successful recipient-payment observation
 and confirmed session are still required; terminal state alone is not success.
 
+Durable Paymaster recovery still validates exact transaction bytes and current
+chain/pool presence on each observation. An identical wallet state with complete
+durable metadata skips `AddToWallet`, preserving balance caches and avoiding
+duplicate UI notifications. Changed confirmation block, height, position or
+durable metadata is reconciled normally. Qt emits the existing DigiDollar update
+signal when a validated Paymaster session first enters the mempool and when its
+payment completes. Repeated observations and unsigned/failed requests do not
+trigger these refreshes; an unconfirmed payment remains displayed as pending.
+Opt-in `bench` diagnostics time durable recovery and separate slow shared DD
+history worker startup, wallet read/serialization and queued Qt delivery.
+
 Transport/retry source baseline: `1789c803be` (2026-09-27). Alternative recovery
 releases the original payment lease after durable preparation so the separate
 recovery lease can use the default single outgoing slot. Expected Capacity

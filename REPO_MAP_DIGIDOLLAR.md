@@ -1108,6 +1108,9 @@ or chain parameters.
 - Produces user input-control proofs without exposing private key material.
 
 ### src/wallet/paymasterprovider.{h,cpp}
+- Exact durable observations skip unchanged wallet updates after witness/state
+  checks, preserving caches and notifications; changed state/metadata still
+  reconciles. `RecoverDurablePaymasterCommits` has opt-in `bench` timing.
 - Wallet-specific provider proof construction, announcement generation,
   operational slot reservation, and policy/pool readiness integration.
 - Persists and validates wallet-local liquidity policy and maintenance-ledger
@@ -1480,6 +1483,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   controls, persistent-session presentation, polling, exact-offer confirmation,
   retries and recovery. It reuses `WalletModel::executeRpcAsync` and the existing
   confirmation guards; Core remains authoritative for spending and persistence.
+- First mempool acceptance and validated direct/reconciled payment completions
+  emit `digiDollarChanged`, so DD history need not wait for its periodic refresh.
+  Repeated observations do not emit additional refresh signals.
 - `IsValidatedPaymasterCompletion` in `paymasterconfirmation.h` also accepts a
   confirmed, Core-validated recipient payment with no provider-result envelope.
   Terminal state alone and unknown result states remain insufficient.
@@ -1563,6 +1569,8 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `SerializeDigiDollarHistory()` preserves wallet status, including `expired_mint`,
   across the asynchronous history bridge; both overview and transaction history
   render that upstream status.
+- History refreshes taking at least one second report worker startup, wallet
+  read/serialization and Qt delivery times under opt-in `bench` logging.
 
 ### src/qt/paymasterwallet.cpp/h
 - `PaymasterQt::ExecuteSigningRpcAsync()` reads encryption state, signs through
