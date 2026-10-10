@@ -6,17 +6,21 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chainparams.h>
+#include <coins.h>
 #include <hash.h>
 #include <key.h>
 #include <key_io.h>
 #include <paymaster/protocol.h>
 #include <paymaster/psbt.h>
 #include <paymaster/reservation.h>
+#include <paymaster/txbuilder.h>
 #include <paymaster/wire.h>
 #include <script/descriptor.h>
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <validation.h>
 #include <version.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -25,6 +29,10 @@
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 namespace {
+
+struct PaymasterWalletSetup : WalletTestingSetup {
+    PaymasterWalletSetup() : WalletTestingSetup{ChainType::REGTEST} {}
+};
 
 template <typename T>
 std::vector<unsigned char> SerializePaymasterTestArtifact(const T& value)
@@ -54,7 +62,7 @@ std::vector<COutPoint> InputsOwnedBy(
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_psbt_tests, WalletTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_psbt_tests, PaymasterWalletSetup)
 
 BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
 {
@@ -94,6 +102,32 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
         {{transaction.vin[0].prevout, user_tx, InputRole::USER_DGB},
          {transaction.vin[1].prevout, provider_tx, InputRole::PROVIDER_DGB}},
         trusted, error));
+
+    // An authenticated provider remains untrusted for transaction contents.
+    // Even a wallet containing both parties' keys must refuse each mutation
+    // before creating either signature, independently of network validation.
+    for (const auto party : {SigningParty::USER, SigningParty::PROVIDER}) {
+        for (int attack = 0; attack < 10; ++attack) {
+            BOOST_TEST_CONTEXT("signing party " << static_cast<int>(party) << ", mutation " << attack) {
+                PartiallySignedTransaction malicious{trusted.psbt};
+                switch (attack) {
+                case 0: malicious.tx->vout[0].scriptPubKey = script; break;
+                case 1: --malicious.tx->vout[0].nValue; break;
+                case 2: malicious.tx->vin[0].prevout = transaction.vin[1].prevout; break;
+                case 3: malicious.tx->vin[1].prevout = transaction.vin[0].prevout; break;
+                case 4: --malicious.tx->vin[0].nSequence; break;
+                case 5: ++malicious.tx->nLockTime; break;
+                case 6: ++malicious.tx->nVersion; break;
+                case 7: ++malicious.inputs[0].witness_utxo.nValue; break;
+                case 8: ++malicious.inputs[1].witness_utxo.nValue; break;
+                case 9: malicious.inputs[0].sighash_type = SIGHASH_ALL | SIGHASH_ANYONECANPAY; break;
+                }
+                BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, malicious, trusted, party, error));
+                BOOST_CHECK(!PSBTInputSigned(malicious.inputs[0]));
+                BOOST_CHECK(!PSBTInputSigned(malicious.inputs[1]));
+            }
+        }
+    }
 
     PartiallySignedTransaction psbt{trusted.psbt};
     BOOST_REQUIRE(SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::USER, error));
@@ -157,6 +191,141 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
         invalid_provider_witness, invalid_provider_witness_tx.GetHash(),
         invalid_provider_witness_tx.GetWitnessHash(), trusted, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGNATURE_INVALID");
+}
+
+BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_payment)
+{
+    CKey user_key, provider_key, impostor;
+    user_key.MakeNewKey(true);
+    provider_key.MakeNewKey(true);
+    impostor.MakeNewKey(true);
+    FlatSigningProvider signing_provider;
+    std::string error;
+    auto descriptor = Parse("tr(" + EncodeSecret(user_key) + ")", signing_provider,
+        error, /*require_checksum=*/false);
+    BOOST_REQUIRE(descriptor);
+    WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+    TaprootBuilder user_builder, provider_builder;
+    user_builder.Finalize(XOnlyPubKey{user_key.GetPubKey()});
+    provider_builder.Finalize(XOnlyPubKey{provider_key.GetPubKey()});
+    const CScript user_script = GetScriptForDestination(user_builder.GetOutput());
+    const CScript provider_script = GetScriptForDestination(provider_builder.GetOutput());
+    CMutableTransaction user_source;
+    user_source.SetDigiDollarType(::DD_TX_TRANSFER);
+    user_source.vin.emplace_back(COutPoint{uint256::ONE, 80});
+    user_source.vout.emplace_back(0, user_script);
+    user_source.vout.emplace_back(0, CScript{} << OP_RETURN
+        << std::vector<unsigned char>{'D', 'D'} << CScriptNum(DD_TX_TRANSFER) << CScriptNum(1000));
+    const auto user_tx = MakeTransactionRef(std::move(user_source));
+    CMutableTransaction provider_source;
+    provider_source.vin.emplace_back(COutPoint{uint256::ONE, 81});
+    provider_source.vout.emplace_back(COIN, provider_script);
+    const auto provider_tx = MakeTransactionRef(std::move(provider_source));
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, signing_provider, "", false));
+        BOOST_REQUIRE(m_wallet.AddToWallet(user_tx, TxStateInMempool{}));
+    }
+    {
+        LOCK(cs_main);
+        auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();
+        coins.AddCoin({user_tx->GetHash(), 0}, Coin{user_tx->vout[0], 0, false}, false);
+        coins.AddCoin({provider_tx->GetHash(), 0}, Coin{provider_tx->vout[0], 0, false}, false);
+    }
+    CollaborativeTransferParams params;
+    params.inputs = {{COutPoint{user_tx->GetHash(), 0}, user_tx, InputRole::USER_DD},
+        {COutPoint{provider_tx->GetHash(), 0}, provider_tx, InputRole::PROVIDER_DGB}};
+    params.dd_outputs = {{provider_script, 100, DDOutputRole::RECIPIENT},
+        {user_script, 900, DDOutputRole::USER_CHANGE}};
+    params.dgb_outputs = {CTxOut{9 * COIN / 10, provider_script}};
+    params.fee_rate = 1;
+    const auto built = BuildUnsignedCollaborativeTransfer(params, Params(), *m_node.chainman);
+    BOOST_REQUIRE_MESSAGE(built.success, built.error);
+    CollaborativePSBTTemplate trusted;
+    BOOST_REQUIRE(CreateCollaborativePSBTTemplate(built.tx, params.inputs, trusted, error));
+    constexpr int64_t now{100000};
+    PaymentIntent intent;
+    intent.genesis_hash = Params().GenesisBlock().GetHash();
+    intent.provider_id = GetPaymasterId(XOnlyPubKey{provider_key.GetPubKey()});
+    intent.request_id = "550e8400-e29b-41d4-a716-446655440080";
+    intent.session_id = uint256S("80");
+    intent.client_nonce = uint256S("81");
+    intent.canonical_request_hash = uint256S("82");
+    intent.user_dd_inputs = {params.inputs[0].outpoint};
+    intent.recipient_script = provider_script;
+    intent.recipient_amount = DDCents{100};
+    intent.user_dd_change_script = user_script;
+    intent.offer_id = uint256S("83");
+    intent.policy_hash = uint256S("84");
+    intent.funding_model = FundingModel::USER_PAID;
+    intent.expires_at = now + 60;
+    PaymasterQuote quote;
+    quote.genesis_hash = intent.genesis_hash;
+    quote.provider_id = intent.provider_id;
+    quote.quote_id = uint256S("85");
+    quote.funding_model = intent.funding_model;
+    quote.intent_hash = GetPaymentIntentHash(intent);
+    quote.offer_id = intent.offer_id;
+    quote.policy_hash = intent.policy_hash;
+    quote.reserved_dgb_inputs = {{params.inputs[1].outpoint,
+        CMutableTransaction{*provider_tx}, DGBSatoshis{COIN}}};
+    quote.dgb_change_script = provider_script;
+    quote.network_fee = DGBSatoshis{COIN / 10};
+    quote.created_at = now;
+    quote.expires_at = now + 60;
+    quote.retry_until = now + DEFAULT_RETRY_SECONDS;
+    quote.unsigned_transaction = built.tx;
+    quote.unsigned_txid = CTransaction{built.tx}.GetHash();
+    quote.template_commitment = GetCollaborativeTemplateCommitment(intent, quote, trusted);
+    const OfferTerms offer{intent.offer_id, intent.policy_hash, FundingModel::USER_PAID,
+        SponsorshipScope::PUBLIC, 0, DDCents{100}, DDCents{1000000}};
+    const auto sign_quote = [](PaymasterQuote& candidate, const CKey& key) {
+        candidate.identity_signature.resize(64);
+        BOOST_REQUIRE(key.SignSchnorr(GetPaymasterQuoteSignatureHash(candidate),
+            candidate.identity_signature, nullptr, uint256{}));
+    };
+    sign_quote(quote, provider_key);
+    CollaborativePSBTTemplate reconstructed;
+    BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuoteForClient(quote, intent, offer,
+        XOnlyPubKey{provider_key.GetPubKey()}, DDCents{0}, now, error), error);
+    BOOST_REQUIRE_MESSAGE(BuildTrustedQuoteTemplate(m_wallet, intent, quote, Params(),
+        *m_node.chainman, reconstructed, error), error);
+    for (int attack = 0; attack < 8; ++attack) {
+        BOOST_TEST_CONTEXT("correctly signed malicious quote " << attack) {
+            auto malicious = quote;
+            switch (attack) {
+            case 0: malicious.unsigned_transaction.vout[0].scriptPubKey = user_script; break;
+            case 1:
+                malicious.unsigned_transaction.vout.back().scriptPubKey = CScript{} << OP_RETURN
+                    << std::vector<unsigned char>{'D', 'D'} << CScriptNum(DD_TX_TRANSFER)
+                    << CScriptNum(101) << CScriptNum(899);
+                break;
+            case 2: malicious.unsigned_transaction.vout[1].scriptPubKey = provider_script; break;
+            case 3: malicious.unsigned_transaction.vout.emplace_back(0, provider_script); break;
+            case 4: malicious.unsigned_transaction.vin[0].prevout = params.inputs[1].outpoint; break;
+            case 5: ++malicious.unsigned_transaction.nLockTime; break;
+            case 6: ++malicious.unsigned_transaction.nVersion; break;
+            case 7: --malicious.unsigned_transaction.vout[2].nValue; break;
+            }
+            malicious.unsigned_txid = CTransaction{malicious.unsigned_transaction}.GetHash();
+            sign_quote(malicious, provider_key);
+            // A real provider signature and consistent txid alone are not the
+            // firewall. Reconstruction from our wallet/intent must still fail.
+            BOOST_REQUIRE(ValidatePaymasterQuoteForClient(malicious, intent, offer,
+                XOnlyPubKey{provider_key.GetPubKey()}, DDCents{0}, now, error));
+            BOOST_CHECK(!BuildTrustedQuoteTemplate(m_wallet, intent, malicious, Params(),
+                *m_node.chainman, reconstructed, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_QUOTE_TRANSACTION_MISMATCH");
+            BOOST_CHECK(!reconstructed.psbt.tx);
+        }
+    }
+    auto exchanged_identity = quote;
+    exchanged_identity.provider_id = GetPaymasterId(XOnlyPubKey{impostor.GetPubKey()});
+    sign_quote(exchanged_identity, impostor);
+    BOOST_CHECK(!ValidatePaymasterQuoteForClient(exchanged_identity, intent, offer,
+        XOnlyPubKey{impostor.GetPubKey()}, DDCents{0}, now, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH");
 }
 
 BOOST_AUTO_TEST_CASE(payment_intent_control_proofs_use_only_wallet_owned_bip86_inputs)
