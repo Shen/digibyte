@@ -39,7 +39,10 @@ def digidollar_scriptpubkey(address):
 
 def sponsorship_capability(secret, descriptor, recipient_script, amount_cents,
                            payment_request_nonce, expires_at, genesis_hash):
-    """Create the canonical V1 capability consumed by restricted sponsorship."""
+    """Retained V1 fixture for future Restricted work; new service is disabled.
+
+    Active codec/replay coverage is in paymaster_sponsorship_tests.
+    """
     unsigned = (
         struct.pack("<H", 1) +
         ser_uint256(int(genesis_hash, 16)) +
@@ -2274,145 +2277,31 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(wallet.stoppaymaster()["running"], False)
         assert_equal(shadow.stoppaymaster()["running"], False)
 
-        self.log.info("Complete a non-gossiped restricted SPONSORED transfer")
-        policy["sponsorship_scope"] = "restricted"
-        # Public and restricted sponsorship use independent safety budgets.
-        sponsorship_transition_safety = provider_safety_policy(
-            policy["funding_models"], "public")
-        sponsorship_transition_safety["restricted_sponsored"] = (
-            sponsorship_transition_safety["public_sponsored"].copy())
-        cli.setpaymastersafetypolicy(sponsorship_transition_safety)
-        persisted_policy = cli.setpaymasterpolicy(policy)
-        cli.setpaymastersafetypolicy(
-            provider_safety_policy(policy["funding_models"],
-                                   policy["sponsorship_scope"]))
+        self.log.info("Restricted new service is disabled without altering the saved public offer")
+        saved_public_policy = wallet.getpaymasterinfo()["policy"]
+        disabled_policy = dict(policy, sponsorship_scope="restricted")
+        for api in (wallet, cli):
+            assert_raises_rpc_error(
+                -4, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED",
+                api.setpaymasterpolicy, disabled_policy)
+            assert_raises_rpc_error(
+                -8, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED",
+                api.createrestrictedpaymasterdescriptor,
+                "11" * 32, "Disabled sponsor", 300)
+        assert_equal(wallet.getpaymasterinfo()["policy"], saved_public_policy)
+        assert_equal(saved_public_policy, persisted_policy)
 
-        # Restore sufficient operational capacity after the prior transfers.
-        # Capability reuse itself is rejected earlier by the persistent
-        # Capacity-v5 nonce firewall and never consumes this pool.
-        restricted_target = {
-            "admission_dgb_slots": 3,
-            "operational_dgb_slots": 2,
-        }
-        restricted_preview = cli.preparepaymasterpool(restricted_target)
-        assert_equal(restricted_preview["executed"], False)
-        if (restricted_preview["missing_admission_dgb_slots"] > 0 or
-                restricted_preview["missing_operational_dgb_slots"] > 0):
-            restricted_target["execute"] = True
-            restricted_target["plan_id"] = restricted_preview["plan_id"]
-            restricted_pool = cli.preparepaymasterpool(restricted_target)
-            assert_equal(restricted_pool["executed"], True)
-            assert_equal(len(restricted_pool["dgb_txid"]), 64)
+        # Preserve the public-provider restart fixture after the preceding
+        # transfers. Legacy Restricted codecs/capabilities remain covered by
+        # paymaster_sponsorship_tests; no new Restricted payment is permitted.
+        restart_target = {"admission_dgb_slots": 3, "operational_dgb_slots": 2}
+        restart_preview = cli.preparepaymasterpool(restart_target)
+        if (restart_preview["missing_admission_dgb_slots"] > 0 or
+                restart_preview["missing_operational_dgb_slots"] > 0):
+            restart_target.update(execute=True, plan_id=restart_preview["plan_id"])
+            assert_equal(cli.preparepaymasterpool(restart_target)["executed"], True)
             self.generatetoaddress(node, 1, wallet.getnewaddress())
-
-        restricted_started = wallet.startpaymaster()
-        assert_equal(restricted_started["running"], True)
-        assert_equal(restricted_started["ready"], True)
-        assert "announcement_sequence" not in restricted_started
-
-        sponsor_secret = (42).to_bytes(32, "big")
-        sponsor_key, _ = compute_xonly_pubkey(sponsor_secret)
-        assert sponsor_key is not None
-        descriptor = wallet.createrestrictedpaymasterdescriptor(
-            sponsor_key.hex(), "Functional Test Sponsor", 300)
-        assert_equal(descriptor["provider_id"], identity["provider_id"])
-        assert_equal(descriptor["policy_hash"], persisted_policy["policy_hash"])
-
-        # Refill only the client DD side. Restricted sponsorship remains free
-        # to the user and is never exposed through public discovery.
-        restricted_funding = wallet.senddigidollar(client_address, 100)
-        assert_equal(len(restricted_funding["txid"]), 64)
-        self.generatetoaddress(node, 1, wallet.getnewaddress())
-        self.sync_blocks()
-        assert_equal(client.getdigidollarbalance()["total"], 299)
-
-        restricted_amount = 100
-        payment_nonce = "7f" + "00" * 30 + "01"
-        capability_expiry = min(
-            descriptor["expires_at"], int(time.time()) + 240)
-        capability = sponsorship_capability(
-            sponsor_secret,
-            descriptor,
-            digidollar_scriptpubkey(recipient),
-            restricted_amount,
-            payment_nonce,
-            capability_expiry,
-            node.getblockhash(0),
-        )
-        restricted_options = {
-            "maximum_provider_attempts": 1,
-            "provider_identity_key": descriptor["provider_identity_key"],
-            "restricted_service_descriptor": descriptor["descriptor"],
-            "sponsorship_capability": capability,
-        }
-        restricted_txid = complete_paymaster_transfer(
-            "550e8400-e29b-41d4-a716-446655440103",
-            restricted_amount,
-            0,
-            restricted_options,
-        )
-        assert restricted_txid not in (final_txid, sponsored_txid)
-        self.generatetoaddress(node, 1, wallet.getnewaddress())
-        self.sync_blocks()
-        assert_equal(client.getdigidollarbalance()["total"], 199)
-        restricted_provider_safety = wallet.getpaymastersafetystatus()[
-            "restricted_sponsored"]
-        assert_equal(restricted_provider_safety[
-            "reserved_network_fee_satoshis"], 0)
-        assert_equal(restricted_provider_safety[
-            "spent_network_fee_last_day_satoshis"], 10000000)
-        assert_equal(restricted_provider_safety["completed_last_day"], 1)
-        restricted_finance = wallet.getpaymasterfinancestatus({
-            "period": "all",
-            "include_events": True,
-            "limit": 10000,
-        })
-        restricted_events = [
-            event for event in restricted_finance["events"]
-            if event.get("transaction_id") == restricted_txid
-        ]
-        assert_equal(len(restricted_events), 1)
-        assert_equal(restricted_events[0]["kind"], "transfer")
-        assert_equal(restricted_events[0]["state"], "confirmed")
-        assert_equal(restricted_events[0]["funding_model"], "sponsored")
-        assert_equal(restricted_events[0]["sponsorship_scope"], "restricted")
-        assert_equal(restricted_events[0]["dd_income_cents"], 0)
-        assert_equal(restricted_events[0]["dgb_cost_satoshis"], 10000000)
-
-        self.log.info("Reject reuse of the consumed restricted capability")
-        # The recovered 199-cent output cannot fund an exact 100-cent payment:
-        # its 99-cent change would be below the consensus minimum. Give the
-        # replay attempt a fresh exact input so this test reaches the durable
-        # Capacity-v5 nonce firewall instead of failing in local coin selection.
-        # Restricted capabilities intentionally use their payment nonce as the
-        # pre-intent client nonce; reuse is therefore rejected before the
-        # capability or payment intent is disclosed again.
-        replay_funding = wallet.senddigidollar(client_address, 100)
-        assert_equal(len(replay_funding["txid"]), 64)
-        self.generatetoaddress(node, 1, wallet.getnewaddress())
-        self.sync_blocks()
-        assert_equal(client.getdigidollarbalance()["total"], 299)
-        replay_options = {
-            "fee_mode": "paymaster",
-            "request_id": "550e8400-e29b-41d4-a716-446655440104",
-            "maximum_paymaster_fee_cents": 0,
-            "privacy": "standard",
-            "selection": "lowest_total_cost",
-        }
-        replay_options.update(restricted_options)
-
-        def replay_client_send():
-            return send_with_transport_retry(
-                client, recipient, restricted_amount, replay_options)
-
-        replay_request = replay_client_send()
-        assert_equal(replay_request["status"], "pending")
-        self.wait_until(lambda: replay_client_send()["queued"])
-        assert_raises_rpc_error(
-            -4,
-            "PAYMASTER_CAPACITY_REQUEST_CONFLICT",
-            wallet.processpaymasterrequests,
-        )
+        assert_equal(wallet.startpaymaster()["ready"], True)
         assert_equal(wallet.stoppaymaster()["running"], False)
         persisted_sequence = wallet.getpaymasterinfo()["announcement_sequence"]
         # Policy and liquidity refreshes may each consume another valid
@@ -2461,9 +2350,9 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         assert_equal(recovered_safety["restricted_sponsored"]
                      ["reserved_network_fee_satoshis"], 0)
         assert_equal(recovered_safety["restricted_sponsored"]
-                     ["spent_network_fee_last_day_satoshis"], 10000000)
+                     ["spent_network_fee_last_day_satoshis"], 0)
         assert_equal(recovered_safety["restricted_sponsored"]
-                     ["completed_last_day"], 1)
+                     ["completed_last_day"], 0)
 
         self.log.info(
             "Unlock resumes autostart without storing a passphrase")
@@ -2525,11 +2414,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "capability replay request ID": "550e8400-e29b-41d4-a716-446655440104",
             "recovery request ID": recovery_request_id,
             "recovery session ID": interrupted_session_id,
-            "restricted service descriptor": descriptor["descriptor"],
-            "restricted sponsorship capability": capability,
-            "restricted payment nonce": payment_nonce,
             "recovery transaction": recovery_hex,
-            "sponsor secret": sponsor_secret.hex(),
             "wallet passphrase": "paymaster test passphrase",
         }
         for index, psbt in enumerate(set(observed_paymaster_psbts)):

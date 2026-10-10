@@ -646,7 +646,7 @@ RPCHelpMan getpaymasterclientinfo()
             result.pushKV("maximum_user_total_cents", MAX_DD_OUTPUT_CENTS);
             result.pushKV("fee_modes", strings({"dgb", "paymaster", "auto"}));
             result.pushKV("funding_models", strings({"user_paid", "sponsored"}));
-            result.pushKV("sponsorship_scopes", strings({"public", "restricted"}));
+            result.pushKV("sponsorship_scopes", strings({"public"}));
             result.pushKV("supported", true);
             result.pushKV("ready", errors.empty());
             result.pushKV("readiness_errors", std::move(errors));

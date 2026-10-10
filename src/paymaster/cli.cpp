@@ -401,21 +401,22 @@ public:
             std::cout << "Existing provider identity and name remain unchanged.\n";
         }
         OperatorShowOffer(choices.policy);
-        if (OperatorCustomize("Customer offer")) {
+        const bool restricted_saved = choices.policy.find_value("sponsorship_scope").get_str() == "restricted";
+        if (restricted_saved) std::cout << "Restricted sponsorship is disabled. Choose and review a supported offer; saved settings are not converted automatically.\n";
+        if (restricted_saved || OperatorCustomize("Customer offer")) {
             const bool paid_before = OperatorAllowsModel(choices.policy, "user_paid");
             const bool sponsored_before = OperatorAllowsModel(choices.policy, "sponsored");
             const auto selected = paid_before ? (sponsored_before ? "both" : "user_paid") :
-                choices.policy.find_value("sponsorship_scope").get_str() == "restricted" ? "restricted" : "sponsored";
+                restricted_saved ? "" : "sponsored";
             const auto mode = OperatorSelect("Who pays for this service?", {
                 {"user_paid", "Customer pays a DD service fee (recommended)", "You supply DGB network fees and receive the configured percentage in DD. Income and costs use different assets."},
                 {"sponsored", "You sponsor public payments", "You pay the DGB network fee and receive no DD service fee. Anyone may request service within your limits."},
-                {"both", "Customer-paid and public sponsored payments", "Keep separate budgets for customer-paid payments and sponsorship open to anyone."},
-                {"restricted", "Restricted sponsorship only (advanced)", "Sponsor only authorized requests, with no DD service fee. Cannot be combined with customer-paid service. Separate authorization grants are required; this assistant does not issue them."}}, selected);
+                {"both", "Customer-paid and public sponsored payments", "Keep separate budgets for customer-paid payments and sponsorship open to anyone."}}, selected);
             UniValue models{UniValue::VARR};
             if (mode == "user_paid" || mode == "both") models.push_back("user_paid");
             if (mode != "user_paid") models.push_back("sponsored");
             choices.policy.pushKV("funding_models", models);
-            choices.policy.pushKV("sponsorship_scope", mode == "restricted" ? "restricted" : "public");
+            choices.policy.pushKV("sponsorship_scope", "public");
             if (!OperatorAllowsModel(choices.policy, "user_paid")) choices.policy.pushKV("fee_rate_bps", 0);
             do {
                 OperatorFields(choices.policy, true, OperatorAllowsModel(choices.policy, "user_paid") ? std::set<std::string>{} : std::set<std::string>{"fee_rate_bps"});

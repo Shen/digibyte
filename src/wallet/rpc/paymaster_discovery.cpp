@@ -552,6 +552,11 @@ RPCHelpMan requestpaymasterquote()
                     throw JSONRPCError(RPC_WALLET_ERROR, error);
                 }
             }
+            // Existing durable authorizations above retain their exact recovery
+            // path. A new request must respect current feature availability.
+            if (restricted && !CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+            }
             if (restricted) {
                 const std::vector<unsigned char> key_bytes =
                     ParseHexV(options.find_value("provider_identity_key"), "provider_identity_key");
@@ -1606,6 +1611,10 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                 *context.paymaster, store, durable_session, error)) {
             throw JSONRPCError(RPC_WALLET_ERROR, error);
         }
+    }
+    // Do not apply the new-request gate to the durable authorization resume above.
+    if (restricted && !CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, error);
     }
     const DDCents effective_fee_cap =
         EffectiveClientServiceFeeCap(*wallet, DDCents{fee_cap}, error);

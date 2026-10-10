@@ -1696,7 +1696,8 @@ RPCHelpMan processpaymasterrequests()
                                    "PAYMASTER_REQUEST_QUEUE_CORRUPT");
             }
 
-            if (!ValidateQuoteRequestEnvelope(*quote_request, Params().GenesisBlock().GetHash(),
+            if (!CheckNewSponsorshipScope(quote_request->intent.sponsorship_scope, error) ||
+                !ValidateQuoteRequestEnvelope(*quote_request, Params().GenesisBlock().GetHash(),
                                               now, error)) {
                 if (!AcknowledgeRejectedDirectMessage(
                         *context.paymaster, direct, error)) {

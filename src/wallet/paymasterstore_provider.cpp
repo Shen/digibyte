@@ -13,6 +13,7 @@
 #include <hash.h>
 #include <node/context.h>
 #include <paymaster/protocol.h>
+#include <paymaster/provider.h>
 #include <paymaster/psbt.h>
 #include <paymaster/validation.h>
 #include <paymaster/wire.h>
@@ -1167,6 +1168,10 @@ bool PaymasterStore::AcceptClientAuthorization(
         error = "PAYMASTER_QUOTE_ENCODING";
         return false;
     }
+
+    // A pre-existing accepted authorization may finish/recover. An old quote
+    // that was never approved cannot acquire new restricted spending authority.
+    if (!already_accepted && !CheckNewSponsorshipScope(quote_response.quote.sponsorship_scope, error)) return false;
 
     ClientSafetyPolicy client_policy;
     ClientFeeLedger client_fee_ledger;

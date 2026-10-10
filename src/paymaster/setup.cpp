@@ -680,6 +680,7 @@ void CheckSetupChoices(const SetupChoices& choices)
     policy.quote_ttl = choices.policy.find_value("quote_ttl").getInt<int64_t>();
     policy.maximum_network_fee = DGBSatoshis{choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>()};
     std::string error;
+    if (!CheckNewSponsorshipScope(policy.sponsorship_scope, error)) throw std::runtime_error(error);
     if (!ValidateProviderPolicy(policy, error)) throw std::runtime_error(error);
 
     const auto funding_limits = [](const UniValue& value) {

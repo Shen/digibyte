@@ -709,6 +709,13 @@ struct ServiceFeePlan {
 };
 
 bool PolicyAllowsFundingModel(const ProviderPolicy& policy, FundingModel model);
+/** Availability gate for NEW service, separate from persisted/protocol validation.
+ * Restricted sponsorship is parked for a future payment-voucher design. Keep
+ * its codecs, signatures, accounting and recovery checks valid for old records.
+ * There is deliberately no runtime switch to re-enable new restricted work.
+ * See doc/digidollar-paymaster-implementation.md (parked restricted sponsorship).
+ */
+bool CheckNewSponsorshipScope(SponsorshipScope scope, std::string& error);
 bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error);
 /** Pure validators shared by setup and provider admission; no wallet/node access. */
 bool ValidateProviderFundingSafetyLimits(const FundingSafetyLimits& limits, bool required,

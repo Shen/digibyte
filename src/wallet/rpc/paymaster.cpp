@@ -719,6 +719,13 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     if (!result.wallet_eligible) result.errors.push_back(eligibility_error);
     if (!result.have_identity) result.errors.push_back("PAYMASTER_IDENTITY_NOT_FOUND");
     if (!result.have_policy) result.errors.push_back("PAYMASTER_POLICY_NOT_FOUND");
+    if (result.have_policy) {
+        std::string scope_error;
+        if (!DigiDollar::Paymaster::CheckNewSponsorshipScope(result.policy.sponsorship_scope, scope_error)) {
+            result.errors.push_back(scope_error);
+            result.available_funding_models = 0;
+        }
+    }
     if (!result.have_safety_policy) result.errors.push_back("PAYMASTER_SAFETY_POLICY_NOT_FOUND");
     if (!result.have_budget_ledger) result.errors.push_back("PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND");
     if (result.have_settings && result.have_policy && result.settings.policy_hash != DigiDollar::Paymaster::GetProviderPolicyHash(result.policy)) {

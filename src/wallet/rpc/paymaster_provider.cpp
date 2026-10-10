@@ -383,6 +383,7 @@ RPCHelpMan createrestrictedpaymasterdescriptor()
 {
     return RPCHelpMan{
         "createrestrictedpaymasterdescriptor",
+        "Currently disabled: restricted sponsorship is reserved for a future extension.\n"
         "Create a short-lived provider-signed restricted service descriptor. "
         "The descriptor is not announced or persisted by the node.\n" +
             HELP_REQUIRING_PASSPHRASE,
@@ -409,6 +410,10 @@ RPCHelpMan createrestrictedpaymasterdescriptor()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            std::string scope_error;
+            if (!CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, scope_error)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, scope_error);
+            }
             wallet->BlockUntilSyncedToCurrentChain();
             const std::vector<unsigned char> key_bytes =
                 ParseHexV(request.params[0], "sponsor_authorization_key");

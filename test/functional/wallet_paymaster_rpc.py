@@ -61,6 +61,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.add_wallet_options(parser, legacy=False)
         parser.add_argument("--client-preparation-only", action="store_true",
                             help="Run capability, failed-preparation and paused-provider cancellation contracts only")
+        parser.add_argument("--restricted-disabled-only", action="store_true",
+                            help="Run disabled Restricted RPC/CLI contracts without executing payments")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -115,6 +117,46 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_snapshot_equal(
             before, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
 
+    def check_restricted_disabled(self, provider, client):
+        self.log.info("Restricted is disabled through RPC and CLI without new reservations")
+        provider_cli = self.nodes[0].cli("-rpcwallet=provider")
+        client_cli = self.nodes[1].cli("-rpcwallet=client")
+        saved_policy = provider.getpaymasterinfo()["policy"]
+        saved_safety = provider.getpaymastersafetystatus()
+        provider_reservations = provider.listpaymasterreservations()
+        client_reservations = client.listpaymasterreservations()
+        sessions = client.listdigidollarsendsessions()
+        recipient = provider.getdigidollaraddress()
+        disabled = "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"
+        restricted_policy = dict(saved_policy)
+        restricted_policy.pop("policy_hash", None)
+        restricted_policy.update(funding_models=["sponsored"],
+                                 sponsorship_scope="restricted", fee_rate_bps=0)
+        restricted_options = {
+            "request_id": "550e8400-e29b-41d4-a716-446655449201",
+            "fee_mode": "paymaster", "maximum_paymaster_fee_cents": 0,
+            "maximum_provider_attempts": 1,
+            "provider_identity_key": "11" * 32,
+            "restricted_service_descriptor": "00",
+            "sponsorship_capability": "00",
+        }
+        for provider_api, client_api in ((provider, client), (provider_cli, client_cli)):
+            assert_equal(client_api.getpaymasterclientinfo()["sponsorship_scopes"], ["public"])
+            assert_raises_rpc_error(-4, disabled, provider_api.setpaymasterpolicy, restricted_policy)
+            assert_raises_rpc_error(-8, disabled, provider_api.createrestrictedpaymasterdescriptor,
+                                   "11" * 32, "Disabled test", 300)
+            assert_raises_rpc_error(-8, disabled, client_api.senddigidollar,
+                                   recipient, 100, "", 0, None, "cents", restricted_options)
+            assert_raises_rpc_error(-8, disabled, client_api.requestpaymasterquote,
+                                   "11" * 32, {**restricted_options, "address": recipient,
+                                              "amount_cents": 100,
+                                              "selected_inputs": [{"txid": "22" * 32, "vout": 0}]})
+        assert_equal(provider.getpaymasterinfo()["policy"], saved_policy)
+        assert_equal(provider.getpaymastersafetystatus(), saved_safety)
+        assert_equal(provider.listpaymasterreservations(), provider_reservations)
+        assert_equal(client.listpaymasterreservations(), client_reservations)
+        assert_equal(client.listdigidollarsendsessions(), sessions)
+
     def run_test(self):
         harness = PaymasterFunctionalHarness(self)
         provider, client = harness.create_wallets()
@@ -122,6 +164,10 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             operation_mode="manual", carrier_cents=4_000,
             fee_rate_bps=1_900)
         assert_equal(info["operation_mode"], "manual")
+        if self.options.restricted_disabled_only:
+            harness.fund_client_dd(200)
+            self.check_restricted_disabled(provider, client)
+            return
         # Keep one independent operational carrier available after the submit
         # contract spends another one.  This lets release_slot be tested
         # without depending on successor promotion timing.
@@ -155,6 +201,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
         self.sync_blocks()
         assert_equal(client.getdigidollarbalance()["total"], 1_500)
+        self.check_restricted_disabled(provider, client)
 
         # Use a third wallet as an independent recipient so every value-moving
         # assertion distinguishes client change from recipient value.
@@ -179,7 +226,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client_info["maximum_user_total_cents"], 10_000_000)
         assert_equal(set(client_info["fee_modes"]), {"dgb", "auto", "paymaster"})
         assert_equal(client_info["funding_models"], ["user_paid", "sponsored"])
-        assert_equal(client_info["sponsorship_scopes"], ["public", "restricted"])
+        assert_equal(client_info["sponsorship_scopes"], ["public"])
         assert_equal(client_info["supported"], True)
         self.wait_until(lambda: client.getpaymasterclientinfo()["ready"])
         assert_equal(client.getpaymasterclientinfo()["readiness_errors"], [])
@@ -362,7 +409,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             -8, "", client.resolvepaymastersession,
             {"request_id": "not-a-canonical-request-id"}, "refresh")
         assert_raises_rpc_error(
-            -8, "", provider.createrestrictedpaymasterdescriptor,
+            -8, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED", provider.createrestrictedpaymasterdescriptor,
             "00", "invalid sponsor", 300)
         assert_raises_rpc_error(
             -8, "request_id must be a canonical lowercase UUID",

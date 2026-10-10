@@ -76,6 +76,16 @@ bool PolicyAllowsFundingModel(const ProviderPolicy& policy, FundingModel model)
     return (policy.funding_models & bit) != 0;
 }
 
+bool CheckNewSponsorshipScope(SponsorshipScope scope, std::string& error)
+{
+    error.clear();
+    if (scope == SponsorshipScope::PUBLIC) return true;
+    error = scope == SponsorshipScope::RESTRICTED
+        ? "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"
+        : "PAYMASTER_INVALID_SPONSORSHIP_SCOPE";
+    return false;
+}
+
 bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
 {
     error.clear();

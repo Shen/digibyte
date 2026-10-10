@@ -1184,6 +1184,7 @@ bool SetPaymasterProviderPolicy(CWallet& wallet,
                                 std::string& error)
 {
     error.clear();
+    if (!CheckNewSponsorshipScope(policy.sponsorship_scope, error)) return false;
     LOCK(wallet.cs_wallet);
     if (!CheckPaymasterProviderWallet(wallet, error)) return false;
     if (!ValidateProviderPolicy(policy, error)) return false;
@@ -2111,7 +2112,8 @@ bool ReserveAndBuildPaymasterCapacityProof(
         error = batch.HasPaymasterProviderBudgetLedger() ? "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER" : "PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND";
         return false;
     }
-    if (!ValidateProviderPolicy(policy, error) ||
+    if (!CheckNewSponsorshipScope(policy.sponsorship_scope, error) ||
+        !ValidateProviderPolicy(policy, error) ||
         !ValidateProviderSafetyPolicy(safety_policy, policy, error) ||
         !PolicyAllowsFundingModel(policy, request.funding_model) ||
         !ValidateProviderPoolEntries(entries, error)) {
@@ -2433,6 +2435,9 @@ bool BuildRestrictedServiceDescriptor(
     std::string& error)
 {
     descriptor = {};
+    // Retained extension code; no descriptor/signature/sequence may be issued
+    // while restricted sponsorship is unavailable.
+    if (!CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error)) return false;
     if (policy.sponsorship_scope != SponsorshipScope::RESTRICTED ||
         policy.funding_models != FUNDING_MODEL_SPONSORED || policy.fee_rate_bps != 0 ||
         !sponsor_authorization_key.IsFullyValid() ||

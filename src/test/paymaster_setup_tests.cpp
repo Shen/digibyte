@@ -240,7 +240,7 @@ BOOST_AUTO_TEST_CASE(cli_currency_and_percentage_inputs_are_exact_and_retry_inva
     BOOST_CHECK_EQUAL(SetupReadNumber(slots, output, field("target_admission_dgb"), 3), 3);
     BOOST_CHECK(output.str().find("Please try again") != std::string::npos);
 }
-BOOST_AUTO_TEST_CASE(restricted_setup_is_sponsored_only_before_any_mutation)
+BOOST_AUTO_TEST_CASE(restricted_setup_is_disabled_before_any_mutation)
 {
     auto snapshot = Snapshot();
     auto provider = snapshot.find_value("provider");
@@ -250,7 +250,7 @@ BOOST_AUTO_TEST_CASE(restricted_setup_is_sponsored_only_before_any_mutation)
     auto choices = Choices();
     choices.policy.pushKV("sponsorship_scope", "restricted");
     const auto restricted_error = [](const std::runtime_error& error) {
-        return std::string{error.what()}.find("PAYMASTER_INVALID_RESTRICTED_POLICY") == 0;
+        return std::string{error.what()} == "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED";
     };
     // Reject before a plan can pause the existing provider or change budgets.
     BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
@@ -263,7 +263,7 @@ BOOST_AUTO_TEST_CASE(restricted_setup_is_sponsored_only_before_any_mutation)
     choices.liquidity = SetupDefaultLiquidity(false);
     choices.pool.pushKV("admission_carrier_slots", 0);
     choices.pool.pushKV("operational_carrier_slots", 0);
-    BOOST_CHECK_NO_THROW(BuildSetupPlan(snapshot, choices));
+    BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);
     models.push_back("user_paid");
     choices.policy.pushKV("funding_models", models);
     BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, choices), std::runtime_error, restricted_error);

@@ -34,6 +34,27 @@ ProviderPolicy UserPaidPolicy(uint32_t rate_bps)
     return policy;
 }
 
+BOOST_AUTO_TEST_CASE(restricted_new_service_disabled_legacy_policy_valid)
+{
+    std::string error;
+    BOOST_CHECK(CheckNewSponsorshipScope(SponsorshipScope::PUBLIC, error));
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(!CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED");
+    ProviderPolicy legacy = UserPaidPolicy(0);
+    legacy.funding_models = FUNDING_MODEL_SPONSORED;
+    legacy.sponsorship_scope = SponsorshipScope::RESTRICTED;
+    BOOST_CHECK(ValidateProviderPolicy(legacy, error));
+    BOOST_CHECK(error.empty());
+    CDataStream stream{SER_DISK, 0};
+    stream << legacy;
+    ProviderPolicy restored;
+    stream >> restored;
+    BOOST_CHECK(ValidateProviderPolicy(restored, error));
+    BOOST_CHECK(GetProviderPolicyHash(restored) == GetProviderPolicyHash(legacy));
+    BOOST_CHECK(!CheckNewSponsorshipScope(restored.sponsorship_scope, error));
+}
+
 ProviderPoolEntry PoolEntry(uint32_t index,
                             PoolPurpose purpose,
                             PoolAsset asset,

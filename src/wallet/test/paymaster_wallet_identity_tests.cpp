@@ -100,6 +100,57 @@ struct RawProviderSettingsV2 {
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(restricted_policy_disabled_without_rewriting_saved_state)
+{
+    const auto height = m_node.chain->getHeight();
+    BOOST_REQUIRE(height.has_value());
+    const uint256 tip = m_node.chain->getBlockHash(*height);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetLastBlockProcessed(*height, tip);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+    }
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Restricted legacy test", 100, identity, error));
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_SPONSORED;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{100000};
+    policy.maximum_network_fee = DGBSatoshis{20000000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(m_wallet, policy, 101, error));
+    const auto public_hash = GetProviderPolicyHash(policy);
+    policy.sponsorship_scope = SponsorshipScope::RESTRICTED;
+    BOOST_CHECK(!SetPaymasterProviderPolicy(m_wallet, policy, 102, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED");
+    ProviderPolicy saved;
+    BOOST_REQUIRE(GetPaymasterProviderPolicy(m_wallet, saved));
+    BOOST_CHECK(GetProviderPolicyHash(saved) == public_hash);
+
+    // Simulate a wallet written by the preceding version. Record validation
+    // still accepts it, while the new-service boundary refuses it unchanged.
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterPolicy(policy));
+    BOOST_REQUIRE(GetPaymasterProviderPolicy(m_wallet, saved));
+    BOOST_CHECK(GetProviderPolicyHash(saved) == GetProviderPolicyHash(policy));
+    BOOST_CHECK(!SetPaymasterProviderPolicy(m_wallet, saved, 103, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED");
+    BOOST_REQUIRE(batch.ReadPaymasterPolicy(saved));
+    BOOST_CHECK(saved.sponsorship_scope == SponsorshipScope::RESTRICTED);
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    const auto readiness = paymaster_rpc::internal::GetProviderReadiness(m_wallet, context, false, false);
+    BOOST_CHECK(!readiness.ready);
+    BOOST_CHECK_EQUAL(readiness.available_funding_models, 0);
+    BOOST_CHECK(std::find(readiness.errors.begin(), readiness.errors.end(),
+                          "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED") != readiness.errors.end());
+    RestrictedServiceDescriptor descriptor;
+    BOOST_CHECK(!BuildRestrictedServiceDescriptor(m_wallet, identity, saved, {}, {}, {}, "Legacy", {}, {}, 103, 120, descriptor, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED");
+}
+
 BOOST_AUTO_TEST_CASE(refill_suggestions_preserve_saved_limits_and_separate_payment_budgets)
 {
     using namespace paymaster_rpc::internal;
