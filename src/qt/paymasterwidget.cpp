@@ -8263,6 +8263,12 @@ private:
 
     QString readinessExplanation(const QString& error) const
     {
+        if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_RETIRED"))
+            return tr("This provider identity was permanently retired when its recovered capital was released. New payments and reserve spending are blocked. Its released funds remain in this wallet for normal transfers. Keep the recovery records; use a fresh provider identity for any future service.");
+        if (error == QLatin1String("PAYMASTER_CAPITAL_RECOVERY_CHECKPOINT_CHANGED"))
+            return tr("The independently saved wallet state changed or could not be secured. No capital release was confirmed. Review the checkpoint and current wallet state before requesting another preview.");
+        if (error == QLatin1String("PAYMASTER_CAPITAL_RECOVERY_REQUIRES_RESTORED_WALLET"))
+            return tr("Recovery release requires an explicitly restored provider wallet. For a current wallet, use the normal stop and capital-release workflow.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED"))
             return tr("This provider wallet does not match its independently saved safety checkpoint. New payments and reserve spending are blocked. Use the complete current provider wallet and checkpoint together. Do not delete the checkpoint or increase fee limits to bypass this protection.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION"))
@@ -8270,7 +8276,7 @@ private:
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_WRITE"))
             return tr("The independent provider safety checkpoint could not be saved. New payments and reserve spending are blocked. Check storage availability and diagnostics before continuing.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
-            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Use the complete current provider wallet for continued operation; already recorded exact transactions remain recoverable.");
+            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Funds & reserves, retirement can review capital release if this wallet matches the independently saved checkpoint and has no unfinished work. Continued service requires the complete current provider wallet.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
             return tr("Restricted sponsorship is currently disabled. Review a supported offer in Settings. Existing payment records remain available in Activity.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
@@ -10810,28 +10816,38 @@ private:
         });
     }
 
-    void reviewFullCapitalRelease(bool retire = false)
+    void reviewFullCapitalRelease(bool retire = false, bool recovery = false)
     {
         if (m_privacy || !hasRpcTransport()) return;
-        call("releasepaymastercapital", {}, false, nullptr, [this, retire](const UniValue& preview) {
+        UniValue preview_params{UniValue::VARR};
+        if (recovery) {
+            UniValue options{UniValue::VOBJ};
+            options.pushKV("recovery", true);
+            preview_params.push_back(options);
+        }
+        call("releasepaymastercapital", preview_params, false, nullptr, [this, retire, recovery](const UniValue& preview) {
             if (m_privacy) return;
             const auto valid = [](const UniValue& result) {
                 if (!IsHex256Field(result, "plan_id") || !result.find_value("executed").isBool()) return false;
+                if (!result.find_value("recovery_release").isNull() && !result.find_value("recovery_release").isBool()) return false;
                 for (const auto* key : {"pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis"}) {
                     qint64 value{0};
                     if (!GetInt64Field(result, key, value) || value < 0) return false;
                 }
                 return result.find_value("network_fee_satoshis").getInt<int64_t>() == 0;
             };
-            if (!valid(preview) || !preview.find_value("executed").isFalse()) {
+            if (!valid(preview) || !preview.find_value("executed").isFalse() ||
+                preview.find_value("recovery_release").isTrue() != recovery) {
                 setStatusLabel(m_operator_stop_status, tr("Provider stopped, but the capital preview is invalid. Nothing was released."), "error");
                 return;
             }
             const auto generation = m_wallet_generation;
-            const auto answer = askPlainTextQuestion(this, tr("Release all operating capital"),
-                tr("Release %1 DGB and %2 DD from %3 pool outputs to ordinary wallet funds?\n\nNo transaction or network fee is created. Automatic refill and paid-maintenance approval are disabled. Identity, targets, budgets and recovery history remain. The provider is already stopped; cancelling keeps its capital prepared.")
+            QString review = tr("Release %1 DGB and %2 DD from %3 pool outputs to ordinary wallet funds?\n\nNo transaction or network fee is created. Automatic refill and paid-maintenance approval are disabled. Identity, targets, budgets and recovery history remain. The provider is already stopped; cancelling keeps its capital prepared.")
                     .arg(compactDgbAmount(financeNumber(preview, "dgb_satoshis")), ddAmount(financeNumber(preview, "dd_cents")))
-                    .arg(financeNumber(preview, "pool_entries")));
+                    .arg(financeNumber(preview, "pool_entries"));
+            if (recovery) review += tr("\n\nRecovery release permanently retires this provider identity, including other copies using this node's checkpoint. Signing protections remain active. Afterwards, use the normal Send pages to transfer the released funds. Cancelling makes no retirement or release change.");
+            const auto answer = askPlainTextQuestion(this,
+                recovery ? tr("Recover capital and retire provider identity") : tr("Release all operating capital"), review);
             if (generation != m_wallet_generation || m_privacy) return;
             if (answer != QMessageBox::Yes) {
                 setStatusLabel(m_operator_stop_status, tr("Provider stopped. Capital release was not authorized; reserves remain prepared."), "neutral");
@@ -10841,30 +10857,43 @@ private:
             UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
             options.pushKV("execute", true);
             options.pushKV("plan_id", preview.find_value("plan_id"));
+            if (recovery) options.pushKV("recovery", true);
             params.push_back(options);
             call("releasepaymastercapital", params, false, nullptr, [this, preview, valid, retire](const UniValue& result) {
                 if (m_privacy) return;
                 bool matches = valid(result) && result.find_value("executed").isTrue();
-                for (const auto* key : {"plan_id", "pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis"})
+                for (const auto* key : {"plan_id", "pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis", "recovery_release"})
                     matches &= result.find_value(key).write() == preview.find_value(key).write();
                 setStatusLabel(m_operator_stop_status, matches
-                    ? tr("Provider stopped; all reviewed pool capital was released to this wallet. No funds were sent. Create a new full-wallet backup.")
+                    ? (preview.find_value("recovery_release").isTrue()
+                        ? tr("Provider identity permanently retired; reviewed capital is available in this wallet for normal transfers. No funds were sent. Keep the recovery records and create a new full-wallet backup.")
+                        : tr("Provider stopped; all reviewed pool capital was released to this wallet. No funds were sent. Create a new full-wallet backup."))
                     : tr("Capital release result is unclear. Inspect pool state; do not repeat automatically."), matches ? "ready" : "error");
-                if (matches && retire) reviewRetirementBalances();
+                if (matches && retire) reviewRetirementBalances(preview.find_value("recovery_release").isTrue());
                 else refreshOperatorStatus();
             }, false, [this](const QString& error) {
                 if (m_privacy) return;
-                setStatusLabel(m_operator_stop_status, tr("Capital release was not confirmed. No automatic retry. Inspect pool and recovery state: %1").arg(error), "action");
+                const QString detail = error.contains(QLatin1String("PAYMASTER_CAPITAL_RECOVERY_CHECKPOINT_CHANGED"))
+                    ? readinessExplanation(QStringLiteral("PAYMASTER_CAPITAL_RECOVERY_CHECKPOINT_CHANGED")) : error;
+                setStatusLabel(m_operator_stop_status, tr("Capital release was not confirmed. No automatic retry. Inspect pool and recovery state: %1").arg(detail), "action");
                 refreshOperatorStatus();
             });
-        }, false, [this](const QString& error) {
+        }, false, [this, retire, recovery](const QString& error) {
             if (m_privacy) return;
-            setStatusLabel(m_operator_stop_status, tr("Provider stopped; capital was not released. Check synchronization, confirmations, reservations, manual coin locks and unfinished setup in Activity before requesting another review. Never force-unlock signed work. %1").arg(error), "action");
+            if (!recovery && error.contains(QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
+                reviewFullCapitalRelease(retire, true);
+                return;
+            }
+            QString detail = error;
+            for (const auto* code : {"PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED", "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION", "PAYMASTER_CAPITAL_RECOVERY_REQUIRES_RESTORED_WALLET"}) {
+                if (error.contains(QLatin1String(code))) { detail = readinessExplanation(QLatin1String(code)); break; }
+            }
+            setStatusLabel(m_operator_stop_status, tr("Provider stopped; capital was not released. Check synchronization, confirmations, reservations, manual coin locks and unfinished setup in Activity before requesting another review. Never force-unlock signed work. %1").arg(detail), "action");
             refreshOperatorStatus();
         });
     }
 
-    void reviewRetirementBalances()
+    void reviewRetirementBalances(bool recovery = false)
     {
         if (m_privacy || !hasRpcTransport()) return;
         m_retirement_summary->show();
@@ -10875,7 +10904,7 @@ private:
             setStatusLabel(m_operator_stop_status, tr("Stopped and capital released; retirement review is incomplete."), "action");
             refreshOperatorStatus();
         };
-        call("getbalances", {}, false, nullptr, [this, unavailable](const UniValue& balances) {
+        call("getbalances", {}, false, nullptr, [this, unavailable, recovery](const UniValue& balances) {
             if (m_privacy) return;
             const auto& mine = balances.find_value("mine");
             QStringList dgb_lines;
@@ -10896,7 +10925,7 @@ private:
             }
             // minconf=0 includes pending DD; the default would omit it.
             UniValue params{UniValue::VARR}; params.push_back(""); params.push_back(0);
-            call("getdigidollarbalance", params, false, nullptr, [this, dgb_lines, unavailable](const UniValue& dd) {
+            call("getdigidollarbalance", params, false, nullptr, [this, dgb_lines, unavailable, recovery](const UniValue& dd) {
                 if (m_privacy) return;
                 qint64 confirmed{0}, pending{0}, total{0};
                 if (!GetInt64Field(dd, "confirmed", confirmed) || !GetInt64Field(dd, "unconfirmed", pending) ||
@@ -10907,7 +10936,9 @@ private:
                 m_retirement_balances->setText(dgb_lines.join(QLatin1Char('\n')) +
                     tr("\nDD confirmed: %1 DD\nDD pending: %2 DD\nBalance observations: %3 (UTC). Not a live or atomic balance guarantee.")
                         .arg(ddAmount(confirmed), ddAmount(pending), QDateTime::currentDateTimeUtc().toString(Qt::ISODate)));
-                setStatusLabel(m_operator_stop_status, tr("Provider stopped and pool capital released. Review the remaining funds and complete the full-wallet backup before archiving."), "neutral");
+                setStatusLabel(m_operator_stop_status, recovery
+                    ? tr("Provider identity permanently retired and pool capital released. Review the remaining funds for normal transfers and complete the full-wallet backup before archiving.")
+                    : tr("Provider stopped and pool capital released. Review the remaining funds and complete the full-wallet backup before archiving."), "neutral");
                 refreshOperatorStatus();
             }, false, unavailable);
         }, false, unavailable);
