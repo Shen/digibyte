@@ -307,6 +307,8 @@ class PaymasterProviderBackupTest(DigiByteTestFramework):
                         (api.withdrawpaymastercarrier, {"mode": "all_excess"}),
                         (api.releasepaymastercapital, {})):
                     assert_raises_rpc_error(-4, gate, function, options)
+                assert_raises_rpc_error(-4, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED",
+                                        api.releasepaymastercapital, {"recovery": True})
             # Toggling provider settings, approved limits, and backup reminders
             # cannot constitute evidence about a withheld signed transaction.
             restored.setpaymasterenabled(False)
