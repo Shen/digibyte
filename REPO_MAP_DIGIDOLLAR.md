@@ -1088,7 +1088,7 @@ or chain parameters.
 - `PaymasterStore` atomically persists sessions, exact append-only attempts,
   reservations, authorizations, provider commits/results, self-recovery raw
   transactions, outcome markers, and permanent idempotency tombstones.
-- `paymasteridentity.cpp` persists the append-only `pmrestoreguard` through `paymasterdb.cpp` before explicit `RestoreWallet` loads a provider backup. New provider signing and reserve spending are quarantined; known exact signed recovery remains available. Manual file/directory rollback needs an independent checkpoint.
+- `paymasteridentity.cpp` persists the append-only `pmrestoreguard` through `paymasterdb.cpp` before explicit `RestoreWallet` loads a provider backup. New provider signing and reserve spending are quarantined; known exact signed recovery remains available. `paymastercheckpoint.cpp` additionally detects unmarked wallet-only rollback using a versioned wallet counter and a node-local checkpoint bound to network/provider. WalletBatch only notifies Paymaster transaction boundaries; codecs atomically track financial records. Native reserve transactions use a pending fence. Whole-datadir rollback still needs independent retained state.
 - Integrates Paymaster and ordinary wallet locks, restores state at startup,
   reconciles mempool/confirmation/reorg observations, and prunes session detail
   after the configured safety depth or the complete unsigned replay window.

@@ -345,9 +345,13 @@ with the existing provider-identity type. Readiness, announcements, capacity and
 quote authority, provider signatures and reserve-spending paths fail closed.
 Known exact signed commits can still be replayed; client-only restore is unchanged.
 The marker is not cleared by settings or backup acknowledgement. There is no
-automatic reconstruction/override for missing signed history. Manual file or
-whole-directory rollback needs an independent monotonic checkpoint and remains
-outside this detection mechanism. See `doc/paymaster-threat-model.md` (TM-003).
+automatic reconstruction/override for missing signed history. The Paymaster-owned
+`paymastercheckpoint` module additionally binds wallet financial transactions to
+an independently flushed node-local checkpoint outside the wallet directory.
+Wallet-only rollback, missing/mismatched checkpoints and unfinished native
+reserve operations block new authority. Whole-directory rollback still requires
+an independently retained high-water mark. Initial legacy enrollment is a
+trusted baseline, not proof of past completeness. See `doc/paymaster-threat-model.md` (TM-003).
 
 ## Executive Summary
 

@@ -420,6 +420,8 @@ actions reject that gate in RPC/CLI; Qt explains it as missing financial history
 Already recorded exact signed finals retain read-only recovery. Client-only
 backup restoration is unchanged. Do not retry configuration changes or backup
 acknowledgements as a way to resume: there is no guard-clear RPC or automatic
-reconstruction of omitted signatures. Manually replacing an old wallet/data
-directory bypasses this restore hook and needs an independent monotonic
-checkpoint. See [the threat model](paymaster-threat-model.md).
+reconstruction of omitted signatures. `wallet/paymastercheckpoint.cpp` binds
+provider financial writes atomically to a versioned wallet generation and a
+flushed checkpoint outside the wallet directory. Unmarked wallet-only rollback
+fails closed; restoring wallet and checkpoint together still needs a trustworthy
+high-water mark outside that storage. See [the threat model](paymaster-threat-model.md).

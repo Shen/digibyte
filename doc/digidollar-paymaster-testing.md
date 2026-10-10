@@ -3693,10 +3693,10 @@ checkout, use the equivalent full solution build, the two Python commands above,
 `test_digibyte.exe --run_test=paymaster_wallet_security_tests`,
 `--run_test=paymaster_wallet_psbt_tests`, and the `PaymasterWidgetTests` Qt filter.
 
-Physical SQLite write/checkpoint failure, unmarked wallet-file or whole-datadir
-rollback, safe migration after complete original-history loss, deep reorgs and
-sanitizer/fuzz campaigns remain unexecuted. A marker in an old database cannot
-detect that database being copied back outside the restore API. Do not claim
+At that earlier checkpoint, physical SQLite write/checkpoint failure, unmarked
+wallet-file/whole-datadir rollback, safe migration, deep reorgs and sanitizer/fuzz
+campaigns were unexecuted. The independent checkpoint section below now covers
+unmarked wallet-only rollback; the other scenarios remain open. Do not claim
 general stale-backup recovery or release approval from these passing cases.
 
 ### SQLite engine failures after the backup correction
@@ -3736,3 +3736,52 @@ failed assertions. The full-build helper above includes them automatically
 when it runs `paymaster_wallet_security_tests`; the SQLite-disabled build does
 not register them. Local evidence is in `provider-backup-fix/unit-sqlite-faults.txt`
 and `sqlite-faults-receipt.json`, with source/object/binary/report hashes.
+
+### Independent provider checkpoints (2026-10-10)
+
+The provider-wallet generation commits with every Paymaster mutation. A bounded
+node-local checkpoint is flushed/replaced before wallet commit. Native reserve
+operations carry a durable pending fence until wallet transaction and accounting
+records are saved. Missing/mismatching state, invalid binding/version, exhausted
+generations and interrupted fences reject fresh authority; there is no reset RPC.
+Normal wallet writes keep their original transaction semantics. Paymaster logic
+lives in `wallet/paymastercheckpoint.*` and `paymasterdb.cpp`; WalletBatch supplies
+only transaction/lifetime notifications.
+
+Focused MSVC verification passes 33 cases / 9,923 assertions (25 security,
+five PSBT, one backup-metadata and two original wallet DB cases). The seven new
+`checkpoint_*` cases include actual SQLite commit denial and matching invalid
+pairs so semantic checks cannot be masked by a simple generation mismatch.
+Both `wallet_paymaster_backup.py` variants pass after copying an unmarked stale
+image under another wallet name and restarting; RPC and CLI must refuse new
+start/preparation/release without a mempool change. Client-only restore remains
+compatible. The readable GUI protection case passes in dark and light themes.
+Python syntax parsing and `git diff --check` pass; flake8 is not installed.
+
+The isolated binaries and receipt are in the workspace-local
+`build_msvc/paymaster-refresh-check/provider-backup-fix/`. The receipt pins
+source, object, binary and report hashes. These are selected-object checks;
+normal application executables still require a full build. Following the
+repository/operator workflow, close the normal client/provider instances and
+run from `D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\provider-backup-fix\build-and-check.ps1 -Build -FullQtTests
+```
+
+The helper regenerates MSVC projects from `src/Makefile.am`, builds the whole
+solution with the existing MSVC v143/Qt 5.15.10/vcpkg environment, runs focused
+wallet checks, both regtest variants and the complete Paymaster Qt suite.
+Prerequisites: configured test/config.ini, Python, existing MSVC 14.43.34808,
+Windows SDK 10.0.26100.0 and static Qt at D:\Qt51510\install. Runtime: minutes
+to tens of minutes. Success: exit 0, both functional variants passed, no failed
+unit/Qt cases and an operator report directory. The helper restores its process
+environment after running. On other checkouts, regenerate/build using
+build_msvc/README.md and run the same suite/functional/Qt filters.
+
+Full fresh builds/full Qt were not run locally. POSIX synchronization rejects
+unsupported or failed fsync; its execution on Linux/macOS, real physical storage
+failures, power loss/torn writes and sanitizer/fuzz campaigns remain open. A
+wallet/checkpoint pair restored together or operated on multiple independent
+hosts is outside the node-local detection guarantee; initial legacy enrollment
+is a trusted complete-history baseline. Do not erase marker files to resume.

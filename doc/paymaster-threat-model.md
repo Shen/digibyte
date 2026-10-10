@@ -12,7 +12,7 @@ and the provider-backup follow-up:**
 - **TM-002 — medium:** expired, never-signed provider requests retain full session
   and attempt records without an automatic retention bound. Repeated valid
   requests can grow persistent state and the work performed under the wallet lock.
-- **TM-003 — high, corrected for explicit GUI/RPC restore:** restoring an older provider wallet renews
+- **TM-003 — high before correction; explicit restore and wallet-only rollback protected:** restoring an older provider wallet renews
   forgotten spending authority. A real SQLite/regtest restore allowed 0.3 DGB
   in confirmed payment fees under a 0.2-DGB daily approval. A second variant
   exposed and re-signed inputs of an earlier signed payment absent from both
@@ -26,7 +26,9 @@ input ownership and transaction signatures independently of transport and peer
 claims. The durable restore guard quarantines restored provider wallets before
 loading and survives file copying, renaming and restarting. It prevents renewed
 authority rather than inventing missing history. Manual replacement with an
-older unmarked image or rollback of the whole directory remains undetected.
+older unmarked image is additionally checked against a node-local checkpoint.
+Rollback of a matching wallet/checkpoint pair, including the whole directory,
+still requires a separately retained high-water mark.
 This is a scoped source review with selected tests, not proof of absence of such
 paths or release approval.
 
@@ -264,7 +266,7 @@ navigation anchors when subsequent edits move lines.
    wait for expiry and repeat with fresh request IDs. TM-002 retains the full
    historical records despite releasing current capacity.
 6. **Exploit restored history:** after an operator restores an old provider
-   backup, exploit forgotten spending/reservations. TM-003 reproduced both renewed expenditure and conflicting signing. Explicit GUI/RPC restore now persists a quarantine before wallet loading. Manual copying of an old wallet or entire data directory still requires an independent monotonic checkpoint to detect rollback.
+   backup, exploit forgotten spending/reservations. TM-003 reproduced both renewed expenditure and conflicting signing. Explicit GUI/RPC restore now persists a quarantine before wallet loading. An independent node-local checkpoint additionally blocks unmarked wallet-only rollback. Restoring a matching wallet/checkpoint pair still requires independently retained state.
 7. **Interrupt durable transitions:** terminate processes or provoke storage
    failure between signature, commit and broadcast. Existing injected-failure
    tests cover important transitions; real disk-full/power-loss behavior remains
@@ -284,7 +286,7 @@ an exploit has been confirmed.
 |---|---|---|---|---|---|
 | TM-001 **confirmed** | Delayed/withheld final outcome; provider signed commit survives >24 h; subsequent ledger pruning removes its SPENT row. | Failed recovery; committed DD/DGB may remain bound. No theft/extra fee shown. | Exact final validation and budget firewall reject missing authority; probe reproduces rejection. | Retain authorization provenance independently of rolling accounting. Detect missing-row errors for retained commits. | Medium / medium / **medium** |
 | TM-002 **confirmed** | Valid public client repeatedly creates unique quotes and lets unsigned requests expire. | Persistent database growth and increasing wallet-lock work; indirect recovery delays. | Short quote life, input control proofs, active/rate limits and capacity replay cleanup. | No automatic bound on full expired session/attempt history. Compact only provably unsigned terminal records; monitor counts, disk and reconciliation latency. | Medium / medium / **medium** |
-| TM-003 **explicit restore corrected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass. | No automatic history reconstruction or guard-clear API. Manual file/directory rollback cannot be detected from its own old contents; an independent checkpoint and physical storage-failure tests remain open. | Conditional on restore / high pre-fix / manual rollback residual |
+| TM-003 **restore/wallet-only rollback protected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass, including unmarked renamed copies against the independent checkpoint. | No automatic history reconstruction or guard-clear API. Whole-datadir/matching-pair rollback, multiple independent stores and physical storage-failure tests remain boundaries. | Conditional on restore / high pre-fix / matching-pair rollback residual |
 | TM-004 **defended integrity; privacy residual** | Active MITM terminates two transports and relays authentic Paymaster artifacts. | Can observe forwarded metadata or delay service; no modified spend demonstrated. | Identity/quote/capacity signatures and independent PSBT checks; V2 required. | No provider-authenticated transport transcript binding found. If active-MITM confidentiality is required, design explicit channel binding and test a relay. | Medium / low financial severity / **low** |
 | TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
 | TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
@@ -486,29 +488,61 @@ the guard is active. Ordinary wallet key ownership is unchanged; this is not an
 OS-wide prohibition on spending a restored wallet.
 
 Copying a wallet that already contains the guard preserves quarantine, even
-under a different wallet name and after a node restart. Both real backup
-variants also exercise this file-copy/load path through RPC and CLI. In contrast,
-manually replacing a wallet with an older **unmarked** image, or rolling back
-the entire data directory to such an image, bypasses the explicit restore hook.
-The new checks are not active just because the executable contains them: they
-need the durable marker. This is a real remaining risk of renewed approval or
-conflicting signing, not an attack available to a peer without local rollback.
+under a different wallet name and after a node restart. Unmarked wallet-only
+rollback is additionally protected by `wallet/paymastercheckpoint.cpp`.
 
-Detecting unmarked rollback requires trustworthy state outside the rolled-back
-data. A future checkpoint must bind the network and persistent provider identity
-to a monotonically advancing financial generation; commit it durably before
-publishing each new signature or reserve-spending authority. A mismatch, a
-missing established checkpoint or a write failure must block new authority.
-Crash ordering must fail closed, and known exact recovery must not advance or
-clear the checkpoint. Wallet renaming and configuration/backup acknowledgement
-must not reset it. Initial registration of an existing provider requires a
-trusted complete current wallet; the first registration cannot retroactively
-prove that an already copied file is current. A checkpoint inside the node data
-directory only detects wallet-only rollback if that directory survives; restoring
-both requires an independently retained checkpoint. Timestamps, a rescan and
-mempool absence are not substitutes. This mechanism is **not implemented**;
-do not describe the explicit restore correction as safe recovery from every
-old backup. Real disk-full/power-loss durability also remains open.
+**Independent checkpoint (implemented).** Every Paymaster record mutation in
+an enrolled provider wallet advances a versioned `pmcheckpoint` in the SAME
+wallet DB transaction as the changed financial records. An implicit transaction
+wraps standalone codecs. The checkpoint binds the genesis hash, provider ID,
+monotonic generation, random token and unfinished-operation flag. The external
+file in `<network datadir>/paymaster-checkpoints/<binding hash>.checkpoint`
+contains only that record and a domain-separated checksum; no keys, PSBTs or
+payment contents. Its fixed-size parser rejects future versions, corruption,
+extra bytes, network/provider mismatch and missing established state.
+
+A tracked transaction holds both an in-process exclusion and an OS file lock.
+The external file is flushed and atomically replaced BEFORE the wallet commit;
+the wallet counter and financial records then commit together. A crash between
+these commits leaves the external file ahead and blocks further authority.
+Neither a failed commit nor a missing file causes the high-water mark to be
+recreated from an old wallet. Failed writes before external replacement abort
+without advancing it. The counter cannot overflow. Wallet renaming, settings
+changes and backup acknowledgement cannot reset it. Ordinary client-only wallet
+writes perform no checkpoint I/O. The generic wallet changes are limited to
+batch transaction/lifetime notifications and Paymaster codec declarations.
+
+Wallet-native reserve broadcasts use a durable pending fence before commit.
+The live operation keeps the wallet lock and a thread-local authorization while
+saving transaction/accounting records; it clears the fence only after those
+records are durable. Other threads, copied wallets and a restarted process do
+not inherit that temporary authorization. An unfinished fence therefore blocks
+new signatures and reserve spending. This conservative protection can require
+operator recovery after a failed broadcast even when funds were not lost; there
+is no blind fence-clear/reset RPC.
+
+Explicitly restored wallets remain permanently quarantined by `pmrestoreguard`.
+Their known exact signed recovery/accounting does not overwrite the original
+provider checkpoint. An unmarked mismatching copy cannot update Paymaster
+records; use explicit restore for quarantined recovery of its retained exact
+history. These checks protect Paymaster authority, not every ordinary wallet
+spend made by an operator with the keys.
+
+**Remaining boundary.** The first enrollment of a legacy identity without
+EITHER marker is a trusted baseline at its first Paymaster write, not proof
+that its pre-enrollment history is complete. Start from a complete current
+wallet (or a fresh provider identity for first production use). Restoring the
+wallet AND its matching checkpoint together, including a whole data directory
+or an older independently retained checkpoint, can still conceal rollback.
+Preventing that requires a trustworthy high-water mark outside the restored
+storage or a separate service. Initial production deployment does not remove
+this requirement for future backups. Moving only an enrolled provider wallet
+to another node fails closed if its established checkpoint is missing; copying
+a stale matching pair is not safe migration. Physical failed fsync/torn-write,
+power-loss and cross-platform checks remain open. A checksum detects damage;
+it does not authenticate storage against an attacker already controlling the OS.
+Do not operate the same identity on multiple independent checkpoint stores:
+node-local locks cannot coordinate financial generations across different hosts.
 
 ## Criticality calibration
 
@@ -626,11 +660,12 @@ if ($LASTEXITCODE -ne 0) { throw 'An existing protection test failed' }
 
 ### Open scenarios and completion criteria
 
-1. **Stale provider backup (TM-003): explicit restore corrected.** Both
+1. **Stale provider backup (TM-003): explicit restore and wallet-only rollback protected.** Both
    `wallet_paymaster_backup.py` variants now require no renewed authority based
    on forgotten liability. They cover automatic runtime selection, reserve
-   actions, restarts and copying an already guarded wallet. An independently
-   durable checkpoint for manually copied unmarked images and comprehensive
+   actions, restarts and copying guarded and unmarked stale wallets. The node-local
+   checkpoint is implemented and checked. A separately retained high-water mark
+   for whole-datadir rollback and comprehensive
    missing-history reconciliation remain unimplemented; see the finding above.
 2. **Storage failures (TM-007).** The real SQLite engine-level follow-up passes
    two cases / 123 assertions for page-limit `SQLITE_FULL` and denied marker
@@ -745,3 +780,25 @@ independent review or long-running deployment gates.
   findings separated from hypotheses and intentionally allowed budget use.
 - [x] Reproduction limits, source/binary identity, unresolved tests and concrete
   correction acceptance criteria recorded; no release or complete-safety claim.
+
+### Independent provider checkpoint verification (2026-10-10)
+
+The selected-object MSVC run passes 33 cases / 9,923 assertions: the 25-case
+Paymaster wallet security suite, five PSBT cases, the identity backup-metadata
+case and two original wallet database cases. Seven new checkpoint cases cover
+transaction atomicity/abandonment, renamed unmarked copies, concurrent copies,
+failed DB commits and restart, corrupt/missing markers, matching but semantically
+invalid pairs, overflow and incomplete native operations. Commit failure is
+also injected through the actual SQLite authorizer. Older corruption fixtures
+use explicit test-only raw injections to exercise their field-specific firewall;
+this is not a production checkpoint-reset mechanism.
+
+Both real SQLite/regtest backup variants pass, including unmarked file copy,
+restart, RPC/CLI refusal of fresh authority and client-only compatibility.
+The Qt readiness regression passes in both themes for the restore guard and
+three checkpoint protection messages. `git diff --check` and Python syntax
+parsing pass. Inputs, object/binary/report hashes and the working-copy diff are
+recorded in the workspace-local `provider-backup-fix/checkpoint-receipt.json`.
+Normal product executables were not replaced. Full fresh builds/full Qt,
+Linux/macOS and physical ENOSPC/fsync/power-loss/device-cache checks remain
+operator work; see `digidollar-paymaster-testing.md`.

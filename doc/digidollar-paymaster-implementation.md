@@ -369,7 +369,7 @@ wallet eligibility: known records remain readable, while new provider model
 availability, identity/transaction signing, quote admission and reserve spending
 are blocked. Exact known signed commits remain recoverable. Settings and backup
 acknowledgement cannot erase the marker; no override/history-reconstruction API
-is provided. Manual file/directory rollback requires an independent checkpoint.
+is provided. Unmarked wallet-only rollback is checked by `wallet/paymastercheckpoint.cpp` against an independently flushed node-local generation. Whole-datadir rollback still requires separately retained state; see `paymaster-threat-model.md` (TM-003).
 See [TM-003](paymaster-threat-model.md#tm-003-stale-provider-restore-forgets-expenditure-and-signed-inputs).
 
 `processpaymasterrequests` defers temporary capacity/quote admission-limit

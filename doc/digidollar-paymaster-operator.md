@@ -819,9 +819,19 @@ wallet. If it is lost, keep the restored provider paused pending comprehensive
 recovery; do not manually release inputs or copy an old image to bypass the
 guard. A copied wallet that already contains the restore guard stays protected,
 including when renamed and loaded after a node restart. An old backup made
-before the guard was stored does not contain it: manually copying that image
-instead of using GUI/RPC restoration bypasses detection. The old file cannot
-prove its own freshness. Use the restoration function for provider backups;
+before the guard was stored does not contain it. Enrolled wallets additionally
+have a safety generation checked against `<network datadir>/paymaster-checkpoints/`,
+which is outside the wallet backup. A manually copied old wallet, a missing or
+mismatching checkpoint, or an interrupted reserve operation blocks new Paymaster
+signatures/spending. Keep the complete current wallet and checkpoint together;
+do not delete, overwrite with an older copy or recreate checkpoint files to
+resume service. A whole-datadir rollback can restore both to an old matching
+state and still requires a trustworthy high-water mark outside that backup.
+Legacy identities enroll at their first Paymaster write; this initial baseline
+requires the complete current history and cannot detect earlier unmarked copies.
+An incomplete-operation warning can occur after a crash or failed commit even
+without fund loss. Review exact saved transactions and diagnostics; there is no
+blind reset command or automatic release of possibly signed inputs. Use the restoration function for provider backups;
 do not manually replace the provider wallet/data directory. Client-only backups
 retain their normal restore behavior.
 
