@@ -1,5 +1,177 @@
 # Paymaster build and test runbook
 
+## Restricted new service disabled (2026-10-09)
+
+The new-service boundary is `CheckNewSponsorshipScope`, documented in
+`digidollar-paymaster-implementation.md#parked-restricted-sponsorship`.
+Repository/CLAUDE reading order, DigiDollar architecture, Qt, wallet/RPC,
+functional-test and formatting guidance apply. This change uses Paymaster
+modules and preserves protocol/storage validation for accepted legacy work.
+
+Verification completed:
+
+- Selected MSVC compilation and isolated linking of the changed components,
+  GUI, CLI, daemon and test executables.
+- Eight Core cases: the new scope gate/legacy-policy round trip, setup rejection
+  before mutation, saved wallet policy preservation and unavailable readiness,
+  four existing sponsorship validation/replay cases, and the existing atomic
+  client-authorization/idempotence case.
+- Eighteen Qt cases, excluding setup/cleanup: `paymasterOfferSpendingLimitsReview`
+  (11), `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` (3), and
+  `paymasterLiveOverview` (4). Restricted selection is disabled; a legacy value
+  cannot cause policy/budget writes or offer-saving side effects.
+- `wallet_paymaster_rpc.py --restricted-disabled-only` passed using isolated
+  provider/client nodes. Both HTTP RPC and actual CLI calls reject new Restricted
+  policy, descriptor, send and direct quote requests. Saved policy, safety state,
+  reservations and sessions remain unchanged; capabilities advertise public only.
+- Python syntax checks for both changed functional files and `git diff --check`.
+
+The broad provider scenario now checks Restricted rejection and continues with
+public-sponsored restart/recovery. It was **not rerun in full**; neither were the
+full solution or complete Qt suite, per the operator's resource instructions.
+The initial new-test failures were fixture issues (descriptor/processed-tip
+initialization, funded client and nonempty input list), corrected before the
+successful runs above. Legacy Restricted accepted-transfer recovery remains
+enabled by code review and unchanged codecs; a complete old-wallet payment
+upgrade/recovery scenario was not executed in this focused run.
+
+Operator follow-up (MSVC 14.43, Qt 5.15.10 and existing dependencies; close GUI
+and CLI first; several minutes to tens of minutes, exit 0 and no test failures):
+
+```powershell
+Set-Location D:\Digibyte\digibyte-fork
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python test/functional/wallet_paymaster_provider.py --configfile=test/config.ini
+```
+
+After verifying that no normal DigiByte processes were running, the GUI, CLI
+and daemon EXEs were backed up, replaced and compared by SHA256. The installed
+GUI hash is `F75D50C3DAB12BA8A6F2758D4C80F440AE54185B63DBF15B773CF6CAE5DA9DBE`.
+The local backup/hash receipt is
+`build_msvc/paymaster-refresh-check/reserve-presets/restricted-disabled-installed.json`.
+No live wallet settings or payment state were edited; the applications were not
+started automatically. The GUI also includes the DD-history correction below.
+
+## DD history startup status (2026-10-09)
+
+The operator confirmed that all-Pending rows appeared only immediately after
+opening the tab. Read-only `listdigidollartxs` on both running regtest wallets
+reported confirmed transactions (including a shared client/provider transaction
+with 657 confirmations). The stored-history startup preview had been presenting
+persisted zero counts as current status before the asynchronous read completed.
+
+The fix is confined to the shared Qt history serializer and the two consumers:
+`walletmodel.cpp`, `digidollartransactionswidget.cpp`, and
+`digidollaroverviewwidget.cpp`. Stored preview rows carry a Qt-only `checking`
+status; the existing worker replaces them with live status. There are no new
+wallet locks, workers, RPC calls, persistent records or confirmation rules.
+Repository, DigiDollar, Qt, test, formatting and translation guidance apply.
+
+Targeted regression coverage:
+
+- `transactionsWidgetShowsStoredHistoryWhileWalletBusy`: 50 immediate stored
+  rows while another thread holds `cs_wallet`; both views show Checking, then
+  a wallet-confirmed row shows one confirmation and genuinely unconfirmed rows
+  show Pending. All 75 rows load, the loading banner clears and the model retains
+  verified status for later views.
+- `ddTabLoadsSelectedPageOnFirstShow` and
+  `transactionsWidgetRefreshesOnDigiDollarSignal`.
+- `transactionsWidgetShowsRpcHistorySignsAndFields` and
+  `transactionsConfirmationsColumnIsAlwaysACount`.
+- `failedMintsKeepTheirWalletStatus`.
+- `overviewRecentTransactionDoubleClickOpensTransactionsTab` and
+  `overviewRecentTransactionAmountIsRightAligned`.
+
+The two existing tests that inspect live status now wait for it, instead of
+assuming visible stored rows already contain a completed background read.
+All eight targeted GUI cases passed (excluding fixture setup/cleanup), along
+with selected MSVC compilation, isolated Qt/app linking and `git diff --check`.
+The initially staged GUI hash was
+`EAFCD3CA29B1AC4BFC056A3A5199DD9BD55E1C37FADF15550C7610B1A152ECF9`.
+This correction was subsequently included in the combined Restricted-disabled
+GUI build installed after regular shutdown; see the installation record above.
+The full solution and complete suite remain operator checks using the command
+and prerequisites below. No live wallet settings or payments are changed.
+
+## Overview readiness and settings restart (2026-10-09)
+
+Product changes are confined to `src/qt/paymasterwidget.cpp`; existing Core/RPC
+interfaces are reused. No polling or per-payment wallet reads were added.
+Repository, Qt, formatting and translation guidance apply.
+
+Targeted checks:
+
+- `paymasterLiveOverview` (4 theme/width cases): saved models versus unsaved
+  drafts, zero-fee user-paid pricing, missing and exhausted model budgets,
+  concurrent customer counts, multiple reserve operation references, drain/error
+  states, hidden inactive controls, privacy/wallet clearing and layout bounds.
+- `paymasterSettingsRestart` (19 cases): offer and processing-mode saves,
+  unchanged autostart on/off, cancellation, busy stop, incomplete acknowledgements,
+  failed save/readback/enable/start, deferred readiness, wallet switch, privacy
+  interruption at several stages and privacy turned off again before a reply.
+  The sequence never replays a mutation after an ambiguous result.
+- Existing regression checks: `paymasterOperatorWorkTransitions` (2),
+  `paymasterOfferPolicyTypedValues` (10),
+  `paymasterInjectedRpcCoversConfigurationWorkflows` (1),
+  `paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows` (1),
+  `paymasterOfferFormAlignment` (4), and
+  `paymasterOperatorOverviewGuidesAndFailsClosed` (1).
+
+All 42 targeted GUI/mock-RPC cases passed, excluding fixture setup/cleanup.
+The targeted compilation, isolated Qt/app linking and `git diff --check` passed;
+screenshots were inspected in dark/wide and light/narrow layouts. The normal
+`build_msvc/x64/Release/digibyte-qt.exe` was replaced after checking that no
+instance used it, with a backup and matching staged/installed SHA256. Its hash is
+`1220EAB3C0837B8D7019EB08436FFE072123D620264231DB9724D4A2DAD79EF3`.
+Full solution/full Paymaster suite and live provider restart remain
+operator checks. Use the full-build command and prerequisites below; no live
+wallet settings or payments are changed by these tests.
+
+## Funds & reserves operator layout (2026-10-09)
+
+The production change is confined to `src/qt/paymasterwidget.cpp`. It follows
+the repository/Qt guidance, existing semantic theme roles and translation policy.
+Current metrics consume the existing serialized operator and overview-finance
+reads. Expanding the reserve table or advanced actions issues no RPC. Current
+saved targets are independent of the editable preset; missing capital data is
+shown as unavailable instead of retained as current or replaced with zero.
+
+Targeted MSVC compilation and isolated Qt/app linking passed. The four
+`paymasterFundsOperatorPresentation` cases cover both themes at 760/1360 pixels,
+large fonts, table/advanced disclosures without RPCs, unchanged saved targets
+during edits, payout minimum, failed finance reads, privacy and wallet changes.
+Screenshots were inspected in dark/wide and light/narrow configurations.
+
+Additional passing checks:
+
+- `paymasterCarrierWithdrawalPreviewsArePlanBound` and
+  `paymasterLiquidityPolicyDefaultsAndApprovalGuard`.
+- `paymasterGuidedCapitalTasks`: `release_slot-approve`, `release_slot-cancel`,
+  `all_excess-approve`, `rebalancepaymasterpool-approve`.
+- `paymasterReserveReduction:dark-approve`.
+- All four `paymasterFinanceOperatorPresentation` rows.
+- `DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix`: existing
+  page/currency structure check. Updated removed-card/text expectations and
+  older fixture assumptions: unsaved sponsorship does not remove DD targets,
+  and fee summaries require a valid amount/recipient before comparison.
+
+All **16 targeted GUI cases** passed, excluding fixture setup/cleanup.
+`git diff --check` passed. These are GUI/mock-RPC checks, not live financial
+transactions; the approval implementations are unchanged.
+
+Full solution build/full Paymaster Qt suite remain operator checks. From
+`D:\Digibyte\digibyte-fork`, with the GUI instances and active CLI calls closed:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\reserve-presets\build-and-check.ps1 -FullQtTests
+```
+
+Requires the existing MSVC 14.43, Qt 5.15.10 and cached static dependencies.
+Allow several minutes; success means exit code 0 and no failed tests. No Core,
+RPC or consensus behavior changed in this presentation update.
+
 ## DD transaction refresh after Paymaster payments (2026-10-09)
 
 First accepted-mempool observation and validated payment completion now emit
@@ -2471,8 +2643,9 @@ and complete Paymaster Qt commands above. Full build/Qt runs take minutes to
 tens of minutes and must return exit code 0 with no requested failures/skips.
 The terminal funding walkthrough above remains required; these targeted checks
 do not exercise a real interactive console from first prompt through funding.
-Also reconfigure an existing provider from user-paid to restricted sponsored,
-then back to public mixed service. Verify that inactive saved budgets are shown,
+Also reconfigure an existing provider from user-paid to public sponsored,
+then back to public mixed service. Restricted is disabled for new use as of
+2026-10-09; the earlier Restricted setup results below are historical. Verify that inactive saved budgets are shown,
 invalid edits can be corrected before approval, sponsored DD targets become
 zero without withdrawing funds, and the exact reviewed values are persisted.
 
@@ -3137,3 +3310,238 @@ The existing Core case
 advertised policy. Reports use the `-notices-20261009.txt` suffix in the local
 reserve-presets check directory. No Core/RPC behavior changed; no full build or
 complete suite was run.
+
+### Effective percentage limits and timeout observation
+
+Focused coverage: `paymaster_provider_tests/client_percentage_fee_limits_use_actual_amounts_and_preserve_legacy_encoding`
+checks cent rounding, net recipient semantics, zero, absolute limits, v1/v2
+serialization, unknown versions and truncation.
+`paymaster_wallet_store_tests/client_percentage_policy_update_preserves_approval_and_recovery_bounds`
+checks persisted approval, omission and recovery return aggregation.
+Qt `paymasterClientPercentageLimits` and `paymasterClientTimeoutKeepsObserving`
+cover an unapproved 1% suggestion, exact saved values, restart-age guidance,
+read-only polling after timeout, and transient status failures.
+
+Run the isolated RPC/CLI integration case with the newly built daemon/CLI:
+`python test/functional/wallet_paymaster_rpc.py --client-protection-only --configfile=test/config.ini`.
+It checks invalid values, omission, offer filtering, gross/net semantics,
+rejection without input reservations, tightened limits before signing and
+restart persistence. Existing same-input recovery and non-expiring signed
+reservation tests remain required regressions. Full suites remain separate
+operator-run release checks.
+
+## Additional wallet-store failure tests (2026-10-10)
+
+The four affected cases passed after targeted MSVC compilation and isolated
+linking on 2026-10-10: 655 assertions (191, 58, 254 and 152 in table order).
+Compilation exposed ambiguous unqualified `CWallet` names and a duplicate local
+variable in the additions; both were corrected in the Paymaster test source.
+Reports are in `build_msvc/paymaster-refresh-check/functional-fixes/`.
+The operator's earlier 320-case run used a binary built before these additions
+and does not cover them. No production source, shared wallet test infrastructure,
+database format or consensus rule changed for these failure-test additions.
+
+All four cases are in `paymaster_wallet_store_tests`:
+
+| Case | Additional checks |
+| --- | --- |
+| `client_fee_policy_write_failures_preserve_approval_and_open_exposure` | First approval, tightening and legacy omission fail atomically at begin, each write and commit; saved percentage/absolute limits, open/spent fees and monotonic accounting time survive. Reopening persisted rows and retrying a lost reply preserve the approval. |
+| `unsigned_client_cancel_failures_and_lost_reply_preserve_input_ownership` | Failed cancellation preserves both inputs and in-memory locks; commit failure rolls back deletion of reservations/locks. A lost-reply retry is harmless and cannot unlock inputs subsequently reserved by a new request. |
+| `client_attempt_artifacts_and_authorization_are_append_only_and_atomic` | Existing fixture extended with failures during fallback and signature persistence, including wallet-flag atomicity. A persisted signature survives a failed retry and quote expiry after reopening; unsigned cancellation remains forbidden. |
+| `self_recovery_is_same_input_idempotent_and_reorg_safe` | Existing fixture extended with failures while storing a return and rolling back a confirmation. Lost-reply retry uses the identical durable return, rejects a conflicting replacement and retains signed input reservations. |
+
+The local `CheckPaymasterWriteFailures` helper checks the error category, exact
+number of attempted writes, byte-identical database records, unchanged wallet
+flags, and operation-specific safety invariants. Failure injection is cleared
+before assertions so later checks do not accidentally inherit it. It reuses the
+existing `MockableDatabase`; no new production fault switches are introduced.
+
+Scope limits: reopening here constructs another wallet over copied mock records;
+it does not kill a process or reopen a real SQLite file. The mock cannot inject
+individual `EraseKey` failures; the cancellation commit-failure case covers
+rollback after deletions, not failure of each deletion. Real storage exhaustion,
+power loss, older provider backups and adversarial original-payment/recovery
+network races remain separate integration requirements. Reorg persistence checks
+do not establish complete fee-accounting correctness across every reorg.
+
+For a subsequent normal-binary rerun, incrementally rebuild `test_digibyte`
+with the matching libraries. In this workspace, the local helper is:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\fault-tests\build-and-check.ps1
+```
+
+This workspace-local helper is not a tracked release artifact. It requires the
+existing MSVC v143/14.43.34808 installation, cached static dependencies and a
+successful preceding solution build. It builds only the unit-test project with
+project-reference builds disabled, then runs the four cases separately and
+records their logs. Expect a few minutes for compilation/linking, then short
+unit-test runs. Require exit code 0 from every command; stop on the first failure.
+No complete solution build or GUI/daemon/CLI replacement is performed.
+
+The workspace helper explicitly passes `SolutionDir=.../build_msvc/` when
+building the test project directly. Without it, referenced libraries are
+resolved below each project directory instead of the existing solution output
+directory, causing LNK1181 despite the libraries being present. After correcting
+this helper on 2026-10-10, its normal `test_digibyte.exe` build and all four cases
+passed (655 assertions, exit 0). Reports are in
+`build_msvc/paymaster-refresh-check/fault-tests/20261010-065506-151Z/`.
+This follow-up rebuilds the unit-test executable only; it does not incorporate
+the separate RPC-schema source correction into the normal GUI/daemon binaries.
+
+On another supported build, rebuild the unit binary through that platform's
+normal build system and select each case with
+`--run_test=paymaster_wallet_store_tests/<case>`.
+
+## Functional matrix follow-up (2026-10-10)
+
+The operator's normal build succeeded, as did the Paymaster Qt group (443 results)
+and the selected 320 Core cases (12,364 assertions). Of seven functional scenarios,
+provider drain recovery, readiness and reorg passed; RPC, full provider, lifecycle
+and failover initially failed. These results predate the additional wallet-store
+failure tests above.
+
+The four failing scripts were corrected and rerun individually:
+
+- RPC: the preparation/cancellation cases exhausted the listener's four initial
+  admissions from one local netgroup. The fixture now allows one admission to
+  replenish on the real monotonic clock before its next independent channel;
+  production limits and error checks remain intact. Continuing the test exposed
+  a genuinely incomplete `getpaymasterreputation` result schema. The Paymaster
+  RPC now declares all returned fields. The test requires nonempty records and
+  compares RPC and CLI responses using the same client wallet.
+- Provider: the insufficient-funds assertion now matches the stable
+  `PAYMASTER_DD_INPUT_SELECTION_FAILED` category and current balance message;
+  no-session and no-financial-side-effect assertions remain.
+- Lifecycle: a restored backup with wallet change is already reconciled by
+  startup maintenance. The test requires confirmed state, the exact txid, one
+  fee charged and zero open fee reservations, and rejects another `retry_same`.
+  The no-change variant still requires a protected pending authorization until
+  exact txindex observation. Both variants test four RPC and four CLI entry
+  points, unchanged mempools/provider accounting, and persistence after reload.
+- Failover: provider setup uses the shared policy fixture, including the required
+  service-fee cap field, while retaining its distinct provider fee rates.
+
+Successful isolated runs under
+`build_msvc/paymaster-refresh-check/functional-fixes/` are `rpc-3`, `provider-1`,
+`failover-1`, `lifecycle-2` and `lifecycle-no-change-1`. Each has exit code 0 and
+its own `test_framework.log`. The schema and wallet-store test source passed
+targeted MSVC compilation; separate daemon/unit executables were linked against
+the operator-built libraries. The normal executables were not replaced.
+An initial wallet-library Build target scheduled unrelated recompilation and
+was stopped before replacing that library; validation used selected-file
+compilation and isolated links instead. Python syntax and `git diff --check`
+passed. No complete build, full Qt/Core rerun, cross-platform, real-Tor or fuzz
+campaign was performed in this follow-up. The normal binaries still require a
+regular operator build before these source changes are included in them.
+
+## Recovery fee reorg regression (2026-10-10)
+
+The review first reproduced two failed invariants in an isolated copy of the
+wallet-store recovery test: after a one-block recovery was disconnected, its
+3-cent original fee stayed released; with 4 cents already spent, another 16
+cents could be reserved against a 20-cent daily limit. The diagnostic artifacts
+are under `build_msvc/paymaster-refresh-check/security-review/`. This is a
+wallet-store simulation, not a demonstrated live-chain theft.
+
+The fix changes only Paymaster wallet code. Fees remain reserved through the
+existing 240-block safety depth. A common helper repairs retained historical
+liabilities under the wallet lock before new payment/recovery acceptance and
+final reconciliation; changes share the caller's atomic database transaction.
+Routine final observations inspect only their session, avoiding repeated
+wallet-wide scans. Limits and already-spent accounting dates are preserved.
+
+Four new cases plus the extended self-recovery case passed **384 assertions**
+using selected MSVC compilation and an isolated link. The related selection
+passed **28 cases / 1,542 assertions**, including those five. Coverage includes:
+
+- A shallow confirmation, disconnection, 239/240-confirmation boundary and
+  begin/write/commit failures without lost fee or input protection.
+- Released and aged-out fee rows, lowered saved limits, reopened persisted
+  records, invalid authorization evidence and idempotent reconciliation.
+- Denying new approval before periodic repair has run.
+- A winning original payment with a stale canceled recovery status, exact
+  deep local confirmation, late provider results and duplicate replies.
+- Existing signing, ownership, concurrent budget/pool, percentage-limit,
+  unsigned-cancel and persistence-failure tests.
+
+Reports and isolated artifacts are under
+`build_msvc/paymaster-refresh-check/reorg-fee-fix/`. The normal application
+executables were not replaced. Full product/Qt/functional/sanitizer/fuzz and
+real storage-failure verification were not run in this targeted follow-up.
+The correction retains the existing 240-block pruning horizon; it does not
+reconstruct already-pruned history after deeper reorganizations.
+
+Workspace-local operator command, from `D:\Digibyte\digibyte-fork`, after
+closing Client and Paymaster normally:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\reorg-fee-fix\build-and-check.ps1
+```
+
+Requires the previously installed MSVC 14.43, Qt 5.15.10 and cached vcpkg
+dependencies. It builds the regular Release solution, then runs every registered
+`paymaster_*` Core suite, recording source/binary hashes and timestamped reports.
+Runtime is normally minutes; success requires build/test exit code 0 and zero
+failed tests. It does not replace the separate full release matrix or independent
+security review.
+
+## Provider security corrections (2026-10-10)
+
+The two reproduced findings in the [threat model](paymaster-threat-model.md) now
+have source corrections. Exact provider commit recovery can outlive the rolling
+24-hour expenditure ledger without recharging fees or allowing a new signature.
+Expired unsigned provider history is pruned atomically after its complete replay
+window, with a 64-session cleanup bound and an 8,192-session admission bound.
+Signed/ambiguous records and historical restricted capabilities stay protected.
+
+Selected MSVC compilation of seven translation units and an isolated link passed.
+Two new tests and an extended durable-commit case pass **3 cases / 8,539 assertions**:
+
+| Case in `paymaster_wallet_security_tests` | Coverage |
+| --- | --- |
+| `provider_final_commit_spends_budget_atomically` | Real signed final, exact 24-hour boundary, aged-out SPENT row, restart and policy change, successful durable recovery, no duplicate budget write/charge, rejection of conflicting and corrupt evidence, unchanged RESERVED checks. |
+| `expired_unsigned_provider_history_is_compacted_atomically` | Full replay boundary, atomic begin/commit failure rollback, protected signature/budget/capability records, reopened mock database, removal of all associated session/attempt indices, no permanent unsigned tombstone, stale replay rejection and idempotent maintenance. |
+| `provider_history_quota_preserves_existing_requests` | Actual 8,192-session boundary, existing-request continuation and new-request admission after space is freed. Its 8,197 assertions mostly insert fixture records. |
+
+The related selection, including these three cases, passes **48 cases / 10,012
+assertions**, exit 0. It covers protocol bindings, signatures, malformed messages,
+transport isolation, recovery firewalls, concurrent budget/pool ownership and
+prior client recovery-fee/reorg fixes. Artifacts are workspace-local under
+`build_msvc/paymaster-refresh-check/security-fixes/`: `focused-report.txt`,
+`related-report.txt`, `related-filter.txt`, `results.json`, source hashes/diff and
+the isolated test executable. Existing operator-built libraries and the previous
+client-fee test object are reused; this is not a full rebuild of every dependency.
+The normal application executables have not been replaced.
+
+For the operator's full current-source build and all Paymaster Core suites, close
+Client/Paymaster normally and reuse the existing helper; its older folder name
+does not pin an older source revision:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\reorg-fee-fix\build-and-check.ps1
+```
+
+Prerequisites: the existing MSVC 14.43, Qt 5.15.10 and cached vcpkg installation.
+Runtime class: minutes for the incremental full Release solution build and tests.
+Success requires build/test exit code 0 and no failed tests; preserve the printed
+report directory. This command builds the normal GUI, daemon, CLI and test binary.
+
+Then run the focused functional matrix against those freshly built binaries:
+
+```powershell
+$env:DIGIBYTED = (Resolve-Path '.\build_msvc\x64\Release\digibyted.exe').Path
+$env:DIGIBYTECLI = (Resolve-Path '.\build_msvc\x64\Release\digibyte-cli.exe').Path
+python -X utf8 test/functional/test_runner.py wallet_paymaster_lifecycle.py wallet_paymaster_reorg.py wallet_paymaster_failover.py wallet_paymaster_provider.py wallet_paymaster_rpc.py -j1
+```
+
+This requires the existing Python test environment and `test/config.ini` pointing
+to this checkout. It uses temporary test wallets/regtest, takes minutes to tens
+of minutes and must report every selected scenario passed with exit code 0.
+No live wallet is needed. These operator commands were not executed in this
+follow-up. Full Qt/release, sanitizer/fuzz, real SQLite disk-full/power-loss,
+stale-provider-backup and adversarial network/load checks remain open. The new
+historical alternative-provider commit retry also needs a full functional rerun;
+the new aged-commit regression directly exercises the normal provider path.

@@ -8,6 +8,17 @@
 
 ## Paymaster architecture in this branch
 
+Provider recovery separates the rolling 24-hour expenditure ledger from the
+lifetime of a signed transaction. A missing aged SPENT row may be validated
+read-only from its exact retained local commit/manifest; current reservations
+and conflicting records still fail closed. No spending authority or accounting
+entry is recreated. Periodic reconciliation atomically removes provably unsigned
+expired provider requests after their retry/replay window, including secondary
+indices, without permanent tombstones. It prunes at most 64 per pass; new quotes
+are refused at 8,192 retained provider sessions while exact retries remain
+available. Signed/recovery history retains its existing protection. These
+Paymaster-only changes introduce no consensus, wire or database-format change.
+
 After a failed first prepare-only RPC, Qt reconciles the same wallet/request
 before offering another payment. A status-aware missing-session result clears
 only an unpersisted local attempt, retaining its recipient and amount. Known
@@ -124,6 +135,21 @@ Capital actions and target/cost forms live in Funds & reserves. The saved
 refill goal is shown separately from the actual reserve capacity. Saving a lower
 goal offers a separate DD/DGB excess-retirement preview. Core binds its saved
 target revision, inputs and finite fees; cancellation retains existing reserves.
+Funds & reserves reuses the finance-page typography and responsive cards for
+available payment capacity, DGB funds and DD base capital. Its expandable counts
+table uses saved targets, never draft form values. Normal actions cover refill,
+earnings withdrawal and coordinated capacity reduction; individual DD release
+and DGB-only retirement live under Advanced reserve management. The page reuses
+the existing serialized operator/finance snapshots without additional RPCs.
+Overview model cards derive saved enablement, local readiness and per-model
+budget eligibility from that same operator snapshot. Customer-work counters
+remain separate from aggregated reserve/management progress. Inactive offer
+pricing sections are hidden without overwriting the draft. An explicitly
+confirmed Qt settings restart uses the existing atomic disable-and-stop RPC,
+preserving autostart, then saves, verifies via read-only status, enables and
+requests readiness-aware start. Wallet/generation/privacy guards cover the
+whole serialized chain; an ambiguous reply halts it without replay or rollback.
+No Core or RPC implementation change is required.
 The operational hero excludes backup reminders. getpaymasternodeconfig supplies
 nodewide effective source, editability/conflicts and pending restart changes to the
 shared inline/setup editor. Config writes retain file-bound preview/backup/
@@ -173,6 +199,11 @@ DD Overview also reads its Paymaster-aware balance breakdown, collateral and
 wallet mint capability through a read-only worker. Refreshes coalesce and retain
 the last successful wallet-bound display; rebinding rejects old replies. Hidden
 overview callbacks do not read balances after navigation to Paymaster Network.
+The shared DD history cache seeds the overview and transaction list with stored
+rows immediately. These rows carry a Qt-only `checking` status until the existing
+worker reads live wallet confirmations. Persisted zero counts are not presented
+as pending payments; subsequent views reuse the verified cache. This adds no
+wallet/database state, RPC changes or additional worker requests.
 Oracle and network-health RPCs run outside the GUI thread with one in-flight
 request per view and query, so Core lock contention cannot stall these refreshes.
 The DD Vault widget likewise uses one retained-wallet worker for its existing
@@ -1283,7 +1314,7 @@ Authentication Methods:
 | `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster_provider.cpp` | Configure a wallet-scoped provider and its isolated pools |
 | `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster_provider.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
 | `withdrawpaymastercarrier` | `wallet/rpc/paymaster_provider.cpp` | Preview and execute wallet-owned carrier-excess consolidation or release one stopped-provider carrier slot |
-| `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster_provider.cpp` | Create a non-gossiped provider-signed restricted sponsorship descriptor |
+| `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster_provider.cpp` | Retained Restricted descriptor endpoint; new issuance is disabled |
 | `startpaymaster` / `stoppaymaster` / `getpaymasterinfo` | `wallet/rpc/paymaster_runtime.cpp`, `wallet/rpc/paymaster_provider.cpp` | Operate and inspect an explicitly enabled provider |
 
 Both `sendoracleprice` and `submitoracleprice` are absent from the source tree — `sendoracleprice` was removed as a fake-price-injection vulnerability and `submitoracleprice` never existed. Oracle prices come exclusively from live exchange aggregation. See `REPO_MAP_DIGIDOLLAR.md` for the complete RPC inventory.
@@ -1549,9 +1580,13 @@ finite-budget maintenance only when configured targets remain missing
   operation additionally requires an eligible descriptor wallet, a persisted
   BIP86 identity and policy, prepared admission/operational pools, explicit
   enablement, and `startpaymaster`.
-- `USER_PAID` and public or restricted `SPONSORED` offers use the same
-  transaction protocol. Restricted capabilities are payment-bound and their
-  durable records retain hashes rather than plaintext authorization material.
+- `USER_PAID` and public `SPONSORED` are available for new payments. Restricted
+  `SPONSORED` is parked behind `CheckNewSponsorshipScope` in Paymaster code.
+  Its protocol and storage remain readable for already accepted transfers and
+  recovery; new policies, descriptors, requests and first authorizations are
+  disabled. Saved Restricted settings are never converted to public silently.
+  Capabilities remain payment-bound with hash-only durable records. See
+  `doc/digidollar-paymaster-implementation.md#parked-restricted-sponsorship`.
 - Standard privacy requires v2 transport with no v1 fallback. High privacy is
   onion-only, uses Tor stream isolation, permits one provider attempt, and has
   no clearnet fallback. This reduces metadata; it does not provide anonymity.
@@ -1867,7 +1902,7 @@ debug=validation
 - `src/qt/test/` - DigiDollar Qt widget tests (`digidollarwidgettests.cpp`, `digidollarwave19widgettests.cpp`); generated `moc_*.cpp` files are build products.
 
 ### Functional Tests
-- `test/functional/` - Python integration tests; DD/oracle coverage is registered through `digidollar_*`, `wallet_digidollar_*`, and `feature_oracle_p2p.py`; `wallet_paymaster_provider.py` covers the descriptor-provider lifecycle, high-privacy selection rejection, user-paid/public/restricted transfers, and recovery.
+- `test/functional/` - Python integration tests; DD/oracle coverage is registered through `digidollar_*`, `wallet_digidollar_*`, and `feature_oracle_p2p.py`; `wallet_paymaster_provider.py` covers the descriptor-provider lifecycle, high-privacy selection rejection, user-paid/public transfers, Restricted rejection, and recovery.
 
 ### Running Tests
 ```bash
@@ -2105,8 +2140,9 @@ CLI presentation uses the stream-based `SetupSelect`, `SetupConfirm` and
 `SetupReadNumber` helpers in `paymaster/setup.cpp`. Menus and exact decimal-unit
 conversion are testable without an RPC transport. Field explanations and bounds
 map user DGB/DD/percent input to the existing integer RPC fields. Core validation
-remains authoritative. The shared setup plan rejects restricted sponsorship
-unless it is sponsored-only with zero DD fee before returning any mutating step.
+remains authoritative. The shared setup plan rejects all new Restricted
+sponsorship before returning any mutating step; legacy policy validation and
+recovery are preserved separately.
 `SetupCliDefaults` builds proposals for new continuous providers and overlays complete saved values for existing wallets; it performs
 no mutations. `SetupChoices::autostart` is optional: the existing GUI leaves it
 empty to retain saved behavior, while CLI applies the explicitly reviewed choice
@@ -2178,3 +2214,15 @@ consent. Save errors and incomplete acknowledgements are reconciled by reading
 claiming success. Unconfirmed edits remain dirty with an inline explanation;
 no write is retried automatically. The form reports automatic refill and
 paid-maintenance approval separately, including zero-limit blocking.
+
+Paymaster client fee protection also supports wallet-local effective percentage approval
+(`ClientSafetyPolicy` v2, v1 read compatibility). Actual fee/net-recipient checks
+are shared by preview, acceptance and signing; recovery uses wallet-return totals.
+Qt timeouts switch signed operations to read-only observation and reviewed recovery.
+Cancel-to-self retains original client fee reservations through the existing
+240-confirmation reorg safety depth. A shared Paymaster store helper reconstructs
+prematurely released or aged-out liabilities from exact accepted signatures in
+unpruned recovery sessions before new approval and during final reconciliation.
+Restoration is atomic with the caller's transition and never raises saved limits;
+already-spent fees retain their original accounting date.
+No consensus or base DigiByte transaction rules are changed by this protection.

@@ -105,7 +105,11 @@ funding and the existing exact-total/sweep options keep their own behavior.
 `getpaymasterclientinfo` has no parameters. It reports `integration_version=1`,
 `network`, the full `genesis_hash`, `amount_unit`, `minimum_payment_cents`,
 `maximum_payment_cents`, `maximum_user_total_cents`, `fee_modes`,
-`funding_models`, and `sponsorship_scopes`.
+`funding_models`, and `sponsorship_scopes`. Available scopes are currently
+`["public"]`. New Restricted policies, descriptor creation, requests and first
+authorization are disabled with `PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED`.
+Legacy artifacts remain readable for already accepted transfers and recovery;
+their presence does not mean new Restricted service is available.
 
 `supported` describes the binary's integration support. `ready` and
 `readiness_errors` describe the wallet/node's local authorization prerequisites:
@@ -306,6 +310,14 @@ that sum; released entries do not count. The existing accounting high-water time
 prevents clock rollback from reopening a spent window. This is service-fee
 protection, not a limit on recipient payments or a total agent spending budget.
 
+After cancel-to-self, the original fee stays reserved until the recovery has
+240 confirmations, matching signed-input retention. A shallow recovery or its
+reorganization must not reopen that fee allowance. Retained sessions from older
+versions repair early-released or aged-out rows from the exact accepted signed
+attempt before a new payment/recovery approval or final reconciliation. Saved
+limits stay unchanged; a restored obligation above the cap blocks new approvals.
+This wallet-store rule is shared by GUI, RPC and CLI.
+
 ## Interface support for a possible x402 extension
 
 The specifications below were checked on 2026-09-23. They are external, evolving
@@ -370,3 +382,29 @@ and Linux/WSL commands, prerequisites, expected runtime and success criteria.
 It includes the current Qt/vcpkg paths instead of relying on implicit defaults.
 Independent review and real Tor remain open in the
 [release gate](digidollar-paymaster-release-gate.md).
+
+### Effective client service-fee ceiling
+
+`setpaymasterclientsafetypolicy` accepts optional `maximum_service_fee_bps`
+(integer 0..10000, 100 = 1%). It is enforced together with the per-transfer and
+rolling-day DD ceilings. Example policy:
+
+```json
+{"maximum_service_fee_per_transaction_cents":100,"maximum_service_fee_per_day_cents":1000,"maximum_service_fee_bps":100}
+```
+
+Omission preserves a configured percentage; absent output on a legacy policy
+means no percentage has yet been approved. Zero means zero-fee only. Fractional,
+negative, null and out-of-range values are rejected. GUI, CLI and RPC use the
+same wallet enforcement. `getpaymasteroffers` filters the actual rounded fee
+against the actual recipient amount, including net-of-fee requests. Recheck
+errors use `PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED`; a previously viewed
+quote does not override a subsequently tightened cap. The final signature gate
+checks again. Alternative recovery applies the percentage to its wallet returns.
+
+Continue using `resolvepaymastersession(..., "refresh")` to observe an ambiguous
+signed transfer, including after reopening the wallet. Read `allowed_actions`
+for safe unsigned closure or return-to-self preparation. Never infer permission
+to send a replacement, sign recovery or release inputs from a timeout. Qt's
+live continuation switches to this read-only path after two minutes; CLI callers
+control their own polling interval.

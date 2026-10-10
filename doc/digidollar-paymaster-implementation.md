@@ -1,5 +1,26 @@
 # DigiDollar Paymaster implementation reference
 
+## Provider retention corrections (2026-10-10)
+
+The rolling 24-hour expenditure ledger is not the lifetime of a signed payment's
+authorization. When a SPENT row has aged out, a matching retained local commit
+and authorization manifest can validate only that exact historical execution.
+This fallback requires an accounting high-water more than 24 hours after commit,
+complete transaction/binding validation and no conflicting existing budget row.
+New RESERVED authorization checks remain unchanged; exact retries do not recreate
+budget rows or shift expenditure dates. Normal provider recovery and idempotent
+normal/alternative-provider final commits share the retained-evidence checks.
+
+New provider quote admission is capped at 8,192 retained sessions per wallet,
+including signed history. Existing requests can continue. Periodic reconciliation
+atomically prunes up to 64 expired, unsigned provider sessions per pass after
+their complete retry/capacity window plus 24 hours. Referenced records and indices
+are validated before deletion. Signed, ambiguous, capability-bound and otherwise
+protected history remains intact. No permanent tombstone is added for expired
+unsigned requests; their original signed envelopes can no longer be replayed.
+No wire, consensus or database format changes are involved. See the
+[review and verification scope](paymaster-threat-model.md#follow-up-corrections-2026-10-10).
+
 **Operator-workflow feature candidate (2026-09-27):**
 `feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
 [shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). Its new-source
@@ -38,12 +59,42 @@ DGB for the fee. Both parties retain their private keys.
 | Upgraded relay | Relay bounded admission announcements and directory requests. | No payment authorization or privileged consensus role. |
 | Existing validator/miner | Validate/mine the ordinary resulting DD transfer. | No requirement to run provider discovery or a Paymaster wallet. |
 
-The supported economic models are `USER_PAID`, public `SPONSORED`, and
-restricted `SPONSORED`. Sponsored payments have zero client service fee;
-restricted sponsorship additionally requires a payment-bound capability.
+The available economic models are `USER_PAID` and public `SPONSORED`.
+Sponsored payments have zero client service fee. Restricted `SPONSORED`
+remains implemented at the protocol/storage level but is disabled for new use.
 There is one recipient per Paymaster session. This path does not sponsor mint
 or redemption operations and does not add Paymaster batching to
 `sendmanydigidollar`.
+
+### Parked restricted sponsorship
+
+Since 2026-10-09, `CheckNewSponsorshipScope` in
+`src/paymaster/provider_policy.cpp` rejects new Restricted service with
+`PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED`. There is no runtime enable switch.
+Provider policy writes, setup preflight, readiness, descriptor issuance,
+capacity construction, new client requests, provider quote admission and first
+client authorization enforce this boundary. CLI uses the same RPC/Core gates;
+GUI and setup selectors cannot select Restricted. Client capabilities advertise
+only the `public` scope.
+
+Do not put this gate in `ValidateProviderPolicy`, serializers, signature checks
+or recovery validators. Those continue to read and verify saved Restricted
+policies, descriptors, capabilities, accounting and signed transfers. Already
+accepted exact authorizations retain their continuation/recovery paths; a saved
+quote without accepted authorization cannot acquire new spending authority.
+The provider can drain existing work but cannot admit new Restricted payments.
+Saved Restricted policies remain unchanged and are shown as unavailable. An
+operator must explicitly review a supported replacement; never silently turn
+private sponsorship into public sponsorship. Inactive Restricted budgets and
+historical finance records remain stored.
+
+The retained implementation is a foundation for future work, not an available
+voucher feature. A future fee-waiver voucher design must specify issuance,
+redemption, payment/provider binding, expiry, revocation and replay protection,
+separate finite sponsorship budgets, user consent, and matching GUI/RPC/CLI
+flows before this gate is changed. Preserve zero-fee `USER_PAID` semantics and
+existing accepted-transfer recovery. Re-enable only with end-to-end tests for
+authorization, cancellation, replay, budget accounting and restart recovery.
 
 ## 2. Transaction construction and fee accounting
 
@@ -257,13 +308,25 @@ current Core-derived `allowed_actions`:
 - After signing, timeout does not release inputs. `cancel_to_self` prepares or
   resumes one exact same-input return transaction. A distinct eligible
   `USER_PAID` provider can supply DGB when the client has none. Signing requires
-  the exact recovery authorization commitment, and cancellation is final only
-  after confirmation.
+  the exact recovery authorization commitment. A recovery confirmation is
+  reversible: original fee reservations and signed-input protection remain
+  until the existing 240-block reorganization safety depth.
 
 Remote messages cannot undo a final committed authorization. Separately, local
 chain reconciliation can roll back a confirmation after a reorganization and
 restore pending finance/pool state. This distinction is tested by
 [wallet_paymaster_reorg.py](../test/functional/wallet_paymaster_reorg.py).
+
+Client recovery fee repair also covers older unpruned sessions whose original
+fee was released after one confirmation. The common store helper validates the
+accepted manifest, exact user signature, session/input binding and recovery
+artifact before reinstating a released or aged-out fee row. New payment and
+recovery approvals include these liabilities before checking the daily cap;
+reinstatement never expands saved limits. Changes are staged under the wallet
+lock and committed with the caller's session/authorization transition. Existing
+spent rows are neither reset nor charged twice. Exact deeply confirmed original
+payments can settle even when a disconnected recovery left a canceled/conflicted
+session status. This does not extend recovery beyond pruned 240-block history.
 
 ## 6. Persistence and provider operation
 
@@ -533,3 +596,37 @@ authorize an increased fee or change recurring maintenance budgets.
 
 Regression details and runtime acceptance are tracked in
 [the edge-case review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).
+
+### Client percentage approval and unresolved outcomes
+
+`ClientSafetyPolicy` wallet records use version 2. Version 1 remains readable
+with `maximum_service_fee_bps = -1` (legacy absolute-only approval). A new
+explicit percentage is 0..10000 basis points; zero allows only zero service
+fees. RPC omission preserves any saved cap. No migration grants a percentage
+approval automatically. Older binaries cannot validate version 2 and must not
+be used to rewrite these records.
+
+`CheckClientServiceFee` compares actual integer DD cents:
+`service_fee * 10000 <= recipient_amount * maximum_service_fee_bps`, alongside
+the absolute ceiling. The recipient amount is the net amount when the fee is
+deducted. This deliberately rejects rounding that exceeds the approved effective
+percentage. Wallet-side checks cover discovery, selection, durable acceptance
+and the final client signing boundary. Recovery fees use the total DD returned
+to wallet-owned outputs. Existing signed artifacts retain their observation,
+replay and recovery paths; elapsed time never releases their inputs.
+
+Qt ends an unsigned live preparation after two minutes only through Core's
+fresh `abandon_unsigned` capability. Signed send/retry/recovery continuations
+switch to read-only `refresh` polling after that interval. Transient read errors
+are inline and retried, while malformed state remains fail-closed. Durable
+session creation time also makes the return-to-wallet action prominent after
+restart. Failed/conflicted sessions with unresolved authority remain observed.
+Recovery preparation and any signing still use the existing exact review flow.
+
+An authenticated remote unsigned-abort message is **not implemented**. Local
+closure cannot prove that a remote provider has released a reservation. A future
+extension must bind identity, session/attempt, quote and nonce, persist replay
+protection, and atomically reject release once any client spending authority is
+accepted. Until that protocol exists, provider reservations expire under the
+existing bounded quote/capacity rules; they are never freed on an unauthenticated
+notification or solely on a client UI timeout.

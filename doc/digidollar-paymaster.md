@@ -716,7 +716,7 @@ as a wallet-scoped Qt preference; Core remains authoritative for readiness.
 
 The guided setup uses a theme-controlled classic dialog on Windows. It covers
 current prerequisites, explicit provider-wallet selection, public identity,
-user-paid/public-sponsored/restricted service models, offer limits, a finite
+user-paid/public-sponsored service models, offer limits, a finite
 safety profile, policy-aware liquidity targets, and a final review. A dedicated
 provider wallet is recommended, but not required. Because the wizard belongs
 to the currently selected wallet view, it never silently creates or switches a
@@ -819,8 +819,9 @@ The provider lifecycle is deliberately staged:
    the optional `maximum_user_paid_service_fee_cents` caps each user-paid fee;
    zero means no cap. The value is included in the signed public offer and is
    available through `setpaymasterpolicy` as well as the CLI/Qt setup controls.
-   Sponsored transfers charge no DD service fee. Restricted sponsorship is a
-   sponsored-only invitation mode and cannot be combined with `user_paid`.
+   Sponsored transfers charge no DD service fee. Restricted / invitation-only
+   sponsorship is currently disabled; its implementation is retained for future
+   work and legacy recovery.
 4. Set a complete finite provider loss/rate policy with
    `setpaymastersafetypolicy` and inspect it with
    `getpaymastersafetystatus`. A funding model that the provider advertises
@@ -1207,7 +1208,14 @@ capabilities are bound to one concrete payment and are not globally gossiped.
 Public sponsorship must still have explicit finite hourly and daily DGB budgets;
 the budgets cap loss but do not provide Sybil fairness.
 
-For restricted operation, configure a sponsored-only policy with
+**Availability (2026-10-09): Restricted is disabled for new use in GUI, CLI and
+RPC.** The following describes retained protocol code, not operating steps for
+this build. There is no enable switch or voucher interface. New policy writes,
+descriptors, requests and first authorizations are rejected. Old records and
+already accepted exact authorizations remain recoverable. See
+[parked restricted sponsorship](digidollar-paymaster-implementation.md#parked-restricted-sponsorship).
+
+The retained restricted design uses a sponsored-only policy with
 `sponsorship_scope=restricted`. `startpaymaster` starts the direct provider
 runtime but deliberately publishes no announcement. An authenticated sponsor
 service supplies its x-only authorization key to

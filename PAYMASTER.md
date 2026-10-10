@@ -1,5 +1,12 @@
 # DigiDollar Paymaster: developer starting point
 
+**Current-worktree security review (2026-10-10):** The
+[threat model](doc/paymaster-threat-model.md) records two reproduced provider
+recovery/retention findings and their subsequent source corrections, tested
+signing and fee controls, exact
+source/binary evidence, and outstanding backup/storage/sanitizer checks.
+Its selected tests are not a full release-build pass.
+
 **Operator-workflow feature candidate (2026-09-27):**
 `feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
 [shared Qt/CLI setup and operation](doc/digidollar-paymaster-operator.md). Its new-source

@@ -1,5 +1,53 @@
 # DigiDollar Paymaster V1 release gate
 
+**Security review (2026-10-10):** The
+[current-worktree threat model](paymaster-threat-model.md) identified two
+medium-priority findings: aging out provider budget evidence needed
+by a retained durable commit (TM-001), and unbounded retention of full expired
+unsigned provider sessions/attempts (TM-002). Both have isolated diagnostic
+reproductions. Thirty-seven existing protection cases pass 1,130 assertions;
+the two diagnostic cases intentionally fail their respective invariant checks.
+No additional unauthorized spend was demonstrated. Subsequent Paymaster source
+corrections reuse retained exact commit authority for historical retries and
+atomically prune eligible unsigned provider history, with bounded cleanup and
+new-admission backpressure. The focused regression group passes 3 cases / 8,539
+assertions; the related selection passes 48 cases / 10,012 assertions, including
+those three. Most assertions in the quota test seed the 8,192-session boundary.
+This used selected MSVC compilation and an isolated executable. Fresh full-build
+verification remains open, alongside stale-provider-backup, physical storage-failure,
+sanitizer/fuzz and independent-review checks; see the
+[correction runbook](digidollar-paymaster-testing.md#provider-security-corrections-2026-10-10).
+
+**Recovery fee-budget correction (2026-10-10):** An isolated regression
+demonstrated that a shallow cancel-to-self confirmation followed by reorganization
+could leave its original fee released and permit exposure above the daily cap.
+The Paymaster wallet correction retains fees through 240 confirmations, repairs
+retained older liabilities before new approvals, and records a winning original
+payment once. Five focused cases pass 384 assertions; the related selection
+passes 28 cases / 1,542 assertions, including those five. This used selected MSVC
+compilation and an isolated unit executable. A normal product build and full
+release matrix remain required; see the
+[recovery fee runbook](digidollar-paymaster-testing.md#recovery-fee-reorg-regression-2026-10-10).
+
+**Functional follow-up (2026-10-10):** The operator reported a successful build,
+443 Paymaster Qt results and 320 selected Core cases. Four initially failing
+functional scripts now pass in isolated reruns, together with the additional
+no-change lifecycle variant. Changes comprise corrected Paymaster test fixtures
+and a complete `getpaymasterreputation` result schema; financial rules and
+transport limits were not relaxed. See the
+[run details and binary scope](digidollar-paymaster-testing.md#functional-matrix-follow-up-2026-10-10).
+Normal binaries still require an operator build to include these latest changes.
+
+**Failure-test additions (2026-10-10):** Two new wallet-store cases and two
+extended cases cover simulated begin/write/commit failures, preserved fee
+approval/exposure, signed-input protection and lost-reply retries. They were
+added after compilation of the affected unit-test source in an ongoing operator
+build. That run does not contain these additions. A subsequent targeted MSVC
+compile and isolated link passed all four affected cases (655 assertions); see the
+[failure-test runbook](digidollar-paymaster-testing.md#additional-wallet-store-failure-tests-2026-10-10).
+These in-memory database tests do not close real SQLite/power-loss/disk-full,
+stale-provider-backup, sanitizer/fuzz or independent-review gates.
+
 The [subsequent Qt flow audit](design/paymaster-flow-audit.md) adds regression
 coverage for fallback, lost replies, discovery failures, modal wallet changes
 and delayed provider-startup status reads.
@@ -107,7 +155,7 @@ snapshot records only superseded pre-hardening states.
 | 11 | Covered | Reputation tests cover local-only storage, neutral failures, cooldown, and security-first eligibility. | Final focused unit run. |
 | 12 | Covered | Headless selection, fee caps, durable sessions, and request-id idempotency are covered by client/store and provider functional tests. | Final focused and functional run. |
 | 13 | Covered | Legacy `senddigidollar` without options remains on the wallet-funded path and has regression coverage. | Final broad wallet regression run. |
-| 14 | Covered | The provider functional test completes public and restricted zero-service-fee sponsorship with the common protocol. | Final functional rerun. |
+| 14 | Scoped | Public zero-service-fee sponsorship remains available. Restricted new service is disabled as of 2026-10-09; the provider test now checks rejection and preserves the public restart path. | Final broad functional rerun; see the testing runbook for targeted disabled-service checks. |
 | 15 | Covered | Capability tests bind restricted authorization to the payment, store only its hash, reject reuse, and keep it out of gossip. | Final focused and functional run. |
 | 16 | Covered | Builder tests require fresh internal DD/DGB change; the provider functional test scans production logs for payment artifacts and secrets. | Final functional rerun with `debug=net,rpc`. |
 | 17 | Covered | Readiness tests enforce onion-only high privacy, Tor isolation, one attempt, and no v1/clearnet fallback. | Perform a deployment smoke test with a real Tor proxy/onion service. |

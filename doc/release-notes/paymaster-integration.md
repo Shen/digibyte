@@ -1,9 +1,96 @@
 # Paymaster integration release notes
 
+## Provider recovery and unsigned history (2026-10-10)
+
+Provider recovery now remains possible when an already signed transaction's
+SPENT budget entry has aged out of the rolling 24-hour ledger. The exact local
+commit and authorization are independently validated; conflicting or corrupt
+evidence still fails closed. This path grants no new signature, raises no limit
+and never charges the fee again. It also covers exact final-commit retries.
+
+Expired unsigned provider requests are now removed atomically after the complete
+retry/capacity window plus 24 hours. Maintenance removes at most 64 sessions per
+pass. Admission stops at 8,192 retained provider sessions per wallet while
+allowing existing requests to continue. Signed, ambiguous and historical
+restricted artifacts remain protected. Cleanup does not create permanent
+tombstones for expired unsigned requests.
+
+Changes are confined to Paymaster code, tests and documentation; consensus,
+wire and database formats are unchanged. The
+[security report](../paymaster-threat-model.md#follow-up-corrections-2026-10-10)
+and [test runbook](../digidollar-paymaster-testing.md#provider-security-corrections-2026-10-10)
+distinguish selected-test evidence from the still-required full product build
+and broader release gates.
+
+## Client recovery fee budget after reorganization (2026-10-10)
+
+Original service-fee reservations now remain protected until cancel-to-self
+reaches the existing 240-confirmation safety depth. Previously a single recovery
+confirmation released the fee; a reorganization did not restore it, permitting
+further approvals above the intended daily exposure limit.
+
+Retained older recovery sessions reconstruct released or aged-out fee rows from
+their exact accepted signatures before new approvals and final reconciliation.
+Restoration and session/authorization updates are atomic, saved limits are not
+raised, and spent fees are not duplicated. An original payment that wins after
+the reorganization can settle from its validated provider result or deep local
+confirmation, including stale canceled/conflicted recovery status. The correction
+is confined to Paymaster wallet code and tests; consensus and record formats
+are unchanged. See the testing guide for targeted validation and build scope.
+
+## Local reputation RPC schema (2026-10-10)
+
+`getpaymasterreputation` now declares its complete result schema, including the
+optional success rate. Nonempty results no longer fail strict RPC result
+validation. RPC and CLI regression coverage checks the same wallet's aggregate
+records. This changes no reputation accounting, fees, reservations or consensus
+behavior.
+
+## Restricted sponsorship parked (2026-10-09)
+
+Restricted / invitation-only sponsorship is disabled for new use in GUI, CLI
+and RPC/Core. User paid and public Sponsored remain available. Existing saved
+Restricted settings are shown as unavailable and are never silently converted
+to public sponsorship. New descriptors, requests and first authorizations are
+rejected with a stable RPC error; the GUI explains the restriction in plain text.
+
+The implementation, serialized records, signature/replay checks and historical
+accounting remain for future extensions and already accepted-transfer recovery.
+This does not introduce voucher creation or redemption. Design boundaries and
+re-enablement requirements are documented in the implementation guide under
+"Parked restricted sponsorship". No consensus or original DigiByte fee rules
+change. The older Restricted setup notes below describe the previous behavior.
+
+
 These fork-specific changes are unreleased and are separate from the official
 [v9.26.6 release notes](../../RELEASE_v9.26.6.md). Upstream verification results
 do not validate this integration. See the [test runbook](../digidollar-paymaster-testing.md)
 for the current checkpoint and remaining checks.
+
+## DD history startup status
+
+The fast stored-history preview no longer briefly labels already-confirmed
+transactions as Pending when opening the DD history or overview. It shows
+Checking… until the existing asynchronous wallet read supplies live status.
+The immediate preview remains non-blocking; wallet, RPC and confirmation rules
+are unchanged.
+
+## Funds and reserves presentation
+
+Overview now shows the saved User paid and Sponsored models with separate local
+readiness/budget indicators and explicit zero-fee pricing. Concurrent customer
+offers, capacity reservations and queue depths are separate from provider
+management/reserve progress. Settings hides inactive model controls symmetrically
+and offers a confirmed service-only restart when saving an offer or processing
+mode. Autostart, budgets and protected reservations are retained; incomplete
+replies stop the sequence for review. Core and RPC implementations are unchanged.
+
+The Paymaster funds page now shares the income/cost page's responsive metric
+cards and table typography. It separates current capacity/capital, daily actions,
+saved reserve counts and the target/refill form. Individual DD release and
+DGB-only release are under Advanced reserve management with their effects
+explained. Existing approval flows, RPCs and Core spending rules are unchanged;
+the layout uses already-loaded snapshots, with no additional refresh requests.
 
 ## Official v9.26.7 integration
 
@@ -393,3 +480,14 @@ open-offer reservations and the per-recipient limit. Client notices distinguish
 an incomplete exchange from an unreachable endpoint and explain that provider
 reservations can remain until expiry after local cancellation. Presets, approved
 fees, wire messages and signature/reservation safety rules are unchanged.
+
+- Client wallets can approve an effective service-fee percentage alongside their
+  absolute and daily DD caps. Send $DD proposes 1%, activated only by saving.
+  Existing wallets retain their previous approval until review. Actual rounded
+  fees and net recipient amounts are checked in discovery, acceptance and before
+  signing, including alternative recovery. RPC omission cannot remove a cap.
+- After a two-minute live wait, unsigned preparation is closed only when Core
+  confirms it is safe. Signed transfers/recoveries switch to status observation;
+  no timeout releases inputs or authorizes a replacement. Older unresolved
+  sessions prominently offer reviewed return-to-wallet recovery. Transient read
+  failures no longer interrupt background observation with repeated dialogs.

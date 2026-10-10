@@ -1,8 +1,26 @@
 # Paymaster operator workflow
 
-Current UI candidate: integration/paymaster-v9.26.6rc2, 2026-10-01.
+Current UI candidate: integration/paymaster-v9.26.7, 2026-10-09.
 The task-oriented redesign has separate verification; earlier results do not
 validate this revision. This is not a release approval.
+
+## Provider history and delayed transfers
+
+An already signed provider transaction can be recovered after its expenditure
+leaves the rolling 24-hour budget window. Recovery uses the exact retained local
+authorization and transaction; it does not approve another payment or charge the
+same fee again. Keep the wallet's saved transfer records while recovery is open.
+
+Expired requests that were never signed are removed automatically after their
+complete replay window plus 24 hours, up to 64 per maintenance pass. Protected
+signed/ambiguous transfers and historical restricted requests are retained.
+New offers stop at 8,192 retained provider sessions per wallet; existing requests
+can continue. A legacy backlog may need multiple maintenance passes. Do not
+manually delete transfer records or unlock their inputs to bypass this limit.
+
+These source corrections require a new product build. Targeted verification and
+the operator build command are in the
+[test runbook](digidollar-paymaster-testing.md#provider-security-corrections-2026-10-10).
 
 ## Find the right page in Qt
 
@@ -18,9 +36,28 @@ The [design contract](design/paymaster-operator-ux.md) describes the interface.
 | **Income & costs** | DD income, DGB costs, financial history and complete CSV export. |
 | **Settings** | Offer, Spending limits, Operation & automation, Node connection, Wallet & backup. |
 
+On first opening **$DD Transactions** or the DD overview, saved transactions can
+appear immediately with **Checking…** while current confirmations are read in
+the background. This is a loading status, not an unconfirmed payment. It changes
+automatically to the wallet's actual confirmation count or transaction state.
+
 A sidebar is used from 960 logical pixels; a compact selector opens the same
 pages in narrower windows. Settings categories have a Back to settings action.
-Current task progress stays visible while navigating. Background reads preserve
+Provider management task progress stays visible while navigating. It describes
+reserve/management work, not the progress of every customer payment. Multiple
+reserve operations show combined progress, with operation references in Activity.
+Overview separately shows customer offers/payments holding budgets, capacity
+reservations and queued requests/submissions. These stages can overlap; do not
+add the counters or interpret an open offer as a completed payment.
+
+The User paid and Sponsored cards use the **saved** offer, not Settings drafts.
+They distinguish disabled, missing spending approval, exhausted limits, waiting
+for readiness and locally ready. A green check means the local service and that
+model's minimum-quote budget check are ready; each actual request still checks
+its amount, recipient, reserves and limits. It does not prove external reachability.
+User paid at 0% is explicitly labelled as charging no DD service fee.
+
+Background reads preserve
 the visible pages, including when the window is resized or uncovered. If a read
 takes more than two seconds, its current step and elapsed time are shown.
 Passive reads leave navigation and draft inputs enabled. A deliberate wallet
@@ -45,6 +82,19 @@ changes. Saving budgets alone does not activate sponsorship. You can discard the
 limit edits without changing the saved budgets. Core applies the same compatibility
 check to RPC/CLI: save compatible finite limits with `setpaymastersafetypolicy`
 before the new `setpaymasterpolicy` call.
+
+When the provider is running, **Save and restart provider…** offers one review
+for pausing this service, saving the offer or processing mode, checking the saved
+values and restarting. DigiByte Core is not restarted. The flow uses
+`setpaymasterenabled false`, which also stops runtime while retaining autostart,
+then the setting RPC, a read-only verification, enable and a readiness-aware
+start. It does not reset budgets or release reserves. Older unsigned offers may
+need replacing; signed payments retain their recovery records and reservations.
+Any unconfirmed step stops the sequence without replay. If a save fails after
+the pause, review Settings and resume from Overview when ready. An unknown
+enable/start reply requires checking status because saved autostart can resume
+the service. Turning off a model hides its irrelevant form controls; unsaved
+values remain available if it is selected again before saving.
 
 ### Read income and costs
 
@@ -276,10 +326,13 @@ corrected in place. Decimal point or comma is accepted; do not enter thousands
 separators. DD amounts use DD, DGB amounts use DGB, and service fees use percent
 (for example `0.50` means 0.50%, not 50%). Percent fees must use 0.10% steps.
 
-The supported offer choices are customer-paid, public sponsored, both public
-models, or restricted sponsored-only. Restricted sponsorship requires separate
-authorization and zero DD service fee; it cannot be combined with customer-paid
-service in one provider policy.
+The supported offer choices are customer-paid, public sponsored, or both.
+Restricted / invitation-only sponsorship is currently disabled in GUI, CLI and
+RPC. Existing Restricted settings remain readable but cannot accept new work;
+choose and review a supported offer explicitly. There is no automatic switch
+to public sponsorship. Historical records and already accepted payments retain
+their recovery paths. The code is retained for a possible future voucher design;
+voucher creation/redemption is not an available feature.
 
 New-provider CLI proposals are:
 
@@ -324,8 +377,8 @@ liquidity policy and pool request using the same pure validators as Core before
 returning any configuration-writing step. Core still rechecks each RPC and the
 current wallet state.
 
-- Restricted sponsorship permits only sponsored service and a zero DD service
-  fee. Customer-paid service can be combined with **public** sponsorship only.
+- Restricted sponsorship is rejected before applying new settings. Customer-paid
+  service can be combined with **public** sponsorship.
 - Sponsored-only pool preparation requires zero DD carrier targets. Switching
   the setup targets to zero does not withdraw existing DD outputs.
 - Inactive saved budget classes must also satisfy the advertised network-fee
@@ -405,6 +458,26 @@ Pause provider to stop new authorized work. Local completion does not prove
 external reachability.
 
 ## Guided daily tasks
+
+**Funds & reserves** starts with available payment reserves, available DGB
+reserve funds and DD base capital. Prepared payment reserves are not a promise
+that the service is running or its spending budgets are sufficient. Expand
+**View reserve counts and targets** for ready, in-use, pending and saved-target
+counts by purpose. Editing a preset does not change this current-state table.
+
+The normal actions are **Keep capacity ready**, **Collect service fees** and
+**Reduce reserved capital**. For reduction, choose and save a smaller target,
+then review excess DGB and DD together. Saving a target and approving release
+remain separate decisions. Earnings below the minimum payout stay visible
+beside the disabled withdrawal button.
+
+**Advanced reserve management** contains individual adjustments and detailed
+maintenance information. **Release one DD reserve** pauses the provider and
+turns off autostart after confirmation. It releases the entire selected reserve
+without a transaction or fee and lowers only the DD payment-reserve target.
+Other targets remain unchanged. **Release excess DGB** retains DD reserves and
+saved targets; its preview shows any network fees. Prefer coordinated reduction
+through the preset when changing the provider's overall capacity.
 
 **Restore reserves** automatically includes confirmed and pending reserves in
 its preview. Review only the missing capital and maximum DGB fees. The main
@@ -810,6 +883,14 @@ the confirmed transaction remains available through the wallet transaction histo
 Qt recognizes Core's validated local confirmation even without a provider receipt;
 it does not show an unproven terminal state as a successful recipient payment.
 
+A cancel-to-self transaction does not immediately restore the original service-fee
+allowance. That fee remains reserved until the recovery has 240 confirmations,
+because an earlier confirmation can disappear in a reorganization. Older retained
+sessions may regain a missing fee reservation during reconciliation or approval
+checks. This restores an existing obligation, sends no payment and does not raise
+your limits. If the original payment instead confirms, its exact authorized fee
+is recorded once. Do not manually clear these records to regain allowance.
+
 An explicit `resolvepaymastersession` `cancel_to_self` call checks the same
 validated original payment before preparing recovery. If that payment is already
 deeply confirmed, it returns the original confirmed session and creates no recovery.
@@ -1062,3 +1143,23 @@ Pending or canceled requests do not announce a successful payment. The history
 page still loads in the background and uses its existing periodic refresh for
 incoming payments and confirmations. Repeated recovery of an unchanged exact
 transaction no longer invalidates wallet caches or sends duplicate wallet events.
+
+### Client fee percentage and delayed payments
+
+In Send $DD, **Set service-fee limits** proposes a 1% effective service-fee cap
+in addition to 1 DD per payment and 10 DD per rolling day. Nothing is approved
+until Save. Existing wallets keep their previous absolute limits and show a
+review hint until a percentage is explicitly saved. A zero percentage allows
+only free offers. The cap measures the actual fee against what the recipient
+receives: 1 cent on 1 DD is 1%, regardless of the advertised rate. When deducting
+the fee, the smaller recipient amount is the denominator. All limits must hold.
+
+A signed payment with an unknown outcome must not be sent again. After a long
+wait, the GUI continues checking the same saved payment and offers **Prepare
+return to this wallet** when Core permits it. Review the exact recovery fee and
+wallet returns before signing. Recovery requires usable own DGB or an eligible
+alternative provider; it cannot guarantee immediate release or make missing
+funding available. Only confirmation of the original or conflicting recovery
+transaction settles the ambiguity. An unsigned cancellation releases client
+funds after Core verifies that no signature exists; the provider's separate
+reservation can remain until its offer expires.
