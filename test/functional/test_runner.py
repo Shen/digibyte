@@ -364,6 +364,7 @@ BASE_SCRIPTS = [
     'wallet_paymaster_backup.py --descriptors',
     'wallet_paymaster_backup.py --descriptors --pending-offline',
     'wallet_paymaster_backup_exit.py --descriptors',
+    'wallet_paymaster_checkpoint_rollback.py --descriptors',
     'wallet_paymaster_readiness.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors',
     'wallet_paymaster_provider.py --descriptors',

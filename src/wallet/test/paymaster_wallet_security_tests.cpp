@@ -882,6 +882,31 @@ BOOST_AUTO_TEST_CASE(checkpoint_transaction_atomicity_and_unmarked_rollback)
     BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
 }
 
+BOOST_AUTO_TEST_CASE(checkpoint_matching_pair_rollback_cannot_detect_newer_history)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const auto old_image = database.m_records;
+    const auto path = PaymasterCheckpointPath(Params().GenesisBlock().GetHash(), environment.identity.provider_id);
+    const auto snapshot = m_path_root / "matching-checkpoint.bak";
+    BOOST_REQUIRE(fs::copy_file(path, snapshot, fs::copy_options::none));
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    wallet::CWallet copied{m_node.chain.get(), "whole-pair-rollback", std::make_unique<MockableDatabase>(old_image)};
+    std::string error;
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(copied, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+    // Only this disposable fixture deliberately rolls back both independent
+    // stores. A matching pair contains no evidence of the later generation;
+    // this passing test records a limitation, not protection against it.
+    BOOST_REQUIRE(fs::copy_file(snapshot, path, fs::copy_options::overwrite_existing));
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(copied, error), error);
+    BOOST_REQUIRE(WalletBatch{copied.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(m_wallet, error));
+    // The resulting new branch fences the other image again at this store.
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+}
+
 BOOST_AUTO_TEST_CASE(checkpoint_concurrent_copies_cannot_both_commit)
 {
     const auto environment = MakeProviderEnvironment(200000, 2000);
