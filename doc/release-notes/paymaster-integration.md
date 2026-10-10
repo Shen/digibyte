@@ -509,3 +509,15 @@ fees, wire messages and signature/reservation safety rules are unchanged.
   stale or missing checkpoints still block release. Backup reminder updates no
   longer make an otherwise current backup obsolete. This is no checkpoint reset
   or new provider-signing permission. See `doc/paymaster-capital-release.md`.
+
+- New Paymaster direct connections authenticate the provider against the local
+  BIP324 session before Capacity/payment/recovery metadata is transmitted.
+  Both endpoints require the added channel-authentication capability. Retained
+  V5/V6 financial artifacts keep their original signatures; there is no unsafe
+  transport fallback. A real-cipher two-leg relay regression covers mismatched
+  sessions and manipulated proofs.
+- A new disposable-regtest diagnostic reproduces the still-open matching
+  wallet/checkpoint rollback: 0.3 DGB paid under a 0.2-DGB approval. Independently
+  hosted copies of one provider identity remain unsupported. Use separate
+  identities or one signing authority behind transparent access points; an
+  external durable witness/replicated financial ledger is future work.

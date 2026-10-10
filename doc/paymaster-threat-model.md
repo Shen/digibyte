@@ -287,7 +287,7 @@ an exploit has been confirmed.
 | TM-001 **confirmed** | Delayed/withheld final outcome; provider signed commit survives >24 h; subsequent ledger pruning removes its SPENT row. | Failed recovery; committed DD/DGB may remain bound. No theft/extra fee shown. | Exact final validation and budget firewall reject missing authority; probe reproduces rejection. | Retain authorization provenance independently of rolling accounting. Detect missing-row errors for retained commits. | Medium / medium / **medium** |
 | TM-002 **confirmed** | Valid public client repeatedly creates unique quotes and lets unsigned requests expire. | Persistent database growth and increasing wallet-lock work; indirect recovery delays. | Short quote life, input control proofs, active/rate limits and capacity replay cleanup. | No automatic bound on full expired session/attempt history. Compact only provably unsigned terminal records; monitor counts, disk and reconciliation latency. | Medium / medium / **medium** |
 | TM-003 **restore/wallet-only rollback protected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass, including unmarked renamed copies against the independent checkpoint. | No automatic history reconstruction or guard-clear API. Whole-datadir/matching-pair rollback, multiple independent stores and physical storage-failure tests remain boundaries. | Conditional on restore / high pre-fix / matching-pair rollback residual |
-| TM-004 **defended integrity; privacy residual** | Active MITM terminates two transports and relays authentic Paymaster artifacts. | Can observe forwarded metadata or delay service; no modified spend demonstrated. | Identity/quote/capacity signatures and independent PSBT checks; V2 required. | No provider-authenticated transport transcript binding found. If active-MITM confidentiality is required, design explicit channel binding and test a relay. | Medium / low financial severity / **low** |
+| TM-004 **channel binding implemented; wider testing open** | Active MITM terminates two BIP324 transports and relays authentic Paymaster artifacts. | Before channel binding, payment metadata could be observed; delays/drop remain possible. No modified spend demonstrated. | Mandatory provider signature over the locally observed BIP324 session ID, expected identity, genesis and fresh nonce; private queues are gated before Capacity/payment/recovery. Existing financial checks remain mandatory. | Real-cipher two-leg relay and focused network/payment checks are covered below. Full hostile TCP relay, fresh full binaries, independent review and traffic-analysis evaluation remain open. | Low selected confidentiality residual / low financial severity / continued verification |
 | TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
 | TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
 | TM-007 **open physical verification** | Process/storage failure at commit/broadcast boundary. | Lost authority, unavailable wallet or incorrect fee recovery if durability fails. | Atomic transactions, simulated begin/write/commit failures and lifecycle restarts; real SQLite page-cap `SQLITE_FULL` and connection-local commit-denial tests now verify unchanged records, close/reopen, restore quarantine and exact retry. | Physical ENOSPC, failed writes/fsync, torn writes and power loss remain untested. Use isolated filesystems/VMs, assert exact authority before publication and once-only accounting. | Unestablished physical durability / potentially high / **high** verification priority |
@@ -704,12 +704,13 @@ if ($LASTEXITCODE -ne 0) { throw 'An existing protection test failed' }
 3. **Deep reorgs.** Explicitly document and test behavior after the 240-block
    pruning horizon; this audit does not justify assuming finality or deleting
    earlier evidence more aggressively.
-4. **MITM/privacy, parser memory safety and sustained load.** Build a two-leg
-   transport relay with synthetic wallet data; verify financial modification is
-   rejected and measure what metadata remains visible. Run current sanitizer/fuzz
-   builds and long-lived quote/admission load before claiming memory safety or a
-   bounded service footprint. No relay confidentiality guarantee is established
-   merely by the current V2 requirement.
+4. **MITM/privacy, parser memory safety and sustained load.** The channel-binding
+   implementation and real-cipher two-leg regression below reject transcript
+   relay before financial metadata. Extend this with an actual hostile TCP relay
+   across daemon connections and measure remaining timing/size information.
+   Run current sanitizer/fuzz builds and long-lived quote/admission load before
+   claiming memory safety or a bounded service footprint. V2 alone remains
+   insufficient; both endpoints must support the new channel authentication.
 5. **Independent review/current binaries.** Review both corrections before public
    deployment, repeat tests with fresh normal binaries, and obtain independent
    financial-signing/persistence review. An old committed CI run does not cover
@@ -846,3 +847,86 @@ remain; this capital exit is not automatic reconstruction of missing history.
 Normal product executables were not replaced. Full fresh builds/full Qt,
 Linux/macOS and physical ENOSPC/fsync/power-loss/device-cache checks remain
 operator work; see `digidollar-paymaster-testing.md`.
+
+## Matching-pair rollback and provider channel binding (2026-10-10)
+
+This follow-up starts from `b51c00797a5c0713e35fc067664b7485b59c4fd2` and includes
+its current worktree changes. Local source/object/binary/report hashes are saved
+in `build_msvc/paymaster-refresh-check/privacy-rollback/run-receipt.json`.
+Selected MSVC compiles use cached dependencies; full fresh builds are not claimed.
+
+**Matching wallet/checkpoint rollback: reproduced, still open.**
+`wallet_paymaster_checkpoint_rollback.py --descriptors` creates two actual
+confirmed 0.1-DGB payments under an explicit 0.2-DGB hourly/daily approval. It
+stops both disposable regtest nodes, replaces only the provider SQLite wallet
+and its matching checkpoint with pre-payment images, and keeps the current
+chain. The rolled-back provider accepts a third actual 0.1-DGB payment using
+remaining reserves. Independent transaction-value accounting proves 0.3 DGB
+paid while the restored ledger records only 0.1 DGB. This is a passing
+*diagnostic reproduction*, not evidence that this rollback is protected.
+The unit case `checkpoint_matching_pair_rollback_cannot_detect_newer_history`
+separately proves that a wallet-only rollback is fenced while a matching pair
+passes. No operator wallet, filesystem outside test roots or recovery override
+is used. Preventing this needs a high-water authority outside the jointly
+restorable storage; a checksum, a rescan or a second co-restored file cannot
+supply missing history.
+
+**The same identity on independent hosts: unsupported.** Local file locks fence
+copies sharing one checkpoint store. They do not coordinate different hosts'
+independent budget ledgers, retained signatures or pools. Safe current choices
+are independent wallets/identities per provider, or one signing wallet/node
+behind multiple transparent TCP/onion access points. The latter keeps one
+budget and persistence authority; access points must forward encrypted bytes.
+For failover, first stop/fence the old signing node and migrate the complete
+current state. A future replicated service needs durable globally ordered
+reservations/commits and fencing, including still-executable old signatures.
+A lease timeout alone cannot revoke an already signed payment. A network share
+or periodically copied checkpoint is not an implemented distributed guarantee.
+
+An external witness is a possible future matching-pair defence: bind provider
+and network, compare-and-swap the last committed generation/state, never permit
+re-enrollment/reset of an established identity, and participate before every
+new financial authority rather than only at backup time. Lost acknowledgements
+or unavailable witness state must block new authority. It must be retained
+outside the wallet/checkpoint rollback domain. This service and multi-host
+failover are design options here, not implemented or validated features.
+
+**MITM confidentiality: channel authentication implemented.** `ChannelChallenge`
+and `ChannelProof` in `paymaster/wire.{h,cpp}` sign a separate tagged hash over
+version, genesis, locally selected provider identity, local BIP324 session ID
+and random nonce. The provider validates the id against its own cipher before
+its wallet worker signs. The client checks against its own challenge and
+expected identity. No recipient, amount, payment UUID/session or user inputs
+are sent in this exchange. The existing cross-thread transport-ready flag is
+set only after the proof; both receive and send paths gate Capacity, quote,
+submit, result and alternative recovery on that flag. Every reconnect repeats
+authentication. Both direct peers must advertise `CAP_CHANNEL_AUTH`; there is
+no fallback to unauthenticated payment traffic. Financial V5/V6 serialization
+and signatures are unchanged.
+
+The eight-entry transient queue expires with the handshake deadline, accepts
+one challenge per peer and rejects signing results after disconnect. Keys stay
+in the wallet; locked, stopped or quarantined wallets do not sign. The worker
+handles one challenge per cycle under the existing provider work guard, even
+in manual mode, and acquires no extra work guard when the queue is empty.
+Authentication messages use the existing private-message direction, capture
+and logging filters. They authorize no payment, fee, expiry extension or input
+release. Independent PSBT and financial-manifest checks remain essential.
+
+`channel_authentication_rejects_two_leg_bip324_relay` establishes two genuine
+BIP324 cipher pairs, decrypts/re-encrypts the challenge and proof, and rejects
+both unchanged forwarding and rewriting to the relay's other session ID. It
+also rejects changed identity, genesis, nonce, version and signature. Queue
+regressions cover bounds, wrong provider, disconnect, duplicate response,
+once-only delivery, expiry and disable. Functional normal payments and the
+withheld-signature backup scenario exercise the handshake through actual daemon
+P2P connections. `p2p_paymaster.py` also rejects auth messages over V1. See the
+matching testing checkpoint for exact completed runs.
+
+BIP324 explicitly exposes the session ID as a foundation for separate
+application authentication ([BIP324 specification](https://github.com/bitcoin/bips/blob/master/bip-0324.mediawiki)).
+This implementation adds that binding only to Paymaster direct connections.
+It does not authenticate all ordinary P2P peers or hide IP addresses, traffic
+size/timing, public chain data, or information from the selected provider.
+Full hostile TCP relay, Tor testing, fresh full Qt/product binaries, independent
+cryptographic review and the earlier physical-durability/fuzz gaps remain open.

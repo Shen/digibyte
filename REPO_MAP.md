@@ -15,6 +15,13 @@ in the capacity guide. Recovery releases the original payment lease; expected
 Capacity proofs are accepted on payment and recovery channels. `senddigidollar`
 forwards explicit `retry_transport` requests without changing financial authority.
 
+Direct channels now also require `CAP_CHANNEL_AUTH`. Provider signatures bind
+the local BIP324 session ID and a fresh challenge before payment metadata is
+sent. `wire.{h,cpp}`, `manager.{h,cpp}` and the wallet provider worker own this
+Paymaster-specific logic; the P2P adapter uses the existing transport session ID.
+`wallet_paymaster_checkpoint_rollback.py` reproduces the separate limitation of
+restoring an old matching wallet/checkpoint pair; it is a diagnostic test.
+
 *Last validated: 2026-05-20 against `feature/digidollar-v1`*
 
 > This map covers **core DigiByte C++ code only**. DigiDollar subsystem (`src/digidollar/`, `src/oracle/`, `src/rpc/digidollar*`, `src/consensus/{dca,err,volatility,digidollar*}.{cpp,h}`, `src/index/digidollarstatsindex.{cpp,h}`, DD wallet code, DD Qt widgets) is documented in `REPO_MAP_DIGIDOLLAR.md`. Third-party libs (leveldb, secp256k1, crc32c, minisketch, univalue) and the `depends/` directory are excluded.

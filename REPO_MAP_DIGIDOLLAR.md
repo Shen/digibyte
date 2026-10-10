@@ -709,6 +709,11 @@ or chain parameters.
   enter global gossip.
 
 ### src/paymaster/wire.{h,cpp} and manager.{h,cpp}
+- `ChannelChallenge` / `ChannelProof` bind the expected provider and network to
+  the local BIP324 session and a fresh nonce. The manager bounds transient
+  signing work to eight peers, with expiry/disconnect cleanup. The wallet worker
+  signs this separate domain even in manual operation; transport readiness and
+  all financial queues remain gated until authentication completes.
 - Defines bounded capacity, quote, submit, and result messages for isolated
   `PAYMASTER` connections and validates cheap size/time/count constraints before
   signature work.

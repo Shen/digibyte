@@ -86,11 +86,32 @@ retains its existing timing and has not been validated by this patch.
 
 The dedicated listener prevents ordinary inbound saturation from occupying
 the Direct handshake reserve. v2 and the Direct marker negotiate transport
-only. A shape-valid request to a running local provider is required for
+only. New connections additionally require `CAP_CHANNEL_AUTH`: a provider
+identity signature over the local BIP324 session ID, network and fresh nonce
+is validated before Capacity/payment/recovery metadata can be sent or accepted.
+A shape-valid financial request to a running local provider is required for
 promotion; inbox limits still apply. A Direct marker on the ordinary P2P
 listener is rejected, preventing admission bypass. Direct listeners never
 enter Dandelion bookkeeping. Admitted work is protected from handshake eviction.
 The marker grants no financial authority.
+
+The channel-authentication queue is separate from durable payment queues and
+holds at most eight fixed-size challenges/proofs. Each socket accepts one
+challenge; expiry or disconnect removes its transient work, and a late worker
+cannot recreate a disconnected request. The normal handshake deadlines and
+connection-start/group limits still apply. The provider's wallet worker signs
+one challenge per cycle under its existing work guard, including manual mode;
+a locked, stopped or restore-quarantined provider cannot authenticate a new
+channel. No private key is cached in the networking code.
+
+Both client and provider must be updated. A peer without channel-authentication
+support fails closed; existing V5/V6 payment, commit and recovery records keep
+their original bytes and can be retried through a new authenticated channel.
+Discovery/announcement V6 is unchanged. A transparent encrypted-byte proxy
+remains usable, but a decrypting two-leg relay cannot obtain a signature for the
+client's session from a provider attached to a different session. Channel
+authentication does not conceal IP addresses, timing, size, public chain data
+or data deliberately disclosed to the selected provider.
 
 Tor transport grouping uses ephemeral peer identifiers because forwarded users
 all appear as loopback. Global start limits and replacement of old pending

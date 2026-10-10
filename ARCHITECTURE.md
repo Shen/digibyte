@@ -1585,6 +1585,8 @@ local admission-proof validation and offer selection
         ↓
 isolated BIP324-v2 PAYMASTER connection to one selected provider
         ↓
+provider identity signature over the local BIP324 session ID and fresh challenge
+        ↓
 authenticated Capacity V5 proof for one exact provider resource set
         ↓
 payment intent → resource-bound quote → local client manifest/firewall
@@ -1614,6 +1616,11 @@ finite-budget maintenance only when configured targets remain missing
 - Standard privacy requires v2 transport with no v1 fallback. High privacy is
   onion-only, uses Tor stream isolation, permits one provider attempt, and has
   no clearnet fallback. This reduces metadata; it does not provide anonymity.
+  New direct channels additionally require `CAP_CHANNEL_AUTH`: `pmauthreq` /
+  `pmauthresp` authenticate the selected provider against the live BIP324
+  session before any Capacity/payment/recovery payload leaves the queue.
+  This channel proof grants no financial authority and changes no persisted
+  V5/V6 financial signatures. Both endpoints must support channel authentication.
 - Persistent `request_id` sessions prevent duplicate payment. Once user
   signatures make a session ambiguous, timeout does not release its inputs;
   recovery uses exact-provider retry or a same-input `cancel_to_self` spend

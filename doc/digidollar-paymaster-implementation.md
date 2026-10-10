@@ -200,6 +200,9 @@ from the durable provider commit.
    resource set. Verify genesis, identity signature, request/session binding,
    nonce, reference block, expiry, BIP86 control proofs, creating transactions,
    and live outpoints. Persist the validated snapshot.
+   Before even this exchange, authenticate the actual BIP324 channel with
+   `pmauthreq` / `pmauthresp` as described below; a valid Capacity signature on
+   another encrypted channel is not confidentiality protection.
 4. **Quote:** the signed intent binds the local order and user input-control
    proofs. The quote must match the selected offer, policy, capacity, recipient,
    fee, change, and complete unsigned transaction. The provider reserves pool
@@ -652,3 +655,26 @@ protection, and atomically reject release once any client spending authority is
 accepted. Until that protocol exists, provider reservations expire under the
 existing bounded quote/capacity rules; they are never freed on an unauthenticated
 notification or solely on a client UI timeout.
+
+## Provider channel authentication
+
+New direct channels require `CAP_CHANNEL_AUTH` in addition to the outbound
+Direct marker; the accepted provider half acknowledges channel authentication.
+Before sending Capacity or any financial/recovery payload, the client sends
+`pmauthreq`: version 1, genesis, expected provider, local BIP324 session ID and
+fresh random nonce. It contains no payment identifiers, recipient, amount or
+inputs. The provider rejects a different local session ID before queueing it.
+Its wallet worker signs `DigiByte Paymaster BIP324 Channel v1` over the complete
+challenge and returns `pmauthresp` with the x-only identity key and 64-byte
+Schnorr signature. The client independently matches the entire challenge,
+provider-ID/key binding and signature. Only then is the channel ready.
+
+A reconnect, including a result/recovery retry, requires a fresh proof. A
+peer lacking this capability receives no financial metadata. The eight-entry
+process-local queue accepts one challenge per socket, expires stale work and
+removes it on disconnect. Manual operation also authenticates automatically;
+this separate signature authorizes no payment and changes no persisted V5/V6
+artifacts. Signing keys remain wallet-owned behind lock/restore gates. A
+transparent encrypted-byte proxy works; a two-leg decrypting relay fails the
+local-session comparison. Existing manifests, prevout validation, signature
+modes and financial budgets remain independent requirements.

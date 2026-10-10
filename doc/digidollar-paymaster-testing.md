@@ -3828,3 +3828,73 @@ session. Success is exit 0, three functional entries passed, zero failed
 unit/Qt tests and a source/binary receipt. Without `-FullQtTests`, the two
 relevant Qt functions run separately. Full fresh builds/full Qt, cross-platform,
 sanitizer/fuzz and physical-storage failure campaigns remain operator work.
+
+## Matching-pair rollback and authenticated transport (2026-10-10)
+
+The follow-up starts from `b51c00797a5c0713e35fc067664b7485b59c4fd2` and tests
+current worktree changes. `privacy-rollback/run-receipt.json` records source,
+object, binary and report hashes. Selected MSVC compiles include changed code
+and constructor/layout dependencies; cached libraries are still used. They
+are not a full fresh build or installed GUI binaries.
+
+| Selected check | Result |
+| --- | --- |
+| `paymaster_transport_tests` | 14 cases / 2,526 assertions, including encrypted two-leg relay, proof mutations and bounded queue lifecycle |
+| `paymaster_wire_tests` | 58 cases / 1,887 assertions |
+| `paymaster_protocol_tests` | 6 cases / 75 assertions |
+| `net_tests/paymaster*` | 6 cases / 160 assertions, including auth message direction/privacy classification |
+| `paymaster_wallet_security_tests/checkpoint*` | 11 cases / 207 assertions, including matching-pair limitation and protected wallet-only rollback |
+| `wallet_paymaster_checkpoint_rollback.py --descriptors` | Actual confirmed fees 0.3 DGB under 0.2-DGB approval; restored ledger 0.1 DGB; diagnostic succeeds |
+| `wallet_paymaster_backup.py --descriptors --pending-offline` | Withheld final, restart, retained exact RPC/CLI replay and restored-wallet new-authority blocking |
+| `p2p_paymaster.py` | Real P2P firewall, including V1 rejection of channel-authentication messages |
+
+The unit filters above must run separately: a comma joining a suite and a
+nested `suite/case` can silently omit the first suite in this Boost build. The
+final logs record 95 passed cases and 4,855 assertions. The crypto cases need
+`BasicTestingSetup`; early test setup/link attempts failed and were corrected.
+Do not treat those early logs as a passing receipt. Normal application EXEs
+have not been replaced.
+
+The pair-rollback test intentionally passes when forgotten spending authority
+is renewed. It is a diagnostic boundary test, not a desired safety invariant.
+It replaces only files under its disposable regtest datadir with both nodes
+stopped, retains current chainstate and derives actual fees from transaction
+inputs/outputs. No normal-wallet overwrite or guard-clear API is involved.
+
+From `D:\Digibyte\digibyte-fork`, after closing normal client/provider instances,
+run the workspace-local operator helper for a fresh complete solution build:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\privacy-rollback\build-and-check.ps1 -Build -FullQtTests
+```
+
+Prerequisites are the existing Visual Studio/MSVC v143 14.43.34808, Windows SDK,
+Qt 5.15.10 at the configured path, static vcpkg dependencies and Python setup
+used by `provider-backup-fix/build-and-check.ps1`. No new package is required.
+Allow minutes to tens of minutes for the full build and broader checks. Success
+is exit 0, all baseline backup/capital checks, the five separate unit filters,
+the matching-pair diagnostic and P2P test, and zero failures in the Paymaster Qt
+suite. The helper writes fresh source/binary receipts. A passing diagnostic
+still confirms the need for independently retained external authority.
+
+Portable targeted runtime commands after a fresh build (set `DIGIBYTED` and
+`DIGIBYTECLI` to that build's binaries when needed):
+
+```text
+test_digibyte --run_test=paymaster_transport_tests --report_level=detailed
+test_digibyte --run_test=paymaster_wire_tests --report_level=detailed
+test_digibyte --run_test=paymaster_protocol_tests --report_level=detailed
+test_digibyte --run_test=net_tests/paymaster* --report_level=detailed
+test_digibyte --run_test=paymaster_wallet_security_tests/checkpoint* --report_level=detailed
+python -X utf8 test/functional/wallet_paymaster_checkpoint_rollback.py --configfile=test/config.ini --descriptors
+python -X utf8 test/functional/wallet_paymaster_backup.py --configfile=test/config.ini --descriptors --pending-offline
+python -X utf8 test/functional/p2p_paymaster.py --configfile=test/config.ini
+```
+
+Both endpoints need the new channel-authentication capability; wire/persisted
+financial V5/V6 artifacts are unchanged. The relay regression uses actual
+BIP324 cipher pairs and encrypted challenge/proof packets, not a TCP proxy.
+A hostile two-leg TCP relay with live daemon connections, Tor tests, independent
+crypto review, full fresh product/Qt builds, sanitizer/fuzz and physical storage
+fault campaigns remain open. Multi-host replicated accounting/external witness
+services are documented design options, not implemented features.

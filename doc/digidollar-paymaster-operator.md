@@ -1202,3 +1202,28 @@ funding available. Only confirmation of the original or conflicting recovery
 transaction settles the ambiguity. An unsigned cancellation releases client
 funds after Core verifies that no signature exists; the provider's separate
 reservation can remain until its offer expires.
+
+## One provider identity and restored files
+
+Use a distinct provider wallet and identity for each independent signing node.
+Multiple access points may forward encrypted TCP traffic to one provider node;
+that keeps one signing, pool and budget authority. Concurrent copies of the
+same identity on independent hosts have no shared financial accounting in this
+implementation. Local checkpoint locks are not a distributed lock. A failover
+must fence the old signer and carry complete current state, including retained
+signed payments; a lease timeout cannot invalidate old signatures.
+
+Keep an independently retained current checkpoint outside wallet backup rollback
+operations. Restoring both old matching files can renew forgotten approval:
+the diagnostic `wallet_paymaster_checkpoint_rollback.py` reproduces 0.3 DGB of
+actual fees under a 0.2-DGB allowance. A rescan cannot reconstruct unpublished
+signatures or complete budget history. Preventing rollback of both stores needs
+an external durable authority outside that rollback domain; it is not a shipped
+feature. See `paymaster-threat-model.md` for the reproduced boundary and designs.
+
+Both client and provider now need channel-authentication support. Before any
+Capacity/payment data, the provider proves its identity for the actual BIP324
+connection. Old peers fail closed; saved payment/recovery artifacts retain their
+original signatures. This prevents a decrypting intermediary from relaying a
+proof for its other channel. IP addresses, timing and public transaction data
+remain observable; the selected provider necessarily sees its own requests.
