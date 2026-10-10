@@ -442,7 +442,7 @@ The guard disables model availability/readiness, manual/automatic starts,
 identity-key access for announcements/capacity/quotes, store admission and both
 ordinary/alternative-provider pre-signature checks. The role-limited wallet
 signer checks it again for PROVIDER inputs. Manual reserve preparation,
-withdrawals, retirement and capital release, both automatic refill builders,
+withdrawals, retirement and normal capital release, both automatic refill builders,
 and recurring preparation cannot create fresh spending authority. Changes to
 settings, approved limits, backup reminders, or the clock do not clear it.
 GUI diagnostics explain the missing-history risk without putting the internal
@@ -527,6 +527,28 @@ provider checkpoint. An unmarked mismatching copy cannot update Paymaster
 records; use explicit restore for quarantined recovery of its retained exact
 history. These checks protect Paymaster authority, not every ordinary wallet
 spend made by an operator with the keys.
+
+**Narrow capital exit.** A restored wallet can preview
+`releasepaymastercapital {"recovery":true}` only when its established checkpoint
+matches the independently retained external state. It must also pass all
+existing full-capital checks: stopped/disabled/autostart off, caught-up chain,
+no open provider work, reserved inputs/budgets, ambiguous pool or unconfirmed
+payment/maintenance transactions, and confirmed owned unspent outputs without
+manual locks. The plan binds the checkpoint checksum. Execution rechecks it
+under the OS/in-process lock, permanently retires the identity in checkpoint
+version 2, and atomically releases eligible reserves to the same wallet.
+External retirement precedes database commit, fencing old copies before funds
+become ordinarily spendable. Failed commit leaves a conservative mismatch,
+never a checkpoint rollback. The restore guard and history stay; this grants
+neither fresh provider signing nor override of an unknown obligation.
+Version 1 is readable and upgrades on a legitimate write; older checkpoint-aware
+binaries reject version 2. A matching-pair rollback is still undetectable locally.
+
+Backup reminder metadata is excluded from financial generation advancement:
+`BackupWallet` records its success after copying the image, and that reminder
+must not itself invalidate the current backup. Reminder/acknowledgement writes
+do not enable service, clear quarantine or grant spending authority. Financial
+transitions which update reminders retain their tracked transaction.
 
 **Remaining boundary.** The first enrollment of a legacy identity without
 EITHER marker is a trusted baseline at its first Paymaster write, not proof
@@ -799,6 +821,28 @@ The Qt readiness regression passes in both themes for the restore guard and
 three checkpoint protection messages. `git diff --check` and Python syntax
 parsing pass. Inputs, object/binary/report hashes and the working-copy diff are
 recorded in the workspace-local `provider-backup-fix/checkpoint-receipt.json`.
+
+### Restored-provider capital exit verification (2026-10-10)
+
+The selected Windows wallet filters pass 38 cases / 10,160 assertions. New
+checkpoint tests verify permanent retirement versus original copies, strict
+version 1 upgrade and backup reminders without authority advancement. Capital
+recovery covers pure preview, exact plan, stale/concurrently advanced copies,
+reserved inputs, unfinished native fences, write failure with safe retry and
+commit failure leaving a blocking external-ahead state. The pre-existing normal
+capital-release fixture now accounts for checkpoint advancement and never
+assumes a failed commit can be retried blindly.
+
+The new real SQLite/regtest exit test passes RPC/CLI preview/execution, restart,
+blocked original-copy authority and complete ordinary DD Send after release.
+Both stale-backup variants still pass and explicitly reject recovery release.
+The 32 GUI stop/retirement rows and the readiness function pass; the latter
+checks both themes. Source/object/binary/report hashes are retained in
+`provider-backup-fix/recovery-capital-receipt.json`. This is selected-object
+evidence, not a complete fresh application build. The prescribed full-build
+and full-Qt operator command is in `doc/digidollar-paymaster-testing.md`.
+All matching-pair, independent-host and physical-durability boundaries above
+remain; this capital exit is not automatic reconstruction of missing history.
 Normal product executables were not replaced. Full fresh builds/full Qt,
 Linux/macOS and physical ENOSPC/fsync/power-loss/device-cache checks remain
 operator work; see `digidollar-paymaster-testing.md`.

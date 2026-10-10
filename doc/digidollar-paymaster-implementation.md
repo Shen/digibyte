@@ -372,6 +372,17 @@ acknowledgement cannot erase the marker; no override/history-reconstruction API
 is provided. Unmarked wallet-only rollback is checked by `wallet/paymastercheckpoint.cpp` against an independently flushed node-local generation. Whole-datadir rollback still requires separately retained state; see `paymaster-threat-model.md` (TM-003).
 See [TM-003](paymaster-threat-model.md#tm-003-stale-provider-restore-forgets-expenditure-and-signed-inputs).
 
+`releasepaymastercapital {"recovery":true}` adds a narrow capital exit for a
+restored wallet matching the independently retained checkpoint. It reuses the
+full stopped/quiescent release checks; the reviewed plan also binds the exact
+checkpoint revision. `WalletBatch::RetirePaymasterCheckpoint` rechecks under
+the checkpoint lock and writes version 2's permanent retirement state in the
+same transaction as pool release. The external fence advances before commit;
+no signing guard or history is cleared. Version 1 remains readable. Backup
+reminders alone use ordinary `WriteIC`: recording backup success after copying
+the wallet must not make a current financial checkpoint stale. They have no
+spending authority. No wire, consensus or generic wallet format change is needed.
+
 `processpaymasterrequests` defers temporary capacity/quote admission-limit
 failures in the fair inbox (`deferred`, `deferral_reason`) without putting the
 whole service into drain-only mode. Every retry repeats the existing checks;

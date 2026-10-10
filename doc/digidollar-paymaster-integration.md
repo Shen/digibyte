@@ -425,3 +425,11 @@ provider financial writes atomically to a versioned wallet generation and a
 flushed checkpoint outside the wallet directory. Unmarked wallet-only rollback
 fails closed; restoring wallet and checkpoint together still needs a trustworthy
 high-water mark outside that storage. See [the threat model](paymaster-threat-model.md).
+
+A separate reviewed recovery release is possible only for a restored wallet
+matching its independently retained checkpoint with no unfinished work. It
+permanently retires the identity at that checkpoint store and releases eligible
+pool outputs into ordinary funds in the same wallet. It never clears the guard
+or sends funds. RPC/CLI use `releasepaymastercapital {"recovery":true}`;
+Qt offers the separate retirement confirmation. Backup reminder writes do not
+advance financial generations. See [capital recovery](paymaster-capital-release.md#capital-recovery-after-restoring-a-provider-wallet).

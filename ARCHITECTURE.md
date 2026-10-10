@@ -352,6 +352,13 @@ Wallet-only rollback, missing/mismatched checkpoints and unfinished native
 reserve operations block new authority. Whole-directory rollback still requires
 an independently retained high-water mark. Initial legacy enrollment is a
 trusted baseline, not proof of past completeness. See `doc/paymaster-threat-model.md` (TM-003).
+For a restored wallet matching that independently retained checkpoint, the
+existing full-capital release can explicitly retire the identity and release
+confirmed, unreserved pool outputs into the same wallet. All normal release
+checks and the restore guard remain. Checkpoint revision and retirement are
+bound to the atomic release; other copies sharing the checkpoint are fenced.
+Backup reminders carry no financial authority and do not advance generations.
+See `doc/paymaster-capital-release.md` for recovery conditions and limitations.
 
 ## Executive Summary
 

@@ -3739,7 +3739,7 @@ and `sqlite-faults-receipt.json`, with source/object/binary/report hashes.
 
 ### Independent provider checkpoints (2026-10-10)
 
-The provider-wallet generation commits with every Paymaster mutation. A bounded
+The provider-wallet generation commits with financial Paymaster mutations. A bounded
 node-local checkpoint is flushed/replaced before wallet commit. Native reserve
 operations carry a durable pending fence until wallet transaction and accounting
 records are saved. Missing/mismatching state, invalid binding/version, exhausted
@@ -3785,3 +3785,46 @@ failures, power loss/torn writes and sanitizer/fuzz campaigns remain open. A
 wallet/checkpoint pair restored together or operated on multiple independent
 hosts is outside the node-local detection guarantee; initial legacy enrollment
 is a trusted complete-history baseline. Do not erase marker files to resume.
+
+### Restored-provider capital exit (2026-10-10)
+
+The explicit recovery option on `releasepaymastercapital` requires a restored
+wallet matching the independently retained checkpoint, plus all normal
+full-capital checks. It permanently retires the provider identity at that store
+before committing release into ordinary funds in the same wallet. Neither
+`pmrestoreguard` nor financial history is cleared. Backup reminders alone do
+not advance financial generations; actual financial writes remain tracked.
+
+The selected Windows checks passed on the source snapshot recorded in
+`provider-backup-fix/recovery-capital-receipt.json`:
+
+| Check | Actual result |
+| --- | --- |
+| Wallet security, PSBT, backup metadata, normal/recovery capital release and wallet database filters | 38 cases, 10,160 assertions; exit 0 |
+| `wallet_paymaster_backup_exit.py --descriptors` | Real RPC preview and CLI execution, manual-lock blocker, unchanged transaction count/mempool, restart, blocked original copy and complete ordinary DD Send after release; exit 0 |
+| `wallet_paymaster_backup.py` / `--pending-offline` | Both stale-backup variants pass; RPC and CLI reject the new recovery option, including a withheld signed final; exit 0 |
+| `PaymasterWidgetTests::paymasterStopAndRelease` | 32 data rows, including stop and guided retirement recovery, cancel, stale preview, changed checkpoint and mismatched receipt; 34 passes including setup/cleanup, no failures |
+| `paymasterExternalReadinessIsSeparatedFromConfiguration` | Restore and checkpoint messages, including retired identity, pass in dark/light themes; exit 0 |
+| Python AST, PowerShell helper parsing, `git diff --check` | Passed; flake8/clang-format are not installed |
+
+MSVC checks compile only changed objects and link cached Release dependencies;
+these are not full fresh-build results or installed application binaries.
+The modal GUI tests use `QT_QPA_PLATFORM=windows`: the minimal plugin crashed
+in a pre-existing QMessageBox path, consistent with the existing test comments.
+The operator helper now selects the Windows plugin and restores the original
+environment. Test dialogs are answered automatically; no operator wallet is used.
+
+From `D:\Digibyte\digibyte-fork`, with normal instances closed, run the same
+complete-build command above:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\provider-backup-fix\build-and-check.ps1 -Build -FullQtTests
+```
+
+It now includes both capital-release unit cases, all three functional entries
+and the complete Paymaster Qt suite. Required existing MSVC/SDK/Qt/Python setup
+and runtime remain as above; Qt modal checks require an interactive Windows
+session. Success is exit 0, three functional entries passed, zero failed
+unit/Qt tests and a source/binary receipt. Without `-FullQtTests`, the two
+relevant Qt functions run separately. Full fresh builds/full Qt, cross-platform,
+sanitizer/fuzz and physical-storage failure campaigns remain operator work.

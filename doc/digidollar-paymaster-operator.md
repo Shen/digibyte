@@ -835,6 +835,18 @@ blind reset command or automatic release of possibly signed inputs. Use the rest
 do not manually replace the provider wallet/data directory. Client-only backups
 retain their normal restore behavior.
 
+For a **current** restored provider whose checkpoint still matches the
+independently retained node checkpoint, **Funds & reserves → Retire Paymaster…**
+can review a recovery release. A second confirmation shows the exact amounts
+and permanently retires the old provider identity before returning eligible
+reserves to ordinary funds in this wallet. Signing protections remain; this
+does not send money. Use the normal DGB/DD Send pages afterwards. Open payments,
+reservations, unfinished operations or stale/missing checkpoints prevent this
+release. Do not reset a checkpoint to make it pass. Other copies sharing this
+checkpoint remain blocked; future service requires a fresh provider identity
+in a new wallet. See [capital recovery](paymaster-capital-release.md#capital-recovery-after-restoring-a-provider-wallet)
+for RPC/CLI instructions and the separate matching-pair rollback boundary.
+
 ### Spending limits at a glance
 
 Overview shows a separate budget block for each enabled payment model and for

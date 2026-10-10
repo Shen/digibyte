@@ -110,11 +110,64 @@ Inspect `getpaymasterpoolinfo`, settings and a fresh preview: zero remaining poo
 outputs is distinguishable from an unsuccessful release. Historical records
 remain; they are not active funds. Create a full-wallet backup after completion.
 
-## Tests
+## Capital recovery after restoring a provider wallet
+
+An explicit restore keeps new provider signatures blocked. A restored **current**
+wallet can nevertheless release its reserves into the same wallet if its saved
+checkpoint matches the independently retained node checkpoint and all the
+fail-closed conditions above pass. This is a separate recovery approval, not
+permission to resume the old provider. A stale wallet, missing checkpoint,
+unfinished native operation or unknown signed obligation prevents release.
+
+In **Funds & reserves**, stop persistently and choose the separate capital
+review (or **Retire Paymaster…**). When Core reports a restore quarantine, Qt
+requests a read-only recovery preview and explains that approval **permanently
+retires this provider identity**. Cancelling leaves the reserves and identity
+unchanged. Use the correct network, data directory and restored wallet for CLI:
+
+```sh
+digibyte-cli -regtest -rpcwallet=RESTORED stoppaymaster '{"persistent":true,"pause_setup":true}'
+digibyte-cli -regtest -rpcwallet=RESTORED releasepaymastercapital '{"recovery":true}'
+digibyte-cli -regtest -rpcwallet=RESTORED releasepaymastercapital '{"recovery":true,"execute":true,"plan_id":"REVIEWED_PLAN_ID"}'
+```
+
+Review the DGB/DD totals, zero fee, pool count and `recovery_release:true` before
+execution. The plan also binds the checkpoint revision, which is checked again
+under its file lock. Retirement advances the external checkpoint before the
+atomic wallet release commits. Other copies using this checkpoint store cannot
+resume. A failed wallet commit can leave the external checkpoint ahead; stop
+and review instead of rolling it back or automatically retrying. Version 1
+checkpoints remain readable and upgrade on a legitimate write; version 2
+preserves the bounded layout and adds the permanent retirement state. Older
+checkpoint-aware binaries reject version 2; do not downgrade or reset markers.
+
+`pmrestoreguard`, history and signing protections remain. Eligible pool entries
+become ordinary wallet funds, and refill/paid-maintenance consent is revoked.
+No signature, transaction, network fee or external transfer occurs. Afterwards
+use the normal DGB and DD Send pages; DD transactions still require normal DGB
+fees. Collateral, immature outputs and unresolved payments retain their normal
+restrictions. Create a new full-wallet backup and retain the checkpoint and
+recovery records. Future provider service needs a fresh identity in a new wallet.
+
+A backup success/acknowledgement only updates a non-blocking reminder; it does
+not advance financial authority or invalidate an otherwise current backup.
+Financial transitions which also update that reminder remain atomic and tracked.
+Matching state is meaningful only when the external checkpoint was retained
+independently. Restoring an old matching wallet/checkpoint pair together, or
+using the identity on independent hosts, remains outside local detection.
+
+## Regression coverage
 
 - `paymaster_wallet_identity_tests/capital_release_is_reviewed_atomic_and_fail_closed`:
   pure preview, exact binding, unsafe states, pending outputs, stopped settings,
   database-write/commit rollback, wallet-local release, no new transaction and replay.
+- `capital_recovery_release_is_atomic_and_retires_identity` additionally covers
+  matching recovery, stale original copies, reservation/native fences, changed
+  checkpoints, write/commit failures and permanent retirement without broadcast.
+- `wallet_paymaster_backup_exit.py --descriptors` uses real RPC and CLI, SQLite
+  backup/restore, pure read-only review, manual locks, exact execution,
+  restart, a blocked original copy and a complete ordinary DD transfer afterwards.
+  The two stale-backup variants separately require recovery release to fail.
 - `wallet_paymaster_pool_setup.py`, native and `--usecli`: rejects unfinished
   Dandelion setup, exercises USER_PAID and sponsored pools via actual CLI,
   changes a policy between preview/execute, checks values and zero fees,

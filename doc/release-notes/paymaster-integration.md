@@ -500,3 +500,12 @@ fees, wire messages and signature/reservation safety rules are unchanged.
   and conflicting wallet copies block new authority. The GUI explains these
   protection states without raw error codes. Initial legacy enrollment requires
   trusted complete history; whole-datadir rollback remains a separate boundary.
+
+- Restored current provider wallets can explicitly review recovery capital
+  release when their independently retained checkpoint matches and no unfinished
+  or unconfirmed work exists. Approval permanently retires the provider identity
+  at that checkpoint store and releases eligible reserves into the same wallet;
+  ordinary Send remains available afterwards. Signing guards/history remain;
+  stale or missing checkpoints still block release. Backup reminder updates no
+  longer make an otherwise current backup obsolete. This is no checkpoint reset
+  or new provider-signing permission. See `doc/paymaster-capital-release.md`.
