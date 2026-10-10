@@ -4,6 +4,8 @@
 #ifndef DIGIBYTE_PAYMASTER_TRANSPORT_H
 #define DIGIBYTE_PAYMASTER_TRANSPORT_H
 
+#include <uint256.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -165,13 +167,15 @@ struct DirectKey {
     std::string owner;
     std::string operation;
     bool recovery{false};
+    /** Locally selected identity, never supplied by the transport peer. */
+    uint256 provider_id{};
     friend bool operator<(const DirectKey& a, const DirectKey& b)
     {
-        return std::tie(a.owner, a.operation, a.recovery) < std::tie(b.owner, b.operation, b.recovery);
+        return std::tie(a.owner, a.operation, a.recovery, a.provider_id) < std::tie(b.owner, b.operation, b.recovery, b.provider_id);
     }
     friend bool operator==(const DirectKey& a, const DirectKey& b)
     {
-        return a.owner == b.owner && a.operation == b.operation && a.recovery == b.recovery;
+        return a.owner == b.owner && a.operation == b.operation && a.recovery == b.recovery && a.provider_id == b.provider_id;
     }
 };
 

@@ -1377,7 +1377,7 @@ UniValue ResolveAlternativePaymasterRecovery(
             throw JSONRPCError(RPC_WALLET_ERROR, error);
         }
         node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
-            "recovery:" + recovery.recovery_id.GetHex(), true});
+            "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
         AlternativeRecoveryParameters parameters;
         AlternativeRecoveryTemplate trusted;
         PartiallySignedTransaction unsigned_psbt;
@@ -1569,7 +1569,7 @@ UniValue ResolveAlternativePaymasterRecovery(
             }
 
             node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
-                "recovery:" + recovery.recovery_id.GetHex(), true});
+                "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
 
             // The final commit above performs database work and spends the
             // client fee reservation. Rebuild every authority from the exact
@@ -1986,7 +1986,7 @@ RPCHelpMan resolvepaymastersession()
                     if (const auto* node = wallet->chain().context(); node && node->connman &&
                         store.GetAlternativeRecovery(session.request_id, recovery)) {
                         node->connman->RetryPaymasterConnection({wallet->m_paymaster_transport_owner.GetHex(),
-                            "recovery:" + recovery.recovery_id.GetHex(), true});
+                            "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
                     }
                 }
                 return ResolveAlternativePaymasterRecovery(

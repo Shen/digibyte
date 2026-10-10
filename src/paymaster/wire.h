@@ -12,6 +12,7 @@
 #include <pubkey.h>
 #include <serialize.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -25,6 +26,41 @@ static constexpr size_t MAX_DIRECT_MESSAGE_BYTES{1024 * 1024};
 static constexpr size_t MAX_DIRECT_PSBT_BYTES{900 * 1024};
 static constexpr size_t MAX_CAPACITY_DGB_INPUTS{64};
 static constexpr int64_t MAX_DIRECT_MESSAGE_TTL_SECONDS{60};
+
+/** No payment identifiers, recipient, amount or inputs are disclosed during
+ * channel authentication. The session id comes from the local BIP324 cipher,
+ * never from a peer's asserted view of the transport. */
+struct ChannelChallenge {
+    uint16_t version{1};
+    uint256 genesis_hash;
+    PaymasterId provider_id;
+    uint256 transport_session_id;
+    uint256 nonce;
+
+    SERIALIZE_METHODS(ChannelChallenge, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id,
+                  obj.transport_session_id, obj.nonce);
+    }
+};
+
+struct ChannelProof {
+    ChannelChallenge challenge;
+    XOnlyPubKey identity_key;
+    std::array<unsigned char, 64> signature{};
+
+    SERIALIZE_METHODS(ChannelProof, obj)
+    {
+        READWRITE(obj.challenge, obj.identity_key, obj.signature);
+    }
+};
+
+uint256 GetChannelAuthHash(const ChannelChallenge& challenge);
+bool ValidateChannelChallenge(const ChannelChallenge& challenge,
+                              const uint256& genesis_hash,
+                              const uint256& transport_session_id);
+bool ValidateChannelProof(const ChannelProof& proof,
+                          const ChannelChallenge& expected);
 
 struct CapacityControlProof {
     uint256 reference_block;

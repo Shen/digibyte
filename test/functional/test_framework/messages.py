@@ -1597,6 +1597,14 @@ class msg_pmannounce(_msg_paymaster_raw):
     msgtype = b"pmannounce"
 
 
+class msg_pmauthreq(_msg_paymaster_raw):
+    msgtype = b"pmauthreq"
+
+
+class msg_pmauthresp(_msg_paymaster_raw):
+    msgtype = b"pmauthresp"
+
+
 class msg_pmcapreq(_msg_paymaster_raw):
     msgtype = b"pmcapreq"
 

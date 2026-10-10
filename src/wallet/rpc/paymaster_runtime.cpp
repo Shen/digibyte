@@ -455,6 +455,31 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         }
     }
 
+    // Authenticate even manual and drain-only transports before accepting
+    // payment metadata. This domain-separated identity proof approves no spend.
+    // Keys remain wallet-owned, and restore/lock gates still apply.
+    if (!wallet.IsLocked() && manager->HasChannelChallenges(identity.provider_id, DirectNow())) {
+        ProviderWorkGuard work_guard{*manager, wallet.GetName(), identity.provider_id};
+        if (work_guard.Acquired()) {
+            const auto challenges = manager->TakeChannelChallenges(identity.provider_id, 1, DirectNow());
+            for (const auto& [peer_id, challenge] : challenges) {
+                CKey key;
+                ProviderIdentityRecord current;
+                std::string error;
+                if (!GetPaymasterIdentityKey(wallet, key, current, error) ||
+                    current.provider_id != challenge.provider_id) continue;
+                ChannelProof proof;
+                proof.challenge = challenge;
+                proof.identity_key = current.identity_key;
+                if (key.SignSchnorr(GetChannelAuthHash(challenge), proof.signature, nullptr, GetRandHash()) &&
+                    manager->QueueChannelProof(peer_id, proof, DirectNow())) {
+                    if (const auto* node = wallet.chain().context(); node && node->connman)
+                        node->connman->WakeMessageHandler();
+                }
+            }
+        }
+    }
+
     if (settings.operation_mode == ProviderOperationMode::MANUAL) {
         manager->SetProviderServiceStatus(wallet.GetName(),
                                           ProviderServiceState::MANUAL);

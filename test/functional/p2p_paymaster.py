@@ -5,6 +5,8 @@
 """Exercise the Paymaster P2P negotiation and transport firewall."""
 
 from test_framework.messages import (
+    msg_pmauthreq,
+    msg_pmauthresp,
     msg_pmcapreq,
     msg_pmcapresp,
     msg_pmquotereq,
@@ -82,6 +84,8 @@ class PaymasterP2PTest(DigiByteTestFramework):
         # Every command gets an independent connection so the first expected
         # disconnect cannot mask a less strict handler for a later command.
         direct_messages = (
+            msg_pmauthreq(b"\x00"),
+            msg_pmauthresp(b"\x00"),
             msg_pmcapreq(b"\x00"),
             msg_pmcapresp(b"\x00"),
             msg_pmquotereq(b"\x00"),

@@ -307,6 +307,9 @@ extern const char* ORACLEHEARTBEAT;
 extern const char* SENDPMASTERS;
 extern const char* PMANNOUNCE;
 extern const char* GETPMASTERS;
+/** Provider authentication of the live BIP324 channel, before payment data. */
+extern const char* PMAUTHREQ;
+extern const char* PMAUTHRESP;
 /** DigiDollar Paymaster V1 isolated direct-session messages. */
 extern const char* PMCAPREQ;
 extern const char* PMCAPRESP;

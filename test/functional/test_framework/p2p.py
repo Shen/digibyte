@@ -62,6 +62,8 @@ from test_framework.messages import (
     msg_ping,
     msg_pong,
     msg_pmannounce,
+    msg_pmauthreq,
+    msg_pmauthresp,
     msg_pmcapreq,
     msg_pmcapresp,
     msg_pmquotereq,
@@ -151,6 +153,8 @@ MESSAGEMAP = {
     b"ping": msg_ping,
     b"pong": msg_pong,
     b"pmannounce": msg_pmannounce,
+    b"pmauthreq": msg_pmauthreq,
+    b"pmauthresp": msg_pmauthresp,
     b"pmcapreq": msg_pmcapreq,
     b"pmcapresp": msg_pmcapresp,
     b"pmquotereq": msg_pmquotereq,
@@ -464,6 +468,8 @@ class P2PInterface(P2PConnection):
     def on_notfound(self, message): pass
     def on_pong(self, message): pass
     def on_pmannounce(self, message): pass
+    def on_pmauthreq(self, message): pass
+    def on_pmauthresp(self, message): pass
     def on_pmcapreq(self, message): pass
     def on_pmcapresp(self, message): pass
     def on_pmquotereq(self, message): pass

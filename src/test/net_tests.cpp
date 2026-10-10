@@ -42,6 +42,7 @@ BOOST_FIXTURE_TEST_SUITE(net_tests, RegTestingSetup)
 BOOST_AUTO_TEST_CASE(paymaster_direct_messages_are_sensitive)
 {
     const std::vector<std::string> request_messages{
+        NetMsgType::PMAUTHREQ,
         NetMsgType::PMCAPREQ,
         NetMsgType::PMQUOTEREQ,
         NetMsgType::PMSUBMIT,
@@ -49,6 +50,7 @@ BOOST_AUTO_TEST_CASE(paymaster_direct_messages_are_sensitive)
         NetMsgType::PMRECOVERYSUBMIT,
     };
     const std::vector<std::string> response_messages{
+        NetMsgType::PMAUTHRESP,
         NetMsgType::PMCAPRESP,
         NetMsgType::PMQUOTERESP,
         NetMsgType::PMRESULT,

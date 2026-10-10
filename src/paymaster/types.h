@@ -48,6 +48,10 @@ constexpr bool IsSupportedDirectProtocolVersion(uint16_t version)
  * INBOUND half as the same isolated direct channel.
  */
 static constexpr uint32_t CAP_DIRECT_CONNECTION{1U << 0};
+/** Mandatory for new direct connections, including reconnect/recovery. This
+ * changes transport negotiation only; retained V5/V6 financial artifacts keep
+ * their original serialization and signature hashes. */
+static constexpr uint32_t CAP_CHANNEL_AUTH{1U << 1};
 static constexpr uint32_t MAX_RATE_BPS{10000};
 static constexpr int64_t MAX_DD_OUTPUT_CENTS{10000000};
 static constexpr int64_t ANNOUNCEMENT_TTL_SECONDS{600};

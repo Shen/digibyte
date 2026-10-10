@@ -283,6 +283,8 @@ struct Peer {
     /** Whether this peer supports Dandelion++ privacy protocol */
     std::atomic<bool> fSupportsDandelion{false};
     std::atomic<bool> m_paymaster_negotiated{false};
+    std::optional<DigiDollar::Paymaster::ChannelChallenge> m_paymaster_challenge
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     int64_t m_last_getpaymasters GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
 
     struct TxRelay {
@@ -3979,7 +3981,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             m_connman.PushMessage(&pfrom, msg_maker.Make(
                 NetMsgType::SENDPMASTERS,
                 DigiDollar::Paymaster::PROTOCOL_VERSION,
-                DigiDollar::Paymaster::CAP_DIRECT_CONNECTION));
+                DigiDollar::Paymaster::CAP_DIRECT_CONNECTION | DigiDollar::Paymaster::CAP_CHANNEL_AUTH));
         }
 
         if (!pfrom.IsPaymasterDirectConn() && greatest_common_version >= WTXID_RELAY_VERSION) {
@@ -4242,7 +4244,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (IsPaymasterP2PActive(m_chainman)) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::SENDPMASTERS,
                                                            DigiDollar::Paymaster::PROTOCOL_VERSION,
-                                                           uint32_t{0}));
+                                                           pfrom.IsPaymasterDirectConn()
+                                                               ? DigiDollar::Paymaster::CAP_CHANNEL_AUTH : uint32_t{0}));
             }
         }
         
@@ -4268,13 +4271,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!vRecv.empty() || version != DigiDollar::Paymaster::PROTOCOL_VERSION ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled() ||
             !IsPaymasterP2PActive(m_chainman)) return;
-        if ((capabilities & ~DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) return;
+        if ((capabilities & ~(DigiDollar::Paymaster::CAP_DIRECT_CONNECTION |
+                              DigiDollar::Paymaster::CAP_CHANNEL_AUTH)) != 0) return;
         if (peer->m_paymaster_negotiated) return; // Never renew negotiation deadlines.
         if (pfrom.m_paymaster_listener &&
-            (capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) == 0) {
+            capabilities != (DigiDollar::Paymaster::CAP_DIRECT_CONNECTION |
+                             DigiDollar::Paymaster::CAP_CHANNEL_AUTH)) {
             pfrom.fDisconnect = true;
             return;
         }
+        if (pfrom.IsPaymasterConn() && capabilities != DigiDollar::Paymaster::CAP_CHANNEL_AUTH) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (!pfrom.IsPaymasterDirectConn() && capabilities == DigiDollar::Paymaster::CAP_CHANNEL_AUTH) return;
         if ((capabilities & DigiDollar::Paymaster::CAP_DIRECT_CONNECTION) != 0) {
             // Only the accepting half can be reclassified. An ordinary
             // outbound peer cannot turn an existing relay connection into a
@@ -4292,7 +4302,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         peer->m_paymaster_negotiated = true;
         pfrom.m_direct_negotiated_at = DigiDollar::Paymaster::DirectNow();
-        pfrom.m_paymaster_negotiated = true;
+        // For direct channels this cross-thread flag becomes true only after
+        // the selected provider authenticates the actual BIP324 session.
+        pfrom.m_paymaster_negotiated = !pfrom.IsPaymasterDirectConn();
         if (!pfrom.IsPaymasterDirectConn()) {
             m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPMASTERS, uint16_t{16}));
         }
@@ -4364,6 +4376,52 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::PMAUTHREQ || msg_type == NetMsgType::PMAUTHRESP) {
+        const auto transport = pfrom.m_transport->GetInfo();
+        if (!pfrom.IsPaymasterDirectConn() || !pfrom.fSuccessfullyConnected ||
+            !peer->m_paymaster_negotiated || pfrom.m_paymaster_negotiated ||
+            transport.transport_type != TransportProtocolType::V2 || !transport.session_id ||
+            !m_opts.paymaster || !m_opts.paymaster->Enabled() ||
+            !IsPaymasterP2PActive(m_chainman) ||
+            (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages)) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (msg_type == NetMsgType::PMAUTHREQ) {
+            DigiDollar::Paymaster::ChannelChallenge challenge;
+            if (!pfrom.IsInboundConn() || peer->m_paymaster_challenge ||
+                vRecv.size() != GetSerializeSize(challenge, PROTOCOL_VERSION)) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            vRecv >> challenge;
+            // Validate against our cipher's session id, not the peer's claim.
+            // A two-leg decrypting relay has a different id on each leg.
+            if (!vRecv.empty() || !DigiDollar::Paymaster::ValidateChannelChallenge(
+                    challenge, m_chainparams.GenesisBlock().GetHash(), *transport.session_id) ||
+                !m_opts.paymaster->QueueChannelChallenge(pfrom.GetId(), challenge, DigiDollar::Paymaster::DirectNow())) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            peer->m_paymaster_challenge = challenge;
+        } else {
+            DigiDollar::Paymaster::ChannelProof proof;
+            if (pfrom.IsInboundConn() || !peer->m_paymaster_challenge ||
+                !pfrom.m_paymaster_lease || pfrom.m_paymaster_lease->canceled ||
+                vRecv.size() != GetSerializeSize(proof, PROTOCOL_VERSION)) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            vRecv >> proof;
+            if (!vRecv.empty() || !DigiDollar::Paymaster::ValidateChannelProof(proof, *peer->m_paymaster_challenge)) {
+                pfrom.fDisconnect = true;
+                return;
+            }
+            pfrom.m_paymaster_negotiated = true;
+        }
+        return;
+    }
+
     const bool direct_paymaster_message{NetMsgType::IsPaymasterDirectMessage(msg_type)};
     if (direct_paymaster_message) {
         // The client always opens the dedicated connection. Its outbound half
@@ -4379,7 +4437,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // over-sized frames fail closed before deserialization.
         if (!pfrom.IsPaymasterDirectConn() || !pfrom.fSuccessfullyConnected ||
             !expected_direction ||
-            !peer->m_paymaster_negotiated ||
+            !peer->m_paymaster_negotiated || !pfrom.m_paymaster_negotiated ||
             pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
             (m_chainparams.GetChainType() == ChainType::MAIN && m_opts.capture_messages) ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled() || vRecv.empty() ||
@@ -7405,6 +7463,44 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             return true;
         }
         if (!peer->m_paymaster_negotiated) {
+            MaybeSendPing(*pto, *peer, GetTime<std::chrono::microseconds>());
+            return true;
+        }
+        if (!pto->m_paymaster_negotiated) {
+            const auto transport = pto->m_transport->GetInfo();
+            if (!transport.session_id) {
+                pto->fDisconnect = true;
+                return true;
+            }
+            if (pto->IsInboundConn()) {
+                const auto proof = m_opts.paymaster->TakeChannelProof(pto->GetId(), DigiDollar::Paymaster::DirectNow());
+                if (proof) {
+                    if (!peer->m_paymaster_challenge ||
+                        !DigiDollar::Paymaster::ValidateChannelChallenge(proof->challenge,
+                            m_chainparams.GenesisBlock().GetHash(), *transport.session_id) ||
+                        !DigiDollar::Paymaster::ValidateChannelProof(*proof, *peer->m_paymaster_challenge)) {
+                        pto->fDisconnect = true;
+                        return true;
+                    }
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMAUTHRESP, *proof));
+                    pto->m_paymaster_negotiated = true;
+                }
+            } else if (!peer->m_paymaster_challenge) {
+                const auto& lease = pto->m_paymaster_lease;
+                if (!lease || lease->canceled || lease->key.provider_id.IsNull()) {
+                    pto->fDisconnect = true;
+                    return true;
+                }
+                DigiDollar::Paymaster::ChannelChallenge challenge;
+                challenge.genesis_hash = m_chainparams.GenesisBlock().GetHash();
+                challenge.provider_id = lease->key.provider_id;
+                challenge.transport_session_id = *transport.session_id;
+                challenge.nonce = GetRandHash();
+                peer->m_paymaster_challenge = challenge;
+                m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::PMAUTHREQ, challenge));
+            }
+            // Never dequeue payment metadata while authenticating, even when
+            // a caller has already queued it. Responses precede later traffic.
             MaybeSendPing(*pto, *peer, GetTime<std::chrono::microseconds>());
             return true;
         }

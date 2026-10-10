@@ -10,6 +10,7 @@
  */
 
 #include <paymaster/manager.h>
+#include <paymaster/transport.h>
 
 #include <hash.h>
 
@@ -1284,11 +1285,83 @@ DirectEnqueueResult Manager::EnqueueNetworkDirectMessage(
 void Manager::ForgetDirectPeer(int64_t peer_id)
 {
     LOCK(m_direct_mutex);
+    m_channel_exchanges.erase(peer_id);
     for (auto it = m_expected_responses.begin(); it != m_expected_responses.end();) {
         if (std::get<0>(it->first) == peer_id) it = m_expected_responses.erase(it);
         else ++it;
     }
     // Queued signed evidence and reconnect rate history intentionally survive.
+}
+
+void Manager::PruneChannelExchanges(int64_t now)
+{
+    AssertLockHeld(m_direct_mutex);
+    for (auto it = m_channel_exchanges.begin(); it != m_channel_exchanges.end();) {
+        if (TimeDeltaExceeds(now, it->second.created_at, DIRECT_HANDSHAKE_MS)) {
+            it = m_channel_exchanges.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool Manager::QueueChannelChallenge(int64_t peer_id, const ChannelChallenge& challenge, int64_t now)
+{
+    if (!Enabled() || peer_id < 0 || now < 0 ||
+        !ValidateChannelChallenge(challenge, challenge.genesis_hash, challenge.transport_session_id)) return false;
+    LOCK(m_direct_mutex);
+    PruneChannelExchanges(now);
+    if (!Enabled() || m_channel_exchanges.size() >= MAX_DIRECT_HANDSHAKES) return false;
+    return m_channel_exchanges.emplace(peer_id, ChannelExchange{challenge, now, false, {}}).second;
+}
+
+bool Manager::HasChannelChallenges(const PaymasterId& provider_id, int64_t now)
+{
+    LOCK(m_direct_mutex);
+    PruneChannelExchanges(now);
+    return Enabled() && std::any_of(m_channel_exchanges.begin(), m_channel_exchanges.end(),
+        [&provider_id](const auto& item) {
+            return !item.second.leased && item.second.challenge.provider_id == provider_id;
+        });
+}
+
+std::vector<std::pair<int64_t, ChannelChallenge>> Manager::TakeChannelChallenges(
+    const PaymasterId& provider_id, size_t maximum, int64_t now)
+{
+    LOCK(m_direct_mutex);
+    PruneChannelExchanges(now);
+    std::vector<std::pair<int64_t, ChannelChallenge>> result;
+    if (!Enabled()) return result;
+    for (auto& [peer_id, exchange] : m_channel_exchanges) {
+        if (result.size() >= maximum) break;
+        if (exchange.leased || exchange.challenge.provider_id != provider_id) continue;
+        exchange.leased = true;
+        result.emplace_back(peer_id, exchange.challenge);
+    }
+    return result;
+}
+
+bool Manager::QueueChannelProof(int64_t peer_id, const ChannelProof& proof, int64_t now)
+{
+    LOCK(m_direct_mutex);
+    PruneChannelExchanges(now);
+    const auto found = m_channel_exchanges.find(peer_id);
+    if (!Enabled() || found == m_channel_exchanges.end() || !found->second.leased ||
+        found->second.proof || GetPaymasterId(proof.identity_key) != found->second.challenge.provider_id ||
+        GetChannelAuthHash(proof.challenge) != GetChannelAuthHash(found->second.challenge)) return false;
+    found->second.proof = proof;
+    return true;
+}
+
+std::optional<ChannelProof> Manager::TakeChannelProof(int64_t peer_id, int64_t now)
+{
+    LOCK(m_direct_mutex);
+    PruneChannelExchanges(now);
+    const auto found = m_channel_exchanges.find(peer_id);
+    if (!Enabled() || found == m_channel_exchanges.end() || !found->second.proof) return {};
+    auto proof = std::move(found->second.proof);
+    m_channel_exchanges.erase(found);
+    return proof;
 }
 
 bool Manager::QueueOutboundDirectMessage(int64_t peer_id,
@@ -1416,6 +1489,7 @@ void Manager::ClearDirectMessages()
     {
         LOCK(m_direct_mutex);
         m_direct_messages.clear();
+        m_channel_exchanges.clear();
         m_expected_responses.clear();
         m_direct_replays.clear();
         m_leased_direct_ids.clear();

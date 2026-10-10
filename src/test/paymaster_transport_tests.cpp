@@ -3,11 +3,21 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <paymaster/transport.h>
+#include <paymaster/manager.h>
+#include <paymaster/wire.h>
+
+#include <bip324.h>
+#include <chainparams.h>
+#include <key.h>
+#include <random.h>
+#include <streams.h>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace DigiDollar::Paymaster;
@@ -267,6 +277,124 @@ BOOST_AUTO_TEST_CASE(raw_byte_and_control_message_work_has_bounded_refill)
     for (int i = 0; i < 64; ++i) BOOST_REQUIRE(messages.Consume(1, 1000));
     BOOST_CHECK(!messages.Consume(1, 1124));
     BOOST_CHECK(messages.Consume(1, 1125));
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_authentication_rejects_two_leg_bip324_relay, BasicTestingSetup)
+{
+    CKey client_key, relay_front_key, relay_back_key, provider_key;
+    client_key.MakeNewKey(true);
+    relay_front_key.MakeNewKey(true);
+    relay_back_key.MakeNewKey(true);
+    provider_key.MakeNewKey(true);
+    const auto entropy = GetRandHash();
+    BIP324Cipher client{client_key, MakeByteSpan(entropy)};
+    BIP324Cipher relay_front{relay_front_key, MakeByteSpan(entropy)};
+    BIP324Cipher relay_back{relay_back_key, MakeByteSpan(entropy)};
+    BIP324Cipher provider{provider_key, MakeByteSpan(entropy)};
+    client.Initialize(relay_front.GetOurPubKey(), true);
+    relay_front.Initialize(client.GetOurPubKey(), false);
+    relay_back.Initialize(provider.GetOurPubKey(), true);
+    provider.Initialize(relay_back.GetOurPubKey(), false);
+    const uint256 client_session{MakeUCharSpan(client.GetSessionID())};
+    const uint256 provider_session{MakeUCharSpan(provider.GetSessionID())};
+    BOOST_REQUIRE(client_session == uint256{MakeUCharSpan(relay_front.GetSessionID())});
+    BOOST_REQUIRE(provider_session == uint256{MakeUCharSpan(relay_back.GetSessionID())});
+    BOOST_REQUIRE(client_session != provider_session);
+
+    ChannelChallenge challenge;
+    challenge.genesis_hash = Params().GenesisBlock().GetHash();
+    challenge.provider_id = GetPaymasterId(XOnlyPubKey{provider_key.GetPubKey()});
+    challenge.transport_session_id = client_session;
+    challenge.nonce = GetRandHash();
+    const auto transit = [](BIP324Cipher& sender, BIP324Cipher& receiver, const auto& message) {
+        CDataStream encoded{SER_NETWORK, ::PROTOCOL_VERSION};
+        encoded << message;
+        std::vector<std::byte> ciphertext(encoded.size() + BIP324Cipher::EXPANSION);
+        sender.Encrypt(MakeByteSpan(encoded), {}, false, ciphertext);
+        const auto length = receiver.DecryptLength(Span{ciphertext}.first(BIP324Cipher::LENGTH_LEN));
+        std::vector<std::byte> plaintext(length);
+        bool ignore{true};
+        BOOST_REQUIRE(receiver.Decrypt(Span{ciphertext}.subspan(BIP324Cipher::LENGTH_LEN), {}, ignore, plaintext));
+        BOOST_REQUIRE(!ignore);
+        CDataStream decoded{MakeUCharSpan(plaintext), SER_NETWORK, ::PROTOCOL_VERSION};
+        std::remove_cvref_t<decltype(message)> received;
+        decoded >> received;
+        BOOST_REQUIRE(decoded.empty());
+        return received;
+    };
+    ChannelChallenge forwarded = transit(relay_back, provider, transit(client, relay_front, challenge));
+    BOOST_REQUIRE(GetChannelAuthHash(forwarded) == GetChannelAuthHash(challenge));
+    // Forwarding authentic bytes fails at the provider's own channel check.
+    BOOST_CHECK(!ValidateChannelChallenge(forwarded, challenge.genesis_hash, provider_session));
+    // Rewriting the id permits a genuine proof on the second leg, but that
+    // signature is not authority for the client's original channel/challenge.
+    forwarded.transport_session_id = provider_session;
+    BOOST_REQUIRE(ValidateChannelChallenge(forwarded, challenge.genesis_hash, provider_session));
+    ChannelProof proof{forwarded, XOnlyPubKey{provider_key.GetPubKey()}, {}};
+    BOOST_REQUIRE(provider_key.SignSchnorr(GetChannelAuthHash(forwarded), proof.signature, nullptr, GetRandHash()));
+    const auto relayed_proof = transit(relay_front, client, transit(provider, relay_back, proof));
+    BOOST_CHECK(!ValidateChannelProof(relayed_proof, challenge));
+    proof.challenge.transport_session_id = client_session;
+    BOOST_CHECK(!ValidateChannelProof(proof, challenge));
+    // A direct encrypted channel with the selected identity succeeds.
+    BOOST_REQUIRE(provider_key.SignSchnorr(GetChannelAuthHash(challenge), proof.signature, nullptr, GetRandHash()));
+    BOOST_REQUIRE(ValidateChannelProof(proof, challenge));
+    auto changed = challenge;
+    changed.nonce = GetRandHash();
+    BOOST_CHECK(!ValidateChannelProof(proof, changed));
+    changed = challenge;
+    changed.genesis_hash = GetRandHash();
+    BOOST_CHECK(!ValidateChannelProof(proof, changed));
+    changed = challenge;
+    changed.provider_id = GetPaymasterId(XOnlyPubKey{client_key.GetPubKey()});
+    BOOST_CHECK(!ValidateChannelProof(proof, changed));
+    changed = challenge;
+    ++changed.version;
+    BOOST_CHECK(!ValidateChannelProof(proof, changed));
+    proof.signature[0] ^= 1;
+    BOOST_CHECK(!ValidateChannelProof(proof, challenge));
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_auth_queue_bounds_disconnect_and_expiry, BasicTestingSetup)
+{
+    Manager manager{true};
+    CKey identity;
+    identity.MakeNewKey(true);
+    ChannelChallenge challenge;
+    challenge.genesis_hash = Params().GenesisBlock().GetHash();
+    challenge.provider_id = GetPaymasterId(XOnlyPubKey{identity.GetPubKey()});
+    challenge.transport_session_id = GetRandHash();
+    challenge.nonce = GetRandHash();
+    for (int64_t peer = 0; peer < MAX_DIRECT_HANDSHAKES; ++peer)
+        BOOST_REQUIRE(manager.QueueChannelChallenge(peer, challenge, 1000));
+    BOOST_CHECK(!manager.QueueChannelChallenge(0, challenge, 1001));
+    BOOST_CHECK(!manager.QueueChannelChallenge(MAX_DIRECT_HANDSHAKES, challenge, 1001));
+    BOOST_CHECK(manager.HasChannelChallenges(challenge.provider_id, 1001));
+    BOOST_CHECK(!manager.HasChannelChallenges(GetRandHash(), 1001));
+    BOOST_CHECK(manager.TakeChannelChallenges(GetRandHash(), 1, 1001).empty());
+    auto work = manager.TakeChannelChallenges(challenge.provider_id, 1, 1001);
+    BOOST_REQUIRE_EQUAL(work.size(), 1);
+    ChannelProof proof{challenge, XOnlyPubKey{identity.GetPubKey()}, {}};
+    BOOST_REQUIRE(identity.SignSchnorr(GetChannelAuthHash(challenge), proof.signature, nullptr, GetRandHash()));
+    manager.ForgetDirectPeer(work.front().first);
+    BOOST_CHECK(!manager.QueueChannelProof(work.front().first, proof, 1002));
+    BOOST_CHECK(!manager.TakeChannelProof(work.front().first, 1002));
+    work = manager.TakeChannelChallenges(challenge.provider_id, 1, 1002);
+    BOOST_REQUIRE_EQUAL(work.size(), 1);
+    BOOST_REQUIRE(manager.QueueChannelProof(work.front().first, proof, 1002));
+    BOOST_CHECK(!manager.QueueChannelProof(work.front().first, proof, 1003));
+    const auto received = manager.TakeChannelProof(work.front().first, 1003);
+    BOOST_REQUIRE(received);
+    BOOST_CHECK(ValidateChannelProof(*received, challenge));
+    BOOST_CHECK(!manager.TakeChannelProof(work.front().first, 1003));
+    BOOST_CHECK(manager.TakeChannelChallenges(challenge.provider_id, MAX_DIRECT_HANDSHAKES, 31'001).empty());
+    BOOST_REQUIRE(manager.QueueChannelChallenge(0, challenge, 31'001));
+    work = manager.TakeChannelChallenges(challenge.provider_id, 1, 31'001);
+    BOOST_REQUIRE_EQUAL(work.size(), 1);
+    manager.SetEnabled(false);
+    BOOST_CHECK(!manager.QueueChannelProof(0, proof, 31'002));
+    BOOST_CHECK(!manager.TakeChannelProof(0, 31'002));
+    BOOST_CHECK(!manager.HasChannelChallenges(challenge.provider_id, 31'002));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

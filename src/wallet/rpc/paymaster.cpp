@@ -80,7 +80,7 @@ DigiDollar::Paymaster::DirectKey PaymentChannelKey(
     const DigiDollar::Paymaster::PaymasterId& provider)
 {
     return {wallet.m_paymaster_transport_owner.GetHex(),
-            session.session_id.GetHex() + ":" + provider.GetHex(), false};
+            session.session_id.GetHex() + ":" + provider.GetHex(), false, provider};
 }
 
 const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state)
@@ -3947,7 +3947,7 @@ bool QueueRecoveryMessage(WalletContext& context,
         return false;
     }
     const DirectKey channel{wallet.m_paymaster_transport_owner.GetHex(),
-                            "recovery:" + recovery.recovery_id.GetHex(), true};
+                            "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id};
     const auto transport = node->connman->RequestPaymasterConnection(
         channel, endpoint, recovery.privacy_profile == PrivacyProfile::HIGH);
     state.connection_pending = transport.Pending();

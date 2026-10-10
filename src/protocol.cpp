@@ -63,6 +63,8 @@ const char* ORACLEHEARTBEAT = "oraclehb";
 const char* SENDPMASTERS = "sendpmasters";
 const char* PMANNOUNCE = "pmannounce";
 const char* GETPMASTERS = "getpmasters";
+const char* PMAUTHREQ = "pmauthreq";
+const char* PMAUTHRESP = "pmauthresp";
 const char* PMCAPREQ = "pmcapreq";
 const char* PMCAPRESP = "pmcapresp";
 const char* PMQUOTEREQ = "pmquotereq";
@@ -76,14 +78,14 @@ const char* PMRECOVERYRESULT = "pmrecresult";
 
 bool IsPaymasterDirectRequest(const std::string& message_type)
 {
-    return message_type == PMCAPREQ || message_type == PMQUOTEREQ ||
+    return message_type == PMAUTHREQ || message_type == PMCAPREQ || message_type == PMQUOTEREQ ||
            message_type == PMSUBMIT || message_type == PMRECOVERYREQ ||
            message_type == PMRECOVERYSUBMIT;
 }
 
 bool IsPaymasterDirectResponse(const std::string& message_type)
 {
-    return message_type == PMCAPRESP || message_type == PMQUOTERESP ||
+    return message_type == PMAUTHRESP || message_type == PMCAPRESP || message_type == PMQUOTERESP ||
            message_type == PMRESULT || message_type == PMRECOVERYRESP ||
            message_type == PMRECOVERYRESULT;
 }
@@ -98,7 +100,8 @@ bool IsPaymasterConnectionMessage(const std::string& message_type)
 {
     return message_type == VERSION || message_type == VERACK ||
            message_type == SENDPMASTERS || message_type == PING ||
-           message_type == PONG || IsPaymasterDirectMessage(message_type);
+           message_type == PONG || message_type == PMAUTHREQ ||
+           message_type == PMAUTHRESP || IsPaymasterDirectMessage(message_type);
 }
 } // namespace NetMsgType
 
@@ -154,6 +157,8 @@ const static std::vector<std::string> g_all_net_message_types{
     NetMsgType::SENDPMASTERS,
     NetMsgType::PMANNOUNCE,
     NetMsgType::GETPMASTERS,
+    NetMsgType::PMAUTHREQ,
+    NetMsgType::PMAUTHRESP,
     NetMsgType::PMCAPREQ,
     NetMsgType::PMCAPRESP,
     NetMsgType::PMQUOTEREQ,

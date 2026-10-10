@@ -233,6 +233,15 @@ public:
     bool CanReceiveDirectMessage(int64_t peer_id, const DirectPayload& payload,
                                  DirectAdmissionClass admission, int64_t now);
     void ForgetDirectPeer(int64_t peer_id);
+    /** Bounded, process-local channel proofs contain no financial authority.
+     * Callers supply monotonic milliseconds. Disconnect drops queued work;
+     * a signer finishing later cannot resurrect the peer's request. */
+    bool QueueChannelChallenge(int64_t peer_id, const ChannelChallenge& challenge, int64_t now);
+    bool HasChannelChallenges(const PaymasterId& provider_id, int64_t now);
+    std::vector<std::pair<int64_t, ChannelChallenge>> TakeChannelChallenges(
+        const PaymasterId& provider_id, size_t maximum, int64_t now);
+    bool QueueChannelProof(int64_t peer_id, const ChannelProof& proof, int64_t now);
+    std::optional<ChannelProof> TakeChannelProof(int64_t peer_id, int64_t now);
     DirectEnqueueResult EnqueueNetworkDirectMessage(
         int64_t peer_id, const uint256& message_id, size_t serialized_size,
         DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
@@ -473,6 +482,13 @@ private:
     std::atomic<bool> m_enabled;
     Directory m_directory;
     mutable Mutex m_direct_mutex;
+    struct ChannelExchange {
+        ChannelChallenge challenge;
+        int64_t created_at;
+        bool leased{false};
+        std::optional<ChannelProof> proof;
+    };
+    void PruneChannelExchanges(int64_t now) EXCLUSIVE_LOCKS_REQUIRED(m_direct_mutex);
     std::deque<DirectMessage> m_direct_messages GUARDED_BY(m_direct_mutex);
     // Multiple RPC scopes may inspect the same stable candidate concurrently.
     // Pruning is allowed only after every scope has released its reference.
@@ -522,6 +538,7 @@ private:
      * holding a wallet slot must not complete a start for another provider. */
     std::map<std::string, PaymasterId> m_provider_work GUARDED_BY(m_provider_mutex);
     std::map<std::string, ProviderServiceStatus> m_provider_service_status GUARDED_BY(m_provider_mutex);
+    std::map<int64_t, ChannelExchange> m_channel_exchanges GUARDED_BY(m_direct_mutex);
 };
 
 } // namespace DigiDollar::Paymaster

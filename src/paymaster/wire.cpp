@@ -108,6 +108,35 @@ uint256 GetCapacityControlHash(const PaymasterCapacityProof& proof,
     return hasher.GetSHA256();
 }
 
+uint256 GetChannelAuthHash(const ChannelChallenge& challenge)
+{
+    HashWriter hasher = TaggedHash("DigiByte Paymaster BIP324 Channel v1");
+    hasher << challenge;
+    return hasher.GetSHA256();
+}
+
+bool ValidateChannelChallenge(const ChannelChallenge& challenge,
+                              const uint256& genesis_hash,
+                              const uint256& transport_session_id)
+{
+    return challenge.version == 1 && !genesis_hash.IsNull() &&
+           challenge.genesis_hash == genesis_hash &&
+           !challenge.provider_id.IsNull() && !transport_session_id.IsNull() &&
+           challenge.transport_session_id == transport_session_id &&
+           !challenge.nonce.IsNull();
+}
+
+bool ValidateChannelProof(const ChannelProof& proof,
+                          const ChannelChallenge& expected)
+{
+    return ValidateChannelChallenge(expected, expected.genesis_hash,
+                                    expected.transport_session_id) &&
+           GetChannelAuthHash(proof.challenge) == GetChannelAuthHash(expected) &&
+           GetPaymasterId(proof.identity_key) == expected.provider_id &&
+           proof.identity_key.VerifySchnorr(GetChannelAuthHash(expected),
+                                            proof.signature);
+}
+
 uint256 GetCapacityProofSignatureHash(const PaymasterCapacityProof& proof)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity v1");
