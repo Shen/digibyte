@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <set>
 
 #include <QLabel>
 #include <QVBoxLayout>
@@ -1157,6 +1158,7 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
     std::vector<DDTransaction> transactions;
     if (!result.isArray()) return;
     transactions.reserve(result.size());
+    std::set<std::string> unchecked_txids;
     for (size_t index = 0; index < result.size(); ++index) {
         const UniValue& value = result[index];
         if (!value.isObject()) continue;
@@ -1172,6 +1174,7 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
         tx.abandoned = value.find_value("abandoned").get_bool();
         tx.lock_tier = value.find_value("lock_tier").getInt<int>();
         const UniValue& wallet_state = value.find_value("wallet_state");
+        if (wallet_state.isStr() && wallet_state.get_str() == "checking") unchecked_txids.insert(tx.txid);
         tx.is_local = wallet_state.isStr() && wallet_state.get_str() == "local";
         tx.is_expired_mint = wallet_state.isStr() && wallet_state.get_str() == "expired_mint";
         transactions.push_back(std::move(tx));
@@ -1304,7 +1307,10 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
 
         // Confirmations - also check for abandoned status
         QString confirmText;
-        if (tx.is_expired_mint) {
+        const bool checking_status = unchecked_txids.count(tx.txid) != 0;
+        if (checking_status) {
+            confirmText = tr("Checking…");
+        } else if (tx.is_expired_mint) {
             confirmText = tr("Expired mint");
         } else if (tx.abandoned) {
             confirmText = tr("Abandoned");
@@ -1319,13 +1325,17 @@ void DigiDollarOverviewWidget::populateRecentTransactions(const UniValue& result
         }
         QLabel* confirmLabel = new QLabel(confirmText);
         confirmLabel->setObjectName("recentTxStatusLabel");
-        if (tx.is_expired_mint) {
+        if (checking_status) {
+            confirmLabel->setToolTip(tr("Saved transaction; checking its current confirmation status."));
+        } else if (tx.is_expired_mint) {
             confirmLabel->setToolTip(tr("This mint was not confirmed before its deadline."));
         } else if (tx.is_local) {
             confirmLabel->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
         }
         confirmLabel->ensurePolished();
-        confirmLabel->setFixedWidth(std::max(100, confirmLabel->fontMetrics().horizontalAdvance(tr("Expired mint")) + 12));
+        confirmLabel->setFixedWidth(std::max({100,
+            confirmLabel->fontMetrics().horizontalAdvance(tr("Expired mint")) + 12,
+            confirmLabel->fontMetrics().horizontalAdvance(tr("Checking…")) + 12}));
         layout->addWidget(confirmLabel);
 
         // Date/time

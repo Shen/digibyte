@@ -69,7 +69,7 @@ using wallet::DEFAULT_DISABLE_WALLET;
 
 namespace {
 
-UniValue SerializeDigiDollarHistory(const std::vector<DDTransaction>& transactions)
+UniValue SerializeDigiDollarHistory(const std::vector<DDTransaction>& transactions, bool live_status = true)
 {
     UniValue result{UniValue::VARR};
     for (const DDTransaction& tx : transactions) {
@@ -87,7 +87,7 @@ UniValue SerializeDigiDollarHistory(const std::vector<DDTransaction>& transactio
         tx_info.pushKV("abandoned", tx.abandoned);
         tx_info.pushKV("lock_tier", tx.lock_tier);
         tx_info.pushKV("in_mempool", tx.in_mempool);
-        tx_info.pushKV("wallet_state", tx.is_expired_mint ? "expired_mint" :
+        tx_info.pushKV("wallet_state", !live_status ? "checking" : tx.is_expired_mint ? "expired_mint" :
             (tx.is_local ? "local" :
              (tx.abandoned ? "abandoned" :
               (tx.confirmations < 0 ? "conflicted" :
@@ -129,10 +129,11 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
 
     // WalletDB has already populated transaction_history at this point. Seed
     // the model with only the rows that can be visible immediately, without
-    // performing descriptor ownership recovery on Qt's event thread.
+    // performing descriptor ownership recovery on Qt's event thread. Persisted
+    // confirmations are not live status; the worker will replace this seed.
     if (DigiDollarWallet* const dd_wallet = m_wallet->getDigiDollarWallet()) {
         m_digi_dollar_history_cache =
-            SerializeDigiDollarHistory(dd_wallet->GetStoredDDTransactionHistory(/*count=*/50));
+            SerializeDigiDollarHistory(dd_wallet->GetStoredDDTransactionHistory(/*count=*/50), /*live_status=*/false);
     }
 }
 
@@ -1684,7 +1685,7 @@ UniValue WalletModel::getCachedDigiDollarTransactionHistory(int count, int skip)
     if (m_digi_dollar_history_cache.empty()) {
         if (DigiDollarWallet* const dd_wallet = m_wallet->getDigiDollarWallet()) {
             const UniValue stored = SerializeDigiDollarHistory(
-                dd_wallet->GetStoredDDTransactionHistory(/*count=*/50));
+                dd_wallet->GetStoredDDTransactionHistory(/*count=*/50), /*live_status=*/false);
             if (!stored.empty()) m_digi_dollar_history_cache = stored;
         }
     }

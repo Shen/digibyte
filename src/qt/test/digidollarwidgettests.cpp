@@ -3647,13 +3647,26 @@ void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy(
     DigiDollarWallet* const dd_wallet = wallet->GetDDWallet();
     QVERIFY(dd_wallet != nullptr);
 
+    // Persisted history may still say zero even though the wallet has already
+    // confirmed this transaction. Only the live worker may present its status.
+    CMutableTransaction confirmed;
+    confirmed.vin.emplace_back(COutPoint(uint256::ONE, 0));
+    confirmed.vout.emplace_back(COIN, CScript() << OP_TRUE);
+    const auto confirmed_tx = MakeTransactionRef(confirmed);
+    const std::string confirmed_id = confirmed_tx->GetHash().GetHex();
+    const auto tip_hash = WITH_LOCK(cs_main, return test.m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+    {
+        LOCK(wallet->cs_wallet);
+        QVERIFY(wallet->AddToWallet(confirmed_tx, wallet::TxStateConfirmed{tip_hash, 105, 1}));
+    }
+
     constexpr int STORED_ROWS{75};
     for (int index = 0; index < STORED_ROWS; ++index) {
         DDTransaction transaction;
-        transaction.txid = strprintf("%064x", index + 1);
+        transaction.txid = index == STORED_ROWS - 1 ? confirmed_id : strprintf("%064x", index + 1);
         transaction.amount = index + 1;
         transaction.timestamp = GetTime() + index;
-        transaction.confirmations = 1;
+        transaction.confirmations = 0;
         transaction.incoming = true;
         transaction.address = "TDstored";
         transaction.category = "receive";
@@ -3670,6 +3683,11 @@ void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy(
 
     QTableWidget* const table = transactions.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
+    QLabel* const status = transactions.findChild<QLabel*>("transactionsStatusLabel");
+    QVERIFY(status != nullptr);
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(mini_gui.walletModel.get());
+    overview.setClientModel(mini_gui.clientModel.get());
 
     std::promise<void> lock_acquired;
     std::future<void> ready = lock_acquired.get_future();
@@ -3693,6 +3711,21 @@ void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy(
     transactions.updateView();
     const qint64 initial_render_ms = elapsed.elapsed();
     const int initial_row_count = table->rowCount();
+    constexpr int TX_ID_COLUMN{5};
+    constexpr int CONFIRMATIONS_COLUMN{6};
+    bool initial_status_checking = initial_row_count > 0;
+    for (int row = 0; row < initial_row_count; ++row) {
+        const auto* item = table->item(row, CONFIRMATIONS_COLUMN);
+        initial_status_checking &= item && item->text() == QStringLiteral("Checking…");
+    }
+    const bool initial_banner_visible = status->isVisible() && status->text().contains("confirmation status");
+    overview.show();
+    const bool overview_refreshed = QMetaObject::invokeMethod(&overview, "updateRecentTransactions", Qt::DirectConnection);
+    const auto initial_overview_statuses = overview.findChildren<QLabel*>("recentTxStatusLabel");
+    bool initial_overview_checking = initial_overview_statuses.size() == 20;
+    for (const auto* label : initial_overview_statuses) {
+        initial_overview_checking &= label->text() == QStringLiteral("Checking…");
+    }
 
     {
         std::lock_guard<std::mutex> lock{gate_mutex};
@@ -3706,6 +3739,10 @@ void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy(
     // pump the complete Qt event queue while cs_wallet is intentionally held:
     // unrelated WalletModel timers are allowed to inspect the same wallet.
     QCOMPARE(initial_row_count, 50);
+    QVERIFY(initial_status_checking);
+    QVERIFY(initial_banner_visible);
+    QVERIFY(overview_refreshed);
+    QVERIFY(initial_overview_checking);
     QVERIFY2(initial_render_ms < 200,
              qPrintable(QStringLiteral("Rendering stored DD history waited %1 ms for cs_wallet")
                             .arg(initial_render_ms)));
@@ -3713,6 +3750,35 @@ void DigiDollarWidgetTests::transactionsWidgetShowsStoredHistoryWhileWalletBusy(
     // The canonical worker replaces the bounded startup seed after it can read
     // live wallet state; the temporary 50-row view is not a permanent limit.
     QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), STORED_ROWS, 5000);
+    QVERIFY(!status->isVisible());
+    int confirmed_rows{0};
+    for (int row = 0; row < table->rowCount(); ++row) {
+        const QString id = table->item(row, TX_ID_COLUMN)->data(Qt::UserRole).toString();
+        const QString live_status = table->item(row, CONFIRMATIONS_COLUMN)->text();
+        if (id == QString::fromStdString(confirmed_id)) {
+            QCOMPARE(live_status, QStringLiteral("1"));
+            ++confirmed_rows;
+        } else {
+            QCOMPARE(live_status, QStringLiteral("Pending"));
+        }
+    }
+    QCOMPARE(confirmed_rows, 1);
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        int confirmed_count{0};
+        const auto labels = overview.findChildren<QLabel*>("recentTxStatusLabel");
+        for (const auto* label : labels) {
+            if (label->text() == QStringLiteral("Checking…")) return false;
+            if (label->text() == QStringLiteral("1 conf")) ++confirmed_count;
+        }
+        return confirmed_count == 1;
+    }(), 5000);
+
+    // A later view reuses the verified cache, not the persisted startup seed.
+    const UniValue cached = mini_gui.walletModel->getCachedDigiDollarTransactionHistory(1000, 0);
+    QCOMPARE(cached.size(), size_t{STORED_ROWS});
+    for (const UniValue& row : cached.getValues()) {
+        QVERIFY(row.find_value("wallet_state").get_str() != "checking");
+    }
 }
 
 void DigiDollarWidgetTests::transactionsWidgetRefreshesOnDigiDollarSignal()
@@ -6895,6 +6961,15 @@ void DigiDollarWidgetTests::overviewRecentTransactionAmountIsRightAligned()
     QVERIFY(transactionsList != nullptr);
     QTRY_VERIFY_WITH_TIMEOUT(transactionsList->count() >= 2, 5000);
 
+    // The stored preview has the same row count; wait for live status before
+    // retaining row-widget pointers, which are replaced by the worker reply.
+    QTRY_VERIFY_WITH_TIMEOUT([&] {
+        const auto labels = overviewWidget.findChildren<QLabel*>("recentTxStatusLabel");
+        return labels.size() == 2 && std::all_of(labels.begin(), labels.end(), [](const QLabel* label) {
+            return label->text() == QStringLiteral("Pending");
+        });
+    }(), 5000);
+
     bool foundSmall = false;
     bool foundLarge = false;
     int smallAmountLeft = -1;
@@ -7491,6 +7566,10 @@ void DigiDollarWidgetTests::transactionsWidgetShowsRpcHistorySignsAndFields()
     QTableWidget* table = transactionsWidget.findChild<QTableWidget*>();
     QVERIFY(table != nullptr);
     QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 5, 5000);
+
+    // Stored rows appear before the canonical worker has read confirmations.
+    // This case verifies live history fields, not the preliminary preview.
+    QTRY_COMPARE_WITH_TIMEOUT(table->item(0, 6)->text(), QStringLiteral("Pending"), 5000);
 
     auto findRowByTxid = [&](const QString& txid) -> int {
         for (int row = 0; row < table->rowCount(); ++row) {

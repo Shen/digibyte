@@ -549,6 +549,7 @@ void DigiDollarTransactionsWidget::populateTable()
         QString searchText = m_searchEdit->text().toLower();
 
         int row = 0;
+        bool checking_status{false};
         for (size_t i = 0; i < result.size(); ++i) {
             const UniValue& tx = result[i];
 
@@ -641,10 +642,14 @@ void DigiDollarTransactionsWidget::populateTable()
                 isLocal = walletStateVal.get_str() == "local";
             }
             const bool isExpiredMint = walletStateVal.isStr() && walletStateVal.get_str() == "expired_mint";
-            QTableWidgetItem* confItem = new QTableWidgetItem(isExpiredMint ? tr("Expired mint") :
+            const bool isChecking = walletStateVal.isStr() && walletStateVal.get_str() == "checking";
+            checking_status |= isChecking;
+            QTableWidgetItem* confItem = new QTableWidgetItem(isChecking ? tr("Checking…") : isExpiredMint ? tr("Expired mint") :
                 formatConfirmations(confirmations, isAbandoned, isLocal));
             confItem->setTextAlignment(Qt::AlignCenter);
-            if (isExpiredMint) {
+            if (isChecking) {
+                confItem->setToolTip(tr("Saved transaction; checking its current confirmation status."));
+            } else if (isExpiredMint) {
                 confItem->setToolTip(tr("This mint was not confirmed before its deadline."));
             } else if (isLocal) {
                 confItem->setToolTip(tr("Created locally but not currently in mempool. It may need rebroadcast or may have been rejected."));
@@ -654,10 +659,13 @@ void DigiDollarTransactionsWidget::populateTable()
             ++row;
         }
 
-        m_statusLabel->setVisible(row == 0);
+        m_statusLabel->setVisible(row == 0 || checking_status);
         if (row == 0) {
             DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::INFO);
             m_statusLabel->setText(tr("ℹ No transactions match the current filters."));
+        } else if (checking_status) {
+            DigiDollarStatus::SetBanner(m_statusLabel, DigiDollarStatus::Kind::WAITING);
+            m_statusLabel->setText(tr("… Saved transactions are shown while their current confirmation status is checked."));
         }
 
     } catch (const UniValue& e) {
