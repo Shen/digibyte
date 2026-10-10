@@ -3660,8 +3660,8 @@ settings/backup-acknowledgement changes and automatic runtime selection. They
 also manually copy an already guarded SQLite image under a new wallet name,
 load it without the restore RPC, restart the node and require RPC/CLI startup
 and reserve actions to remain blocked. This proves the guard survives copying;
-it does not detect rollback to an unmarked image. The
-wallet tests additionally call both refill builders and the shared signing
+it does not detect rollback to an unmarked image. The wallet tests additionally
+call both refill builders and the shared signing
 boundaries directly, cover marker write/commit rollback, restart/idempotence,
 append-only writes and malformed/future records. The GUI test checks a clear
 restore instruction in both themes, including simultaneous liquidity errors.
@@ -3693,8 +3693,46 @@ checkout, use the equivalent full solution build, the two Python commands above,
 `test_digibyte.exe --run_test=paymaster_wallet_security_tests`,
 `--run_test=paymaster_wallet_psbt_tests`, and the `PaymasterWidgetTests` Qt filter.
 
-Physical SQLite write/checkpoint failure, manual wallet-file or whole-datadir
+Physical SQLite write/checkpoint failure, unmarked wallet-file or whole-datadir
 rollback, safe migration after complete original-history loss, deep reorgs and
 sanitizer/fuzz campaigns remain unexecuted. A marker in an old database cannot
 detect that database being copied back outside the restore API. Do not claim
 general stale-backup recovery or release approval from these passing cases.
+
+### SQLite engine failures after the backup correction
+
+Two additional cases in `paymaster_wallet_security_tests.cpp` use actual,
+temporary SQLite databases with the normal wallet backend:
+
+- `sqlite_full_quote_preserves_budget_pool_and_retry` caps `max_page_count` at
+  the database's current size and independently verifies an actual `SQLITE_FULL`.
+  A subsequent provider quote must fail without altering any stored record,
+  fee reservation, pool binding or request index. The database must return to
+  autocommit, reopen with the original record digest, and then accept exactly
+  one reservation for the same request. A further exact retry changes no record.
+- `sqlite_failed_restore_commit_cannot_leave_partial_guard` uses SQLite's
+  connection-local authorizer to deny only `COMMIT`. Marker creation must fail
+  with `guarded=false`, roll back, and reopen with every record unchanged.
+  After removing the fault, marker creation succeeds and blocks provider
+  authority after another close/reopen.
+
+The focused run passes two cases / 123 assertions using the selected-object
+MSVC test binary. The full focused wallet security suite, including these two
+cases, passes 18 cases / 9,094 assertions. The connection-local page cap does
+not fill the filesystem;
+commit denial is deliberate engine-level fault injection. Neither test proves
+physical ENOSPC, failed journal/database writes or fsync, torn writes, device
+cache durability or power-loss behavior. Those TM-007 scenarios remain open.
+No production code or base SQLite implementation was changed for these tests.
+
+After rebuilding `test_digibyte` with SQLite support, run from the repository root:
+
+```powershell
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_wallet_security_tests/sqlite_*' --report_level=short
+```
+
+The two cases run in seconds. Success means exit 0, two passing cases and no
+failed assertions. The full-build helper above includes them automatically
+when it runs `paymaster_wallet_security_tests`; the SQLite-disabled build does
+not register them. Local evidence is in `provider-backup-fix/unit-sqlite-faults.txt`
+and `sqlite-faults-receipt.json`, with source/object/binary/report hashes.

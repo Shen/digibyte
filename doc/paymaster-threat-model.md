@@ -23,7 +23,10 @@ persistent resource-growth path. TM-003 subsequently demonstrated expenditure
 beyond an approved fee limit and conflicting provider signing after rollback.
 The reviewed signing paths bind amounts, destinations, fees, actual prevouts,
 input ownership and transaction signatures independently of transport and peer
-claims. The new durable restore guard now quarantines restored provider wallets before loading. It prevents renewed authority rather than inventing missing history. Manual file replacement or whole-directory rollback remains outside this detection mechanism.
+claims. The durable restore guard quarantines restored provider wallets before
+loading and survives file copying, renaming and restarting. It prevents renewed
+authority rather than inventing missing history. Manual replacement with an
+older unmarked image or rollback of the whole directory remains undetected.
 This is a scoped source review with selected tests, not proof of absence of such
 paths or release approval.
 
@@ -79,7 +82,9 @@ Seven selected translation units were compiled and linked into a new isolated
 test executable. Sources, binary/report hashes and exact filters are recorded
 under `build_msvc/paymaster-refresh-check/security-fixes/`. Normal product
 executables were not rebuilt or replaced. Fresh full product/functional,
-sanitizer/fuzz, real SQLite storage-failure and independent review gates remain open. The stale-provider explicit-restore gate is now covered by the TM-003 follow-up below. The threat table below describes the initial attack
+sanitizer/fuzz, physical SQLite storage-failure and independent review gates
+remain open. The real engine-level SQLite follow-up and the stale-provider
+explicit-restore gate are documented below. The threat table describes the initial attack
 assessment; TM-001 and TM-002 now have source corrections with this targeted
 verification, rather than unresolved implementations.
 
@@ -283,7 +288,7 @@ an exploit has been confirmed.
 | TM-004 **defended integrity; privacy residual** | Active MITM terminates two transports and relays authentic Paymaster artifacts. | Can observe forwarded metadata or delay service; no modified spend demonstrated. | Identity/quote/capacity signatures and independent PSBT checks; V2 required. | No provider-authenticated transport transcript binding found. If active-MITM confidentiality is required, design explicit channel binding and test a relay. | Medium / low financial severity / **low** |
 | TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
 | TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
-| TM-007 **open verification** | Process/storage failure at commit/broadcast boundary. | Lost authority, unavailable wallet or incorrect fee recovery if durability fails. | Atomic database transactions and simulated begin/write/commit failure tests; lifecycle process-restart tests exist. | Current real SQLite ENOSPC/power-loss matrix unrun. Test isolated filesystems/VMs, assert exact authority before publication and once-only accounting. | Unestablished / potentially high / **high** verification priority |
+| TM-007 **open physical verification** | Process/storage failure at commit/broadcast boundary. | Lost authority, unavailable wallet or incorrect fee recovery if durability fails. | Atomic transactions, simulated begin/write/commit failures and lifecycle restarts; real SQLite page-cap `SQLITE_FULL` and connection-local commit-denial tests now verify unchanged records, close/reopen, restore quarantine and exact retry. | Physical ENOSPC, failed writes/fsync, torn writes and power loss remain untested. Use isolated filesystems/VMs, assert exact authority before publication and once-only accounting. | Unestablished physical durability / potentially high / **high** verification priority |
 | TM-008 **expected budget use** | Many eligible public-sponsored clients consume the approved subsidy. | Intentional bounded DGB expenditure and capacity exhaustion, rather than unauthorized theft. | Per-transfer/hour/day, recipient/netgroup and concurrent admission controls. | Sybil resistance is not guaranteed. Keep public budgets deliberately finite; monitor remaining allowance and request concentration. | High if targeted / bounded by approvals / **medium** operational |
 | TM-009 **no injection confirmed; test gap** | Arbitrary peer fields reach decoders, database, logs or display. | Parser crash/resource exhaustion; key compromise would be severe if memory corruption exists. | Wire/PSBT/count limits, typed DB records, structured RPC, plain/escaped UI text; selected malformed-input tests pass. | No executable/SQL injection path identified. Current sanitizer/fuzz and sustained-load runs remain open; TM-002 is a concrete cumulative-storage exception. | Unestablished residual / potentially high / **medium** verification |
 
@@ -627,8 +632,14 @@ if ($LASTEXITCODE -ne 0) { throw 'An existing protection test failed' }
    actions, restarts and copying an already guarded wallet. An independently
    durable checkpoint for manually copied unmarked images and comprehensive
    missing-history reconciliation remain unimplemented; see the finding above.
-2. **Physical storage failures (TM-007).** In an isolated disposable VM/filesystem,
-   interrupt before/after wallet DB commit, final publication and wallet insertion;
+2. **Storage failures (TM-007).** The real SQLite engine-level follow-up passes
+   two cases / 123 assertions for page-limit `SQLITE_FULL` and denied marker
+   commit, including record
+   digests, close/reopen and exactly-once retry. These tests live solely in
+   `paymaster_wallet_security_tests.cpp`; the full focused security suite now
+   passes 18 cases / 9,094 assertions. For the remaining physical fault
+   injection, use an isolated disposable VM/filesystem. Interrupt before/after
+   wallet DB commit, final publication and wallet insertion;
    include ENOSPC on writes/checkpoints and abrupt power loss. After restart,
    prove exactly-once accounting and preserved signed-input protection. Ordinary
    process kill and in-memory failure injection are not substitutes. Do not
