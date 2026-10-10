@@ -8263,6 +8263,8 @@ private:
 
     QString readinessExplanation(const QString& error) const
     {
+        if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
+            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Use the complete current provider wallet for continued operation; already recorded exact transactions remain recoverable.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
             return tr("Restricted sponsorship is currently disabled. Review a supported offer in Settings. Existing payment records remain available in Activity.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
@@ -8378,6 +8380,11 @@ private:
     void updateReadinessSummary(const QStringList& errors, bool running, bool ready)
     {
         updateExternalPrerequisites();
+        if (errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
+            setStatusLabel(m_next_step, tr("Restored provider wallet is protected"), QStringLiteral("action"));
+            m_readiness_summary->setText(readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")));
+            return;
+        }
         if (running) {
             setStatusLabel(m_next_step, tr("Provider is running"),
                            QStringLiteral("ready"));
@@ -8419,6 +8426,7 @@ private:
 
         QString next;
         const QStringList priority{
+            QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"),
             QStringLiteral("PAYMASTER_DISABLED"),
             QStringLiteral("PAYMASTER_IDENTITY_NOT_FOUND"),
             QStringLiteral("PAYMASTER_POLICY_NOT_FOUND"),
@@ -8914,6 +8922,10 @@ private:
 
     QString providerServiceStatusText() const
     {
+        if (m_readiness_errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")) ||
+            m_last_service_error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")) {
+            return readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"));
+        }
         if (m_service_state == QLatin1String("waiting_for_readiness") &&
             (m_last_service_error ==
                  QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") ||
@@ -9905,7 +9917,13 @@ private:
         QString hint;
         QString button;
         QString kind = QStringLiteral("waiting");
-        if (action == QLatin1String("start") || action == QLatin1String("enable")) {
+        if (m_readiness_errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
+            headline = tr("Restored provider wallet is protected");
+            hint = readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"));
+            button = tr("View diagnostics");
+            kind = QStringLiteral("action");
+            action = QStringLiteral("inspect_error");
+        } else if (action == QLatin1String("start") || action == QLatin1String("enable")) {
             headline = ready ? tr("Ready to start") : tr("Operation is paused");
             hint = tr("Start using the saved settings. You do not need to repeat setup; existing spending limits remain in force.");
             button = ready ? tr("Start provider…") : tr("Resume provider…");

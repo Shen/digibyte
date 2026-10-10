@@ -1276,6 +1276,26 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
     QCOMPARE(other_requirement->property("statusKind").toString(),
              QStringLiteral("error"));
     QVERIFY(other_requirement->text().startsWith(QStringLiteral("!")));
+
+    UniValue restored_provider{unknown_failure};
+    UniValue restore_errors{UniValue::VARR};
+    restore_errors.push_back("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    restore_errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    restored_provider.pushKV("readiness_errors", std::move(restore_errors));
+    auto* restore_summary = tab.findChild<QLabel*>("paymasterReadinessSummary");
+    QVERIFY(restore_summary != nullptr);
+    for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+        QFile css(":/css/" + theme);
+        QVERIFY(css.open(QIODevice::ReadOnly));
+        tab.setStyleSheet(QString::fromUtf8(css.readAll()));
+        tab.setPaymasterReadinessStatusForTesting(restored_provider);
+        QVERIFY(next_step->text().contains(QStringLiteral("Restored provider wallet is protected")));
+        QVERIFY(restore_summary->text().contains(QStringLiteral("restored from a backup")));
+        QVERIFY(restore_summary->text().contains(QStringLiteral("New payments and reserve spending are blocked")));
+        QVERIFY(restore_summary->text().contains(QStringLiteral("A rescan or a higher fee limit cannot resolve this")));
+        QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
+        QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
+    }
 }
 
 void PaymasterWidgetTests::paymasterPendingStartUsesLiveStatusInsteadOfStaleModal()
