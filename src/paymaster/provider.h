@@ -30,6 +30,8 @@ static constexpr uint8_t FUNDING_MODEL_USER_PAID{1U << static_cast<uint8_t>(Fund
 static constexpr uint8_t FUNDING_MODEL_SPONSORED{1U << static_cast<uint8_t>(FundingModel::SPONSORED)};
 static constexpr uint8_t FUNDING_MODEL_ALL{FUNDING_MODEL_USER_PAID | FUNDING_MODEL_SPONSORED};
 static constexpr int64_t MAX_QUOTE_TTL_SECONDS{60};
+/** Rolling expenditure window, not the lifetime of a signed authorization. */
+inline constexpr int64_t PROVIDER_BUDGET_WINDOW_SECONDS{24 * 60 * 60};
 
 enum class FeeOutputKind : uint8_t {
     NONE,

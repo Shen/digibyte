@@ -1604,10 +1604,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
         if (have_commit && have_result && SameCommit(existing_commit, commit) &&
             SameResult(existing_result, result) &&
             SameAlternativeRecoveryRecord(current, recovery) &&
-            ValidateProviderAlternativeRecoveryBudgetAuthorization(
-                current, /*policy=*/nullptr, budget_ledger,
-                BudgetReservationState::SPENT,
-                /*allow_historical_policy=*/true, error)) {
+            ValidateRetainedProviderRecoveryBudget(batch, current, budget_ledger, error)) {
             return true;
         }
         if (!error.empty()) return false;

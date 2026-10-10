@@ -31,7 +31,7 @@ namespace DigiDollar::Paymaster {
 namespace {
 
 static constexpr int64_t SAFETY_HOUR_SECONDS{60 * 60};
-static constexpr int64_t SAFETY_DAY_SECONDS{24 * SAFETY_HOUR_SECONDS};
+static constexpr int64_t SAFETY_DAY_SECONDS{PROVIDER_BUDGET_WINDOW_SECONDS};
 static constexpr int64_t QUOTE_REQUEST_WINDOW_SECONDS{60};
 static constexpr size_t MAX_BUDGET_LEDGER_ENTRIES{8192};
 static constexpr size_t MAX_QUOTE_REQUEST_EVENTS{8192};

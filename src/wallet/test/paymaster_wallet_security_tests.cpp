@@ -2804,6 +2804,72 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         environment.identity.provider_id, has_work, error));
     BOOST_CHECK(!has_work);
 
+    // Rolling expenditure can age out while this exact signed transaction is
+    // still unconfirmed. Durable retries use retained authority, never a new
+    // budget reservation or signature (including after restart/policy change).
+    ProviderBudgetLedger missing{restarted_ledger};
+    missing.reservations.clear();
+    missing.accounting_time_high_water = commit.committed_at + PROVIDER_BUDGET_WINDOW_SECONDS;
+    {
+        LOCK(restarted_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{restarted_wallet.GetDatabase()}.WritePaymasterProviderBudgetLedger(missing));
+    }
+    BOOST_CHECK(!restarted_store.ValidateProviderBudgetAuthorization(restarted_attempt,
+        BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_BUDGET_RESERVATION_MISSING");
+    const int64_t later = commit.committed_at + PROVIDER_BUDGET_WINDOW_SECONDS + 1;
+    ProviderBudgetLedger aged{restarted_ledger};
+    BOOST_REQUIRE_MESSAGE(ReserveProviderBudget(aged, environment.safety,
+        FundingModel::SPONSORED, SponsorshipScope::PUBLIC,
+        SecurityTestId(uint256S("a001"), 1), DGBSatoshis{network_fee},
+        SecurityTestId(uint256S("a001"), 2), later, error, environment.netgroup_bucket), error);
+    BOOST_REQUIRE(FindBudgetReservation(aged, commit.commit_key) == nullptr);
+    {
+        LOCK(restarted_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{restarted_wallet.GetDatabase()}.WritePaymasterProviderBudgetLedger(aged));
+    }
+    BOOST_CHECK(!restarted_store.ValidateProviderBudgetAuthorization(restarted_attempt,
+        BudgetReservationState::RESERVED, /*allow_historical_policy=*/true, error));
+    BOOST_REQUIRE_MESSAGE(restarted_store.ValidateProviderBudgetAuthorization(restarted_attempt,
+        BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error), error);
+    const auto before_aged_retry = restarted_mock.m_records;
+    restarted_mock.FailWriteAt(0);
+    BOOST_REQUIRE_MESSAGE(restarted_store.CommitProviderFinalTransaction(request_id,
+        provider_signed.attempt_id, commit, result, result.genesis_hash, error), error);
+    restarted_mock.ClearFailureInjection();
+    BOOST_CHECK(restarted_mock.m_records == before_aged_retry);
+    const auto recovered_after_aging = RecoverDurablePaymasterCommit(restarted_wallet, commit, later);
+    BOOST_CHECK_MESSAGE(recovered_after_aging.error.empty(), recovered_after_aging.error);
+    ProviderBudgetLedger after_aging;
+    BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(restarted_wallet, after_aging));
+    BOOST_CHECK(SerializePaymasterSecurityObject(after_aging) == SerializePaymasterSecurityObject(aged));
+
+    // Present conflicting rows and damaged durable artifacts must not qualify.
+    auto conflict = restarted_ledger.reservations.front();
+    conflict.state = BudgetReservationState::RELEASED;
+    auto conflicting_ledger = aged;
+    conflicting_ledger.reservations.push_back(conflict);
+    {
+        LOCK(restarted_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{restarted_wallet.GetDatabase()}.WritePaymasterProviderBudgetLedger(conflicting_ledger));
+    }
+    BOOST_CHECK(!restarted_store.ValidateProviderBudgetAuthorization(restarted_attempt,
+        BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error));
+    ProviderCommitRecord damaged{commit};
+    damaged.raw_transaction_hash = uint256S("bad");
+    {
+        LOCK(restarted_wallet.cs_wallet);
+        WalletBatch batch{restarted_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(aged));
+        BOOST_REQUIRE(batch.WritePaymasterProviderCommit(damaged, /*overwrite=*/true));
+    }
+    BOOST_CHECK(!restarted_store.ValidateProviderBudgetAuthorization(restarted_attempt,
+        BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error));
+    {
+        LOCK(restarted_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{restarted_wallet.GetDatabase()}.WritePaymasterProviderCommit(commit, /*overwrite=*/true));
+    }
+
     WITH_LOCK(m_node.mempool->cs,
               m_node.mempool->removeRecursive(
                   *final_ref, MemPoolRemovalReason::CONFLICT));

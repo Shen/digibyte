@@ -380,7 +380,14 @@ bool PaymasterStore::CommitProviderFinalTransaction(
                 return false;
             }
         }
-        if (!spend_budget(existing.committed_at)) return false;
+        const bool aged_budget = have_safety_policy && have_budget_ledger &&
+            std::none_of(budget_ledger.reservations.begin(), budget_ledger.reservations.end(),
+                [&](const ProviderBudgetReservation& entry) { return entry.commit_key == existing.commit_key; });
+        if (aged_budget) {
+            if (!ValidateRetainedProviderBudget(batch, attempt, safety_policy, budget_ledger, error)) return false;
+        } else if (!spend_budget(existing.committed_at)) {
+            return false;
+        }
         bool pool_changed{false};
         if (!RegisterProviderPoolSuccessors(
                 attempt, existing, transaction, successor_policy,

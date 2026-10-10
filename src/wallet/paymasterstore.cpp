@@ -532,6 +532,93 @@ bool ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(
     return true;
 }
 
+namespace {
+bool ReadAgedProviderCommit(WalletBatch& batch, const uint256& commit_key,
+                           const ProviderBudgetLedger& ledger,
+                           ProviderCommitRecord& commit, std::string& error)
+{
+    // Only NOT_FOUND in the already validated rolling ledger is recoverable.
+    // A present, conflicting row must continue to fail closed. The immutable
+    // commit was stored atomically with the original RESERVED -> SPENT change.
+    if (error != "PAYMASTER_BUDGET_RESERVATION_MISSING") return false;
+    const auto status = batch.ReadPaymasterProviderCommitWithStatus(commit_key, commit);
+    if (status == DatabaseReadStatus::NOT_FOUND) return false;
+    if (status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(status, "ProviderCommitRecord", commit,
+            "PAYMASTER_PROVIDER_COMMIT_NOT_FOUND", "PAYMASTER_INVALID_PERSISTED_PROVIDER_COMMIT");
+        return false;
+    }
+    if (commit.commit_key != commit_key || commit.committed_at <= 0 ||
+        !TimeDeltaExceeds(ledger.accounting_time_high_water, commit.committed_at,
+                          PROVIDER_BUDGET_WINDOW_SECONDS)) {
+        error = "PAYMASTER_BUDGET_RESERVATION_MISSING";
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+bool ValidateRetainedProviderBudget(WalletBatch& batch,
+                                    const ProviderAttempt& attempt,
+                                    const ProviderSafetyPolicy& policy,
+                                    const ProviderBudgetLedger& ledger,
+                                    std::string& error)
+{
+    if (ValidateProviderBudgetState(attempt, policy, ledger,
+            BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error)) return true;
+    ProviderCommitRecord commit;
+    CMutableTransaction transaction;
+    if (!ReadAgedProviderCommit(batch, attempt.commit_key, ledger, commit, error) ||
+        !ValidateProviderCommitForExecution(attempt, commit,
+            ledger.accounting_time_high_water, transaction, error)) return false;
+
+    // This view checks the retained manifest's budget binding. It is never
+    // persisted or used by admission, signing, or spending-limit accounting.
+    ProviderBudgetReservation evidence;
+    evidence.commit_key = commit.commit_key;
+    evidence.funding_model = attempt.provider_manifest.funding_model;
+    evidence.sponsorship_scope = attempt.provider_manifest.sponsorship_scope;
+    evidence.network_fee = attempt.provider_manifest.network_fee;
+    evidence.netgroup_bucket = attempt.provider_netgroup_bucket;
+    evidence.state = BudgetReservationState::SPENT;
+    return ValidateProviderBudgetReservationBinding(attempt.provider_manifest,
+        attempt, evidence, policy, BudgetReservationState::SPENT,
+        /*allow_historical_policy=*/true, error);
+}
+
+bool ValidateRetainedProviderRecoveryBudget(WalletBatch& batch,
+                                            const AlternativeRecoveryRecord& recovery,
+                                            const ProviderBudgetLedger& ledger,
+                                            std::string& error)
+{
+    if (ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery,
+            nullptr, ledger, BudgetReservationState::SPENT,
+            /*allow_historical_policy=*/true, error)) return true;
+    ProviderCommitRecord commit;
+    CMutableTransaction transaction;
+    std::vector<COutPoint> inputs;
+    if (!ReadAgedProviderCommit(batch, recovery.recovery_response.recovery_commit_key,
+                               ledger, commit, error) ||
+        !ValidateProviderAlternativeRecoveryCommitBinding(recovery, commit,
+                                                          transaction, inputs, error)) return false;
+    ProviderBudgetReservation evidence;
+    evidence.commit_key = commit.commit_key;
+    evidence.funding_model = FundingModel::USER_PAID;
+    evidence.sponsorship_scope = SponsorshipScope::PUBLIC;
+    evidence.network_fee = recovery.recovery_response.manifest.network_fee;
+    evidence.recipient_bucket = GetRecipientBudgetBucket(ledger,
+        recovery.recovery_response.manifest.wallet_returns.front().script_pub_key);
+    evidence.netgroup_bucket = recovery.provider_netgroup_bucket;
+    evidence.state = BudgetReservationState::SPENT;
+    evidence.reserved_at = commit.committed_at;
+    evidence.updated_at = commit.committed_at;
+    ProviderBudgetLedger retained{ledger};
+    retained.reservations = {evidence};
+    return ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery,
+        nullptr, retained, BudgetReservationState::SPENT,
+        /*allow_historical_policy=*/true, error);
+}
+
 // Exact equality helpers make retries idempotent. Reusing an identifier with
 // different bytes is a conflict, never an update to the previous authorization.
 bool SameCommit(const ProviderCommitRecord& lhs, const ProviderCommitRecord& rhs)

@@ -71,6 +71,18 @@ bool HasTimelyDurableProviderSignature(const ProviderAttempt& attempt);
 
 // Provider budget and commit authorization firewalls shared by normal and
 // alternative-recovery finalization paths.
+/** Validate SPENT authority from the rolling ledger or an exact locally
+ * retained commit after its accounting window. Never grants a new signature,
+ * writes a reservation, or changes expenditure timestamps. */
+bool ValidateRetainedProviderBudget(WalletBatch& batch,
+                                    const ProviderAttempt& attempt,
+                                    const ProviderSafetyPolicy& policy,
+                                    const ProviderBudgetLedger& ledger,
+                                    std::string& error);
+bool ValidateRetainedProviderRecoveryBudget(WalletBatch& batch,
+                                            const AlternativeRecoveryRecord& recovery,
+                                            const ProviderBudgetLedger& ledger,
+                                            std::string& error);
 bool ValidateProviderBudgetState(const ProviderAttempt& attempt,
                                  const ProviderSafetyPolicy& policy,
                                  const ProviderBudgetLedger& ledger,

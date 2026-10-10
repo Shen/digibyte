@@ -1300,6 +1300,9 @@ bool PaymasterStore::ValidateProviderBudgetAuthorization(
         return false;
     }
     if (!ValidateProviderBudgetLedger(ledger, error)) return false;
+    if (expected_state == BudgetReservationState::SPENT && allow_historical_policy) {
+        return ValidateRetainedProviderBudget(batch, persisted, policy, ledger, error);
+    }
     return ValidateProviderBudgetState(
         persisted, policy, ledger, expected_state,
         allow_historical_policy, error);
