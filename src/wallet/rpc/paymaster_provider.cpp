@@ -43,6 +43,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/fees.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -1544,6 +1545,9 @@ RPCHelpMan withdrawpaymastercarrier()
                 pool = std::move(current_pool);
             }
 
+            LOCK(wallet->cs_wallet);
+            PaymasterCheckpointOperation checkpoint{*wallet};
+            if (!checkpoint.Begin(transfer_error)) throw JSONRPCError(RPC_WALLET_ERROR, transfer_error);
             std::string txid_string;
             if (!dd_wallet->TransferDigiDollarMany(
                     recipients, txid_string, transfer_error,
@@ -1688,6 +1692,7 @@ RPCHelpMan withdrawpaymastercarrier()
             result.pushKV(
                 "estimated_network_fee_satoshis",
                 actual_fee);
+            if (!checkpoint.Complete(transfer_error)) throw JSONRPCError(RPC_WALLET_ERROR, transfer_error);
             return result;
         },
     };
@@ -1753,7 +1758,7 @@ void AddPreparationDiagnostic(UniValue& item, const ProviderMaintenanceRecord& r
     }
 }
 
-std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record)
+std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record, PaymasterCheckpointOperation& checkpoint)
 {
     LOCK(wallet.cs_wallet);
     ProviderSettings settings;
@@ -1795,6 +1800,7 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         if (!created) return "PAYMASTER_POOL_WAITING_DGB: " + util::ErrorString(created).original;
         if (created->fee > record.maximum_fee.value) return PreparationFeeLimit("signed", created->fee, record.maximum_fee.value);
         std::string error;
+        if (!checkpoint.Begin(error)) return error;
         if (!wallet.CommitTransaction(created->tx, {}, {}, &error)) return "PAYMASTER_POOL_TRANSACTION_REJECTED: " + error;
     } else {
         auto* dd_wallet = wallet.GetDDWallet();
@@ -1831,6 +1837,7 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         // Check the exact signed fee before commit. Use the wallet primitive
         // directly: a rejected pool transaction must remain recoverable, not
         // enter the ordinary DD send helper's automatic-abandon path.
+        if (!checkpoint.Begin(error)) return error;
         if (!wallet.CommitTransaction(tx, {{"comment", "Paymaster carrier pool"}}, {}, &error)) {
             return "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + error;
         }
@@ -1854,10 +1861,12 @@ void ContinuePoolPreparation(CWallet& wallet)
         const bool conflict = std::any_of(snapshot.records.begin(), snapshot.records.end(), [&](const auto& other) {
             return other.IsPreparation() && other.plan_id == record.plan_id && other.state == ProviderMaintenanceState::FAILED;
         });
-        error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record);
+        PaymasterCheckpointOperation checkpoint{wallet};
+        error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record, checkpoint);
         size_t reconciled{0};
         std::string reconcile_error;
         if (!ReconcileProviderMaintenance(wallet, reconciled, reconcile_error)) throw JSONRPCError(RPC_WALLET_ERROR, reconcile_error);
+        if (checkpoint.Active() && error.empty() && !checkpoint.Complete(reconcile_error)) throw JSONRPCError(RPC_WALLET_ERROR, reconcile_error);
         auto ledger = ReadPreparationLedger(wallet);
         for (auto& current : ledger.records) {
             if (current.operation_id == record.operation_id && current.preparation_error != error.substr(0, 256)) {
@@ -2815,6 +2824,8 @@ RPCHelpMan rebalancepaymasterpool()
                 dgb_tx = created->tx;
                 dgb_fee = created->fee;
             }
+            LOCK(wallet->cs_wallet);
+            PaymasterCheckpointOperation checkpoint{*wallet};
             bool executed{false};
             std::string dd_txid;
             CTransactionRef dd_tx;
@@ -2851,6 +2862,7 @@ RPCHelpMan rebalancepaymasterpool()
                 }
                 // The marker and signed bytes share the existing wallet write.
                 // Rejection must not abandon an already saved transaction.
+                if (!checkpoint.Begin(transfer_error)) throw JSONRPCError(RPC_WALLET_ERROR, transfer_error);
                 if (!wallet->CommitTransaction(dd_tx,
                         {{"comment", "Paymaster carrier retirement"},
                          {PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
@@ -2883,6 +2895,7 @@ RPCHelpMan rebalancepaymasterpool()
 
             if (!retire_dgb.empty()) {
                 std::string commit_error;
+                if (!checkpoint.Active() && !checkpoint.Begin(commit_error)) throw JSONRPCError(RPC_WALLET_ERROR, commit_error);
                 if (!wallet->CommitTransaction(dgb_tx,
                         {{PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
                         {}, &commit_error)) {
@@ -2911,6 +2924,8 @@ RPCHelpMan rebalancepaymasterpool()
             if (!ReconcilePaymasterProviderFinances(*wallet, changed_events, finance_error)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
             }
+
+            if (checkpoint.Active() && !checkpoint.Complete(finance_error)) throw JSONRPCError(RPC_WALLET_ERROR, finance_error);
 
             UniValue pool{UniValue::VARR};
             for (const auto& entry : entries)

@@ -49,6 +49,7 @@
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -615,6 +616,11 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
                                        bool wait_for_sync, bool reconcile)
 {
     ProviderReadiness result;
+    std::string checkpoint_error;
+    {
+        LOCK(wallet.cs_wallet);
+        if (!CheckPaymasterCheckpoint(wallet.GetDatabase(), checkpoint_error)) reconcile = false;
+    }
     if (reconcile) {
         PaymasterStore store{wallet};
         size_t recovered_successors{0};
@@ -2497,6 +2503,9 @@ bool RunAutomaticDGBReplenishment(
         error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
         return false;
     }
+    LOCK(wallet.cs_wallet);
+    PaymasterCheckpointOperation checkpoint{wallet};
+    if (!checkpoint.Begin(error)) return false;
     std::string commit_error;
     if (!wallet.CommitTransaction(created->tx, {}, {}, &commit_error)) {
         error = "PAYMASTER_POOL_TRANSACTION_REJECTED: " + commit_error;
@@ -2577,7 +2586,7 @@ bool RunAutomaticDGBReplenishment(
             return false;
         }
     }
-    return true;
+    return checkpoint.Complete(error);
 }
 
 // DD carriers are ordinary wallet value with a dedicated provider role. Never
@@ -2753,6 +2762,9 @@ bool RunAutomaticCarrierReplenishment(
         return false;
     }
 
+    LOCK(wallet.cs_wallet);
+    PaymasterCheckpointOperation checkpoint{wallet};
+    if (!checkpoint.Begin(error)) return false;
     std::string txid_string;
     std::string transfer_error;
     if (!dd_wallet->TransferDigiDollarMany(
@@ -2873,7 +2885,7 @@ bool RunAutomaticCarrierReplenishment(
             return false;
         }
     }
-    return true;
+    return checkpoint.Complete(error);
 }
 
 UniValue ReliabilityToJSON(const DigiDollar::Paymaster::PaymasterReliabilityRecord& record,

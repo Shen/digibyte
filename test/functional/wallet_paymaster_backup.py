@@ -322,8 +322,7 @@ class PaymasterProviderBackupTest(DigiByteTestFramework):
 
             # Copy an already quarantined image without calling restorewallet.
             # The guard belongs to the database, not its name or restore RPC.
-            # An older unmarked image cannot be recognized this way; detecting
-            # that rollback requires independent state outside the copied file.
+            # The independent checkpoint additionally covers unmarked copies.
             guarded_backup = self.nodes[0].datadir_path / "provider-guarded.bak"
             restored.backupwallet(guarded_backup)
             self.nodes[0].unloadwallet("restored_provider", load_on_startup=False)
@@ -347,6 +346,31 @@ class PaymasterProviderBackupTest(DigiByteTestFramework):
                 assert_raises_rpc_error(-4, gate, api.releasepaymastercapital, {})
             assert_equal(set(self.nodes[0].getrawmempool()), mempool_before)
             observations["guarded_file_copy_restart_protected"] = True
+
+        # Bypass restorewallet completely with an older UNMARKED wallet image.
+        # The independent file must survive both wallet renaming and restart.
+        self.nodes[0].unloadwallet("copied_guarded_provider", load_on_startup=False)
+        unmarked_name = "copied_unmarked_provider"
+        unmarked_directory = self.nodes[0].wallets_path / unmarked_name
+        unmarked_directory.mkdir()
+        copyfile(backup, unmarked_directory / self.wallet_data_filename)
+        self.nodes[0].loadwallet(unmarked_name, load_on_startup=True)
+        self.restart_node(0, provider_args)
+        self.connect_nodes(0, 1)
+        self.wait_chain_ready()
+        unmarked = self.nodes[0].get_wallet_rpc(unmarked_name)
+        unmarked_cli = self.nodes[0].cli(f"-rpcwallet={unmarked_name}")
+        checkpoint_gate = "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED"
+        info = unmarked.getpaymasterinfo()
+        assert checkpoint_gate in info["readiness_errors"]
+        assert_equal(info["ready"], False)
+        assert_equal(info["running"], False)
+        for api in (unmarked, unmarked_cli):
+            assert_raises_rpc_error(-4, checkpoint_gate, api.startpaymaster)
+            assert_raises_rpc_error(-4, checkpoint_gate, api.preparepaymasterpool, targets)
+            assert_raises_rpc_error(-4, checkpoint_gate, api.releasepaymastercapital, {})
+        assert_equal(set(self.nodes[0].getrawmempool()), mempool_before)
+        observations["unmarked_file_copy_restart_protected"] = True
 
         # The generic restore hook must not quarantine a client-only wallet.
         client_backup = self.nodes[1].datadir_path / "client-backup.bak"
