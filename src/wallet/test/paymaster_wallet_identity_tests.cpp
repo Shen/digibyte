@@ -21,6 +21,7 @@
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
@@ -1001,7 +1002,7 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
     WalletBatch batch{m_wallet.GetDatabase()};
     BOOST_REQUIRE(batch.WritePaymasterProviderPool({entry}));
     auto& db = GetMockableDatabase(m_wallet);
-    const auto original = db.m_records;
+    auto original = db.m_records;
     PaymasterCapitalRelease plan;
     BOOST_REQUIRE_MESSAGE(ReleasePaymasterCapital(m_wallet, false, {}, 2000, plan, error), error);
     BOOST_CHECK(db.m_records == original); // Preview writes no authorization.
@@ -1023,6 +1024,7 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
         BOOST_CHECK(db.m_records == before);
     }
     BOOST_REQUIRE(batch.WritePaymasterProviderPool({entry}));
+    original = db.m_records; // Legitimate mutations advance the checkpoint.
     wtx->m_state = TxStateInactive{};
     BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, plan_id, 2000, plan, error));
     BOOST_CHECK(db.m_records == original);
@@ -1053,11 +1055,8 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
     BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, false, {}, 2000, plan, error));
     settings.enabled = false;
     BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+    original = db.m_records;
     db.FailWriteAt(0);
-    BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, plan_id, 2000, plan, error));
-    db.ClearFailureInjection();
-    BOOST_CHECK(db.m_records == original);
-    db.FailCommit();
     BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, plan_id, 2000, plan, error));
     db.ClearFailureInjection();
     BOOST_CHECK(db.m_records == original);
@@ -1071,6 +1070,128 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPITAL_PLAN_CHANGED");
     BOOST_REQUIRE(ReleasePaymasterCapital(m_wallet, false, {}, 2000, plan, error));
     BOOST_CHECK_EQUAL(plan.entries, 0U);
+    const auto released = db.m_records;
+    const auto empty_plan = plan.plan_id;
+    db.FailCommit();
+    BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, empty_plan, 2000, plan, error));
+    db.ClearFailureInjection();
+    BOOST_CHECK(db.m_records == released);
+    // An external-ahead commit failure never permits a blind fresh retry.
+    BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
+}
+
+BOOST_AUTO_TEST_CASE(capital_recovery_release_is_atomic_and_retires_identity)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    // Success, write failure/retry, commit failure, a real reservation,
+    // interrupted native spending, and a concurrently advanced original copy.
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        CWallet wallet{m_node.chain.get(), "recovery-capital-" + std::to_string(scenario), CreateMockableWalletDatabase()};
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+        ProviderIdentityRecord identity;
+        std::string error;
+        BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Recovered capital", 100, identity, error));
+        ProviderPolicy policy;
+        policy.funding_models = FUNDING_MODEL_SPONSORED;
+        policy.sponsorship_scope = SponsorshipScope::PUBLIC;
+        policy.min_payment = DDCents{100};
+        policy.max_payment = DDCents{100000};
+        policy.maximum_network_fee = DGBSatoshis{20000000};
+        BOOST_REQUIRE(SetPaymasterProviderPolicy(wallet, policy, 101, error));
+        ProviderLiquidityPolicy liquidity;
+        liquidity.updated_at = 102;
+        BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(wallet, liquidity, 102, error));
+        const auto destination = wallet.GetNewDestination(OutputType::BECH32M, "capital recovery");
+        BOOST_REQUIRE(destination);
+        CMutableTransaction funding;
+        funding.vin.emplace_back(COutPoint{uint256S("ea"), 0});
+        funding.vout.emplace_back(20000000, GetScriptForDestination(*destination));
+        const auto tx = MakeTransactionRef(funding);
+        BOOST_REQUIRE(wallet.AddToWallet(tx, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+        wallet.SetLastBlockProcessed(1, Params().GenesisBlock().GetHash());
+        ProviderPoolEntry entry;
+        entry.outpoint = COutPoint{tx->GetHash(), 0};
+        entry.purpose = PoolPurpose::OPERATIONAL;
+        entry.asset = PoolAsset::DGB;
+        entry.script_pub_key = funding.vout[0].scriptPubKey;
+        entry.dgb_value = DGBSatoshis{20000000};
+        entry.confirmation_height = 1;
+        entry.updated_at = 103;
+        WalletBatch batch{wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool({entry}));
+        if (scenario == 3) {
+            InputReservation reservation;
+            reservation.outpoint = entry.outpoint;
+            reservation.request_id = "550e8400-e29b-41d4-a716-446655440097";
+            reservation.session_id = uint256S("eb");
+            reservation.role = ReservationRole::PROVIDER_DGB;
+            reservation.created_at = 100;
+            BOOST_REQUIRE(batch.WritePaymasterReservation(reservation));
+        }
+        if (scenario == 4) {
+            PaymasterCheckpointOperation interrupted{wallet};
+            BOOST_REQUIRE(interrupted.Begin(error));
+        }
+        auto& database = GetMockableDatabase(wallet);
+        CWallet original{m_node.chain.get(), "original-recovery-copy", std::make_unique<MockableDatabase>(database.m_records)};
+        bool guarded{false};
+        BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+        BOOST_REQUIRE(guarded);
+        const auto before = database.m_records;
+        PaymasterCapitalRelease preview;
+        BOOST_CHECK(!ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+        if (scenario == 3 || scenario == 4) {
+            BOOST_CHECK(!ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error, true));
+            BOOST_CHECK_EQUAL(error, scenario == 3 ? "PAYMASTER_CAPITAL_INPUT_RESERVED_OR_UNREADABLE" : "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION");
+            BOOST_CHECK(database.m_records == before);
+            continue;
+        }
+        BOOST_REQUIRE_MESSAGE(ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error, true), error);
+        BOOST_CHECK(preview.recovery_release);
+        BOOST_CHECK_EQUAL(preview.entries, 1U);
+        BOOST_CHECK_EQUAL(preview.dgb_satoshis, 20000000);
+        BOOST_CHECK(database.m_records == before);
+        const auto plan = preview.plan_id;
+        BOOST_CHECK(!ReleasePaymasterCapital(wallet, true, uint256::ONE, 2000, preview, error, true));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPITAL_PLAN_CHANGED");
+        if (scenario == 5) {
+            ProviderSettings changed;
+            BOOST_REQUIRE(WalletBatch{original.GetDatabase()}.ReadPaymasterSettings(changed));
+            ++changed.updated_at;
+            BOOST_REQUIRE(WalletBatch{original.GetDatabase()}.WritePaymasterSettings(changed));
+            BOOST_CHECK(!ReleasePaymasterCapital(wallet, true, plan, 2000, preview, error, true));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+            BOOST_CHECK(database.m_records == before);
+            continue;
+        }
+        if (scenario == 1 || scenario == 2) {
+            if (scenario == 1) database.FailWriteAt(1); // after the retirement record, before pool update
+            else database.FailCommit();
+            BOOST_CHECK(!ReleasePaymasterCapital(wallet, true, plan, 2000, preview, error, true));
+            database.ClearFailureInjection();
+            BOOST_CHECK(database.m_records == before);
+            if (scenario == 2) {
+                BOOST_CHECK(!CheckPaymasterCheckpoint(original.GetDatabase(), error));
+                BOOST_CHECK(!ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error, true));
+                BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+                continue;
+            }
+        }
+        BOOST_REQUIRE_MESSAGE(ReleasePaymasterCapital(wallet, true, plan, 2000, preview, error, true), error);
+        BOOST_CHECK(!IsPaymasterInputReserved(wallet, entry.outpoint));
+        BOOST_CHECK_EQUAL(wallet.mapWallet.size(), 1U);
+        BOOST_CHECK(!CheckPaymasterCheckpoint(original.GetDatabase(), error));
+        BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(wallet, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+        BOOST_CHECK(!ReleasePaymasterCapital(wallet, true, plan, 2000, preview, error, true));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPITAL_PLAN_CHANGED");
+        BOOST_REQUIRE(ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error, true));
+        BOOST_CHECK_EQUAL(preview.entries, 0U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(policy_and_enablement_are_atomically_bound)

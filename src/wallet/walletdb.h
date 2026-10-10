@@ -297,6 +297,7 @@ public:
     ~WalletBatch() { PaymasterCheckpointEnd(this); }
 
     bool SetPaymasterCheckpointPending(bool pending);
+    bool RetirePaymasterCheckpoint(const uint256& expected_revision);
 
     bool WriteName(const std::string& strAddress, const std::string& strName);
     bool EraseName(const std::string& strAddress);

@@ -48,10 +48,11 @@ thread_local std::set<WalletDatabase*> pending_operations;
 
 bool Valid(const PaymasterCheckpoint& record, const uint256& provider)
 {
-    return record.version == PaymasterCheckpoint::CURRENT_VERSION &&
+    return (record.version == 1 || record.version == PaymasterCheckpoint::CURRENT_VERSION) &&
            record.genesis_hash == Params().GenesisBlock().GetHash() &&
            record.provider_id == provider && !provider.IsNull() &&
-           record.generation > 0 && !record.token.IsNull() && record.pending <= 1;
+           record.generation > 0 && !record.token.IsNull() &&
+           record.pending <= (record.version == 1 ? 1 : PaymasterCheckpoint::RETIRED);
 }
 
 struct StrictRecord : PaymasterCheckpoint {
@@ -216,10 +217,43 @@ bool CheckPaymasterCheckpoint(WalletDatabase& database, std::string& error)
         error = "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED";
         return false;
     }
+    if (enrolled && current.pending == PaymasterCheckpoint::RETIRED) {
+        error = "PAYMASTER_PROVIDER_CHECKPOINT_RETIRED";
+        return false;
+    }
     if (enrolled && current.pending && !pending_operations.count(&database)) {
         error = "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION";
         return false;
     }
+    return true;
+}
+
+bool CheckPaymasterCapitalRecoveryCheckpoint(WalletDatabase& database,
+                                            uint256& revision, std::string& error)
+{
+    error.clear();
+    revision.SetNull();
+    WalletBatch batch{database};
+    DigiDollar::Paymaster::ProviderIdentityRecord identity, guard;
+    if (batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+        batch.ReadPaymasterRestoreGuardWithStatus(guard) != DatabaseReadStatus::FOUND ||
+        guard.provider_id != identity.provider_id) {
+        error = "PAYMASTER_CAPITAL_RECOVERY_REQUIRES_RESTORED_WALLET";
+        return false;
+    }
+    auto raw = database.MakeBatch();
+    PaymasterCheckpoint current;
+    bool enrolled{false};
+    if (!ReadCurrent(*raw, identity.provider_id, current, enrolled) || !enrolled ||
+        current.generation == (std::numeric_limits<uint64_t>::max)()) {
+        error = "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED";
+        return false;
+    }
+    if (current.pending == 1) {
+        error = "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION";
+        return false;
+    }
+    revision = Checksum(current);
     return true;
 }
 
@@ -235,7 +269,9 @@ bool PaymasterCheckpointInTransaction(const WalletBatch* owner)
     return transactions.count(owner) != 0;
 }
 
-bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, WalletDatabase& database)
+namespace {
+bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatabase& database,
+                     bool retirement, const uint256& expected_revision)
 {
     std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
     const auto found = transactions.find(owner);
@@ -246,7 +282,7 @@ bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, Wa
     // Explicitly restored wallets remain permanently quarantined by the
     // append-only guard. Their exact signed recovery/accounting must not
     // overwrite the original provider's independent high-water mark.
-    if (batch.Exists(DBKeys::PAYMASTER_RESTORE_GUARD)) return true;
+    if (!retirement && batch.Exists(DBKeys::PAYMASTER_RESTORE_GUARD)) return true;
     DigiDollar::Paymaster::ProviderIdentityRecord identity;
     const auto identity_status = batch.ReadWithStatus(DBKeys::PAYMASTER_IDENTITY, identity);
     if (identity_status == DatabaseReadStatus::NOT_FOUND) return true;
@@ -273,8 +309,19 @@ bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, Wa
         if (!state.file_lock->TryLock()) throw std::runtime_error("checkpoint busy");
         bool enrolled{false};
         if (!ReadCurrent(batch, identity.provider_id, state.next, enrolled) ||
-            (enrolled && state.next.pending && !pending_operations.count(&database)) ||
             state.next.generation == (std::numeric_limits<uint64_t>::max)()) throw std::runtime_error("checkpoint not current");
+        if (retirement) {
+            DigiDollar::Paymaster::ProviderIdentityRecord guard;
+            if (batch.ReadWithStatus(DBKeys::PAYMASTER_RESTORE_GUARD, guard) != DatabaseReadStatus::FOUND ||
+                guard.version != DigiDollar::Paymaster::ProviderIdentityRecord::CURRENT_VERSION ||
+                guard.provider_id != identity.provider_id || !enrolled ||
+                expected_revision.IsNull() || Checksum(state.next) != expected_revision ||
+                state.next.pending == 1) throw std::runtime_error("recovery checkpoint changed");
+            state.next.pending = PaymasterCheckpoint::RETIRED;
+        } else if (enrolled && (state.next.pending == PaymasterCheckpoint::RETIRED ||
+                   (state.next.pending && !pending_operations.count(&database)))) {
+            throw std::runtime_error("checkpoint prohibits new authority");
+        }
         state.next.version = PaymasterCheckpoint::CURRENT_VERSION;
         state.next.genesis_hash = Params().GenesisBlock().GetHash();
         state.next.provider_id = identity.provider_id;
@@ -288,6 +335,20 @@ bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, Wa
         state.failed = true;
         return false;
     }
+}
+} // namespace
+
+bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, WalletDatabase& database)
+{
+    return TrackCheckpoint(owner, batch, database, false, {});
+}
+
+bool WalletBatch::RetirePaymasterCheckpoint(const uint256& expected_revision)
+{
+    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
+    const auto found = transactions.find(this);
+    if (found == transactions.end() || found->second.dirty) return false;
+    return TrackCheckpoint(this, *m_batch, m_database, true, expected_revision);
 }
 
 bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)

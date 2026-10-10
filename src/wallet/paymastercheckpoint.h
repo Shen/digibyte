@@ -21,7 +21,10 @@ class WalletDatabase;
 /** No keys or transaction contents leave the wallet. The random token also
  * distinguishes independently advanced copies at the same generation. */
 struct PaymasterCheckpoint {
-    static constexpr uint32_t CURRENT_VERSION{1};
+    // Version 2 retains the layout and reads version 1, adding permanent
+    // retirement. Older binaries reject the new version rather than resume.
+    static constexpr uint32_t CURRENT_VERSION{2};
+    static constexpr uint8_t RETIRED{2};
     uint32_t version{CURRENT_VERSION};
     uint256 genesis_hash;
     uint256 provider_id;
@@ -37,6 +40,12 @@ struct PaymasterCheckpoint {
 
 fs::path PaymasterCheckpointPath(const uint256& genesis, const uint256& provider);
 bool CheckPaymasterCheckpoint(WalletDatabase& database, std::string& error);
+
+/** Read-only recovery proof: an explicitly restored wallet must match the
+ * independently retained, enrolled checkpoint and have no unfinished fence.
+ * The revision must be rechecked under the checkpoint lock at execution. */
+bool CheckPaymasterCapitalRecoveryCheckpoint(WalletDatabase& database,
+                                            uint256& revision, std::string& error);
 
 // WalletBatch transaction notifications. Ordinary wallet writes do not perform
 // checkpoint I/O. State belongs to this Paymaster module, not to WalletBatch.

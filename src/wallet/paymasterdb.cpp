@@ -1500,8 +1500,13 @@ bool WalletBatch::WritePaymasterBackupStatus(
     bool overwrite)
 {
     std::string error;
+    // This is a non-blocking reminder, never financial authority. In
+    // particular, recording success AFTER BackupWallet copied the database
+    // must not make that otherwise current backup's checkpoint obsolete.
+    // Financial transitions which also update the reminder still track their
+    // other writes in the caller's atomic transaction.
     return DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error) &&
-           WritePaymasterIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
+           WriteIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterBackupStatusWithStatus(

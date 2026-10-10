@@ -27,6 +27,7 @@
 #include <streams.h>
 #include <tinyformat.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -1715,12 +1716,19 @@ bool SetPaymasterProviderPoolEntries(CWallet& wallet,
 }
 
 bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
-                            int64_t now, PaymasterCapitalRelease& result, std::string& error)
+                            int64_t now, PaymasterCapitalRelease& result, std::string& error,
+                            bool recovery)
 {
     LOCK(wallet.cs_wallet);
     result = {};
     error.clear();
-    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
+    uint256 checkpoint_revision;
+    if (recovery) {
+        if (!CheckPaymasterCapitalRecoveryCheckpoint(wallet.GetDatabase(), checkpoint_revision, error)) return false;
+        result.recovery_release = true;
+    } else if (!CheckPaymasterProviderRestoreGuard(wallet, error)) {
+        return false;
+    }
     const auto fail = [&](const char* code) { error = code; return false; };
     if (now <= 0) return fail("PAYMASTER_INVALID_TIME");
     WalletBatch batch{wallet.GetDatabase()};
@@ -1797,9 +1805,10 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     }
     // Bind the exact persisted state, identity, network and wallet. No preview
     // record or authorization is written; all prerequisites are rechecked above.
-    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster capital release v1"}
+    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster capital release v2"}
         << Params().GenesisBlock().GetHash() << wallet.GetName() << identity.provider_id
-        << settings << liquidity << pool << maintenance << budgets).GetHash();
+        << settings << liquidity << pool << maintenance << budgets
+        << recovery << checkpoint_revision).GetHash();
     if (!execute) return true;
     if (expected_plan.IsNull() || expected_plan != result.plan_id) return fail("PAYMASTER_CAPITAL_PLAN_CHANGED");
     for (auto& entry : pool) {
@@ -1817,6 +1826,13 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
         liquidity.updated_at = std::max(now, liquidity.updated_at + 1);
     }
     if (!batch.TxnBegin()) return fail("PAYMASTER_DATABASE_BEGIN");
+    // Recheck the independently retained revision under its OS/in-process
+    // lock. Retirement advances before this release commits, fencing other
+    // copies of the identity. No restoration/signing guard is cleared.
+    if (recovery && !batch.RetirePaymasterCheckpoint(checkpoint_revision)) {
+        batch.TxnAbort();
+        return fail("PAYMASTER_CAPITAL_RECOVERY_CHECKPOINT_CHANGED");
+    }
     if (!batch.WritePaymasterProviderPool(pool) ||
         (liquidity_status == DatabaseReadStatus::FOUND && !batch.WritePaymasterLiquidityPolicy(liquidity)) ||
         !WriteProviderBackupReminder(batch, identity, now, error)) {

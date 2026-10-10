@@ -968,7 +968,7 @@ BOOST_AUTO_TEST_CASE(checkpoint_matching_invalid_pair_and_exhaustion_fail_closed
         if (mutation == 2) changed.provider_id = uint256S("2");
         if (mutation == 3) changed.generation = 0;
         if (mutation == 4) changed.token.SetNull();
-        if (mutation == 5) changed.pending = 2;
+        if (mutation == 5) changed.pending = 3;
         if (mutation == 6) changed.generation = (std::numeric_limits<uint64_t>::max)();
         if (mutation == 7) changed.pending = 1;
         // Both stores agree and the checksum is valid: rejection must come
@@ -1024,6 +1024,103 @@ BOOST_AUTO_TEST_CASE(checkpoint_pending_native_operation_survives_restart)
     BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION");
     BOOST_CHECK(!WalletBatch{restarted.GetDatabase()}.WritePaymasterSettings(environment.settings));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_recovery_retirement_fences_other_copies)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    WalletBatch batch{database};
+    BOOST_REQUIRE(batch.WritePaymasterIdentity(environment.identity));
+    const auto original_records = database.m_records;
+    wallet::CWallet original{m_node.chain.get(), "original-before-recovery", std::make_unique<MockableDatabase>(original_records)};
+    std::string error;
+    uint256 revision;
+    BOOST_CHECK(!CheckPaymasterCapitalRecoveryCheckpoint(database, revision, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPITAL_RECOVERY_REQUIRES_RESTORED_WALLET");
+    bool guarded{false};
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_REQUIRE(guarded);
+    const auto guarded_records = database.m_records;
+    BOOST_REQUIRE(CheckPaymasterCapitalRecoveryCheckpoint(database, revision, error));
+    BOOST_CHECK(database.m_records == guarded_records);
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_CHECK(!batch.RetirePaymasterCheckpoint(uint256::ONE));
+    BOOST_REQUIRE(batch.TxnAbort());
+    BOOST_CHECK(database.m_records == guarded_records);
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(original.GetDatabase(), error));
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.RetirePaymasterCheckpoint(revision));
+    BOOST_REQUIRE(batch.WritePaymasterSettings(environment.settings));
+    BOOST_REQUIRE(batch.TxnCommit());
+    PaymasterCheckpoint retired;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, retired));
+    BOOST_CHECK_EQUAL(retired.pending, PaymasterCheckpoint::RETIRED);
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_RETIRED");
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(m_wallet, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    BOOST_CHECK(!CheckPaymasterCheckpoint(original.GetDatabase(), error));
+    BOOST_CHECK(!WalletBatch{original.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    // Restarted copies cannot inherit any release permission or resume signing.
+    wallet::CWallet restarted{m_node.chain.get(), "recovered-restart", std::make_unique<MockableDatabase>(database.m_records)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    BOOST_REQUIRE(CheckPaymasterCapitalRecoveryCheckpoint(database, revision, error));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_backup_reminder_does_not_obsolete_current_backup)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const auto backup = database.m_records;
+    PaymasterCheckpoint checkpoint;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, checkpoint));
+    std::string error;
+    BOOST_REQUIRE(MarkPaymasterProviderBackupCompleted(m_wallet, environment.identity.created_at + 1, error));
+    BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(m_wallet, environment.identity.created_at + 2, error));
+    PaymasterCheckpoint after;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, after));
+    BOOST_CHECK(after == checkpoint);
+    wallet::CWallet restored{m_node.chain.get(), "current-backup", std::make_unique<MockableDatabase>(backup)};
+    bool guarded{false};
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(restored.GetDatabase(), guarded, error));
+    BOOST_REQUIRE(guarded);
+    uint256 revision;
+    BOOST_REQUIRE(CheckPaymasterCapitalRecoveryCheckpoint(restored.GetDatabase(), revision, error));
+    // Real settings/authority changes must still invalidate that same backup.
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    BOOST_CHECK(!CheckPaymasterCapitalRecoveryCheckpoint(restored.GetDatabase(), revision, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_version_one_upgrades_without_reenrollment)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    PaymasterCheckpoint legacy;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, legacy));
+    legacy.version = 1;
+    CDataStream bytes{SER_DISK, CLIENT_VERSION};
+    bytes << uint64_t{0x3150435042474444} << legacy
+          << (HashWriter{} << std::string{"DigiByte/PaymasterCheckpoint/v1"} << legacy).GetHash();
+    const auto path = PaymasterCheckpointPath(legacy.genesis_hash, legacy.provider_id);
+    FILE* file = fsbridge::fopen(path, "wb");
+    BOOST_REQUIRE(file);
+    BOOST_REQUIRE_EQUAL(std::fwrite(bytes.data(), 1, bytes.size(), file), bytes.size());
+    BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+    BOOST_REQUIRE(database.MakeBatch()->Write(std::string{"pmcheckpoint"}, legacy));
+    std::string error;
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(database, error));
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    PaymasterCheckpoint upgraded;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, upgraded));
+    BOOST_CHECK_EQUAL(upgraded.version, PaymasterCheckpoint::CURRENT_VERSION);
+    BOOST_CHECK_EQUAL(upgraded.generation, legacy.generation + 1);
+    BOOST_CHECK(upgraded.token != legacy.token);
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(database, error));
 }
 
 BOOST_AUTO_TEST_CASE(provider_restore_guard_is_durable_and_blocks_new_signatures)

@@ -218,9 +218,11 @@ struct PaymasterCapitalRelease {
     int64_t dgb_satoshis{0};
     int64_t dd_cents{0};
     uint32_t entries{0};
+    bool recovery_release{false};
 };
 bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
-                            int64_t now, PaymasterCapitalRelease& result, std::string& error);
+                            int64_t now, PaymasterCapitalRelease& result, std::string& error,
+                            bool recovery = false);
 
 /** Atomically reserve at most one operational DGB entry and, when required,
  * one carrier. Repeating the same reservation id returns the exact same slot.
