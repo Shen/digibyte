@@ -1192,6 +1192,8 @@ bool PaymasterStore::AcceptClientAuthorization(
             return false;
         }
     } else {
+        if (!RestoreClientRecoveryFeeReservations(batch, client_fee_ledger,
+                effective_now, client_fee_changed, error)) return false;
         const auto existing_fee = std::find_if(
             client_fee_ledger.reservations.begin(),
             client_fee_ledger.reservations.end(),

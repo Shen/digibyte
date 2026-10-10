@@ -40,6 +40,95 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_store::internal;
 
+bool paymaster_store::internal::RestoreClientRecoveryFeeReservations(
+    WalletBatch& batch, ClientFeeLedger& ledger, int64_t now,
+    bool& changed, std::string& error, const PaymentSession* recovery_session)
+{
+    if (now <= 0 || !ValidateClientFeeLedger(ledger, error)) {
+        if (error.empty()) error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
+        return false;
+    }
+    std::vector<PaymentSession> sessions;
+    if (recovery_session) {
+        sessions.push_back(*recovery_session);
+    } else if (!batch.ListPaymasterSessions(sessions)) {
+        error = "PAYMASTER_SESSION_DATABASE_READ";
+        return false;
+    }
+    for (const PaymentSession& session : sessions) {
+        if (session.provider_side || session.recovery_txid.IsNull() || session.user_inputs.empty()) continue;
+        bool recovery_validated{false};
+        for (const uint256& attempt_id : session.attempt_ids) {
+            ProviderAttempt attempt;
+            if (batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt) != DatabaseReadStatus::FOUND ||
+                attempt.session_id != session.session_id) {
+                error = "PAYMASTER_CLIENT_FEE_ATTEMPT_MISSING";
+                return false;
+            }
+            // Unsigned abandoned offers are not liabilities. Already spent
+            // fees keep their accounting date and must never be charged twice.
+            if (attempt.user_signed_psbt.empty()) continue;
+            const auto entry = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
+                [&](const ClientFeeReservation& fee) { return fee.commit_key == attempt.commit_key; });
+            if (entry != ledger.reservations.end() && entry->state != BudgetReservationState::RELEASED) continue;
+            if (!recovery_validated) {
+                ExactFinalArtifact recovery;
+                if (!LoadRecoveryFinalArtifact(batch, session, recovery, error)) return false;
+                recovery_validated = true;
+            }
+
+            // Older clients released this fee at one confirmation. Its row may
+            // even have aged out while the signed attempt remained recoverable.
+            // Reconstruct only from the exact, previously accepted signature.
+            PaymasterQuoteRequest request;
+            PaymasterQuoteResponse response;
+            CollaborativePSBTTemplate trusted;
+            PartiallySignedTransaction signed_psbt;
+            std::string decode_error;
+            if (attempt.accepted_client_manifest_id.IsNull() ||
+                attempt.accepted_client_manifest_id != attempt.client_manifest.manifest_id ||
+                attempt.client_manifest_accepted_at <= 0 ||
+                attempt.client_manifest.request_id != session.request_id ||
+                attempt.client_manifest.session_id != session.session_id ||
+                attempt.client_manifest.user_dd_inputs != session.user_inputs ||
+                !LoadAttemptAuthorizationArtifacts(attempt, request, response, trusted, error) ||
+                !ValidateClientAuthorizationManifest(attempt.client_manifest, request.intent,
+                    response.quote, attempt.capacity_snapshot, trusted, error) ||
+                attempt.commit_key != GetPaymasterCommitKey(attempt.provider_id,
+                    request.intent.client_nonce, response.quote.intent_hash,
+                    response.quote.quote_id, response.quote.template_commitment) ||
+                !DecodeRawPSBT(signed_psbt, MakeByteSpan(attempt.user_signed_psbt), decode_error) ||
+                !ValidateCollaborativePSBT(signed_psbt, trusted,
+                    CollaborativeSignatureStage::USER_SIGNED, error)) {
+                if (error.empty()) error = "PAYMASTER_CLIENT_FEE_AUTHORIZATION_MISMATCH";
+                return false;
+            }
+            const DDCents fee = attempt.client_manifest.service_fee;
+            const int64_t effective_now = std::max({now, ledger.accounting_time_high_water,
+                                                  attempt.client_manifest_accepted_at});
+            if (entry != ledger.reservations.end()) {
+                if (entry->service_fee != fee) {
+                    error = "PAYMASTER_CLIENT_FEE_RESERVATION_CONFLICT";
+                    return false;
+                }
+                entry->state = BudgetReservationState::RESERVED;
+                entry->updated_at = effective_now;
+            } else {
+                ledger.reservations.push_back({ClientFeeReservation::CURRENT_VERSION,
+                    attempt.commit_key, fee, BudgetReservationState::RESERVED,
+                    attempt.client_manifest_accepted_at, effective_now});
+            }
+            // Reinstating an existing signature may exceed a newly lowered cap.
+            // Keep that exposure visible; ReserveClientFee then denies any new
+            // allowance. Never use the cap to discard an existing liability.
+            ledger.accounting_time_high_water = effective_now;
+            if (!ValidateClientFeeLedger(ledger, error)) return false;
+            changed = true;
+        }
+    }
+    return ValidateClientFeeLedger(ledger, error);
+}
+
 bool PaymasterSessionObservation::PaymentConfirmed(SessionState state) const
 {
     return state != SessionState::FAILED && state != SessionState::CONFLICTED &&
@@ -591,8 +680,7 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
             }
             ClientFeeLedger client_fee_ledger;
             bool client_fee_changed{false};
-            if (state == SessionState::CANCELED_SAFE && final_depth > 0 &&
-                !session.provider_side) {
+            if (!session.provider_side && !session.recovery_txid.IsNull()) {
                 const DatabaseReadStatus client_ledger_status =
                     batch.ReadPaymasterClientFeeLedgerWithStatus(
                         client_fee_ledger);
@@ -604,12 +692,13 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                 const bool have_client_ledger{
                     client_ledger_status == DatabaseReadStatus::FOUND};
                 if (have_client_ledger) {
-                    // Confirmation of the cancel-to-self transaction proves
-                    // that no original provider attempt can consume these DD
-                    // inputs. Release only still-reserved original fees;
-                    // already-spent fees and the (separate) recovery fee stay
-                    // untouched.
+                    if (!RestoreClientRecoveryFeeReservations(batch, client_fee_ledger,
+                            now, client_fee_changed, error, &session)) return false;
+                    // Keep fee liabilities through the same reorg safety depth
+                    // as signed inputs. A single confirmation is reversible.
                     for (const uint256& attempt_id : session.attempt_ids) {
+                        if (state != SessionState::CANCELED_SAFE ||
+                            final_depth < DEFAULT_REORG_SAFETY_DEPTH) break;
                         ProviderAttempt original_attempt;
                         const DatabaseReadStatus attempt_status =
                             batch.ReadPaymasterAttemptWithStatus(
@@ -740,7 +829,10 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             if (!session.provider_side && session.final_txid.IsNull() &&
                 !session.attempt_ids.empty() &&
                 (session.state == SessionState::AUTHORIZED ||
-                 session.state == SessionState::PENDING_PROVIDER)) {
+                 session.state == SessionState::PENDING_PROVIDER ||
+                 (!session.recovery_txid.IsNull() &&
+                  (session.state == SessionState::CANCELED_SAFE ||
+                   session.state == SessionState::CONFLICTED)))) {
                 ProviderAttempt attempt;
                 const auto status = batch.ReadPaymasterAttemptWithStatus(
                     session.attempt_ids.back(), attempt);

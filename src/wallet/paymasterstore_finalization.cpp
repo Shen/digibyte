@@ -968,6 +968,8 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
             return false;
         }
         if (have_client_policy) {
+            if (!RestoreClientRecoveryFeeReservations(batch, client_fee_ledger,
+                    now, client_fee_changed, error, &session)) return false;
             const auto reservation = std::find_if(
                 client_fee_ledger.reservations.begin(), client_fee_ledger.reservations.end(),
                 [&](const ClientFeeReservation& entry) {
@@ -978,7 +980,7 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
                 if (!SpendClientFee(client_fee_ledger, attempt.commit_key, now, error)) {
                     return false;
                 }
-                client_fee_changed = previous_state != BudgetReservationState::SPENT;
+                client_fee_changed |= previous_state != BudgetReservationState::SPENT;
             } else if (attempt.created_at >= client_policy.updated_at) {
                 PaymasterQuoteResponse quote_response;
                 try {
@@ -1494,7 +1496,9 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
          attempt.state != AttemptState::USER_PSBT_ACCEPTED &&
          attempt.state != AttemptState::AMBIGUOUS) ||
         (session.state != SessionState::AUTHORIZED &&
-         session.state != SessionState::PENDING_PROVIDER) ||
+         session.state != SessionState::PENDING_PROVIDER &&
+         (session.recovery_txid.IsNull() ||
+          (session.state != SessionState::CANCELED_SAFE && session.state != SessionState::CONFLICTED))) ||
         attempt.client_manifest_accepted_at > session.updated_at ||
         !ValidateClientAuthorizationOwnership(m_wallet, attempt.client_manifest, error)) {
         if (error.empty()) error = "PAYMASTER_CLIENT_OBSERVATION_NOT_AUTHORIZED";
@@ -1528,6 +1532,7 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
     }
     bool write_ledger{false};
     if (ledger_status == DatabaseReadStatus::FOUND) {
+        if (!RestoreClientRecoveryFeeReservations(batch, ledger, now, write_ledger, error, &session)) return false;
         const auto reservation = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
             [&](const ClientFeeReservation& entry) { return entry.commit_key == attempt.commit_key; });
         if (reservation != ledger.reservations.end()) {

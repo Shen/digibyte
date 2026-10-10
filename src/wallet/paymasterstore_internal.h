@@ -300,6 +300,17 @@ bool LoadAttemptAuthorizationArtifacts(const ProviderAttempt& attempt,
 bool ValidateAttemptAuthorizationManifest(const ProviderAttempt& attempt,
                                           bool provider_side,
                                           std::string& error);
+/** Restore existing signed fee liabilities for unpruned client recoveries.
+ * Stages ledger changes only; callers persist them with their atomic transition.
+ * A null session checks all retained recoveries before new authorization;
+ * final observation paths supply their session to avoid wallet-wide rescans.
+ * This never grants new authority or raises the user's saved fee limits. */
+bool RestoreClientRecoveryFeeReservations(WalletBatch& batch,
+                                          ClientFeeLedger& ledger,
+                                          int64_t now,
+                                          bool& changed,
+                                          std::string& error,
+                                          const PaymentSession* recovery_session = nullptr);
 bool DecodeUnsignedIntent(const std::vector<unsigned char>& bytes,
                           PaymentIntent& intent,
                           int64_t now,

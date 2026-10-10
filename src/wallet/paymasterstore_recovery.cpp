@@ -679,6 +679,9 @@ bool PaymasterStore::AcceptAlternativeRecoveryAuthorization(
         error = "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED";
         return false;
     }
+    bool client_fee_changed{false};
+    if (!RestoreClientRecoveryFeeReservations(batch, client_fee_ledger,
+            effective_now, client_fee_changed, error)) return false;
     const auto existing_fee = std::find_if(
         client_fee_ledger.reservations.begin(),
         client_fee_ledger.reservations.end(),
@@ -700,7 +703,6 @@ bool PaymasterStore::AcceptAlternativeRecoveryAuthorization(
         error = "PAYMASTER_CLIENT_FEE_PREAUTHORIZATION_ORPHAN";
         return false;
     }
-    bool client_fee_changed{false};
     if (!exact_reserved_fee) {
         if (!ReserveClientFee(
                 client_fee_ledger, client_policy,
