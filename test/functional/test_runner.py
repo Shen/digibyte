@@ -361,6 +361,8 @@ BASE_SCRIPTS = [
     'p2p_paymaster.py',
     'p2p_paymaster_connection_capacity.py --descriptors',
     'wallet_paymaster_lifecycle.py --descriptors',
+    'wallet_paymaster_backup.py --descriptors',
+    'wallet_paymaster_backup.py --descriptors --pending-offline',
     'wallet_paymaster_readiness.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors',
     'wallet_paymaster_provider.py --descriptors',
