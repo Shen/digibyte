@@ -1295,6 +1295,19 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
         QVERIFY(restore_summary->text().contains(QStringLiteral("A rescan or a higher fee limit cannot resolve this")));
         QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
         QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
+        for (const auto& gate : {"PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED",
+                                 "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION",
+                                 "PAYMASTER_PROVIDER_CHECKPOINT_WRITE"}) {
+            UniValue checkpoint_provider{unknown_failure};
+            UniValue checkpoint_errors{UniValue::VARR};
+            checkpoint_errors.push_back(gate);
+            checkpoint_provider.pushKV("readiness_errors", std::move(checkpoint_errors));
+            tab.setPaymasterReadinessStatusForTesting(checkpoint_provider);
+            QVERIFY(next_step->text().contains(QStringLiteral("Provider wallet safety check needs review")));
+            QVERIFY(restore_summary->text().contains(QStringLiteral("New payments and reserve spending are blocked")));
+            QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
+            QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
+        }
     }
 }
 

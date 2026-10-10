@@ -8263,6 +8263,12 @@ private:
 
     QString readinessExplanation(const QString& error) const
     {
+        if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED"))
+            return tr("This provider wallet does not match its independently saved safety checkpoint. New payments and reserve spending are blocked. Use the complete current provider wallet and checkpoint together. Do not delete the checkpoint or increase fee limits to bypass this protection.");
+        if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION"))
+            return tr("A reserve transaction was interrupted before its accounting was fully saved. New payments and reserve spending are blocked. Review recorded transactions and diagnostics before continuing; the operation must not be repeated blindly.");
+        if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_WRITE"))
+            return tr("The independent provider safety checkpoint could not be saved. New payments and reserve spending are blocked. Check storage availability and diagnostics before continuing.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
             return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Use the complete current provider wallet for continued operation; already recorded exact transactions remain recoverable.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
@@ -8380,6 +8386,13 @@ private:
     void updateReadinessSummary(const QStringList& errors, bool running, bool ready)
     {
         updateExternalPrerequisites();
+        for (const auto& error : errors) {
+            if (error.startsWith(QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_"))) {
+                setStatusLabel(m_next_step, tr("Provider wallet safety check needs review"), QStringLiteral("action"));
+                m_readiness_summary->setText(readinessExplanation(error));
+                return;
+            }
+        }
         if (errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
             setStatusLabel(m_next_step, tr("Restored provider wallet is protected"), QStringLiteral("action"));
             m_readiness_summary->setText(readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")));
@@ -8922,6 +8935,10 @@ private:
 
     QString providerServiceStatusText() const
     {
+        for (const auto& error : m_readiness_errors) {
+            if (error.startsWith(QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_"))) return readinessExplanation(error);
+        }
+        if (m_last_service_error.startsWith(QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_"))) return readinessExplanation(m_last_service_error);
         if (m_readiness_errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")) ||
             m_last_service_error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")) {
             return readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"));
@@ -9917,7 +9934,17 @@ private:
         QString hint;
         QString button;
         QString kind = QStringLiteral("waiting");
-        if (m_readiness_errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
+        QString checkpoint_error;
+        for (const auto& error : m_readiness_errors) {
+            if (error.startsWith(QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_"))) { checkpoint_error = error; break; }
+        }
+        if (!checkpoint_error.isEmpty()) {
+            headline = tr("Provider wallet safety check needs review");
+            hint = readinessExplanation(checkpoint_error);
+            button = tr("View diagnostics");
+            kind = QStringLiteral("action");
+            action = QStringLiteral("inspect_error");
+        } else if (m_readiness_errors.contains(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))) {
             headline = tr("Restored provider wallet is protected");
             hint = readinessExplanation(QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"));
             button = tr("View diagnostics");
