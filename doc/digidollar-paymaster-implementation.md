@@ -361,6 +361,17 @@ finance records keep DD income, DGB costs, pool principal, and optional oracle
 valuation separate. A backup acknowledgement records an operator action, not
 proof that a backup is usable.
 
+Explicit provider-wallet restore persists the append-only `pmrestoreguard`
+through `MarkPaymasterProviderRestored` before `LoadWallet` can invoke callbacks
+or autostart. The codec reuses `ProviderIdentityRecord`; no base-wallet schema
+migration or wire change is needed. Quarantine is independent of descriptor
+wallet eligibility: known records remain readable, while new provider model
+availability, identity/transaction signing, quote admission and reserve spending
+are blocked. Exact known signed commits remain recoverable. Settings and backup
+acknowledgement cannot erase the marker; no override/history-reconstruction API
+is provided. Manual file/directory rollback requires an independent checkpoint.
+See [TM-003](paymaster-threat-model.md#tm-003-stale-provider-restore-forgets-expenditure-and-signed-inputs).
+
 `processpaymasterrequests` defers temporary capacity/quote admission-limit
 failures in the fair inbox (`deferred`, `deferral_reason`) without putting the
 whole service into drain-only mode. Every retry repeats the existing checks;

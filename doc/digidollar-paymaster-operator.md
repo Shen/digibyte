@@ -808,6 +808,23 @@ reminder opens that section; Income & costs has no second backup panel. The
 central controls remain available after a successful backup. Both backup methods
 refer to the complete provider wallet, including its financial records.
 
+Explicit GUI/RPC restoration of a provider backup blocks new Paymaster payments
+and reserve spending before autostart. An old image can omit money already spent
+or a signed payment still held by a client; a blockchain rescan cannot prove
+that history complete. Known exact signed transactions remain recoverable.
+Settings changes, higher fee limits and backup acknowledgement do not lift the
+block. There is currently no guard-clear command or automatic reconciliation of
+missing provider history. Continue from the complete current original provider
+wallet. If it is lost, keep the restored provider paused pending comprehensive
+recovery; do not manually release inputs or copy an old image to bypass the
+guard. A copied wallet that already contains the restore guard stays protected,
+including when renamed and loaded after a node restart. An old backup made
+before the guard was stored does not contain it: manually copying that image
+instead of using GUI/RPC restoration bypasses detection. The old file cannot
+prove its own freshness. Use the restoration function for provider backups;
+do not manually replace the provider wallet/data directory. Client-only backups
+retain their normal restore behavior.
+
 ### Spending limits at a glance
 
 Overview shows a separate budget block for each enabled payment model and for

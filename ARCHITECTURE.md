@@ -17,7 +17,8 @@ expired provider requests after their retry/replay window, including secondary
 indices, without permanent tombstones. It prunes at most 64 per pass; new quotes
 are refused at 8,192 retained provider sessions while exact retries remain
 available. Signed/recovery history retains its existing protection. These
-Paymaster-only changes introduce no consensus, wire or database-format change.
+Paymaster-only changes introduce no consensus or wire change. Wallet-local
+Paymaster records may be extended without changing the base wallet schema.
 
 After a failed first prepare-only RPC, Qt reconciles the same wallet/request
 before offering another payment. A status-aware missing-session result clears
@@ -335,6 +336,18 @@ transaction is an ordinary `DD_TX_TRANSFER`. The broader branch also contains
 arithmetic portability changes in consensus source, which require separate
 equivalence review. Verification is tracked in the
 [Paymaster release gate](doc/digidollar-paymaster-release-gate.md).
+
+### Paymaster provider backup restoration
+
+Explicit `RestoreWallet` calls a Paymaster database helper before loading the
+copied image. Provider backups receive an append-only `pmrestoreguard`, encoded
+with the existing provider-identity type. Readiness, announcements, capacity and
+quote authority, provider signatures and reserve-spending paths fail closed.
+Known exact signed commits can still be replayed; client-only restore is unchanged.
+The marker is not cleared by settings or backup acknowledgement. There is no
+automatic reconstruction/override for missing signed history. Manual file or
+whole-directory rollback needs an independent monotonic checkpoint and remains
+outside this detection mechanism. See `doc/paymaster-threat-model.md` (TM-003).
 
 ## Executive Summary
 

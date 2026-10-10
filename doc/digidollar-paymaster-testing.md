@@ -3542,6 +3542,159 @@ to this checkout. It uses temporary test wallets/regtest, takes minutes to tens
 of minutes and must report every selected scenario passed with exit code 0.
 No live wallet is needed. These operator commands were not executed in this
 follow-up. Full Qt/release, sanitizer/fuzz, real SQLite disk-full/power-loss,
-stale-provider-backup and adversarial network/load checks remain open. The new
+stale-provider-backup and adversarial network/load checks remained open at that
+follow-up; the backup result below supersedes that test gap. The new
 historical alternative-provider commit retry also needs a full functional rerun;
 the new aged-commit regression directly exercises the normal provider path.
+
+## Stale provider backup regression (2026-10-10)
+
+`wallet_paymaster_backup.py` is registered with two variants in the functional
+runner. It uses only temporary descriptor SQLite wallets and two regtest nodes,
+real quotes, client authorization, provider signing and independently computed
+DGB transaction fees. It unloads the original provider before restore, then
+restarts both processes so volatile announcement sequence caches cannot mask
+the rollback. **Both variants reproduced TM-003 before its correction and now
+pass with the durable explicit-restore quarantine**, described in
+[the threat model](paymaster-threat-model.md).
+
+| Variant | Fixture and pre-fix observed failure |
+| --- | --- |
+| Default | Backup before two payments; first confirmed, second in both mempools. The 0.2-DGB daily allowance was exhausted before restore. Restored autostart reports ready with zero spent; it signs another payment. All three payments confirm, proving 0.3-DGB actual fees under the unchanged 0.2-DGB approval. |
+| `--pending-offline` | Backup after the first confirmation, before a second signed final; restart both disposable nodes with `-persistmempool=0 -walletbroadcast=0`, retaining the valid final outside them. Restore forgets its cost and exposes its pool inputs; a new provider-signed transaction reuses an input. This is conflicting authority, not proof that both competing transactions settle. |
+
+The probes also verify the original provider was blocked by its exhausted
+budget; old missing templates are rejected via RPC and the real CLI; retained
+exact commits replay idempotently; chain/mempool-visible spent inputs stay
+unavailable; a reserve-preparation preview changes neither payment budget nor
+mempool. Their JSON summary contains public status/transaction identifiers,
+not keys or signed PSBTs. Execution of paid refill/withdrawal/retirement after
+restore remains additional coverage to implement with the correction.
+
+Tested against normal Release daemon SHA-256
+`a7c37549e2b15c8cbe018e8e6621ffb8911ac184bb19c95777e4248d1cb763d8`
+on branch `integration/paymaster-v9.26.7`, HEAD
+`9478107c93fc4e8ac6a8bd337b67c25680c7a9be`, plus the new uncommitted test.
+No product build or binary replacement was performed. Reports are workspace-local:
+
+- `build_msvc/paymaster-refresh-check/provider-backup/visible-20261010-170704/`
+- `build_msvc/paymaster-refresh-check/provider-backup/offline-20261010-170511/`
+
+Both exit 1 at the final security assertion, after the payment probes complete.
+The default reports three failed protection conditions; offline reports four.
+The following receipts document the original failing product. Preserve each run's
+`test_framework.log`, node logs and `provider-backup-observations.json`.
+
+The completed test was then run through both registered runner entries: 25 and
+32 seconds, both exit 1 at the same reproduced defects. The additional autostart
+check gives four and five failed conditions, respectively; all 18 framework
+unit checks pass. Final test source SHA-256:
+`832d85d4a5bb3ab58bf25dbfae973fbb04b1d0233f0cf3e114f7a17cbb0b3db6`.
+`build_msvc/paymaster-refresh-check/provider-backup/run-receipt.json` records
+checkout/binary hashes and final results. `final-visible-observations.json`,
+`final-offline-observations.json` and corresponding `final-*-test.log` copies
+provide accessible report paths outside the runner's Unicode directory.
+
+Reproduce from the repository root with the existing Python environment,
+SQLite/wallet/txindex-enabled Release binaries and `test/config.ini`. Each
+variant takes roughly 30–60 seconds; no full rebuild is needed merely to run
+these Python tests against the existing executable:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+$env:DIGIBYTED = (Resolve-Path '.\build_msvc\x64\Release\digibyted.exe').Path
+$env:DIGIBYTECLI = (Resolve-Path '.\build_msvc\x64\Release\digibyte-cli.exe').Path
+$env:PYTHONUTF8 = '1'
+python -X utf8 test/functional/wallet_paymaster_backup.py --configfile=test/config.ini --descriptors --nocleanup
+python -X utf8 test/functional/wallet_paymaster_backup.py --configfile=test/config.ini --descriptors --pending-offline --nocleanup
+```
+
+After rebuilding the corrected Paymaster code, require
+**exit 0 from each command**: missing history must keep new authority paused or
+be safely reconstructed, the actual old fees must not disappear from the
+effective allowance, and hidden signed inputs must not be re-signed. Keep
+exact known-commit replay and read-only diagnostics safe. Reserve previews and
+execution may instead reject the explicit restore guard without spending or
+releasing inputs. Do not replace these
+assertions with expected-success checks for the vulnerable behavior.
+
+No live wallet was touched. This scenario does not simulate physical SQLite
+write/checkpoint failure, whole-datadir rollback, deep reorgs or hostile transport.
+
+Python AST syntax checks and `git diff --check` pass. The prescribed Python lint
+script was invoked but skipped because `flake8` is absent; its exit 0 is **not**
+a completed lint check. No package was installed. To run the repository's
+selected flake8 rules without modifying the operator's global Python environment:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+python -m venv build_msvc/paymaster-refresh-check/provider-backup/lint-env
+$backupLintPython = (Resolve-Path 'build_msvc/paymaster-refresh-check/provider-backup/lint-env/Scripts/python.exe').Path
+& $backupLintPython -m pip install flake8
+& $backupLintPython -m flake8 --version
+$backupLintRules = python -c "import runpy; print(runpy.run_path('test/lint/lint-python.py')['ENABLED'])"
+& $backupLintPython -m flake8 --ignore=B,C,E,F,I,N,W "--select=$backupLintRules" test/functional/wallet_paymaster_backup.py
+```
+
+This optional local lint environment needs package-download access; installation
+and lint take seconds to a few minutes. Success is a printed flake8 version and
+exit 0 without lint diagnostics. Set `PYTHONUTF8=1` when using the functional
+runner on Windows: `python -X utf8` on its parent alone does not propagate UTF-8
+to child scripts. The final run's console emitted encoding diagnostics for the
+runner's Unicode directory; file reports and financial probes completed normally.
+
+### Correction and current verification
+
+Explicit GUI/RPC restore now commits `pmrestoreguard` before `LoadWallet`,
+callbacks, autostart or reserve preparation. New provider signing and spending
+fail closed; no configuration, backup acknowledgement or expired clock clears
+the record. No automatic history reconstruction or guard-clear RPC is provided.
+Client-only restore keeps its DD balance and fee policy. Known exact committed
+payments still replay without new signing.
+
+Both variants pass using the isolated, selected-object MSVC daemon in
+`build_msvc/paymaster-refresh-check/provider-backup-fix/`. They cover RPC and the
+real CLI, restored autostart/manual start, withheld final transactions,
+preparation preview/execution, reserve retirement, withdrawal, capital release,
+settings/backup-acknowledgement changes and automatic runtime selection. They
+also manually copy an already guarded SQLite image under a new wallet name,
+load it without the restore RPC, restart the node and require RPC/CLI startup
+and reserve actions to remain blocked. This proves the guard survives copying;
+it does not detect rollback to an unmarked image. The
+wallet tests additionally call both refill builders and the shared signing
+boundaries directly, cover marker write/commit rollback, restart/idempotence,
+append-only writes and malformed/future records. The GUI test checks a clear
+restore instruction in both themes, including simultaneous liquidity errors.
+Final selected unit results: 22 cases / 9,348 assertions (16 security cases /
+8,971 assertions, 5 PSBT cases / 311 assertions, one backup-metadata case /
+66 assertions). Both real backup variants exit 0, as does the targeted Qt check.
+Hashes, build/link logs and exact test reports are recorded in the local
+`provider-backup-fix/run-receipt.json` and adjacent files.
+
+The normal product executables have not been rebuilt/replaced by this selected
+verification. Delegate the full MSVC solution build and wider Paymaster Qt suite
+to the operator. From the repository root, with the existing MSVC v143 toolchain,
+static Qt 5.15.10, vcpkg dependencies, Python and closed normal client/provider
+processes, run:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\provider-backup-fix\build-and-check.ps1 -Build -FullQtTests
+```
+
+This workspace-local helper builds the full solution (avoiding mismatched
+project library paths), runs the focused wallet security/PSBT/backup-metadata
+checks, both registered backup variants and the complete Paymaster Qt suite.
+Runtime is minutes to tens of minutes depending on the build cache. Success is
+exit 0, both functional variants passing, no failed unit/Qt tests and a report
+directory printed at the end. It records source and normal-binary hashes before
+testing and restores its temporary environment variables afterward. For another
+checkout, use the equivalent full solution build, the two Python commands above,
+`test_digibyte.exe --run_test=paymaster_wallet_security_tests`,
+`--run_test=paymaster_wallet_psbt_tests`, and the `PaymasterWidgetTests` Qt filter.
+
+Physical SQLite write/checkpoint failure, manual wallet-file or whole-datadir
+rollback, safe migration after complete original-history loss, deep reorgs and
+sanitizer/fuzz campaigns remain unexecuted. A marker in an old database cannot
+detect that database being copied back outside the restore API. Do not claim
+general stale-backup recovery or release approval from these passing cases.

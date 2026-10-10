@@ -2,7 +2,8 @@
 
 ## Executive summary
 
-**Review date: 2026-10-10. Two findings reproduced in the initial snapshot:**
+**Review date: 2026-10-10. Three findings reproduced across the initial review
+and the provider-backup follow-up:**
 
 - **TM-001 — medium:** provider budget pruning can delete the authorization
   evidence needed to recover an already signed, unconfirmed transaction after
@@ -11,12 +12,18 @@
 - **TM-002 — medium:** expired, never-signed provider requests retain full session
   and attempt records without an automatic retention bound. Repeated valid
   requests can grow persistent state and the work performed under the wallet lock.
+- **TM-003 — high, corrected for explicit GUI/RPC restore:** restoring an older provider wallet renews
+  forgotten spending authority. A real SQLite/regtest restore allowed 0.3 DGB
+  in confirmed payment fees under a 0.2-DGB daily approval. A second variant
+  exposed and re-signed inputs of an earlier signed payment absent from both
+  mempools. No direct recipient diversion or DD theft was demonstrated.
 
-Neither reproduction demonstrates theft or expenditure beyond an approved fee
-limit. They establish a recovery failure and a persistent resource-growth path.
+The initial TM-001/TM-002 reproductions establish a recovery failure and a
+persistent resource-growth path. TM-003 subsequently demonstrated expenditure
+beyond an approved fee limit and conflicting provider signing after rollback.
 The reviewed signing paths bind amounts, destinations, fees, actual prevouts,
 input ownership and transaction signatures independently of transport and peer
-claims. **No additional confirmed path to unauthorized DD/DGB loss was found.**
+claims. The new durable restore guard now quarantines restored provider wallets before loading. It prevents renewed authority rather than inventing missing history. Manual file replacement or whole-directory rollback remains outside this detection mechanism.
 This is a scoped source review with selected tests, not proof of absence of such
 paths or release approval.
 
@@ -72,8 +79,7 @@ Seven selected translation units were compiled and linked into a new isolated
 test executable. Sources, binary/report hashes and exact filters are recorded
 under `build_msvc/paymaster-refresh-check/security-fixes/`. Normal product
 executables were not rebuilt or replaced. Fresh full product/functional,
-sanitizer/fuzz, real SQLite storage-failure, stale-provider-backup and independent
-review gates remain open. The threat table below describes the initial attack
+sanitizer/fuzz, real SQLite storage-failure and independent review gates remain open. The stale-provider explicit-restore gate is now covered by the TM-003 follow-up below. The threat table below describes the initial attack
 assessment; TM-001 and TM-002 now have source corrections with this targeted
 verification, rather than unresolved implementations.
 
@@ -95,9 +101,7 @@ interfaces; retained future-extension code is not evidence of a publicly usable
 voucher feature.
 
 Deployment details still affecting residual risk are the expected sustained
-request rate/storage budget, whether provider backups can be restored into
-automatic operation, and whether confidentiality against an active transport
-relay is required. No positive assumptions about those guarantees were used.
+request rate/storage budget, manual provider-file/directory rollback outside the explicit restore API, and whether confidentiality against an active transport relay is required. No positive assumptions about those guarantees were used.
 
 The audit includes the uncommitted worktree, including the previous client
 recovery fee-reservation correction. It is **not** a review of HEAD alone:
@@ -255,8 +259,7 @@ navigation anchors when subsequent edits move lines.
    wait for expiry and repeat with fresh request IDs. TM-002 retains the full
    historical records despite releasing current capacity.
 6. **Exploit restored history:** after an operator restores an old provider
-   backup, exploit forgotten spending/reservations. This is an open financial
-   verification task, not a demonstrated exploit in this review.
+   backup, exploit forgotten spending/reservations. TM-003 reproduced both renewed expenditure and conflicting signing. Explicit GUI/RPC restore now persists a quarantine before wallet loading. Manual copying of an old wallet or entire data directory still requires an independent monotonic checkpoint to detect rollback.
 7. **Interrupt durable transitions:** terminate processes or provoke storage
    failure between signature, commit and broadcast. Existing injected-failure
    tests cover important transitions; real disk-full/power-loss behavior remains
@@ -276,7 +279,7 @@ an exploit has been confirmed.
 |---|---|---|---|---|---|
 | TM-001 **confirmed** | Delayed/withheld final outcome; provider signed commit survives >24 h; subsequent ledger pruning removes its SPENT row. | Failed recovery; committed DD/DGB may remain bound. No theft/extra fee shown. | Exact final validation and budget firewall reject missing authority; probe reproduces rejection. | Retain authorization provenance independently of rolling accounting. Detect missing-row errors for retained commits. | Medium / medium / **medium** |
 | TM-002 **confirmed** | Valid public client repeatedly creates unique quotes and lets unsigned requests expire. | Persistent database growth and increasing wallet-lock work; indirect recovery delays. | Short quote life, input control proofs, active/rate limits and capacity replay cleanup. | No automatic bound on full expired session/attempt history. Compact only provably unsigned terminal records; monitor counts, disk and reconciliation latency. | Medium / medium / **medium** |
-| TM-003 **open verification** | Operator restores stale provider backup; remote party replays retained artifacts or continues payments against old local accounting. | Possible forgotten rolling expenditure/authority; no reproduced overspend. | UTXO/ownership validation and durable records protect records present in the backup. | Missing provider rollback scenario. Test pending and confirmed spends; pause restored operation pending trustworthy reconciliation. Detect backup age/chain and accounting discontinuities. | Unestablished / potentially high / **high** verification priority |
+| TM-003 **explicit restore corrected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass. | No automatic history reconstruction or guard-clear API. Manual file/directory rollback cannot be detected from its own old contents; an independent checkpoint and physical storage-failure tests remain open. | Conditional on restore / high pre-fix / manual rollback residual |
 | TM-004 **defended integrity; privacy residual** | Active MITM terminates two transports and relays authentic Paymaster artifacts. | Can observe forwarded metadata or delay service; no modified spend demonstrated. | Identity/quote/capacity signatures and independent PSBT checks; V2 required. | No provider-authenticated transport transcript binding found. If active-MITM confidentiality is required, design explicit channel binding and test a relay. | Medium / low financial severity / **low** |
 | TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
 | TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
@@ -400,18 +403,121 @@ replay; begin/write/commit failures; signed/ambiguous sessions remain intact;
 independent wallets remain isolated. Measure wallet-lock time under sustained
 admission before claiming a production capacity limit.
 
+### TM-003: stale provider restore forgets expenditure and signed inputs
+
+**Status: corrected for explicit GUI/RPC wallet restoration; targeted tests pass.**
+The fix conservatively blocks new authority. It does not reconstruct financial
+records missing from a backup or establish that an unpublished signature is gone.
+
+**Prerequisite and original reproduction.** An operator restores an old provider
+backup. Public counterparties cannot invoke this local RPC themselves. Two real
+payments each cost 0.1 DGB under an unchanged 0.2-DGB rolling-hour/day approval
+and two-payment count limit. A pre-payment SQLite backup previously autostarted
+ready, signed a third payment, and all three confirmed (0.3 DGB total). A second
+variant restores after the first confirmation but before the second signed final,
+with the final absent from both mempools. It previously exposed and re-signed an
+input of that withheld transaction. Competing spends cannot both settle; this
+variant proves conflicting authority, not an extra confirmed 0.3-DGB charge.
+
+**Implemented protection.** `RestoreWallet` in
+[`wallet.cpp`](../src/wallet/wallet.cpp) opens only the copied database and calls
+`MarkPaymasterProviderRestored` before `LoadWallet`, its callbacks, or autostart.
+The Paymaster helper and guard checks live in
+[`paymasteridentity.cpp`](../src/wallet/paymasteridentity.cpp), with codecs in
+[`paymasterdb.cpp`](../src/wallet/paymasterdb.cpp). The optional wallet record
+`pmrestoreguard` reuses the versioned provider-identity codec and is append-only.
+Marker creation must commit successfully or restoration fails before loading.
+Missing identity means a client-only backup is unchanged; malformed identities
+are rejected. Malformed/unsupported markers fail closed and cannot be overwritten
+by the helper. The base wallet schema and Paymaster wire protocol are unchanged.
+
+The guard disables model availability/readiness, manual/automatic starts,
+identity-key access for announcements/capacity/quotes, store admission and both
+ordinary/alternative-provider pre-signature checks. The role-limited wallet
+signer checks it again for PROVIDER inputs. Manual reserve preparation,
+withdrawals, retirement and capital release, both automatic refill builders,
+and recurring preparation cannot create fresh spending authority. Changes to
+settings, approved limits, backup reminders, or the clock do not clear it.
+GUI diagnostics explain the missing-history risk without putting the internal
+error token in the main instruction text; RPC/CLI use
+`PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED`.
+
+Exact, already persisted fully signed commits can still be validated and
+replayed without new signatures. Lost templates cannot be reconstructed from
+untrusted replay data. This distinction is verified with actual retained and
+lost payments, not just mocked readiness flags.
+
+**Verification.** [`wallet_paymaster_backup.py`](../test/functional/wallet_paymaster_backup.py)
+uses only disposable descriptor SQLite wallets and two regtest nodes. Both
+variants pass with restored autostart/manual start blocked, exact retained
+commit replay unchanged, RPC and real CLI reserve actions rejected, no mempool
+change, and the guard surviving enable/disable, safety-policy saves, backup
+acknowledgement and automatic runtime selection. Client-only backup restoration
+preserves DD funds and its fee policy without a provider quarantine.
+
+Three additional wallet unit cases cover restart, append-only/idempotent marker
+creation, write/commit failure rollback, malformed/future layouts and the shared
+signing/refill boundaries. The focused security suite, existing PSBT suite and
+backup-metadata case pass. The GUI regression checks the readable instruction
+in light and dark themes. Source, object and binary hashes and per-run reports
+are tied to 22 passing unit cases / 9,348 assertions, both passing real backup
+variants and the targeted Qt check. Verification inputs and outputs
+are recorded in the workspace-local
+`build_msvc/paymaster-refresh-check/provider-backup-fix/run-receipt.json`.
+This is a selected-object MSVC build linked with existing Release dependencies;
+it is not a fresh full build or cross-platform/sanitizer approval. Normal product
+executables were not replaced. Pre-fix proof remains in
+`build_msvc/paymaster-refresh-check/provider-backup/run-receipt.json` and its
+visible/offline observations; those failing runs are historical evidence.
+
+**Residual scope and availability cost.** No guard-clear RPC is provided: an
+acknowledgement, a rescan, waiting 24 hours, or increasing limits cannot prove
+that an omitted signature is harmless. Continue service from the complete,
+current original provider wallet, not the quarantined image. If that source is
+lost, comprehensive history reconciliation/safe migration is still required;
+new provider activity and reserve release remain blocked. Pool entries in an
+old image may look locally unspent, but they confer no provider authority while
+the guard is active. Ordinary wallet key ownership is unchanged; this is not an
+OS-wide prohibition on spending a restored wallet.
+
+Copying a wallet that already contains the guard preserves quarantine, even
+under a different wallet name and after a node restart. Both real backup
+variants also exercise this file-copy/load path through RPC and CLI. In contrast,
+manually replacing a wallet with an older **unmarked** image, or rolling back
+the entire data directory to such an image, bypasses the explicit restore hook.
+The new checks are not active just because the executable contains them: they
+need the durable marker. This is a real remaining risk of renewed approval or
+conflicting signing, not an attack available to a peer without local rollback.
+
+Detecting unmarked rollback requires trustworthy state outside the rolled-back
+data. A future checkpoint must bind the network and persistent provider identity
+to a monotonically advancing financial generation; commit it durably before
+publishing each new signature or reserve-spending authority. A mismatch, a
+missing established checkpoint or a write failure must block new authority.
+Crash ordering must fail closed, and known exact recovery must not advance or
+clear the checkpoint. Wallet renaming and configuration/backup acknowledgement
+must not reset it. Initial registration of an existing provider requires a
+trusted complete current wallet; the first registration cannot retroactively
+prove that an already copied file is current. A checkpoint inside the node data
+directory only detects wallet-only rollback if that directory survives; restoring
+both requires an independently retained checkpoint. Timestamps, a rescan and
+mempool absence are not substitutes. This mechanism is **not implemented**;
+do not describe the explicit restore correction as safe recovery from every
+old backup. Real disk-full/power-loss durability also remains open.
+
 ## Criticality calibration
 
 Direct unauthorized signature, recipient diversion, approval bypass or key
-extraction would be high/critical. None was reproduced. Medium here means an
+extraction would be high/critical. TM-003 reproduces approval bypass following
+local backup restoration and has high correction priority. Medium here means an
 attacker-reachable or operationally reachable state/liveness defect with a
 concrete failed invariant. TM-002's eventual outage size/rate is not measured.
 
 | Consequence | Result of this review |
 |---|---|
 | DD/DGB theft or unauthorized principal diversion | No additional confirmed path; exact signing guards passed the selected tests. |
-| Exceeding approved service/network fees | No additional confirmed bypass; the existing client recovery repair was rechecked. Stale provider backups remain a financial test gap. |
-| Bound or inaccessible capital | TM-001 confirmed recovery rejection; adversarial withholding can also legitimately require same-input recovery/confirmation. |
+| Exceeding approved service/network fees | TM-003 confirmed provider network-fee overspend following stale restore. Client service-fee bypass was not demonstrated. |
+| Bound or inaccessible capital | TM-003 conflicting signing after loss of a pending final; TM-001 initial recovery rejection. Adversarial withholding can also legitimately require same-input recovery/confirmation. |
 | Operating disruption | TM-002 confirmed retained-state growth; resulting disk/latency limits unmeasured. Public subsidy exhaustion is separately expected within approval. |
 
 ### Attacks examined and stopped by existing controls
@@ -515,15 +621,12 @@ if ($LASTEXITCODE -ne 0) { throw 'An existing protection test failed' }
 
 ### Open scenarios and completion criteria
 
-1. **Stale provider backup (TM-003).** Existing lifecycle coverage includes an
-   older *client* authorized backup and provider process restart, not rollback
-   of provider accounting. Use temporary SQLite regtest wallets: snapshot before
-   a spend; create both confirmed and still-unconfirmed durable provider commits;
-   restore the snapshot and exercise startup, advertisements, replay, signing and
-   reserve maintenance. Success: no automatic new authority based on forgotten
-   liability, no daily-budget reset, no unsafe input release. If durable history
-   cannot be reconstructed, restoration must remain paused pending review.
-   This scenario requires new test code; no existing green command closes it.
+1. **Stale provider backup (TM-003): explicit restore corrected.** Both
+   `wallet_paymaster_backup.py` variants now require no renewed authority based
+   on forgotten liability. They cover automatic runtime selection, reserve
+   actions, restarts and copying an already guarded wallet. An independently
+   durable checkpoint for manually copied unmarked images and comprehensive
+   missing-history reconciliation remain unimplemented; see the finding above.
 2. **Physical storage failures (TM-007).** In an isolated disposable VM/filesystem,
    interrupt before/after wallet DB commit, final publication and wallet insertion;
    include ENOSPC on writes/checkpoints and abrupt power loss. After restart,
@@ -559,8 +662,9 @@ Set-Location 'D:\Digibyte\digibyte-fork'
 **Functional follow-up:** after that build, use fresh executables explicitly
 (Python and the existing `test/config.ini` required; minutes, isolated regtest
 nodes). Success: all selected scripts pass, no unexpected daemon errors. These
-are existing scenarios; they do not implement the new stale-provider-backup or
-physical storage tests described above.
+are existing scenarios; run the two backup variants separately as documented
+in the testing guide. They pass after the explicit restoration correction.
+Physical storage tests remain unimplemented.
 
 ```powershell
 Set-Location 'D:\Digibyte\digibyte-fork'

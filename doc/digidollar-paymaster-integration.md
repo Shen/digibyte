@@ -408,3 +408,18 @@ for safe unsigned closure or return-to-self preparation. Never infer permission
 to send a replacement, sign recovery or release inputs from a timeout. Qt's
 live continuation switches to this read-only path after two minutes; CLI callers
 control their own polling interval.
+
+### Provider backup restore quarantine
+
+The explicit wallet restore API marks a copied provider database before loading
+or service callbacks. `getpaymasterinfo` reports
+`PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED` and no available funding models;
+the descriptor wallet remains structurally eligible and its known payment
+records stay readable. Start, new provider signatures and reserve-spending
+actions reject that gate in RPC/CLI; Qt explains it as missing financial history.
+Already recorded exact signed finals retain read-only recovery. Client-only
+backup restoration is unchanged. Do not retry configuration changes or backup
+acknowledgements as a way to resume: there is no guard-clear RPC or automatic
+reconstruction of omitted signatures. Manually replacing an old wallet/data
+directory bypasses this restore hook and needs an independent monotonic
+checkpoint. See [the threat model](paymaster-threat-model.md).

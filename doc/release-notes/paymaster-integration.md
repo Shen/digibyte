@@ -491,3 +491,5 @@ fees, wire messages and signature/reservation safety rules are unchanged.
   no timeout releases inputs or authorizes a replacement. Older unresolved
   sessions prominently offer reviewed return-to-wallet recovery. Transient read
   failures no longer interrupt background observation with repeated dialogs.
+
+- Explicit GUI/RPC provider-wallet restore now commits a durable Paymaster quarantine before loading or autostart. Old backups cannot renew forgotten payment budgets or sign again with inputs of a withheld final. New provider payments and reserve spending are blocked; exact retained signed commits remain recoverable. Both real SQLite/regtest backup variants pass, including RPC/CLI checks and client-only restore compatibility. There is no acknowledgement-based override or automatic reconstruction of missing history. Manual wallet-file/directory rollback still needs an independent checkpoint. See `doc/paymaster-threat-model.md` and `doc/digidollar-paymaster-testing.md`.
