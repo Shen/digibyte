@@ -39,6 +39,30 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_store::internal;
 
+bool paymaster_store::internal::CheckProviderSessionCapacity(
+    WalletBatch& batch, const std::string& request_id, std::string& error)
+{
+    PaymentSession existing;
+    const auto status = batch.ReadPaymasterSessionWithStatus(request_id, existing);
+    if (status == DatabaseReadStatus::FOUND) return true; // Exact retries create no history.
+    if (status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_SESSION_DATABASE_READ";
+        return false;
+    }
+    std::vector<PaymentSession> sessions;
+    if (!batch.ListPaymasterSessions(sessions)) {
+        error = "PAYMASTER_SESSION_DATABASE_READ";
+        return false;
+    }
+    if (std::count_if(sessions.begin(), sessions.end(),
+            [](const PaymentSession& session) { return session.provider_side; }) >=
+        MAX_RETAINED_PROVIDER_SESSIONS) {
+        error = "PAYMASTER_PROVIDER_HISTORY_FULL";
+        return false;
+    }
+    return true;
+}
+
 bool PaymasterStore::CommitProviderQuote(ProviderAttempt attempt,
                                          const uint256& expected_genesis,
                                          int64_t now,
@@ -89,6 +113,8 @@ bool PaymasterStore::CheckProviderQuoteAdmission(
         error = "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE";
         return false;
     }
+
+    if (!CheckProviderSessionCapacity(batch, request.intent.request_id, error)) return false;
 
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;
@@ -363,6 +389,7 @@ bool PaymasterStore::CommitProviderQuote(
         error = "PAYMASTER_ATTEMPT_ID_CONFLICT";
         return false;
     }
+    if (!CheckProviderSessionCapacity(batch, request.intent.request_id, error)) return false;
 
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;

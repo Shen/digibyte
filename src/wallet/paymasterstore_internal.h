@@ -23,6 +23,11 @@ using namespace DigiDollar::Paymaster;
 
 inline constexpr size_t MAX_RECOVERY_ENDPOINT_BYTES{512};
 inline constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
+inline constexpr size_t MAX_RETAINED_PROVIDER_SESSIONS{8192};
+inline constexpr size_t MAX_PROVIDER_SESSION_PRUNES_PER_PASS{64};
+
+bool CheckProviderSessionCapacity(WalletBatch& batch, const std::string& request_id,
+                                  std::string& error);
 
 /** Translate typed wallet-database failures into stable Paymaster errors
  * without collapsing a present-but-unreadable authority record into absence. */

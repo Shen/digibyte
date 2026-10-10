@@ -817,6 +817,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
     };
     std::vector<ReconciliationCandidate> candidates;
     std::set<uint256> scheduled_wtxids;
+    size_t pruned_unsigned{0};
     {
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
@@ -826,6 +827,14 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             return false;
         }
         for (const PaymentSession& session : sessions) {
+            if (session.provider_side && session.state == SessionState::FAILED &&
+                TimeDeltaExceeds(now, session.updated_at, CAPACITY_REPLAY_RETENTION_SECONDS) &&
+                pruned_unsigned < MAX_PROVIDER_SESSION_PRUNES_PER_PASS) {
+                bool pruned{false};
+                if (!PruneSession(session.request_id, error, now, pruned)) return false;
+                if (pruned) ++pruned_unsigned;
+                continue;
+            }
             if (!session.provider_side && session.final_txid.IsNull() &&
                 !session.attempt_ids.empty() &&
                 (session.state == SessionState::AUTHORIZED ||
@@ -900,7 +909,15 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
 
 bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::string& error)
 {
+    bool pruned{false};
+    return PruneSession(request_id, error, /*unsigned_expiry_time=*/0, pruned);
+}
+
+bool PaymasterStore::PruneSession(const std::string& request_id, std::string& error,
+                                 int64_t unsigned_expiry_time, bool& pruned)
+{
     error.clear();
+    pruned = false;
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     PaymentSession session;
@@ -915,6 +932,15 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
     }
     if (!IsTerminal(session.state)) {
         error = "PAYMASTER_SESSION_NOT_FINAL";
+        return false;
+    }
+    const bool prune_unsigned = unsigned_expiry_time > 0;
+    if (prune_unsigned &&
+        (!session.provider_side || session.state != SessionState::FAILED ||
+         session.pending_phase != PendingPhase::NONE || !session.final_txid.IsNull() ||
+         !session.recovery_txid.IsNull() || session.attempt_ids.empty() ||
+         !TimeDeltaExceeds(unsigned_expiry_time, session.updated_at, CAPACITY_REPLAY_RETENTION_SECONDS))) {
+        error = "PAYMASTER_UNSIGNED_PRUNE_UNSAFE";
         return false;
     }
 
@@ -1003,6 +1029,24 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
             error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
             return false;
         }
+        if (prune_unsigned &&
+            (records.attempt.state != AttemptState::QUOTE_EXPIRED ||
+             !records.attempt.user_signed_psbt.empty() ||
+             !records.attempt.final_transaction.empty() || !records.attempt.final_txid.IsNull() ||
+             records.attempt.provider_signed_at != 0 || !records.attempt.provider_signed_result.empty() ||
+             !records.attempt.accepted_client_manifest_id.IsNull() || records.attempt.client_manifest_accepted_at != 0 ||
+             records.attempt.quote_expires_at <= 0 ||
+             records.attempt.retry_until < records.attempt.quote_expires_at)) {
+            error = "PAYMASTER_UNSIGNED_PRUNE_UNSAFE";
+            return false;
+        }
+        if (prune_unsigned && !TimeDeltaExceeds(unsigned_expiry_time,
+                std::max(records.attempt.retry_until, records.attempt.capacity_snapshot.expires_at),
+                CAPACITY_REPLAY_RETENTION_SECONDS)) return true; // A longer replay window is still open.
+        // Historical restricted offers have a separate capability lifecycle.
+        // Retain them without blocking ordinary expiry/reconciliation or
+        // consuming this pass's cleanup quota. New restricted offers are disabled.
+        if (prune_unsigned && !records.attempt.sponsorship_capability_hash.IsNull()) return true;
 
         if (!records.attempt.template_commitment.IsNull()) {
             uint256 indexed_attempt;
@@ -1091,6 +1135,23 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
                 "PAYMASTER_INVALID_PERSISTED_OUTCOME");
             return false;
         }
+        if (prune_unsigned) {
+            ProviderBudgetLedger ledger;
+            std::vector<ProviderPoolEntry> pool;
+            if (records.has_commit || records.has_authorization || records.has_result || records.has_outcome ||
+                !batch.ReadPaymasterProviderBudgetLedger(ledger) || !ValidateProviderBudgetLedger(ledger, error) ||
+                !batch.ReadPaymasterProviderPool(pool) || !ValidateProviderPoolEntries(pool, error) ||
+                std::any_of(ledger.reservations.begin(), ledger.reservations.end(),
+                    [&](const ProviderBudgetReservation& entry) {
+                        return entry.commit_key == records.attempt.commit_key && entry.state != BudgetReservationState::RELEASED;
+                    }) ||
+                std::any_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
+                    return entry.reservation_id == records.attempt.commit_key || entry.reservation_id == records.attempt.client_nonce;
+                })) {
+                if (error.empty()) error = "PAYMASTER_UNSIGNED_PRUNE_UNSAFE";
+                return false;
+            }
+        }
         attempts.push_back(std::move(records));
     }
 
@@ -1146,6 +1207,10 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_INDEX_DATABASE_READ";
         return false;
     }
+    if (prune_unsigned && (recovery || alternative_recovery)) {
+        error = "PAYMASTER_UNSIGNED_PRUNE_UNSAFE";
+        return false;
+    }
 
     const uint256 tombstone_txid = session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid;
     IdempotencyTombstone tombstone{IdempotencyTombstone::CURRENT_VERSION, request_id, session.session_id,
@@ -1155,7 +1220,10 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
                                    session.subtract_paymaster_fee_from_amount,
                                    session.send_all_spendable_dd};
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-    if (!batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    // Expired unsigned provider artifacts no longer authorize any spend or
+    // valid replay. Keeping a permanent tombstone for each public request
+    // would only move the unbounded storage growth to another record type.
+    if (!prune_unsigned && !batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     if (!session.provider_side) {
         for (const auto& outpoint : session.user_inputs) {
             if ((reservations_to_erase.count(outpoint) != 0 &&
@@ -1211,10 +1279,14 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
     if (!batch.ErasePaymasterSession(request_id)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
+    if (prune_unsigned && !batch.ErasePaymasterSessionId(session.session_id)) {
+        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    }
     if (!batch.TxnCommit()) {
         error = "PAYMASTER_DATABASE_COMMIT";
         return false;
     }
+    pruned = true;
     if (!session.provider_side) {
         for (const auto& outpoint : session.user_inputs)
             m_wallet.UnlockCoin(outpoint);

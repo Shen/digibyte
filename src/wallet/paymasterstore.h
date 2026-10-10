@@ -728,6 +728,10 @@ public:
     bool PruneFinalSession(const std::string& request_id, std::string& error);
 
 private:
+    /** With unsigned_expiry_time > 0, erase only expired unsigned provider
+     * history after its complete replay window; retain no permanent tombstone. */
+    bool PruneSession(const std::string& request_id, std::string& error,
+                      int64_t unsigned_expiry_time, bool& pruned);
     CWallet& m_wallet;
 };
 

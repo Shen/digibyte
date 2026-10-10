@@ -26,6 +26,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -1037,6 +1038,141 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_REQUIRE(ReadProviderSecurityState(
         corrupt_wallet, still_missing, ignored_pool));
     BOOST_CHECK(still_missing.reservations.empty());
+}
+
+BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
+{
+    constexpr int64_t now{1000};
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655441091";
+    auto environment = MakeProviderEnvironment(now, /*maximum_reserved=*/2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment, request_id,
+        uint256S("1091"), now, fixture, error), error);
+    BOOST_REQUIRE(PersistProviderQuoteEnvironment(m_wallet, environment, {fixture.pool_entry}));
+    PaymasterStore store{m_wallet};
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, now, error), error);
+    size_t expired{0};
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderQuotes(now + 61, expired, error), error);
+    BOOST_REQUIRE_EQUAL(expired, 1U);
+    PaymentSession session;
+    ProviderAttempt attempt;
+    BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
+    BOOST_REQUIRE(store.GetAttempt(fixture.attempt.attempt_id, attempt));
+    const int64_t boundary = std::max({session.updated_at, attempt.retry_until,
+        attempt.capacity_snapshot.expires_at}) + paymaster_store::internal::CAPACITY_REPLAY_RETENTION_SECONDS;
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(boundary, error), error);
+    BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, attempt));
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto before = database.m_records;
+    database.m_txn_pass = false;
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
+    database.m_txn_pass = true;
+    BOOST_CHECK(database.m_records == before);
+    database.FailCommit();
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before);
+
+    // Even a FAILED/QUOTE_EXPIRED label cannot make signed artifacts prunable.
+    ProviderAttempt unsafe{attempt};
+    unsafe.user_signed_psbt = {1};
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(unsafe));
+    }
+    const auto signed_records = database.m_records;
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
+    BOOST_CHECK(database.m_records == signed_records);
+    database.m_records = before;
+
+    // Parked restricted history is retained without stopping maintenance.
+    unsafe = attempt;
+    unsafe.sponsorship_capability_hash = uint256S("1093");
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(unsafe));
+    }
+    const auto restricted_records = database.m_records;
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(boundary + 1, error), error);
+    BOOST_CHECK(database.m_records == restricted_records);
+    database.m_records = before;
+
+    // A budget/pool binding is independently protective, even if labels lie.
+    ProviderBudgetLedger ledger;
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger, pool));
+    const auto released_ledger = ledger;
+    auto row = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
+        [&](const ProviderBudgetReservation& item) { return item.commit_key == attempt.commit_key; });
+    if (row != ledger.reservations.end()) row->state = BudgetReservationState::RESERVED;
+    else {
+        auto bound = environment.ledger;
+        BOOST_REQUIRE_MESSAGE(ReserveProviderBudget(bound, environment.safety,
+            fixture.request.intent.funding_model, fixture.request.intent.sponsorship_scope,
+            attempt.commit_key, fixture.response.quote.network_fee,
+            GetRecipientBudgetBucket(bound, fixture.request.intent.recipient_script), now, error,
+            environment.netgroup_bucket), error);
+        ledger.reservations = bound.reservations;
+    }
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterProviderBudgetLedger(ledger));
+    }
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
+    BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, unsafe));
+    database.m_records = before;
+
+    auto restarted_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    wallet::CWallet restarted{m_node.chain.get(), "unsigned-history-restart", std::move(restarted_database)};
+    PaymasterStore restarted_store{restarted};
+    BOOST_REQUIRE_MESSAGE(restarted_store.ReconcileFinalSessionsAtTip(boundary + 1, error), error);
+    BOOST_CHECK(!restarted_store.GetSessionByRequestId(request_id, session));
+    BOOST_CHECK(!restarted_store.GetAttempt(attempt.attempt_id, unsafe));
+    {
+        LOCK(restarted.cs_wallet);
+        WalletBatch batch{restarted.GetDatabase()};
+        std::string indexed;
+        uint256 indexed_attempt;
+        IdempotencyTombstone tombstone;
+        BOOST_CHECK(batch.ReadPaymasterSessionIdWithStatus(attempt.session_id, indexed) == DatabaseReadStatus::NOT_FOUND);
+        BOOST_CHECK(batch.ReadPaymasterTemplateWithStatus(attempt.template_commitment, indexed_attempt) == DatabaseReadStatus::NOT_FOUND);
+        BOOST_CHECK(batch.ReadPaymasterUnsignedTxWithStatus(attempt.unsigned_txid, indexed_attempt) == DatabaseReadStatus::NOT_FOUND);
+        BOOST_CHECK(batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone) == DatabaseReadStatus::NOT_FOUND);
+    }
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, ledger, pool));
+    BOOST_CHECK(SerializePaymasterSecurityObject(ledger) == SerializePaymasterSecurityObject(released_ledger));
+    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
+    const auto compacted = GetMockableDatabase(restarted).m_records;
+    BOOST_CHECK(!restarted_store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, boundary + 2, error));
+    BOOST_CHECK(GetMockableDatabase(restarted).m_records == compacted);
+    BOOST_REQUIRE_MESSAGE(restarted_store.ReconcileFinalSessionsAtTip(boundary + 3, error), error);
+    BOOST_CHECK(GetMockableDatabase(restarted).m_records == compacted);
+}
+
+BOOST_AUTO_TEST_CASE(provider_history_quota_preserves_existing_requests)
+{
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    std::string error;
+    PaymentSession session;
+    session.provider_side = true;
+    session.created_at = session.updated_at = 1000;
+    session.canonical_request_hash = uint256S("01");
+    for (size_t i = 0; i < paymaster_store::internal::MAX_RETAINED_PROVIDER_SESSIONS; ++i) {
+        session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+        session.session_id = SecurityTestId(uint256S("1092"), i + 1);
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    }
+    BOOST_CHECK(paymaster_store::internal::CheckProviderSessionCapacity(batch, session.request_id, error));
+    BOOST_CHECK(!paymaster_store::internal::CheckProviderSessionCapacity(batch,
+        "550e8400-e29b-41d4-a716-999999999999", error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
+    BOOST_REQUIRE(batch.ErasePaymasterSession(session.request_id));
+    BOOST_CHECK(paymaster_store::internal::CheckProviderSessionCapacity(batch,
+        "550e8400-e29b-41d4-a716-999999999999", error));
 }
 
 BOOST_AUTO_TEST_CASE(
