@@ -67,6 +67,8 @@ private Q_SLOTS:
     void paymasterFinancesAndBackupWorkflow();
     void paymasterFinanceOperatorPresentation_data();
     void paymasterFinanceOperatorPresentation();
+    void paymasterFundsOperatorPresentation_data();
+    void paymasterFundsOperatorPresentation();
     void paymasterOverviewAutostart_data();
     void paymasterOverviewAutostart();
     void paymasterOverviewRefill_data();
@@ -76,6 +78,10 @@ private Q_SLOTS:
     void paymasterOverviewFinanceWalletAndPrivacyBinding();
     void paymasterOperatorWorkTransitions_data();
     void paymasterOperatorWorkTransitions();
+    void paymasterLiveOverview_data();
+    void paymasterLiveOverview();
+    void paymasterSettingsRestart_data();
+    void paymasterSettingsRestart();
     void paymasterOperatorPollingPreservesDraftsAndThrottlesFinance();
     void paymasterOperatorBackgroundRefresh_data();
     void paymasterOperatorBackgroundRefresh();

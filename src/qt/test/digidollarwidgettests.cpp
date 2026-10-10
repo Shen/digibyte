@@ -4167,8 +4167,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         tab.findChild<QWidget*>("paymasterSponsoredOfferCard");
     QLabel* liquidityCapacityExplanation =
         tab.findChild<QLabel*>("paymasterLiquidityCapacityExplanation");
-    QWidget* liquidityCapacityCards =
-        tab.findChild<QWidget*>("paymasterLiquidityCapacityCards");
+    QWidget* liquidityCounts =
+        tab.findChild<QWidget*>("paymasterFundsReserveCounts");
     QPushButton* liquiditySettings =
         tab.findChild<QPushButton*>("paymasterAdvancedLiquidityToggle");
     QVERIFY(setupChoice != nullptr);
@@ -4227,15 +4227,10 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         QStringLiteral("client"), Qt::CaseInsensitive));
     QVERIFY(liquidityCapacityExplanation->text().contains(
         QStringLiteral("payment capacity"), Qt::CaseInsensitive));
-    QVERIFY(liquidityCapacityCards != nullptr);
-    const QList<QPushButton*> obsoleteCapacityActions =
-        liquidityCapacityCards->findChildren<QPushButton*>();
-    QCOMPARE(obsoleteCapacityActions.size(), 2);
-    for (QPushButton* action : obsoleteCapacityActions) {
-        QVERIFY(action->isHidden());
-    }
+    QVERIFY(liquidityCounts != nullptr);
+    QVERIFY(liquidityCounts->findChildren<QPushButton*>().isEmpty());
     QVERIFY(liquiditySettings != nullptr);
-    QCOMPARE(liquiditySettings->text(), QStringLiteral("Change liquidity settings"));
+    QCOMPARE(liquiditySettings->text(), QStringLiteral("Advanced reserve management"));
     const QList<QWidget*> pageColumns =
         tab.findChildren<QWidget*>("paymasterPageColumn");
     QCOMPARE(pageColumns.size(), 10);
@@ -4541,8 +4536,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QSpinBox* admissionCarriers =
         tab.findChild<QSpinBox*>("paymasterAdmissionCarrierSlots");
     QVERIFY(liquidityIntroduction != nullptr);
-    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("Funds remain in this wallet")));
-    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("network fee")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("All funds remain in this wallet")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("capacity to keep ready")));
     QVERIFY(liquiditySteps != nullptr);
     QVERIFY(liquiditySteps->text().contains(QStringLiteral("review the exact amounts and fees")));
     QVERIFY(liquiditySummary != nullptr);
@@ -4558,12 +4553,16 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     restoreLiquidity->click();
     QCOMPARE(admissionDgb->value(), 3);
     QCOMPARE(admissionCarriers->value(), 3);
-    QVERIFY(liquiditySummary->text().contains(QStringLiteral("minimum user-paid pool shape")));
+    QVERIFY(liquiditySummary->text().contains(QStringLiteral("1 payment(s)")));
+    QVERIFY(liquiditySummary->text().contains(QStringLiteral("4.00 DD")));
     sponsoredPolicy->setChecked(true);
     userPaidPolicy->setChecked(false);
     restoreLiquidity->click();
-    QCOMPARE(admissionCarriers->value(), 0);
-    QVERIFY(liquiditySummary->text().contains(QStringLiteral("minimum sponsored-only pool shape")));
+    // An unsaved offer draft is not authority to remove DD reserve targets.
+    // Without a confirmed provider policy the editor retains user-paid capacity.
+    QCOMPARE(admissionCarriers->value(), 3);
+    QVERIFY(liquiditySummary->text().contains(QStringLiteral("1 payment(s)")));
+    QVERIFY(liquiditySummary->text().contains(QStringLiteral("4.00 DD")));
     userPaidPolicy->setChecked(true);
     sponsoredPolicy->setChecked(false);
     restoreLiquidity->click();
