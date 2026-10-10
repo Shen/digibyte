@@ -3898,3 +3898,78 @@ A hostile two-leg TCP relay with live daemon connections, Tor tests, independent
 crypto review, full fresh product/Qt builds, sanitizer/fuzz and physical storage
 fault campaigns remain open. Multi-host replicated accounting/external witness
 services are documented design options, not implemented features.
+
+## Authentication order and adversarial regressions (2026-10-10)
+
+Baseline: `2725df82691d6315831ec79778e4c8ae43e1a4ce`. The worktree follow-up
+adds seven transport cases and one wallet case, extends both-role PSBT mutation
+checks, and hardens only the existing Paymaster-specific block of
+`CConnman::PushMessage`. The initial internal-sender diagnostic failed 13
+assertions, reproducing disclosure through an internal call that bypassed the
+already guarded queued sender. It is retained as `sender-before-fix.txt`, not
+counted as a successful test or remote exploitation evidence.
+
+The new transport fixture uses real V2 handshakes and encrypted challenge/proof
+and financial packets, including the actual receive queue and message handler.
+VERSION/VERACK/capability messages enter that handler directly. The tests do not
+use real TCP sockets. Cases verify both sender halves and all ten financial
+message types, provider identity substitution, signed wrong channel/network/
+nonce/version, malformed frame sizes, canceled leases, disconnect and old-proof
+replay. Correctly signed malicious quotes also reach the real independent
+client DD reconstruction; it rejects altered outputs/inputs/metadata before
+building a signing template. Neither signing role signs the tested PSBT mutations.
+
+| Final selected check | Passed cases | Passed assertions |
+| --- | ---: | ---: |
+| `paymaster_transport_tests` | 21 | 4,129 |
+| `net_tests/paymaster*` | 6 | 159 |
+| `paymaster_wallet_psbt_tests` | 6 | 422 |
+| `paymaster_protocol_tests` | 6 | 75 |
+| `paymaster_psbt_tests` | 4 | 109 |
+| `paymaster_txbuilder_tests` | 9 | 135 |
+| **Total** | **52** | **5,029** |
+
+`wallet_paymaster_backup.py --descriptors --pending-offline` and
+`p2p_paymaster.py` also pass against the corrected isolated daemon. They use
+disposable wallets and real TCP/RPC/CLI, covering retained exact signed recovery,
+restore quarantine, V1 rejection, invalid negotiation and malformed reconnects.
+Expected peer disconnects are part of these successful negative tests.
+
+MSVC `/WX` compilation covered `net.cpp`, `net_tests.cpp`,
+`paymaster_transport_tests.cpp` and `paymaster_wallet_psbt_tests.cpp`; isolated
+unit/daemon links reused unchanged objects and libraries from the recorded
+baseline. Source/object/binary/report hashes are in the workspace-local
+`auth-adversarial/run-receipt.json`. `git diff --check` passed. Repository,
+C++ formatting, wallet/Paymaster architecture and MSVC/test guidance were used.
+No normal GUI executable was replaced, and no full fresh product or Qt build
+is claimed. clang-format/flake8 are absent in this workspace; no lint pass is
+claimed.
+
+For an operator build using installed MSVC 14.43, Windows SDK, vcpkg, static
+Qt 5.15.10 at `D:\Qt51510\install` and Python, close the normal client/provider
+instances and run from `D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\auth-adversarial\build-and-check.ps1 -Build
+```
+
+The workspace-local helper generates the MSVC projects, builds the solution
+with one worker, runs the six filters separately and the two disposable regtest
+scenarios, and hashes source/binaries/reports. Expected duration is minutes to
+tens of minutes. Success means exit 0, at least the case counts above, no failed
+assertions, and both functional reports ending in `Tests successful`. Linux
+fresh-build equivalents after configuring the repository dependencies are:
+
+```sh
+make -j2
+for filter in paymaster_transport_tests 'net_tests/paymaster*' paymaster_wallet_psbt_tests paymaster_protocol_tests paymaster_psbt_tests paymaster_txbuilder_tests; do
+    src/test/test_digibyte --run_test="$filter" --report_level=detailed || exit 1
+done
+python3 test/functional/wallet_paymaster_backup.py --descriptors --pending-offline
+python3 test/functional/p2p_paymaster.py
+```
+
+The full hostile two-leg TCP proxy, Tor, sanitizer/fuzz, physical storage-fault
+campaigns and independent cryptographic review remain separate open gates.
+Channel-authentication failure stops the affected network attempt; it must not
+erase prior signatures, durable authority or ambiguous-input reservations.

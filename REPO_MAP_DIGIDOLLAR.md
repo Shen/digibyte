@@ -10,6 +10,9 @@ admission and protected reply/recovery quotas. Core ownership lives in
 and `src/netbase.{h,cpp}`. Focused tests are
 `src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
 and `test/functional/p2p_paymaster_connection_capacity.py`.
+The transport suite also drives genuine V2 packets through the message dispatcher
+to check authentication ordering, identity swaps, malformed proofs, disconnects,
+reconnect replay and the last internal send barrier.
 Migration, current passing checks and remaining release gates are documented
 in the capacity guide. Recovery releases the original payment lease; expected
 Capacity proofs are accepted on payment and recovery channels. `senddigidollar`
@@ -1832,7 +1835,7 @@ present in the tree but not compiled into the current unit-test binary.
 | File | Coverage Area |
 |------|--------------|
 | `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records |
-| `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs and signing only the requested collaborative input role |
+| `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs, role-limited signing, mutations before either party signs, and correctly signed malicious DD quotes rejected by independent client reconstruction |
 | `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records; simulated begin/write/commit failures for fee-policy approval, signature persistence, fallback, cancellation and self-recovery, including lost replies and protection of newly reserved inputs |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, malicious client/provider persistence failures, durable restore quarantine, and real SQLite page-limit/commit-denial rollback and exact retry |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |

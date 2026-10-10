@@ -1,5 +1,20 @@
 # Paymaster integration release notes
 
+## Authenticated transport boundary verification (2026-10-10)
+
+The existing Paymaster-only send filter now repeats the live V2 connection,
+authentication and non-canceled client-lease checks even for internal direct
+callers. Only the channel challenge/proof may precede authentication. Normal
+queued sending and financial receive dispatch already enforced this ordering;
+the additional filter closes the lower-level internal-call gap.
+
+Seven encrypted dispatcher regressions and a correctly signed malicious DD
+quote case supplement the independent signing firewalls. Selected checks pass
+52 cases / 5,029 assertions plus two disposable regtest scenarios. See the
+[security follow-up](../paymaster-threat-model.md#authentication-ordering-and-adversarial-verification-2026-10-10)
+for evidence and remaining TCP proxy/full-build review limits. Disconnect never
+deletes signed payment authority or releases ambiguous funds automatically.
+
 ## Provider recovery and unsigned history (2026-10-10)
 
 Provider recovery now remains possible when an already signed transaction's

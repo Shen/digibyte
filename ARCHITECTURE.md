@@ -1619,6 +1619,10 @@ finite-budget maintenance only when configured targets remain missing
   New direct channels additionally require `CAP_CHANNEL_AUTH`: `pmauthreq` /
   `pmauthresp` authenticate the selected provider against the live BIP324
   session before any Capacity/payment/recovery payload leaves the queue.
+  The existing Paymaster-only filter in `CConnman::PushMessage` repeats the
+  live-V2/authentication check for internal callers and rejects canceled client
+  leases. Invalid proof or disconnect stops network advancement; already signed
+  artifacts retain their independent durable recovery authority.
   This channel proof grants no financial authority and changes no persisted
   V5/V6 financial signatures. Both endpoints must support channel authentication.
 - Persistent `request_id` sessions prevent duplicate payment. Once user

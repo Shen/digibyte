@@ -930,3 +930,74 @@ It does not authenticate all ordinary P2P peers or hide IP addresses, traffic
 size/timing, public chain data, or information from the selected provider.
 Full hostile TCP relay, Tor testing, fresh full Qt/product binaries, independent
 cryptographic review and the earlier physical-durability/fuzz gaps remain open.
+
+### Authentication ordering and adversarial verification (2026-10-10)
+
+This follow-up starts from `2725df82691d6315831ec79778e4c8ae43e1a4ce` and includes
+the current worktree. The workspace-local `auth-adversarial/run-receipt.json`
+records source, object, binary, patch and report hashes, separating the
+pre-correction diagnostic from the final passing runs.
+
+**Ordering verified.** `RequestPaymasterConnection` requires the channel-proof
+flag before first exposing a ready channel. Payment Capacity/quote/submit and
+alternative-recovery RPC paths wait for readiness before queueing network work.
+`PeerManagerImpl::SendMessages` never dequeues financial payloads before proof;
+the provider sends `PMAUTHRESP` before releasing later responses. The receive
+dispatcher rejects all ten financial request/response types before decoding
+them if authentication is missing. Expected provider identity comes from the
+local operation's lease; expected session ID comes from the local BIP324
+transport. A reconnect gets a new session ID and nonce. Capability negotiation
+or a signature over the relay's other cipher session cannot satisfy this check.
+
+**Additional last-send barrier corrected.** The new
+`channel_sender_checks_authentication_for_internal_callers` deliberately calls
+`CConnman::PushMessage` outside the normal queued sender. Before correction,
+all ten financial message types escaped this helper before authentication;
+messages also escaped on canceled leases or disconnected nodes (13 failed
+assertions). This was a missing internal boundary, not a reproduced remote
+bypass of the existing gated PeerManager path. No financial loss or live
+payment disclosure was demonstrated. The existing Paymaster-only block in
+`src/net.cpp` now suppresses direct payloads unless the connection is connected,
+live and V2; financial messages also require authentication, and client
+messages require a non-canceled lease. Only authentication messages may precede
+proof. This 12-line addition is the sole shared product-code change; consensus,
+ordinary traffic and financial serialization remain unchanged.
+
+Seven new transport cases use genuine `V2Transport` pairs, encrypted packets,
+the real receive queue and message dispatcher. They test all financial message
+directions, early requests/responses, wrong provider keys/IDs, signed wrong
+genesis/session/nonce/version, damaged signatures, malformed frame sizes,
+canceled leases, disconnect, old-proof replay and provider response ordering.
+The existing cipher-level two-leg MITM regression remains in the selection.
+
+**Authentication does not replace transaction validation.** A new wallet case
+creates a local DD input and reconstructs a valid quote. Eight malicious quotes
+retain valid signatures from the selected provider and a consistent txid;
+preliminary identity/fee checks accept them, but actual client reconstruction
+rejects redirected recipient/change, changed DD metadata amounts, added outputs,
+replaced inputs, locktime/version changes and changed miner-fee outputs. A
+different provider's correctly signed quote is rejected against the original
+intent. Another matrix attempts ten PSBT mutations for each signing role;
+neither client nor provider creates a signature. Existing manifest, prevout,
+full-witness and provider execution-firewall cases also pass.
+
+Final selected checks pass **52 cases / 5,029 assertions**; real-daemon
+`wallet_paymaster_backup.py --descriptors --pending-offline` and `p2p_paymaster.py`
+also pass with the corrected sender. All wallets/datadirs are disposable. The
+normal application executable has not been replaced. See the
+[matching test runbook](digidollar-paymaster-testing.md#authentication-order-and-adversarial-regressions-2026-10-10).
+
+**Failure semantics.** Authentication failure cannot admit new financial messages
+or trigger signing through that network attempt. Local unsigned preparation is
+not payment authorization. Already accepted, independently validated requests
+and signatures are different: disconnect never invalidates a signature, deletes
+durable authorization or unlocks ambiguous inputs. Exact retry, reconciliation
+and recovery retain their existing firewalls. Explicit local offline/expert
+signing RPCs validate their own financial authority; channel authentication
+guards network disclosure, not every offline wallet operation.
+
+These are scoped transport/dispatcher, wallet and two regtest checks. An actual
+hostile two-leg TCP daemon proxy, Tor, full clean product/Qt build, sanitizer/fuzz,
+physical durability and independent cryptographic review remain open. Matching
+wallet/checkpoint rollback and independent multi-host identity limits from the
+preceding section are unchanged.
