@@ -22,6 +22,7 @@
 #include <util/time.h>
 #include <version.h>
 #include <wallet/paymasterpsbt.h>
+#include <wallet/paymasterprovider.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
@@ -685,6 +686,8 @@ bool PaymasterStore::AcceptAlternativeRecoveryAuthorization(
             return reservation.commit_key ==
                    recovery.recovery_response.recovery_commit_key;
         });
+    if (!already_accepted && !CheckPaymasterRecoveryServiceFee(
+            m_wallet, recovery.recovery_response.manifest, error)) return false;
     const bool exact_reserved_fee =
         existing_fee != client_fee_ledger.reservations.end() &&
         existing_fee->service_fee ==

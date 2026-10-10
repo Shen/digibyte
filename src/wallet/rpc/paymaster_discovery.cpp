@@ -255,9 +255,14 @@ RPCHelpMan getpaymasteroffers()
                       reputation, now, error);
             if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
             UniValue result{UniValue::VARR};
+            ClientSafetyPolicy client_policy;
+            if (!GetPaymasterClientSafetyPolicy(*wallet, client_policy)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
+            }
             for (const auto& candidate : candidates) {
                 if (privacy == PrivacyProfile::HIGH &&
                     !candidate.endpoint.IsTor()) continue;
+                if (!CheckClientServiceFee(client_policy, candidate.payment, candidate.service_fee, error)) continue;
                 UniValue offer{UniValue::VOBJ};
                 offer.pushKV("provider_id", candidate.provider_id.GetHex());
                 offer.pushKV("display_name", candidate.display_name);
@@ -679,6 +684,9 @@ RPCHelpMan requestpaymasterquote()
             }
 
             PaymentSession session;
+            if (!CheckPaymasterClientServiceFee(*wallet, candidate.payment, candidate.service_fee, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
             const auto create_result = store.CreateOrJoinSession(
                 request_id, canonical_request_hash, requested_mode, now, session, error);
             if (create_result == CreatePaymasterSessionResult::CONFLICT ||
@@ -1810,6 +1818,19 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
                   reputation, now, error);
         if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
     }
+    ClientSafetyPolicy selection_policy;
+    if (!GetPaymasterClientSafetyPolicy(*wallet, selection_policy)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
+    }
+    std::string fee_error;
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+        [&](const OfferCandidate& candidate) {
+            std::string candidate_error;
+            if (CheckClientServiceFee(selection_policy, candidate.payment, candidate.service_fee, candidate_error)) return false;
+            fee_error = candidate_error;
+            return true;
+        }), candidates.end());
+    if (candidates.empty() && !fee_error.empty()) throw JSONRPCError(RPC_WALLET_ERROR, fee_error);
     if (privacy == PrivacyProfile::HIGH) {
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
                                         [](const OfferCandidate& candidate) { return !candidate.endpoint.IsTor(); }),

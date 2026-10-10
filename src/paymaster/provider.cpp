@@ -135,13 +135,34 @@ void PruneClientLedger(ClientFeeLedger& ledger, int64_t now)
 bool ValidateClientSafetyPolicy(const ClientSafetyPolicy& policy, std::string& error)
 {
     error.clear();
-    if (policy.version != ClientSafetyPolicy::CURRENT_VERSION || policy.updated_at <= 0 ||
+    if ((policy.version != 1 && policy.version != ClientSafetyPolicy::CURRENT_VERSION) || policy.updated_at <= 0 ||
+        policy.maximum_service_fee_bps < -1 || policy.maximum_service_fee_bps > 10000 ||
+        (policy.version == 1 && policy.maximum_service_fee_bps != -1) ||
         policy.maximum_service_fee_per_transaction.value < 0 ||
         policy.maximum_service_fee_per_transaction.value > MAX_DD_OUTPUT_CENTS ||
         policy.maximum_service_fee_per_day.value <
             policy.maximum_service_fee_per_transaction.value ||
         policy.maximum_service_fee_per_day.value > MAX_DD_OUTPUT_CENTS) {
         error = "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY";
+        return false;
+    }
+    return true;
+}
+
+bool CheckClientServiceFee(const ClientSafetyPolicy& policy, DDCents recipient_amount,
+                           DDCents service_fee, std::string& error)
+{
+    if (!ValidateClientSafetyPolicy(policy, error)) return false;
+    if (recipient_amount.value <= 0 || recipient_amount.value > std::numeric_limits<int64_t>::max() / 10000 ||
+        service_fee.value < 0 || service_fee.value > policy.maximum_service_fee_per_transaction.value) {
+        error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+        return false;
+    }
+    // Bounds above keep both products within int64_t. Do not round the allowance
+    // up: a one-cent fee on one DD is 1%, even if advertised as a lower rate.
+    if (policy.maximum_service_fee_bps >= 0 &&
+        service_fee.value * 10000 > recipient_amount.value * policy.maximum_service_fee_bps) {
+        error = "PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED";
         return false;
     }
     return true;

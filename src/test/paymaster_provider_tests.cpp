@@ -1488,6 +1488,57 @@ BOOST_AUTO_TEST_CASE(client_fee_budget_enforces_limits_and_idempotent_transition
     BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, high_water_before_failed_spend);
 }
 
+BOOST_AUTO_TEST_CASE(client_percentage_fee_limits_use_actual_amounts_and_preserve_legacy_encoding)
+{
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{100};
+    policy.maximum_service_fee_per_day = DDCents{1000};
+    policy.maximum_service_fee_bps = 100;
+    policy.updated_at = 1000;
+    std::string error;
+    BOOST_CHECK(CheckClientServiceFee(policy, DDCents{100}, DDCents{1}, error));
+    BOOST_CHECK(!CheckClientServiceFee(policy, DDCents{99}, DDCents{1}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED");
+    // Gross amount 28.50 DD, 15 cents deducted: percentage uses 28.35 DD.
+    BOOST_CHECK(CheckClientServiceFee(policy, DDCents{2835}, DDCents{15}, error));
+    policy.maximum_service_fee_bps = 50;
+    BOOST_CHECK(!CheckClientServiceFee(policy, DDCents{100}, DDCents{1}, error));
+    BOOST_CHECK(!CheckClientServiceFee(policy, DDCents{2835}, DDCents{15}, error));
+    BOOST_CHECK(CheckClientServiceFee(policy, DDCents{3000}, DDCents{15}, error));
+    policy.maximum_service_fee_bps = 0;
+    BOOST_CHECK(CheckClientServiceFee(policy, DDCents{100}, DDCents{0}, error));
+    BOOST_CHECK(!CheckClientServiceFee(policy, DDCents{10000000}, DDCents{1}, error));
+    policy.maximum_service_fee_bps = 10000;
+    BOOST_CHECK(!CheckClientServiceFee(policy, DDCents{10000000}, DDCents{101}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED");
+    policy.maximum_service_fee_bps = 10001;
+    BOOST_CHECK(!ValidateClientSafetyPolicy(policy, error));
+    policy.maximum_service_fee_bps = -2;
+    BOOST_CHECK(!ValidateClientSafetyPolicy(policy, error));
+
+    // Decode the exact original v1 layout, including when reusing a v2 object.
+    CDataStream legacy{SER_DISK, 0};
+    legacy << uint16_t{1} << DDCents{100} << DDCents{1000} << int64_t{1000};
+    legacy >> policy;
+    BOOST_CHECK(legacy.empty());
+    BOOST_CHECK_EQUAL(policy.maximum_service_fee_bps, -1);
+    BOOST_CHECK(CheckClientServiceFee(policy, DDCents{100}, DDCents{100}, error));
+    policy.version = ClientSafetyPolicy::CURRENT_VERSION;
+    policy.maximum_service_fee_bps = 100;
+    CDataStream encoded{SER_DISK, 0};
+    encoded << policy;
+    ClientSafetyPolicy decoded;
+    encoded >> decoded;
+    BOOST_CHECK(encoded.empty());
+    BOOST_CHECK_EQUAL(decoded.maximum_service_fee_bps, 100);
+    BOOST_CHECK(ValidateClientSafetyPolicy(decoded, error));
+    CDataStream truncated{SER_DISK, 0};
+    truncated << uint16_t{2} << DDCents{100} << DDCents{1000} << int64_t{1000};
+    BOOST_CHECK_THROW(truncated >> decoded, std::ios_base::failure);
+    decoded.version = 3;
+    BOOST_CHECK(!ValidateClientSafetyPolicy(decoded, error));
+}
+
 BOOST_AUTO_TEST_CASE(client_fee_open_reservations_do_not_expire)
 {
     ClientSafetyPolicy policy;

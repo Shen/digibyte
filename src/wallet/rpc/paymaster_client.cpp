@@ -1373,6 +1373,9 @@ UniValue ResolveAlternativePaymasterRecovery(
     }
 
     if (recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+        if (!CheckPaymasterRecoveryServiceFee(wallet, recovery.recovery_response.manifest, error)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, error);
+        }
         node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
             "recovery:" + recovery.recovery_id.GetHex(), true});
         AlternativeRecoveryParameters parameters;
@@ -1435,10 +1438,17 @@ UniValue ResolveAlternativePaymasterRecovery(
                 *context.paymaster, store, recovery, error)) {
             throw JSONRPCError(RPC_WALLET_ERROR, error);
         }
-        if (!SignCollaborativePSBTForParty(
-                wallet, unsigned_psbt, trusted.trusted_template,
-                SigningParty::USER, error) ||
-            !ValidateAlternativeRecoveryPSBTAgainstChainstate(
+        {
+            // Serialize policy edits with the actual signature, without holding
+            // the wallet lock while querying chainstate below.
+            LOCK(wallet.cs_wallet);
+            if (!CheckPaymasterRecoveryServiceFee(wallet, recovery.recovery_response.manifest, error) ||
+                !SignCollaborativePSBTForParty(wallet, unsigned_psbt, trusted.trusted_template,
+                                               SigningParty::USER, error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            }
+        }
+        if (!ValidateAlternativeRecoveryPSBTAgainstChainstate(
                 unsigned_psbt, trusted, parameters, Params(),
                 *node->chainman, now,
                 CollaborativeSignatureStage::USER_SIGNED, error)) {
@@ -2397,10 +2407,14 @@ RPCHelpMan walletprocesspaymasterpsbt()
                     throw JSONRPCError(RPC_WALLET_ERROR, error);
                 }
                 attempt = std::move(signing_attempt);
-                if (!SignCollaborativePSBTForParty(*wallet, candidate,
-                                                   signing_template,
-                                                   DigiDollar::Paymaster::SigningParty::USER, error)) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                {
+                    LOCK(wallet->cs_wallet);
+                    if (!CheckPaymasterClientServiceFee(*wallet, attempt.client_manifest.recipient_amount,
+                            attempt.client_manifest.service_fee, error) ||
+                        !SignCollaborativePSBTForParty(*wallet, candidate, signing_template,
+                                                       DigiDollar::Paymaster::SigningParty::USER, error)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, error);
+                    }
                 }
                 const std::vector<unsigned char> signed_psbt = SerializePSBT(candidate);
                 if (!store.TransitionSession(session.request_id,

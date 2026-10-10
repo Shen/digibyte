@@ -61,6 +61,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.add_wallet_options(parser, legacy=False)
         parser.add_argument("--client-preparation-only", action="store_true",
                             help="Run capability, failed-preparation and paused-provider cancellation contracts only")
+        parser.add_argument("--client-protection-only", action="store_true",
+                            help="Run percentage-cap persistence, RPC/CLI and pre-signature checks only")
         parser.add_argument("--restricted-disabled-only", action="store_true",
                             help="Run disabled Restricted RPC/CLI contracts without executing payments")
 
@@ -117,6 +119,67 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_snapshot_equal(
             before, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
 
+    def check_client_percentage_protection(self, harness, provider, client):
+        self.log.info("Client percentage approval is preserved and enforced through RPC and CLI")
+        client_cli = self.nodes[1].cli("-rpcwallet=client")
+        recipient = provider.getdigidollaraddress()
+        policy = {"maximum_service_fee_per_transaction_cents": 100,
+                  "maximum_service_fee_per_day_cents": 1000}
+        assert "maximum_service_fee_bps" not in client.getpaymasterclientsafetystatus()["policy"]
+        provider.startpaymaster()
+        self.wait_until(lambda: len(client.getpaymasteroffers(100)) > 0)
+        reservations = client.listpaymasterreservations()
+        for api in (client, client_cli):
+            for invalid in (-1, 10001, 0.5, None):
+                assert_raises_rpc_error(-8, "maximum_service_fee_bps", api.setpaymasterclientsafetypolicy,
+                                       {**policy, "maximum_service_fee_bps": invalid})
+            saved = api.setpaymasterclientsafetypolicy({**policy, "maximum_service_fee_bps": 100})
+            assert_equal(saved["maximum_service_fee_bps"], 100)
+            assert_equal(api.setpaymasterclientsafetypolicy(policy)["maximum_service_fee_bps"], 100)
+            assert_equal(api.getpaymasteroffers(100), [])  # Provider charges 19%.
+            assert_equal(api.getpaymasteroffers(119, {"subtract_paymaster_fee_from_amount": True}), [])
+            options = {"fee_mode": "paymaster", "prepare_only": True,
+                       "request_id": "550e8400-e29b-41d4-a716-446655449300",
+                       "maximum_paymaster_fee_cents": 100}
+            assert_raises_rpc_error(-4, "PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED",
+                                   api.senddigidollar, recipient, 100, "", 0, None, "cents", options)
+            assert_equal(api.listpaymasterreservations(), reservations)
+        client.setpaymasterclientsafetypolicy({**policy, "maximum_service_fee_bps": 1900})
+        offer = client.getpaymasteroffers(100)[0]
+        assert_equal(offer["payment_cents"], 100)
+        assert_equal(offer["service_fee_cents"], 19)
+        gross = client.getpaymasteroffers(119, {"subtract_paymaster_fee_from_amount": True})[0]
+        assert_equal(gross["payment_cents"], 100)
+        assert_equal(gross["user_total_cents"], 119)
+        request_id = "550e8400-e29b-41d4-a716-446655449301"
+        options, _, send = harness.wait_for_quote(request_id, recipient, 100)
+        prepared = send()
+        options["authorization_commitment"] = prepared["authorization_commitment"]
+        client.setpaymasterclientsafetypolicy({**policy, "maximum_service_fee_bps": 0})
+        assert_raises_rpc_error(-4, "PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED", send)
+        state = client.resolvepaymastersession({"request_id": request_id}, "refresh")
+        assert_equal(state["artifact"], "none")
+        assert "abandon_unsigned" in state["allowed_actions"]
+        assert_equal(client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"], 0)
+        # A genuinely approved fee can sign. Tightening afterwards must not
+        # invalidate the already signed artifact or free its reserved inputs.
+        client.setpaymasterclientsafetypolicy({**policy, "maximum_service_fee_bps": 1900})
+        authorized = send()
+        assert_equal(authorized["authorization_accepted"], True)
+        client.setpaymasterclientsafetypolicy({**policy, "maximum_service_fee_bps": 0})
+        resumed = send()
+        assert_equal(resumed["session_id"], authorized["session_id"])
+        state = client.resolvepaymastersession({"request_id": request_id}, "refresh")
+        assert_equal(state["artifact"], "user_psbt")
+        assert "abandon_unsigned" not in state["allowed_actions"]
+        signed_reservations = client.listpaymasterreservations()
+        assert_equal(client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"], 19)
+        self.restart_node(1)
+        client = self.nodes[1].get_wallet_rpc("client")
+        assert_equal(client.getpaymasterclientsafetystatus()["policy"]["maximum_service_fee_bps"], 0)
+        assert_equal(client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"], 19)
+        assert_equal(client.listpaymasterreservations(), signed_reservations)
+
     def check_restricted_disabled(self, provider, client):
         self.log.info("Restricted is disabled through RPC and CLI without new reservations")
         provider_cli = self.nodes[0].cli("-rpcwallet=provider")
@@ -164,6 +227,10 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             operation_mode="manual", carrier_cents=4_000,
             fee_rate_bps=1_900)
         assert_equal(info["operation_mode"], "manual")
+        if self.options.client_protection_only:
+            harness.fund_client_dd(500)
+            self.check_client_percentage_protection(harness, provider, client)
+            return
         if self.options.restricted_disabled_only:
             harness.fund_client_dd(200)
             self.check_restricted_disabled(provider, client)

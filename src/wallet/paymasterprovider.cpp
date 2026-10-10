@@ -1603,6 +1603,16 @@ bool SetPaymasterClientSafetyPolicy(CWallet& wallet,
     ClientSafetyPolicy persisted{policy};
     persisted.updated_at = effective_now;
     if (!ValidateClientSafetyPolicy(persisted, error)) return false;
+    ClientSafetyPolicy previous;
+    if (batch.HasPaymasterClientSafetyPolicy() && !batch.ReadPaymasterClientSafetyPolicy(previous)) {
+        error = "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY";
+        return false;
+    }
+    // Older RPC callers updating absolute limits must not remove a percentage cap.
+    if (persisted.maximum_service_fee_bps < 0) {
+        persisted.maximum_service_fee_bps = previous.maximum_service_fee_bps;
+    }
+    persisted.version = ClientSafetyPolicy::CURRENT_VERSION;
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
@@ -1630,6 +1640,31 @@ bool GetPaymasterClientFeeLedger(const CWallet& wallet,
 {
     LOCK(wallet.cs_wallet);
     return WalletBatch{wallet.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger);
+}
+
+bool CheckPaymasterClientServiceFee(const CWallet& wallet, DDCents recipient_amount,
+                                   DDCents service_fee, std::string& error)
+{
+    ClientSafetyPolicy policy;
+    if (!GetPaymasterClientSafetyPolicy(wallet, policy)) {
+        error = "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED";
+        return false;
+    }
+    return CheckClientServiceFee(policy, recipient_amount, service_fee, error);
+}
+
+bool CheckPaymasterRecoveryServiceFee(const CWallet& wallet,
+                                     const AlternativeRecoveryManifest& manifest, std::string& error)
+{
+    int64_t returned{0};
+    for (const auto& output : manifest.wallet_returns) {
+        if (output.amount.value <= 0 || output.amount.value > std::numeric_limits<int64_t>::max() / 10000 - returned) {
+            error = "PAYMASTER_INVALID_RECOVERY_RETURN_AMOUNT";
+            return false;
+        }
+        returned += output.amount.value;
+    }
+    return CheckPaymasterClientServiceFee(wallet, DDCents{returned}, manifest.service_fee, error);
 }
 
 bool SetPaymasterProviderPoolEntries(CWallet& wallet,

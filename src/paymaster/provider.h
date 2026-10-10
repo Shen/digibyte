@@ -237,17 +237,21 @@ struct ProviderSafetyStatus {
 /** Wallet-local client fee ceiling. Presence of this record is the explicit
  * opt-in; zero values intentionally permit only zero-service-fee offers. */
 struct ClientSafetyPolicy {
-    static constexpr uint16_t CURRENT_VERSION{1};
+    static constexpr uint16_t CURRENT_VERSION{2};
 
     uint16_t version{CURRENT_VERSION};
     DDCents maximum_service_fee_per_transaction;
     DDCents maximum_service_fee_per_day;
     int64_t updated_at{0};
+    // -1 preserves legacy absolute-only approval. Zero permits only free offers.
+    int32_t maximum_service_fee_bps{-1};
 
     SERIALIZE_METHODS(ClientSafetyPolicy, obj)
     {
         READWRITE(obj.version, obj.maximum_service_fee_per_transaction,
                   obj.maximum_service_fee_per_day, obj.updated_at);
+        if (obj.version >= 2) READWRITE(obj.maximum_service_fee_bps);
+        SER_READ(obj, if (obj.version == 1) obj.maximum_service_fee_bps = -1);
     }
 };
 
@@ -725,6 +729,9 @@ bool ValidateProviderSafetyPolicy(const ProviderSafetyPolicy& safety,
                                   const ProviderPolicy& advertised,
                                   std::string& error);
 bool ValidateClientSafetyPolicy(const ClientSafetyPolicy& policy, std::string& error);
+/** Check the actual rounded fee against the amount received, using integer arithmetic. */
+bool CheckClientServiceFee(const ClientSafetyPolicy& policy, DDCents recipient_amount,
+                           DDCents service_fee, std::string& error);
 bool ValidateProviderBudgetLedger(const ProviderBudgetLedger& ledger, std::string& error);
 bool ValidateClientFeeLedger(const ClientFeeLedger& ledger, std::string& error);
 const FundingSafetyLimits& GetFundingSafetyLimits(const ProviderSafetyPolicy& policy,

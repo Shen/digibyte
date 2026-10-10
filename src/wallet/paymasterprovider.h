@@ -9,6 +9,7 @@
 
 #include <paymaster/directory.h>
 #include <paymaster/provider.h>
+#include <paymaster/recovery.h>
 #include <paymaster/reservation.h>
 #include <paymaster/sponsorship.h>
 #include <paymaster/wire.h>
@@ -185,6 +186,15 @@ bool SetPaymasterClientSafetyPolicy(
 bool GetPaymasterClientSafetyPolicy(
     const CWallet& wallet,
     DigiDollar::Paymaster::ClientSafetyPolicy& policy);
+
+/** Recheck current wallet-local fee approval before creating new authority. */
+bool CheckPaymasterClientServiceFee(const CWallet& wallet,
+                                   DigiDollar::Paymaster::DDCents recipient_amount,
+                                   DigiDollar::Paymaster::DDCents service_fee,
+                                   std::string& error);
+bool CheckPaymasterRecoveryServiceFee(const CWallet& wallet,
+                                     const DigiDollar::Paymaster::AlternativeRecoveryManifest& manifest,
+                                     std::string& error);
 
 bool GetPaymasterClientFeeLedger(
     const CWallet& wallet,

@@ -289,16 +289,18 @@ RPCHelpMan setpaymasterclientsafetypolicy()
 {
     return RPCHelpMan{
         "setpaymasterclientsafetypolicy",
-        "Persist wallet-local per-transfer and rolling-day Paymaster service-fee ceilings.\n",
+        "Persist wallet-local absolute, percentage and rolling-day Paymaster service-fee ceilings.\n",
         {
             {"policy", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Complete local client safety policy", {
                                                                                                            {"maximum_service_fee_per_transaction_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Maximum service fee for one transfer"},
+                                                                                                           { "maximum_service_fee_bps", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Effective fee as basis points of the actual recipient amount (100 = 1%, 0 = free only, 0..10000). Omission preserves the saved percentage cap." },
                                                                                                            {"maximum_service_fee_per_day_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Rolling-day service-fee ceiling"},
                                                                                                        }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Persisted client safety policy", {
                                                                                   {RPCResult::Type::NUM, "maximum_service_fee_per_transaction_cents", "Per-transfer service-fee ceiling"},
                                                                                   {RPCResult::Type::NUM, "maximum_service_fee_per_day_cents", "Rolling-day service-fee ceiling"},
+                                                                                  {RPCResult::Type::NUM, "maximum_service_fee_bps", /*optional=*/true, "Effective percentage ceiling; absent for legacy absolute-only approval"},
                                                                                   {RPCResult::Type::NUM_TIME, "updated_at", "Last policy update"},
                                                                               }},
         RPCExamples{HelpExampleCli("setpaymasterclientsafetypolicy", "'{\"maximum_service_fee_per_transaction_cents\":100,\"maximum_service_fee_per_day_cents\":1000}'")},
@@ -329,7 +331,8 @@ RPCHelpMan getpaymasterclientsafetystatus()
                                                                         {RPCResult::Type::OBJ, "policy", /*optional=*/true, "Client safety policy", {
                                                                                                                                                         {RPCResult::Type::NUM, "maximum_service_fee_per_transaction_cents", "Per-transfer ceiling"},
                                                                                                                                                         {RPCResult::Type::NUM, "maximum_service_fee_per_day_cents", "Rolling-day ceiling"},
-                                                                                                                                                        {RPCResult::Type::NUM_TIME, "updated_at", "Last policy update"},
+                                                                                                                                                        {RPCResult::Type::NUM, "maximum_service_fee_bps", /*optional=*/true, "Effective percentage ceiling; absent for legacy absolute-only approval"},
+                                                                                  {RPCResult::Type::NUM_TIME, "updated_at", "Last policy update"},
                                                                                                                                                     }},
                                                                         {RPCResult::Type::NUM_TIME, "accounting_time_high_water", /*optional=*/true, "Monotonic accounting time"},
                                                                         {RPCResult::Type::NUM, "active_reservations", /*optional=*/true, "Active fee reservations"},

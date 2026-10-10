@@ -6281,4 +6281,36 @@ BOOST_AUTO_TEST_CASE(provider_successor_reconciliation_recycles_carrier_and_dgb_
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_SUCCESSOR_CONFLICT");
 }
 
+BOOST_AUTO_TEST_CASE(client_percentage_policy_update_preserves_approval_and_recovery_bounds)
+{
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{100};
+    policy.maximum_service_fee_per_day = DDCents{1000};
+    std::string error;
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 100, error));
+    ClientSafetyPolicy saved;
+    BOOST_REQUIRE(GetPaymasterClientSafetyPolicy(m_wallet, saved));
+    BOOST_CHECK_EQUAL(saved.maximum_service_fee_bps, -1);
+    policy.maximum_service_fee_bps = 100;
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 101, error));
+    BOOST_CHECK(CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{1}, error));
+    BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{99}, DDCents{1}, error));
+    policy.maximum_service_fee_bps = -1; // Older client changes only the absolute limits.
+    policy.maximum_service_fee_per_transaction = DDCents{200};
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 102, error));
+    BOOST_REQUIRE(GetPaymasterClientSafetyPolicy(m_wallet, saved));
+    BOOST_CHECK_EQUAL(saved.maximum_service_fee_bps, 100);
+    BOOST_CHECK_EQUAL(saved.maximum_service_fee_per_transaction.value, 200);
+    AlternativeRecoveryManifest recovery;
+    recovery.wallet_returns = {{CScript{}, DDCents{50}}, {CScript{}, DDCents{50}}};
+    recovery.service_fee = DDCents{1};
+    BOOST_CHECK(CheckPaymasterRecoveryServiceFee(m_wallet, recovery, error));
+    recovery.wallet_returns.back().amount = DDCents{49};
+    BOOST_CHECK(!CheckPaymasterRecoveryServiceFee(m_wallet, recovery, error));
+    policy.maximum_service_fee_bps = 0;
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 103, error));
+    BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{1}, error));
+    BOOST_CHECK(CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{0}, error));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

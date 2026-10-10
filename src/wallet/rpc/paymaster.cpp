@@ -5262,6 +5262,9 @@ UniValue ClientSafetyPolicyToJSON(
                   policy.maximum_service_fee_per_transaction.value);
     result.pushKV("maximum_service_fee_per_day_cents",
                   policy.maximum_service_fee_per_day.value);
+    if (policy.maximum_service_fee_bps >= 0) {
+        result.pushKV("maximum_service_fee_bps", policy.maximum_service_fee_bps);
+    }
     result.pushKV("updated_at", policy.updated_at);
     return result;
 }
@@ -5270,16 +5273,33 @@ DigiDollar::Paymaster::ClientSafetyPolicy ParseClientSafetyPolicy(
     const UniValue& value)
 {
     using namespace DigiDollar::Paymaster;
+    RPCTypeCheckObj(value,
+        {{"maximum_service_fee_per_transaction_cents", UniValueType(UniValue::VNUM)},
+         {"maximum_service_fee_per_day_cents", UniValueType(UniValue::VNUM)}},
+        /*fAllowNull=*/false, /*fStrict=*/false);
     RPCTypeCheckObj(
         value,
         {{"maximum_service_fee_per_transaction_cents", UniValueType(UniValue::VNUM)},
-         {"maximum_service_fee_per_day_cents", UniValueType(UniValue::VNUM)}},
-        /*fAllowNull=*/false, /*fStrict=*/true);
+         {"maximum_service_fee_per_day_cents", UniValueType(UniValue::VNUM)},
+         {"maximum_service_fee_bps", UniValueType(UniValue::VNUM)}},
+        /*fAllowNull=*/true, /*fStrict=*/true);
     ClientSafetyPolicy policy;
     policy.maximum_service_fee_per_transaction = DDCents{
         value.find_value("maximum_service_fee_per_transaction_cents").getInt<int64_t>()};
     policy.maximum_service_fee_per_day = DDCents{
         value.find_value("maximum_service_fee_per_day_cents").getInt<int64_t>()};
+    if (value.exists("maximum_service_fee_bps")) {
+        int64_t bps;
+        try {
+            bps = value.find_value("maximum_service_fee_bps").getInt<int64_t>();
+        } catch (const std::exception&) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "maximum_service_fee_bps must be an integer between 0 and 10000");
+        }
+        if (bps < 0 || bps > 10000) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "maximum_service_fee_bps must be between 0 and 10000");
+        }
+        policy.maximum_service_fee_bps = static_cast<int32_t>(bps);
+    }
     return policy;
 }
 

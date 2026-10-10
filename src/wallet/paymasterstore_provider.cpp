@@ -1198,6 +1198,10 @@ bool PaymasterStore::AcceptClientAuthorization(
             [&](const ClientFeeReservation& reservation) {
                 return reservation.commit_key == attempt.commit_key;
             });
+        if (!already_accepted && !CheckClientServiceFee(client_policy,
+                attempt.client_manifest.recipient_amount, quote_response.quote.service_fee, error)) {
+            return false;
+        }
         const bool exact_reserved_fee =
             existing_fee != client_fee_ledger.reservations.end() &&
             existing_fee->service_fee == quote_response.quote.service_fee &&
