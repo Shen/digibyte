@@ -139,6 +139,8 @@ private Q_SLOTS:
     void paymasterClientRecoveryExpiryIsFailClosed();
     void paymasterClientLiveRecoveryProgresses_data();
     void paymasterClientLiveRecoveryProgresses();
+    void paymasterClientPercentageLimits();
+    void paymasterClientTimeoutKeepsObserving();
     void paymasterClientDelayedCallbackIgnoresWalletClose();
     void paymasterClientUnlockLeaseSurvivesWalletModelClose();
     void paymasterSigningWaitKeepsGuiResponsive();

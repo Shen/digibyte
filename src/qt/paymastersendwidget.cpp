@@ -50,6 +50,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHeaderView>
@@ -104,7 +105,7 @@ private:
 
 bool DecodeClientSafetyPolicy(const UniValue& policy,
                               qint64& maximum_per_transaction,
-                              qint64& maximum_per_day)
+                              qint64& maximum_per_day, qint64& maximum_bps)
 {
     const UniValue& per_transaction =
         policy.find_value("maximum_service_fee_per_transaction_cents");
@@ -116,6 +117,9 @@ bool DecodeClientSafetyPolicy(const UniValue& policy,
     try {
         maximum_per_transaction = per_transaction.getInt<qint64>();
         maximum_per_day = per_day.getInt<qint64>();
+        const auto& bps = policy.find_value("maximum_service_fee_bps");
+        maximum_bps = bps.isNull() ? -1 : bps.getInt<qint64>();
+        if (maximum_bps < -1 || maximum_bps > 10000 || (policy.exists("maximum_service_fee_bps") && maximum_bps < 0)) return false;
     } catch (const std::exception&) {
         return false;
     }
@@ -130,7 +134,7 @@ bool DecodeClientSafetyPolicy(const UniValue& policy,
 
 bool DecodeClientSafetyStatus(const UniValue& result, bool& configured,
                               qint64& maximum_per_transaction,
-                              qint64& maximum_per_day,
+                              qint64& maximum_per_day, qint64& maximum_bps,
                               qint64& active_reservations,
                               qint64& reserved_cents,
                               qint64& spent_cents,
@@ -150,7 +154,7 @@ bool DecodeClientSafetyStatus(const UniValue& result, bool& configured,
         result.find_value("available_service_fee_today_cents");
     if (!DecodeClientSafetyPolicy(
             result.find_value("policy"), maximum_per_transaction,
-            maximum_per_day) ||
+            maximum_per_day, maximum_bps) ||
         !active.isNum() || !reserved.isNum() || !spent.isNum() ||
         !available.isNum()) {
         return false;
@@ -252,9 +256,7 @@ bool IsKnownPaymasterAction(const QString& action)
 bool IsTerminalPaymasterState(const QString& state)
 {
     return state == QStringLiteral("CONFIRMED") ||
-        state == QStringLiteral("CANCELED_SAFE") ||
-        state == QStringLiteral("FAILED") ||
-        state == QStringLiteral("CONFLICTED");
+        state == QStringLiteral("CANCELED_SAFE");
 }
 
 struct PaymasterSessionSnapshot {
@@ -280,6 +282,7 @@ struct PaymasterSessionSnapshot {
     QString result_status;
     qint64 result_sequence{-1};
     qint64 recovery_expires_at{-1};
+    qint64 created_at{0};
     QStringList allowed_actions;
     qint64 payment_cents{-1};
     qint64 service_fee_cents{-1};
@@ -337,6 +340,11 @@ bool DecodePaymasterSessionSnapshot(const UniValue& result,
             }
             snapshot.restored_options.pushKV(key, value);
         }
+    }
+    if (session.exists("created_at") &&
+        (!ReadInt64(session, "created_at", snapshot.created_at) || snapshot.created_at <= 0)) {
+        error = QStringLiteral("invalid session creation time");
+        return false;
     }
     snapshot.transaction_id = read_string(session, "txid");
     snapshot.recovery_transaction_id = read_string(session, "recovery_txid");
@@ -1454,7 +1462,7 @@ QString PaymasterSendWidget::friendlyPaymasterSessionStatus() const
     }
     if (m_paymasterSessionState == QStringLiteral("PENDING_PROVIDER")) {
         return m_paymasterArtifact == QStringLiteral("user_psbt")
-            ? DigiDollarSendWidget::tr("Your authorized transaction is waiting for the provider. Keep this session protected until it completes or is safely recovered.")
+            ? DigiDollarSendWidget::tr("Your signed payment is waiting for the provider. Status checks continue automatically. Do not send the payment again. If it remains unresolved, prepare a return to this wallet; review any recovery fee before signing. Funds become available only after a payment or recovery is confirmed.")
             : DigiDollarSendWidget::tr("Waiting for the selected provider. No additional action is normally required.");
     }
     if (m_paymasterSessionState == QStringLiteral("MEMPOOL") ||
@@ -1608,9 +1616,13 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
                 ? DigiDollarSendWidget::tr("Check another offer")
                 : DigiDollarSendWidget::tr("Try another Paymaster"));
     } else if ((m_paymasterSessionState == QStringLiteral("FAILED") ||
-                m_paymasterSessionState == QStringLiteral("CONFLICTED")) && safe_recovery) {
+                m_paymasterSessionState == QStringLiteral("CONFLICTED") ||
+                ((m_paymasterSessionState == QStringLiteral("AUTHORIZED") ||
+                  m_paymasterSessionState == QStringLiteral("PENDING_PROVIDER")) &&
+                 m_paymasterSessionCreatedAt > 0 &&
+                 QDateTime::currentSecsSinceEpoch() - m_paymasterSessionCreatedAt >= MAX_PAYMASTER_ACTIVE_SEND_MS / 1000)) && safe_recovery) {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::RECOVER;
-        m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Start safe recovery"));
+        m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Prepare return to this wallet…"));
     } else {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::REFRESH;
         m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Check current status"));
@@ -1725,6 +1737,7 @@ void PaymasterSendWidget::onPaymasterPrimaryAction()
         m_paymasterResultStatus.clear();
         m_paymasterResultSequence = -1;
         m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterSessionCreatedAt = 0;
         m_paymasterTerminalNoticeShown = false;
         m_paymasterSessionPersisted = false;
         m_paymasterAddress.clear();
@@ -1799,33 +1812,43 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     auto* explanation = new QLabel(DigiDollarSendWidget::tr(
         "These wallet-local limits protect your $DD. A Paymaster offer can never charge more "
         "than the lower of these limits and the limit selected for the transfer. Limits are "
-        "not shared with providers. Both values must be positive."), &dialog);
+        "not shared with providers. The percentage uses the actual rounded fee divided by the amount received. Zero permits only free offers."), &dialog);
     explanation->setWordWrap(true);
     layout->addWidget(explanation);
 
     auto* form = new QFormLayout();
     auto* per_transfer = new NoWheelSpinBox(&dialog);
     per_transfer->setObjectName("clientSafetyPerTransferDialog");
-    per_transfer->setRange(1, 10000000);
+    per_transfer->setRange(0, 10000000);
     per_transfer->setValue(static_cast<int>(m_clientSafetyMaximumPerTransaction));
     per_transfer->setSuffix(DigiDollarSendWidget::tr(" cents"));
     auto* per_day = new NoWheelSpinBox(&dialog);
     per_day->setObjectName("clientSafetyPerDayDialog");
-    per_day->setRange(1, 10000000);
+    per_day->setRange(0, 10000000);
     per_day->setValue(static_cast<int>(m_clientSafetyMaximumPerDay));
     per_day->setSuffix(DigiDollarSendWidget::tr(" cents"));
+    auto* percentage = new QDoubleSpinBox(&dialog);
+    percentage->setObjectName("clientSafetyPercentDialog");
+    percentage->setLocale(QLocale::c());
+    percentage->setRange(0, 100);
+    percentage->setDecimals(2);
+    percentage->setSingleStep(0.1);
+    percentage->setSuffix(QStringLiteral(" %"));
+    percentage->setValue(m_clientSafetyMaximumBps < 0 ? 1.0 : m_clientSafetyMaximumBps / 100.0);
+    form->addRow(DigiDollarSendWidget::tr("Maximum effective service fee:"), percentage);
     form->addRow(DigiDollarSendWidget::tr("Maximum per transfer:"), per_transfer);
     form->addRow(DigiDollarSendWidget::tr("Maximum in a rolling day:"), per_day);
     layout->addLayout(form);
 
     auto* recommendation = new QLabel(
         DigiDollarSendWidget::tr("Recommended starting values: 1.00 $DD (100 cents) per transfer and "
-           "10.00 $DD (1,000 cents) per rolling day."), &dialog);
+           "10.00 $DD (1,000 cents) per rolling day, with a 1% effective fee ceiling. This allows a 1-cent fee on 1 DD received. Changes take effect only after saving."), &dialog);
     recommendation->setWordWrap(true);
     layout->addWidget(recommendation);
     auto* restore = new QPushButton(DigiDollarSendWidget::tr("Restore recommended limits"), &dialog);
     restore->setObjectName(QStringLiteral("clientSafetyRestoreDefaultsButton"));
-    connect(restore, &QPushButton::clicked, &dialog, [per_transfer, per_day] {
+    connect(restore, &QPushButton::clicked, &dialog, [per_transfer, per_day, percentage] {
+        percentage->setValue(1.0);
         per_transfer->setValue(100);
         per_day->setValue(1000);
     });
@@ -1854,6 +1877,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     UniValue policy{UniValue::VOBJ};
     const qint64 requested_per_transaction = per_transfer->value();
     const qint64 requested_per_day = per_day->value();
+    const qint64 requested_bps = qRound64(percentage->value() * 100);
+    policy.pushKV("maximum_service_fee_bps", requested_bps);
     policy.pushKV("maximum_service_fee_per_transaction_cents",
                   requested_per_transaction);
     policy.pushKV("maximum_service_fee_per_day_cents", requested_per_day);
@@ -1865,7 +1890,7 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     WalletModel* requested_model = m_walletModel;
     executePaymasterRpcAsync("setpaymasterclientsafetypolicy", std::move(params),
         [guard, requested_model, requested_per_transaction,
-         requested_per_day](UniValue result, QString error) {
+         requested_per_day, requested_bps](UniValue result, QString error) {
             if (!guard || guard->m_walletModel != requested_model) return;
             guard->m_configureClientSafetyButton->setEnabled(true);
             if (!error.isEmpty()) {
@@ -1878,8 +1903,10 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
             }
             qint64 persisted_per_transaction{0};
             qint64 persisted_per_day{0};
+            qint64 persisted_bps{-1};
             if (!DecodeClientSafetyPolicy(
-                    result, persisted_per_transaction, persisted_per_day) ||
+                    result, persisted_per_transaction, persisted_per_day, persisted_bps) ||
+                persisted_bps != requested_bps ||
                 persisted_per_transaction != requested_per_transaction ||
                 persisted_per_day != requested_per_day) {
                 const QString malformed = DigiDollarSendWidget::tr(
@@ -1895,6 +1922,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
             guard->m_clientSafetyMaximumPerTransaction =
                 persisted_per_transaction;
             guard->m_clientSafetyMaximumPerDay = persisted_per_day;
+            guard->m_clientSafetyMaximumBps = persisted_bps;
+            guard->invalidatePaymasterOfferPreview();
             guard->m_clientSafetyStatusKnown = true;
             guard->m_clientSafetyConfigured = true;
             guard->m_clientSafetyError.clear();
@@ -1931,6 +1960,7 @@ void PaymasterSendWidget::refreshClientSafetyStatus()
             bool configured{false};
             qint64 maximum_per_transaction{0};
             qint64 maximum_per_day{0};
+            qint64 maximum_bps{-1};
             qint64 active_reservations{0};
             qint64 reserved_cents{0};
             qint64 spent_cents{0};
@@ -1938,7 +1968,7 @@ void PaymasterSendWidget::refreshClientSafetyStatus()
             if (error.isEmpty() &&
                 !DecodeClientSafetyStatus(
                     result, configured, maximum_per_transaction,
-                    maximum_per_day, active_reservations, reserved_cents,
+                    maximum_per_day, maximum_bps, active_reservations, reserved_cents,
                     spent_cents, available_cents)) {
                 error = DigiDollarSendWidget::tr(
                     "Core returned an incomplete Paymaster client-safety status. No provider fee is authorized until a complete refresh succeeds.");
@@ -1947,9 +1977,15 @@ void PaymasterSendWidget::refreshClientSafetyStatus()
             guard->m_clientSafetyConfigured = error.isEmpty() && configured;
             guard->m_clientSafetyError = error;
             if (guard->m_clientSafetyConfigured) {
+                if (guard->m_clientSafetyMaximumBps != maximum_bps ||
+                    guard->m_clientSafetyMaximumPerTransaction != maximum_per_transaction ||
+                    guard->m_clientSafetyMaximumPerDay != maximum_per_day) {
+                    guard->invalidatePaymasterOfferPreview();
+                }
                 guard->m_clientSafetyMaximumPerTransaction =
                     maximum_per_transaction;
                 guard->m_clientSafetyMaximumPerDay = maximum_per_day;
+                guard->m_clientSafetyMaximumBps = maximum_bps;
                 guard->m_clientSafetyActiveReservations = active_reservations;
                 guard->m_clientSafetyReservedCents = reserved_cents;
                 guard->m_clientSafetySpentTodayCents = spent_cents;
@@ -1992,13 +2028,18 @@ void PaymasterSendWidget::updateClientSafetyDisplay()
         m_clientSafetyStatus->setText(DigiDollarSendWidget::tr(
             "! Action required · Set wallet-local Paymaster service-fee limits before sending. "
             "They cap how much $DD a provider may charge."));
-        if (m_clientSafetyDetails) m_clientSafetyDetails->setText(DigiDollarSendWidget::tr("No positive wallet-local Paymaster limits are saved."));
+        if (m_clientSafetyDetails) m_clientSafetyDetails->setText(DigiDollarSendWidget::tr("No wallet-local Paymaster limits are saved."));
     } else {
         DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::SUCCESS);
         m_clientSafetyStatus->setText(DigiDollarSendWidget::tr(
             "✓ Service-fee limits: %1 per payment · %2 per rolling 24 h")
             .arg(formatCents(m_clientSafetyMaximumPerTransaction),
                  formatCents(m_clientSafetyMaximumPerDay)));
+        const QString percentage = m_clientSafetyMaximumBps < 0
+            ? DigiDollarSendWidget::tr("Percentage limit not configured; review service-fee limits.")
+            : DigiDollarSendWidget::tr("Maximum effective fee: %1% of the amount received.").arg(QString::number(m_clientSafetyMaximumBps / 100.0, 'f', 2));
+        m_clientSafetyStatus->setText(m_clientSafetyStatus->text() + QStringLiteral(" · ") + percentage);
+        if (m_clientSafetyMaximumBps < 0) DigiDollarStatus::SetBanner(m_clientSafetyFrame, DigiDollarStatus::Kind::ACTION);
         m_clientSafetyStatus->setToolTip(DigiDollarSendWidget::tr(
             "Available today: %1\nReserved: %2 in %3 session(s)\nSpent today: %4\n"
             "The transfer-specific limit can only reduce these wallet limits.")
@@ -2850,7 +2891,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 ++row;
             }
             guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
-                                       row == 0 ? DigiDollarSendWidget::tr("No public offer for this amount yet.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
+                                       row == 0 ? DigiDollarSendWidget::tr("No public offer within this amount and your service-fee limits.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
                                                                                                                                 DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
             guard->m_offerPreview = result;
             if (!guard->m_privacy) guard->renderOfferCards();
@@ -3110,6 +3151,7 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
             m_paymasterResultStatus.clear();
             m_paymasterResultSequence = -1;
             m_paymasterRecoveryExpiresAt = -1;
+            m_paymasterSessionCreatedAt = 0;
             m_paymasterTerminalNoticeShown = false;
             m_paymasterSessionPersisted = false;
             m_paymasterAuthorizationCommitment.clear();
@@ -3405,6 +3447,7 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
     }
 
     const QString previous_state = m_paymasterSessionState;
+    if (previous_state != snapshot.state) m_paymasterTerminalNoticeShown = false;
     m_paymasterSessionFrame->show();
     if (!snapshot.request_id.isEmpty()) m_paymasterRequestId = snapshot.request_id;
     if (!snapshot.session_id.isEmpty()) {
@@ -3423,6 +3466,7 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
     m_paymasterResultStatus = snapshot.result_status;
     m_paymasterResultSequence = snapshot.result_sequence;
     m_paymasterRecoveryExpiresAt = snapshot.recovery_expires_at;
+    m_paymasterSessionCreatedAt = snapshot.created_at;
     // Replace optional state atomically. Missing fields explicitly clear stale
     // values; a new session can never inherit an old attempt or artifact.
     m_paymasterArtifact = snapshot.artifact;
@@ -3558,6 +3602,7 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
             applyPaymasterPrivacy();
             m_paymasterTerminalNoticeShown = true;
         }
+        schedulePaymasterPoll(/*state_changed=*/false);
         return true;
     }
     if (m_paymasterTerminalNoticeShown) return true;
@@ -3579,6 +3624,7 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
             m_paymasterTerminalNoticeShown = true;
             return true;
         }
+        setPaymasterNotice(QString{});
         if (m_walletModel) Q_EMIT m_walletModel->digiDollarChanged();
         m_form.showSuccess(m_paymasterTransactionId, recipient_cents / 100.0);
         m_form.onClearClicked();
@@ -3620,6 +3666,7 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
         return true;
     }
 
+    setPaymasterNotice(QString{});
     m_paymasterStateValue->setText(
         DigiDollarSendWidget::tr("Recovery confirmed; reserved inputs are safely resolved"));
     m_form.updateBalance();
@@ -3814,11 +3861,7 @@ void PaymasterSendWidget::pollPaymasterSession()
     if (m_paymasterRecoveryActive && m_paymasterActiveRecoveryParams.isArray()) {
         if (!m_paymasterActiveRecoveryStarted.isValid() ||
             m_paymasterActiveRecoveryStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
-            stopPaymasterPolling();
-            m_paymasterRecoveryActive = false;
-            updatePaymasterFocusMode();
-            m_form.showWarning(DigiDollarSendWidget::tr("Recovery processing paused"),
-                DigiDollarSendWidget::tr("Recovery did not finish within two minutes. Its authorization and reservations remain protected. Check the current status before explicitly continuing."));
+            observePaymasterOutcome();
             return;
         }
         setPaymasterBusy(true);
@@ -3830,10 +3873,13 @@ void PaymasterSendWidget::pollPaymasterSession()
     }
     if (canContinueActivePaymasterSend()) {
         if (m_paymasterActiveSendStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
-            stopPaymasterPolling();
-            m_form.showWarning(DigiDollarSendWidget::tr("Paymaster processing paused"),
-                               DigiDollarSendWidget::tr("This request did not finish within two minutes. Its saved state and any existing authorization remain protected. Check the current status before choosing a resume or recovery action."));
-            updatePaymasterFocusMode();
+            const bool unsigned_preparation = m_paymasterAuthorizationCommitment.isEmpty() &&
+                (m_paymasterArtifact.isEmpty() || m_paymasterArtifact == QStringLiteral("none"));
+            if (unsigned_preparation) {
+                closeUnusablePaymasterOffer(DigiDollarSendWidget::tr("The provider did not complete preparation within two minutes."), /*allow_cancel=*/true);
+            } else {
+                observePaymasterOutcome();
+            }
             return;
         }
         // Freeze all original fields, including the UUID, inputs, fee cap and
@@ -3886,6 +3932,19 @@ void PaymasterSendWidget::refreshPaymasterSessionState()
         });
 }
 
+void PaymasterSendWidget::observePaymasterOutcome()
+{
+    // Stop transport/signing continuations, then observe the same durable session.
+    // A timeout never grants authority to release inputs or create another spend.
+    stopPaymasterPolling();
+    m_paymasterRecoveryActive = false;
+    setPaymasterNotice(DigiDollarSendWidget::tr(
+        "The outcome is still unclear. Status checks continue automatically; no new payment is sent. "
+        "Your reserved funds remain protected. You can review a return to this wallet when Core offers it; "
+        "any recovery fee and signature require your approval."));
+    schedulePaymasterPoll(/*state_changed=*/false);
+}
+
 void PaymasterSendWidget::stopPaymasterPolling()
 {
     m_paymasterActiveRetryRequest.clear();
@@ -3902,6 +3961,7 @@ void PaymasterSendWidget::stopPaymasterPolling()
 void PaymasterSendWidget::schedulePaymasterPoll(bool state_changed)
 {
     if (m_paymasterRequestId.isEmpty() ||
+        m_paymasterUnsignedClosed ||
         IsTerminalPaymasterState(m_paymasterSessionState)) {
         stopPaymasterPolling();
         return;
@@ -3958,6 +4018,13 @@ void PaymasterSendWidget::refreshPaymasterSessionForAction(
             UniValue result, QString error) mutable {
             if (!guard) return;
             if (!error.isEmpty()) {
+                if (required_action == QStringLiteral("refresh")) {
+                    guard->setPaymasterNotice(DigiDollarSendWidget::tr(
+                        "Status is temporarily unavailable. Checks continue automatically; the existing payment and its reserved funds remain protected."));
+                    guard->setPaymasterBusy(false);
+                    guard->schedulePaymasterPoll(/*state_changed=*/false);
+                    return;
+                }
                 guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"), error);
                 guard->setPaymasterBusy(false);
                 return;
@@ -4037,9 +4104,7 @@ void PaymasterSendWidget::continuePaymasterRetry()
         m_paymasterActiveRetryRequest != m_paymasterRequestId) return;
     if (!m_paymasterActiveRetryStarted.isValid() ||
         m_paymasterActiveRetryStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
-        stopPaymasterPolling();
-        m_form.showWarning(DigiDollarSendWidget::tr("Exact retry paused"),
-            DigiDollarSendWidget::tr("The provider result has not arrived within two minutes. The existing transfer remains protected. Check its status before choosing the next step."));
+        observePaymasterOutcome();
         return;
     }
     UniValue lookup{UniValue::VOBJ};
@@ -4396,6 +4461,7 @@ void PaymasterSendWidget::clearClosedPaymasterSession()
     m_paymasterResultStatus.clear();
     m_paymasterResultSequence = -1;
     m_paymasterRecoveryExpiresAt = -1;
+    m_paymasterSessionCreatedAt = 0;
     m_paymasterTerminalNoticeShown = false;
     m_paymasterAllowedActions.clear();
     m_paymasterAllowedActionsKnown = false;
@@ -5157,6 +5223,7 @@ void PaymasterSendWidget::setPaymasterSessionForTesting(
     m_paymasterAllowedActions = allowed_actions;
     m_paymasterAllowedActionsKnown = allowed_actions_known;
     m_paymasterRecoveryExpiresAt = -1;
+    m_paymasterSessionCreatedAt = 0;
     m_paymasterSessionPersisted = persisted;
     m_paymasterAddress = address;
     m_paymasterAmount = amount;
@@ -5352,6 +5419,7 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         m_paymasterResultStatus.clear();
         m_paymasterResultSequence = -1;
         m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterSessionCreatedAt = 0;
         m_paymasterTerminalNoticeShown = false;
         m_paymasterAllowedActions.clear();
         m_paymasterAllowedActionsKnown = false;
@@ -5375,6 +5443,7 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         m_clientSafetyStatusKnown = false;
         m_clientSafetyConfigured = false;
         m_clientSafetyActiveReservations = 0;
+        m_clientSafetyMaximumBps = -1;
         m_clientSafetyReservedCents = 0;
         m_clientSafetySpentTodayCents = 0;
         m_clientSafetyAvailableTodayCents = 0;
@@ -5490,6 +5559,7 @@ void PaymasterSendWidget::send(const QString& address, CAmount amount_cents)
             m_paymasterResultStatus.clear();
             m_paymasterResultSequence = -1;
             m_paymasterRecoveryExpiresAt = -1;
+            m_paymasterSessionCreatedAt = 0;
             m_paymasterTerminalNoticeShown = false;
             m_paymasterAuthorizationCommitment.clear();
             m_paymasterSessionPrivacy = m_privacyCombo->currentData().toString();
@@ -5540,6 +5610,7 @@ void PaymasterSendWidget::resetEntry()
         m_paymasterResultStatus.clear();
         m_paymasterResultSequence = -1;
         m_paymasterRecoveryExpiresAt = -1;
+        m_paymasterSessionCreatedAt = 0;
         m_paymasterTerminalNoticeShown = false;
         m_paymasterSessionPersisted = false;
         m_paymasterAddress.clear();
@@ -5574,7 +5645,10 @@ bool PaymasterSendWidget::subtractFee() const
 bool PaymasterSendWidget::DescribeBackendError(
     const QString& reasonFailed, QString& errorTitle, QString& errorMessage)
 {
-    if (reasonFailed.contains(QStringLiteral("PAYMASTER_CLIENT_SAFETY"))) {
+    if (reasonFailed.contains(QStringLiteral("PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED"))) {
+        errorTitle = DigiDollarSendWidget::tr("Paymaster percentage limit exceeded");
+        errorMessage = DigiDollarSendWidget::tr("The actual service fee exceeds your saved percentage of the amount received. Choose a cheaper offer or review your service-fee limits. No new signature was created.");
+    } else if (reasonFailed.contains(QStringLiteral("PAYMASTER_CLIENT_SAFETY"))) {
         errorTitle = DigiDollarSendWidget::tr("Paymaster service-fee limits required");
         errorMessage = DigiDollarSendWidget::tr(
             "This wallet does not yet have valid Paymaster service-fee limits.\n\n"

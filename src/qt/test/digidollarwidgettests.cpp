@@ -4696,6 +4696,12 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(subtractPaymasterFee != nullptr);
     QVERIFY(subtractPaymasterFee->isHidden());
     QVERIFY(!subtractPaymasterFee->isChecked());
+    QVERIFY(feeSummary->text().contains(QStringLiteral("Enter a recipient")));
+    auto* feeAddress = sendPage->findChild<QLineEdit*>("addressEdit");
+    auto* feeAmount = sendPage->findChild<QLineEdit*>("amountEdit");
+    QVERIFY(feeAddress && feeAmount);
+    feeAddress->setText(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"));
+    feeAmount->setText(QStringLiteral("1.00"));
     QVERIFY(feeSummary->text().contains(QStringLiteral("~0.1 DGB")));
     QVERIFY(paymasterHelp != nullptr);
     QCOMPARE(paymasterHelp->parentWidget(), paymasterFeeCard);

@@ -100,6 +100,7 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
+    friend class PaymasterWidgetTests;
     bool hasMatchingPaymasterOffer() const;
     void updateFeeChoiceLayout();
     void setupFeeSection();
@@ -149,6 +150,7 @@ private:
     Q_SLOT void pollPaymasterSession();
     Q_SLOT void refreshPaymasterSessionState();
     void stopPaymasterPolling();
+    void observePaymasterOutcome();
     void schedulePaymasterPoll(bool state_changed);
     void refreshPaymasterSessionForAction(
         const QString& required_action, std::function<void()> continuation);
@@ -276,6 +278,7 @@ private:
     QString m_paymasterResultStatus;
     qint64 m_paymasterResultSequence{-1};
     qint64 m_paymasterRecoveryExpiresAt{-1};
+    qint64 m_paymasterSessionCreatedAt{0};
     QStringList m_paymasterAllowedActions;
     QString m_paymasterAddress;
     QString m_paymasterAuthorizationCommitment;
@@ -309,6 +312,7 @@ private:
     bool m_clientSafetyConfigured{false};
     qint64 m_clientSafetyMaximumPerTransaction{100};
     qint64 m_clientSafetyMaximumPerDay{1000};
+    qint64 m_clientSafetyMaximumBps{-1};
     qint64 m_clientSafetyActiveReservations{0};
     qint64 m_clientSafetyReservedCents{0};
     qint64 m_clientSafetySpentTodayCents{0};

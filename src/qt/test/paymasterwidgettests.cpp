@@ -3170,7 +3170,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
-    QVERIFY(status->text().contains(QStringLiteral("No public offer for this amount yet.")));
+    QVERIFY(status->text().contains(QStringLiteral("No public offer within this amount and your service-fee limits.")));
     QCOMPARE(refresh->text(), QStringLiteral("Check again"));
     QVERIFY(!send_widget.findChild<QTimer*>(QStringLiteral("paymasterOfferIconTimer"))->isActive());
 
@@ -3754,7 +3754,7 @@ void PaymasterWidgetTests::paymasterClientSessionActionMatrix_data()
         << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
         << QStringList{QStringLiteral("refresh"), QStringLiteral("retry_same"),
                        QStringLiteral("cancel_to_self")}
-        << QStringLiteral("Start safe recovery")
+        << QStringLiteral("Prepare return to this wallet…")
         << true << false << false << false << true;
     QTest::newRow("failed-signed-core-denies-recovery")
         << QStringLiteral("FAILED") << QStringLiteral("user_psbt")
@@ -3767,7 +3767,7 @@ void PaymasterWidgetTests::paymasterClientSessionActionMatrix_data()
         << QStringLiteral("SUBMITTED") << QStringLiteral("NONE")
         << QStringList{QStringLiteral("refresh"), QStringLiteral("retry_same"),
                        QStringLiteral("cancel_to_self")}
-        << QStringLiteral("Start safe recovery")
+        << QStringLiteral("Prepare return to this wallet…")
         << true << false << false << false << true;
     QTest::newRow("contradictory-unsigned-provider-pending")
         << QStringLiteral("PENDING_PROVIDER") << QStringLiteral("none")
@@ -12628,4 +12628,104 @@ void PaymasterWidgetTests::paymasterAppNumberFormat()
         QVERIFY(rate->text().contains("0.80"));
         QVERIFY(!rate->text().contains(','));
     }
+}
+
+
+void PaymasterWidgetTests::paymasterClientPercentageLimits()
+{
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-percentage-policy");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    UniValue status = PaymasterClientSafetyStatus();
+    UniValue saved;
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasterclientsafetystatus") return status;
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "setpaymasterclientsafetypolicy") {
+            saved = params[0];
+            status.pushKV("policy", saved);
+            return saved;
+        }
+        throw std::runtime_error("unexpected percentage test RPC");
+    });
+    form.setWalletModel(gui.walletModel.get());
+    QVERIFY(client->m_clientSafetyStatus->text().contains("Percentage limit not configured"));
+    bool reviewed{false};
+    QTimer::singleShot(0, &form, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto* percentage = dialog->findChild<QDoubleSpinBox*>("clientSafetyPercentDialog");
+        QVERIFY(percentage);
+        QCOMPARE(percentage->value(), 1.0);
+        QVERIFY(saved.isNull()); // Displaying the suggestion grants no approval.
+        percentage->setValue(0.50);
+        reviewed = true;
+        dialog->accept();
+    });
+    client->configureClientSafetyPolicy();
+    QVERIFY(reviewed);
+    QCOMPARE(saved.find_value("maximum_service_fee_bps").getInt<int>(), 50);
+    QCOMPARE(client->m_clientSafetyMaximumBps, qint64{50});
+    QVERIFY(client->m_clientSafetyStatus->text().contains("0.50%"));
+    form.setWalletModel(nullptr);
+    QCOMPARE(client->m_clientSafetyMaximumBps, qint64{-1});
+}
+
+void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
+{
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-timeout-observation");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    QStringList actions;
+    bool unavailable{false};
+    auto snapshot = PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED");
+    UniValue session = snapshot.find_value("session");
+    session.pushKV("created_at", QDateTime::currentSecsSinceEpoch() - 180);
+    snapshot.pushKV("session", session);
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command != "resolvepaymastersession") throw std::runtime_error("unexpected mutation");
+        actions.push_back(QString::fromStdString(params[1].get_str()));
+        if (unavailable) throw std::runtime_error("temporarily unavailable");
+        return snapshot;
+    });
+    form.setWalletModel(gui.walletModel.get());
+    QVERIFY(client->updatePaymasterSessionView(snapshot));
+    QVERIFY(client->m_paymasterPrimaryButton->text().contains("Prepare return"));
+    // A live recovery wait expires without granting a fresh signature or retry.
+    client->m_paymasterRecoveryActive = true;
+    client->m_paymasterActiveRecoveryParams = UniValue{UniValue::VARR};
+    client->m_paymasterActiveRecoveryStarted.invalidate();
+    client->pollPaymasterSession();
+    QVERIFY(client->m_paymasterPollTimer->isActive());
+    QVERIFY(!client->m_paymasterRecoveryActive);
+    QVERIFY(actions.isEmpty());
+    client->pollPaymasterSession();
+    QCOMPARE(actions, QStringList{"refresh"});
+    unavailable = true;
+    client->pollPaymasterSession();
+    QCOMPARE(actions, QStringList({"refresh", "refresh"}));
+    QVERIFY(client->m_paymasterPollTimer->isActive());
+    QVERIFY(client->m_paymasterNotice->text().contains("temporarily unavailable"));
+    QCOMPARE(client->m_paymasterArtifact, QStringLiteral("user_psbt"));
+    QVERIFY(!client->m_paymasterRequestId.isEmpty());
+    unavailable = false;
+    snapshot = PaymasterSessionView("FAILED", "user_psbt", "USER_SIGNED");
+    client->pollPaymasterSession();
+    QVERIFY(client->m_paymasterPollTimer->isActive());
+    QCOMPARE(actions.back(), QStringLiteral("refresh"));
+    QCOMPARE(client->m_paymasterArtifact, QStringLiteral("user_psbt"));
 }
