@@ -34,6 +34,12 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
+#ifdef USE_SQLITE
+#include <sqlite3.h>
+#include <util/translation.h>
+#include <wallet/sqlite.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <initializer_list>
@@ -45,6 +51,66 @@ using namespace DigiDollar::Paymaster;
 using namespace wallet;
 
 namespace {
+
+#ifdef USE_SQLITE
+uint256 SQLiteRecordDigest(WalletDatabase& database)
+{
+    auto batch = database.MakeBatch();
+    auto cursor = batch->GetNewCursor();
+    BOOST_REQUIRE(cursor);
+    std::vector<std::pair<std::vector<unsigned char>, std::vector<unsigned char>>> records;
+    while (true) {
+        DataStream key;
+        DataStream value;
+        const auto status = cursor->Next(key, value);
+        if (status == DatabaseCursor::Status::DONE) break;
+        BOOST_REQUIRE(status == DatabaseCursor::Status::MORE);
+        const auto key_bytes = MakeUCharSpan(key);
+        const auto value_bytes = MakeUCharSpan(value);
+        records.push_back({{key_bytes.begin(), key_bytes.end()}, {value_bytes.begin(), value_bytes.end()}});
+    }
+    std::sort(records.begin(), records.end());
+    HashWriter hasher;
+    hasher << records;
+    return hasher.GetHash();
+}
+
+int SQLiteInteger(sqlite3* database, const std::string& sql)
+{
+    sqlite3_stmt* statement{nullptr};
+    BOOST_REQUIRE_EQUAL(sqlite3_prepare_v2(database, sql.c_str(), -1, &statement, nullptr), SQLITE_OK);
+    const int result = sqlite3_step(statement);
+    const int value = result == SQLITE_ROW ? sqlite3_column_int(statement, 0) : -1;
+    sqlite3_finalize(statement);
+    BOOST_REQUIRE_EQUAL(result, SQLITE_ROW);
+    return value;
+}
+
+/** Deny only COMMIT on one connection; rollback and reads remain available.
+ * Exercises the real SQLite transaction, not a physical I/O/power-loss fault. */
+class SQLiteCommitFailure {
+    sqlite3* const m_database;
+
+public:
+    size_t denied_commits{0};
+
+    explicit SQLiteCommitFailure(sqlite3* database) : m_database{database}
+    {
+        BOOST_REQUIRE_EQUAL(sqlite3_set_authorizer(database,
+            [](void* context, int action, const char* first, const char*, const char*, const char*) {
+                if (action == SQLITE_TRANSACTION && first && std::string_view{first} == "COMMIT") {
+                    ++static_cast<SQLiteCommitFailure*>(context)->denied_commits;
+                    return SQLITE_DENY;
+                }
+                return SQLITE_OK;
+            }, this), SQLITE_OK);
+    }
+
+    ~SQLiteCommitFailure() { sqlite3_set_authorizer(m_database, nullptr, nullptr); }
+    SQLiteCommitFailure(const SQLiteCommitFailure&) = delete;
+    SQLiteCommitFailure& operator=(const SQLiteCommitFailure&) = delete;
+};
+#endif
 
 template <typename T>
 std::vector<unsigned char> SerializePaymasterSecurityObject(const T& object)
@@ -831,6 +897,106 @@ BOOST_AUTO_TEST_CASE(provider_restore_marker_corruption_and_future_versions_fail
         BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_restore);
     }
 }
+
+#ifdef USE_SQLITE
+BOOST_AUTO_TEST_CASE(sqlite_full_quote_preserves_budget_pool_and_retry)
+{
+    constexpr int64_t now{1000};
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655441095";
+    auto environment = MakeProviderEnvironment(now, /*maximum_reserved=*/2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment, request_id,
+        uint256S("1095"), now, fixture, error), error);
+    const auto path = m_path_root / "paymaster-sqlite-full";
+    DatabaseOptions options;
+    DatabaseStatus status;
+    bilingual_str database_error;
+    uint256 before;
+    {
+        auto database = MakeSQLiteDatabase(path, options, status, database_error);
+        BOOST_REQUIRE_MESSAGE(database, database_error.original);
+        auto* const sqlite = database.get();
+        wallet::CWallet wallet{m_node.chain.get(), "sqlite-full-provider", std::move(database)};
+        BOOST_REQUIRE(PersistProviderQuoteEnvironment(wallet, environment, {fixture.pool_entry}));
+        before = SQLiteRecordDigest(wallet.GetDatabase());
+        const int pages = SQLiteInteger(sqlite->m_db, "PRAGMA page_count");
+        BOOST_REQUIRE_EQUAL(SQLiteInteger(sqlite->m_db,
+            "PRAGMA max_page_count=" + std::to_string(pages)), pages);
+        // Real SQLITE_FULL from a bounded engine, without filling a disk.
+        BOOST_REQUIRE_EQUAL(sqlite3_exec(sqlite->m_db,
+            "INSERT INTO main(key,value) VALUES(X'00',zeroblob(1048576))",
+            nullptr, nullptr, nullptr), SQLITE_FULL);
+        BOOST_CHECK(SQLiteRecordDigest(wallet.GetDatabase()) == before);
+        PaymasterStore store{wallet};
+        BOOST_CHECK(!store.CommitProviderQuote(fixture.attempt,
+            fixture.request.intent.genesis_hash, now, error));
+        BOOST_CHECK(error == "PAYMASTER_DATABASE_WRITE" || error == "PAYMASTER_DATABASE_COMMIT");
+        BOOST_CHECK_EQUAL(sqlite3_get_autocommit(sqlite->m_db), 1);
+        BOOST_CHECK(SQLiteRecordDigest(wallet.GetDatabase()) == before);
+    }
+    options.require_existing = true;
+    auto reopened = MakeSQLiteDatabase(path, options, status, database_error);
+    BOOST_REQUIRE_MESSAGE(reopened, database_error.original);
+    BOOST_CHECK(SQLiteRecordDigest(*reopened) == before);
+    // The page limit is connection-local. Reopening restores capacity; the
+    // exact request must succeed once, without duplicated budget or indices.
+    wallet::CWallet restarted{m_node.chain.get(), "sqlite-full-restart", std::move(reopened)};
+    PaymasterStore store{restarted};
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, now, error), error);
+    ProviderBudgetLedger ledger;
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, ledger, pool));
+    BOOST_REQUIRE_EQUAL(ledger.reservations.size(), 1U);
+    BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+    BOOST_CHECK(ledger.reservations.front().commit_key == fixture.attempt.commit_key);
+    BOOST_CHECK(pool.front().reservation_id == fixture.attempt.commit_key);
+    const auto committed = SQLiteRecordDigest(restarted.GetDatabase());
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, now + 1, error), error);
+    BOOST_CHECK(SQLiteRecordDigest(restarted.GetDatabase()) == committed);
+}
+
+BOOST_AUTO_TEST_CASE(sqlite_failed_restore_commit_cannot_leave_partial_guard)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    const auto path = m_path_root / "paymaster-sqlite-restore-commit";
+    DatabaseOptions options;
+    DatabaseStatus status;
+    bilingual_str database_error;
+    auto database = MakeSQLiteDatabase(path, options, status, database_error);
+    BOOST_REQUIRE_MESSAGE(database, database_error.original);
+    BOOST_REQUIRE(WalletBatch{*database}.WritePaymasterIdentity(environment.identity));
+    const auto before = SQLiteRecordDigest(*database);
+    bool guarded{false};
+    std::string error;
+    {
+        SQLiteCommitFailure failure{database->m_db};
+        BOOST_CHECK(!MarkPaymasterProviderRestored(*database, guarded, error));
+        BOOST_CHECK_EQUAL(failure.denied_commits, 1U);
+        BOOST_CHECK(!guarded);
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_DATABASE_WRITE");
+        BOOST_CHECK_EQUAL(sqlite3_get_autocommit(database->m_db), 1);
+        BOOST_CHECK(SQLiteRecordDigest(*database) == before);
+    }
+    database.reset();
+    options.require_existing = true;
+    database = MakeSQLiteDatabase(path, options, status, database_error);
+    BOOST_REQUIRE_MESSAGE(database, database_error.original);
+    BOOST_CHECK(SQLiteRecordDigest(*database) == before);
+    BOOST_REQUIRE_MESSAGE(MarkPaymasterProviderRestored(*database, guarded, error), error);
+    BOOST_CHECK(guarded);
+    const auto protected_image = SQLiteRecordDigest(*database);
+    database.reset();
+    auto reopened = MakeSQLiteDatabase(path, options, status, database_error);
+    BOOST_REQUIRE_MESSAGE(reopened, database_error.original);
+    BOOST_CHECK(SQLiteRecordDigest(*reopened) == protected_image);
+    wallet::CWallet restored{m_node.chain.get(), "sqlite-guard-restart", std::move(reopened)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restored, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(provider_policy_update_preserves_safety_policy_liveness)
 {
