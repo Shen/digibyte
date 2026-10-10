@@ -162,13 +162,13 @@ BOOST_AUTO_TEST_CASE(paymaster_connection_suppresses_ordinary_outbound_messages)
     {
         LOCK(inbound.cs_vSend);
         const auto& [bytes, more, message_type] =
-            inbound.m_transport->GetBytesToSend(/*have_next_message=*/true);
+            inbound.m_transport->GetBytesToSend(/*have_next_message=*/!inbound.vSendMsg.empty());
         BOOST_CHECK(!bytes.empty());
         BOOST_CHECK_EQUAL(message_type, NetMsgType::PING);
-        BOOST_CHECK(more);
-        BOOST_REQUIRE_EQUAL(inbound.vSendMsg.size(), 1U);
-        BOOST_CHECK_EQUAL(inbound.vSendMsg.front().m_type,
-                          NetMsgType::PMRECOVERYRESULT);
+        // This synthetic node uses V1 and has not authenticated a provider.
+        // Even a correctly directed private result must stay off the wire.
+        BOOST_CHECK(!more);
+        BOOST_CHECK(inbound.vSendMsg.empty());
     }
     {
         LOCK(ordinary.cs_vSend);

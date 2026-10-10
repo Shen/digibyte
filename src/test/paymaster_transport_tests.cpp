@@ -9,8 +9,12 @@
 #include <bip324.h>
 #include <chainparams.h>
 #include <key.h>
+#include <net.h>
+#include <net_processing.h>
+#include <netmessagemaker.h>
 #include <random.h>
 #include <streams.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -21,6 +25,154 @@
 #include <vector>
 
 using namespace DigiDollar::Paymaster;
+
+namespace {
+
+/** Exercise the real message handler with genuine BIP324 transports. Ordinary
+ * handshake messages enter the dispatcher directly; channel proofs and payment
+ * packets also pass through encryption and the actual receive queue. */
+struct PaymasterChannelSetup : TestingSetup {
+    Manager manager{true};
+
+    PaymasterChannelSetup() : TestingSetup{ChainType::REGTEST, {"-digidollaractivationheight=0"}}
+    {
+        PeerManager::Options options;
+        options.deterministic_rng = true;
+        options.paymaster = &manager;
+        m_node.peerman = PeerManager::make(*m_node.connman, *m_node.addrman,
+            m_node.banman.get(), *m_node.chainman, *m_node.mempool, *m_node.stempool, options);
+        CConnman::Options connman_options;
+        connman_options.m_msgproc = m_node.peerman.get();
+        connman_options.nSendBufferMaxSize = 4 * 1024 * 1024;
+        m_node.connman->Init(connman_options);
+    }
+
+    ~PaymasterChannelSetup() { m_node.peerman.reset(); }
+
+    static std::vector<CNetMessage> Transfer(Transport& sender, Transport& receiver)
+    {
+        std::vector<CNetMessage> messages;
+        const auto& [bytes, more, type] = sender.GetBytesToSend(false);
+        if (bytes.empty()) return messages;
+        std::vector<uint8_t> copied{bytes.begin(), bytes.end()};
+        sender.MarkBytesSent(copied.size());
+        Span<const uint8_t> remaining{copied};
+        while (!remaining.empty()) {
+            const size_t previous = remaining.size();
+            BOOST_REQUIRE(receiver.ReceivedBytes(remaining));
+            if (receiver.ReceivedMessageComplete()) {
+                bool reject{false};
+                messages.push_back(receiver.GetReceivedMessage({}, reject));
+                BOOST_REQUIRE(!reject);
+            }
+            BOOST_REQUIRE(remaining.size() < previous);
+        }
+        return messages;
+    }
+
+    std::unique_ptr<CNode> MakePeer(NodeId id, bool inbound, V2Transport& remote, const PaymasterId& provider)
+    {
+        in_addr address;
+        address.s_addr = htonl(0x01020304);
+        auto node = std::make_unique<CNode>(id, nullptr,
+            CAddress{CService{address, 12024}, NODE_NETWORK}, id, 0, CAddress{}, "",
+            inbound ? ConnectionType::INBOUND : ConnectionType::PAYMASTER, false,
+            CNodeOptions{.use_v2transport = true, .paymaster_listener = inbound});
+        for (int round = 0; round < 8; ++round) {
+            BOOST_REQUIRE(Transfer(*node->m_transport, remote).empty());
+            BOOST_REQUIRE(Transfer(remote, *node->m_transport).empty());
+        }
+        BOOST_REQUIRE(node->m_transport->GetInfo().session_id);
+        BOOST_REQUIRE(node->m_transport->GetInfo().session_id == remote.GetInfo().session_id);
+        m_node.peerman->InitializeNode(*node, NODE_NETWORK);
+        Drain(*node, remote);
+        if (!inbound) {
+            node->m_paymaster_lease = std::make_shared<DirectLease>();
+            node->m_paymaster_lease->key = {"test-wallet", "test-payment", false, provider};
+            node->m_paymaster_lease->peer_id = id;
+        }
+        const CNetMsgMaker maker{::PROTOCOL_VERSION};
+        const uint64_t services{NODE_NETWORK | NODE_WITNESS | NODE_P2P_V2};
+        const auto version = maker.Make(NetMsgType::VERSION, ::PROTOCOL_VERSION,
+            services, int64_t{0}, services, CAddress::V1_NETWORK(static_cast<const CService&>(node->addr)));
+        CDataStream version_stream{version.data, SER_NETWORK, ::PROTOCOL_VERSION};
+        const std::atomic<bool> interrupt{false};
+        m_node.peerman->ProcessMessage(*node, NetMsgType::VERSION, version_stream, {}, interrupt);
+        CDataStream capabilities{SER_NETWORK, ::PROTOCOL_VERSION};
+        capabilities << DigiDollar::Paymaster::PROTOCOL_VERSION
+                     << (inbound ? CAP_DIRECT_CONNECTION | CAP_CHANNEL_AUTH : CAP_CHANNEL_AUTH);
+        m_node.peerman->ProcessMessage(*node, NetMsgType::SENDPMASTERS, capabilities, {}, interrupt);
+        CDataStream verack{SER_NETWORK, ::PROTOCOL_VERSION};
+        m_node.peerman->ProcessMessage(*node, NetMsgType::VERACK, verack, {}, interrupt);
+        Drain(*node, remote);
+        BOOST_REQUIRE(!node->fDisconnect);
+        BOOST_REQUIRE(node->IsPaymasterDirectConn());
+        BOOST_REQUIRE(!node->m_paymaster_negotiated);
+        return node;
+    }
+
+    std::vector<CNetMessage> Drain(CNode& node, V2Transport& remote)
+    {
+        std::vector<CNetMessage> messages;
+        LOCK(node.cs_vSend);
+        for (size_t round = 0; ; ++round) {
+            if (round == 1024) BOOST_FAIL("V2 test send queue made no bounded progress");
+            if (!node.vSendMsg.empty()) {
+                const size_t memory = node.vSendMsg.front().GetMemoryUsage();
+                if (node.m_transport->SetMessageToSend(node.vSendMsg.front())) {
+                    node.m_send_memusage -= memory;
+                    node.vSendMsg.pop_front();
+                }
+            }
+            auto received = Transfer(*node.m_transport, remote);
+            if (received.empty() && node.vSendMsg.empty() &&
+                std::get<0>(node.m_transport->GetBytesToSend(false)).empty()) break;
+            for (auto& message : received) messages.push_back(std::move(message));
+        }
+        return messages;
+    }
+
+    void Receive(CNode& node, V2Transport& remote, CSerializedNetMsg message)
+    {
+        BOOST_REQUIRE(remote.SetMessageToSend(message));
+        const auto& [bytes, more, type] = remote.GetBytesToSend(false);
+        BOOST_REQUIRE(!bytes.empty());
+        bool complete{false};
+        static_cast<ConnmanTestMsg&>(*m_node.connman).NodeReceiveMsgBytes(node, bytes, complete);
+        remote.MarkBytesSent(bytes.size());
+        BOOST_REQUIRE(complete);
+        static_cast<ConnmanTestMsg&>(*m_node.connman).ProcessMessagesOnce(node);
+    }
+
+    ChannelChallenge BeginAuthentication(CNode& node, V2Transport& remote)
+    {
+        m_node.peerman->SendMessages(&node);
+        auto messages = Drain(node, remote);
+        std::optional<ChannelChallenge> challenge;
+        for (auto& message : messages) {
+            BOOST_REQUIRE(message.m_type == NetMsgType::PMAUTHREQ || message.m_type == NetMsgType::PING);
+            if (message.m_type == NetMsgType::PMAUTHREQ) {
+                BOOST_REQUIRE(!challenge);
+                challenge.emplace();
+                message.m_recv >> *challenge;
+                BOOST_REQUIRE(message.m_recv.empty());
+            }
+        }
+        BOOST_REQUIRE(challenge);
+        BOOST_REQUIRE(challenge->provider_id == node.m_paymaster_lease->key.provider_id);
+        BOOST_REQUIRE(challenge->transport_session_id == *remote.GetInfo().session_id);
+        return *challenge;
+    }
+
+    static ChannelProof Sign(const ChannelChallenge& challenge, const CKey& key)
+    {
+        ChannelProof proof{challenge, XOnlyPubKey{key.GetPubKey()}, {}};
+        BOOST_REQUIRE(key.SignSchnorr(GetChannelAuthHash(challenge), proof.signature, nullptr, GetRandHash()));
+        return proof;
+    }
+};
+
+} // namespace
 
 BOOST_AUTO_TEST_SUITE(paymaster_transport_tests)
 
@@ -395,6 +547,252 @@ BOOST_FIXTURE_TEST_CASE(channel_auth_queue_bounds_disconnect_and_expiry, BasicTe
     BOOST_CHECK(!manager.QueueChannelProof(0, proof, 31'002));
     BOOST_CHECK(!manager.TakeChannelProof(0, 31'002));
     BOOST_CHECK(!manager.HasChannelChallenges(challenge.provider_id, 31'002));
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_withholds_all_requests_until_authenticated, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity;
+    identity.MakeNewKey(true);
+    V2Transport remote{101, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto node = MakePeer(101, false, remote, GetPaymasterId(XOnlyPubKey{identity.GetPubKey()}));
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    const std::vector<DirectPayload> payloads{PaymasterCapacityRequest{}, PaymasterQuoteRequest{},
+        PaymasterSubmit{}, AlternativeRecoveryRequest{}, AlternativeRecoverySubmit{}};
+    const std::vector<std::string> types{NetMsgType::PMCAPREQ, NetMsgType::PMQUOTEREQ,
+        NetMsgType::PMSUBMIT, NetMsgType::PMRECOVERYREQ, NetMsgType::PMRECOVERYSUBMIT};
+    const auto challenge = BeginAuthentication(*node, remote);
+    for (size_t index = 0; index < payloads.size(); ++index) {
+        BOOST_REQUIRE(manager.QueueOutboundDirectMessage(node->GetId(), GetRandHash(), 100, payloads[index], GetTime()));
+        m_node.peerman->SendMessages(node.get());
+        BOOST_CHECK(Drain(*node, remote).empty());
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+        // Exercise each application variant independently within the peer's
+        // bounded queue. Authentication must never dequeue any of them.
+        if (index + 1 != payloads.size()) {
+            BOOST_REQUIRE_EQUAL(manager.TakeOutboundDirectMessages(node->GetId(), 1, GetTime()).size(), 1);
+        }
+    }
+    Receive(*node, remote, maker.Make(NetMsgType::PMAUTHRESP, Sign(challenge, identity)));
+    BOOST_REQUIRE(node->m_paymaster_negotiated);
+    BOOST_REQUIRE(!node->fDisconnect);
+    m_node.peerman->SendMessages(node.get());
+    auto released = Drain(*node, remote);
+    BOOST_REQUIRE_EQUAL(released.size(), 1);
+    BOOST_CHECK_EQUAL(released.front().m_type, types.back());
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 0);
+    m_node.peerman->FinalizeNode(*node);
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_rejects_identity_and_proof_manipulation, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity, impostor;
+    identity.MakeNewKey(true);
+    impostor.MakeNewKey(true);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    for (int attack = 0; attack < 8; ++attack) {
+        V2Transport remote{200 + attack, false, SER_NETWORK, INIT_PROTO_VERSION};
+        auto node = MakePeer(200 + attack, false, remote, GetPaymasterId(XOnlyPubKey{identity.GetPubKey()}));
+        const auto challenge = BeginAuthentication(*node, remote);
+        auto proof = Sign(challenge, identity);
+        switch (attack) {
+        case 0: proof = Sign(challenge, impostor); break;
+        case 1: proof.challenge.provider_id = GetPaymasterId(XOnlyPubKey{impostor.GetPubKey()}); break;
+        case 2: proof.challenge.transport_session_id = GetRandHash(); break;
+        case 3: proof.challenge.genesis_hash = GetRandHash(); break;
+        case 4: proof.challenge.nonce = GetRandHash(); break;
+        case 5: ++proof.challenge.version; break;
+        case 6: proof.signature[0] ^= 1; break;
+        case 7: node->m_paymaster_lease->canceled = true; break;
+        }
+        if (attack >= 1 && attack <= 5) proof = Sign(proof.challenge, identity);
+        BOOST_REQUIRE(manager.QueueCapacityRequest(node->GetId(), GetRandHash(), 100, {}, GetTime()));
+        Receive(*node, remote, maker.Make(NetMsgType::PMAUTHRESP, proof));
+        BOOST_REQUIRE(node->fDisconnect);
+        BOOST_CHECK(!node->m_paymaster_negotiated);
+        m_node.peerman->SendMessages(node.get());
+        BOOST_CHECK(Drain(*node, remote).empty());
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0);
+        m_node.peerman->FinalizeNode(*node);
+        // Disconnect removes channel proof authority, never signed financial
+        // evidence. Unsent artifacts remain bounded and expire normally.
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+        manager.ClearDirectMessages();
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_rejects_early_payment_traffic_on_both_halves, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    const std::vector<std::string> requests{NetMsgType::PMCAPREQ, NetMsgType::PMQUOTEREQ,
+        NetMsgType::PMSUBMIT, NetMsgType::PMRECOVERYREQ, NetMsgType::PMRECOVERYSUBMIT};
+    const std::vector<std::string> responses{NetMsgType::PMCAPRESP, NetMsgType::PMQUOTERESP,
+        NetMsgType::PMRESULT, NetMsgType::PMRECOVERYRESP, NetMsgType::PMRECOVERYRESULT};
+    for (int index = 0; index < 10; ++index) {
+        const bool inbound = index < 5;
+        V2Transport remote{300 + index, inbound, SER_NETWORK, INIT_PROTO_VERSION};
+        auto node = MakePeer(300 + index, inbound, remote, GetRandHash());
+        // Deliberately malformed bytes would throw if the financial decoder
+        // were reached. The unauthenticated transport gate must stop first.
+        Receive(*node, remote, maker.Make(inbound ? requests[index] : responses[index - 5], uint8_t{0xff}));
+        BOOST_REQUIRE(node->fDisconnect);
+        BOOST_CHECK(!node->m_paymaster_negotiated);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0);
+        m_node.peerman->SendMessages(node.get());
+        BOOST_CHECK(Drain(*node, remote).empty());
+        m_node.peerman->FinalizeNode(*node);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_reauthenticates_after_disconnect, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity;
+    identity.MakeNewKey(true);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    const auto provider = GetPaymasterId(XOnlyPubKey{identity.GetPubKey()});
+    V2Transport first_remote{401, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto first = MakePeer(401, false, first_remote, provider);
+    const auto previous = BeginAuthentication(*first, first_remote);
+    Receive(*first, first_remote, maker.Make(NetMsgType::PMAUTHRESP, Sign(previous, identity)));
+    BOOST_REQUIRE(first->m_paymaster_negotiated);
+    BOOST_REQUIRE(manager.QueueCapacityRequest(first->GetId(), GetRandHash(), 100, {}, GetTime()));
+    first->CloseSocketDisconnect();
+    m_node.peerman->SendMessages(first.get());
+    BOOST_CHECK(Drain(*first, first_remote).empty());
+    m_node.peerman->FinalizeNode(*first);
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+
+    V2Transport next_remote{402, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto next = MakePeer(402, false, next_remote, provider);
+    const auto replacement = BeginAuthentication(*next, next_remote);
+    BOOST_REQUIRE(replacement.transport_session_id != previous.transport_session_id);
+    BOOST_REQUIRE(replacement.nonce != previous.nonce);
+    Receive(*next, next_remote, maker.Make(NetMsgType::PMAUTHRESP, Sign(previous, identity)));
+    BOOST_CHECK(next->fDisconnect);
+    BOOST_CHECK(!next->m_paymaster_negotiated);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0);
+    m_node.peerman->FinalizeNode(*next);
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_provider_proof_precedes_all_responses, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity;
+    identity.MakeNewKey(true);
+    const auto provider = GetPaymasterId(XOnlyPubKey{identity.GetPubKey()});
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    V2Transport remote{501, true, SER_NETWORK, INIT_PROTO_VERSION};
+    auto node = MakePeer(501, true, remote, provider);
+    ChannelChallenge challenge;
+    challenge.genesis_hash = Params().GenesisBlock().GetHash();
+    challenge.provider_id = provider;
+    challenge.transport_session_id = *remote.GetInfo().session_id;
+    challenge.nonce = GetRandHash();
+    Receive(*node, remote, maker.Make(NetMsgType::PMAUTHREQ, challenge));
+    BOOST_REQUIRE(!node->fDisconnect);
+    BOOST_REQUIRE(!node->m_paymaster_negotiated);
+    auto work = manager.TakeChannelChallenges(provider, 1, DirectNow());
+    BOOST_REQUIRE_EQUAL(work.size(), 1);
+    BOOST_CHECK(manager.TakeChannelChallenges(GetRandHash(), 1, DirectNow()).empty());
+    PaymasterQuoteResponse quote_response;
+    const std::vector<DirectPayload> payloads{PaymasterCapacityProof{}, quote_response,
+        PaymasterResultMessage{}, AlternativeRecoveryResponse{}, AlternativeRecoveryResultMessage{}};
+    for (const auto& payload : payloads) {
+        BOOST_REQUIRE(manager.QueueOutboundDirectMessage(node->GetId(), GetRandHash(), 100, payload, GetTime()));
+        m_node.peerman->SendMessages(node.get());
+        for (const auto& message : Drain(*node, remote)) BOOST_CHECK_EQUAL(message.m_type, NetMsgType::PING);
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+        BOOST_REQUIRE_EQUAL(manager.TakeOutboundDirectMessages(node->GetId(), 1, GetTime()).size(), 1);
+    }
+    BOOST_REQUIRE(manager.QueueOutboundDirectMessage(node->GetId(), GetRandHash(), 100,
+        DirectPayload{PaymasterResultMessage{}}, GetTime()));
+    BOOST_REQUIRE(manager.QueueChannelProof(node->GetId(), Sign(challenge, identity), DirectNow()));
+    m_node.peerman->SendMessages(node.get());
+    const auto proof_messages = Drain(*node, remote);
+    BOOST_REQUIRE_EQUAL(proof_messages.size(), 1);
+    BOOST_CHECK_EQUAL(proof_messages.front().m_type, NetMsgType::PMAUTHRESP);
+    BOOST_REQUIRE(node->m_paymaster_negotiated);
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+    m_node.peerman->SendMessages(node.get());
+    const auto response_messages = Drain(*node, remote);
+    BOOST_REQUIRE_EQUAL(response_messages.size(), 1);
+    BOOST_CHECK_EQUAL(response_messages.front().m_type, NetMsgType::PMRESULT);
+    m_node.peerman->FinalizeNode(*node);
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_rejects_invalid_challenges_and_frames, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    for (int attack = 0; attack < 7; ++attack) {
+        V2Transport remote{600 + attack, true, SER_NETWORK, INIT_PROTO_VERSION};
+        auto node = MakePeer(600 + attack, true, remote, GetRandHash());
+        ChannelChallenge challenge;
+        challenge.genesis_hash = Params().GenesisBlock().GetHash();
+        challenge.provider_id = GetRandHash();
+        challenge.transport_session_id = *remote.GetInfo().session_id;
+        challenge.nonce = GetRandHash();
+        switch (attack) {
+        case 0: challenge.transport_session_id = GetRandHash(); break;
+        case 1: challenge.genesis_hash = GetRandHash(); break;
+        case 2: challenge.provider_id.SetNull(); break;
+        case 3: challenge.nonce.SetNull(); break;
+        case 4: ++challenge.version; break;
+        }
+        auto message = maker.Make(NetMsgType::PMAUTHREQ, challenge);
+        if (attack == 5) message.data.pop_back();
+        if (attack == 6) message.data.push_back(0);
+        Receive(*node, remote, std::move(message));
+        BOOST_REQUIRE(node->fDisconnect);
+        BOOST_CHECK(!node->m_paymaster_negotiated);
+        BOOST_CHECK(!manager.HasChannelChallenges(challenge.provider_id, DirectNow()));
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0);
+        m_node.peerman->SendMessages(node.get());
+        BOOST_CHECK(Drain(*node, remote).empty());
+        m_node.peerman->FinalizeNode(*node);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_sender_checks_authentication_for_internal_callers, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    for (const bool inbound : {false, true}) {
+        CKey identity;
+        identity.MakeNewKey(true);
+        V2Transport remote{701 + inbound, inbound, SER_NETWORK, INIT_PROTO_VERSION};
+        auto node = MakePeer(701 + inbound, inbound, remote,
+            GetPaymasterId(XOnlyPubKey{identity.GetPubKey()}));
+        // Bypass the normal queued sender deliberately. The last transport
+        // boundary must also reject private payloads from an internal caller.
+        const std::vector<std::string> types = inbound
+            ? std::vector<std::string>{NetMsgType::PMCAPRESP, NetMsgType::PMQUOTERESP,
+                NetMsgType::PMRESULT, NetMsgType::PMRECOVERYRESP, NetMsgType::PMRECOVERYRESULT}
+            : std::vector<std::string>{NetMsgType::PMCAPREQ, NetMsgType::PMQUOTEREQ,
+                NetMsgType::PMSUBMIT, NetMsgType::PMRECOVERYREQ, NetMsgType::PMRECOVERYSUBMIT};
+        for (const auto& type : types) {
+            m_node.connman->PushMessage(node.get(), maker.Make(type, uint8_t{0xff}));
+            BOOST_CHECK(Drain(*node, remote).empty());
+        }
+        if (!inbound) {
+            const auto challenge = BeginAuthentication(*node, remote);
+            Receive(*node, remote, maker.Make(NetMsgType::PMAUTHRESP, Sign(challenge, identity)));
+            BOOST_REQUIRE(node->m_paymaster_negotiated);
+            m_node.connman->PushMessage(node.get(), maker.Make(NetMsgType::PMCAPREQ, uint8_t{0xff}));
+            BOOST_REQUIRE_EQUAL(Drain(*node, remote).size(), 1);
+            node->m_paymaster_lease->canceled = true;
+            m_node.connman->PushMessage(node.get(), maker.Make(NetMsgType::PMCAPREQ, uint8_t{0xff}));
+            BOOST_CHECK(Drain(*node, remote).empty());
+        }
+        node->CloseSocketDisconnect();
+        m_node.connman->PushMessage(node.get(), maker.Make(types.front(), uint8_t{0xff}));
+        BOOST_CHECK(Drain(*node, remote).empty());
+        m_node.peerman->FinalizeNode(*node);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

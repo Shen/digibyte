@@ -4009,6 +4009,18 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
         return;
     }
     if (pnode->IsPaymasterDirectConn() && paymaster_direct_message) {
+        const bool channel_authentication{
+            msg.m_type == NetMsgType::PMAUTHREQ || msg.m_type == NetMsgType::PMAUTHRESP};
+        // Apply the same privacy boundary to every internal caller, not only
+        // the queued PeerManager sender. Authentication itself carries no
+        // payment data and is the only direct payload allowed before proof.
+        if (pnode->fDisconnect || !pnode->fSuccessfullyConnected ||
+            pnode->m_transport->GetInfo().transport_type != TransportProtocolType::V2 ||
+            (!channel_authentication && !pnode->m_paymaster_negotiated) ||
+            (!pnode->IsInboundConn() &&
+             (!pnode->m_paymaster_lease || pnode->m_paymaster_lease->canceled))) {
+            return;
+        }
         // The client owns the outbound half and sends requests. The provider
         // owns the accepted inbound half and sends responses. Suppress a local
         // caller that tries to put a private message on the opposite half.
