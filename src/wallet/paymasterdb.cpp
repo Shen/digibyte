@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/walletdb.h>
+#include <wallet/paymastercheckpoint.h>
 
 #include <algorithm>
 #include <ios>
@@ -56,6 +57,43 @@ const std::string PAYMASTER_EQUIVOCATION{"pmequivocation"};
 const std::string PAYMASTER_PROVIDER_BLOCK{"pmproviderblock"};
 } // namespace DBKeys
 
+// Each Paymaster mutation and its checkpoint share the same DB transaction.
+// Standalone codecs get an implicit transaction; multi-record transitions use
+// their caller's existing transaction and advance the external file once.
+template <typename K, typename T>
+bool WalletBatch::WritePaymasterIC(const K& key, const T& value, bool overwrite)
+{
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const bool written = PaymasterCheckpointWrite(this, *m_batch, m_database) &&
+                         WriteIC(key, value, overwrite) &&
+                         PaymasterCheckpointWrite(this, *m_batch, m_database);
+    if (!written) {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return false;
+    }
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
+}
+
+template <typename K>
+bool WalletBatch::ErasePaymasterIC(const K& key)
+{
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const bool erased = PaymasterCheckpointWrite(this, *m_batch, m_database) && EraseIC(key);
+    if (!erased) {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return false;
+    }
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
+}
+
 // -------------------------------------------------------------------------
 // Paymaster database codecs
 // -------------------------------------------------------------------------
@@ -86,7 +124,7 @@ bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSess
         session.version != DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION) {
         return false;
     }
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), session, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), session, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterSessionWithStatus(
@@ -157,7 +195,7 @@ bool WalletBatch::ListPaymasterSessions(
 
 bool WalletBatch::ErasePaymasterSession(const std::string& request_id)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_SESSION, request_id));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, request_id));
 }
 
 bool WalletBatch::WritePaymasterRecovery(
@@ -171,7 +209,7 @@ bool WalletBatch::WritePaymasterRecovery(
         recovery.final_transaction.empty() || recovery.created_at <= 0) {
         return false;
     }
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_RECOVERY, recovery.request_id),
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RECOVERY, recovery.request_id),
                    recovery, overwrite);
 }
 
@@ -203,7 +241,7 @@ bool WalletBatch::ReadPaymasterRecovery(
 
 bool WalletBatch::ErasePaymasterRecovery(const std::string& request_id)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_RECOVERY, request_id));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RECOVERY, request_id));
 }
 
 bool WalletBatch::WritePaymasterAlternativeRecovery(
@@ -232,7 +270,7 @@ bool WalletBatch::WritePaymasterAlternativeRecovery(
                                     recovery.recovery_provider_id, recovery.client_nonce)) {
         return false;
     }
-    return WriteIC(
+    return WritePaymasterIC(
         std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id),
         recovery, overwrite);
 }
@@ -321,7 +359,7 @@ bool WalletBatch::ErasePaymasterAlternativeRecovery(
     const uint256& recovery_id)
 {
     return !recovery_id.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY,
                                   recovery_id));
 }
 
@@ -331,7 +369,7 @@ bool WalletBatch::WritePaymasterAlternativeRecoveryRequest(
 {
     return DigiDollar::Paymaster::IsCanonicalRequestId(request_id) &&
            !recovery_id.IsNull() &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST,
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST,
                                   request_id),
                    recovery_id, overwrite);
 }
@@ -362,7 +400,7 @@ bool WalletBatch::ErasePaymasterAlternativeRecoveryRequest(
     const std::string& request_id)
 {
     return DigiDollar::Paymaster::IsCanonicalRequestId(request_id) &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST,
                                   request_id));
 }
 
@@ -375,7 +413,7 @@ bool WalletBatch::WritePaymasterAttempt(const DigiDollar::Paymaster::ProviderAtt
             DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES) {
         return false;
     }
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt.attempt_id), attempt, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt.attempt_id), attempt, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterAttemptWithStatus(
@@ -415,7 +453,7 @@ bool WalletBatch::HasPaymasterAttempt(const uint256& attempt_id)
 
 bool WalletBatch::ErasePaymasterAttempt(const uint256& attempt_id)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id));
 }
 
 bool WalletBatch::WritePaymasterCapacitySnapshot(
@@ -427,7 +465,7 @@ bool WalletBatch::WritePaymasterCapacitySnapshot(
         snapshot.session_id.IsNull() || snapshot.attempt_id.IsNull()) {
         return false;
     }
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot.snapshot_id),
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot.snapshot_id),
                    snapshot, overwrite);
 }
 
@@ -495,7 +533,7 @@ bool WalletBatch::ListPaymasterCapacitySnapshots(
 bool WalletBatch::ErasePaymasterCapacitySnapshot(const uint256& snapshot_id)
 {
     return !snapshot_id.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot_id));
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY, snapshot_id));
 }
 
 bool WalletBatch::WritePaymasterCapacitySlot(const uint256& resource_commitment,
@@ -503,7 +541,7 @@ bool WalletBatch::WritePaymasterCapacitySlot(const uint256& resource_commitment,
                                              bool overwrite)
 {
     return !resource_commitment.IsNull() && !snapshot_id.IsNull() &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SLOT, resource_commitment),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SLOT, resource_commitment),
                    snapshot_id, overwrite);
 }
 
@@ -520,7 +558,7 @@ bool WalletBatch::ErasePaymasterCapacitySlot(
     const uint256& resource_commitment)
 {
     return !resource_commitment.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SLOT,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SLOT,
                                   resource_commitment));
 }
 
@@ -537,7 +575,7 @@ bool WalletBatch::WritePaymasterCapacityResource(
         binding.value <= 0 || binding.expires_at <= 0) {
         return false;
     }
-    return WriteIC(
+    return WritePaymasterIC(
         std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESOURCE,
                        std::make_pair(binding.provider_id, binding.outpoint)),
         binding, overwrite);
@@ -583,7 +621,7 @@ bool WalletBatch::ErasePaymasterCapacityResource(
     const COutPoint& outpoint)
 {
     return !provider_id.IsNull() && !outpoint.IsNull() &&
-           EraseIC(std::make_pair(
+           ErasePaymasterIC(std::make_pair(
                DBKeys::PAYMASTER_CAPACITY_RESOURCE,
                std::make_pair(provider_id, outpoint)));
 }
@@ -594,7 +632,7 @@ bool WalletBatch::WritePaymasterCapacityResponse(
     bool overwrite)
 {
     return !request_hash.IsNull() && !response.empty() &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, request_hash),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, request_hash),
                    response, overwrite);
 }
 
@@ -643,7 +681,7 @@ bool WalletBatch::ListPaymasterCapacityResponses(
 bool WalletBatch::ErasePaymasterCapacityResponse(const uint256& request_hash)
 {
     return !request_hash.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE,
                                   request_hash));
 }
 
@@ -652,7 +690,7 @@ bool WalletBatch::WritePaymasterCapacityNonce(const uint256& client_nonce,
                                               bool overwrite)
 {
     return !client_nonce.IsNull() && !request_hash.IsNull() &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE, client_nonce),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE, client_nonce),
                    request_hash, overwrite);
 }
 
@@ -668,7 +706,7 @@ bool WalletBatch::ReadPaymasterCapacityNonce(const uint256& client_nonce,
 bool WalletBatch::ErasePaymasterCapacityNonce(const uint256& client_nonce)
 {
     return !client_nonce.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE,
                                   client_nonce));
 }
 
@@ -677,7 +715,7 @@ bool WalletBatch::WritePaymasterCapacitySession(const uint256& session_key,
                                                 bool overwrite)
 {
     return !session_key.IsNull() && !request_hash.IsNull() &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION, session_key),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION, session_key),
                    request_hash, overwrite);
 }
 
@@ -693,7 +731,7 @@ bool WalletBatch::ReadPaymasterCapacitySession(const uint256& session_key,
 bool WalletBatch::ErasePaymasterCapacitySession(const uint256& session_key)
 {
     return !session_key.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION,
                                   session_key));
 }
 
@@ -704,7 +742,7 @@ bool WalletBatch::WritePaymasterCapacityRelease(
     return release.version == DigiDollar::Paymaster::ProviderCapacityReleaseRecord::CURRENT_VERSION &&
            !release.request_hash.IsNull() && !release.client_nonce.IsNull() &&
            release.released_at > 0 &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE,
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE,
                                   release.request_hash),
                    release, overwrite);
 }
@@ -742,7 +780,7 @@ bool WalletBatch::HasPaymasterCapacityRelease(const uint256& request_hash)
 bool WalletBatch::ErasePaymasterCapacityRelease(const uint256& request_hash)
 {
     return !request_hash.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE,
                                   request_hash));
 }
 
@@ -751,7 +789,7 @@ bool WalletBatch::WritePaymasterTemplate(const uint256& template_commitment,
                                          bool overwrite)
 {
     if (template_commitment.IsNull() || attempt_id.IsNull()) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment), attempt_id, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment), attempt_id, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterTemplateWithStatus(
@@ -776,7 +814,7 @@ bool WalletBatch::ReadPaymasterTemplate(const uint256& template_commitment,
 
 bool WalletBatch::ErasePaymasterTemplate(const uint256& template_commitment)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_TEMPLATE, template_commitment));
 }
 
 bool WalletBatch::WritePaymasterUnsignedTx(const uint256& unsigned_txid,
@@ -784,7 +822,7 @@ bool WalletBatch::WritePaymasterUnsignedTx(const uint256& unsigned_txid,
                                            bool overwrite)
 {
     if (unsigned_txid.IsNull() || attempt_id.IsNull()) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid), attempt_id, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid), attempt_id, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterUnsignedTxWithStatus(
@@ -809,13 +847,13 @@ bool WalletBatch::ReadPaymasterUnsignedTx(const uint256& unsigned_txid,
 
 bool WalletBatch::ErasePaymasterUnsignedTx(const uint256& unsigned_txid)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_UNSIGNED_TX, unsigned_txid));
 }
 
 bool WalletBatch::WritePaymasterSessionId(const uint256& session_id, const std::string& request_id, bool overwrite)
 {
     if (session_id.IsNull() || !DigiDollar::Paymaster::IsCanonicalRequestId(request_id)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id), request_id, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id), request_id, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterSessionIdWithStatus(
@@ -840,7 +878,7 @@ bool WalletBatch::ReadPaymasterSessionId(const uint256& session_id,
 
 bool WalletBatch::ErasePaymasterSessionId(const uint256& session_id)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION_ID, session_id));
 }
 
 bool WalletBatch::WritePaymasterReservation(const DigiDollar::Paymaster::InputReservation& reservation, bool overwrite)
@@ -848,7 +886,7 @@ bool WalletBatch::WritePaymasterReservation(const DigiDollar::Paymaster::InputRe
     if (reservation.version != DigiDollar::Paymaster::InputReservation::CURRENT_VERSION ||
         reservation.outpoint.IsNull() || reservation.session_id.IsNull() ||
         !DigiDollar::Paymaster::IsCanonicalRequestId(reservation.request_id)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_RESERVATION, reservation.outpoint), reservation, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RESERVATION, reservation.outpoint), reservation, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterReservationWithStatus(
@@ -877,7 +915,7 @@ bool WalletBatch::ReadPaymasterReservation(
 
 bool WalletBatch::ErasePaymasterReservation(const COutPoint& outpoint)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_RESERVATION, outpoint));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RESERVATION, outpoint));
 }
 
 bool WalletBatch::WritePaymasterTombstone(const DigiDollar::Paymaster::IdempotencyTombstone& tombstone, bool overwrite)
@@ -885,7 +923,7 @@ bool WalletBatch::WritePaymasterTombstone(const DigiDollar::Paymaster::Idempoten
     if (tombstone.version != DigiDollar::Paymaster::IdempotencyTombstone::CURRENT_VERSION ||
         !DigiDollar::Paymaster::IsCanonicalRequestId(tombstone.request_id) || tombstone.session_id.IsNull() ||
         !DigiDollar::Paymaster::IsTerminal(tombstone.final_state)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, tombstone.request_id), tombstone, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_TOMBSTONE, tombstone.request_id), tombstone, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterTombstoneWithStatus(
@@ -919,7 +957,7 @@ bool WalletBatch::WritePaymasterProviderCommit(const DigiDollar::Paymaster::Prov
         commit.template_commitment.IsNull() || commit.final_txid.IsNull() ||
         commit.raw_transaction_hash.IsNull() || commit.final_transaction.empty() ||
         commit.provider_inputs.empty()) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit.commit_key), commit, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit.commit_key), commit, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterProviderCommitWithStatus(
@@ -951,7 +989,7 @@ bool WalletBatch::ReadPaymasterProviderCommit(
 
 bool WalletBatch::ErasePaymasterProviderCommit(const uint256& commit_key)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit_key));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit_key));
 }
 
 bool WalletBatch::ListPaymasterProviderCommits(
@@ -998,7 +1036,7 @@ bool WalletBatch::WritePaymasterUserAuthorization(
         authorization.commit_key.IsNull() || authorization.attempt_id.IsNull() ||
         authorization.canonical_psbt_hash.IsNull() || authorization.accepted_at <= 0 ||
         authorization.retry_until < authorization.accepted_at) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, authorization.commit_key),
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, authorization.commit_key),
                    authorization, overwrite);
 }
 
@@ -1029,7 +1067,7 @@ bool WalletBatch::ReadPaymasterUserAuthorization(
 
 bool WalletBatch::ErasePaymasterUserAuthorization(const uint256& commit_key)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, commit_key));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, commit_key));
 }
 
 bool WalletBatch::WritePaymasterIdentity(
@@ -1037,7 +1075,7 @@ bool WalletBatch::WritePaymasterIdentity(
     bool overwrite)
 {
     if (!DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity)) return false;
-    return WriteIC(DBKeys::PAYMASTER_IDENTITY, identity, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_IDENTITY, identity, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterIdentityWithStatus(
@@ -1063,7 +1101,7 @@ bool WalletBatch::WritePaymasterPolicy(const DigiDollar::Paymaster::ProviderPoli
 {
     std::string error;
     if (!DigiDollar::Paymaster::ValidateProviderPolicy(policy, error)) return false;
-    return WriteIC(DBKeys::PAYMASTER_POLICY, policy, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_POLICY, policy, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterPolicyWithStatus(
@@ -1096,7 +1134,7 @@ bool WalletBatch::WritePaymasterSettings(const DigiDollar::Paymaster::ProviderSe
 {
     if (settings.version != DigiDollar::Paymaster::ProviderSettings::CURRENT_VERSION ||
         settings.updated_at <= 0 || (settings.enabled && settings.policy_hash.IsNull())) return false;
-    return WriteIC(DBKeys::PAYMASTER_SETTINGS, settings, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_SETTINGS, settings, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterSettingsWithStatus(
@@ -1143,7 +1181,7 @@ bool WalletBatch::WritePaymasterProviderSafetyPolicy(
         !DigiDollar::Paymaster::ValidateProviderSafetyPolicy(safety, advertised, error)) {
         return false;
     }
-    return WriteIC(DBKeys::PAYMASTER_PROVIDER_SAFETY, safety, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_SAFETY, safety, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterProviderSafetyPolicyWithStatus(
@@ -1181,7 +1219,7 @@ bool WalletBatch::WritePaymasterClientSafetyPolicy(
 {
     std::string error;
     return DigiDollar::Paymaster::ValidateClientSafetyPolicy(policy, error) &&
-           WriteIC(DBKeys::PAYMASTER_CLIENT_SAFETY, policy, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_CLIENT_SAFETY, policy, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterClientSafetyPolicyWithStatus(
@@ -1214,7 +1252,7 @@ bool WalletBatch::WritePaymasterProviderBudgetLedger(
 {
     std::string error;
     return DigiDollar::Paymaster::ValidateProviderBudgetLedger(ledger, error) &&
-           WriteIC(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterProviderBudgetLedgerWithStatus(
@@ -1247,7 +1285,7 @@ bool WalletBatch::WritePaymasterClientFeeLedger(
 {
     std::string error;
     return DigiDollar::Paymaster::ValidateClientFeeLedger(ledger, error) &&
-           WriteIC(DBKeys::PAYMASTER_CLIENT_FEES, ledger, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_CLIENT_FEES, ledger, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterClientFeeLedgerWithStatus(
@@ -1280,7 +1318,7 @@ bool WalletBatch::WritePaymasterSponsorshipAuthorization(
 {
     std::string error;
     if (!DigiDollar::Paymaster::ValidateSponsorshipAuthorizationRecord(authorization, error)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_SPONSOR_AUTH, authorization.capability_hash),
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SPONSOR_AUTH, authorization.capability_hash),
                    authorization, overwrite);
 }
 
@@ -1316,7 +1354,7 @@ bool WalletBatch::WritePaymasterProviderPool(
     using namespace DigiDollar::Paymaster;
     std::string error;
     if (!ValidateProviderPoolEntries(entries, error)) return false;
-    return WriteIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterProviderPoolWithStatus(
@@ -1360,7 +1398,7 @@ bool WalletBatch::WritePaymasterLiquidityPolicy(
     if (!DigiDollar::Paymaster::ValidateProviderLiquidityPolicy(policy, error)) {
         return false;
     }
-    return WriteIC(DBKeys::PAYMASTER_LIQUIDITY_POLICY, policy, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_LIQUIDITY_POLICY, policy, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterLiquidityPolicyWithStatus(
@@ -1396,7 +1434,7 @@ bool WalletBatch::WritePaymasterMaintenanceLedger(
     if (!DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger, error)) {
         return false;
     }
-    return WriteIC(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceLedgerWithStatus(
@@ -1430,7 +1468,7 @@ bool WalletBatch::WritePaymasterFinanceLedger(
 {
     std::string error;
     return DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error) &&
-           WriteIC(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterFinanceLedgerWithStatus(
@@ -1463,7 +1501,7 @@ bool WalletBatch::WritePaymasterBackupStatus(
 {
     std::string error;
     return DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error) &&
-           WriteIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_BACKUP_STATUS, status, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterBackupStatusWithStatus(
@@ -1512,7 +1550,7 @@ bool WalletBatch::WritePaymasterCarrierWithdrawalPlan(
     std::string error;
     return DigiDollar::Paymaster::ValidateProviderCarrierWithdrawalPlan(
                plan, error) &&
-           WriteIC(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL, plan, overwrite);
+           WritePaymasterIC(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL, plan, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterCarrierWithdrawalPlanWithStatus(
@@ -1542,13 +1580,13 @@ bool WalletBatch::HasPaymasterCarrierWithdrawalPlan()
 
 bool WalletBatch::ErasePaymasterCarrierWithdrawalPlan()
 {
-    return m_batch->Erase(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL);
+    return ErasePaymasterIC(DBKeys::PAYMASTER_CARRIER_WITHDRAWAL);
 }
 
 bool WalletBatch::WritePaymasterAnnouncementSequence(uint64_t sequence, bool overwrite)
 {
     if (sequence == 0) return false;
-    return WriteIC(DBKeys::PAYMASTER_ANNOUNCE_SEQ, sequence, overwrite);
+    return WritePaymasterIC(DBKeys::PAYMASTER_ANNOUNCE_SEQ, sequence, overwrite);
 }
 
 bool WalletBatch::ReadPaymasterAnnouncementSequence(uint64_t& sequence)
@@ -1561,7 +1599,7 @@ bool WalletBatch::WritePaymasterResult(const DigiDollar::Paymaster::PaymasterRes
 {
     std::string error;
     if (!DigiDollar::Paymaster::ValidatePaymasterResultShape(result, error)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_RESULT, result.commit_key), result, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RESULT, result.commit_key), result, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterResultWithStatus(
@@ -1596,7 +1634,7 @@ bool WalletBatch::HasPaymasterResult(const uint256& commit_key)
 
 bool WalletBatch::ErasePaymasterResult(const uint256& commit_key)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_RESULT, commit_key));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RESULT, commit_key));
 }
 
 bool WalletBatch::WritePaymasterReliability(
@@ -1604,7 +1642,7 @@ bool WalletBatch::WritePaymasterReliability(
     bool overwrite)
 {
     if (!DigiDollar::Paymaster::ValidateReliabilityRecord(record)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, record.provider_id), record, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, record.provider_id), record, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterReliabilityWithStatus(
@@ -1661,7 +1699,7 @@ bool WalletBatch::ListPaymasterReliability(
 
 bool WalletBatch::ErasePaymasterReliability(const DigiDollar::Paymaster::PaymasterId& provider_id)
 {
-    return !provider_id.IsNull() && EraseIC(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id));
+    return !provider_id.IsNull() && ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id));
 }
 
 bool WalletBatch::WritePaymasterEquivocationEvidence(
@@ -1669,7 +1707,7 @@ bool WalletBatch::WritePaymasterEquivocationEvidence(
     bool overwrite)
 {
     return DigiDollar::Paymaster::ValidateEquivocationEvidence(evidence) &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION, evidence.evidence_id),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION, evidence.evidence_id),
                    evidence, overwrite);
 }
 
@@ -1693,7 +1731,7 @@ bool WalletBatch::WritePaymasterPendingEquivocation(
     bool overwrite)
 {
     return DigiDollar::Paymaster::ValidateEquivocationEvidence(evidence) &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION_PENDING,
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION_PENDING,
                                   evidence.provider_id),
                    evidence, overwrite);
 }
@@ -1758,7 +1796,7 @@ bool WalletBatch::ErasePaymasterPendingEquivocation(
     const DigiDollar::Paymaster::PaymasterId& provider_id)
 {
     return !provider_id.IsNull() &&
-           EraseIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION_PENDING,
+           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_EQUIVOCATION_PENDING,
                                   provider_id));
 }
 
@@ -1767,7 +1805,7 @@ bool WalletBatch::WritePaymasterProviderBlock(
     bool overwrite)
 {
     return DigiDollar::Paymaster::ValidateProviderBlock(block) &&
-           WriteIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_BLOCK, block.provider_id),
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_BLOCK, block.provider_id),
                    block, overwrite);
 }
 
@@ -1824,7 +1862,7 @@ bool WalletBatch::WritePaymasterOutcomeMarker(
         marker.attempt_id.IsNull() || marker.provider_id.IsNull() || marker.observed_at <= 0 ||
         static_cast<uint8_t>(marker.outcome) >
             static_cast<uint8_t>(DigiDollar::Paymaster::ReliabilityOutcome::AVAILABILITY_TIMEOUT)) return false;
-    return WriteIC(std::make_pair(DBKeys::PAYMASTER_OUTCOME, marker.attempt_id), marker, overwrite);
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_OUTCOME, marker.attempt_id), marker, overwrite);
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterOutcomeMarkerWithStatus(
@@ -1855,7 +1893,7 @@ bool WalletBatch::ReadPaymasterOutcomeMarker(
 
 bool WalletBatch::ErasePaymasterOutcomeMarker(const uint256& attempt_id)
 {
-    return EraseIC(std::make_pair(DBKeys::PAYMASTER_OUTCOME, attempt_id));
+    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_OUTCOME, attempt_id));
 }
 
 } // namespace wallet

@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <wallet/walletdb.h>
+#include <wallet/paymastercheckpoint.h>
 
 #include <common/system.h>
 #include <key_io.h>
@@ -1961,17 +1962,24 @@ bool WalletBatch::EraseRecords(const std::unordered_set<std::string>& types)
 
 bool WalletBatch::TxnBegin()
 {
-    return m_batch->TxnBegin();
+    if (!m_batch->TxnBegin()) return false;
+    PaymasterCheckpointBegin(this);
+    return true;
 }
 
 bool WalletBatch::TxnCommit()
 {
-    return m_batch->TxnCommit();
+    const bool committed = PaymasterCheckpointPrepareCommit(this) && m_batch->TxnCommit();
+    if (!committed && PaymasterCheckpointTracked(this)) m_batch->TxnAbort();
+    PaymasterCheckpointEnd(this);
+    return committed;
 }
 
 bool WalletBatch::TxnAbort()
 {
-    return m_batch->TxnAbort();
+    const bool aborted = m_batch->TxnAbort();
+    PaymasterCheckpointEnd(this);
+    return aborted;
 }
 
 std::unique_ptr<WalletDatabase> MakeDatabase(const fs::path& path, const DatabaseOptions& options, DatabaseStatus& status, bilingual_str& error)

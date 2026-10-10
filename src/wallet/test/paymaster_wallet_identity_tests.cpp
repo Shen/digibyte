@@ -879,7 +879,9 @@ BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
     ProviderPolicy legacy_policy = restored_policy;
     legacy_policy.version = ProviderPolicy::LEGACY_VERSION;
     legacy_policy.maximum_user_paid_service_fee = DDCents{0};
-    BOOST_REQUIRE(backup_batch.WritePaymasterPolicy(legacy_policy));
+    // Inject a legacy codec fixture; a restored copy must not advance the
+    // original provider checkpoint while testing deserialization.
+    BOOST_REQUIRE(backup_snapshot->MakeBatch()->Write(DBKeys::PAYMASTER_POLICY, legacy_policy));
     ProviderPolicy legacy_restored;
     BOOST_REQUIRE(backup_batch.ReadPaymasterPolicy(legacy_restored));
     BOOST_CHECK_EQUAL(legacy_restored.version, 1);

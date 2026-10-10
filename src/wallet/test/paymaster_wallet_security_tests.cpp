@@ -24,6 +24,7 @@
 #include <test/util/index.h>
 #include <validation.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -41,8 +42,10 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <initializer_list>
+#include <limits>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -191,6 +194,40 @@ bool AddTaprootSigningKey(wallet::CWallet& wallet,
     wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
     return wallet.AddWalletDescriptor(
         wallet_descriptor, provider, "", false);
+}
+
+// Existing firewall tests intentionally inject mutually exclusive synthetic
+// states for one provider. Keep the independently current marker when building
+// such a fixture, so the checkpoint gate does not mask the field-specific
+// invariant under test. This raw test-only injection is NOT a recovery API.
+// The checkpoint_* cases deliberately do not use this helper.
+void AlignSecurityFixtureCheckpoint(WalletDatabase& database)
+{
+    ProviderIdentityRecord identity;
+    if (!WalletBatch{database}.ReadPaymasterIdentity(identity)) return;
+    const auto path = PaymasterCheckpointPath(Params().GenesisBlock().GetHash(), identity.provider_id);
+    FILE* file = fsbridge::fopen(path, "rb");
+    BOOST_REQUIRE(file);
+    std::array<unsigned char, 149> bytes{};
+    const bool read = std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size();
+    const bool closed = std::fclose(file) == 0;
+    BOOST_REQUIRE(read && closed);
+    CDataStream stream{bytes, SER_DISK, CLIENT_VERSION};
+    uint64_t magic;
+    PaymasterCheckpoint checkpoint;
+    uint256 checksum;
+    stream >> magic >> checkpoint >> checksum;
+    BOOST_REQUIRE(checkpoint.provider_id == identity.provider_id);
+    BOOST_REQUIRE(checkpoint.genesis_hash == Params().GenesisBlock().GetHash());
+    BOOST_REQUIRE(checksum == (HashWriter{} << std::string{"DigiByte/PaymasterCheckpoint/v1"} << checkpoint).GetHash());
+    BOOST_REQUIRE(database.MakeBatch()->Write(std::string{"pmcheckpoint"}, checkpoint));
+}
+
+std::unique_ptr<WalletDatabase> DuplicateSecurityFixtureDatabase(WalletDatabase& database)
+{
+    auto copy = DuplicateMockDatabase(database);
+    AlignSecurityFixtureCheckpoint(*copy);
+    return copy;
 }
 
 FundingSafetyLimits SecurityLimits(int64_t maximum_reserved)
@@ -806,6 +843,189 @@ bool BuildDurableClientFinalFixture(
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_security_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(checkpoint_transaction_atomicity_and_unmarked_rollback)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    PaymasterCheckpoint before;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, before));
+    const auto old_image = database.m_records;
+    {
+        WalletBatch batch{database};
+        BOOST_REQUIRE(batch.TxnBegin());
+        BOOST_REQUIRE(batch.WritePaymasterSettings(environment.settings));
+        BOOST_REQUIRE(batch.WritePaymasterPolicy(environment.policy));
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    PaymasterCheckpoint after;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, after));
+    BOOST_CHECK_EQUAL(after.generation, before.generation + 1);
+    BOOST_CHECK(after.token != before.token);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    wallet::CWallet copied{m_node.chain.get(), "renamed-unmarked-backup", std::make_unique<MockableDatabase>(old_image)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(copied, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+    BOOST_CHECK(!WalletBatch{copied.GetDatabase()}.WritePaymasterPolicy(environment.policy));
+    BOOST_CHECK(GetMockableDatabase(copied).m_records == old_image);
+    // Abandon an uncommitted transaction. Its counter and lock must disappear
+    // with the batch, without advancing the independently retained file.
+    const auto current_image = database.m_records;
+    {
+        WalletBatch abandoned{database};
+        BOOST_REQUIRE(abandoned.TxnBegin());
+        BOOST_REQUIRE(abandoned.WritePaymasterSettings(environment.settings));
+    }
+    BOOST_CHECK(database.m_records == current_image);
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_concurrent_copies_cannot_both_commit)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    wallet::CWallet clone{m_node.chain.get(), "parallel-clone", std::make_unique<MockableDatabase>(database.m_records)};
+    const auto clone_before = GetMockableDatabase(clone).m_records;
+    WalletBatch first{database};
+    BOOST_REQUIRE(first.TxnBegin());
+    BOOST_REQUIRE(first.WritePaymasterSettings(environment.settings));
+    // Before the first commit the independent generation is still current for
+    // both images. The live transaction lock must protect this exact window.
+    bool second_committed{true};
+    std::thread second([&] {
+        second_committed = WalletBatch{clone.GetDatabase()}.WritePaymasterSettings(environment.settings);
+    });
+    second.join();
+    BOOST_CHECK(!second_committed);
+    BOOST_CHECK(GetMockableDatabase(clone).m_records == clone_before);
+    BOOST_REQUIRE(first.TxnCommit());
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    BOOST_CHECK(!CheckPaymasterCheckpoint(clone.GetDatabase(), error));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_failed_commit_blocks_retry_and_restart)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const auto before = database.m_records;
+    database.m_fail_commit = true;
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    database.m_fail_commit = false;
+    BOOST_CHECK(database.m_records == before);
+    std::string error;
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    wallet::CWallet restarted{m_node.chain.get(), "commit-failed-restart", std::make_unique<MockableDatabase>(before)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_missing_corrupt_and_unmarked_records_fail_closed)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const auto path = PaymasterCheckpointPath(Params().GenesisBlock().GetHash(), environment.identity.provider_id);
+    const auto saved = m_path_root / "checkpoint-valid.bak";
+    BOOST_REQUIRE(fs::copy_file(path, saved, fs::copy_options::none));
+    std::string error;
+    FILE* file = fsbridge::fopen(path, "ab");
+    BOOST_REQUIRE(file);
+    BOOST_REQUIRE(std::fputc(0, file) != EOF);
+    BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    BOOST_REQUIRE(fs::remove(path));
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+    BOOST_REQUIRE(fs::copy_file(saved, path, fs::copy_options::none));
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    BOOST_REQUIRE(database.MakeBatch()->Erase(std::string{"pmcheckpoint"}));
+    // Losing the in-wallet marker does not permit re-enrollment when the
+    // external provider checkpoint already exists.
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_matching_invalid_pair_and_exhaustion_fail_closed)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    PaymasterCheckpoint original;
+    BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, original));
+    const auto path = PaymasterCheckpointPath(original.genesis_hash, original.provider_id);
+    for (int mutation = 0; mutation < 8; ++mutation) {
+        auto changed = original;
+        if (mutation == 0) ++changed.version;
+        if (mutation == 1) changed.genesis_hash = uint256S("1");
+        if (mutation == 2) changed.provider_id = uint256S("2");
+        if (mutation == 3) changed.generation = 0;
+        if (mutation == 4) changed.token.SetNull();
+        if (mutation == 5) changed.pending = 2;
+        if (mutation == 6) changed.generation = (std::numeric_limits<uint64_t>::max)();
+        if (mutation == 7) changed.pending = 1;
+        // Both stores agree and the checksum is valid: rejection must come
+        // from semantic binding/version/overflow/pending checks, not mismatch.
+        CDataStream bytes{SER_DISK, CLIENT_VERSION};
+        bytes << uint64_t{0x3150435042474444} << changed
+              << (HashWriter{} << std::string{"DigiByte/PaymasterCheckpoint/v1"} << changed).GetHash();
+        FILE* file = fsbridge::fopen(path, "wb");
+        BOOST_REQUIRE(file);
+        BOOST_REQUIRE_EQUAL(std::fwrite(bytes.data(), 1, bytes.size(), file), bytes.size());
+        BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+        BOOST_REQUIRE(database.MakeBatch()->Write(std::string{"pmcheckpoint"}, changed));
+        std::string error;
+        BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(m_wallet, error));
+        BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+        PaymasterCheckpoint retained;
+        BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, retained));
+        BOOST_CHECK(retained == changed);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_pending_native_operation_survives_restart)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    std::string error;
+    {
+        LOCK(m_wallet.cs_wallet);
+        PaymasterCheckpointOperation operation{m_wallet};
+        BOOST_REQUIRE_MESSAGE(operation.Begin(error), error);
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+        BOOST_REQUIRE(WalletBatch{database}.WritePaymasterSettings(environment.settings));
+        BOOST_REQUIRE_MESSAGE(operation.Complete(error), error);
+    }
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    {
+        LOCK(m_wallet.cs_wallet);
+        PaymasterCheckpointOperation interrupted{m_wallet};
+        BOOST_REQUIRE_MESSAGE(interrupted.Begin(error), error);
+        // A second thread cannot use the first operation's temporary authority.
+        bool accepted{true};
+        std::thread other([&] {
+            std::string thread_error;
+            accepted = CheckPaymasterCheckpoint(database, thread_error);
+        });
+        other.join();
+        BOOST_CHECK(!accepted);
+    }
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(m_wallet, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION");
+    wallet::CWallet restarted{m_node.chain.get(), "pending-restart", std::make_unique<MockableDatabase>(database.m_records)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION");
+    BOOST_CHECK(!WalletBatch{restarted.GetDatabase()}.WritePaymasterSettings(environment.settings));
+}
+
 BOOST_AUTO_TEST_CASE(provider_restore_guard_is_durable_and_blocks_new_signatures)
 {
     const auto environment = MakeProviderEnvironment(200000, 2000);
@@ -886,6 +1106,7 @@ BOOST_AUTO_TEST_CASE(provider_restore_marker_corruption_and_future_versions_fail
     BOOST_CHECK(!MarkPaymasterProviderRestored(database, guarded, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_IDENTITY_INVALID");
     const auto environment = MakeProviderEnvironment(200000, 2000);
+    BOOST_REQUIRE(database.MakeBatch()->Erase(DBKeys::PAYMASTER_IDENTITY));
     BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity, /*overwrite=*/true));
     for (uint16_t version : {uint16_t{1}, uint16_t{65535}}) {
         BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_RESTORE_GUARD, version));
@@ -956,6 +1177,29 @@ BOOST_AUTO_TEST_CASE(sqlite_full_quote_preserves_budget_pool_and_retry)
     BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
         fixture.request.intent.genesis_hash, now + 1, error), error);
     BOOST_CHECK(SQLiteRecordDigest(restarted.GetDatabase()) == committed);
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_sqlite_commit_failure_retains_independent_high_water_mark)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    DatabaseOptions options;
+    DatabaseStatus status;
+    bilingual_str database_error;
+    auto database = MakeSQLiteDatabase(m_path_root / "checkpoint-commit", options, status, database_error);
+    BOOST_REQUIRE_MESSAGE(database, database_error.original);
+    BOOST_REQUIRE(WalletBatch{*database}.WritePaymasterIdentity(environment.identity));
+    const auto before = SQLiteRecordDigest(*database);
+    {
+        SQLiteCommitFailure failure{database->m_db};
+        BOOST_CHECK(!WalletBatch{*database}.WritePaymasterSettings(environment.settings));
+        BOOST_CHECK_EQUAL(failure.denied_commits, 1U);
+        BOOST_CHECK_EQUAL(sqlite3_get_autocommit(database->m_db), 1);
+    }
+    BOOST_CHECK(SQLiteRecordDigest(*database) == before);
+    std::string error;
+    BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+    BOOST_CHECK(!WalletBatch{*database}.WritePaymasterSettings(environment.settings));
 }
 
 BOOST_AUTO_TEST_CASE(sqlite_failed_restore_commit_cannot_leave_partial_guard)
@@ -1088,6 +1332,7 @@ BOOST_AUTO_TEST_CASE(provider_policy_update_preserves_safety_policy_liveness)
     BOOST_CHECK_EQUAL(persisted_settings.updated_at,
                       environment.settings.updated_at);
 
+    AlignSecurityFixtureCheckpoint(database);
     BOOST_REQUIRE_MESSAGE(SetPaymasterProviderPolicy(
                               m_wallet, compatible, now + 2, error),
                           error);
@@ -1191,6 +1436,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == before_quote);
+    AlignSecurityFixtureCheckpoint(database);
 
     BOOST_REQUIRE_MESSAGE(
         store.CommitProviderQuote(
@@ -1254,7 +1500,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
         environment.identity.provider_id, has_work, error));
     BOOST_CHECK(has_work);
 
-    auto restarted_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto restarted_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet restarted_wallet{m_node.chain.get(),
                                      "quote-security-restart",
                                      std::move(restarted_database)};
@@ -1276,17 +1522,18 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
         environment.identity.provider_id, has_work, error));
     BOOST_CHECK(has_work);
 
-    auto corrupt_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto corrupt_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet corrupt_wallet{m_node.chain.get(),
                                    "quote-security-missing-budget",
                                    std::move(corrupt_database)};
     {
         LOCK(corrupt_wallet.cs_wallet);
         WalletBatch batch{corrupt_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(corrupt_wallet.GetDatabase());
         ProviderBudgetLedger corrupt_ledger;
         BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(corrupt_ledger));
         corrupt_ledger.reservations.clear();
-        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(corrupt_ledger));
+        BOOST_REQUIRE(corrupt_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_BUDGET, corrupt_ledger));
     }
     PaymasterStore corrupt_store{corrupt_wallet};
     BOOST_CHECK(!corrupt_store.CommitProviderQuote(
@@ -1335,6 +1582,8 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == before);
 
+    AlignSecurityFixtureCheckpoint(database);
+
     // Even a FAILED/QUOTE_EXPIRED label cannot make signed artifacts prunable.
     ProviderAttempt unsafe{attempt};
     unsafe.user_signed_psbt = {1};
@@ -1346,6 +1595,7 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
     BOOST_CHECK(database.m_records == signed_records);
     database.m_records = before;
+    AlignSecurityFixtureCheckpoint(database);
 
     // Parked restricted history is retained without stopping maintenance.
     unsafe = attempt;
@@ -1358,6 +1608,7 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(boundary + 1, error), error);
     BOOST_CHECK(database.m_records == restricted_records);
     database.m_records = before;
+    AlignSecurityFixtureCheckpoint(database);
 
     // A budget/pool binding is independently protective, even if labels lie.
     ProviderBudgetLedger ledger;
@@ -1383,8 +1634,9 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(boundary + 1, error));
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, unsafe));
     database.m_records = before;
+    AlignSecurityFixtureCheckpoint(database);
 
-    auto restarted_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto restarted_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet restarted{m_node.chain.get(), "unsigned-history-restart", std::move(restarted_database)};
     PaymasterStore restarted_store{restarted};
     BOOST_REQUIRE_MESSAGE(restarted_store.ReconcileFinalSessionsAtTip(boundary + 1, error), error);
@@ -1393,6 +1645,7 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     {
         LOCK(restarted.cs_wallet);
         WalletBatch batch{restarted.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(restarted.GetDatabase());
         std::string indexed;
         uint256 indexed_attempt;
         IdempotencyTombstone tombstone;
@@ -1472,11 +1725,11 @@ BOOST_AUTO_TEST_CASE(
     const uint256 user_psbt_hash{Hash(user_signed.user_signed_psbt)};
 
     // Preserve the exact pre-authorization state for the stale-policy branch.
-    auto stale_database = DuplicateMockDatabase(m_wallet.GetDatabase());
-    auto stopped_database = DuplicateMockDatabase(m_wallet.GetDatabase());
-    auto advertised_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto stale_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
+    auto stopped_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
+    auto advertised_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     auto mismatched_budget_database =
-        DuplicateMockDatabase(m_wallet.GetDatabase());
+        DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet stale_wallet{m_node.chain.get(),
                                  "stale-user-authorization-policy",
                                  std::move(stale_database)};
@@ -1524,13 +1777,14 @@ BOOST_AUTO_TEST_CASE(
     {
         LOCK(stale_wallet.cs_wallet);
         WalletBatch batch{stale_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(stale_wallet.GetDatabase());
         ProviderSafetyPolicy changed_safety;
         BOOST_REQUIRE(
             batch.ReadPaymasterProviderSafetyPolicy(changed_safety));
         ++changed_safety.maximum_active_quotes_total;
         changed_safety.updated_at = now + 4;
         BOOST_REQUIRE(
-            batch.WritePaymasterProviderSafetyPolicy(changed_safety));
+            stale_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_SAFETY, changed_safety));
     }
     PaymasterStore stale_store{stale_wallet};
     BOOST_REQUIRE_MESSAGE(stale_store.AcceptUserAuthorization(
@@ -1573,6 +1827,7 @@ BOOST_AUTO_TEST_CASE(
     {
         LOCK(mismatched_budget_wallet.cs_wallet);
         WalletBatch batch{mismatched_budget_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(mismatched_budget_wallet.GetDatabase());
         ProviderSafetyPolicy changed_safety;
         ProviderBudgetLedger mismatched_ledger;
         BOOST_REQUIRE(
@@ -1590,9 +1845,9 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(reservation != mismatched_ledger.reservations.end());
         ++reservation->network_fee.value;
         BOOST_REQUIRE(
-            batch.WritePaymasterProviderSafetyPolicy(changed_safety));
+            mismatched_budget_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_SAFETY, changed_safety));
         BOOST_REQUIRE(
-            batch.WritePaymasterProviderBudgetLedger(mismatched_ledger));
+            mismatched_budget_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_BUDGET, mismatched_ledger));
     }
     PaymasterStore mismatched_budget_store{mismatched_budget_wallet};
     auto& mismatched_budget_mock =
@@ -1614,11 +1869,12 @@ BOOST_AUTO_TEST_CASE(
     {
         LOCK(stopped_wallet.cs_wallet);
         WalletBatch batch{stopped_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(stopped_wallet.GetDatabase());
         ProviderSettings stopped_settings;
         BOOST_REQUIRE(batch.ReadPaymasterSettings(stopped_settings));
         stopped_settings.enabled = false;
         stopped_settings.updated_at = now + 4;
-        BOOST_REQUIRE(batch.WritePaymasterSettings(stopped_settings));
+        BOOST_REQUIRE(stopped_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_SETTINGS, stopped_settings));
     }
     PaymasterStore stopped_store{stopped_wallet};
     auto& stopped_mock = GetMockableDatabase(stopped_wallet);
@@ -1634,6 +1890,7 @@ BOOST_AUTO_TEST_CASE(
     {
         LOCK(advertised_wallet.cs_wallet);
         WalletBatch batch{advertised_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(advertised_wallet.GetDatabase());
         ProviderPolicy changed_policy;
         ProviderSettings changed_settings;
         BOOST_REQUIRE(batch.ReadPaymasterPolicy(changed_policy));
@@ -1642,8 +1899,8 @@ BOOST_AUTO_TEST_CASE(
         changed_settings.policy_hash =
             GetProviderPolicyHash(changed_policy);
         changed_settings.updated_at = now + 4;
-        BOOST_REQUIRE(batch.WritePaymasterPolicy(changed_policy));
-        BOOST_REQUIRE(batch.WritePaymasterSettings(changed_settings));
+        BOOST_REQUIRE(advertised_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_POLICY, changed_policy));
+        BOOST_REQUIRE(advertised_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_SETTINGS, changed_settings));
     }
     PaymasterStore advertised_store{advertised_wallet};
     auto& advertised_mock = GetMockableDatabase(advertised_wallet);
@@ -1712,18 +1969,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(SerializePaymasterSecurityObject(capacity_proof) ==
                 SerializePaymasterSecurityObject(fixture.capacity_proof));
 
-    auto pool_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto pool_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet pool_wallet{m_node.chain.get(),
                                 "pre-signature-pool-conflict",
                                 std::move(pool_database)};
     {
         LOCK(pool_wallet.cs_wallet);
         WalletBatch batch{pool_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(pool_wallet.GetDatabase());
         std::vector<ProviderPoolEntry> pool;
         BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
         BOOST_REQUIRE_EQUAL(pool.size(), 1U);
         pool.front().reservation_id = SecurityTestId(uint256S("1701"), 99);
-        BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+        BOOST_REQUIRE(pool_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_POOL, pool));
     }
     PaymasterStore pool_store{pool_wallet};
     BOOST_CHECK(!pool_store.ValidateProviderPreSignatureAuthorization(
@@ -1733,13 +1991,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(capacity_request.provider_id.IsNull());
     BOOST_CHECK(capacity_proof.provider_id.IsNull());
 
-    auto budget_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto budget_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet budget_wallet{m_node.chain.get(),
                                   "pre-signature-budget-conflict",
                                   std::move(budget_database)};
     {
         LOCK(budget_wallet.cs_wallet);
         WalletBatch batch{budget_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(budget_wallet.GetDatabase());
         ProviderBudgetLedger ledger;
         BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(ledger));
         const auto reservation = std::find_if(
@@ -1749,7 +2008,7 @@ BOOST_AUTO_TEST_CASE(
             });
         BOOST_REQUIRE(reservation != ledger.reservations.end());
         ++reservation->network_fee.value;
-        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(ledger));
+        BOOST_REQUIRE(budget_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger));
     }
     PaymasterStore budget_store{budget_wallet};
     BOOST_CHECK(!budget_store.ValidateProviderPreSignatureAuthorization(
@@ -1757,13 +2016,14 @@ BOOST_AUTO_TEST_CASE(
         capacity_request, capacity_proof, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_BUDGET_BINDING_MISMATCH");
 
-    auto capacity_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto capacity_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet capacity_wallet{m_node.chain.get(),
                                     "pre-signature-capacity-missing",
                                     std::move(capacity_database)};
     {
         LOCK(capacity_wallet.cs_wallet);
         WalletBatch batch{capacity_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(capacity_wallet.GetDatabase());
         BOOST_REQUIRE(batch.ErasePaymasterCapacityResponse(
             fixture.capacity_request_hash));
     }
@@ -2020,18 +2280,19 @@ BOOST_AUTO_TEST_CASE(
         error);
     BOOST_CHECK(mock.m_records == before_validation);
 
-    auto pool_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto pool_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet pool_wallet{m_node.chain.get(),
                                 "recovery-pre-signature-pool-conflict",
                                 std::move(pool_database)};
     {
         LOCK(pool_wallet.cs_wallet);
         WalletBatch batch{pool_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(pool_wallet.GetDatabase());
         std::vector<ProviderPoolEntry> pool;
         BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
         BOOST_REQUIRE_EQUAL(pool.size(), 1U);
         pool.front().reservation_id = SecurityTestId(seed, 12);
-        BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+        BOOST_REQUIRE(pool_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_POOL, pool));
     }
     PaymasterStore pool_store{pool_wallet};
     BOOST_CHECK(!pool_store
@@ -2039,13 +2300,14 @@ BOOST_AUTO_TEST_CASE(
                          recovery, genesis_hash, now + 2, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_RESERVATION_CONFLICT");
 
-    auto budget_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto budget_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet budget_wallet{m_node.chain.get(),
                                   "recovery-pre-signature-budget-conflict",
                                   std::move(budget_database)};
     {
         LOCK(budget_wallet.cs_wallet);
         WalletBatch batch{budget_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(budget_wallet.GetDatabase());
         ProviderBudgetLedger ledger;
         BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(ledger));
         const auto reservation = std::find_if(
@@ -2055,7 +2317,7 @@ BOOST_AUTO_TEST_CASE(
             });
         BOOST_REQUIRE(reservation != ledger.reservations.end());
         ++reservation->network_fee.value;
-        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(ledger));
+        BOOST_REQUIRE(budget_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_BUDGET, ledger));
     }
     PaymasterStore budget_store{budget_wallet};
     BOOST_CHECK(!budget_store
@@ -2452,18 +2714,19 @@ BOOST_AUTO_TEST_CASE(outdated_client_finals_are_not_recoverable)
     const auto validate_outdated_variant =
         [&](const std::string& wallet_name, auto&& mutate,
             std::string& variant_error) {
-            auto database = DuplicateMockDatabase(m_wallet.GetDatabase());
+            auto database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
             wallet::CWallet outdated_wallet{
                 m_node.chain.get(), wallet_name, std::move(database)};
             BOOST_REQUIRE(outdated_wallet.LoadWallet() == DBErrors::LOAD_OK);
             {
                 LOCK(outdated_wallet.cs_wallet);
                 WalletBatch batch{outdated_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(outdated_wallet.GetDatabase());
                 ProviderAttempt persisted;
                 BOOST_REQUIRE(batch.ReadPaymasterAttempt(
                     fixture.attempt.attempt_id, persisted));
                 mutate(persisted, batch);
-                BOOST_REQUIRE(batch.WritePaymasterAttempt(persisted));
+                BOOST_REQUIRE(outdated_wallet.GetDatabase().MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, persisted.attempt_id), persisted));
             }
             PaymasterStore outdated_store{outdated_wallet};
             return outdated_store.ValidateClientDurableFinalForBroadcast(
@@ -2547,7 +2810,8 @@ BOOST_AUTO_TEST_CASE(outdated_client_finals_are_not_recoverable)
     {
         LOCK(foreign_wallet.cs_wallet);
         WalletBatch batch{foreign_wallet.GetDatabase()};
-        BOOST_REQUIRE(batch.WritePaymasterAttempt(foreign_attempt));
+        AlignSecurityFixtureCheckpoint(foreign_wallet.GetDatabase());
+        BOOST_REQUIRE(foreign_wallet.GetDatabase().MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, foreign_attempt.attempt_id), foreign_attempt));
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
         BOOST_REQUIRE(batch.WritePaymasterResult(result, false));
         UserAuthorizationRecord authorization;
@@ -2751,7 +3015,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     const MockableData before_commit = database.m_records;
 
     auto unreadable_pool_database =
-        DuplicateMockDatabase(m_wallet.GetDatabase());
+        DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet unreadable_pool_wallet{
         m_node.chain.get(), "unreadable-provider-pool",
         std::move(unreadable_pool_database)};
@@ -2807,7 +3071,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     const auto check_unpromotable = [&](const std::string& wallet_name,
                                         auto mutate) {
         auto tampered_database =
-            DuplicateMockDatabase(m_wallet.GetDatabase());
+            DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
         wallet::CWallet tampered_wallet{
             m_node.chain.get(), wallet_name,
             std::move(tampered_database)};
@@ -2816,10 +3080,11 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         {
             LOCK(tampered_wallet.cs_wallet);
             WalletBatch batch{tampered_wallet.GetDatabase()};
+        AlignSecurityFixtureCheckpoint(tampered_wallet.GetDatabase());
             BOOST_REQUIRE(batch.ReadPaymasterAttempt(
                 provider_signed.attempt_id, tampered));
             mutate(tampered);
-            BOOST_REQUIRE(batch.WritePaymasterAttempt(tampered));
+            BOOST_REQUIRE(tampered_wallet.GetDatabase().MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, tampered.attempt_id), tampered));
         }
         const DurablePaymasterRecoveryReport rejected =
             RecoverDurablePaymasterCommits(
@@ -2909,6 +3174,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                     std::move(boundary_database)};
                 BOOST_REQUIRE(boundary_wallet.LoadWallet() ==
                               DBErrors::LOAD_OK);
+                AlignSecurityFixtureCheckpoint(boundary_wallet.GetDatabase());
                 PaymasterStore boundary_store{boundary_wallet};
 
                 const bool database_committed =
@@ -2974,7 +3240,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                 // This database copy is the simulated abrupt process stop:
                 // only records durable at the selected boundary survive.
                 restart_database =
-                    DuplicateMockDatabase(boundary_wallet.GetDatabase());
+                    DuplicateSecurityFixtureDatabase(boundary_wallet.GetDatabase());
             }
 
             wallet::CWallet restarted_boundary_wallet{
@@ -3100,6 +3366,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     SecureString restart_passphrase{"provider-signed-restart"};
     BOOST_REQUIRE(m_wallet.EncryptWallet(restart_passphrase));
     BOOST_REQUIRE(m_wallet.IsLocked());
+    AlignSecurityFixtureCheckpoint(m_wallet.GetDatabase());
     const DurablePaymasterRecoveryReport recovery =
         RecoverDurablePaymasterCommits(
             m_wallet, commit.committed_at);
@@ -3152,7 +3419,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                               commit.committed_at + 1, error),
                           error);
 
-    auto restarted_database = DuplicateMockDatabase(m_wallet.GetDatabase());
+    auto restarted_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet restarted_wallet{m_node.chain.get(),
                                      "final-security-restart",
                                      std::move(restarted_database)};

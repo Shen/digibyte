@@ -28,9 +28,9 @@ bool MarkPaymasterProviderRestored(WalletDatabase& database, bool& guarded, std:
 /** Gate new provider authority and reserve spending. Malformed or unsupported
  * markers fail closed. Exact, already durable signed recovery does not call
  * this gate and remains available without creating any new signature. The
- * marker survives file copying and renaming. Its absence is NOT evidence of
- * freshness: an old unmarked image copied outside RestoreWallet cannot be
- * identified without a checkpoint outside the rolled-back database. */
+ * marker survives file copying and renaming. Unmarked wallet-only rollback
+ * is additionally checked against the provider/network checkpoint outside
+ * the wallet. Initial enrollment is a trusted baseline, not a history proof. */
 bool CheckPaymasterProviderRestoreGuard(const CWallet& wallet, std::string& error);
 
 bool CreatePaymasterIdentity(CWallet& wallet,

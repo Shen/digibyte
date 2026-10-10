@@ -9,6 +9,7 @@
  */
 
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymastercheckpoint.h>
 
 #include <chainparams.h>
 #include <key.h>
@@ -66,7 +67,7 @@ bool CheckPaymasterProviderRestoreGuard(const CWallet& wallet, std::string& erro
     LOCK(wallet.cs_wallet);
     ProviderIdentityRecord identity;
     const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterRestoreGuardWithStatus(identity);
-    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status == DatabaseReadStatus::NOT_FOUND) return CheckPaymasterCheckpoint(wallet.GetDatabase(), error);
     // Presence, storage errors and future layouts all prohibit new signing.
     // Neither saved settings, time passage nor a backup acknowledgement can
     // establish that an old backup includes every externally held signature.

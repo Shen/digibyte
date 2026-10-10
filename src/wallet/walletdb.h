@@ -243,6 +243,9 @@ public:
     }
 };
 
+class WalletBatch;
+void PaymasterCheckpointEnd(const WalletBatch* owner);
+
 /** Access to the wallet database.
  * Opens the database and provides read and write access to it. Each read and write is its own transaction.
  * Multiple operation transactions can be started using TxnBegin() and committed using TxnCommit()
@@ -253,6 +256,11 @@ public:
 class WalletBatch
 {
 private:
+    // Defined in paymasterdb.cpp; ordinary wallet codecs keep WriteIC/EraseIC.
+    template <typename K, typename T>
+    bool WritePaymasterIC(const K& key, const T& value, bool overwrite = true);
+    template <typename K>
+    bool ErasePaymasterIC(const K& key);
     template <typename K, typename T>
     bool WriteIC(const K& key, const T& value, bool fOverwrite = true)
     {
@@ -286,6 +294,9 @@ public:
     }
     WalletBatch(const WalletBatch&) = delete;
     WalletBatch& operator=(const WalletBatch&) = delete;
+    ~WalletBatch() { PaymasterCheckpointEnd(this); }
+
+    bool SetPaymasterCheckpointPending(bool pending);
 
     bool WriteName(const std::string& strAddress, const std::string& strName);
     bool EraseName(const std::string& strAddress);

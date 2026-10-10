@@ -395,6 +395,7 @@ DIGIBYTE_CORE_H = \
   wallet/wallet.h \
   wallet/walletdb.h \
   wallet/paymasterpsbt.h \
+  wallet/paymastercheckpoint.h \
   wallet/paymasteridentity.h \
   wallet/paymasterprovider.h \
   wallet/paymasterstore.h \
@@ -579,6 +580,7 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/transaction.cpp \
   wallet/wallet.cpp \
   wallet/walletdb.cpp \
+  wallet/paymastercheckpoint.cpp \
   wallet/paymasterdb.cpp \
   wallet/paymasterpsbt.cpp \
   wallet/paymasteridentity.cpp \
