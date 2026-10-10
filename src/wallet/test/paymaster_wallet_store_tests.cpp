@@ -2115,6 +2115,16 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
                                     "client-fallback-preauthorization",
                                     std::move(fallback_database)};
     PaymasterStore fallback_store{fallback_wallet};
+    CheckPaymasterWriteFailures(fallback_wallet, 3,
+        [&](std::string& failure) {
+            return fallback_store.AbandonClientAttemptForFallback(request_id, quoted.attempt_id, 107, failure);
+        },
+        [&] {
+            BOOST_CHECK(IsPaymasterInputReserved(fallback_wallet, user_input));
+            ClientFeeLedger ledger;
+            BOOST_REQUIRE(GetPaymasterClientFeeLedger(fallback_wallet, ledger));
+            BOOST_CHECK(SerializePaymasterTestObject(ledger) == SerializePaymasterTestObject(accepted_fee_ledger));
+        });
     BOOST_REQUIRE_MESSAGE(fallback_store.AbandonClientAttemptForFallback(
                               request_id, quoted.attempt_id, 107, error),
                           error);
@@ -2308,6 +2318,23 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     user_signed.state = AttemptState::USER_SIGNED;
     user_signed.user_signed_psbt = {7, 8};
     user_signed.updated_at = 107;
+    CheckPaymasterWriteFailures(m_wallet, 4,
+        [&](std::string& failure) { return store.UpdateAttempt(request_id, user_signed, failure); },
+        [&] {
+            wallet::CWallet reopened{m_node.chain.get(), "client-signature-write-failure",
+                             DuplicateMockDatabase(m_wallet.GetDatabase())};
+            PaymasterStore reopened_store{reopened};
+            ProviderAttempt persisted;
+            BOOST_REQUIRE(reopened_store.GetAttempt(quoted.attempt_id, persisted));
+            BOOST_CHECK(persisted.user_signed_psbt.empty());
+            BOOST_CHECK_EQUAL(persisted.accepted_client_manifest_id, quoted.client_manifest.manifest_id);
+            BOOST_CHECK(IsPaymasterInputReserved(reopened, user_input));
+            ClientFeeLedger ledger;
+            BOOST_REQUIRE(GetPaymasterClientFeeLedger(reopened, ledger));
+            BOOST_CHECK(SerializePaymasterTestObject(ledger) == SerializePaymasterTestObject(accepted_fee_ledger));
+            LOCK(m_wallet.cs_wallet);
+            BOOST_CHECK(m_wallet.IsLockedCoin(user_input));
+        });
     // Attempt, reservation, wallet flag, and session are committed together.
     // A fifth write would be the forbidden post-commit SetWalletFlag path.
     database.FailWriteAt(4);
@@ -2325,6 +2352,32 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, pending));
     BOOST_CHECK(pending.state == SessionState::PENDING_PROVIDER);
     BOOST_CHECK(pending.pending_phase == PendingPhase::USER_SIGNATURE_SENT);
+
+    // A committed signature with a lost reply must remain exactly replayable
+    // from persisted state. Neither quote expiry nor another cancellation
+    // attempt may turn that signed state back into spendable inputs.
+    wallet::CWallet reopened{m_node.chain.get(), "client-signed-lost-reply",
+                     DuplicateMockDatabase(m_wallet.GetDatabase())};
+    PaymasterStore reopened_store{reopened};
+    auto& reopened_database = GetMockableDatabase(reopened);
+    const MockableData signed_rows{reopened_database.m_records};
+    reopened_database.FailCommit();
+    const bool failed_retry = reopened_store.UpdateAttempt(request_id, user_signed, error);
+    reopened_database.ClearFailureInjection();
+    BOOST_CHECK(!failed_retry);
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+    BOOST_CHECK(reopened_database.m_records == signed_rows);
+    BOOST_REQUIRE_MESSAGE(reopened_store.UpdateAttempt(request_id, user_signed, error), error);
+    BOOST_CHECK(reopened_database.m_records == signed_rows);
+    size_t reopened_expired_quotes{0};
+    BOOST_REQUIRE_MESSAGE(reopened_store.ExpireProviderQuotes(200000, reopened_expired_quotes, error), error);
+    BOOST_CHECK_EQUAL(reopened_expired_quotes, 0U);
+    BOOST_CHECK(!reopened_store.AbandonClientAttemptForFallback(request_id, quoted.attempt_id, 200001, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FALLBACK_AUTHORIZATION_MAY_EXIST");
+    BOOST_CHECK(!reopened_store.AbandonUnsignedClientSession(request_id, 200001, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_UNSIGNED_ABANDON_AUTHORIZATION_MAY_EXIST");
+    BOOST_CHECK(reopened_database.m_records == signed_rows);
+    BOOST_CHECK(IsPaymasterInputReserved(reopened, user_input));
 }
 
 BOOST_AUTO_TEST_CASE(unsigned_quote_cancellation_atomically_releases_provider_pool)
@@ -6661,6 +6714,162 @@ BOOST_AUTO_TEST_CASE(client_percentage_policy_update_preserves_approval_and_reco
     BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 103, error));
     BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{1}, error));
     BOOST_CHECK(CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{0}, error));
+}
+
+BOOST_AUTO_TEST_CASE(client_fee_policy_write_failures_preserve_approval_and_open_exposure)
+{
+    ScopedRecoveryMockTime mock_time{1000};
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{100};
+    policy.maximum_service_fee_per_day = DDCents{200};
+    policy.maximum_service_fee_bps = 100;
+    policy.updated_at = 1000;
+    std::string error;
+    CheckPaymasterWriteFailures(m_wallet, 2,
+        [&](std::string& failure) { return SetPaymasterClientSafetyPolicy(m_wallet, policy, 1000, failure); },
+        [&] {
+            ClientSafetyPolicy absent_policy;
+            ClientFeeLedger absent_ledger;
+            BOOST_CHECK(!GetPaymasterClientSafetyPolicy(m_wallet, absent_policy));
+            BOOST_CHECK(!GetPaymasterClientFeeLedger(m_wallet, absent_ledger));
+            BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{1}, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
+        });
+    BOOST_REQUIRE_MESSAGE(SetPaymasterClientSafetyPolicy(m_wallet, policy, 1000, error), error);
+    ClientFeeLedger ledger;
+    BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, ledger));
+    const uint256 open_commit{uint256S("f101")};
+    const uint256 spent_commit{uint256S("f102")};
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, open_commit, DDCents{5}, 1000, error));
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, spent_commit, DDCents{7}, 1000, error));
+    BOOST_REQUIRE(SpendClientFee(ledger, spent_commit, 1000, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterClientFeeLedger(ledger));
+    }
+    const auto ledger_bytes = SerializePaymasterTestObject(ledger);
+
+    const auto check_durable = [&](int32_t bps, int64_t per_transaction, int64_t per_day,
+                                   int64_t high_water) {
+        // A second wallet reads only persisted rows, with no policy/ledger state
+        // carried over from the object that attempted the failed update.
+        wallet::CWallet reopened{m_node.chain.get(), "fee-policy-after-failure",
+                         DuplicateMockDatabase(m_wallet.GetDatabase())};
+        ClientSafetyPolicy saved;
+        ClientFeeLedger saved_ledger;
+        BOOST_REQUIRE(GetPaymasterClientSafetyPolicy(reopened, saved));
+        BOOST_REQUIRE(GetPaymasterClientFeeLedger(reopened, saved_ledger));
+        BOOST_CHECK_EQUAL(saved.maximum_service_fee_bps, bps);
+        BOOST_CHECK_EQUAL(saved.maximum_service_fee_per_transaction.value, per_transaction);
+        BOOST_CHECK_EQUAL(saved.maximum_service_fee_per_day.value, per_day);
+        BOOST_CHECK_EQUAL(saved.updated_at, high_water);
+        BOOST_CHECK_EQUAL(saved_ledger.accounting_time_high_water, high_water);
+        // A policy update must not erase, release or charge either reservation.
+        ClientFeeLedger expected{ledger};
+        expected.accounting_time_high_water = high_water;
+        BOOST_CHECK(SerializePaymasterTestObject(saved_ledger) == SerializePaymasterTestObject(expected));
+        BOOST_CHECK(CheckPaymasterClientServiceFee(reopened, DDCents{100}, DDCents{1}, error) == (bps > 0));
+        BOOST_CHECK(!CheckPaymasterClientServiceFee(reopened, DDCents{100}, DDCents{2}, error));
+    };
+
+    ClientSafetyPolicy tightened{policy};
+    tightened.maximum_service_fee_bps = 0;
+    tightened.maximum_service_fee_per_transaction = DDCents{4};
+    tightened.maximum_service_fee_per_day = DDCents{8};
+    const auto tighten = [&](std::string& failure) {
+        return SetPaymasterClientSafetyPolicy(m_wallet, tightened, 900, failure);
+    };
+    CheckPaymasterWriteFailures(m_wallet, 2, tighten, [&] { check_durable(100, 100, 200, 1000); });
+    BOOST_REQUIRE_MESSAGE(tighten(error), error);
+    check_durable(0, 4, 8, 1000);
+    BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, ledger));
+    BOOST_CHECK(SerializePaymasterTestObject(ledger) == ledger_bytes);
+
+    // An older caller omits the percentage field. Even a failed save, a clock
+    // rollback, or an exact retry after a lost reply must not remove the cap.
+    ClientSafetyPolicy legacy_edit;
+    legacy_edit.maximum_service_fee_per_transaction = DDCents{20};
+    legacy_edit.maximum_service_fee_per_day = DDCents{80};
+    const auto save_legacy = [&](std::string& failure) {
+        return SetPaymasterClientSafetyPolicy(m_wallet, legacy_edit, 1001, failure);
+    };
+    CheckPaymasterWriteFailures(m_wallet, 2, save_legacy, [&] { check_durable(0, 4, 8, 1000); });
+    BOOST_REQUIRE_MESSAGE(save_legacy(error), error);
+    check_durable(0, 20, 80, 1001);
+    const MockableData after_save{GetMockableDatabase(m_wallet).m_records};
+    BOOST_REQUIRE_MESSAGE(save_legacy(error), error);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == after_save);
+}
+
+BOOST_AUTO_TEST_CASE(unsigned_client_cancel_failures_and_lost_reply_preserve_input_ownership)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440091";
+    const std::vector<COutPoint> inputs{{uint256S("f201"), 0}, {uint256S("f202"), 1}};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f203"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+        {{inputs[0], ReservationRole::USER_DD}, {inputs[1], ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error), error);
+    const auto cancel = [&](std::string& failure) {
+        return store.AbandonUnsignedClientSession(request_id, 102, failure);
+    };
+    // The session write precedes deletion of both persisted reservations and
+    // wallet locks. Commit failure therefore also tests rollback of deletions.
+    // MockableDatabase does not inject individual EraseKey failures.
+    CheckPaymasterWriteFailures(m_wallet, 1, cancel, [&] {
+        PaymentSession persisted;
+        BOOST_REQUIRE(store.GetSessionByRequestId(request_id, persisted));
+        BOOST_CHECK(persisted.state == SessionState::INPUTS_RESERVED);
+        BOOST_CHECK(persisted.user_inputs == inputs);
+        for (const auto& input : inputs) {
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
+            LOCK(m_wallet.cs_wallet);
+            BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        }
+    });
+    BOOST_REQUIRE_MESSAGE(cancel(error), error);
+    for (const auto& input : inputs) {
+        BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, input));
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsLockedCoin(input));
+    }
+
+    // Model a lost success reply and reopen the persisted state. Repeating the
+    // old cancellation must neither write again nor later unlock a new owner.
+    wallet::CWallet reopened{m_node.chain.get(), "unsigned-cancel-lost-reply",
+                     DuplicateMockDatabase(m_wallet.GetDatabase())};
+    PaymasterStore reopened_store{reopened};
+    auto& database = GetMockableDatabase(reopened);
+    const MockableData after_cancel{database.m_records};
+    database.FailWriteAt(0);
+    const bool repeated = reopened_store.AbandonUnsignedClientSession(request_id, 103, error);
+    const size_t repeated_writes = database.m_write_count;
+    database.ClearFailureInjection();
+    BOOST_REQUIRE_MESSAGE(repeated, error);
+    BOOST_CHECK_EQUAL(repeated_writes, 0U);
+    BOOST_CHECK(database.m_records == after_cancel);
+
+    constexpr auto next_request = "550e8400-e29b-41d4-a716-446655440092";
+    BOOST_REQUIRE(reopened_store.CreateOrJoinSession(next_request, uint256S("f204"),
+        FeeMode::PAYMASTER, 104, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(reopened_store.ReserveInputs(next_request,
+        {{inputs[0], ReservationRole::USER_DD}, {inputs[1], ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 105, error), error);
+    const MockableData with_new_owner{database.m_records};
+    BOOST_CHECK(!reopened_store.AbandonUnsignedClientSession(request_id, 106, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FAILED_SESSION_STILL_RESERVED");
+    BOOST_CHECK(database.m_records == with_new_owner);
+    for (const auto& input : inputs) {
+        InputReservation reservation;
+        LOCK(reopened.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterReservation(input, reservation));
+        BOOST_CHECK_EQUAL(reservation.request_id, next_request);
+        BOOST_CHECK(reopened.IsLockedCoin(input));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
