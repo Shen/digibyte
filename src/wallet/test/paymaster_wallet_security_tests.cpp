@@ -23,10 +23,12 @@
 #include <streams.h>
 #include <test/util/index.h>
 #include <validation.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/rpc/paymaster_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -737,6 +739,98 @@ bool BuildDurableClientFinalFixture(
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_security_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(provider_restore_guard_is_durable_and_blocks_new_signatures)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    std::string error;
+    bool guarded{true};
+    // A client-only backup must retain its normal behavior.
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_CHECK(!guarded);
+    BOOST_REQUIRE(CheckPaymasterProviderRestoreGuard(m_wallet, error));
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    // An unmarked identity alone cannot distinguish a current wallet from a
+    // manually copied old image. The explicit restore must persist the guard.
+    BOOST_REQUIRE(CheckPaymasterProviderRestoreGuard(m_wallet, error));
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_CHECK(guarded);
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_CHECK(guarded);
+    BOOST_CHECK(!WalletBatch{database}.WritePaymasterRestoreGuard(environment.identity));
+
+    wallet::CWallet restarted{m_node.chain.get(), "restored-provider", std::make_unique<MockableDatabase>(database.m_records)};
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    // Configuration changes and backup acknowledgements are not history proof.
+    BOOST_REQUIRE(WalletBatch{restarted.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(restarted, 200001, error));
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(restarted, error));
+    PaymasterStore store{restarted};
+    PaymasterCapacityRequest request;
+    PaymasterCapacityProof proof;
+    BOOST_CHECK(!store.ValidateProviderPreSignatureAuthorization({}, Params().GenesisBlock().GetHash(), 200001, request, proof, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    BOOST_CHECK(!store.ValidateProviderAlternativeRecoveryPreSignatureAuthorization({}, Params().GenesisBlock().GetHash(), 200001, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    PartiallySignedTransaction psbt;
+    BOOST_CHECK(!SignCollaborativePSBTForParty(restarted, psbt, {}, SigningParty::PROVIDER, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    WITH_LOCK(restarted.cs_wallet, restarted.SetWalletFlag(WALLET_FLAG_DESCRIPTORS));
+    CKey key;
+    ProviderIdentityRecord identity;
+    BOOST_CHECK(!GetPaymasterIdentityKey(restarted, key, identity, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    ProviderLiquidityPolicy liquidity;
+    BOOST_CHECK(!paymaster_rpc::internal::RunAutomaticDGBReplenishment(restarted, liquidity, 1, 1, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    BOOST_CHECK(!paymaster_rpc::internal::RunAutomaticCarrierReplenishment(restarted, liquidity, 1, 1, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+}
+
+BOOST_AUTO_TEST_CASE(provider_restore_marker_failure_prevents_restore_completion)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const MockableData original = database.m_records;
+    std::string error;
+    bool guarded{false};
+    for (bool fail_commit : {false, true}) {
+        if (fail_commit) database.FailCommit();
+        else database.FailWriteAt(0);
+        BOOST_CHECK(!MarkPaymasterProviderRestored(database, guarded, error));
+        BOOST_CHECK(!guarded);
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_DATABASE_WRITE");
+        BOOST_CHECK(database.m_records == original);
+        database.ClearFailureInjection();
+    }
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_CHECK(guarded);
+}
+
+BOOST_AUTO_TEST_CASE(provider_restore_marker_corruption_and_future_versions_fail_closed)
+{
+    auto& database = m_wallet.GetDatabase();
+    std::string error;
+    bool guarded{false};
+    // A malformed identity is not a client-only wallet.
+    BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_IDENTITY, uint16_t{65535}));
+    BOOST_CHECK(!MarkPaymasterProviderRestored(database, guarded, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_IDENTITY_INVALID");
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity, /*overwrite=*/true));
+    for (uint16_t version : {uint16_t{1}, uint16_t{65535}}) {
+        BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_RESTORE_GUARD, version));
+        BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(m_wallet, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+        const MockableData before_restore = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK(!MarkPaymasterProviderRestored(database, guarded, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_restore);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(provider_policy_update_preserves_safety_policy_liveness)
 {

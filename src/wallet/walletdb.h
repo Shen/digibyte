@@ -143,6 +143,7 @@ extern const std::string PAYMASTER_LIQUIDITY_POLICY;     // "pmliquidity" - auto
 extern const std::string PAYMASTER_MAINTENANCE_LEDGER;   // "pmmaintenance" - restartable maintenance operations
 extern const std::string PAYMASTER_FINANCE_LEDGER;       // "pmfinance" - durable provider finance history
 extern const std::string PAYMASTER_BACKUP_STATUS;        // "pmbackup" - full-wallet backup acknowledgement
+extern const std::string PAYMASTER_RESTORE_GUARD;        // "pmrestoreguard" - restored provider quarantine
 extern const std::string PAYMASTER_CARRIER_WITHDRAWAL;   // "pmcarrierwithdraw" - last reviewed carrier withdrawal plan
 extern const std::string PAYMASTER_ANNOUNCE_SEQ;         // "pmannounceseq" - last allocated provider announcement sequence
 extern const std::string PAYMASTER_RESULT;               // "pmresult" - latest signed result by commit key
@@ -644,6 +645,11 @@ public:
     bool ReadPaymasterBackupStatus(
         DigiDollar::Paymaster::ProviderBackupStatus& status);
     bool HasPaymasterBackupStatus();
+    // A restore marker uses the existing versioned identity codec. Presence
+    // permanently blocks new provider authority; there is deliberately no
+    // erase/acknowledgement API without proof of complete financial history.
+    bool WritePaymasterRestoreGuard(const DigiDollar::Paymaster::ProviderIdentityRecord& identity);
+    DatabaseReadStatus ReadPaymasterRestoreGuardWithStatus(DigiDollar::Paymaster::ProviderIdentityRecord& identity);
     bool WritePaymasterCarrierWithdrawalPlan(
         const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
         bool overwrite = true);

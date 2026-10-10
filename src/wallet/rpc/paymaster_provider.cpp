@@ -69,6 +69,16 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_rpc::internal;
 
+namespace {
+void EnsureProviderRestoreSafe(const CWallet& wallet)
+{
+    std::string error;
+    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, error);
+    }
+}
+} // namespace
+
 RPCHelpMan createpaymasteridentity()
 {
     return RPCHelpMan{
@@ -882,6 +892,7 @@ RPCHelpMan withdrawpaymastercarrier()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            EnsureProviderRestoreSafe(*wallet);
             const UniValue& options = request.params[0];
             RPCTypeCheckObj(
                 options,
@@ -1766,6 +1777,8 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         }
         return "PAYMASTER_POOL_WAITING_CONFIRMATION";
     }
+    std::string restore_error;
+    if (!CheckPaymasterProviderRestoreGuard(wallet, restore_error)) return restore_error;
     if (wallet.IsLocked()) return "PAYMASTER_WALLET_LOCKED";
     if (record.kind == ProviderMaintenanceKind::PREPARE_DGB) {
         std::vector<CRecipient> recipients;
@@ -1925,6 +1938,8 @@ UniValue paymaster_rpc::internal::PoolPreparationToJSON(CWallet& wallet)
 void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet)
 {
     if (!context.paymaster || !context.paymaster->Enabled()) return;
+    std::string restore_error;
+    if (!CheckPaymasterProviderRestoreGuard(wallet, restore_error)) return;
     ProviderIdentityRecord identity;
     ProviderSettings settings;
     if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderSettings(wallet, settings) || !settings.enabled || !AutomaticProviderStateIsSynchronized(wallet)) return;
@@ -2013,6 +2028,7 @@ RPCHelpMan preparepaymasterpool()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            EnsureProviderRestoreSafe(*wallet);
             wallet->BlockUntilSyncedToCurrentChain();
             ProviderIdentityRecord identity;
             std::optional<ProviderWorkGuard> pool_guard;
@@ -2480,6 +2496,7 @@ RPCHelpMan rebalancepaymasterpool()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
+            EnsureProviderRestoreSafe(*wallet);
             wallet->BlockUntilSyncedToCurrentChain();
             ProviderIdentityRecord identity;
             std::optional<ProviderWorkGuard> pool_guard;

@@ -119,6 +119,10 @@ RPCHelpMan startpaymaster()
             const int64_t now = GetTime();
             const DurablePaymasterRecoveryReport recovery =
                 RecoverDurablePaymasterCommits(*wallet, now);
+            std::string restore_error;
+            if (!CheckPaymasterProviderRestoreGuard(*wallet, restore_error)) {
+                throw JSONRPCError(RPC_WALLET_ERROR, restore_error);
+            }
             UniValue recovery_errors{UniValue::VARR};
             for (const std::string& recovery_error : recovery.errors) {
                 recovery_errors.push_back(recovery_error);
@@ -372,6 +376,14 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     using namespace DigiDollar::Paymaster;
     Manager* const manager = context.paymaster;
     if (!manager || !manager->Enabled()) return;
+
+    std::string restore_error;
+    if (!CheckPaymasterProviderRestoreGuard(wallet, restore_error)) {
+        manager->SetProviderServiceStatus(wallet.GetName(),
+                                          ProviderServiceState::WAITING_FOR_READINESS,
+                                          restore_error);
+        return;
+    }
 
     ProviderSettings settings;
     ProviderIdentityRecord identity;

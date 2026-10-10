@@ -22,6 +22,7 @@
 #include <tinyformat.h>
 #include <util/time.h>
 #include <version.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -83,6 +84,7 @@ bool PaymasterStore::CheckProviderQuoteAdmission(
     std::string& error) const
 {
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     netgroup_bucket.SetNull();
     if (request_hash.IsNull() || canonical_netgroup.empty() || now <= 0) {
         error = "PAYMASTER_INVALID_QUOTE_REQUEST_BUDGET_EVENT";
@@ -157,6 +159,7 @@ bool PaymasterStore::CheckProviderRecoveryAdmission(
     std::string& error) const
 {
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     netgroup_bucket.SetNull();
     if (request_hash.IsNull() || canonical_netgroup.empty() || now <= 0 ||
         request.wallet_returns.empty() ||
@@ -271,6 +274,7 @@ bool PaymasterStore::CommitProviderQuote(
     std::string& error)
 {
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     PaymasterQuoteRequest request;
     PaymasterQuoteResponse response;
     try {
@@ -1346,6 +1350,7 @@ bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
     error.clear();
     capacity_request = {};
     capacity_proof = {};
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     if (expected_genesis.IsNull() || now <= 0 ||
         attempt.version != ProviderAttempt::CURRENT_VERSION ||
         attempt.attempt_id.IsNull() || attempt.commit_key.IsNull() ||

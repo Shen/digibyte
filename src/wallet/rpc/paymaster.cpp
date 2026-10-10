@@ -657,6 +657,8 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     }
     std::string eligibility_error;
     result.wallet_eligible = CheckPaymasterProviderWallet(wallet, eligibility_error);
+    std::string restore_error;
+    const bool restore_safe = CheckPaymasterProviderRestoreGuard(wallet, restore_error);
     result.have_settings = GetPaymasterProviderSettings(wallet, result.settings);
     result.have_identity = GetPaymasterIdentity(wallet, result.identity);
     result.have_policy = GetPaymasterProviderPolicy(wallet, result.policy);
@@ -716,7 +718,14 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
 
     if (!context.paymaster || !context.paymaster->Enabled()) result.errors.push_back("PAYMASTER_DISABLED");
     if (!result.have_settings || !result.settings.enabled) result.errors.push_back("PAYMASTER_PROVIDER_NOT_ENABLED");
-    if (!result.wallet_eligible) result.errors.push_back(eligibility_error);
+    if (!result.wallet_eligible) {
+        result.errors.push_back(eligibility_error);
+        result.available_funding_models = 0;
+    }
+    if (!restore_safe) {
+        result.errors.push_back(restore_error);
+        result.available_funding_models = 0;
+    }
     if (!result.have_identity) result.errors.push_back("PAYMASTER_IDENTITY_NOT_FOUND");
     if (!result.have_policy) result.errors.push_back("PAYMASTER_POLICY_NOT_FOUND");
     if (result.have_policy) {
@@ -2329,6 +2338,7 @@ bool RunAutomaticDGBReplenishment(
 {
     using namespace DigiDollar::Paymaster;
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
     if (missing_admission == 0 && missing_operational == 0) return true;
     if (!policy.automatic_replenishment || !policy.paid_maintenance_approved) {
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
@@ -2582,6 +2592,7 @@ bool RunAutomaticCarrierReplenishment(
 {
     using namespace DigiDollar::Paymaster;
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
     if (missing_admission == 0 && missing_operational == 0) return true;
     if (!policy.automatic_replenishment || !policy.paid_maintenance_approved) {
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";

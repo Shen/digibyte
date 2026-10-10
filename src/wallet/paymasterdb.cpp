@@ -46,6 +46,7 @@ const std::string PAYMASTER_MAINTENANCE_LEDGER{"pmmaintenance"};
 const std::string PAYMASTER_CARRIER_WITHDRAWAL{"pmcarrierwithdraw"};
 const std::string PAYMASTER_FINANCE_LEDGER{"pmfinance"};
 const std::string PAYMASTER_BACKUP_STATUS{"pmbackup"};
+const std::string PAYMASTER_RESTORE_GUARD{"pmrestoreguard"};
 const std::string PAYMASTER_ANNOUNCE_SEQ{"pmannounceseq"};
 const std::string PAYMASTER_RESULT{"pmresult"};
 const std::string PAYMASTER_RELIABILITY{"pmreliability"};
@@ -1487,6 +1488,21 @@ bool WalletBatch::ReadPaymasterBackupStatus(
 bool WalletBatch::HasPaymasterBackupStatus()
 {
     return m_batch->Exists(DBKeys::PAYMASTER_BACKUP_STATUS);
+}
+
+bool WalletBatch::WritePaymasterRestoreGuard(const DigiDollar::Paymaster::ProviderIdentityRecord& identity)
+{
+    return DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity) &&
+           WriteIC(DBKeys::PAYMASTER_RESTORE_GUARD, identity, /*overwrite=*/false);
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterRestoreGuardWithStatus(DigiDollar::Paymaster::ProviderIdentityRecord& identity)
+{
+    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(DBKeys::PAYMASTER_RESTORE_GUARD, identity);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity)
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::WritePaymasterCarrierWithdrawalPlan(

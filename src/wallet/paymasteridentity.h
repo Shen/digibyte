@@ -16,8 +16,22 @@ class CKey;
 namespace wallet {
 
 class CWallet;
+class WalletDatabase;
 
 bool CheckPaymasterProviderWallet(const CWallet& wallet, std::string& error);
+
+/** Called on the copied database BEFORE LoadWallet can run autostart or
+ * maintenance. A chain rescan cannot recover withheld signatures or lost
+ * spending approvals. Client-only backups are unchanged. */
+bool MarkPaymasterProviderRestored(WalletDatabase& database, bool& guarded, std::string& error);
+
+/** Gate new provider authority and reserve spending. Malformed or unsupported
+ * markers fail closed. Exact, already durable signed recovery does not call
+ * this gate and remains available without creating any new signature. The
+ * marker survives file copying and renaming. Its absence is NOT evidence of
+ * freshness: an old unmarked image copied outside RestoreWallet cannot be
+ * identified without a checkpoint outside the rolled-back database. */
+bool CheckPaymasterProviderRestoreGuard(const CWallet& wallet, std::string& error);
 
 bool CreatePaymasterIdentity(CWallet& wallet,
                              const std::string& display_name,

@@ -22,6 +22,7 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <version.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/wallet.h>
 
@@ -80,6 +81,9 @@ bool SignCollaborativePSBTForParty(
     std::string& error)
 {
     using namespace DigiDollar::Paymaster;
+    LOCK(wallet.cs_wallet);
+    if (party == SigningParty::PROVIDER &&
+        !CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
     const CollaborativeSignatureStage before = party == SigningParty::USER ? CollaborativeSignatureStage::UNSIGNED : CollaborativeSignatureStage::USER_SIGNED;
     const CollaborativeSignatureStage after = party == SigningParty::USER ? CollaborativeSignatureStage::USER_SIGNED : CollaborativeSignatureStage::FULLY_SIGNED;
     if (!ValidateCollaborativePSBT(psbt, trusted_template, before, error)) return false;

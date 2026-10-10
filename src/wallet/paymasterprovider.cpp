@@ -1720,6 +1720,7 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     LOCK(wallet.cs_wallet);
     result = {};
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
     const auto fail = [&](const char* code) { error = code; return false; };
     if (now <= 0) return fail("PAYMASTER_INVALID_TIME");
     WalletBatch batch{wallet.GetDatabase()};

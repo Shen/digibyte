@@ -25,6 +25,55 @@ namespace wallet {
 using DigiDollar::Paymaster::ProviderBackupStatus;
 using DigiDollar::Paymaster::ProviderIdentityRecord;
 
+bool MarkPaymasterProviderRestored(WalletDatabase& database, bool& guarded, std::string& error)
+{
+    error.clear();
+    guarded = false;
+    WalletBatch batch{database};
+    ProviderIdentityRecord identity;
+    const auto status = batch.ReadPaymasterIdentityWithStatus(identity);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_PROVIDER_RESTORE_IDENTITY_INVALID";
+        return false;
+    }
+    ProviderIdentityRecord previous;
+    const auto guard_status = batch.ReadPaymasterRestoreGuardWithStatus(previous);
+    if (guard_status == DatabaseReadStatus::FOUND && previous.provider_id == identity.provider_id) {
+        guarded = true;
+        return true;
+    }
+    if (guard_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED";
+        return false;
+    }
+    if (!batch.TxnBegin()) {
+        error = "PAYMASTER_PROVIDER_RESTORE_DATABASE_WRITE";
+        return false;
+    }
+    if (!batch.WritePaymasterRestoreGuard(identity) || !batch.TxnCommit()) {
+        batch.TxnAbort();
+        error = "PAYMASTER_PROVIDER_RESTORE_DATABASE_WRITE";
+        return false;
+    }
+    guarded = true;
+    return true;
+}
+
+bool CheckPaymasterProviderRestoreGuard(const CWallet& wallet, std::string& error)
+{
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    ProviderIdentityRecord identity;
+    const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterRestoreGuardWithStatus(identity);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    // Presence, storage errors and future layouts all prohibit new signing.
+    // Neither saved settings, time passage nor a backup acknowledgement can
+    // establish that an old backup includes every externally held signature.
+    error = "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED";
+    return false;
+}
+
 bool CheckPaymasterProviderWallet(const CWallet& wallet, std::string& error)
 {
     error.clear();
@@ -57,7 +106,8 @@ bool GetPaymasterIdentityKey(CWallet& wallet,
     using namespace DigiDollar::Paymaster;
     error.clear();
     LOCK(wallet.cs_wallet);
-    if (!CheckPaymasterProviderWallet(wallet, error)) return false;
+    if (!CheckPaymasterProviderWallet(wallet, error) ||
+        !CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
     if (wallet.IsLocked()) {
         error = "PAYMASTER_WALLET_LOCKED";
         return false;

@@ -21,6 +21,7 @@
 #include <tinyformat.h>
 #include <util/time.h>
 #include <version.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/wallet.h>
@@ -1228,6 +1229,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
     std::string& error)
 {
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     if (expected_genesis.IsNull() ||
         recovery.recovery_request.genesis_hash != expected_genesis ||
         recovery.recovery_response.genesis_hash != expected_genesis ||
@@ -1455,6 +1457,7 @@ bool PaymasterStore::ValidateProviderAlternativeRecoveryPreSignatureAuthorizatio
     std::string& error) const
 {
     error.clear();
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     if (expected_genesis.IsNull() || now <= 0 ||
         recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         !recovery.provider_side || recovery.expired ||

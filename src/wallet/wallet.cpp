@@ -538,7 +538,21 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
 
         fs::copy_file(backup_file, wallet_file, fs::copy_options::none);
 
-        wallet = LoadWallet(context, wallet_name, load_on_start, options, status, error, warnings);
+        // Paymaster restore quarantine must be durable before wallet-load
+        // callbacks can start the provider or sign reserve maintenance.
+        auto database = MakeWalletDatabase(wallet_name, options, status, error);
+        if (database) {
+            bool guarded{false};
+            std::string restore_error;
+            if (MarkPaymasterProviderRestored(*database, guarded, restore_error)) {
+                database.reset();
+                if (guarded) warnings.push_back(_("This provider wallet was restored from a backup. New Paymaster payments and reserve spending are blocked because the backup may omit signed transactions and spent fee budgets. Already recorded exact transactions can still be recovered."));
+                wallet = LoadWallet(context, wallet_name, load_on_start, options, status, error, warnings);
+            } else {
+                error = Untranslated(restore_error);
+                status = DatabaseStatus::FAILED_LOAD;
+            }
+        }
     } catch (const std::exception& e) {
         assert(!wallet);
         if (!error.empty()) error += Untranslated("\n");
