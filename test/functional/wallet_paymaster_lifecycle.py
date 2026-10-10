@@ -202,28 +202,45 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
                         assert_equal(restored_session["reserved_user_inputs"],
                                      signed_session["reserved_user_inputs"])
                         restored_budget = restored_client.getpaymasterclientsafetystatus()
-                        assert_equal(restored_budget["active_reservations"], 1)
+                        # A rescan with wallet change finds the exact payment;
+                        # startup maintenance now settles it before any RPC.
+                        # Without change, the action below must still recover
+                        # the exact transaction through txindex.
+                        pending_observation = self.options.client_without_change
+                        assert_equal(restored_session["session_state"],
+                                     "PENDING_PROVIDER" if pending_observation else "CONFIRMED")
+                        assert_equal(restored_budget["active_reservations"], int(pending_observation))
+                        assert_equal(restored_budget["spent_service_fee_last_day_cents"],
+                                     0 if pending_observation else 1)
+                        if not pending_observation:
+                            assert_equal(restored_session["txid"], payment_txid)
                         # Exact chain evidence settles this old authorization without any
                         # provider response, new signature, broadcast or second fee.
                         api = (self.nodes[1].cli(f"-rpcwallet={restore_name}")
                                if transport == "cli" else restored_client)
                         lookup = {"request_id": request_id}
                         api.resolvepaymastersession(lookup, "refresh")
-                        assert_equal(api.getpaymasterclientsafetystatus()["active_reservations"], 1)
+                        assert_equal(api.getpaymasterclientsafetystatus()["active_reservations"],
+                                     int(pending_observation))
                         if entry == "resolve":
-                            reconciled = api.resolvepaymastersession(lookup, "retry_same")
+                            if pending_observation:
+                                reconciled = api.resolvepaymastersession(lookup, "retry_same")
+                            else:
+                                assert_raises_rpc_error(-4, "PAYMASTER_SESSION_ACTION_NOT_ALLOWED",
+                                                        api.resolvepaymastersession, lookup, "retry_same")
+                                reconciled = api.resolvepaymastersession(lookup, "refresh")
                             assert_equal(reconciled["session"]["payment_confirmed"], True)
                             assert_equal(reconciled["session"]["txid"], payment_txid)
                             assert_equal(reconciled["artifact"], "final_transaction")
                             assert reconciled["result_status"] is None
                         elif entry == "result":
                             reconciled = api.processpaymasterresult(request_id)
-                            assert_equal(reconciled["processed"], True)
+                            assert_equal(reconciled["processed"], pending_observation)
                             assert "result_status" not in reconciled
                         elif entry == "send":
                             reconciled = api.senddigidollar(
                                 recipient, 100, "", 0, None, "cents", options)
-                            assert_equal(reconciled["processed"], True)
+                            assert_equal(reconciled.get("processed", False), pending_observation)
                         else:
                             assert_raises_rpc_error(-4, "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH",
                                                     api.walletprocesspaymasterpsbt, unsigned_psbt, "11" * 32)

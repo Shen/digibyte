@@ -1755,7 +1755,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         }
         assert_raises_rpc_error(
             -6,
-            "Insufficient confirmed DigiDollar inputs",
+            "PAYMASTER_DD_INPUT_SELECTION_FAILED: Insufficient confirmed DD balance",
             client.senddigidollar,
             boundary_recipient,
             100,

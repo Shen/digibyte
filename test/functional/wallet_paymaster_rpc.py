@@ -539,6 +539,13 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client.listpaymasterreservations(), reservations_before)
         self.nodes[1].unloadwallet("other_client")
 
+        # The preparation/cancellation contracts above can exhaust the four
+        # initial Direct admissions from this localhost netgroup. Refill one
+        # permit (4 per 20 real seconds) before opening another channel. Mock
+        # time cannot advance this monotonic transport clock. Do not suppress
+        # connection failures or relax the production admission limits.
+        next_admission = time.monotonic() + 5
+        self.wait_until(lambda: time.monotonic() >= next_admission)
         second_request_id = "550e8400-e29b-41d4-a716-446655441000"
         second_options = dict(first_options)
         second_options["request_id"] = second_request_id
@@ -754,6 +761,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             wallet_name="submit_client", descriptors=True,
             load_on_startup=True)
         client = self.nodes[1].get_wallet_rpc("submit_client")
+        client_cli = self.nodes[1].cli("-rpcwallet=submit_client")
         client.setpaymasterclientsafetypolicy({
             "maximum_service_fee_per_transaction_cents": 100,
             "maximum_service_fee_per_day_cents": 10_000,
@@ -1345,12 +1353,14 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
 
         self.log.info("Reputation listing and clearing have deterministic contracts")
         records = client.getpaymasterreputation()
+        assert records, "Completed payments must produce nonempty reliability records"
+        assert_equal(client_cli.getpaymasterreputation(), records)
         assert_equal(records, sorted(records, key=lambda item: item["provider_id"]))
-        if records:
-            provider_id = records[0]["provider_id"]
-            assert_equal(len(client.getpaymasterreputation(provider_id)), 1)
-            assert_equal(client.clearpaymasterreputation(provider_id)["cleared"], 1)
-            assert_equal(client.getpaymasterreputation(provider_id), [])
+        provider_id = records[0]["provider_id"]
+        assert_equal(client.getpaymasterreputation(provider_id), [records[0]])
+        assert_equal(client_cli.getpaymasterreputation(provider_id), [records[0]])
+        assert_equal(client.clearpaymasterreputation(provider_id)["cleared"], 1)
+        assert_equal(client.getpaymasterreputation(provider_id), [])
         remaining_records = len(client.getpaymasterreputation())
         assert_equal(client.clearpaymasterreputation()["cleared"],
                      remaining_records)

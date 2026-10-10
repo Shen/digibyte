@@ -2109,7 +2109,22 @@ RPCHelpMan getpaymasterreputation()
         {
             {"provider_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional provider identity; omit to list all local records"},
         },
-        RPCResult{RPCResult::Type::ARR, "", "Local provider reliability records", {{RPCResult::Type::OBJ, "", /*optional=*/false, "Reliability aggregate", {}}}},
+        RPCResult{RPCResult::Type::ARR, "", "Local provider reliability records", {
+            {RPCResult::Type::OBJ, "", "Reliability aggregate", {
+                {RPCResult::Type::STR_HEX, "provider_id", "Provider identity"},
+                {RPCResult::Type::NUM, "successful_attempts", "Locally observed successful attempts"},
+                {RPCResult::Type::NUM, "provider_failures", "Locally observed provider-attributable failures"},
+                {RPCResult::Type::NUM, "neutral_failures", "Failures not attributed to the provider"},
+                {RPCResult::Type::NUM, "availability_timeouts", "Locally observed availability timeouts"},
+                {RPCResult::Type::BOOL, "sufficient_data", "Whether enough observations exist to report a success rate"},
+                {RPCResult::Type::NUM, "success_rate_basis_points", /*optional=*/true, "Success rate in basis points when sufficient data exists"},
+                {RPCResult::Type::NUM, "latency_ewma_ms", "Locally observed smoothed latency in milliseconds"},
+                {RPCResult::Type::NUM, "consecutive_provider_failures", "Consecutive provider-attributable failures"},
+                {RPCResult::Type::NUM_TIME, "last_observation_at", "Last local observation time"},
+                {RPCResult::Type::NUM_TIME, "cooldown_until", "Local cooldown expiry time, or zero"},
+                {RPCResult::Type::BOOL, "cooldown_active", "Whether the local cooldown is active"},
+            }},
+        }},
         RPCExamples{HelpExampleCli("getpaymasterreputation", "")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);

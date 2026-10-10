@@ -15,6 +15,7 @@ PSBT exists and proves that only one payment is committed and accounted.
 from test_framework.paymaster import (
     confirm_pool_preparation,
     default_liquidity_policy,
+    default_provider_policy,
     paymaster_node_args,
     provider_safety_policy,
 )
@@ -45,15 +46,9 @@ class PaymasterFailoverTest(DigiByteTestFramework):
 
     @staticmethod
     def policy(fee_rate_bps):
-        return {
-            "funding_models": ["user_paid"],
-            "sponsorship_scope": "public",
-            "fee_rate_bps": fee_rate_bps,
-            "min_amount_cents": 100,
-            "max_amount_cents": 100_000,
-            "quote_ttl": 60,
-            "maximum_network_fee_dgb_satoshis": 20_000_000,
-        }
+        policy = default_provider_policy()
+        policy["fee_rate_bps"] = fee_rate_bps
+        return policy
 
     def configure_provider(self, wallet, cli, display_name, fee_rate_bps):
         identity = wallet.createpaymasteridentity(display_name)
