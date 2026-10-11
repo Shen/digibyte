@@ -52,7 +52,8 @@ public:
     void beginSweep();
     void setPrivacy(bool privacy);
     bool isBusy() const { return m_paymasterBusy; }
-    bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured && m_sessionDiscoveryReady; }
+    bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured && m_sessionDiscoveryReady && !historyBlocksPreparation(); }
+    bool historyBlocksPreparation() const;
     bool sessionDiscoveryReady() const { return m_sessionDiscoveryReady; }
     bool safetyStatusKnown() const { return m_clientSafetyStatusKnown; }
     bool hasCurrentPaymasterOffer() const;
@@ -101,6 +102,8 @@ protected:
 
 private:
     friend class PaymasterWidgetTests;
+    void updateHistoryWaitState();
+    bool activePaymasterSendExpired() const;
     bool hasMatchingPaymasterOffer() const;
     void updateFeeChoiceLayout();
     void setupFeeSection();
@@ -187,6 +190,11 @@ private:
     void setPaymasterBusy(bool busy);
     DigiDollarSendWidget& m_form;
     WalletModel* m_walletModel{nullptr};
+    QMetaObject::Connection m_historyConnection;
+    QLabel* m_historyStatus{nullptr};
+    QTimer* m_historyStatusTimer{nullptr};
+    QElapsedTimer m_historyWaitStarted;
+    bool m_historyDeferredRefresh{false};
     bool m_privacy{false};
     // Fee section
     QLabel* m_paymasterNotice{nullptr};
@@ -332,6 +340,8 @@ private:
     // the timer. Restored sessions have no continuation or signing authority.
     UniValue m_paymasterActiveSendParams;
     QElapsedTimer m_paymasterActiveSendStarted;
+    qint64 m_paymasterHistoryPausedAt{-1};
+    qint64 m_paymasterHistoryPausedMs{0};
     QString m_paymasterActiveRetryRequest;
     QElapsedTimer m_paymasterActiveRetryStarted;
     static constexpr int MAX_PAYMASTER_ACTIVE_SEND_MS{120000};
@@ -340,6 +350,7 @@ private:
     QTimer* m_offerIconTimer{nullptr};
     int m_offerIconFrame{0};
     QTimer* m_offerExpiryTimer{nullptr};
+    QElapsedTimer m_offerPreviewClock;
     OfferCheckState m_offerCheckState{OfferCheckState::NOT_CHECKED};
     QString m_paymasterTransportState;
 

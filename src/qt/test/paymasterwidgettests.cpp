@@ -13035,6 +13035,222 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
     QCOMPARE(client->m_clientSafetyMaximumBps, qint64{-1});
 }
 
+void PaymasterWidgetTests::paymasterWaitsForFullHistory_data()
+{
+    QTest::addColumn<bool>("other_wallet");
+    QTest::addColumn<bool>("unload_scan_model");
+    QTest::newRow("selected-wallet") << false << false;
+    QTest::newRow("another-wallet-on-node") << true << false;
+    QTest::newRow("unloaded-model-still-scanning") << true << true;
+}
+
+void PaymasterWidgetTests::paymasterWaitsForFullHistory()
+{
+    QFETCH(bool, other_wallet);
+    QFETCH(bool, unload_scan_model);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-history-client");
+    auto scanned_wallet = other_wallet ? SetupDescriptorsWallet(m_node, test, "qt-history-other") : wallet;
+    wallet->EnsureDDWallet();
+    scanned_wallet->EnsureDDWallet();
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarMiniGUI scan_gui(m_node);
+    if (other_wallet) scan_gui.initModelForWallet(m_node, scanned_wallet);
+    WalletModel* const scan_model = other_wallet ? scan_gui.walletModel.get() : gui.walletModel.get();
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    int sends{0};
+    int offer_reads{0};
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") { ++offer_reads; return PaymasterPublicOffers(); }
+        ++sends;
+        throw std::runtime_error("History waiting must not start a payment");
+        return UniValue{};
+    });
+    form.setWalletModel(gui.walletModel.get());
+    auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
+    mode->setCurrentIndex(mode->findData(QStringLiteral("paymaster")));
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
+    form.findChild<QLineEdit*>("amountEdit")->setText("3.25");
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    form.show();
+    client->refreshPaymasterOffers();
+    QVERIFY(client->hasCurrentPaymasterOffer());
+    QVERIFY(client->isReady());
+    const int before = offer_reads;
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    int provider_reads{0};
+    panel->setAsyncRpcExecutorForTesting([&](const std::string&, const UniValue&, DigiDollarPaymasterWidget::RpcCallback) { ++provider_reads; });
+
+    // Exercise the real, unchanged history worker while its wallet lock is
+    // unavailable. Avoid pumping unrelated Qt wallet timers until release.
+    std::promise<void> acquired;
+    auto ready = acquired.get_future();
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool release{false};
+    std::thread holder([&] {
+        LOCK(scanned_wallet->cs_wallet);
+        acquired.set_value();
+        std::unique_lock<std::mutex> lock(mutex);
+        condition.wait(lock, [&] { return release; });
+    });
+    ready.wait();
+    int history_replies{0};
+    bool history_ok{true};
+    const auto history_reply = [&](UniValue result, QString error) {
+        ++history_replies;
+        history_ok &= error.isEmpty() && result.isArray();
+    };
+    scan_model->getDigiDollarTransactionHistoryAsync(0, 0, history_reply);
+    scan_model->getDigiDollarTransactionHistoryAsync(0, 0, history_reply); // coalesced
+    const bool blocked = client->historyBlocksPreparation() && !client->isReady();
+    client->send(recipient, 325); // Direct invocation cannot bypass the wait.
+    client->refreshPaymasterOffers();
+    panel->setWalletModel(gui.walletModel.get());
+    const bool provider_wait = panel->findChild<QLabel*>("paymasterOperatorHeadline")->text().contains("history check");
+    const bool no_early_calls = sends == 0 && offer_reads == before && provider_reads == 0;
+    const bool no_request = client->m_paymasterRequestId.isEmpty() && !client->m_paymasterActiveSendStarted.isValid();
+    const bool explanation = client->m_historyStatus->text().contains("No Paymaster payment has been started");
+    mode->setCurrentIndex(mode->findData(QStringLiteral("dgb")));
+    const bool native_unaffected = !client->historyBlocksPreparation();
+    mode->setCurrentIndex(mode->findData(QStringLiteral("paymaster")));
+    if (unload_scan_model) scan_gui.walletModel.reset();
+    const bool still_waiting = gui.walletModel->digiDollarHistoryRefreshInProgress() && client->historyBlocksPreparation();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    condition.notify_all();
+    holder.join();
+
+    QVERIFY(blocked);
+    QVERIFY(provider_wait);
+    QVERIFY(no_early_calls);
+    QVERIFY(no_request);
+    QVERIFY(explanation);
+    QVERIFY(native_unaffected);
+    QVERIFY(still_waiting);
+    QTRY_VERIFY_WITH_TIMEOUT(!gui.walletModel->digiDollarHistoryRefreshInProgress(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(client->isReady() && client->hasCurrentPaymasterOffer(), 5000);
+    QVERIFY(offer_reads > before); // Fresh directory read, never automatic Send.
+    QCOMPARE(provider_reads, 1);
+    QCOMPARE(sends, 0);
+    QVERIFY(client->m_historyStatus->isHidden());
+    QCOMPARE(history_replies, unload_scan_model ? 0 : 2);
+    QVERIFY(history_ok);
+    QVERIFY(client->m_paymasterRequestId.isEmpty());
+}
+
+void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()
+{
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-history-preparation-clock");
+    wallet->EnsureDDWallet();
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    WalletModel::RpcCallback pending;
+    QString warning;
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString& message, QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        warning = message;
+        return QMessageBox::Ok;
+    });
+    client->setPaymasterAsyncRpcExecutorForTesting([&](const std::string& command, const UniValue&, WalletModel::RpcCallback callback) {
+        if (command == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+        else if (command == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+        else if (command == "senddigidollar") pending = std::move(callback);
+    });
+    form.setWalletModel(gui.walletModel.get());
+    client->m_paymasterRequestId = QStringLiteral("00000000-0000-4000-8000-000000000001");
+    client->executePaymasterTransfer(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"), 325, false);
+    QVERIFY(pending);
+    QVERIFY(!client->m_paymasterActiveSendStarted.isValid());
+    QVERIFY(!client->activePaymasterSendExpired());
+    auto result = PaymasterAuthorizationResult(false, "", "CREATED", "none");
+    result.pushKV("request_id", client->m_paymasterRequestId.toStdString());
+    pending(result, {});
+    QVERIFY2(warning.isEmpty(), qPrintable(warning));
+    QVERIFY(client->m_paymasterActiveSendStarted.isValid());
+    QVERIFY(!client->activePaymasterSendExpired());
+    client->m_paymasterPollTimer->stop();
+
+    bool callback_received{false};
+    gui.walletModel->getDigiDollarTransactionHistoryAsync(0, 0, [&](UniValue, QString error) {
+        callback_received = error.isEmpty();
+    });
+    QVERIFY(client->m_paymasterHistoryPausedAt >= 0);
+    const QString request = client->m_paymasterRequestId;
+    client->pollPaymasterSession();
+    QCOMPARE(client->m_paymasterRequestId, request);
+    QTRY_VERIFY_WITH_TIMEOUT(callback_received, 5000);
+    QCOMPARE(client->m_paymasterHistoryPausedAt, qint64{-1});
+    QVERIFY(!client->activePaymasterSendExpired());
+    client->m_paymasterPollTimer->stop();
+}
+
+void PaymasterWidgetTests::paymasterHistoryFailureCanBeRetried()
+{
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-history-error");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    // A real initialization gap exercises the worker's error path. Persisted
+    // display rows or an RPC mock must not silently count as a completed read.
+    QVERIFY(!wallet->GetDDWallet());
+    gui.walletModel->getDigiDollarTransactionHistoryAsync(0, 0, {});
+    QTRY_VERIFY_WITH_TIMEOUT(!gui.walletModel->digiDollarHistoryRefreshInProgress(), 5000);
+    QVERIFY(!gui.walletModel->digiDollarHistoryRefreshError().isEmpty());
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    int sends{0};
+    int offer_reads{0};
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") { ++offer_reads; return PaymasterPublicOffers(); }
+        ++sends;
+        return UniValue{};
+    });
+    form.setWalletModel(gui.walletModel.get());
+    auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
+    mode->setCurrentIndex(mode->findData(QStringLiteral("paymaster")));
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
+    form.findChild<QLineEdit*>("amountEdit")->setText("3.25");
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    form.show();
+    QVERIFY(client->historyBlocksPreparation());
+    QVERIFY(!client->isReady());
+    QVERIFY(client->m_historyStatus->text().contains("could not be completed"));
+    client->send(recipient, 325);
+    QCOMPARE(sends, 0);
+    QCOMPARE(offer_reads, 0);
+    QVERIFY(client->m_paymasterRequestId.isEmpty());
+    wallet->EnsureDDWallet();
+    client->refreshPaymasterOffers();
+    QTRY_VERIFY_WITH_TIMEOUT(client->isReady() && client->hasCurrentPaymasterOffer(), 5000);
+    QVERIFY(gui.walletModel->digiDollarHistoryRefreshError().isEmpty());
+    QVERIFY(offer_reads > 0);
+    QVERIFY(client->m_historyStatus->isHidden());
+    QCOMPARE(sends, 0);
+    QVERIFY(client->m_paymasterRequestId.isEmpty());
+}
+
 void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
 {
     TestChain100Setup test;

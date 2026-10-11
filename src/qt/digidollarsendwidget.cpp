@@ -824,6 +824,8 @@ void DigiDollarSendWidget::updateSendButton()
         m_sendButton->setToolTip(tr(
             "Insufficient spendable DigiDollar: this wallet currently has %1 available. A Paymaster supplies only the DGB network fee, not the DigiDollar being sent.")
             .arg(formatDDAmount(m_availableBalance)));
+    } else if (m_paymaster->historyBlocksPreparation()) {
+        m_sendButton->setToolTip(tr("Waiting for the full DigiDollar history check before preparing a Paymaster payment."));
     } else if (m_paymaster->paymasterModeSelected() && !m_paymaster->sessionDiscoveryReady()) {
         m_sendButton->setToolTip(tr("Read the saved Paymaster transfers successfully before preparing another payment."));
     } else if (m_paymaster->paymasterModeSelected() && !paymaster_ready) {

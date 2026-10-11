@@ -16,6 +16,10 @@ public:
     explicit PaymasterWidgetTests(interfaces::Node& node) : m_node(node) {}
 
 private Q_SLOTS:
+    void paymasterWaitsForFullHistory_data();
+    void paymasterWaitsForFullHistory();
+    void paymasterPreparationClockStartsWithFirstReply();
+    void paymasterHistoryFailureCanBeRetried();
     void paymasterGuidedTaskLayout_data();
     void paymasterGuidedTaskLayout();
     void paymasterGuidedCapitalTasks_data();

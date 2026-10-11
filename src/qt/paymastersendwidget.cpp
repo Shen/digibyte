@@ -1446,6 +1446,16 @@ void PaymasterSendWidget::setupFeeSection()
     DigiDollarStatus::SetBanner(m_paymasterNotice, DigiDollarStatus::Kind::INFO);
     m_paymasterNotice->hide();
     layout->addWidget(m_paymasterNotice);
+    m_historyStatus = new QLabel(this);
+    m_historyStatus->setObjectName("paymasterHistoryWaitStatus");
+    m_historyStatus->setTextFormat(Qt::PlainText);
+    m_historyStatus->setWordWrap(true);
+    m_historyStatus->hide();
+    m_historyStatusTimer = new QTimer(this);
+    m_historyStatusTimer->setSingleShot(true);
+    m_historyStatusTimer->setInterval(500);
+    connect(m_historyStatusTimer, &QTimer::timeout, this, &PaymasterSendWidget::updateHistoryWaitState);
+    layout->addWidget(m_historyStatus);
     layout->addWidget(m_feeFrame);
 
     m_advancedPaymasterFrame->hide();
@@ -1495,6 +1505,72 @@ void PaymasterSendWidget::onFeeModeChanged()
     updateFeeDisplay();
     updatePaymasterFocusMode();
     m_form.updateSendButton();
+    updateHistoryWaitState();
+}
+
+bool PaymasterSendWidget::historyBlocksPreparation() const
+{
+    return m_walletModel && preparesPaymasterPayment() &&
+        (m_walletModel->digiDollarHistoryRefreshInProgress() ||
+         !m_walletModel->digiDollarHistoryRefreshError().isEmpty());
+}
+
+bool PaymasterSendWidget::activePaymasterSendExpired() const
+{
+    if (!m_paymasterActiveSendStarted.isValid()) return false;
+    const qint64 elapsed = m_paymasterActiveSendStarted.elapsed();
+    const qint64 current_pause = m_paymasterHistoryPausedAt < 0 ? 0 : elapsed - m_paymasterHistoryPausedAt;
+    return elapsed - m_paymasterHistoryPausedMs - current_pause >= MAX_PAYMASTER_ACTIVE_SEND_MS;
+}
+
+void PaymasterSendWidget::updateHistoryWaitState()
+{
+    if (!m_historyStatus) return;
+    const bool waiting = m_walletModel && m_walletModel->digiDollarHistoryRefreshInProgress();
+    const bool failed = m_walletModel && !m_walletModel->digiDollarHistoryRefreshError().isEmpty();
+    if (waiting && !m_historyWaitStarted.isValid()) {
+        m_historyWaitStarted.start();
+        m_historyStatusTimer->start();
+    } else if (!waiting) {
+        m_historyWaitStarted.invalidate();
+        m_historyStatusTimer->stop();
+    }
+    const bool unsigned_preparation = m_paymasterAuthorizationCommitment.isEmpty() &&
+        (m_paymasterArtifact.isEmpty() || m_paymasterArtifact == QLatin1String("none"));
+    if (waiting && unsigned_preparation && m_paymasterActiveSendStarted.isValid() && m_paymasterHistoryPausedAt < 0) {
+        m_paymasterHistoryPausedAt = m_paymasterActiveSendStarted.elapsed();
+    } else if (!waiting && m_paymasterHistoryPausedAt >= 0) {
+        if (m_paymasterActiveSendStarted.isValid()) {
+            m_paymasterHistoryPausedMs += m_paymasterActiveSendStarted.elapsed() - m_paymasterHistoryPausedAt;
+        }
+        m_paymasterHistoryPausedAt = -1;
+    }
+    // Gate immediately, but do not insert/remove a banner for a fast warm
+    // refresh. Retain a visible error/wait banner throughout a retry.
+    const bool show_wait = waiting && (m_historyStatus->isVisible() || m_historyWaitStarted.elapsed() >= 500);
+    m_historyStatus->setVisible(paymasterModeSelected() && (show_wait || (!waiting && failed)));
+    if (waiting || failed) {
+        const QString text = waiting
+            ? m_paymasterRequestId.isEmpty()
+                ? DigiDollarSendWidget::tr("Waiting for the full DigiDollar history check on this node. No Paymaster payment has been started. Offers and payment preparation become available automatically when the check finishes; this wait does not consume the payment timeout.")
+                : DigiDollarSendWidget::tr("DigiDollar history is being checked on this node. Unsigned Paymaster preparation waits without consuming its timeout. Existing transfers and their protected inputs are kept; this check does not approve or cancel a payment.")
+            : DigiDollarSendWidget::tr("The DigiDollar history check could not be completed. New Paymaster preparation remains paused. Check offers again to retry the history check; no new payment has been started.");
+        m_historyStatus->setText(text);
+        DigiDollarStatus::SetBanner(m_historyStatus, waiting ? DigiDollarStatus::Kind::WAITING : DigiDollarStatus::Kind::ACTION);
+        m_historyDeferredRefresh = true;
+    }
+    m_form.updateSendButton();
+    updateOfferCheckControls();
+    if (!waiting && !failed && m_historyDeferredRefresh && m_walletModel && !m_paymasterBusy) {
+        m_historyDeferredRefresh = false;
+        refreshClientSafetyStatus();
+        if (!m_sessionDiscoveryReady) discoverPersistedPaymasterSessions();
+        if (m_paymasterRequestId.isEmpty()) {
+            pollPaymasterOffers();
+        } else if (canContinueActivePaymasterSend()) {
+            schedulePaymasterPoll(/*state_changed=*/false);
+        }
+    }
 }
 
 QString PaymasterSendWidget::friendlyPaymasterSessionStatus() const
@@ -2002,6 +2078,10 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
 
 void PaymasterSendWidget::refreshClientSafetyStatus()
 {
+    if (m_walletModel && m_walletModel->digiDollarHistoryRefreshInProgress()) {
+        m_historyDeferredRefresh = true;
+        return;
+    }
     if (!m_walletModel) {
         m_clientSafetyStatusKnown = false;
         m_clientSafetyConfigured = false;
@@ -2153,6 +2233,11 @@ void PaymasterSendWidget::setPaymasterBusy(bool busy)
                                     have_persisted_session);
     m_paymasterPrimaryButton->setEnabled(idle_with_wallet);
     updatePaymasterFocusMode();
+    if (!busy && m_historyDeferredRefresh && m_walletModel &&
+        !m_walletModel->digiDollarHistoryRefreshInProgress() &&
+        m_walletModel->digiDollarHistoryRefreshError().isEmpty()) {
+        QTimer::singleShot(0, this, [this] { updateHistoryWaitState(); });
+    }
 }
 
 void PaymasterSendWidget::reportPaymasterOperationNotStarted(
@@ -2167,6 +2252,10 @@ void PaymasterSendWidget::reportPaymasterOperationNotStarted(
 
 void PaymasterSendWidget::discoverPersistedPaymasterSessions(bool user_requested)
 {
+    if (m_walletModel && m_walletModel->digiDollarHistoryRefreshInProgress()) {
+        m_historyDeferredRefresh = true;
+        return;
+    }
     if (!m_walletModel || !m_paymasterRequestId.isEmpty() || m_sessionDiscoveryPending) return;
     m_sessionDiscoveryReady = false;
     m_sessionDiscoveryPending = true;
@@ -2369,10 +2458,12 @@ void PaymasterSendWidget::activatePersistedPaymasterSession(
 
 bool PaymasterSendWidget::hasCurrentPaymasterOffer() const
 {
-    // Check the timer as well as the state: a queued expiry callback must not
-    // leave an expired preview usable for a new request in this event turn.
+    // A Qt dispatcher can retain a stale positive remainingTime() until it
+    // processes timers. Independently check monotonic elapsed time so a queued
+    // expiry callback cannot leave an expired preview usable in this turn.
     return m_offerCheckState == OfferCheckState::FOUND && m_offerExpiryTimer &&
-           m_offerExpiryTimer->isActive() && m_offerExpiryTimer->remainingTime() > 0;
+           m_offerExpiryTimer->isActive() && m_offerExpiryTimer->remainingTime() > 0 &&
+           m_offerPreviewClock.isValid() && m_offerPreviewClock.elapsed() < m_offerExpiryTimer->interval();
 }
 
 bool PaymasterSendWidget::hasOwnDgbForFees() const
@@ -2450,7 +2541,7 @@ void PaymasterSendWidget::updateOfferCheckControls()
     if (m_offerCardsFrame) {
         m_offerCardsFrame->setVisible(preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
                                       !m_privacy && (!m_offerPreview.empty() || !m_offerCardsFrame->property("excludedOffers").toByteArray().isEmpty()));
-        m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy);
+        m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy && !historyBlocksPreparation());
     }
     if (!m_offerCheckFrame) return;
     m_offerCheckFrame->setVisible(paymasterModeSelected() && m_paymasterRequestId.isEmpty());
@@ -2461,6 +2552,7 @@ void PaymasterSendWidget::updateOfferCheckControls()
                                    (m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::STALE) ? DigiDollarSendWidget::tr("Refresh offers") :
                                                                                                                                   DigiDollarSendWidget::tr("Check offers"));
     m_refreshOffersButton->setEnabled(m_walletModel && !m_paymasterBusy &&
+                                      !m_walletModel->digiDollarHistoryRefreshInProgress() &&
                                       !checking && m_paymasterRequestId.isEmpty());
     if (m_offerCheckHelp) {
         if (!paymasterOnlySelected() && hasOwnDgbForFees()) {
@@ -2794,6 +2886,7 @@ void PaymasterSendWidget::invalidatePaymasterOfferPreview(bool preserve_choice)
     if (!preserve_choice) setPaymasterNotice(QString{});
     ++m_paymasterOfferPreviewGeneration;
     if (m_offerExpiryTimer) m_offerExpiryTimer->stop();
+    m_offerPreviewClock.invalidate();
     if (m_offerCardsFrame) m_offerCardsFrame->setProperty("excludedOffers", QVariant{});
     const bool had_preview =
         m_offerCheckState != OfferCheckState::NOT_CHECKED ||
@@ -2835,6 +2928,15 @@ void PaymasterSendWidget::refreshPaymasterOffers()
 
 void PaymasterSendWidget::requestPaymasterOffers(bool background)
 {
+    if (m_walletModel && (m_walletModel->digiDollarHistoryRefreshInProgress() ||
+                         !m_walletModel->digiDollarHistoryRefreshError().isEmpty())) {
+        m_historyDeferredRefresh = true;
+        if (!background && !m_walletModel->digiDollarHistoryRefreshInProgress()) {
+            m_walletModel->getDigiDollarTransactionHistoryAsync(0, 0, {});
+        }
+        updateHistoryWaitState();
+        return;
+    }
     const auto input = m_form.paymentInput();
     if (!m_walletModel || m_paymasterBusy || !m_paymasterRequestId.isEmpty()) {
         reportPaymasterOperationNotStarted(
@@ -3102,7 +3204,10 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 }
                 const qint64 remaining_seconds = earliest_expiry - QDateTime::currentSecsSinceEpoch();
                 if (remaining_seconds <= 0) guard->expirePaymasterOfferPreview();
-                else guard->m_offerExpiryTimer->start(static_cast<int>(std::min<qint64>(remaining_seconds, std::numeric_limits<int>::max() / 1000) * 1000));
+                else {
+                    guard->m_offerPreviewClock.start();
+                    guard->m_offerExpiryTimer->start(static_cast<int>(std::min<qint64>(remaining_seconds, std::numeric_limits<int>::max() / 1000) * 1000));
+                }
             }
             guard->setPaymasterBusy(false);
             guard->updateFeeDisplay();
@@ -3294,7 +3399,11 @@ void PaymasterSendWidget::executePaymasterTransfer(
     QPointer<PaymasterSendWidget> guard{this};
     m_paymasterActiveSendParams = buildPaymasterSendParams(address, amount_cents);
     m_paymasterSendTemplate = m_paymasterActiveSendParams;
-    m_paymasterActiveSendStarted.start();
+    // Local wallet/chain lock waits before the first reply are not provider
+    // preparation time. Core independently bounds transport and quote expiry.
+    m_paymasterActiveSendStarted.invalidate();
+    m_paymasterHistoryPausedAt = -1;
+    m_paymasterHistoryPausedMs = 0;
     UniValue initial_params{UniValue::VARR};
     for (size_t i = 0; i < 6; ++i)
         initial_params.push_back(m_paymasterActiveSendParams[i]);
@@ -3308,6 +3417,10 @@ void PaymasterSendWidget::executePaymasterTransfer(
                                          guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
                                          guard->setPaymasterBusy(false);
                                          return;
+                                     }
+                                     if (error.isEmpty()) {
+                                         guard->m_paymasterActiveSendStarted.start();
+                                         guard->updateHistoryWaitState();
                                      }
                                      guard->handlePaymasterResult(result, error, address,
                                                                   amount_cents);
@@ -4072,7 +4185,14 @@ void PaymasterSendWidget::pollPaymasterSession()
         return;
     }
     if (canContinueActivePaymasterSend()) {
-        if (m_paymasterActiveSendStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
+        if (m_walletModel && m_walletModel->digiDollarHistoryRefreshInProgress() &&
+            m_paymasterAuthorizationCommitment.isEmpty() &&
+            (m_paymasterArtifact.isEmpty() || m_paymasterArtifact == QLatin1String("none"))) {
+            updateHistoryWaitState();
+            schedulePaymasterPoll(/*state_changed=*/false);
+            return;
+        }
+        if (activePaymasterSendExpired()) {
             const bool unsigned_preparation = m_paymasterAuthorizationCommitment.isEmpty() &&
                 (m_paymasterArtifact.isEmpty() || m_paymasterArtifact == QStringLiteral("none"));
             if (unsigned_preparation) {
@@ -5584,6 +5704,12 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
 {
     const bool wallet_changed = m_walletModel != model;
     if (wallet_changed) {
+        disconnect(m_historyConnection);
+        m_historyDeferredRefresh = false;
+        m_historyWaitStarted.invalidate();
+        m_historyStatusTimer->stop();
+        m_paymasterHistoryPausedAt = -1;
+        m_paymasterHistoryPausedMs = 0;
         // Invalidate every wallet-bound callback before touching visible
         // state. This is the Paymaster-local operation token across close and
         // wallet switch boundaries.
@@ -5600,6 +5726,7 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         m_paymasterTransportState.clear();
         m_offerCheckState = OfferCheckState::NOT_CHECKED;
         m_offerExpiryTimer->stop();
+        m_offerPreviewClock.invalidate();
         m_offersTable->setRowCount(0);
         m_offersStatus->setText(DigiDollarSendWidget::tr("Offers not checked for this wallet. Check offers or wait for the automatic check."));
         m_offersStatus->setAccessibleDescription(m_offersStatus->text());
@@ -5659,6 +5786,10 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         invalidatePaymasterOfferPreview();
     }
     m_walletModel = model;
+    if (wallet_changed && model) {
+        m_historyConnection = connect(model, &WalletModel::digiDollarHistoryRefreshStateChanged,
+                                     this, &PaymasterSendWidget::updateHistoryWaitState);
+    }
 
     if (m_walletModel) {
         // Connect wallet model signals
@@ -5681,11 +5812,16 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         updatePaymasterFocusMode();
     }
     applyPaymasterPrivacy();
+    updateHistoryWaitState();
 }
 
 void PaymasterSendWidget::send(const QString& address, CAmount amount_cents)
 {
     if (!m_walletModel || m_paymasterBusy) return;
+    if (m_paymasterRequestId.isEmpty() && historyBlocksPreparation()) {
+        updateHistoryWaitState();
+        return;
+    }
     if (!m_sessionDiscoveryReady) {
         if (!m_sessionDiscoveryPending) discoverPersistedPaymasterSessions();
         return;

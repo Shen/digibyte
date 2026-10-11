@@ -2019,7 +2019,7 @@ public:
         m_operator_progress_timer = new QTimer(this);
         m_operator_progress_timer->setObjectName("paymasterOperatorProgressTimer");
         m_operator_progress_timer->setInterval(1000);
-        connect(m_operator_progress_timer, &QTimer::timeout, this, [this] { updateOperatorProgress(); });
+        connect(m_operator_progress_timer, &QTimer::timeout, this, [this] { showOperatorBusyState(); });
         auto* operator_actions = new QHBoxLayout;
         m_operator_action = new QPushButton(tr("Refresh status"), m_operator_card);
         m_operator_action->setObjectName("paymasterOperatorNextAction");
@@ -4689,6 +4689,8 @@ public:
 
     void setWalletModel(WalletModel* model) override
     {
+        disconnect(m_history_wait_connection);
+        m_history_deferred_status = false;
         cancelFinanceWrite();
         if (m_node_connection_dialog) m_node_connection_dialog->reject();
         if (m_refill_approval) m_refill_approval->reject();
@@ -4730,6 +4732,18 @@ public:
         m_active_rpc_handler_token = 0;
         m_next_rpc_handler_token = 0;
         m_model = model;
+        if (model) {
+            m_history_wait_connection = connect(model, &WalletModel::digiDollarHistoryRefreshStateChanged, this, [this] {
+                const bool waiting = m_model && m_model->digiDollarHistoryRefreshInProgress();
+                if (waiting) m_history_deferred_status = true;
+                setRpcBusyState(m_busy);
+                showOperatorBusyState();
+                if (!waiting && m_history_deferred_status && !m_busy && !m_rpc_active) {
+                    m_history_deferred_status = false;
+                    refreshStatus();
+                }
+            });
+        }
         m_busy = false;
         m_rpc_active = false;
         m_rpc_chain_foreground = false;
@@ -9910,7 +9924,8 @@ private:
 
     void updateOperatorProgress()
     {
-        const bool reading = m_rpc_active && m_active_rpc_command.rfind("get", 0) == 0;
+        const bool history_wait = m_model && m_model->digiDollarHistoryRefreshInProgress();
+        const bool reading = history_wait || (m_rpc_active && m_active_rpc_command.rfind("get", 0) == 0);
         if (!reading) m_operator_read_elapsed.invalidate();
         if (!reading || m_privacy) {
             m_operator_progress_timer->stop();
@@ -9923,7 +9938,9 @@ private:
         if (!m_operator_progress_timer->isActive()) m_operator_progress_timer->start();
         // Fast polls retain the last verified presentation without flashing.
         // A slow poll must still explain why actions remain unavailable.
-        if (isCurrentOperatorRefresh() && m_operator_read_elapsed.elapsed() < 2000) {
+        const bool quick_history_read = history_wait && !m_operator_snapshot.isNull() &&
+            !m_operation.stale(QDateTime::currentSecsSinceEpoch()) && m_operator_read_elapsed.elapsed() < 1000;
+        if (quick_history_read || (!history_wait && isCurrentOperatorRefresh() && m_operator_read_elapsed.elapsed() < 2000)) {
             m_operator_loading->hide();
             m_operator_loading_step->clear();
             m_operator_progress->setAccessibleDescription({});
@@ -9944,6 +9961,7 @@ private:
             step = tr("Reading provider spending limits…");
         else if (m_active_rpc_command == "getpaymasterclientsafetystatus")
             step = tr("Reading client fee limits…");
+        if (history_wait) step = tr("Waiting for the full DigiDollar history check on this node…");
         const qint64 seconds = m_operator_read_elapsed.elapsed() / 1000;
         const QString text = tr("%1 (%2 s elapsed)").arg(step).arg(seconds);
         m_operator_loading_step->setText(text);
@@ -9955,6 +9973,22 @@ private:
     void showOperatorBusyState()
     {
         updateOperatorProgress();
+        if (m_model && m_model->digiDollarHistoryRefreshInProgress() && !m_privacy) {
+            if (!m_operator_snapshot.isNull() && !m_operation.stale(QDateTime::currentSecsSinceEpoch()) &&
+                m_operator_read_elapsed.elapsed() < 1000) return;
+            m_operator_headline->setText(tr("Waiting for the DigiDollar history check…"));
+            m_status->setText(tr("Wallet history is being checked; provider status will refresh automatically."));
+            m_operator_hint->setText(tr("The original DigiDollar ownership and key-recovery checks are running on this node. Paymaster controls wait for those checks. This wait does not start or stop the Core provider, approve a payment, or discard protected transfers. The current service readiness has not been rechecked yet."));
+            m_operator_action->setEnabled(false);
+            m_operator_start->setEnabled(false);
+            m_operator_pause->setEnabled(false);
+            for (const auto& key : {QStringLiteral("user_paid"), QStringLiteral("sponsored")}) {
+                if (auto* status = m_live_status.value(key))
+                    setStatusLabel(status, tr("Waiting for the history check; readiness not rechecked"), QStringLiteral("waiting"));
+            }
+            setStatusKind(m_operator_card, QStringLiteral("waiting"));
+            return;
+        }
         // Polling keeps a recent, validated status in place; initial reads and
         // stale/error recovery still show loading. RPC mutation guards remain active.
         if (!m_busy || m_privacy || isCurrentOperatorRefresh()) return;
@@ -10450,6 +10484,11 @@ private:
 
     void refreshOperatorStatus(bool background = false)
     {
+        if (m_model && m_model->digiDollarHistoryRefreshInProgress()) {
+            m_history_deferred_status = true;
+            showOperatorBusyState();
+            return;
+        }
         if (!hasRpcTransport() || ((m_busy || (background && m_rpc_active)) && m_rpc_handler_depth == 0) || m_setup_wizard_active || m_privacy) return;
         const QPointer<WalletModel> selected = m_model;
         call("getpaymasteroperatorinfo", {}, false, nullptr, [this, selected, background](const UniValue& snapshot) {
@@ -14828,6 +14867,10 @@ private:
         if (!m_operator_snapshot.isNull() && !m_privacy) renderOperatorPresentation(m_operator_snapshot);
         else resetOperatorPresentation();
         renderCurrentTask();
+        if (m_model && m_model->digiDollarHistoryRefreshInProgress()) {
+            for (int index = 0; index < m_tabs->count(); ++index) m_tabs->widget(index)->setEnabled(false);
+            showOperatorBusyState();
+        }
     }
 
     void showPendingGuidedReview()
@@ -14902,7 +14945,11 @@ private:
             m_active_rpc_background = false;
             if (m_rpc_chain_foreground) setRpcBusyState(false);
             m_rpc_chain_foreground = false;
-            updateOperatorProgress();
+            showOperatorBusyState();
+            if (m_history_deferred_status && m_model && !m_model->digiDollarHistoryRefreshInProgress()) {
+                m_history_deferred_status = false;
+                QTimer::singleShot(0, this, [this] { refreshStatus(); });
+            }
             showPendingGuidedReview();
         }
     }
@@ -14910,6 +14957,16 @@ private:
     void dispatchRpcCall(PendingRpcCall request)
     {
         const uint64_t wallet_generation = m_wallet_generation;
+        // A scan can begin after a read queued its next action. Recheck at
+        // dispatch as well as at the page/command boundary. Do not replay a
+        // delayed approval automatically when the history read completes.
+        if (m_model && m_model->digiDollarHistoryRefreshInProgress()) {
+            m_history_deferred_status = true;
+            finishRpcCall(wallet_generation, request.output, std::move(request.handler), request.show_error,
+                          std::move(request.error_handler), UniValue{},
+                          tr("The full DigiDollar history check is still running. This Paymaster operation was not started; review it again after the check finishes."));
+            return;
+        }
         // Elapsed time belongs to this read, not to an earlier slow step in
         // the serialized chain. A fresh finance read must not inherit loading.
         m_operator_read_elapsed.invalidate();
@@ -15021,6 +15078,12 @@ private:
                 "No wallet is selected, so the Paymaster RPC was not started."));
             return;
         }
+        if (m_model && m_model->digiDollarHistoryRefreshInProgress()) {
+            report_not_started(tr("The full DigiDollar history check is still running. No new Paymaster wallet operation was started. Wait for the check to finish."));
+            m_history_deferred_status = true;
+            showOperatorBusyState();
+            return;
+        }
         if (params.isNull()) params = UniValue{UniValue::VARR};
 
         PendingRpcCall request;
@@ -15070,6 +15133,8 @@ private:
     }
 
     WalletModel* m_model{nullptr};
+    QMetaObject::Connection m_history_wait_connection;
+    bool m_history_deferred_status{false};
     uint64_t m_wallet_generation{0};
     uint64_t m_settings_restart_generation{0};
     uint64_t m_oracle_request_generation{0};
