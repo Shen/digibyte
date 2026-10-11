@@ -32,6 +32,12 @@ still requires a separately retained high-water mark.
 This is a scoped source review with selected tests, not proof of absence of such
 paths or release approval.
 
+The [2026-10-11 integration boundary review](design/paymaster-integration-boundaries.md)
+separately checks original wallet recovery, test gates and scan coverage. It
+withdraws the temporary DD history shortcut and records remaining performance
+and full-build checks; it does not supersede this threat model's financial
+recovery requirements.
+
 Thirty-seven existing protection tests passed **1,130 assertions**. Two isolated
 diagnostic cases failed their intended security assertions (**342/344 assertions
 passed**), reproducing TM-001 and TM-002. Product code and the normal test suite

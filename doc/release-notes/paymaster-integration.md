@@ -577,10 +577,20 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
 - Display client fee limits in DD using exact integer-cent input bindings.
   Clarify that provider display loading is independent of Core service startup
   and cached announcements; published offers do not confirm live readiness.
-- Keep DD history ownership checks read-only: use known DD address keys, owner
-  public keys and ordinary script ownership instead of scanning private
-  descriptor keys for cold foreign outputs. This removes a shared-wallet lock
-  bottleneck during startup that could delay Paymaster preparation. Locked
-  history, self-send and redemption-change rows remain supported; transaction
-  processing/rescan retains key recovery and financial ownership checks.
+- Preserve the original complete DD history ownership and descriptor-key
+  recovery path. The temporary public-key-only optimization was reverted;
+  descriptor-only history can again recover and persist a missing DD address
+  key. Qt workers and cached previews remain, without replacing Core checks.
   Unsigned preparation timeouts no longer attribute every delay to the provider.
+
+### Original integration boundaries reviewed (2026-10-11)
+
+- Restore the original three DCA/health runtime failure thresholds and the
+  default CodeQL build targets; keep the added wallet/test scan coverage.
+- Reject unknown Qt suite filters instead of returning success without tests.
+- Extend Paymaster sanitizer-workflow triggers to shared wallet/lifecycle/GUI
+  adapters; its existing Core-only build does not claim Qt sanitizer coverage.
+- Independently verify the amended DigiByte BIP324 long-packet reference and
+  check the SHA256 of the entire encrypted packet in addition to its suffix.
+- Document necessary shared hooks and outstanding full-build, performance and
+  dynamic checks in the [boundary review](../design/paymaster-integration-boundaries.md).

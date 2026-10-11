@@ -467,12 +467,15 @@ command works with DigiDollar wallets:
 | `backupwallet path` / `restorewallet new_name path` | Full DD state including owner keys; for a provider wallet, also the Paymaster identity key, policies, pool/session records, finance ledger and backup metadata | Restored wallet is loaded under `new_name`; existing wallet is untouched. A restored provider wallet asks for a fresh local backup again. |
 | `importdescriptors` into a fresh wallet + `rescanblockchain` | Reconstructs DD positions from on-chain OP_RETURN metadata after proving ownership of the zero-value DD P2TR output | If the imported descriptors can provide the Taproot spending key, the wallet recovers and indexes that key for redemption. |
 
-DD history reads use already known address/owner public keys and standard wallet
-script ownership to synthesize receive, self-send and redemption-change rows.
-They also work while the wallet is locked. Opening the history does not recover
-private descriptor keys or save ownership records: descriptor-only restoration
-still requires transaction processing/rescan to reconstruct missing DD keys.
-Persisted history rows remain available while that reconstruction is pending.
+DD history reads preserve the original ownership checks, including the
+`IsDDOutputMine()` descriptor recovery fallback when known DD address keys and
+ordinary script ownership do not suffice. With an unlocked wallet, this can
+recover and persist a missing DD address key. Locked wallets still recognize
+known encrypted address/owner keys; missing private-key recovery needs unlock.
+Persisted history rows remain available while live checks are pending. History
+completion is not a substitute for the independent ownership, input, fee and
+signature checks in the normal payment path. Paymaster integrations preserve
+this behavior; see the [boundary review](doc/design/paymaster-integration-boundaries.md).
 
 Paymaster-provider state has stronger recovery requirements than ordinary
 on-chain DD ownership. A seed or descriptor import can recover keys and

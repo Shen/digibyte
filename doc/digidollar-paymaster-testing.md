@@ -4275,6 +4275,13 @@ failures/skips. Without `-Build`, matching normal binaries must already exist.
 
 ## Cold DD history blocking payment preparation (2026-10-11)
 
+**Historical candidate, superseded:** the history optimization and its
+negative-cache expectations below were withdrawn by the
+[original-code boundary review](design/paymaster-integration-boundaries.md).
+The timings and installed-binary hashes remain valid observations of that
+candidate, not acceptance evidence for the restored ownership/recovery path.
+Use the verification procedure in the next section for current source.
+
 The operator's startup capture in
 `build_msvc/paymaster-refresh-check/startup-latency/operator-20261011-200440-592Z`
 used GUI SHA256
@@ -4354,3 +4361,99 @@ require no two-minute preparation timeout or long history-correlated block gap.
 The helper restores the temporary `bench` setting after capture. Other startup
 and readiness checks are still required, so this correction does not promise a
 fixed total startup time or weaken wallet/index synchronization gates.
+
+## Original-code boundary verification (2026-10-11)
+
+The [boundary review](design/paymaster-integration-boundaries.md) compares the
+cumulative integration with pinned original release `d7265fb05e`, starting at
+integration `360a7b3f8a`. It restores the original complete history ownership
+function, three runtime failure thresholds and default CodeQL build targets,
+and rejects unmatched Qt suite filters. Necessary reservation/recovery adapters
+remain. The previous installed history-optimized GUI is not this source stand.
+
+Executed targeted checks in
+`build_msvc/paymaster-refresh-check/original-boundaries/`:
+
+- History/encryption/ownership/self-send: 11 cases, 99 assertions passed. A new
+  imported Taproot-tree descriptor case proves recovery of the exact missing DD
+  address key and persistence after reload. Linking that test against the old
+  optimized history object fails at key recovery; restored source passes.
+- BIP324 packet vectors: 1 case, 697 assertions passed, including SHA256 of the
+  entire long encrypted packet. Independent Python EllSwift/AEAD/length-stream
+  calculation matches session, garbage terminators, suffix and full hash; the
+  original erroneous suffix does not match. Cipher code remains unchanged.
+- Qt filter: nonexistent and mixed valid/nonexistent suites exit 1; `URITests`
+  exits 0, with 3 passed entries and zero failures/skips. The prior normal Qt
+  test executable returns 0 for the nonexistent suite, reproducing the bug.
+- Original performance gates: 2 cases pass, DCA stress fails (312 ms against
+  <100 ms; 31/32 assertions, exit 201). Excluding DD debug logging makes the
+  focused DCA diagnostic pass. Do not treat that exclusion as default-suite
+  acceptance or relax the original threshold to obtain a green report.
+  A combined final-binary run also fails the mass-alert threshold (2,001 ms
+  against <2,000 ms), while DCA stress takes 311 ms. That run has 13/15 cases
+  and 826/828 assertions passed; all wallet/history and BIP324 assertions pass.
+  The later failure remains recorded despite the earlier isolated pass.
+  The two stress cases pass diagnostically with DD debug logging excluded
+  (30 assertions); neither default test setting nor threshold was changed.
+- Python/YAML syntax, original-function equivalence, script inventory warning
+  behavior and `git diff --check` are recorded separately. The redundant
+  assumevalid categorization was removed; the test was already in the default
+  list and remains there.
+
+Selected MSVC translation-unit compiles preserve `/WX`, `/sdl` and `/GS` and
+link isolated executables against existing normal-build inputs. These checks
+are not a full fresh build, full suites or completed CI scans. Source, object,
+link-input, binary and report hashes are in `final-receipt.json`. Operator
+wallets and normal application executables were not changed by this review.
+
+For the normal build and matching broad checks, close client/provider GUIs and
+allow other builds to finish. The workspace-local helper uses the installed
+MSVC v143 14.43.34808, SDK 10.0.26100.0, static Qt at `D:\Qt51510\install`,
+existing vcpkg dependencies and Python. No new package is required. Allow
+minutes to tens of minutes for compilation and broad tests, potentially longer
+for all requested suites:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\original-boundaries\build-and-check.ps1 -Build -FullCoreTests -FullQtTests -FunctionalTests
+```
+
+The helper builds the normal solution with one worker, requires all three
+history cases, runs the targeted wallet/BIP324/performance checks, checks Qt
+filter rejection, then runs complete Core and **all compiled Qt suites** with
+suite/function filters cleared. It collects test failures and still runs
+subsequent requested checks; a failed build stops immediately. Reports and a
+source/binary receipt are retained even on failure. Its full Qt run does not
+set the shared output-file option, which would otherwise overwrite the same
+file for successive suites. Native exit status aggregates all Qt results.
+
+`-FunctionalTests` runs the registered variants of
+`digidollar_wallet_restore_redeem.py`, `digidollar_encrypted_wallet.py`,
+`wallet_encryption.py`, `feature_assumevalid.py`,
+`wallet_paymaster_readiness.py` and `wallet_paymaster_rpc.py` serially, using
+temporary Regtest nodes. Normal wallets are not used. The current
+`test/config.ini` must enable wallet/CLI/daemon tests; framework prerequisites
+from `test/functional/README.md` still apply. This selection is not the entire
+functional suite or reference-release compatibility matrix.
+
+Success requires exit 0, expected nonempty case counts, all native full-suite
+results successful and functional `Tests successful`, with no unapproved skips
+or scanner findings. The known default runtime failures can make this command
+fail; retain their reports and investigate rather than suppressing them. Without
+`-Build`, first build matching normal binaries; the old installed GUI alone
+does not satisfy that condition. Helper PowerShell syntax is checked locally;
+the broad helper execution remains an operator task.
+
+CodeQL still runs for PRs targeting `develop`; verify the restored default
+targets in its build log and review extracted-source coverage/results. The
+Paymaster Security workflow can be dispatched separately for its existing
+ASan/UBSan and bounded fuzz jobs. It still builds Core without Qt; new Qt path
+triggers do not establish Qt sanitizer coverage. Follow the existing
+[release gate](digidollar-paymaster-release-gate.md) for full campaigns and
+cross-platform acceptance. These expensive scans/builds have not run here.
+
+After a matching rebuild, repeat the cold-start reproduction with the existing
+diagnostic helper and prepare only to the exact approval dialog. The restored
+history scan may again take longer; preserve its ownership/recovery path while
+addressing Paymaster scheduling and presentation. No new fixed startup time or
+global history-completion prerequisite for ordinary DD payments is claimed.
