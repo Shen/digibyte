@@ -145,3 +145,27 @@ adjust Paymaster scheduling/progress/availability around the existing wallet
 work; do not reinstate the ownership shortcut. A new startup gate would need
 its own lifecycle/cancellation tests and should describe a Paymaster prerequisite,
 not invent an original global history-scan requirement.
+
+## Paymaster coordination follow-up (2026-10-12)
+
+The Paymaster GUI now waits for the existing canonical history workers on the
+same node before creating a new payment request. The retained worker, not the
+view, owns the activity count, so closing a wallet model cannot falsely end
+the wait. The small WalletModel adapter reports activity/errors and leaves
+`DigiDollarWallet::GetDDTransactionHistory()` unchanged. It adds no wallet,
+consensus, network or financial persistence format.
+
+Client and operator views explain long waits, defer their reads, and refresh
+after completion. A failed selected-wallet read blocks new client preparation
+until explicit retry succeeds. Fast warm reads preserve presentation. The
+two-minute live preparation budget starts after the first successful Core
+reply and excludes observed later unsigned history waits. Native sends,
+original ownership/key recovery, synchronization, transport/quote limits,
+exact financial approval and signed-artifact protection remain in place.
+
+This addresses observed local Qt history contention; it does not promise that
+unknown remote providers or unrelated RPC tasks never time out. Five new
+Paymaster GUI cases use disposable wallets and the real history worker. See
+the [history-wait runbook](../digidollar-paymaster-testing.md#paymaster-coordination-with-full-dd-history-2026-10-12)
+for the final evidence and operator acceptance steps. The normal installed
+GUI is not automatically replaced by an isolated test build.

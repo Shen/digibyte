@@ -4457,3 +4457,90 @@ diagnostic helper and prepare only to the exact approval dialog. The restored
 history scan may again take longer; preserve its ownership/recovery path while
 addressing Paymaster scheduling and presentation. No new fixed startup time or
 global history-completion prerequisite for ordinary DD payments is claimed.
+
+## Paymaster coordination with full DD history (2026-10-12)
+
+This follow-up starts from `c240efa1227e673e385b76893c8afd7529435fa5` on
+`integration/paymaster-v9.26.7`. It changes Paymaster GUI scheduling and a small
+WalletModel observation bridge; the restored complete history implementation,
+ordinary wallet/RPC sends, synchronization, consensus, signing, quote expiry,
+transport authentication/timeouts and financial persistence are unchanged.
+
+Five new cases in `PaymasterWidgetTests` use disposable descriptor wallets and
+the actual canonical worker:
+
+- `paymasterWaitsForFullHistory`: selected-wallet contention, another wallet on
+  the node, and a model unloaded while its retained worker is still blocked.
+  The test holds `cs_wallet` on a separate thread, verifies that preparation
+  creates no UUID/RPC/timer, checks deferred operator reads and coalesced
+  callbacks, and then releases the lock before assertions. Completion refreshes
+  observations without automatically creating a payment. Own-DGB mode retains
+  its ordinary path.
+- `paymasterPreparationClockStartsWithFirstReply`: a withheld first RPC reply
+  does not start the preparation timer. A successful pending response starts it;
+  a subsequent canonical history read pauses the unsigned budget while keeping
+  the same request. It does not test a remote network or wait two real minutes.
+- `paymasterHistoryFailureCanBeRetried`: a real DD-wallet initialization gap
+  fails the history worker. New client preparation stays disabled until an
+  explicit retry succeeds; cached offers or mocked status cannot bypass it.
+
+Workspace evidence and the operator helper are under
+`build_msvc/paymaster-refresh-check/history-wait/`. The isolated GUI test link
+uses selectively compiled GUI files and generated Qt metadata, the restored
+history object from the preceding boundary review, and existing libraries.
+It is not a normal product build or a full-suite binary acceptance result.
+Use the recorded explicit environment-based Qt selectors; command-line test
+arguments are not this repository's suite-selection interface. Earlier failed
+fixture/selection trials are retained separately and do not count as passing
+verification. The final receipt identifies sources, objects, link inputs,
+binary hashes and report exit codes.
+
+Final local checks passed: **18 selected Paymaster GUI cases** (five new,
+13 existing) and **three original history ownership/recovery/locked-wallet
+cases, 46/46 assertions**. Existing coverage includes selectable-offer gates,
+protected timeout observation, late replies after wallet close, six delayed
+operator-start/error rows, page command gating, completed live payment phases
+and an unreachable endpoint. Eight GUI/test compile units and the isolated
+link succeeded; broad product rebuild, full suites and live startup remain
+operator acceptance tasks. `git diff --check` and the operator helper's
+PowerShell parser check passed; no formatter executable was available, so
+formatting was inspected against the repository configurations.
+
+The unchanged queued-expiry test initially failed because Qt could report a
+positive `remainingTime()` after its shortened preview timer had elapsed.
+Paymaster now additionally checks an independent monotonic preview clock.
+The original assertion passes without changing the test or extending Core
+quote validity. This is a stricter Paymaster presentation guard, not a change
+to ordinary payment or signing checks.
+
+The normal installed GUI has not been replaced by this change. Operator
+acceptance requires matching normal binaries. Prerequisites: the existing
+MSVC v143 14.43.34808/SDK 10.0.26100.0/Qt 5.15.10 setup, no competing build,
+and closed GUIs before replacing their executable through the normal build.
+From `D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\history-wait\build-and-check.ps1 -Build -FullQtTests
+```
+
+Runtime class: normal solution build and complete GUI suite, minutes to tens
+of minutes depending on incremental state. Success requires exit zero, exactly
+three current history-wait rows plus the clock and error/retry cases, and a
+successful complete unfiltered GUI suite. Reports and source/binary hashes are
+written to a distinct `operator-*` directory. The helper restores previous
+test environment variables; it does not replace native errors with success.
+The helper's syntax is checked locally; its normal build/full-suite execution
+remains an operator task.
+
+Then repeat a cold start with the original full history code and the existing
+`startup-latency` capture helper. During a slow check, expect a history-wait
+explanation, responsive navigation and no new Paymaster request or preparation
+timeout. After completion, expect fresh offers/status and preparation to the
+exact review dialog on an explicit user action. No signature/payment is needed
+for that reproduction. This live reproduction and full acceptance remain open.
+
+The coordination observes Qt history workers only. Arbitrary CLI/RPC jobs and
+unknown remote-node lock waits are not identified as history waits by this
+adapter. Actual transport/quote failures remain bounded; signed ambiguity still
+retains inputs and uses read-only outcome resolution. The original runtime
+test failures recorded in the boundary review remain open, not waived.

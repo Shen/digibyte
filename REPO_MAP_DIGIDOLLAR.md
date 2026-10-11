@@ -1631,6 +1631,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   worker supplies confirmation status. Verified cached rows keep their status.
 - History refreshes taking at least one second report worker startup, wallet
   read/serialization and Qt delivery times under opt-in `bench` logging.
+- `digiDollarHistoryRefreshInProgress()` and the refresh-state signal expose
+  existing canonical worker activity across wallets on the same node. The
+  worker outlives its view; completion/failure still releases the activity
+  count after model unload. The selected model retains its last history error
+  for explicit client retry. These observations grant no payment authority.
 
 ### src/qt/paymasterwallet.cpp/h
 - `PaymasterQt::ExecuteSigningRpcAsync()` reads encryption state, signs through
@@ -1872,7 +1877,7 @@ present in the tree but not compiled into the current unit-test binary.
 |------|--------------|
 | `digidollarwidgettests.cpp/h` | Qt widget unit tests for DD UI components |
 | `digidollarwave19widgettests.cpp/h` | Wave 19 Qt unit/signal-slot pins for the release-critical DD UX surface (mint tier dropdown, etc.) |
-| `paymasterwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, responsive Node connection / Wallet & backup layouts in both themes, finance cards/details/capital and backup actions, recovery, and asynchronous UI wiring |
+| `paymasterwidgettests.cpp/h` | Fee modes/caps, fixed-gross deduction and wallet-empty summaries, offers, persistent session states, provider controls, responsive Node connection / Wallet & backup layouts in both themes, finance cards/details/capital and backup actions, recovery, asynchronous UI wiring, real history-lock waits across wallets/unload, first-reply deadlines and history-error retry |
 | `digidollarmintrecordtests.cpp/h` | A mint started from the wallet window saves its record before the transaction is sent, and does not send at all if the wallet cannot save it |
 
 The original Qt suite retains DD behavior and boundary integration tests;

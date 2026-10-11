@@ -1,5 +1,28 @@
 # Paymaster integration release notes
 
+## Paymaster waits for the original DD history read (2026-10-12)
+
+New GUI preparation now waits before request creation while canonical DD
+history workers on the same node are active. Long reads have a separate
+explanation; fast warm reads retain the existing presentation. Wallet-model
+unload does not mark an unfinished worker complete. Client status and offers,
+and the operator's service status, refresh after completion. A failed selected
+wallet history read requires a successful explicit retry before new client
+preparation resumes.
+
+The live preparation budget starts with the first successful Core reply and
+excludes observed subsequent unsigned history waits. All original ownership
+and key-recovery checks, ordinary DD sends, quote/transport limits and
+financial authorization/reservation protections remain. This is local GUI
+coordination, not a guarantee against remote outages or signed-payment
+ambiguity. Normal-build/full-Qt and cold-start acceptance are documented in
+the [runbook](../digidollar-paymaster-testing.md#paymaster-coordination-with-full-dd-history-2026-10-12).
+
+The existing queued-expiry regression also exposed Qt reporting a stale
+positive timer remainder. Offer eligibility now additionally checks monotonic
+elapsed time; a delayed timer callback cannot extend a published preview.
+Core's authenticated quote-expiry checks remain independent and unchanged.
+
 ## Authenticated transport boundary verification (2026-10-10)
 
 The existing Paymaster-only send filter now repeats the live V2 connection,

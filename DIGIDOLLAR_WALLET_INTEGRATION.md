@@ -476,6 +476,11 @@ Persisted history rows remain available while live checks are pending. History
 completion is not a substitute for the independent ownership, input, fee and
 signature checks in the normal payment path. Paymaster integrations preserve
 this behavior; see the [boundary review](doc/design/paymaster-integration-boundaries.md).
+Qt Paymaster preparation observes existing history workers on the same node
+and waits before creating a new payment request. The GUI does not impose an
+additional full-history prerequisite on ordinary DD transfers or alter the
+history ownership algorithm. An observed history-read failure keeps new
+Paymaster preparation paused until an explicit retry completes successfully.
 
 Paymaster-provider state has stronger recovery requirements than ordinary
 on-chain DD ownership. A seed or descriptor import can recover keys and

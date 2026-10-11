@@ -1,6 +1,6 @@
 # Paymaster operator workflow
 
-Current UI candidate: integration/paymaster-v9.26.7, 2026-10-09.
+Current UI candidate: integration/paymaster-v9.26.7, 2026-10-12.
 The task-oriented redesign has separate verification; earlier results do not
 validate this revision. This is not a release approval.
 
@@ -21,6 +21,38 @@ manually delete transfer records or unlock their inputs to bypass this limit.
 These source corrections require a new product build. Targeted verification and
 the operator build command are in the
 [test runbook](digidollar-paymaster-testing.md#provider-security-corrections-2026-10-10).
+
+## Waiting for DigiDollar history (2026-10-12)
+
+The complete original history read can recover missing wallet-owned keys and
+therefore legitimately hold wallet or chain locks for a long time. Paymaster
+now observes these GUI workers, including other wallets on the same node.
+New preparation is disabled while a read is pending; no request UUID, payment
+reservation or signature is created by this waiting stage. After completion,
+offers and status are refreshed automatically. Preparing and approving the
+exact offer still require the existing user actions.
+
+Long reads have a separate history-wait explanation. Fast warm refreshes retain
+the displayed cards and do not insert a temporary banner. The provider panel
+distinguishes this display wait from Core service readiness: it does not start
+or stop an autostarted provider, and it does not claim readiness was rechecked.
+If the selected wallet's history read fails, new client preparation remains
+paused. Fix the cause and use **Check offers / Refresh offers** to retry the
+original history read. Technical history errors are not shown in that banner.
+
+The unsigned preparation budget begins with the first successful Core reply,
+and observed subsequent history waits do not consume it. Existing transfers
+and protected inputs remain intact. Quote expiry, authenticated transport
+timeouts, exact-offer approval and Core's independent financial checks remain.
+A stopped or unreachable remote provider can still cause a bounded unsigned
+failure. Lost replies after signing still require protected read-only outcome
+resolution; no GUI waiting scheme can safely declare those funds free.
+
+This coordination covers the existing Qt history workers, not arbitrary CLI
+jobs, remote-node locks or a new protocol-wide readiness promise. Normal DD
+payments retain their original synchronization and ownership behavior. A new
+normal build and cold-start reproduction are needed before this source change
+can be considered verified in the operator's running GUIs.
 
 ## Find the right page in Qt
 

@@ -227,6 +227,14 @@ including `IsDDOutputMine()` and its descriptor-key recovery fallback. An
 unlocked wallet can recover and persist a missing DD address key during that
 read. Cold reads can therefore hold shared wallet locks for longer. The Qt
 worker and preview cache do not replace those checks or authorize a payment.
+The GUI history bridge exposes node-scoped activity to Paymaster views because
+scans in different wallets can contend for shared chain locks. New Paymaster
+preparation waits before creating a request UUID. Status and offers refresh
+after the worker finishes; an unloaded view cannot prematurely clear the wait.
+Unsigned live preparation excludes these observed waits from its two-minute
+budget, which starts with the first successful Core reply. Quote expiry,
+transport limits and all signing/reservation checks remain independent. Native
+DD send paths and the complete wallet history implementation are unchanged.
 Paymaster must accommodate the existing wallet lifecycle; startup performance
 work must preserve its ownership/recovery behavior. See the
 [integration boundary review](doc/design/paymaster-integration-boundaries.md)
