@@ -8547,6 +8547,8 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
         QCOMPARE(headline->text(), QStringLiteral("Reading provider status…"));
         QCOMPARE(action->text(), QStringLiteral("Please wait…"));
         QVERIFY(hint->text().contains("automatically"));
+        QVERIFY(hint->text().contains("does not start or stop the provider"));
+        QVERIFY(hint->text().contains("public announcements"));
         QVERIFY(!loading->isHidden());
         QVERIFY(timer->isActive());
         QCOMPARE(progress->minimum(), 0);

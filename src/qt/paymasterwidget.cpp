@@ -9960,7 +9960,15 @@ private:
         if (!m_busy || m_privacy || isCurrentOperatorRefresh()) return;
         const bool reading = m_active_rpc_command.rfind("get", 0) == 0;
         m_operator_headline->setText(reading ? tr("Reading provider status…") : tr("Wallet operation in progress…"));
-        m_operator_hint->setText(reading ? tr("Saved settings and wallet status are being loaded. Controls become available automatically when the checks finish; you do not need to repeat setup.") : tr("Complete any open confirmation and wait for the current wallet operation to finish."));
+        if (reading) m_status->setText(tr("Reading current provider status…"));
+        m_operator_hint->setText(reading ? tr("The display is loading saved settings and current wallet status. This read does not start or stop the provider. An autostarted provider may already be serving requests, and earlier public announcements may still be listed by clients. Controls become available automatically when the checks finish; you do not need to repeat setup.") : tr("Complete any open confirmation and wait for the current wallet operation to finish."));
+        if (reading) {
+            for (const auto& key : {QStringLiteral("user_paid"), QStringLiteral("sponsored")}) {
+                auto* status = m_live_status.value(key);
+                if (status && status->property("statusKind").toString() == QLatin1String("waiting"))
+                    setStatusLabel(status, tr("Reading current readiness…"), QStringLiteral("waiting"));
+            }
+        }
         m_operator_action->setText(tr("Please wait…"));
         m_operator_action->setToolTip(m_operator_hint->text());
         m_operator_action->setEnabled(false);
