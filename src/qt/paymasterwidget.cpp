@@ -10178,12 +10178,19 @@ private:
             kind = QStringLiteral("waiting");
             if (payment_in_progress) {
                 area = QStringLiteral("payments");
-                headline = work_phase == "capacity" ? tr("Payment capacity reserved") : tr("Payment reserves in use");
-                hint = state == QLatin1String("manual")
+                const bool accepting = ready && !locked && provider.find_value("enabled").isTrue() &&
+                    (state == QLatin1String("active") || state == QLatin1String("manual"));
+                headline = accepting ? (state == QLatin1String("manual") ? tr("Running in manual mode · customer work open") : tr("Provider is running · customer work open"))
+                    : work_phase == "capacity" ? tr("Payment capacity reserved") : tr("Payment reserves in use");
+                hint = accepting
+                    ? tr("Offers and payments are using part of the reserves. Independent free reserves remain available for further requests within the saved limits. Review individual requests in Activity; an open offer is not a completed payment.")
+                    : state == QLatin1String("manual")
                     ? tr("Operating capital is reserved for a payment. Review the current request in Activity; manual processing remains enabled.")
-                    : tr("Open offers and payments reserve capacity. After a client cancels an unsigned request, the provider may keep its reservation until the offer expires. Core continues automatically within the saved limits. A reservation is not a completed payment or a refill expense.");
+                    : tr("New requests are temporarily paused. Open offers and payments reserve capacity. After a client cancels an unsigned request, the provider may keep its reservation until the offer expires. Core continues automatically within the saved limits. A reservation is not a completed payment or a refill expense.");
                 button = tr("View payment activity");
-                setStatusLabel(m_overview_liquidity_status, tr("In use · capacity is reserved for a payment"), QStringLiteral("waiting"));
+                kind = accepting ? QStringLiteral("ready") : QStringLiteral("waiting");
+                if (accepting && state == QLatin1String("manual")) hint += tr(" Manual processing remains enabled.");
+                setStatusLabel(m_overview_liquidity_status, accepting ? tr("Ready · free payment reserves are available") : tr("In use · capacity is reserved for a payment"), kind);
             } else {
                 area = QStringLiteral("liquidity");
                 headline = tr("Waiting for reserve confirmations");
@@ -10336,7 +10343,11 @@ private:
             } else if (!can_accept.isTrue()) {
                 setStatusLabel(status, tr("Enabled · spending or offer limit reached"), QStringLiteral("action"));
             } else if (!accepting) {
-                setStatusLabel(status, tr("Enabled · waiting for provider readiness"), QStringLiteral("waiting"));
+                setStatusLabel(status,
+                    locked ? tr("Enabled · waiting for wallet unlock") :
+                    m_operator_next_area == QLatin1String("payments") ? tr("Enabled · new requests paused while reserves are in use") :
+                    m_operator_next_area == QLatin1String("node") ? tr("Enabled · waiting for current block data") :
+                    tr("Enabled · waiting for provider readiness"), QStringLiteral("waiting"));
             } else {
                 setStatusLabel(status, state.get_str() == "manual" ? tr("Locally ready · manual processing") : tr("Locally ready · accepting requests"), QStringLiteral("ready"));
             }
@@ -11192,6 +11203,7 @@ private:
 
         using Phase = PaymasterOperationController::Phase;
         if (!m_task_card) return;
+        m_task_card->setTitle(m_operation.phase == Phase::Complete ? tr("Last completed management task") : tr("Provider management task"));
         const bool details_available = !m_privacy && m_operation.phase == Phase::Blocked && !m_operation.error.isEmpty();
         m_task_error_details->setText(details_available ? m_operation.error : QString{});
         m_task_error_toggle->setVisible(details_available);

@@ -3258,7 +3258,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
-    QVERIFY(status->text().contains(QStringLiteral("No public offer within this amount and your service-fee limits.")));
+    QVERIFY(status->text().contains(QStringLiteral("No matching public Paymaster offer currently listed.")));
     QCOMPARE(refresh->text(), QStringLiteral("Check again"));
     QVERIFY(!send_widget.findChild<QTimer*>(QStringLiteral("paymasterOfferIconTimer"))->isActive());
 
@@ -8260,7 +8260,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QCOMPARE(icon->text(), QStringLiteral("—"));
     auto* status = form.findChild<QLabel*>("paymasterOffersStatus");
     auto* table = form.findChild<QTableWidget*>("paymasterOffers");
-    QVERIFY(status->text().contains("No public offer"));
+    QVERIFY(status->text().contains("No matching public Paymaster offer"));
     auto* updated = form.findChild<QLabel*>("paymasterOffersUpdated");
     QVERIFY(updated && updated->text().contains("Automatic check every 10 s"));
     QCOMPARE(table->rowCount(), 0);
@@ -8271,6 +8271,54 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QCOMPARE(status->text(), QStringLiteral("Public Paymaster offer found"));
     QCOMPARE(table->rowCount(), 1); // A late announcement appears without a click.
     QCOMPARE(reads, 2);
+    auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
+    auto* expiry = client->findChild<QTimer*>("paymasterOfferExpiryTimer");
+    auto* choice = form.findChild<QRadioButton*>("paymasterOfferChoice0");
+    QVERIFY(cards && expiry && expiry->isActive() && choice);
+    QPointer<QWidget> original_card = form.findChild<QWidget*>("paymasterOfferCard0");
+    QVERIFY(original_card);
+    for (const QString& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+        QFile css(":/css/" + theme);
+        QVERIFY(css.open(QIODevice::ReadOnly));
+        form.setStyleSheet(QString::fromUtf8(css.readAll()));
+        QCoreApplication::processEvents();
+        const QRect geometry = cards->geometry();
+        choice->setFocus();
+        QWidget* focus_before = QApplication::focusWidget();
+        QVERIFY(tick());
+        QVERIFY(pending);
+        QVERIFY(!cards->isHidden());
+        QVERIFY(cards->isEnabled());
+        QVERIFY(expiry->isActive());
+        QCOMPARE(status->text(), QStringLiteral("Public Paymaster offer found"));
+        QVERIFY(!animation->isActive());
+        QCoreApplication::processEvents();
+        QCOMPARE(cards->geometry(), geometry);
+        reply(available);
+        QCoreApplication::processEvents();
+        QCOMPARE(form.findChild<QWidget*>("paymasterOfferCard0"), original_card.data());
+        QCOMPARE(cards->geometry(), geometry);
+        QVERIFY(choice->isChecked());
+        QCOMPARE(QApplication::focusWidget(), focus_before);
+    }
+    auto* refresh_offers = form.findChild<QPushButton*>("refreshPaymasterOffers");
+    QVERIFY(refresh_offers && refresh_offers->isEnabled());
+    refresh_offers->click();
+    QVERIFY(pending);
+    QVERIFY(!cards->isHidden());
+    reply(available);
+    QCOMPARE(form.findChild<QWidget*>("paymasterOfferCard0"), original_card.data());
+    // The retained preview cannot outlive its expiry while a read is pending.
+    QVERIFY(tick());
+    QVERIFY(QMetaObject::invokeMethod(expiry, "timeout", Qt::DirectConnection));
+    QVERIFY(original_card.isNull());
+    QCOMPARE(table->rowCount(), 0);
+    reply(available);
+    QCOMPARE(table->rowCount(), 0); // Expired generation cannot repopulate cards.
+    QVERIFY(status->text().contains("expired"));
+    QVERIFY(tick());
+    reply(available);
+    QVERIFY(form.findChild<QWidget*>("paymasterOfferCard0"));
     QVERIFY(tick());
     reply({}, "node unavailable");
     QVERIFY(!animation->isActive());
@@ -8278,6 +8326,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("error"));
     QVERIFY(status->text().contains("could not be checked"));
     QCOMPARE(table->rowCount(), 0);
+    QVERIFY(!form.findChild<QWidget*>("paymasterOfferCard0"));
     QCOMPARE(dialogs, 0); // Background failures never open repetitive modals.
     QVERIFY(tick());
     reply(UniValue{UniValue::VOBJ});
@@ -9222,13 +9271,16 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     activity.pushKV("capacity_requests", 1);
     activity.pushKV("reserved_outputs", 2);
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment capacity reserved"));
+    QCOMPARE(headline->text(), QString::fromUtf8("Provider is running · customer work open"));
+    QVERIFY(hint->text().contains("Independent free reserves"));
     QCOMPARE(action->text(), QStringLiteral("View payment activity"));
     activity.pushKV("capacity_requests", 0);
     activity.pushKV("active_payments", 1);
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
-    QVERIFY(hint->text().contains("until the offer expires"));
+    QCOMPARE(headline->text(), QString::fromUtf8("Provider is running · customer work open"));
+    auto* model_status = panel->findChild<QLabel*>("paymasterLive_user_paid");
+    QVERIFY(model_status);
+    QVERIFY(model_status->text().contains("accepting requests"));
     QVERIFY(hint->text().contains("Open-offer limit per recipient: 2"));
     provider.pushKV("service_state", "drain_only");
     provider.pushKV("last_service_error", "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING");
@@ -9286,8 +9338,8 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     provider.pushKV("last_service_error", "");
     activity.pushKV("active_payments", 1);
     observe();
-    QCOMPARE(headline->text(), QStringLiteral("Payment reserves in use"));
-    QVERIFY(hint->text().contains("manual processing"));
+    QCOMPARE(headline->text(), QString::fromUtf8("Running in manual mode · customer work open"));
+    QVERIFY(hint->text().contains("Manual processing"));
     QVERIFY(!hint->text().contains("continues automatically"));
     provider.pushKV("service_state", "error");
     provider.pushKV("last_service_error", "PAYMASTER_FUTURE_CONFIRMATION_ERROR");

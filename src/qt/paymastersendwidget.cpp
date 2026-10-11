@@ -2084,6 +2084,7 @@ void PaymasterSendWidget::updateClientSafetyDisplay()
 
 void PaymasterSendWidget::setPaymasterBusy(bool busy)
 {
+    if (!busy && m_offerCheckFrame) m_offerCheckFrame->setProperty("refreshPending", false);
     if (busy && m_paymasterPollTimer) {
         // A mutation or user-confirmation sequence owns the session while it
         // is busy. Pause the single-shot poll without resetting its backoff;
@@ -2406,11 +2407,11 @@ void PaymasterSendWidget::updateOfferCheckControls()
     if (m_offerCardsFrame) {
         m_offerCardsFrame->setVisible(preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
                                       !m_privacy && !m_offerPreview.empty());
-        m_offerCardsFrame->setEnabled(!m_paymasterBusy && !m_privacy);
+        m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy);
     }
     if (!m_offerCheckFrame) return;
     m_offerCheckFrame->setVisible(paymasterModeSelected() && m_paymasterRequestId.isEmpty());
-    const bool checking = m_offerCheckState == OfferCheckState::CHECKING;
+    const bool checking = m_offerCheckState == OfferCheckState::CHECKING || m_offerCheckFrame->property("refreshPending").toBool();
     m_refreshOffersButton->setText(checking                                                                                     ? DigiDollarSendWidget::tr("Checking…") :
                                    m_offerCheckState == OfferCheckState::EMPTY                                                  ? DigiDollarSendWidget::tr("Check again") :
                                    m_offerCheckState == OfferCheckState::FAILED                                                 ? DigiDollarSendWidget::tr("Try again") :
@@ -2421,6 +2422,8 @@ void PaymasterSendWidget::updateOfferCheckControls()
     if (m_offerCheckHelp) {
         if (!paymasterOnlySelected() && hasOwnDgbForFees()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("Automatic uses your DGB first. Core checks whether it covers the network fee; any Paymaster fallback requires approval of the exact fee."));
+        } else if (m_offerCheckState == OfferCheckState::EMPTY) {
+            m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No published offer currently matches this amount and your limits. Availability can change while provider capacity is reserved. Check again, use your own DGB, or review the amount and service-fee limits."));
         } else if (!paymasterOnlySelected() && !hasCurrentPaymasterOffer()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically."));
         } else {
@@ -2514,6 +2517,7 @@ void PaymasterSendWidget::expirePaymasterOfferPreview()
 
 void PaymasterSendWidget::clearOfferCards()
 {
+    if (m_offerCardsFrame) m_offerCardsFrame->setProperty("renderedOfferCards", QVariant{});
     if (!m_offerCardsLayout) return;
     while (auto* item = m_offerCardsLayout->takeAt(0)) {
         delete item->widget();
@@ -2538,8 +2542,7 @@ void PaymasterSendWidget::selectOfferCard(int index, bool manual)
 
 void PaymasterSendWidget::renderOfferCards()
 {
-    clearOfferCards();
-    if (m_privacy || m_offerPreview.empty()) return;
+    if (m_privacy || m_offerPreview.empty()) { clearOfferCards(); return; }
     auto offers = m_offerPreview.getValues();
     std::stable_sort(offers.begin(), offers.end(), [](const UniValue& lhs, const UniValue& rhs) {
         const bool lhs_failed = lhs.find_value("recommendation_deprioritized").isTrue();
@@ -2550,6 +2553,16 @@ void PaymasterSendWidget::renderOfferCards()
     });
     m_offerPreview = UniValue{UniValue::VARR};
     for (const auto& offer : offers) m_offerPreview.push_back(offer);
+    const std::string contents = m_offerPreview.write();
+    if (contents == m_offerCardsFrame->property("renderedOfferCards").toByteArray().toStdString() &&
+        m_offerCardsLayout->count() == static_cast<int>(offers.size())) {
+        // Preserve focus, selection and layout for an unchanged directory
+        // response. The current validated preview still owns all bindings.
+        selectOfferCard(m_offerSelectionGroup->checkedId(), m_offerManuallySelected);
+        updateOfferCheckControls();
+        return;
+    }
+    clearOfferCards();
     int selected{0};
     if (m_offerManuallySelected) {
         bool found{false};
@@ -2646,6 +2659,7 @@ void PaymasterSendWidget::renderOfferCards()
     const bool manual = m_offerManuallySelected;
     m_offerSelectionGroup->button(selected)->setChecked(true);
     selectOfferCard(selected, manual);
+    m_offerCardsFrame->setProperty("renderedOfferCards", QByteArray::fromStdString(contents));
     updateOfferCheckControls();
 }
 
@@ -2704,14 +2718,22 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                              DigiDollarSendWidget::tr("another Paymaster operation is still active"));
         return;
     }
-    invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
+    const bool keep_display = m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::EMPTY;
+    if (keep_display) {
+        // A directory read grants no authority. Keep the last display and its
+        // expiry timer; busy still blocks preparation until validation ends.
+        ++m_paymasterOfferPreviewGeneration;
+    } else {
+        invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
+    }
     const CAmount amount_cents = input.amount_cents;
     if (!input.amount_valid) {
         setOfferCheckStatus(OfferCheckState::NEEDS_AMOUNT, DigiDollarSendWidget::tr("Enter a valid $DD amount, then check offers."));
         m_form.showWarning(DigiDollarSendWidget::tr("Paymaster offers"), DigiDollarSendWidget::tr("Enter an amount before refreshing offers."));
         return;
     }
-    setOfferCheckStatus(OfferCheckState::CHECKING, DigiDollarSendWidget::tr("Checking Paymaster offers…"));
+    m_offerCheckFrame->setProperty("refreshPending", keep_display);
+    if (!keep_display) setOfferCheckStatus(OfferCheckState::CHECKING, DigiDollarSendWidget::tr("Checking Paymaster offers…"));
     setPaymasterBusy(true);
     UniValue params{UniValue::VARR};
     params.push_back(amount_cents);
@@ -2744,6 +2766,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
             guard->m_paymasterPreviewServiceFeeCents = -1;
             guard->m_paymasterPreviewTotalCents = -1;
             if (!error.isEmpty()) {
+                guard->invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
                 guard->setOfferCheckStatus(OfferCheckState::FAILED,
                     IsClientSafetyPolicyError(error) ? ClientSafetyPolicyErrorMessage(error) :
                         DigiDollarSendWidget::tr("Public offers could not be checked. Try again."));
@@ -2753,6 +2776,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 return;
             }
             const auto fail_malformed = [guard, background] {
+                guard->invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
                 guard->m_offersTable->setRowCount(0);
                 guard->m_paymasterPreviewRecipientCents = -1;
                 guard->m_paymasterPreviewServiceFeeCents = -1;
@@ -2915,7 +2939,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 ++row;
             }
             guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
-                                       row == 0 ? DigiDollarSendWidget::tr("No public offer within this amount and your service-fee limits.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
+                                       row == 0 ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
                                                                                                                                 DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
             guard->m_offerPreview = result;
             if (!guard->m_privacy) guard->renderOfferCards();
@@ -4420,7 +4444,7 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                 guard->clearUnsignedPaymasterSession();
                 guard->m_paymasterClosureReason.clear();
                 guard->setPaymasterNotice(DigiDollarSendWidget::tr(
-                    "%1 The unsigned request is closed. No payment was sent and your wallet funds are available again. The provider may keep its offer reservation until expiry. Recipient and amount were kept; prepare a new offer when ready.").arg(reason));
+                    "Previous payment attempt: %1 The unsigned request is closed. No payment was sent and your wallet funds are available again. The provider may keep its offer reservation until expiry. Recipient and amount were kept; prepare a new offer when ready.").arg(reason));
                 return;
             }
             if (guard->m_paymasterSessionState == QStringLiteral("CONFIRMED") ||
