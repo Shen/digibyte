@@ -9242,6 +9242,25 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     provider.pushKV("last_service_error", "PAYMASTER_PROVIDER_SYNCING");
     observe();
     QCOMPARE(headline->text(), QStringLiteral("Waiting for the node"));
+    UniValue prerequisites{UniValue::VOBJ};
+    prerequisites.pushKV("txindex_synced", true);
+    prerequisites.pushKV("chain_height", 100);
+    prerequisites.pushKV("txindex_height", 99);
+    provider.pushKV("prerequisites", prerequisites);
+    observe();
+    QCOMPARE(headline->text(), QString::fromUtf8("Provider is running · checking the latest block"));
+    QVERIFY(hint->text().contains("New requests and reserve refills wait"));
+    QCOMPARE(action->text(), QStringLiteral("View progress"));
+    prerequisites.pushKV("txindex_height", 97);
+    provider.pushKV("prerequisites", prerequisites);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Waiting for the node"));
+    prerequisites.pushKV("txindex_height", 99);
+    prerequisites.pushKV("txindex_synced", false);
+    provider.pushKV("prerequisites", prerequisites);
+    observe();
+    QCOMPARE(headline->text(), QStringLiteral("Waiting for the node"));
+    provider.pushKV("prerequisites", UniValue{UniValue::VOBJ});
     provider.pushKV("service_state", "error");
     provider.pushKV("last_service_error", "PAYMASTER_SUBMIT_BINDING_MISMATCH");
     observe();
@@ -12758,10 +12777,22 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
     auto* client = form.findChild<PaymasterSendWidget*>();
     UniValue status = PaymasterClientSafetyStatus();
     UniValue saved;
+    std::string save_error;
+    std::string offers_error;
+    QString warning;
+    int dialogs{0};
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString& message,
+                                      QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        warning = message;
+        ++dialogs;
+        return QMessageBox::Ok;
+    });
     client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
         if (command == "getpaymasterclientsafetystatus") return status;
         if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") throw std::runtime_error(offers_error);
         if (command == "setpaymasterclientsafetypolicy") {
+            if (!save_error.empty()) throw std::runtime_error(save_error);
             saved = params[0];
             status.pushKV("policy", saved);
             return saved;
@@ -12787,6 +12818,45 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
     QCOMPARE(saved.find_value("maximum_service_fee_bps").getInt<int>(), 50);
     QCOMPARE(client->m_clientSafetyMaximumBps, qint64{50});
     QVERIFY(client->m_clientSafetyStatus->text().contains("0.50%"));
+
+    save_error = "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY";
+    QTimer::singleShot(0, &form, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        dialog->accept();
+    });
+    client->configureClientSafetyPolicy();
+    QVERIFY(warning.contains("Payments remain blocked"));
+    QVERIFY(warning.contains("existing reservations remain protected"));
+    QVERIFY(!warning.contains("PAYMASTER_"));
+    QCOMPARE(client->m_clientSafetyError, QString::fromStdString(save_error));
+    QVERIFY(!client->m_clientSafetyConfigured);
+
+    save_error.clear();
+    QTimer::singleShot(0, &form, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        dialog->accept();
+    });
+    client->configureClientSafetyPolicy();
+    QVERIFY(client->m_clientSafetyConfigured);
+    QVERIFY(client->m_clientSafetyError.isEmpty());
+    form.findChild<QLineEdit*>("amountEdit")->setText("1.11");
+    for (const char* error : {"PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED", "PAYMASTER_INVALID_CLIENT_SAFETY_STATE"}) {
+        offers_error = error;
+        client->refreshPaymasterOffers();
+        QVERIFY(!client->hasCurrentPaymasterOffer());
+        QVERIFY(!warning.contains("PAYMASTER_"));
+        QVERIFY(!client->m_offersStatus->text().contains("Try again"));
+        if (offers_error == "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED") {
+            QVERIFY(warning.contains("Set and save"));
+        } else {
+            QVERIFY(warning.contains("Payments remain blocked"));
+        }
+        const int before_poll = dialogs;
+        client->requestPaymasterOffers(/*background=*/true);
+        QCOMPARE(dialogs, before_poll); // A repeating background check is never modal.
+    }
     form.setWalletModel(nullptr);
     QCOMPARE(client->m_clientSafetyMaximumBps, qint64{-1});
 }

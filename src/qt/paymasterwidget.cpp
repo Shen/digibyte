@@ -9159,17 +9159,23 @@ private:
         const auto& observation = m_overview_liquidity_snapshot.find_value("automation_status");
         const QString state = observation.find_value("state").isStr()
             ? QString::fromStdString(observation.find_value("state").get_str()) : QString{};
+        const auto& reason = observation.find_value("reason");
+        const bool node_wait = reason.isStr() &&
+            (reason.get_str() == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
+             reason.get_str() == "PAYMASTER_PROVIDER_SYNCING" ||
+             reason.get_str() == "PAYMASTER_TXINDEX_NOT_READY");
         QString text;
         if (!policy.find_value("automatic_replenishment").isTrue()) text = tr("Automatic refill is off.");
         else if (!policy.find_value("paid_maintenance_approved").isTrue()) text = tr("Automatic refill is selected; finite refill costs still need approval.");
         else if (state == QLatin1String("working")) text = tr("Automatic refill is on. An approved refill is being prepared.");
         else if (state == QLatin1String("waiting_confirmation")) text = tr("Automatic refill is on. A refill transaction is waiting for confirmation.");
         else if (state == QLatin1String("paused")) text = tr("Automatic refill is on; execution is temporarily paused.");
+        else if (state == QLatin1String("blocked") && node_wait) text = tr("Automatic refill is on; waiting for current block data. Core resumes automatically when the node and transaction index are ready.");
         else if (state == QLatin1String("blocked")) text = tr("Automatic refill is on; a prerequisite needs attention.");
         else if (state == QLatin1String("ready")) text = tr("Automatic refill is on and ready within the saved limits.");
         else text = tr("Automatic refill is on. Refresh the status to verify execution.");
-        const auto& reason = observation.find_value("reason");
-        if (reason.isStr() && !reason.get_str().empty() && policy.find_value("automatic_replenishment").isTrue()) {
+        if (reason.isStr() && !reason.get_str().empty() && policy.find_value("automatic_replenishment").isTrue() &&
+            !(state == QLatin1String("blocked") && node_wait)) {
             const auto code = QString::fromStdString(reason.get_str());
             text += QLatin1Char(' ') + (code == QLatin1String("PAYMASTER_PROVIDER_STOPPED") ? tr("Start the provider to use it.") :
                 code == QLatin1String("PAYMASTER_MANUAL_PROCESSING") ? tr("Automatic request processing is required.") :
@@ -10088,6 +10094,23 @@ private:
         } else if (action == QLatin1String("wait")) {
             headline = area == QLatin1String("liquidity") ? tr("Waiting for confirmations") : tr("Waiting for the node");
             hint = tr("Synchronization or confirmations are still pending. Review progress; no new approval is needed to wait.");
+            const auto& prerequisites = provider.find_value("prerequisites");
+            const auto& chain_height = prerequisites.find_value("chain_height");
+            const auto& index_height = prerequisites.find_value("txindex_height");
+            if (running && area == QLatin1String("node") &&
+                prerequisites.find_value("txindex_synced").isTrue() &&
+                chain_height.isNum() && index_height.isNum() &&
+                chain_height.getInt<int64_t>() >= 0 &&
+                index_height.getInt<int64_t>() >= 0 &&
+                index_height.getInt<int64_t>() <= chain_height.getInt<int64_t>() &&
+                chain_height.getInt<int64_t>() - index_height.getInt<int64_t>() <= 1 &&
+                !m_readiness_errors.contains(QStringLiteral("PAYMASTER_NODE_NOT_READY")) &&
+                !m_readiness_errors.contains(QStringLiteral("PAYMASTER_DIGIDOLLAR_NOT_ACTIVE"))) {
+                // Presentation only. Core still gates each quote/signature on
+                // exact wallet, index and chain-tip agreement.
+                headline = tr("Provider is running · checking the latest block");
+                hint = tr("Wallet and transaction index are catching up with the latest block. New requests and reserve refills wait for current data and resume automatically. Existing reservations remain protected.");
+            }
             button = tr("View progress");
         } else if (action == QLatin1String("review_liquidity")) {
             headline = m_liquidity_targets_satisfy_provider_policy ? tr("Reserves need restoring") : tr("A DD reserve is required to receive service fees");

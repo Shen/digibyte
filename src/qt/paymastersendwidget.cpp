@@ -103,6 +103,27 @@ private:
     QRadioButton* m_button{nullptr};
 };
 
+bool IsClientSafetyPolicyError(const QString& error)
+{
+    return error == QLatin1String("PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED") ||
+        error == QLatin1String("PAYMASTER_INVALID_CLIENT_SAFETY_POLICY") ||
+        error == QLatin1String("PAYMASTER_INVALID_CLIENT_SAFETY_STATE");
+}
+
+QString ClientSafetyPolicyErrorMessage(const QString& error)
+{
+    if (error == QLatin1String("PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED")) {
+        return DigiDollarSendWidget::tr(
+            "Set and save this wallet's service-fee limits before checking Paymaster offers. No payment was created.");
+    }
+    if (IsClientSafetyPolicyError(error)) {
+        return DigiDollarSendWidget::tr(
+            "The saved Paymaster service-fee protection could not be read. Payments remain blocked and existing reservations remain protected. "
+            "Use an up-to-date application, then review the wallet's service-fee limits. If the problem persists, preserve the wallet backup and debug log for diagnosis.");
+    }
+    return error;
+}
+
 bool DecodeClientSafetyPolicy(const UniValue& policy,
                               qint64& maximum_per_transaction,
                               qint64& maximum_per_day, qint64& maximum_bps)
@@ -1898,7 +1919,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
                 guard->m_clientSafetyConfigured = false;
                 guard->m_clientSafetyError = error;
                 guard->updateClientSafetyDisplay();
-                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster service-fee limits"), error);
+                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster service-fee limits"),
+                                         ClientSafetyPolicyErrorMessage(error));
                 return;
             }
             qint64 persisted_per_transaction{0};
@@ -2722,9 +2744,11 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
             guard->m_paymasterPreviewServiceFeeCents = -1;
             guard->m_paymasterPreviewTotalCents = -1;
             if (!error.isEmpty()) {
-                guard->setOfferCheckStatus(OfferCheckState::FAILED, DigiDollarSendWidget::tr(
-                    "Public offers could not be checked. Try again."));
-                if (!background) guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster offers unavailable"), error);
+                guard->setOfferCheckStatus(OfferCheckState::FAILED,
+                    IsClientSafetyPolicyError(error) ? ClientSafetyPolicyErrorMessage(error) :
+                        DigiDollarSendWidget::tr("Public offers could not be checked. Try again."));
+                if (!background) guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster offers unavailable"),
+                                                         ClientSafetyPolicyErrorMessage(error));
                 guard->setPaymasterBusy(false);
                 return;
             }
