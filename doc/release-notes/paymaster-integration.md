@@ -558,3 +558,11 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
   blocked. Related offer/limit dialogs provide actionable text.
 - Clarify near-tip block/index waits for a running provider and automatic refill.
   New-payment readiness remains gated on exact wallet/index/chain agreement.
+- Keep independent free payment slots serving requests while other confirmed
+  slots are reserved. A refill target no longer pauses the entire provider solely
+  because some operational slots are in use. Actual missing/unconfirmed reserves
+  and full readiness, financial and admission limits retain their existing gates.
+- Distinguish current customer work, paused admission and the last completed
+  management task in Overview. Client notices distinguish a previous closed
+  attempt from current matching offers. Directory refresh preserves unchanged
+  cards, focus and selection while expiry/error checks still block stale offers.

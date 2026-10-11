@@ -23,6 +23,15 @@ client fee policies retain their prior absolute approval; their dedicated reader
 permits explicit v2 percentage review without resetting the exposure ledger.
 Provider/session version gates remain strict.
 
+The automatic provider distinguishes its refill target from admission capacity.
+Confirmed reserved operational slots count toward the target; independent free
+slots can continue serving requests when full wallet/index/policy readiness
+passes. Missing capital and unconfirmed replacements retain their existing
+maintenance gates. Overview separates this partial usage from paused admission.
+Client directory refresh keeps the last displayed preview while preparation is
+blocked, retains its expiry timer, and reuses unchanged offer-card widgets.
+Read errors, malformed replies and stale generations still invalidate the preview.
+
 After a failed first prepare-only RPC, Qt reconciles the same wallet/request
 before offering another payment. A status-aware missing-session result clears
 only an unpersisted local attempt, retaining its recipient and amount. Known

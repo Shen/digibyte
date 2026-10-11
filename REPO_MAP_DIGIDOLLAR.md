@@ -640,7 +640,9 @@ earlier inventory date above does not represent a new whole-repository audit.
 
 Operator Overview: `src/qt/paymasterwidget.cpp::renderLiveOverview` separates
 saved payment-model enablement/local budget readiness and concurrent customer
-work from reserve task progress. Settings uses `applyWithProviderRestart` and
+work from reserve task progress. Partial use with free slots retains accepting
+status; paused admission states show the actual wait. Completed management tasks
+are labelled as the last completed task. Settings uses `applyWithProviderRestart` and
 `finishProviderSettingsRestart` to compose existing wallet-scoped RPCs with an
 explicit review, readback and no replay on ambiguous results. Matching GUI
 checks: `paymasterLiveOverview` and `paymasterSettingsRestart` in
@@ -1517,6 +1519,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   percentage with integer arithmetic, without modifying payment authority.
 
 ### src/qt/paymastersendwidget.cpp/h
+- Directory refresh retains the displayed preview and expiry timer while busy,
+  and reuses unchanged cards to preserve geometry, focus and selection. Invalid
+  responses/expired generations still clear the preview. Empty-list messages
+  describe current matching offers separately from a previous failed attempt.
 - [Flow audit](doc/design/paymaster-flow-audit.md): explicit fallback/resume,
   complete session-list loading with progress, concrete errors, explicit retry
   feedback and privacy masking, plus lost-first-reply reconciliation,
@@ -1882,7 +1888,7 @@ oracle P2P proof is `digidollar_wave20_oracle_p2p.py`.
 | `wallet_paymaster_lifecycle.py` | Abrupt provider-process termination after client authorization; older authorized-client SQLite backup reconciliation at startup with change or via exact txindex observation without change, across RPC/CLI entry points, with one fee and no duplicate payment; automatic DGB/carrier replenishment, pending-target accounting, restart idempotency, locked-wallet autostart pause, unlock continuation, confirmation promotion, and absence of duplicate maintenance transactions |
 | `wallet_paymaster_backup.py` | Real stale-provider SQLite restore with a durable pre-load quarantine: restart/autostart and manual start stay blocked; exact retained commits still replay through RPC/CLI; reserve preparation, retirement, withdrawal and capital release reject renewed authority. `--pending-offline` withholds a signed final from both mempools. Configuration changes cannot clear the guard; manual copying/renaming of an already guarded image preserves quarantine across load/restart. Client-only restore preserves DD balance and fee policy. |
 | `wallet_paymaster_backup_exit.py` | Current SQLite provider restore with a matching independent checkpoint: read-only RPC/CLI reviews, manual locks, atomic recovery release, permanent identity retirement, restart and blocked original copy, followed by an ordinary complete DD transfer. Stale-backup variants separately reject this recovery option. |
-| `wallet_paymaster_rpc.py` | HTTP authentication/method-whitelist and mixed-batch rejection, wallet-scoped session lookup/cancellation, direct RPC contracts plus automatic carrier-maintenance gates: deliberate zero target, disabled automation, missing paid-maintenance approval, exactly one pending replacement, restart without duplication, confirmation promotion, and rolling-budget exhaustion without another transaction |
+| `wallet_paymaster_rpc.py` | HTTP authentication/method-whitelist and mixed-batch rejection, wallet-scoped session lookup/cancellation, direct RPC contracts, focused `--reserved-capacity-only` automatic admission/unsigned cancellation/expiry with three independent slots, plus automatic carrier-maintenance gates: deliberate zero target, disabled automation, missing paid-maintenance approval, exactly one pending replacement, restart without duplication, confirmation promotion, and rolling-budget exhaustion without another transaction |
 | `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, focused `--drain-recovery-only` unsigned-abandon/expiry regression with automatic re-admission and unchanged limits, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public sponsorship and disabled-Restricted RPC/CLI rejection, provider-finance periods/pagination/native accounting and backup acknowledgement, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, production-log redaction of payment artifacts, and optional official-pre-Paymaster third-node relay/validation with no Paymaster-announcement traffic |
 | `wallet_paymaster_offer_selection.py` | Three independent current-version daemons with two differently priced USER_PAID providers and one DGB-less client; verifies both visible offers, exact-total ordering, monotonic price replacements, stale-announcement expiry/fresh refresh, automatic cheapest selection, selected-provider-only capacity/intent/reservations, one completed transfer, and no pool/budget/finance mutation at the unselected provider |
 | `wallet_paymaster_failover.py` | Four current-version daemons with two independent providers, one relay, and two client wallets contending for a single cheap operational slot; verifies explicit pre-signature fallback, immutable DD inputs across providers, sequential direct-channel replacement, the post-user-PSBT no-fallback boundary, exactly one standby-provider payment, and clean release of the unsigned contender |

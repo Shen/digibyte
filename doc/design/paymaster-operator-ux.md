@@ -27,6 +27,15 @@ successor outputs show confirmation waits. Known node/index synchronization
 waits and genuine faults retain priority; the scheduler's reason matches its
 current service state. CLI uses the same work-phase classification.
 
+An active ready provider with customer work also reports whether independent
+free slots remain usable. Such partial use stays ready; paused admission is
+labelled explicitly rather than looking like a configuration problem. Completed
+management progress is labelled as the last completed management task, separate
+from current customer work. Client offer cards remain in place during directory
+reads; unchanged replies retain their widget identity, focus and selection. The
+preparation gate remains busy during a read, and expiry/invalid replies still
+remove eligibility immediately.
+
 Visible running providers refresh through the asynchronous operator read every
 two seconds, stopped idle providers every thirty seconds. Finance summaries
 refresh at thirty seconds or when capital/budgets change; an explicit refresh

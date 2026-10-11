@@ -239,9 +239,17 @@ explains that Core continues automatically when they confirm. Neither state
 requires starting setup again. Budget/approval problems retain their own next
 action; unexpected errors still lead to diagnostics.
 
-Before quote acceptance, **Payment capacity reserved** identifies operating
-capacity assigned to the request. A payment can remain in progress while other
-slots are available. Historical committed outputs are not current work. After
+**Provider is running · customer work open** means offers/payments use part of
+the reserves while independent free slots remain available for new requests.
+Both model cards continue to show their actual admission and budget readiness.
+**Payment capacity reserved** / **Payment reserves in use** identify paused new
+requests when capacity or another current prerequisite prevents admission.
+An unsigned cancellation can leave the provider's reservation until offer expiry;
+the client funds are released separately. A saved refill target is not a demand
+that every slot stay unused. Missing capital and unconfirmed replacements still
+retain their existing maintenance gates. Historical committed outputs are not
+current work. Completed reserve management is labelled **Last completed
+management task**, separately from current customer work. After
 confirmation/release the display returns to the current operating state; an
 old scheduler wait does not keep a ready provider waiting. The header uses the
 same state as the main card. Active providers refresh every two seconds while
@@ -1279,6 +1287,20 @@ hint. Opening the dialog proposes 1%; only Save approves it and upgrades the
 record. Existing spent fees, signed-payment reservations and the monotonic
 accounting clock remain intact. Corrupt/truncated or unknown-version records
 remain blocked; do not erase the ledger or release signed inputs to repair them.
+
+### Offer refresh and earlier attempts
+
+Automatic and manual directory refresh keep the last offer display in place
+while the check runs; preparation remains disabled until the reply is validated.
+Unchanged cards retain their selection and focus. Their original expiry timer
+continues running; expiry, changed inputs, unreadable state or malformed replies
+remove eligibility rather than extending a stale preview.
+
+**No matching public Paymaster offer currently listed** describes the current
+directory result. It does not prove a provider is offline or identify one cause:
+amount/fee limits, published availability and reserved capacity can all matter.
+A closed-request notice explicitly describes the previous attempt. A directory
+check is still not a successful connection test or a payment authorization.
 
 A running provider may briefly wait after each new block while its wallet and
 transaction index catch up. Overview distinguishes this near-tip update from

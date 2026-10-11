@@ -4124,3 +4124,52 @@ finish first. This is an incremental solution build followed by focused Core,
 Qt and two RPC/CLI Regtests; allow several minutes. Success requires exit 0,
 all selected cases present and no failures/skips in the targeted Qt functions.
 It does not replace full-suite, fuzz/sanitizer or physical-durability gates.
+
+## Reserved capacity and stable offer refresh (2026-10-11)
+
+`wallet_paymaster_rpc.py --reserved-capacity-only` reproduces the operator's
+sequence in temporary Regtest wallets: receive an unsigned offer, cancel it on
+the client, repeat, then request a third offer. The first two provider
+reservations remain until expiry, but the independent free payment slots keep
+accepting requests. Only exhaustion of all three slots pauses admission.
+Expiry restores all three slots without a payment, a refill transaction or
+spent network-fee allowance. The corrected isolated daemon passes this test;
+the previous daemon fails the same first-slot readiness check with two free
+slots. That baseline reproduction preceded the additional cancellation
+assertions and is not a run of the final test source.
+
+Five targeted Qt functions pass with 19 entries including initialization and
+cleanup, no failures and no skips: `paymasterClientOfferAutomaticRefresh`,
+`paymasterOperatorWorkTransitions`, `paymasterLiveOverview`,
+`paymasterClientOfferPreviewInvalidatesAndHandlesFailures` and
+`paymasterClientOfferPreviewUsesExactRpcAndPlainText`. The refresh test checks
+both themes, unchanged card identity, geometry, selection and keyboard focus
+across manual and automatic reads. It also checks expiry during a pending read,
+discarded late responses and invalidation after an error. Existing preparation
+remains blocked while a read is pending; retaining a display grants no signing
+authority. Provider transitions distinguish usable free slots from paused
+admission, actual index waits and budget failures.
+
+Selected MSVC `/WX` compiles and isolated Qt/daemon/application links reuse
+unchanged normal libraries and the previously checked client-policy reader
+object. Source, object, binary, library and report hashes are recorded in
+`build_msvc/paymaster-refresh-check/status-refresh/run-receipt.json`.
+Python syntax and `git diff --check` pass. This is not a fresh full solution
+build or a complete Qt/lifecycle suite; clang-format/flake8 are unavailable.
+Operator wallets were not mutated by these checks.
+
+For normal-product verification, close both normal instances and let any active
+build finish before running from `D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\status-refresh\build-and-check.ps1 -Build -FullQtTests
+```
+
+The workspace-local helper uses the existing MSVC v143 14.43.34808, Windows SDK,
+static Qt 5.15.10 and Python setup. It regenerates/builds the solution with one
+worker, runs six client-policy/budget Core cases, the legacy-client-policy,
+client-protection and reserved-capacity RPC/CLI Regtests, and the complete
+Paymaster Qt suite. Allow minutes to tens of minutes. Success requires exit 0,
+all selected cases present, successful functional reports and zero Qt failures
+or skips. Without `-Build`, first build matching normal binaries. Full lifecycle,
+sanitizer/fuzz and physical-durability gates remain separate operator checks.
