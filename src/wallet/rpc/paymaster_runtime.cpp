@@ -636,7 +636,18 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                         first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
                     }
                 }
-            } else if (!targets_confirmed) {
+            } else if (!targets_confirmed &&
+                       (!liquidity.ready || std::any_of(
+                           liquidity.pool_entries.begin(), liquidity.pool_entries.end(),
+                           [](const ProviderPoolEntry& entry) {
+                               return entry.state == PoolEntryState::PENDING_SUCCESSOR ||
+                                      (entry.state == PoolEntryState::AVAILABLE &&
+                                       entry.confirmation_height <= 0);
+                           }))) {
+                // Confirmed reserved slots still satisfy the refill target.
+                // They must not stop independent free slots from serving new
+                // requests. Keep the full readiness/confirmation gates for
+                // missing admission capacity and unconfirmed replacement work.
                 accept_new_requests = false;
                 state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
                 first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";

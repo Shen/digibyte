@@ -22,6 +22,7 @@ from urllib.parse import quote, urlsplit
 from test_framework.paymaster import (
     PaymasterFunctionalHarness,
     assert_snapshot_equal,
+    confirm_pool_preparation,
     default_liquidity_policy,
     paymaster_node_args,
     provider_safety_policy,
@@ -66,6 +67,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
                             help="Run percentage-cap persistence, RPC/CLI and pre-signature checks only")
         parser.add_argument("--legacy-client-policy-only", action="store_true",
                             help="Run authentic v1 client-policy reload and upgrade through RPC and CLI only")
+        parser.add_argument("--reserved-capacity-only", action="store_true",
+                            help="Run automatic admission with three independent reserved payment slots only")
         parser.add_argument("--restricted-disabled-only", action="store_true",
                             help="Run disabled Restricted RPC/CLI contracts without executing payments")
 
@@ -262,6 +265,74 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client.listpaymasterreservations(), client_reservations)
         assert_equal(client.listdigidollarsendsessions(), sessions)
 
+    def check_reserved_capacity(self, harness, provider, client):
+        self.log.info("Independent free slots remain usable while earlier offers reserve capacity")
+        targets = {
+            "admission_dgb_slots": 3,
+            "operational_dgb_slots": 3,
+            "admission_carrier_slots": 3,
+            "operational_carrier_slots": 3,
+        }
+        preview = provider.preparepaymasterpool(targets)
+        execution = dict(targets, execute=True, plan_id=preview["plan_id"])
+        prepared = provider.preparepaymasterpool(execution)
+        confirm_pool_preparation(self, self.nodes[0], provider, execution, prepared)
+        liquidity = default_liquidity_policy()
+        liquidity.update(target_operational_dgb=3, target_operational_carriers=3)
+        provider.setpaymasterliquiditypolicy(liquidity)
+        # Each simultaneous request needs an independently spendable DD coin.
+        for _ in range(3):
+            provider.senddigidollar(client.getdigidollaraddress(), 300)
+            self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
+            self.sync_blocks()
+        for node in self.nodes:
+            self.wait_until(lambda node=node: node.getindexinfo()["txindex"]["best_block_height"] == node.getblockcount())
+            node.syncwithvalidationinterfacequeue()
+        provider.setpaymasterruntimesettings({"operation_mode": "automatic", "autostart": False})
+        provider.startpaymaster()
+        before = provider.getpaymastersafetystatus()
+        recipient = provider.getdigidollaraddress()
+        for index in range(3):
+            options = {
+                "request_id": f"550e8400-e29b-41d4-a716-44665544200{index}",
+                "fee_mode": "paymaster", "privacy": "standard",
+                "maximum_paymaster_fee_cents": 100,
+                "selection": "lowest_total_cost", "maximum_provider_attempts": 1,
+            }
+
+            def receive_quote():
+                response = client.senddigidollar(recipient, 100, "", 0, None, "cents", options)
+                return response.get("authorization_required", False)
+
+            self.wait_until(receive_quote, timeout=20)
+            self.nodes[0].mockscheduler(5)
+            self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["pool"]["complete_operational_slots"] == 2 - index)
+            self.log.info("Offer %d: %d independent payment reserves remain", index + 1, 2 - index)
+            if index < 2:
+                self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["service_state"] == "active", timeout=10)
+                assert_equal(provider.getpaymasteroperatorinfo()["provider"]["ready"], True)
+                closed = client.resolvepaymastersession({"request_id": options["request_id"]}, "abandon_unsigned")
+                assert_equal(closed["artifact"], "none")
+                self.log.info("Client canceled unsigned offer %d; provider reservation remains until expiry", index + 1)
+        self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["service_state"] == "waiting_for_liquidity_confirmation")
+        full = provider.getpaymasteroperatorinfo()["provider"]
+        assert_equal(full["ready"], False)
+        assert_equal(full["pool"]["complete_operational_slots"], 0)
+        assert_equal(full["pool"]["activity"]["active_payments"], 3)
+        assert_equal(self.nodes[0].getrawmempool(), [])
+        after = provider.getpaymastersafetystatus()
+        assert_equal(after["user_paid"]["active_quotes"], 3)
+        assert_equal(after["user_paid"]["spent_network_fee_last_day_satoshis"], before["user_paid"]["spent_network_fee_last_day_satoshis"])
+        # No signatures or transactions were created. Expiry releases these
+        # unsigned reservations without creating an unnecessary refill.
+        for node in self.nodes:
+            node.setmocktime(int(time.time()) + 120)
+        self.nodes[0].mockscheduler(5)
+        self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["pool"]["complete_operational_slots"] == 3)
+        self.wait_until(lambda: provider.getpaymasteroperatorinfo()["provider"]["service_state"] == "active")
+        assert_equal(self.nodes[0].getrawmempool(), [])
+        assert_equal(provider.getpaymastersafetystatus()["user_paid"]["active_quotes"], 0)
+
     def run_test(self):
         if self.options.legacy_client_policy_only:
             self.check_legacy_client_policy()
@@ -272,6 +343,9 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             operation_mode="manual", carrier_cents=4_000,
             fee_rate_bps=1_900)
         assert_equal(info["operation_mode"], "manual")
+        if self.options.reserved_capacity_only:
+            self.check_reserved_capacity(harness, provider, client)
+            return
         if self.options.client_protection_only:
             harness.fund_client_dd(500)
             self.check_client_percentage_protection(harness, provider, client)
