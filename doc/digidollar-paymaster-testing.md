@@ -4052,8 +4052,35 @@ test_digibyte --run_test=paymaster_wallet_security_tests/checkpoint*,provider_re
 python -X utf8 test/functional/wallet_paymaster_backup_adoption.py --configfile=test/config.ini --descriptors
 ```
 
-The complete build, full Qt suite and older functional scenarios against this
-follow-up remain operator checks. Physical power-loss/durability campaigns and
-independent review remain open. Adoption does not detect a jointly rolled-back
-wallet/checkpoint pair or coordinate a provider identity across independent
-hosts. The affirmation does not prove independent preservation.
+Operator follow-up using the normal MSVC binaries, recorded in
+`backup-adoption/operator-20261011-113015-567Z`, passes all 14 Core cases /
+562 assertions and all three backup/adoption/recovery functional scenarios.
+The full Paymaster Qt run reports 452 passed entries and one failure:
+`paymasterGuidedTaskLayout(dark-11)` cannot expose its first window. The failure
+occurs before its layout assertions. It is reproduced with the same binary
+when launched through `Start-Process -WindowStyle Hidden`; Windows suppresses
+the first Qt window even after `show()`.
+
+The workspace-local helper now uses a separate GUI launch path with
+`ProcessStartInfo.UseShellExecute=false`, `CreateNoWindow=true` and concurrently
+drained stdout/stderr. This suppresses a console without hiding Qt test widgets.
+Console build/test commands keep their existing hidden launch. Neither widget
+implementation nor Qt assertions, exposure checks or timeouts are changed.
+The corrected helper passes all four `paymasterGuidedTaskLayout` rows and
+`paymasterExternalReadinessIsSeparatedFromConfiguration` on the Windows plugin,
+plus the separate 27-assertion restore-guard Core case. PowerShell 5.1 parsing
+passes. Singular/plural Boost case-count recognition is also corrected. The
+before/after launch evidence, helper and binary/report hashes are retained in
+`backup-adoption/launcher-fix-receipt.json`.
+
+A complete Qt-suite repeat with the corrected launcher remains an operator
+check. No new build is needed for these helper-only corrections:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\backup-adoption\build-and-check.ps1 -FullQtTests
+```
+
+Physical power-loss/durability campaigns and independent review remain open.
+Adoption does not detect a jointly rolled-back wallet/checkpoint pair or
+coordinate a provider identity across independent hosts. The affirmation does
+not prove independent preservation.
