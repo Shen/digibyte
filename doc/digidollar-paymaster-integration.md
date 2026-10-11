@@ -208,6 +208,18 @@ the wallet's per-transaction ceiling and remaining rolling-day budget. The
 rechecks the policy and provider state; an empty preview is not proof that no
 provider could become eligible after local state changes.
 
+Optional `include_fee_rejected=true` includes otherwise matching, current public
+offers rejected by fee limits. This read-only diagnostic marks each entry with
+`eligible`; false entries carry `fee_limit_reason` (`percentage` or
+`absolute_or_daily`), `maximum_service_fee_bps` (-1 for an unconfigured legacy
+percentage limit), and `available_service_fee_cents` (the minimum of requested,
+absolute and remaining-day limits). The default response remains eligible-only.
+Privacy, amount and announcement-validity filters still apply. These fields
+grant no payment authority; preparation and signing recheck the normal limits.
+Qt separates rejected entries into explanatory text and never includes them in
+selectable offer bindings. Both eligible models of one provider retain their
+distinct offer IDs; only the lower-cost eligible offer is recommended.
+
 Offer objects additionally contain the boolean `recommendation_deprioritized`.
 It is true when wallet-local provider failure or availability observations exist
 without a known successful payment, including below the general reliability

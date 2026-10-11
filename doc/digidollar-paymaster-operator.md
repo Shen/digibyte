@@ -335,6 +335,9 @@ separators. DD amounts use DD, DGB amounts use DGB, and service fees use percent
 (for example `0.50` means 0.50%, not 50%). Percent fees must use 0.10% steps.
 
 The supported offer choices are customer-paid, public sponsored, or both.
+Settings and setup offer only the supported public scope. An actual old saved
+private scope appears as an unsupported saved setting, never as a new service
+option; changing it still requires explicit review.
 Restricted / invitation-only sponsorship is currently disabled in GUI, CLI and
 RPC. Existing Restricted settings remain readable but cannot accept new work;
 choose and review a supported offer explicitly. There is no automatic switch
@@ -1301,6 +1304,17 @@ directory result. It does not prove a provider is offline or identify one cause:
 amount/fee limits, published availability and reserved capacity can all matter.
 A closed-request notice explicitly describes the previous attempt. A directory
 check is still not a successful connection test or a payment authorization.
+
+Both models of one provider can appear as separate selectable offers. An
+advertised model may nevertheless be excluded by this client's actual limits.
+For example, a nominal 1% fee on 2.22 DD rounds up to 0.03 DD, an effective
+1.35%; a strict 1% client limit excludes it while a zero-fee Sponsored offer
+remains eligible. At 2.00 or 3.00 DD the same nominal fee is exactly 1%.
+The client explains fee-excluded alternatives with their actual fee and limit
+under the offer status, as plain text outside the selectable cards. Up to five
+exclusions are detailed; remaining exclusions are counted. A directory refresh
+does not increase any approved limit. Choose a different amount, a cheaper
+eligible offer, or deliberately review the limits if desired.
 
 A running provider may briefly wait after each new block while its wallet and
 transaction index catch up. Overview distinguishes this near-tip update from

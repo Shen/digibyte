@@ -4173,3 +4173,56 @@ Paymaster Qt suite. Allow minutes to tens of minutes. Success requires exit 0,
 all selected cases present, successful functional reports and zero Qt failures
 or skips. Without `-Build`, first build matching normal binaries. Full lifecycle,
 sanitizer/fuzz and physical-durability gates remain separate operator checks.
+
+## Public model visibility and fee-exclusion diagnostics (2026-10-11)
+
+Read-only queries to the operator's running Regtest nodes confirm both enabled
+public models in one provider announcement. With its 1% user-paid rate and the
+client's strict 1% cap, 2.00/3.00-DD previews include both models; 2.22 DD includes
+only Sponsored because the actual fee rounds up to three cents (about 1.35%).
+No operator policy, wallet or payment was changed by this investigation.
+
+The isolated `wallet_paymaster_rpc.py --offer-models-only` scenario passes through
+both RPC and CLI on temporary descriptor wallets. It checks distinct offer IDs
+for both models of one provider, the default eligible-only response, opt-in
+percentage and absolute-allowance exclusions, gross-amount semantics, and no
+session/reservation mutation from preview reads. The existing
+`--client-protection-only` regression also passes, including persisted percentage
+approval and enforcement before authorization/signature. The diagnostic option
+is confined to the read-only preview; signing and financial approval code is
+unchanged.
+
+Eight focused Qt selections pass with 51 entries including initialization and
+cleanup, no failures/skips: the three offer-preview/automatic-refresh functions,
+offer spending-limit review, live overview, guided setup bounds/retry, offer
+cards and typed policy values. They cover plain-text untrusted labels, two
+eligible models of one provider, diagnostic entries absent from selectable
+cards, all-rejected previews, malformed diagnostic rejection, expiry, stable
+refresh and absence of the parked scope from normal Settings/setup. The legacy
+readback selection additionally checks blocked saves with the exact old value
+preserved. That selection was repeated after correcting its expected fixture
+from a public policy to the actual loaded legacy policy; production objects
+were unchanged across both Qt runs.
+
+Four selected MSVC `/WX` compiles and isolated Qt/daemon/application links reuse
+unchanged normal libraries and the checked client-policy/runtime objects.
+Source/object/binary/library/report hashes and the operator helper are retained
+under `build_msvc/paymaster-refresh-check/offer-models`. Python syntax,
+PowerShell 5.1 helper parsing and `git diff --check` pass. No complete fresh
+solution build, full Qt/Core suite, sanitizer/fuzz or formatter/linter run is
+claimed.
+
+To verify matching normal binaries, close normal client/provider instances and
+let any active build finish, then run from the repository root:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\offer-models\build-and-check.ps1 -Build -FullQtTests
+```
+
+The helper uses the existing MSVC v143 14.43.34808, Windows SDK, static Qt 5.15.10,
+vcpkg and Python setup. It builds with one worker, runs six focused client-policy
+Core cases, four focused RPC/CLI Regtests and the full Paymaster Qt suite.
+Allow minutes to tens of minutes. Success requires exit 0, all selected cases
+present, each functional report ending in `Tests successful` and no Qt failures
+or skips. Without `-Build`, first build the matching source revision.

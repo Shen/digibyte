@@ -566,3 +566,8 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
   management task in Overview. Client notices distinguish a previous closed
   attempt from current matching offers. Directory refresh preserves unchanged
   cards, focus and selection while expiry/error checks still block stale offers.
+- Remove the parked private sponsorship choice from normal Settings and setup;
+  preserve actual legacy values as unsupported until reviewed.
+- Explain public offers excluded by actual rounded fees, percentage limits or
+  remaining fee allowance. Both eligible models from one provider remain
+  selectable; diagnostic exclusions cannot be selected or authorize a payment.

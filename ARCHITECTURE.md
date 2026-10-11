@@ -31,6 +31,11 @@ maintenance gates. Overview separates this partial usage from paused admission.
 Client directory refresh keeps the last displayed preview while preparation is
 blocked, retains its expiry timer, and reuses unchanged offer-card widgets.
 Read errors, malformed replies and stale generations still invalidate the preview.
+An opt-in local offer diagnostic exposes fee-excluded public alternatives,
+separately from eligible bindings. Qt explains their actual rounded fee and
+limit without making them selectable; normal RPC previews remain eligible-only.
+Settings/setup omit the parked private sponsorship choice while preserving an
+actual saved legacy value as unsupported until explicit operator review.
 
 After a failed first prepare-only RPC, Qt reconciles the same wallet/request
 before offering another payment. A status-aware missing-session result clears
