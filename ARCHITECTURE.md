@@ -222,6 +222,12 @@ rows immediately. These rows carry a Qt-only `checking` status until the existin
 worker reads live wallet confirmations. Persisted zero counts are not presented
 as pending payments; subsequent views reuse the verified cache. This adds no
 wallet/database state, RPC changes or additional worker requests.
+The live DD history read recognizes output ownership from cached DD address
+keys, deduplicated owner public keys (including encrypted records), and ordinary
+wallet script ownership. It does not run the private descriptor recovery scan
+for foreign outputs while holding wallet locks. Missing DD keys are still
+recovered by wallet transaction processing and rescan; display reads do not
+populate that recovery path's negative ownership cache.
 Oracle and network-health RPCs run outside the GUI thread with one in-flight
 request per view and query, so Core lock contention cannot stall these refreshes.
 The DD Vault widget likewise uses one retained-wallet worker for its existing

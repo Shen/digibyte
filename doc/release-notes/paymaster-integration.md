@@ -577,3 +577,10 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
 - Display client fee limits in DD using exact integer-cent input bindings.
   Clarify that provider display loading is independent of Core service startup
   and cached announcements; published offers do not confirm live readiness.
+- Keep DD history ownership checks read-only: use known DD address keys, owner
+  public keys and ordinary script ownership instead of scanning private
+  descriptor keys for cold foreign outputs. This removes a shared-wallet lock
+  bottleneck during startup that could delay Paymaster preparation. Locked
+  history, self-send and redemption-change rows remain supported; transaction
+  processing/rescan retains key recovery and financial ownership checks.
+  Unsigned preparation timeouts no longer attribute every delay to the provider.

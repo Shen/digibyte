@@ -1013,6 +1013,7 @@ or chain parameters.
   - **Submission:**
     - `CommitDDTransaction(tx, error)` → Phase 4.1: submits to mempool
     - `GetDDTransactionConfirmations(txid)` → confirmation count
+    - `GetDDTransactionHistory()` → live status and per-owned-output display rows; uses cached address keys, deduplicated owner public keys (including locked encrypted records), and standard wallet script ownership without private descriptor recovery or negative-cache writes
     - `UpdateDDConfirmations(block_hash)` → updates all DD tx confirmations on new block
     - `GetUnconfirmedDDTransactions()` → list of unconfirmed DD txids
   - **Receive Operations (Task 6):**
@@ -1857,7 +1858,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records; simulated begin/write/commit failures for fee-policy approval, signature persistence, fallback, cancellation and self-recovery, including lost replies and protection of newly reserved inputs |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, malicious client/provider persistence failures, durable restore quarantine, and real SQLite page-limit/commit-denial rollback and exact retry |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
-| `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries |
+| `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries; cold history reads avoid private descriptor recovery while preserving self-send/receive/redemption-change rows and locked/reloaded key recognition |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |
 | `digidollar_wallet_lock_safety_tests.cpp` | The wallet never asks the chain a question while holding its own lock: UTXO rebuild, abandon, expired-mint release and rescan |
 | `digidollar_wave16_persistence_tests.cpp` | Restart restores positions, DD UTXOs and owner/address keys; a crash after broadcast keeps the owner key on disk; a locked encrypted wallet refuses DD key decryption |

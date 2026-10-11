@@ -4272,3 +4272,70 @@ with one worker and runs the six client-policy Core cases, four focused RPC/CLI
 Regtests and full Paymaster Qt suite. Success is exit 0, every selected case
 present, functional reports ending in `Tests successful`, and zero Qt
 failures/skips. Without `-Build`, matching normal binaries must already exist.
+
+## Cold DD history blocking payment preparation (2026-10-11)
+
+The operator's startup capture in
+`build_msvc/paymaster-refresh-check/startup-latency/operator-20261011-200440-592Z`
+used GUI SHA256
+`708BB81425D945A4AA21EF4C33A4CC08917AE4454ECBF6CFAC2FEEF68A05A4A6`.
+The `bench` history read/serialization stage took 21,028 ms for wallet `client`
+(28 rows), 74,705 ms for `paymaster` (109 rows), and 142,611 ms for
+`Client-Receive` (25 rows). Worker startup and Qt delivery were 0–10 ms.
+Block-processing gaps overlapped the slow reads, although subsequent connect
+work took only a few milliseconds. These read timings include waiting for
+shared locks; they are not exclusive CPU profiles. Startup oracle reconstruction
+also took about 58 seconds and is a separate, unchanged startup cost.
+
+`GetDDTransactionHistory()` called `IsDDOutputMine()` while synthesizing owned
+output rows. A cold foreign output can trigger that method's private descriptor
+keypool recovery sweep while wallet locks are held. The history path now uses
+known address keys, deduplicated owner public keys (including encrypted records)
+and ordinary wallet script ownership. Transaction processing/rescan keeps the
+existing recovery and financial ownership checks. The unsigned two-minute
+preparation timeout remains, with wording that does not blame only the provider.
+
+Two new tests in `digidollar_wallet_security_tests` use saved history records and
+real wallet transactions, not appended mock-history rows. With the prior wallet
+object, both tests fail on five negative-cache assertions, proving that display
+reads entered descriptor recovery. With the corrected object, all 34 assertions
+pass. They cover repeated cold foreign reads without ownership-cache writes,
+ordinary descriptor ownership, DD address and reused owner keys, self-send,
+multi-output receive, redemption change, exclusion of foreign/DGB outputs, and
+locked encryption/reload. Eight existing encryption, watch-only, negative-cache,
+key reload and self-send tests also pass (53 assertions).
+
+Selected MSVC `/WX` compiles and isolated unit/application links pass. Reports,
+response files, source/object/binary hashes and installation backup are under
+`build_msvc/paymaster-refresh-check/startup-history`. The operator-approved GUI
+candidate was installed only after both live instances were closed. It is an
+isolated link against existing normal-build inputs, not a full fresh build.
+No new full Core/Qt suite, functional, sanitizer/fuzz or complete cold-start
+acceptance run is claimed. The startup reproduction with the installed fix
+remains an operator check.
+
+To rebuild normally and run the broader matching matrix, close client/provider
+instances and allow other builds to finish, then run:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\startup-history\build-and-check.ps1 -Build -FullQtTests
+```
+
+The workspace helper uses the existing MSVC v143 14.43.34808, Windows SDK,
+static Qt 5.15.10, vcpkg and Python setup, with one build worker. Allow minutes
+to tens of minutes. It requires both new cases and the eight existing ownership
+cases, six client-policy cases, four focused RPC/CLI Regtests and the complete
+Paymaster Qt suite. Success is exit 0, expected case counts, functional
+`Tests successful`, and zero Qt failures/skips. Without `-Build`, normal unit,
+daemon and Qt binaries must already match the current source; the isolated
+installed GUI alone does not meet that condition.
+
+For the live startup comparison, close both Regtest GUIs and run the existing
+`startup-latency/start-with-diagnostics.ps1` helper (240-second capture). Prepare
+an offer up to the exact approval dialog without approving/signing payment.
+Compare worker read durations and preparation progress with the prior capture;
+require no two-minute preparation timeout or long history-correlated block gap.
+The helper restores the temporary `bench` setting after capture. Other startup
+and readiness checks are still required, so this correction does not promise a
+fixed total startup time or weaken wallet/index synchronization gates.

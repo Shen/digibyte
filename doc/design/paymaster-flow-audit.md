@@ -114,7 +114,7 @@ payment authorization or RPC/CLI semantics change.
 | Settings and setup assistant | Identity, policy, safety, refill and node-config operations use asynchronous calls. Exact reviews and wallet-bound continuation remain mandatory. |
 | Client offers, safety and saved sessions | Reads use the asynchronous client wrapper, generation checks and cached balances. Visible offers are bounded to 100. `getAvailableDGBBalance()` is a cached read. |
 | Client exact send and alternative recovery | The new signing bridge keeps lock-state inspection and temporary relocking off Qt. The ordinary modal unlock dialog is retained. |
-| DD Overview / Send / Receive / transaction history | Existing worker reads and cached snapshots avoid automatic wallet-lock waits. Hidden page refresh guards remain. The preceding overview regression is recorded in the runbook. |
+| DD Overview / Send / Receive / transaction history | Worker reads and cached snapshots keep wallet-lock waits off Qt. History ownership uses known public keys/scripts rather than private descriptor recovery for foreign outputs; this removes a cold-start scan that held wallet locks inside the worker. Hidden page refresh guards remain. The startup regression and its remaining verification are recorded in the runbook. |
 | Confirmations and progress | Modal Qt dialogs process events; disabled competing actions are deliberate. No production Paymaster `wait()`, blocking queued connection or sleeping retry loop was found. |
 
 Remaining shared/native synchronous boundaries, retained to avoid a broad
