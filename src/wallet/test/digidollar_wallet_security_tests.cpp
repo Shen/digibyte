@@ -28,10 +28,12 @@
 #include <random.h>
 #include <script/script.h>
 #include <script/standard.h>
+#include <digidollar/scripts.h>
 
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <set>
 #include <vector>
 
 namespace wallet {
@@ -323,6 +325,129 @@ BOOST_AUTO_TEST_CASE(rh08_03a_foreign_descriptor_output_miss_is_cached)
     BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
     BOOST_CHECK(!dd_wallet.IsDDOutputMine(foreign_output, foreign_txid));
     BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
+}
+
+BOOST_AUTO_TEST_CASE(dd_history_does_not_scan_descriptor_secrets_for_foreign_outputs)
+{
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.m_keypool_size = 2;
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+    }
+
+    CKey foreign_key;
+    foreign_key.MakeNewKey(true);
+    CMutableTransaction tx;
+    tx.SetDigiDollarType(DD_TX_TRANSFER);
+    tx.vin.emplace_back(COutPoint{GetRandHash(), 0});
+    tx.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{foreign_key.GetPubKey()}, 123));
+    tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                    << CScriptNum(DD_TX_TRANSFER) << CScriptNum(123));
+    const auto tx_ref = MakeTransactionRef(tx);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(tx_ref, TxStateInactive{}));
+    }
+    DDTransaction send;
+    send.txid = tx_ref->GetHash().GetHex();
+    send.category = "send";
+    send.amount = 123;
+    send.fee = 1;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WriteDDTransaction(send));
+
+    DigiDollarWallet dd_wallet(&m_wallet);
+    BOOST_REQUIRE_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 0u);
+    for (int read = 0; read < 2; ++read) {
+        const auto history = dd_wallet.GetDDTransactionHistory();
+        BOOST_REQUIRE_EQUAL(history.size(), 1u);
+        BOOST_CHECK_EQUAL(history.front().category, "send");
+        // A cold display read must not invoke IsDDOutputMine's wallet-wide
+        // private descriptor recovery scan or populate its negative cache.
+        BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 0u);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(dd_history_preserves_owned_output_rows_when_wallet_is_locked)
+{
+    CScript descriptor_script;
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.m_keypool_size = 2;
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+        const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "history");
+        BOOST_REQUIRE(destination);
+        descriptor_script = GetScriptForDestination(*destination);
+    }
+
+    CKey owner_key, address_key, foreign_key;
+    owner_key.MakeNewKey(true);
+    address_key.MakeNewKey(true);
+    foreign_key.MakeNewKey(true);
+    const auto owner_script = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{owner_key.GetPubKey()}, 100);
+    const auto address_script = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{address_key.GetPubKey()}, 200);
+    const auto foreign_script = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{foreign_key.GetPubKey()}, 400);
+
+    for (int kind = 0; kind < 3; ++kind) {
+        const auto type = kind == 2 ? DD_TX_REDEEM : DD_TX_TRANSFER;
+        CMutableTransaction tx;
+        tx.SetDigiDollarType(type);
+        tx.vin.emplace_back(COutPoint{GetRandHash(), 0});
+        tx.vout.emplace_back(0, owner_script);
+        tx.vout.emplace_back(0, address_script);
+        tx.vout.emplace_back(0, descriptor_script);
+        tx.vout.emplace_back(0, foreign_script);
+        tx.vout.emplace_back(1, owner_script); // DGB output: never a DD row.
+        tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                        << CScriptNum(type) << CScriptNum(100) << CScriptNum(200)
+                                        << CScriptNum(300) << CScriptNum(400));
+        const auto tx_ref = MakeTransactionRef(tx);
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_REQUIRE(m_wallet.AddToWallet(tx_ref, TxStateInactive{}));
+        }
+        DDTransaction row;
+        row.txid = tx_ref->GetHash().GetHex();
+        row.category = kind == 0 ? "send" : kind == 1 ? "receive" : "redeem";
+        row.incoming = kind == 1;
+        row.amount = kind == 0 ? 1000 : 600;
+        row.fee = row.incoming ? 0 : 1;
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WriteDDTransaction(row));
+    }
+    m_wallet.EnsureDDWallet();
+    auto* dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet);
+    // Change can reuse an owner key recorded under a different transaction.
+    BOOST_REQUIRE(dd_wallet->StoreOwnerKey(GetRandHash(), owner_key));
+    const XOnlyPubKey address_output{Span{address_script}.subspan(2, 32)};
+    BOOST_REQUIRE(dd_wallet->StoreAddressKey(address_output, address_key));
+
+    auto check_history = [&] {
+        const auto history = dd_wallet->GetDDTransactionHistory();
+        BOOST_REQUIRE_EQUAL(history.size(), 11u); // 2 outgoing + 3 owned outputs for each transaction.
+        std::multiset<CAmount> received, change;
+        for (const auto& row : history) {
+            if (row.category == "receive") received.insert(row.amount);
+            if (row.category == "redeem_change") change.insert(row.amount);
+        }
+        const std::multiset<CAmount> expected_received{100, 100, 200, 200, 300, 300};
+        const std::multiset<CAmount> expected_change{100, 200, 300};
+        BOOST_CHECK(received == expected_received);
+        BOOST_CHECK(change == expected_change);
+        BOOST_CHECK_EQUAL(dd_wallet->GetCachedForeignDDOutputCount(), 0u);
+    };
+    check_history();
+
+    SecureString passphrase{"history-read-test"};
+    BOOST_REQUIRE(m_wallet.EncryptWallet(passphrase));
+    BOOST_REQUIRE(m_wallet.IsLocked());
+    CKey secret;
+    BOOST_CHECK(!dd_wallet->GetAddressKey(address_output, secret));
+    check_history();
+    // Reading persisted encrypted DD public keys must also work after reload.
+    dd_wallet->LoadFromDatabase();
+    check_history();
 }
 
 BOOST_AUTO_TEST_CASE(rh08_03b_foreign_mint_with_wallet_dgb_output_not_claimed)
