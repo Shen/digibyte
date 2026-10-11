@@ -4310,9 +4310,24 @@ response files, source/object/binary hashes and installation backup are under
 `build_msvc/paymaster-refresh-check/startup-history`. The operator-approved GUI
 candidate was installed only after both live instances were closed. It is an
 isolated link against existing normal-build inputs, not a full fresh build.
-No new full Core/Qt suite, functional, sanitizer/fuzz or complete cold-start
-acceptance run is claimed. The startup reproduction with the installed fix
-remains an operator check.
+No new full Core/Qt suite, functional or sanitizer/fuzz run is claimed. The
+targeted live startup reproduction is recorded below; a complete normal build
+and the broader acceptance matrix remain operator checks.
+
+The follow-up 240-second operator capture
+`startup-latency/operator-20261011-202950-094Z` used installed GUI SHA256
+`922A161CB03D62DF75DB17D9CF9797DBAB7D327951D422CFCB2E4A49BCAE3935`.
+Neither instance reported a completed history refresh at or above the
+1,000-ms total worker/read/delivery threshold. Each log contains 28 tip updates;
+the largest difference between the UpdateTip log timestamp and its block's
+timestamp is 2 seconds on the client and 1 second on the provider (previously
+107 and 34 seconds). This is a wall-clock observation, not an exclusive block
+verification profile. The operator confirmed that the exact offer approval
+dialog arrived quickly after this restart. Both capture restore reports have
+`bench: false`. The comparison and original log hashes are retained in
+`startup-history/startup-comparison.json`. Oracle reconstruction remains an
+independent startup cost; no fixed total startup-time claim follows from this
+single reproduction.
 
 To rebuild normally and run the broader matching matrix, close client/provider
 instances and allow other builds to finish, then run:
