@@ -2433,6 +2433,10 @@ void PaymasterSendWidget::updateOfferCheckControls()
                                      DigiDollarSendWidget::tr("Preparation becomes available automatically when an offer is found."));
         }
     }
+    if (m_offerCheckHelp && !m_privacy) {
+        const QString excluded = m_offerCheckFrame->property("excludedOffersText").toString();
+        if (!excluded.isEmpty()) m_offerCheckHelp->setText(m_offerCheckHelp->text() + QStringLiteral("\n\n") + excluded);
+    }
     updateOfferCheckIcon();
 }
 
@@ -2671,6 +2675,7 @@ void PaymasterSendWidget::invalidatePaymasterOfferPreview(bool preserve_choice)
     if (!preserve_choice) setPaymasterNotice(QString{});
     ++m_paymasterOfferPreviewGeneration;
     if (m_offerExpiryTimer) m_offerExpiryTimer->stop();
+    if (m_offerCheckFrame) m_offerCheckFrame->setProperty("excludedOffersText", QString{});
     const bool had_preview =
         m_offerCheckState != OfferCheckState::NOT_CHECKED ||
         m_paymasterPreviewRecipientCents >= 0 ||
@@ -2743,6 +2748,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
     preview_options.pushKV("maximum_paymaster_fee_cents", m_feeCapSpin->value());
     preview_options.pushKV("privacy", m_privacyCombo->currentData().toString().toStdString());
+    preview_options.pushKV("include_fee_rejected", true);
     const bool subtract_from_amount =
         m_subtractPaymasterFeeCheck &&
         m_subtractPaymasterFeeCheck->isChecked();
@@ -2814,6 +2820,23 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                     const UniValue& policy_hash = offer.find_value("policy_hash");
                     const UniValue& subtract =
                         offer.find_value("subtract_paymaster_fee_from_amount");
+                    const UniValue& eligible = offer.find_value("eligible");
+                    const UniValue& fee_reason = offer.find_value("fee_limit_reason");
+                    const UniValue& percentage_limit = offer.find_value("maximum_service_fee_bps");
+                    const UniValue& available_fee = offer.find_value("available_service_fee_cents");
+                    if ((!eligible.isNull() && !eligible.isBool()) ||
+                        (eligible.isFalse()
+                             ? (!fee_reason.isStr() ||
+                                (fee_reason.get_str() != "percentage" && fee_reason.get_str() != "absolute_or_daily") ||
+                                !percentage_limit.isNum() || !available_fee.isNum() ||
+                                percentage_limit.getInt<int>() < -1 || percentage_limit.getInt<int>() > 10000 ||
+                                (fee_reason.get_str() == "percentage" && percentage_limit.getInt<int>() < 0) ||
+                                available_fee.getInt<qint64>() < 0 ||
+                                available_fee.getInt<qint64>() > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS)
+                             : (!fee_reason.isNull() || !percentage_limit.isNull() || !available_fee.isNull()))) {
+                        fail_malformed();
+                        return;
+                    }
                     if (!offer.isObject() || !display_name.isStr() ||
                         !funding_model.isStr() || !service_fee.isNum() ||
                         !payment.isNum() || !total.isNum() ||
@@ -2885,7 +2908,29 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 return;
             }
             int row{0};
+            UniValue eligible_offers{UniValue::VARR};
+            QStringList excluded_offers;
+            int excluded_count{0};
             for (const UniValue& offer : result.getValues()) {
+                if (offer.find_value("eligible").isFalse()) {
+                    // Keep a large public directory from expanding the status
+                    // card indefinitely; all entries were validated above.
+                    if (++excluded_count > 5) continue;
+                    const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
+                    const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
+                    const QString description = DigiDollarSendWidget::tr("%1 · %2: service fee %3 (effective %4%).")
+                        .arg(QString::fromStdString(offer.find_value("display_name").get_str()),
+                             guard->friendlyFundingModel(QString::fromStdString(offer.find_value("funding_model").get_str())),
+                             guard->formatCents(fee), PaymasterEffectivePercent(fee, payment));
+                    const QString reason = offer.find_value("fee_limit_reason").get_str() == "percentage"
+                        ? DigiDollarSendWidget::tr("Above your %1% limit after cent rounding.")
+                              .arg(QString::number(offer.find_value("maximum_service_fee_bps").getInt<int>() / 100.0, 'f', 2))
+                        : DigiDollarSendWidget::tr("Above your current service-fee allowance of %1 per payment or rolling day.")
+                              .arg(guard->formatCents(offer.find_value("available_service_fee_cents").getInt<qint64>()));
+                    excluded_offers.push_back(description + QLatin1Char(' ') + reason);
+                    continue;
+                }
+                eligible_offers.push_back(offer);
                 guard->m_offersTable->insertRow(row);
                 const QString provider = QString::fromStdString(offer.find_value("display_name").get_str());
                 const QString model = QString::fromStdString(offer.find_value("funding_model").get_str());
@@ -2938,12 +2983,19 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 }
                 ++row;
             }
+            if (excluded_count > 5) excluded_offers.push_back(
+                DigiDollarSendWidget::tr("%1 more advertised offers exceed your fee limits.").arg(excluded_count - 5));
+            guard->m_offerCheckFrame->setProperty("excludedOffersText", excluded_offers.isEmpty() ? QString{} :
+                DigiDollarSendWidget::tr("Other advertised offers are unavailable within your fee limits:") +
+                    QLatin1Char('\n') + excluded_offers.join(QLatin1Char('\n')));
             guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
                                        row == 0 ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
                                                                                                                                 DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
-            guard->m_offerPreview = result;
+            // Rejected entries are explanatory text only. They never enter the
+            // selectable preview or the request's provider/offer bindings.
+            guard->m_offerPreview = eligible_offers;
             if (!guard->m_privacy) guard->renderOfferCards();
-            if (row > 0) {
+            if (!result.empty()) {
                 qint64 earliest_expiry = std::numeric_limits<qint64>::max();
                 for (const auto& offer : result.getValues()) {
                     earliest_expiry = std::min(earliest_expiry, offer.find_value("expires_at").getInt<qint64>());

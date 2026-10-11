@@ -2982,11 +2982,22 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "user_paid",
                     1, 325, true, 2000000000, 50, 1));
-                offers.push_back(PaymasterOffer(
+                auto sponsor = PaymasterOffer(
                     "Sponsor",
                     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                     "sponsored",
-                    0, 325, false, 2000000100));
+                    0, 325, false, 2000000100);
+                // Both models from one provider are distinct offer bindings.
+                sponsor.pushKV("provider_id", std::string(64, 'b'));
+                sponsor.pushKV("offer_id", std::string(64, 'e'));
+                offers.push_back(sponsor);
+                auto rejected = PaymasterOffer("<b>Fee above limit</b>", std::string(64, 'c'),
+                    "user_paid", 4, 325, false, 2000000000, 100);
+                rejected.pushKV("eligible", false);
+                rejected.pushKV("fee_limit_reason", "percentage");
+                rejected.pushKV("maximum_service_fee_bps", 100);
+                rejected.pushKV("available_service_fee_cents", 100);
+                offers.push_back(rejected);
                 return offers;
             }
             throw std::runtime_error("unexpected Paymaster RPC");
@@ -3027,6 +3038,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QCOMPARE(parameters.front()[0].getInt<int64_t>(), int64_t{325});
     const UniValue& preview_options = parameters.front()[1];
     QVERIFY(preview_options.isObject());
+    QVERIFY(preview_options.find_value("include_fee_rejected").isTrue());
     QCOMPARE(preview_options.find_value(
                  "subtract_paymaster_fee_from_amount").get_bool(), false);
     QCOMPARE(preview_options.find_value(
@@ -3050,6 +3062,11 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QCOMPARE(status->text(), QStringLiteral("Public Paymaster offers found: 2"));
     auto* updated = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOffersUpdated"));
     auto* help = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOfferCheckHelp"));
+    QVERIFY(help && help->textFormat() == Qt::PlainText);
+    QVERIFY(help->text().contains("<b>Fee above limit</b>"));
+    QVERIFY(help->text().contains("effective 1.23%"));
+    QVERIFY(help->text().contains("Above your 1.00% limit"));
+    QVERIFY(!send_widget.findChild<QRadioButton*>("paymasterOfferChoice2"));
     QVERIFY(updated && help);
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(updated->toolTip().contains(QStringLiteral("up to 10 minutes")));
@@ -3110,6 +3127,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(QMetaObject::invokeMethod(send_widget.findChild<PaymasterSendWidget*>(),
                                       "expirePaymasterOfferPreview", Qt::DirectConnection));
+    QVERIFY(!help->text().contains("Fee above limit"));
     QCOMPARE(offer_calls, 1); // Expiry invalidates locally; it does not search or send.
     QCOMPARE(table->rowCount(), 0);
     QVERIFY(status->text().contains(QStringLiteral("expired")));
@@ -3163,6 +3181,17 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
                 // Missing payment, total, reputation, expiry and bindings.
                 malformed.push_back(std::move(offer));
                 return malformed;
+            }
+            if (offer_response == 6 || offer_response == 7) {
+                UniValue rejected{UniValue::VARR};
+                auto offer = PaymasterOffer("Rejected", std::string(64, 'b'),
+                    "user_paid", 4, 325, false, 2000000000, 100);
+                offer.pushKV("eligible", false);
+                offer.pushKV("fee_limit_reason", offer_response == 6 ? "unrecognized" : "percentage");
+                offer.pushKV("maximum_service_fee_bps", 100);
+                offer.pushKV("available_service_fee_cents", 100);
+                rejected.push_back(offer);
+                return rejected;
             }
             if (offer_response == 4 && in_flight_amount) {
                 // Simulate a user edit while the production asynchronous RPC
@@ -3281,6 +3310,20 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
     QVERIFY(status->text().contains(QStringLiteral("malformed")));
     QCOMPARE(dialog_title, QStringLiteral("Paymaster offers unavailable"));
     QVERIFY(dialog_message.contains(QStringLiteral("invalid Paymaster offer preview")));
+
+    offer_response = 6;
+    QVERIFY(QMetaObject::invokeMethod(
+        send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("error"));
+    offer_response = 7;
+    QVERIFY(QMetaObject::invokeMethod(
+        send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
+    QCOMPARE(table->rowCount(), 0);
+    QVERIFY(status->text().contains("No matching public"));
+    QVERIFY(send_widget.findChild<QLabel*>("paymasterOfferCheckHelp")->text().contains("Above your 1.00% limit"));
+    QVERIFY(!send_widget.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    QVERIFY(send_widget.findChild<QTimer*>("paymasterOfferExpiryTimer")->isActive());
 
     offer_response = 4;
     amount->setText(QStringLiteral("3.25"));
@@ -5664,8 +5707,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
 
         user_paid->setChecked(false);
         sponsored->setChecked(true);
-        sponsorship_scope->setCurrentIndex(sponsorship_scope->findData(
-            QStringLiteral("restricted")));
+        QCOMPARE(sponsorship_scope->count(), 1);
+        QCOMPARE(sponsorship_scope->findData(QStringLiteral("restricted")), -1);
         restore_policy_defaults->click();
         sponsored_policy_defaults_remove_carrier_targets =
             !user_paid->isChecked() &&
@@ -8995,6 +9038,8 @@ void PaymasterWidgetTests::paymasterLiveOverview()
     auto* pricing = panel->findChild<QWidget*>("paymasterUserPaidPricing");
     auto* scope = panel->findChild<QComboBox*>("paymasterPolicySponsorshipScope");
     QVERIFY(user_paid && sponsored && pricing && scope);
+    QCOMPARE(scope->count(), 1);
+    QCOMPARE(scope->findData(QStringLiteral("restricted")), -1);
     user_paid->setChecked(false);
     sponsored->setChecked(true);
     QVERIFY(pricing->isHidden());
@@ -12391,6 +12436,13 @@ void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview()
     QVERIFY(css.open(QIODevice::ReadOnly));
     panel->setStyleSheet(QString::fromUtf8(css.readAll()));
     auto snapshot = GuidedOperatorSnapshot();
+    if (scenario == "restricted") {
+        auto legacy_provider = snapshot.find_value("provider");
+        auto legacy_policy = legacy_provider.find_value("policy");
+        legacy_policy.pushKV("sponsorship_scope", "restricted");
+        legacy_provider.pushKV("policy", legacy_policy);
+        snapshot.pushKV("provider", legacy_provider);
+    }
     const auto original_policy = snapshot.find_value("provider").find_value("policy");
     const auto original_safety = snapshot.find_value("safety").find_value("policy");
     int offer_writes{0};
@@ -12459,14 +12511,13 @@ void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview()
         QVERIFY(restricted >= 0); // Retained for exact legacy readback.
         QVERIFY(!(scope->model()->flags(scope->model()->index(restricted, 0)) & Qt::ItemIsEnabled));
         QVERIFY(!tabs->isTabVisible(2));
-        // Programmatic selection simulates an old persisted restricted policy.
-        scope->setCurrentIndex(restricted);
+        QCOMPARE(scope->currentIndex(), restricted); // Exact persisted legacy value, not a new option.
         save_offer->click();
         QCOMPARE(offer_writes, 0);
         QCOMPARE(safety_writes, 0);
         QVERIFY(review->isHidden());
         const auto* status = panel->findChild<QLabel*>("paymasterPolicySaveStatus");
-        QVERIFY(status->text().contains("Restricted sponsorship is currently disabled"));
+        QVERIFY(status->text().contains("saved sponsorship setting is unsupported"));
         QVERIFY(!status->text().contains("PAYMASTER_"));
         QCOMPARE(snapshot.find_value("provider").find_value("policy").write(), original_policy.write());
         return;

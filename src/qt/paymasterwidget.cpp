@@ -2846,12 +2846,8 @@ public:
         m_scope = new NoWheelComboBox(policy_group);
         m_scope->setObjectName("paymasterPolicySponsorshipScope");
         m_scope->addItem(tr("Public — available to discovered clients"), QStringLiteral("public"));
-        // Keep a disabled value so saved legacy policies can be displayed
-        // exactly, without silently turning private sponsorship into public.
-        m_scope->addItem(tr("Restricted — currently unavailable"), QStringLiteral("restricted"));
-        static_cast<QStandardItemModel*>(m_scope->model())->item(1)->setEnabled(false);
         m_scope->setToolTip(tr(
-            "Public sponsorship can be offered together with user-paid service. Restricted sponsorship is disabled and reserved for a future extension."));
+            "Public sponsorship can be offered together with user-paid service."));
         m_fee_bps = scaledSpin(policy_group, 0, 10000, 50, 100, 2);
         m_fee_bps->setObjectName("paymasterPolicyFeeBps");
         m_fee_bps->setSingleStep(10);
@@ -8275,6 +8271,14 @@ private:
         m_user_paid->setChecked(user_paid);
         const UniValue& scope = policy.find_value("sponsorship_scope");
         if (scope.isStr()) {
+            // The parked protocol value is not an advertised option. Preserve
+            // an actual legacy policy until the operator explicitly changes it.
+            const int legacy_index = m_scope->findData(QStringLiteral("restricted"));
+            if (legacy_index >= 0) m_scope->removeItem(legacy_index);
+            if (scope.get_str() == "restricted") {
+                m_scope->addItem(tr("Unsupported saved sponsorship setting"), QStringLiteral("restricted"));
+                static_cast<QStandardItemModel*>(m_scope->model())->item(m_scope->count() - 1)->setEnabled(false);
+            }
             const int scope_index = m_scope->findData(QString::fromStdString(scope.get_str()));
             if (scope_index >= 0) m_scope->setCurrentIndex(scope_index);
         }
@@ -8318,7 +8322,7 @@ private:
 
         QString model_text;
         if (restricted) {
-            const QString message = tr("Restricted sponsorship is currently disabled. Choose Public or a user-paid offer and review its limits before saving. Saved settings have not been converted automatically.");
+            const QString message = tr("The saved sponsorship setting is unsupported. Choose Public or a user-paid offer and review its limits before saving. Saved settings have not been converted automatically.");
             m_funding_model_status->setText(message);
             m_policy_summary->setText(message);
             return;
@@ -8388,7 +8392,7 @@ private:
         if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
             return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Settings → Wallet & backup, review adoption only if this wallet matches the independently retained current checkpoint and has no unfinished work. Adoption keeps reserves and spent budgets, and leaves the provider stopped. Funds & reserves also offers separate capital recovery and permanent retirement.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
-            return tr("Restricted sponsorship is currently disabled. Review a supported offer in Settings. Existing payment records remain available in Activity.");
+            return tr("The saved sponsorship setting is unsupported. Review a supported offer in Settings. Existing payment records remain available in Activity.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
             return tr("Wallet and transaction index updates are catching up with the node. Processing resumes automatically when they agree.");
         if (error == QLatin1String("PAYMASTER_DISABLED"))
@@ -13124,13 +13128,15 @@ private:
         auto* wizard_scope = new NoWheelComboBox(model_page);
         wizard_scope->setObjectName("paymasterSetupSponsorshipScope");
         wizard_scope->addItem(tr("Public — discovered clients may request sponsorship"), QStringLiteral("public"));
-        wizard_scope->addItem(tr("Restricted — currently unavailable"), QStringLiteral("restricted"));
-        static_cast<QStandardItemModel*>(wizard_scope->model())->item(1)->setEnabled(false);
+        if (m_scope->currentData().toString() == QLatin1String("restricted")) {
+            wizard_scope->addItem(tr("Unsupported saved sponsorship setting"), QStringLiteral("restricted"));
+            static_cast<QStandardItemModel*>(wizard_scope->model())->item(1)->setEnabled(false);
+        }
         const int selected_scope = wizard_scope->findData(m_scope->currentData());
         if (selected_scope >= 0) wizard_scope->setCurrentIndex(selected_scope);
         wizard_scope->setEnabled(wizard_sponsored->isChecked());
         auto* scope_note = new QLabel(tr(
-            "Both public models may be combined. Restricted sponsorship is disabled and reserved for a future extension."), model_page);
+            "Both payment models may be combined. Public sponsorship is available to discovered clients."), model_page);
         scope_note->setWordWrap(true);
         model_layout->addWidget(wizard_user_paid);
         model_layout->addWidget(user_paid_note);
