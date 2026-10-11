@@ -64,6 +64,7 @@
 #include <QAccessible>
 #include <QColor>
 #include <QCheckBox>
+#include <QDialogButtonBox>
 #include <QCoreApplication>
 #include <QFile>
 #include <QFocusEvent>
@@ -1293,6 +1294,10 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
         QVERIFY(restore_summary->text().contains(QStringLiteral("restored from a backup")));
         QVERIFY(restore_summary->text().contains(QStringLiteral("New payments and reserve spending are blocked")));
         QVERIFY(restore_summary->text().contains(QStringLiteral("A rescan or a higher fee limit cannot resolve this")));
+        QVERIFY(restore_summary->text().contains(QStringLiteral("review adoption")));
+        auto* adopt = tab.findChild<QPushButton*>("paymasterAdoptBackup");
+        QVERIFY(adopt != nullptr);
+        QVERIFY(!adopt->isHidden());
         QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
         QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
         for (const auto& gate : {"PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED",
@@ -1304,12 +1309,61 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
             checkpoint_errors.push_back(gate);
             checkpoint_provider.pushKV("readiness_errors", std::move(checkpoint_errors));
             tab.setPaymasterReadinessStatusForTesting(checkpoint_provider);
+            QVERIFY(adopt->isHidden());
             QVERIFY(next_step->text().contains(QStringLiteral("Provider wallet safety check needs review")));
             QVERIFY(restore_summary->text().contains(QStringLiteral("New payments and reserve spending are blocked")));
             QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
             QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
         }
     }
+    // The review cannot execute until the operator confirms independent state.
+    std::vector<UniValue> adoption_calls;
+    bool execution_confirmed{false};
+    tab.setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command != "adoptpaymasterbackup") return UniValue{UniValue::VOBJ};
+        adoption_calls.push_back(params);
+        const bool execute = params.size() > 0 && params[0].find_value("execute").isTrue();
+        if (execute) execution_confirmed = params[0].find_value("independent_checkpoint").isTrue();
+        UniValue review{UniValue::VOBJ};
+        review.pushKV("executed", execute);
+        review.pushKV("provider_stopped", true);
+        review.pushKV("provider_id", std::string(64, 'a'));
+        review.pushKV("plan_id", std::string(64, 'b'));
+        review.pushKV("pool_entries", 4);
+        review.pushKV("dgb_satoshis", 50000000);
+        review.pushKV("dd_cents", 400);
+        review.pushKV("network_fee_satoshis", 0);
+        return review;
+    });
+    restored_provider.pushKV("enabled", false);
+    restored_provider.pushKV("running", false);
+    for (const bool approve : {false, true}) {
+        tab.setPaymasterReadinessStatusForTesting(restored_provider);
+        auto* adopt = tab.findChild<QPushButton*>("paymasterAdoptBackup");
+        QVERIFY(adopt != nullptr);
+        bool dialog_seen{false};
+        QTimer::singleShot(0, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!dialog || dialog->objectName() != QLatin1String("paymasterAdoptBackupDialog")) return;
+            dialog_seen = true;
+            auto* independent = dialog->findChild<QCheckBox*>("paymasterAdoptIndependentCheckpoint");
+            auto* buttons = dialog->findChild<QDialogButtonBox*>();
+            QVERIFY(independent != nullptr);
+            QVERIFY(buttons != nullptr);
+            QVERIFY(!independent->isChecked());
+            QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+            if (approve) {
+                independent->setChecked(true);
+                QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+            }
+            buttons->button(approve ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        });
+        adopt->click();
+        QVERIFY(dialog_seen);
+        QCOMPARE(adoption_calls.size(), approve ? size_t{3} : size_t{1});
+    }
+    QVERIFY(execution_confirmed);
+
 }
 
 void PaymasterWidgetTests::paymasterPendingStartUsesLiveStatusInsteadOfStaleModal()

@@ -2369,6 +2369,17 @@ public:
         m_backup_summary->setObjectName("paymasterBackupSummary");
         m_backup_summary->setWordWrap(true);
         management_layout->addWidget(m_backup_summary);
+        m_backup_adopt = new QPushButton(tr("Review restored provider wallet…"), management_column);
+        m_backup_adopt->setObjectName("paymasterAdoptBackup");
+        m_backup_adopt->hide();
+        management_layout->addWidget(m_backup_adopt, 0, Qt::AlignLeft);
+        m_backup_adopt_status = new QLabel(management_column);
+        m_backup_adopt_status->setObjectName("paymasterAdoptBackupStatus");
+        m_backup_adopt_status->setWordWrap(true);
+        m_backup_adopt_status->setTextFormat(Qt::PlainText);
+        m_backup_adopt_status->hide();
+        management_layout->addWidget(m_backup_adopt_status);
+        connect(m_backup_adopt, &QPushButton::clicked, this, [this] { reviewBackupAdoption(); });
         m_backup_notice = new QPushButton(tr("A full-wallet backup is recommended. Review backup…"), overview_column);
         m_backup_notice->setObjectName("paymasterBackupReminder");
         m_backup_notice->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
@@ -4713,6 +4724,8 @@ public:
         m_task_error_toggle->setChecked(false);
         m_withdrawal_hint->clear();
         m_withdrawal_hint->hide();
+        m_backup_adopt_status->clear();
+        m_backup_adopt_status->hide();
         m_withdraw_task->setToolTip({});
         m_preview_carrier_excess->setToolTip({});
         m_pending_handler_calls.clear();
@@ -4900,6 +4913,10 @@ public:
         if (m_privacy == privacy) return;
         ++m_settings_restart_generation;
         m_privacy = privacy;
+        if (privacy) {
+            m_backup_adopt->hide();
+            m_backup_adopt_status->hide();
+        }
         if (privacy && m_finance_write_phase) {
             cancelFinanceWrite();
             setFinanceLoading(false, /*exporting=*/true);
@@ -6108,6 +6125,99 @@ private:
                     QStringLiteral("paymasterSetupBackupReminder"))) {
             setup_notice->setVisible(visible);
         }
+    }
+
+    void reviewBackupAdoption(bool stopped = false)
+    {
+        if ((!stopped && m_busy) || m_privacy || !hasRpcTransport()) return;
+        const auto generation = m_wallet_generation;
+        if (!stopped && (m_core_enabled || m_autostart_enabled)) {
+            const auto answer = askPlainTextQuestion(this, tr("Stop and review restored wallet"),
+                tr("Stop this provider persistently, including autostart, then check whether this restored wallet can be adopted. Reserves remain prepared. Adoption requires a separate review and confirmation. Cancelling here changes nothing."));
+            if (generation != m_wallet_generation || m_privacy || answer != QMessageBox::Yes) return;
+            UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
+            options.pushKV("persistent", true);
+            options.pushKV("pause_setup", true);
+            params.push_back(options);
+            call("stoppaymaster", params, false, nullptr, [this](const UniValue& result) {
+                if (!result.find_value("running").isFalse()) return;
+                m_core_enabled = m_core_running = m_autostart_enabled = false;
+                m_autostart_dirty = m_autostart_pending_read = false;
+                reconcileAutostart();
+                reviewBackupAdoption(true);
+            });
+            return;
+        }
+        m_backup_adopt_status->show();
+        call("adoptpaymasterbackup", {}, false, nullptr, [this](const UniValue& preview) {
+            if (m_privacy) return;
+            const auto generation = m_wallet_generation;
+            const auto& plan = preview.find_value("plan_id");
+            if (!IsHex256Field(preview, "plan_id") || !IsHex256Field(preview, "provider_id") ||
+                !preview.find_value("executed").isFalse() ||
+                !preview.find_value("provider_stopped").isTrue() ||
+                financeNumber(preview, "network_fee_satoshis") != 0) return;
+            for (const auto* key : {"pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis"}) {
+                qint64 value{0};
+                if (!GetInt64Field(preview, key, value) || value < 0) return;
+            }
+            QDialog dialog(this);
+            dialog.setObjectName("paymasterAdoptBackupDialog");
+            dialog.setWindowTitle(tr("Adopt current provider backup"));
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* summary = new QLabel(tr("The wallet matches this node's saved checkpoint and has no unfinished payments or reserve operations.\n\nKeep %1 DGB and %2 DD in %3 prepared reserves. Adoption preserves the provider identity, settings, spent budgets and history. No transaction or network fee is created. Older copies using this checkpoint store will be blocked. The provider stays stopped; start it separately after review.")
+                .arg(compactDgbAmount(financeNumber(preview, "dgb_satoshis")), ddAmount(financeNumber(preview, "dd_cents")))
+                .arg(financeNumber(preview, "pool_entries")) + tr("\n\nProvider: %1").arg(QString::fromStdString(preview.find_value("provider_id").get_str())), &dialog);
+            summary->setWordWrap(true);
+            summary->setTextFormat(Qt::PlainText);
+            layout->addWidget(summary);
+            auto* independent_help = new QLabel(tr("Only confirm if the current checkpoint was kept independently of this wallet. Restoring an old wallet and its old checkpoint together cannot prove freshness. Do not operate this provider identity on another host."), &dialog);
+            independent_help->setWordWrap(true);
+            independent_help->setTextFormat(Qt::PlainText);
+            layout->addWidget(independent_help);
+            auto* independent = new QCheckBox(tr("I confirm independently preserved state and sole use of this identity."), &dialog);
+            independent->setObjectName("paymasterAdoptIndependentCheckpoint");
+            layout->addWidget(independent);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+            buttons->button(QDialogButtonBox::Ok)->setText(tr("Adopt reviewed wallet"));
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+            buttons->button(QDialogButtonBox::Cancel)->setDefault(true);
+            connect(independent, &QCheckBox::toggled, buttons->button(QDialogButtonBox::Ok), &QPushButton::setEnabled);
+            connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            layout->addWidget(buttons);
+            setRpcBusyState(true);
+            const bool accepted = dialog.exec() == QDialog::Accepted && independent->isChecked();
+            if (generation != m_wallet_generation) return;
+            setRpcBusyState(false);
+            if (!accepted || m_privacy) return;
+            UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
+            options.pushKV("execute", true);
+            options.pushKV("independent_checkpoint", true);
+            options.pushKV("plan_id", plan.get_str());
+            params.push_back(options);
+            call("adoptpaymasterbackup", params, false, nullptr, [this, preview](const UniValue& result) {
+                const bool confirmed = result.find_value("executed").isTrue() &&
+                    result.find_value("provider_stopped").isTrue() &&
+                    IsHex256Field(result, "plan_id") && IsHex256Field(result, "provider_id") &&
+                    result.find_value("plan_id").get_str() == preview.find_value("plan_id").get_str() &&
+                    result.find_value("provider_id").get_str() == preview.find_value("provider_id").get_str();
+                setStatusLabel(m_backup_adopt_status, confirmed
+                    ? tr("Current backup adopted. Reserves and spent budgets were preserved. The provider remains stopped. Review its settings, create a new full-wallet backup, then start separately.")
+                    : tr("Adoption result is unclear. Check current provider status before acting; do not repeat automatically."), confirmed ? "ready" : "action");
+                refreshOperatorStatus();
+            }, false, [this](const QString&) {
+                setStatusLabel(m_backup_adopt_status, tr("Adoption was not confirmed. Check current status before acting; do not retry automatically. The wallet may remain protected after an interrupted commit."), "action");
+                refreshOperatorStatus();
+            });
+        }, false, [this](const QString& error) {
+            setStatusLabel(m_backup_adopt_status, tr("This backup cannot currently be adopted. %1").arg(
+                error.contains(QLatin1String("CHECKPOINT"))
+                    ? tr("A current independently retained checkpoint is required; an older, missing or retired checkpoint cannot authorize continued service.")
+                    : error.contains(QLatin1String("BACKUP_INCOMPLETE_RECORDS"))
+                        ? tr("Required financial records are missing or invalid. Use the complete current provider wallet; spent fee budgets must not be recreated. Existing protection remains active.")
+                    : tr("Stop the provider persistently and resolve unfinished payments, reserved funds, manual coin locks and unconfirmed reserve transactions. Existing protection remains active.")), "action");
+        });
     }
 
     void requestProviderBackup()
@@ -8276,7 +8386,7 @@ private:
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_WRITE"))
             return tr("The independent provider safety checkpoint could not be saved. New payments and reserve spending are blocked. Check storage availability and diagnostics before continuing.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
-            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Funds & reserves, retirement can review capital release if this wallet matches the independently saved checkpoint and has no unfinished work. Continued service requires the complete current provider wallet.");
+            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Settings → Wallet & backup, review adoption only if this wallet matches the independently retained current checkpoint and has no unfinished work. Adoption keeps reserves and spent budgets, and leaves the provider stopped. Funds & reserves also offers separate capital recovery and permanent retirement.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
             return tr("Restricted sponsorship is currently disabled. Review a supported offer in Settings. Existing payment records remain available in Activity.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
@@ -8391,6 +8501,9 @@ private:
 
     void updateReadinessSummary(const QStringList& errors, bool running, bool ready)
     {
+        m_backup_adopt->setVisible(!m_privacy && errors.contains(
+            QStringLiteral("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")));
+        m_backup_adopt->setEnabled(!m_privacy && !m_busy && hasRpcTransport());
         updateExternalPrerequisites();
         for (const auto& error : errors) {
             if (error.startsWith(QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_"))) {
@@ -14995,6 +15108,8 @@ private:
     QVBoxLayout* m_node_editor_layout{nullptr};
     QPointer<QWidget> m_inline_node_editor;
     QLabel* m_backup_summary{nullptr};
+    QPushButton* m_backup_adopt{nullptr};
+    QLabel* m_backup_adopt_status{nullptr};
     QPushButton* m_backup_notice{nullptr};
     QList<QCheckBox*> m_refill_switches;
     QList<QCheckBox*> m_autostart_copies;
