@@ -781,9 +781,8 @@ BOOST_FIXTURE_TEST_CASE(test_health_alert_extreme_scenarios, DigiDollarHealthTes
         auto endTime = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-        // Test logging performs several writes per iteration, so wall-clock
-        // performance is diagnostic here and should be measured in benchmarks.
-        BOOST_WARN_LT(duration.count(), 10000);
+        // Preserve the upstream mass-alert performance bound.
+        BOOST_CHECK_LT(duration.count(), 2000);
 
         // Test memory pressure resistance - EXPECTED TO FAIL (RED phase)
         // TODO: Implement ValidateMemoryPressureResistance when needed

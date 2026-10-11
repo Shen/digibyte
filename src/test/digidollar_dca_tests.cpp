@@ -334,9 +334,7 @@ BOOST_AUTO_TEST_CASE(integration_with_consensus_params)
 
 BOOST_AUTO_TEST_CASE(performance_health_calculation)
 {
-    // Exercise health calculation repeatedly with large numbers. Wall-clock
-    // performance is benchmark territory and varies substantially in Debug
-    // builds, so this unit test verifies the deterministic result instead.
+    // Preserve upstream's performance bound as well as checking the result.
     CAmount largeCollateral = 1000000000 * COIN;  // 1B DGB
     CAmount largeDD = 100000000000;               // 100B DD (1T USD)
     CAmount oraclePrice = 10000;                  // $0.10 per DGB
@@ -355,7 +353,7 @@ BOOST_AUTO_TEST_CASE(performance_health_calculation)
         std::chrono::steady_clock::now() - start);
 
     BOOST_CHECK_EQUAL(health_sum, static_cast<int64_t>(expected_health) * iterations);
-    BOOST_WARN_LT(duration.count(), 5000000);
+    BOOST_CHECK_LT(duration.count(), 100000); // 1000 calculations in less than 100ms.
 }
 
 BOOST_AUTO_TEST_CASE(numerical_stability)
@@ -524,10 +522,8 @@ BOOST_AUTO_TEST_CASE(test_dca_extreme_scenarios)
         auto endTime = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-        // Wall-clock performance depends heavily on enabled test logging and
-        // should be measured in benchmarks. Keep this as a diagnostic warning while the
-        // loop continues to exercise the full health range.
-        BOOST_WARN_LT(duration.count(), 5000);
+        // Preserve the upstream stress-test performance bound.
+        BOOST_CHECK_LT(duration.count(), 100); // Less than 100ms.
 
         // Test memory stability under load - GREEN phase implemented
         bool memoryStable = DynamicCollateralAdjustment::VerifyMemoryStability();
