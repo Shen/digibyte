@@ -154,6 +154,7 @@ RPCHelpMan getpaymasteroffers()
     return RPCHelpMan{
         "getpaymasteroffers",
         "Return a locally filtered and deterministically sorted snapshot of public Paymaster offers.\n"
+        "Optional fee-rejected entries are diagnostic only and cannot authorize a payment.\n"
         "This does not contact a provider or reserve liquidity.\n",
         {
             {"amount_cents", RPCArg::Type::NUM, RPCArg::Optional::NO, "Recipient amount, or exact total DD outflow when subtract_paymaster_fee_from_amount is true"},
@@ -161,6 +162,7 @@ RPCHelpMan getpaymasteroffers()
                 {"subtract_paymaster_fee_from_amount", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Treat amount_cents as exact total DD outflow and derive the recipient amount"},
                 {"maximum_paymaster_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Requested fee ceiling, further limited by wallet policy and remaining daily budget"},
                 {"privacy", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "standard or high; high includes only Tor endpoints"},
+                {"include_fee_rejected", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Include otherwise matching offers rejected by client fee limits, marked eligible=false; default false"},
             }},
         },
         RPCResult{RPCResult::Type::ARR, "", "Eligible public offers", {{RPCResult::Type::OBJ, "", /*optional=*/false, "Sorted offer", {
@@ -170,6 +172,10 @@ RPCHelpMan getpaymasteroffers()
                                                                                                                                           {RPCResult::Type::STR_HEX, "offer_id", "Public offer identifier"},
                                                                                                                                           {RPCResult::Type::STR_HEX, "policy_hash", "Bound provider policy"},
                                                                                                                                           {RPCResult::Type::STR, "funding_model", "sponsored or user_paid"},
+                                                                                                                                          {RPCResult::Type::BOOL, "eligible", /*optional=*/true, "Whether client fee limits permit this offer; present with include_fee_rejected"},
+                                                                                                                                          {RPCResult::Type::STR, "fee_limit_reason", /*optional=*/true, "Fee exclusion: percentage or absolute_or_daily; diagnostic only"},
+                                                                                                                                          {RPCResult::Type::NUM, "maximum_service_fee_bps", /*optional=*/true, "Current percentage limit for a rejected offer; -1 means not configured"},
+                                                                                                                                          {RPCResult::Type::NUM, "available_service_fee_cents", /*optional=*/true, "Current requested, absolute and remaining daily fee ceiling for a rejected offer"},
                                                                                                                                           {RPCResult::Type::NUM, "fee_rate_bps", "Service-fee rate in basis points"},
                                                                                                                                           {RPCResult::Type::NUM, "maximum_user_paid_service_fee_cents", "Maximum user-paid DD service fee; zero means no cap"},
                                                                                                                                           {RPCResult::Type::NUM, "payment_cents", "Requested recipient amount"},
@@ -204,6 +210,7 @@ RPCHelpMan getpaymasteroffers()
             std::string error;
             const int64_t now = GetTime();
             bool subtract_fee{false};
+            bool include_fee_rejected{false};
             int64_t requested_fee_limit{DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS};
             PrivacyProfile privacy{PrivacyProfile::STANDARD};
             if (!request.params[1].isNull()) {
@@ -212,7 +219,8 @@ RPCHelpMan getpaymasteroffers()
                     options,
                     {{"subtract_paymaster_fee_from_amount", UniValueType(UniValue::VBOOL)},
                      {"maximum_paymaster_fee_cents", UniValueType(UniValue::VNUM)},
-                     {"privacy", UniValueType(UniValue::VSTR)}},
+                     {"privacy", UniValueType(UniValue::VSTR)},
+                     {"include_fee_rejected", UniValueType(UniValue::VBOOL)}},
                     /*fAllowNull=*/true, /*fStrict=*/true);
                 if (!options.find_value(
                         "subtract_paymaster_fee_from_amount").isNull()) {
@@ -223,6 +231,7 @@ RPCHelpMan getpaymasteroffers()
                     requested_fee_limit = options.find_value(
                         "maximum_paymaster_fee_cents").getInt<int64_t>();
                 }
+                include_fee_rejected = options.find_value("include_fee_rejected").isTrue();
                 if (!options.find_value("privacy").isNull()) {
                     const std::string profile = options.find_value("privacy").get_str();
                     if (profile == "high") {
@@ -240,18 +249,20 @@ RPCHelpMan getpaymasteroffers()
             }
             const DigiDollar::Paymaster::DDCents requested_amount{
                 request.params[0].getInt<int64_t>()};
+            const DDCents candidate_fee_limit = include_fee_rejected
+                ? DDCents{MAX_DD_OUTPUT_CENTS} : maximum_service_fee;
             const auto candidates = subtract_fee
                 ? DigiDollar::Paymaster::BuildGrossOfferCandidates(
                       context.paymaster->GetDirectory().List(now),
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
-                      maximum_service_fee,
+                      candidate_fee_limit,
                       reputation, now, error)
                 : DigiDollar::Paymaster::BuildOfferCandidates(
                       context.paymaster->GetDirectory().List(now),
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
-                      maximum_service_fee,
+                      candidate_fee_limit,
                       reputation, now, error);
             if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
             UniValue result{UniValue::VARR};
@@ -262,8 +273,22 @@ RPCHelpMan getpaymasteroffers()
             for (const auto& candidate : candidates) {
                 if (privacy == PrivacyProfile::HIGH &&
                     !candidate.endpoint.IsTor()) continue;
-                if (!CheckClientServiceFee(client_policy, candidate.payment, candidate.service_fee, error)) continue;
+                const bool within_policy = CheckClientServiceFee(
+                    client_policy, candidate.payment, candidate.service_fee, error);
+                const bool eligible = within_policy && candidate.service_fee.value <= maximum_service_fee.value;
+                if (!eligible && !include_fee_rejected) continue;
                 UniValue offer{UniValue::VOBJ};
+                if (include_fee_rejected) {
+                    offer.pushKV("eligible", eligible);
+                    if (!eligible) {
+                        offer.pushKV("fee_limit_reason",
+                            candidate.service_fee.value <= maximum_service_fee.value &&
+                            error == "PAYMASTER_CLIENT_PERCENTAGE_FEE_LIMIT_EXCEEDED"
+                                ? "percentage" : "absolute_or_daily");
+                        offer.pushKV("maximum_service_fee_bps", client_policy.maximum_service_fee_bps);
+                        offer.pushKV("available_service_fee_cents", maximum_service_fee.value);
+                    }
+                }
                 offer.pushKV("provider_id", candidate.provider_id.GetHex());
                 offer.pushKV("display_name", candidate.display_name);
                 offer.pushKV("endpoint", candidate.endpoint.ToStringAddrPort());

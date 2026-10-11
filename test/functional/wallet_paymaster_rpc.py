@@ -69,6 +69,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
                             help="Run authentic v1 client-policy reload and upgrade through RPC and CLI only")
         parser.add_argument("--reserved-capacity-only", action="store_true",
                             help="Run automatic admission with three independent reserved payment slots only")
+        parser.add_argument("--offer-models-only", action="store_true",
+                            help="Run dual-model previews and diagnostic fee rejections through RPC and CLI only")
         parser.add_argument("--restricted-disabled-only", action="store_true",
                             help="Run disabled Restricted RPC/CLI contracts without executing payments")
 
@@ -265,6 +267,45 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client.listpaymasterreservations(), client_reservations)
         assert_equal(client.listdigidollarsendsessions(), sessions)
 
+    def check_offer_models(self, provider, client):
+        self.log.info("Both public models remain visible; rejected fees are diagnostic only")
+        provider.startpaymaster()
+        self.wait_until(lambda: len(client.getpaymasteroffers(200)) == 2)
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 1000,
+            "maximum_service_fee_bps": 100,
+        })
+        client_cli = self.nodes[1].cli("-rpcwallet=client")
+        reservations = client.listpaymasterreservations()
+        sessions = client.listdigidollarsendsessions()
+        for api in (client, client_cli):
+            for amount in (200, 300):
+                offers = api.getpaymasteroffers(amount)
+                assert_equal({offer["funding_model"] for offer in offers}, {"sponsored", "user_paid"})
+                assert_equal(len({offer["provider_id"] for offer in offers}), 1)
+                assert_equal(len({offer["offer_id"] for offer in offers}), 2)
+            normal = api.getpaymasteroffers(222)
+            assert_equal([offer["funding_model"] for offer in normal], ["sponsored"])
+            diagnostic = api.getpaymasteroffers(222, {"include_fee_rejected": True})
+            assert_equal(len(diagnostic), 2)
+            sponsored, paid = diagnostic
+            assert_equal(sponsored["eligible"], True)
+            assert_equal(paid["funding_model"], "user_paid")
+            assert_equal(paid["eligible"], False)
+            assert_equal(paid["service_fee_cents"], 3)
+            assert_equal(paid["fee_limit_reason"], "percentage")
+            assert_equal(paid["maximum_service_fee_bps"], 100)
+            limited = api.getpaymasteroffers(222, {"include_fee_rejected": True, "maximum_paymaster_fee_cents": 0})
+            assert_equal(limited[1]["fee_limit_reason"], "absolute_or_daily")
+            gross = api.getpaymasteroffers(223, {"include_fee_rejected": True, "subtract_paymaster_fee_from_amount": True})
+            assert_equal(gross[1]["payment_cents"], 220)
+            assert_equal(gross[1]["service_fee_cents"], 3)
+            assert_equal(gross[1]["eligible"], False)
+            assert_equal(gross[1]["fee_limit_reason"], "percentage")
+        assert_equal(client.listpaymasterreservations(), reservations)
+        assert_equal(client.listdigidollarsendsessions(), sessions)
+
     def check_reserved_capacity(self, harness, provider, client):
         self.log.info("Independent free slots remain usable while earlier offers reserve capacity")
         targets = {
@@ -341,8 +382,12 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         provider, client = harness.create_wallets()
         info = harness.fund_and_configure(
             operation_mode="manual", carrier_cents=4_000,
-            fee_rate_bps=1_900)
+            funding_models=["sponsored", "user_paid"] if self.options.offer_models_only else None,
+            fee_rate_bps=100 if self.options.offer_models_only else 1_900)
         assert_equal(info["operation_mode"], "manual")
+        if self.options.offer_models_only:
+            self.check_offer_models(provider, client)
+            return
         if self.options.reserved_capacity_only:
             self.check_reserved_capacity(harness, provider, client)
             return
