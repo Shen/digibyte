@@ -224,6 +224,12 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
                             int64_t now, PaymasterCapitalRelease& result, std::string& error,
                             bool recovery = false);
 
+/** Review/adopt a current restored provider using an independently retained
+ * checkpoint. Reuses the full quiescent-capital checks without releasing any
+ * reserve or changing spending budgets. Provider stays persistently stopped. */
+bool AdoptPaymasterBackup(CWallet& wallet, bool execute, const uint256& expected_plan,
+                         int64_t now, PaymasterCapitalRelease& result, std::string& error);
+
 /** Atomically reserve at most one operational DGB entry and, when required,
  * one carrier. Repeating the same reservation id returns the exact same slot.
  */

@@ -1847,6 +1847,58 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     return true;
 }
 
+bool AdoptPaymasterBackup(CWallet& wallet, bool execute, const uint256& expected_plan,
+                         int64_t now, PaymasterCapitalRelease& result, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    // Read-only reuse of the conservative recovery review: no open payments,
+    // reserved fees/inputs, unfinished maintenance or ambiguous pool outputs.
+    if (!ReleasePaymasterCapital(wallet, false, {}, now, result, error, true)) return false;
+    uint256 revision;
+    if (!CheckPaymasterCapitalRecoveryCheckpoint(wallet.GetDatabase(), revision, error)) return false;
+    if (!CheckPaymasterCheckpoint(wallet.GetDatabase(), error)) return false;
+    WalletBatch records{wallet.GetDatabase()};
+    ProviderPolicy policy;
+    ProviderSafetyPolicy safety;
+    ProviderBudgetLedger budgets;
+    ProviderLiquidityPolicy liquidity;
+    // A release may tolerate absent, unused configuration. Restoring signing
+    // authority must never turn a missing budget ledger into a fresh allowance.
+    if (records.ReadPaymasterPolicyWithStatus(policy) != DatabaseReadStatus::FOUND ||
+        records.ReadPaymasterProviderSafetyPolicyWithStatus(safety) != DatabaseReadStatus::FOUND ||
+        records.ReadPaymasterProviderBudgetLedgerWithStatus(budgets) != DatabaseReadStatus::FOUND ||
+        records.ReadPaymasterLiquidityPolicyWithStatus(liquidity) != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_BACKUP_INCOMPLETE_RECORDS";
+        return false;
+    }
+    result.recovery_release = false;
+    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster backup adoption v1"}
+        << result.plan_id << revision << policy << safety).GetHash();
+    if (!execute) return true;
+    if (expected_plan.IsNull() || expected_plan != result.plan_id) {
+        error = "PAYMASTER_BACKUP_PLAN_CHANGED";
+        return false;
+    }
+    WalletBatch batch{wallet.GetDatabase()};
+    if (!batch.TxnBegin()) {
+        error = "PAYMASTER_DATABASE_BEGIN";
+        return false;
+    }
+    if (!batch.AdoptPaymasterCheckpoint(revision)) {
+        batch.TxnAbort();
+        error = "PAYMASTER_BACKUP_CHECKPOINT_CHANGED";
+        return false;
+    }
+    ProviderIdentityRecord identity;
+    if (!batch.ReadPaymasterIdentity(identity) ||
+        !WriteProviderBackupReminder(batch, identity, now, error) || !batch.TxnCommit()) {
+        batch.TxnAbort();
+        if (error.empty()) error = "PAYMASTER_DATABASE_COMMIT";
+        return false;
+    }
+    return true;
+}
+
 bool GetPaymasterProviderPoolEntries(const CWallet& wallet,
                                      std::vector<ProviderPoolEntry>& entries)
 {

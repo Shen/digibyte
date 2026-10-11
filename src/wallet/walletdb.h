@@ -298,6 +298,9 @@ public:
 
     bool SetPaymasterCheckpointPending(bool pending);
     bool RetirePaymasterCheckpoint(const uint256& expected_revision);
+    /** Only for a reviewed, quiescent restored provider; fences older copies
+     * before atomically removing its restoration quarantine. */
+    bool AdoptPaymasterCheckpoint(const uint256& expected_revision);
 
     bool WriteName(const std::string& strAddress, const std::string& strName);
     bool EraseName(const std::string& strAddress);

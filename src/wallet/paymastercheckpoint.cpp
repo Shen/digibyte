@@ -271,7 +271,7 @@ bool PaymasterCheckpointInTransaction(const WalletBatch* owner)
 
 namespace {
 bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatabase& database,
-                     bool retirement, const uint256& expected_revision)
+                     bool retirement, const uint256& expected_revision, bool adoption = false)
 {
     std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
     const auto found = transactions.find(owner);
@@ -279,10 +279,10 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
     auto& state = found->second;
     if (state.failed) return false;
     if (state.dirty) return true;
-    // Explicitly restored wallets remain permanently quarantined by the
-    // append-only guard. Their exact signed recovery/accounting must not
-    // overwrite the original provider's independent high-water mark.
-    if (!retirement && batch.Exists(DBKeys::PAYMASTER_RESTORE_GUARD)) return true;
+    // Quarantined wallets cannot advance the original provider's high-water
+    // mark through signed recovery/accounting. Only an explicit reviewed
+    // retirement or current-backup adoption may advance that checkpoint.
+    if (!retirement && !adoption && batch.Exists(DBKeys::PAYMASTER_RESTORE_GUARD)) return true;
     DigiDollar::Paymaster::ProviderIdentityRecord identity;
     const auto identity_status = batch.ReadWithStatus(DBKeys::PAYMASTER_IDENTITY, identity);
     if (identity_status == DatabaseReadStatus::NOT_FOUND) return true;
@@ -310,14 +310,15 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
         bool enrolled{false};
         if (!ReadCurrent(batch, identity.provider_id, state.next, enrolled) ||
             state.next.generation == (std::numeric_limits<uint64_t>::max)()) throw std::runtime_error("checkpoint not current");
-        if (retirement) {
+        if (retirement || adoption) {
             DigiDollar::Paymaster::ProviderIdentityRecord guard;
             if (batch.ReadWithStatus(DBKeys::PAYMASTER_RESTORE_GUARD, guard) != DatabaseReadStatus::FOUND ||
                 guard.version != DigiDollar::Paymaster::ProviderIdentityRecord::CURRENT_VERSION ||
                 guard.provider_id != identity.provider_id || !enrolled ||
                 expected_revision.IsNull() || Checksum(state.next) != expected_revision ||
-                state.next.pending == 1) throw std::runtime_error("recovery checkpoint changed");
-            state.next.pending = PaymasterCheckpoint::RETIRED;
+                state.next.pending == 1 ||
+                (adoption && state.next.pending != 0)) throw std::runtime_error("recovery checkpoint changed");
+            if (retirement) state.next.pending = PaymasterCheckpoint::RETIRED;
         } else if (enrolled && (state.next.pending == PaymasterCheckpoint::RETIRED ||
                    (state.next.pending && !pending_operations.count(&database)))) {
             throw std::runtime_error("checkpoint prohibits new authority");
@@ -349,6 +350,21 @@ bool WalletBatch::RetirePaymasterCheckpoint(const uint256& expected_revision)
     const auto found = transactions.find(this);
     if (found == transactions.end() || found->second.dirty) return false;
     return TrackCheckpoint(this, *m_batch, m_database, true, expected_revision);
+}
+
+bool WalletBatch::AdoptPaymasterCheckpoint(const uint256& expected_revision)
+{
+    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
+    const auto found = transactions.find(this);
+    if (found == transactions.end() || found->second.dirty ||
+        !TrackCheckpoint(this, *m_batch, m_database, false, expected_revision, true)) return false;
+    // The external checkpoint is advanced by PrepareCommit before this erase
+    // commits. A failed commit leaves the guard and a conservative mismatch.
+    if (!m_batch->Erase(DBKeys::PAYMASTER_RESTORE_GUARD)) {
+        found->second.failed = true;
+        return false;
+    }
+    return true;
 }
 
 bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)

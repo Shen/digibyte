@@ -860,6 +860,81 @@ RPCHelpMan releasepaymastercapital()
     };
 }
 
+RPCHelpMan adoptpaymasterbackup()
+{
+    return RPCHelpMan{
+        "adoptpaymasterbackup",
+        "Preview or adopt a current restored provider wallet. Stop persistently first.\n"
+        "Requires its independently retained current checkpoint, a synchronized chain and no open payments, reserved budgets, unfinished maintenance or ambiguous reserves.\n"
+        "Execution fences older copies using this checkpoint store before clearing restoration quarantine. No transaction or network fee is created.\n"
+        "Reserves, policies, spent budgets and history are retained; the provider stays stopped and autostart remains off. Start separately after review.\n"
+        "A jointly rolled-back wallet/checkpoint pair cannot be detected. Never operate this identity on independent hosts; only confirm independent_checkpoint if the node checkpoint was preserved independently of the restored wallet.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Reviewed adoption approval", {
+            {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Adopt the unchanged reviewed backup"},
+            {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan required for execution"},
+            {"independent_checkpoint", RPCArg::Type::BOOL, RPCArg::Default{false}, "Explicitly confirm the current node checkpoint was retained independently; required for execution"},
+        }}},
+        RPCResult{RPCResult::Type::OBJ, "", "Backup review or adoption receipt", {
+            {RPCResult::Type::BOOL, "executed", "Whether adoption committed"},
+            {RPCResult::Type::STR_HEX, "plan_id", "Binding to the exact reviewed wallet and checkpoint"},
+            {RPCResult::Type::STR_HEX, "provider_id", "Retained provider identity"},
+            {RPCResult::Type::NUM, "pool_entries", "Unchanged prepared reserve count"},
+            {RPCResult::Type::NUM, "dgb_satoshis", "Retained DGB reserve capital"},
+            {RPCResult::Type::NUM, "dd_cents", "Retained DD reserve capital"},
+            {RPCResult::Type::NUM, "network_fee_satoshis", "Always zero"},
+            {RPCResult::Type::BOOL, "provider_stopped", "Always true; start separately"},
+        }},
+        RPCExamples{HelpExampleCli("adoptpaymasterbackup", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            auto wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            auto& context = EnsureWalletContext(request.context);
+            if (!context.paymaster || !context.paymaster->Enabled())
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DISABLED");
+            const auto& options = request.params[0];
+            if (!options.isNull()) RPCTypeCheckObj(options, {
+                {"execute", UniValueType(UniValue::VBOOL)}, {"plan_id", UniValueType(UniValue::VSTR)},
+                {"independent_checkpoint", UniValueType(UniValue::VBOOL)},
+            }, true, true);
+            const bool execute = options.find_value("execute").isTrue();
+            uint256 plan;
+            if (execute) {
+                if (!options.find_value("independent_checkpoint").isTrue())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_BACKUP_INDEPENDENT_CHECKPOINT_REQUIRED");
+                if (options.find_value("plan_id").isNull())
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_BACKUP_PLAN_REQUIRED");
+                plan = ParseHashV(options.find_value("plan_id"), "plan_id");
+            } else if (!options.find_value("plan_id").isNull()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_BACKUP_PREVIEW_TAKES_NO_PLAN");
+            }
+            wallet->BlockUntilSyncedToCurrentChain();
+            if (wallet->chain().isInitialBlockDownload())
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CAPITAL_CHAIN_NOT_READY");
+            DigiDollar::Paymaster::ProviderIdentityRecord identity;
+            if (!GetPaymasterIdentity(*wallet, identity))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_IDENTITY_NOT_FOUND");
+            ProviderWorkGuard guard{*context.paymaster, wallet->GetName(), identity.provider_id, false};
+            if (!guard.Acquired()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_BUSY");
+            if (context.paymaster->IsProviderRunning(wallet->GetName(), identity.provider_id))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_MUST_BE_STOPPED");
+            PaymasterCapitalRelease review;
+            std::string error;
+            if (!AdoptPaymasterBackup(*wallet, execute, plan, GetTime(), review, error))
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("executed", execute);
+            result.pushKV("plan_id", review.plan_id.GetHex());
+            result.pushKV("provider_id", identity.provider_id.GetHex());
+            result.pushKV("pool_entries", review.entries);
+            result.pushKV("dgb_satoshis", review.dgb_satoshis);
+            result.pushKV("dd_cents", review.dd_cents);
+            result.pushKV("network_fee_satoshis", 0);
+            result.pushKV("provider_stopped", true);
+            return result;
+        },
+    };
+}
+
 RPCHelpMan withdrawpaymastercarrier()
 {
     return RPCHelpMan{
