@@ -274,6 +274,11 @@ public:
      */
     void getDigiDollarTransactionHistoryAsync(int count, int skip, RpcCallback callback);
 
+    /** GUI-thread observation only. Scans in another wallet on this node can
+     * also contend for chain locks. This is not transaction authorization. */
+    bool digiDollarHistoryRefreshInProgress() const;
+    QString digiDollarHistoryRefreshError() const { return m_digi_dollar_history_error; }
+
     /** Read stored DD receive requests without waiting for cs_wallet on Qt's
      * event thread. The shared wallet interface remains alive until the read
      * finishes; the callback runs on this model's thread. */
@@ -336,6 +341,7 @@ private:
     UniValue m_digi_dollar_history_cache{UniValue::VARR};
     std::vector<DigiDollarHistoryRequest> m_digi_dollar_history_requests;
     bool m_digi_dollar_history_refresh_in_flight{false};
+    QString m_digi_dollar_history_error;
 
     // Block hash denoting when the last balance update was done.
     uint256 m_cached_last_update_tip{};
@@ -345,6 +351,10 @@ private:
     void checkBalanceChanged(const interfaces::WalletBalances& new_balances);
 
 Q_SIGNALS:
+    /** Emitted for every model on the node when a canonical DD history read
+     * starts or completes, including failure and completion after unload. */
+    void digiDollarHistoryRefreshStateChanged();
+
     // Signal that balance in wallet changed
     void balanceChanged(const interfaces::WalletBalances& balances);
 
