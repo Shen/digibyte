@@ -103,6 +103,7 @@ int main(int argc, char* argv[])
     int num_test_failures{0};
     const QStringList requested_suites = GUIUtil::SplitSkipEmptyParts(
         qEnvironmentVariable("DIGIBYTE_QT_TEST_SUITE"), QLatin1Char(','));
+    QStringList unmatched_suites = requested_suites;
     QStringList test_arguments{QStringLiteral("test_digibyte-qt")};
     const QString requested_function = qEnvironmentVariable("DIGIBYTE_QT_TEST_FUNCTION").trimmed();
     if (!requested_function.isEmpty()) test_arguments.append(requested_function);
@@ -117,6 +118,7 @@ int main(int argc, char* argv[])
             qInfo("Skipping Qt test suite %s (DIGIBYTE_QT_TEST_SUITE filter)", qPrintable(suite_name));
             return;
         }
+        unmatched_suites.removeAll(suite_name);
         num_test_failures += QTest::qExec(&test, test_arguments);
     };
 
@@ -167,6 +169,13 @@ int main(int argc, char* argv[])
     DDTransactionTableTests test11(app.node());
     run_test(test11);
 #endif
+
+    // A misspelled or unavailable suite must never report a successful test
+    // run, including when another requested suite did execute successfully.
+    for (const QString& suite : unmatched_suites) {
+        qWarning("Unknown or unavailable Qt test suite: %s", qPrintable(suite));
+        ++num_test_failures;
+    }
 
     if (num_test_failures) {
         qWarning("\nFailed tests: %d\n", num_test_failures);
