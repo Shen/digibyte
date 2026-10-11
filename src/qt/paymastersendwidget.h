@@ -123,6 +123,7 @@ private:
     void updateOfferCheckControls();
     void clearOfferCards();
     void renderOfferCards();
+    void renderExcludedOfferCards();
     void selectOfferCard(int index, bool manual);
     void updateOfferCheckIcon();
     void renderOfferSpinner();

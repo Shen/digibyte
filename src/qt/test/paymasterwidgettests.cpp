@@ -3063,14 +3063,30 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     auto* updated = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOffersUpdated"));
     auto* help = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOfferCheckHelp"));
     QVERIFY(help && help->textFormat() == Qt::PlainText);
-    QVERIFY(help->text().contains("<b>Fee above limit</b>"));
-    QVERIFY(help->text().contains("effective 1.23%"));
-    QVERIFY(help->text().contains("Above your 1.00% limit"));
+    auto* excluded = send_widget.findChild<QFrame*>("paymasterExcludedOffersFrame");
+    auto* rejected_card = send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0");
+    QVERIFY(excluded && !excluded->isHidden() && rejected_card);
+    QVERIFY(rejected_card->property("feeExcluded").toBool());
+    QVERIFY(rejected_card->findChildren<QAbstractButton*>().isEmpty());
+    QVERIFY(rejected_card->findChild<QLabel*>("paymasterExcludedOfferTitle")->text().contains("<b>Fee above limit</b>"));
+    QVERIFY(rejected_card->findChild<QLabel*>("paymasterExcludedOfferReason")->text().contains("Above your 1.00% limit"));
+    bool rejected_fee_seen{false};
+    for (auto* label : rejected_card->findChildren<QLabel*>()) {
+        QCOMPARE(label->textFormat(), Qt::PlainText);
+        rejected_fee_seen |= label->text().contains("effective 1.23%");
+    }
+    QVERIFY(rejected_fee_seen);
+    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("2 selectable · 1 excluded by fee limits"));
+    auto* client = send_widget.findChild<PaymasterSendWidget*>();
+    const QString selected_offer = client->m_selectedOfferId;
+    QTest::mouseClick(rejected_card, Qt::LeftButton);
+    QCOMPARE(client->m_selectedOfferId, selected_offer);
+    QCOMPARE(client->m_offerPreview.size(), size_t{2});
     QVERIFY(!send_widget.findChild<QRadioButton*>("paymasterOfferChoice2"));
     QVERIFY(updated && help);
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(updated->toolTip().contains(QStringLiteral("up to 10 minutes")));
-    QVERIFY(help->text().contains(QStringLiteral("Connection not checked yet")));
+    QVERIFY(help->text().contains(QStringLiteral("current provider readiness is not checked yet")));
     QVERIFY(!status->text().contains(QStringLiteral("List updated:")));
     QVERIFY(help->text().contains(QStringLiteral("before signing")));
     QVERIFY(help->toolTip().contains(QStringLiteral("can still fail")));
@@ -3111,23 +3127,31 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
                 const QRect area(frame->mapTo(&send_widget, QPoint(0, 0)),
                                  QSize(frame->width(), safety->mapTo(&send_widget, QPoint(0, safety->height())).y() - frame->mapTo(&send_widget, QPoint(0, 0)).y()));
                 QVERIFY(send_widget.grab(area).save(screenshot + "-" + theme + "-" + QString::number(width) + ".png"));
+                auto* cards = send_widget.findChild<QFrame*>("paymasterOfferCardsFrame");
+                QVERIFY(cards->grab().save(screenshot + "-cards-" + theme + "-" + QString::number(width) + ".png"));
+                QVERIFY(excluded->grab().save(screenshot + "-excluded-" + theme + "-" + QString::number(width) + ".png"));
+                auto* scroll = send_widget.findChild<QScrollArea*>("paymasterOfferCardsScroll");
+                scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+                QVERIFY(send_widget.grab().save(screenshot + "-form-" + theme + "-" + QString::number(width) + ".png"));
             }
         }
     }
     send_widget.hide();
-    auto* client = send_widget.findChild<PaymasterSendWidget*>();
     client->setPrivacy(true);
+    QVERIFY(!send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0"));
     QVERIFY(icon->isHidden());
     QVERIFY(icon->text().isEmpty());
     QVERIFY(icon->accessibleName().isEmpty());
     QVERIFY(!updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(updated->toolTip().isEmpty());
     client->setPrivacy(false);
+    QVERIFY(send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0"));
     QCOMPARE(icon->text(), QStringLiteral("✓"));
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(QMetaObject::invokeMethod(send_widget.findChild<PaymasterSendWidget*>(),
                                       "expirePaymasterOfferPreview", Qt::DirectConnection));
-    QVERIFY(!help->text().contains("Fee above limit"));
+    QVERIFY(!send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0"));
+    QVERIFY(excluded->isHidden());
     QCOMPARE(offer_calls, 1); // Expiry invalidates locally; it does not search or send.
     QCOMPARE(table->rowCount(), 0);
     QVERIFY(status->text().contains(QStringLiteral("expired")));
@@ -3191,6 +3215,15 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
                 offer.pushKV("maximum_service_fee_bps", 100);
                 offer.pushKV("available_service_fee_cents", 100);
                 rejected.push_back(offer);
+                if (offer_response == 7) {
+                    // Every validated result must be visible, including beyond
+                    // the previous five-line diagnostic limit.
+                    for (int index = 1; index < 7; ++index) {
+                        offer.pushKV("provider_id", std::string(64, static_cast<char>('1' + index)));
+                        offer.pushKV("offer_id", std::string(64, static_cast<char>('1' + index)));
+                        rejected.push_back(offer);
+                    }
+                }
                 return rejected;
             }
             if (offer_response == 4 && in_flight_amount) {
@@ -3321,7 +3354,11 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
     QVERIFY(status->text().contains("No matching public"));
-    QVERIFY(send_widget.findChild<QLabel*>("paymasterOfferCheckHelp")->text().contains("Above your 1.00% limit"));
+    QVERIFY(send_widget.findChild<QLabel*>("paymasterExcludedOfferReason")->text().contains("Above your 1.00% limit"));
+    QCOMPARE(send_widget.findChild<QWidget*>("paymasterExcludedOfferCards")->layout()->count(), 7);
+    QVERIFY(!send_widget.findChild<QFrame*>("paymasterOfferCardsFrame")->isHidden());
+    QVERIFY(send_widget.findChild<QWidget*>("paymasterSelectableOffers")->isHidden());
+    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("0 selectable · 7 excluded by fee limits"));
     QVERIFY(!send_widget.findChild<QRadioButton*>("paymasterOfferChoice0"));
     QVERIFY(send_widget.findChild<QTimer*>("paymasterOfferExpiryTimer")->isActive());
 
@@ -3333,6 +3370,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
     QCOMPARE(table->rowCount(), 0);
     QCOMPARE(status->property("statusKind").toString(),
              QStringLiteral("info"));
+    QVERIFY(!send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0"));
     QVERIFY(status->text().contains(QStringLiteral("inputs changed"),
                                     Qt::CaseInsensitive));
     QVERIFY(refresh->isEnabled());
@@ -7865,7 +7903,7 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     QVERIFY(!prepare->isEnabled()); // Checking.
     reply(UniValue{UniValue::VARR});
     QVERIFY(!prepare->isEnabled()); // Empty directory.
-    QVERIFY(help->text().contains(funding_mode == QLatin1String("auto") ? "No spendable DGB" : "automatically when an offer is found"));
+    QVERIFY(help->text().contains("No published offer currently matches this amount and your limits"));
     client->send(recipient, 325);
     QCOMPARE(unexpected, 0);
 
@@ -8257,6 +8295,13 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     };
     UniValue available{UniValue::VARR};
     available.push_back(PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 2, 325, false, QDateTime::currentSecsSinceEpoch() + 60));
+    auto rejected_offer = PaymasterOffer("Filtered provider", std::string(64, 'c'), "user_paid", 4, 325, false,
+        QDateTime::currentSecsSinceEpoch() + 60, 100);
+    rejected_offer.pushKV("eligible", false);
+    rejected_offer.pushKV("fee_limit_reason", "percentage");
+    rejected_offer.pushKV("maximum_service_fee_bps", 100);
+    rejected_offer.pushKV("available_service_fee_cents", 100);
+    available.push_back(rejected_offer);
     form.setWalletModel(gui.walletModel.get());
     form.findChild<QRadioButton*>("feeFundingPaymaster")->setChecked(true);
     auto* amount = form.findChild<QLineEdit*>("amountEdit");
@@ -8319,7 +8364,9 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     auto* choice = form.findChild<QRadioButton*>("paymasterOfferChoice0");
     QVERIFY(cards && expiry && expiry->isActive() && choice);
     QPointer<QWidget> original_card = form.findChild<QWidget*>("paymasterOfferCard0");
+    QPointer<QWidget> original_excluded = form.findChild<QWidget*>("paymasterExcludedOfferCard0");
     QVERIFY(original_card);
+    QVERIFY(original_excluded);
     for (const QString& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
         QFile css(":/css/" + theme);
         QVERIFY(css.open(QIODevice::ReadOnly));
@@ -8340,6 +8387,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         reply(available);
         QCoreApplication::processEvents();
         QCOMPARE(form.findChild<QWidget*>("paymasterOfferCard0"), original_card.data());
+        QCOMPARE(form.findChild<QWidget*>("paymasterExcludedOfferCard0"), original_excluded.data());
         QCOMPARE(cards->geometry(), geometry);
         QVERIFY(choice->isChecked());
         QCOMPARE(QApplication::focusWidget(), focus_before);
@@ -12909,9 +12957,20 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
         auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
         QVERIFY(dialog);
         auto* percentage = dialog->findChild<QDoubleSpinBox*>("clientSafetyPercentDialog");
-        QVERIFY(percentage);
+        auto* per_transfer = dialog->findChild<QSpinBox*>("clientSafetyPerTransferDialog");
+        auto* per_day = dialog->findChild<QSpinBox*>("clientSafetyPerDayDialog");
+        QVERIFY(percentage && per_transfer && per_day);
         QCOMPARE(percentage->value(), 1.0);
+        QCOMPARE(per_transfer->text(), QStringLiteral("1.00 DD"));
+        QCOMPARE(per_day->text(), QStringLiteral("10.00 DD"));
         QVERIFY(saved.isNull()); // Displaying the suggestion grants no approval.
+        for (auto* label : dialog->findChildren<QLabel*>()) QVERIFY(!label->text().contains("cents"));
+        per_transfer->findChild<QLineEdit*>()->setText("1.25 DD");
+        per_day->findChild<QLineEdit*>()->setText("12.34 DD");
+        per_transfer->interpretText();
+        per_day->interpretText();
+        QCOMPARE(per_transfer->value(), 125);
+        QCOMPARE(per_day->value(), 1234);
         percentage->setValue(0.50);
         reviewed = true;
         dialog->accept();
@@ -12919,6 +12978,8 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
     client->configureClientSafetyPolicy();
     QVERIFY(reviewed);
     QCOMPARE(saved.find_value("maximum_service_fee_bps").getInt<int>(), 50);
+    QCOMPARE(saved.find_value("maximum_service_fee_per_transaction_cents").getInt<int>(), 125);
+    QCOMPARE(saved.find_value("maximum_service_fee_per_day_cents").getInt<int>(), 1234);
     QCOMPARE(client->m_clientSafetyMaximumBps, qint64{50});
     QVERIFY(client->m_clientSafetyStatus->text().contains("0.50%"));
 
@@ -12939,10 +13000,18 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
     QTimer::singleShot(0, &form, [&] {
         auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
         QVERIFY(dialog);
+        dialog->findChild<QPushButton*>("clientSafetyRestoreDefaultsButton")->click();
+        QCOMPARE(dialog->findChild<QSpinBox*>("clientSafetyPerTransferDialog")->text(), QStringLiteral("1.00 DD"));
+        QCOMPARE(dialog->findChild<QSpinBox*>("clientSafetyPerDayDialog")->text(), QStringLiteral("10.00 DD"));
+        QCOMPARE(dialog->findChild<QDoubleSpinBox*>("clientSafetyPercentDialog")->value(), 1.0);
+        const QString screenshot = qEnvironmentVariable("DIGIBYTE_PAYMASTER_OFFERS_SCREENSHOT");
+        if (!screenshot.isEmpty()) QVERIFY(dialog->grab().save(screenshot + "-dd-limits.png"));
         dialog->accept();
     });
     client->configureClientSafetyPolicy();
     QVERIFY(client->m_clientSafetyConfigured);
+    QCOMPARE(saved.find_value("maximum_service_fee_per_transaction_cents").getInt<int>(), 100);
+    QCOMPARE(saved.find_value("maximum_service_fee_per_day_cents").getInt<int>(), 1000);
     QVERIFY(client->m_clientSafetyError.isEmpty());
     form.findChild<QLineEdit*>("amountEdit")->setText("1.11");
     for (const char* error : {"PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED", "PAYMASTER_INVALID_CLIENT_SAFETY_STATE"}) {

@@ -65,6 +65,14 @@
 using namespace std::chrono_literals;
 
 namespace {
+void ClearOfferWidgets(QLayout* layout)
+{
+    while (auto* item = layout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+}
+
 class NoWheelSpinBox final : public QSpinBox
 {
 public:
@@ -1180,11 +1188,16 @@ void PaymasterSendWidget::setupFeeSection()
     m_offerCardsFrame->setObjectName("paymasterOfferCardsFrame");
     auto* cards_frame_layout = new QVBoxLayout(m_offerCardsFrame);
     cards_frame_layout->setContentsMargins(0, 0, 0, 0);
-    auto* cards_heading = new QLabel(DigiDollarSendWidget::tr("Choose a Paymaster"), m_offerCardsFrame);
+    auto* cards_heading = new QLabel(DigiDollarSendWidget::tr("Paymaster offers"), m_offerCardsFrame);
     QFont cards_font = cards_heading->font();
     cards_font.setBold(true);
     cards_heading->setFont(cards_font);
     cards_frame_layout->addWidget(cards_heading);
+    auto* summary = new QLabel(m_offerCardsFrame);
+    summary->setObjectName("paymasterOffersSummary");
+    summary->setTextFormat(Qt::PlainText);
+    summary->setWordWrap(true);
+    cards_frame_layout->addWidget(summary);
     auto* scroll = new QScrollArea(m_offerCardsFrame);
     scroll->setObjectName("paymasterOfferCardsScroll");
     scroll->setWidgetResizable(true);
@@ -1194,10 +1207,42 @@ void PaymasterSendWidget::setupFeeSection()
     scroll->setMaximumHeight(540);
     auto* cards = new QWidget(scroll);
     cards->setObjectName("paymasterOfferCards");
-    m_offerCardsLayout = new QVBoxLayout(cards);
+    auto* all_cards_layout = new QVBoxLayout(cards);
+    all_cards_layout->setContentsMargins(0, 0, 0, 0);
+    all_cards_layout->setSpacing(10);
+    all_cards_layout->setAlignment(Qt::AlignTop);
+    auto* selectable = new QWidget(cards);
+    selectable->setObjectName("paymasterSelectableOffers");
+    auto* selectable_layout = new QVBoxLayout(selectable);
+    selectable_layout->setContentsMargins(0, 0, 0, 0);
+    auto* selectable_heading = new QLabel(DigiDollarSendWidget::tr("Selectable · within your fee limits"), selectable);
+    selectable_heading->setFont(cards_font);
+    selectable_layout->addWidget(selectable_heading);
+    auto* selectable_cards = new QWidget(selectable);
+    m_offerCardsLayout = new QVBoxLayout(selectable_cards);
     m_offerCardsLayout->setContentsMargins(0, 0, 0, 0);
     m_offerCardsLayout->setSpacing(10);
     m_offerCardsLayout->setAlignment(Qt::AlignTop);
+    selectable_layout->addWidget(selectable_cards);
+    all_cards_layout->addWidget(selectable);
+    auto* excluded = new QFrame(cards);
+    excluded->setObjectName("paymasterExcludedOffersFrame");
+    auto* excluded_layout = new QVBoxLayout(excluded);
+    excluded_layout->setContentsMargins(0, 8, 0, 0);
+    auto* excluded_heading = new QLabel(DigiDollarSendWidget::tr("Excluded · above your fee limits"), excluded);
+    excluded_heading->setFont(cards_font);
+    excluded_layout->addWidget(excluded_heading);
+    auto* excluded_help = new QLabel(DigiDollarSendWidget::tr("These published offers are shown for comparison. They cannot be selected with your current limits."), excluded);
+    excluded_help->setWordWrap(true);
+    excluded_layout->addWidget(excluded_help);
+    auto* excluded_cards = new QWidget(excluded);
+    excluded_cards->setObjectName("paymasterExcludedOfferCards");
+    auto* excluded_cards_layout = new QVBoxLayout(excluded_cards);
+    excluded_cards_layout->setContentsMargins(0, 0, 0, 0);
+    excluded_cards_layout->setSpacing(10);
+    excluded_layout->addWidget(excluded_cards);
+    excluded->hide();
+    all_cards_layout->addWidget(excluded);
     scroll->setWidget(cards);
     cards_frame_layout->addWidget(scroll);
     m_offerSelectionGroup = new QButtonGroup(this);
@@ -1838,16 +1883,14 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     layout->addWidget(explanation);
 
     auto* form = new QFormLayout();
-    auto* per_transfer = new NoWheelSpinBox(&dialog);
+    auto* per_transfer = new PaymasterAmountSpinBox(&dialog);
     per_transfer->setObjectName("clientSafetyPerTransferDialog");
     per_transfer->setRange(0, 10000000);
     per_transfer->setValue(static_cast<int>(m_clientSafetyMaximumPerTransaction));
-    per_transfer->setSuffix(DigiDollarSendWidget::tr(" cents"));
-    auto* per_day = new NoWheelSpinBox(&dialog);
+    auto* per_day = new PaymasterAmountSpinBox(&dialog);
     per_day->setObjectName("clientSafetyPerDayDialog");
     per_day->setRange(0, 10000000);
     per_day->setValue(static_cast<int>(m_clientSafetyMaximumPerDay));
-    per_day->setSuffix(DigiDollarSendWidget::tr(" cents"));
     auto* percentage = new QDoubleSpinBox(&dialog);
     percentage->setObjectName("clientSafetyPercentDialog");
     percentage->setLocale(QLocale::c());
@@ -1862,8 +1905,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     layout->addLayout(form);
 
     auto* recommendation = new QLabel(
-        DigiDollarSendWidget::tr("Recommended starting values: 1.00 $DD (100 cents) per transfer and "
-           "10.00 $DD (1,000 cents) per rolling day, with a 1% effective fee ceiling. This allows a 1-cent fee on 1 DD received. Changes take effect only after saving."), &dialog);
+        DigiDollarSendWidget::tr("Recommended starting values: 1.00 DD per transfer and "
+           "10.00 DD per rolling day, with a 1% effective fee ceiling. This allows a 0.01 DD fee on 1.00 DD received. Changes take effect only after saving."), &dialog);
     recommendation->setWordWrap(true);
     layout->addWidget(recommendation);
     auto* restore = new QPushButton(DigiDollarSendWidget::tr("Restore recommended limits"), &dialog);
@@ -2406,7 +2449,7 @@ void PaymasterSendWidget::updateOfferCheckControls()
 {
     if (m_offerCardsFrame) {
         m_offerCardsFrame->setVisible(preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
-                                      !m_privacy && !m_offerPreview.empty());
+                                      !m_privacy && (!m_offerPreview.empty() || !m_offerCardsFrame->property("excludedOffers").toByteArray().isEmpty()));
         m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy);
     }
     if (!m_offerCheckFrame) return;
@@ -2427,15 +2470,11 @@ void PaymasterSendWidget::updateOfferCheckControls()
         } else if (!paymasterOnlySelected() && !hasCurrentPaymasterOffer()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically."));
         } else {
-            m_offerCheckHelp->setText(m_offerCheckState == OfferCheckState::FOUND ? DigiDollarSendWidget::tr("Connection not checked yet. Preparing may temporarily reserve $DD; you approve the exact provider and fee before signing.") :
+            m_offerCheckHelp->setText(m_offerCheckState == OfferCheckState::FOUND ? DigiDollarSendWidget::tr("Published offer · current provider readiness is not checked yet. A stopped or busy provider may still be listed until its announcement expires. Preparing checks the provider and may temporarily reserve $DD; you approve the exact provider and fee before signing.") :
                                      m_offerCheckState == OfferCheckState::FAILED ? DigiDollarSendWidget::tr("Try the offer check again before preparing a payment.") :
                                      m_offerCheckState == OfferCheckState::STALE ? DigiDollarSendWidget::tr("The offer must be checked again before preparing a payment.") :
                                      DigiDollarSendWidget::tr("Preparation becomes available automatically when an offer is found."));
         }
-    }
-    if (m_offerCheckHelp && !m_privacy) {
-        const QString excluded = m_offerCheckFrame->property("excludedOffersText").toString();
-        if (!excluded.isEmpty()) m_offerCheckHelp->setText(m_offerCheckHelp->text() + QStringLiteral("\n\n") + excluded);
     }
     updateOfferCheckIcon();
 }
@@ -2523,10 +2562,12 @@ void PaymasterSendWidget::clearOfferCards()
 {
     if (m_offerCardsFrame) m_offerCardsFrame->setProperty("renderedOfferCards", QVariant{});
     if (!m_offerCardsLayout) return;
-    while (auto* item = m_offerCardsLayout->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
+    ClearOfferWidgets(m_offerCardsLayout);
+    auto* excluded = m_offerCardsFrame->findChild<QFrame*>("paymasterExcludedOffersFrame");
+    ClearOfferWidgets(excluded->findChild<QWidget*>("paymasterExcludedOfferCards")->layout());
+    excluded->setProperty("renderedExcludedOffers", QVariant{});
+    excluded->hide();
+    m_offerCardsFrame->findChild<QLabel*>("paymasterOffersSummary")->clear();
     m_offerCardsFrame->hide();
 }
 
@@ -2544,9 +2585,87 @@ void PaymasterSendWidget::selectOfferCard(int index, bool manual)
     m_form.updateSendButton();
 }
 
+void PaymasterSendWidget::renderExcludedOfferCards()
+{
+    auto* section = m_offerCardsFrame->findChild<QFrame*>("paymasterExcludedOffersFrame");
+    auto* cards = section->findChild<QWidget*>("paymasterExcludedOfferCards");
+    const QByteArray contents = m_offerCardsFrame->property("excludedOffers").toByteArray();
+    UniValue offers{UniValue::VARR};
+    // These are already validated display diagnostics. They never become a
+    // selectable preview, a provider binding or a financial authorization.
+    if (!contents.isEmpty() && (!offers.read(contents.toStdString()) || !offers.isArray())) offers = UniValue{UniValue::VARR};
+    m_offerCardsFrame->findChild<QLabel*>("paymasterOffersSummary")->setText(
+        DigiDollarSendWidget::tr("%1 selectable · %2 excluded by fee limits")
+            .arg(static_cast<qulonglong>(m_offerPreview.size())).arg(static_cast<qulonglong>(offers.size())));
+    section->setVisible(!offers.empty());
+    if (contents == section->property("renderedExcludedOffers").toByteArray()) return;
+    ClearOfferWidgets(cards->layout());
+    for (size_t index = 0; index < offers.size(); ++index) {
+        const auto& offer = offers[index];
+        auto* card = new QFrame(cards);
+        card->setObjectName(QStringLiteral("paymasterExcludedOfferCard%1").arg(static_cast<qulonglong>(index)));
+        card->setProperty("feeExcluded", true);
+        card->setStyleSheet(QStringLiteral(
+            "QFrame[feeExcluded=\"true\"] { border: 1px solid rgba(128, 128, 128, 150); border-radius: 8px; background-color: rgba(128, 128, 128, 30); }"
+            "QLabel { border: none; background: transparent; }"));
+        card->setFocusPolicy(Qt::NoFocus);
+        auto* layout = new QVBoxLayout(card);
+        layout->setContentsMargins(14, 12, 14, 12);
+        layout->setSpacing(6);
+        const auto add_label = [card, layout](const QString& text) {
+            auto* label = new QLabel(text, card);
+            label->setTextFormat(Qt::PlainText);
+            label->setWordWrap(true);
+            label->setProperty("offerCardText", true);
+            layout->addWidget(label);
+            return label;
+        };
+        const QString name = QString::fromStdString(offer.find_value("display_name").get_str()).trimmed();
+        const QString model = friendlyFundingModel(QString::fromStdString(offer.find_value("funding_model").get_str()));
+        auto* title = add_label(DigiDollarSendWidget::tr("%1 · %2")
+            .arg(name.isEmpty() ? DigiDollarSendWidget::tr("Paymaster") : name, model));
+        title->setObjectName("paymasterExcludedOfferTitle");
+        QFont font = title->font();
+        font.setBold(true);
+        title->setFont(font);
+        title->setProperty("offerCardEmphasis", true);
+        add_label(DigiDollarSendWidget::tr("Not selectable · fee limit exceeded"));
+        const QString provider_id = QString::fromStdString(offer.find_value("provider_id").get_str());
+        add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)))->setToolTip(provider_id);
+        const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
+        const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
+        add_label(DigiDollarSendWidget::tr("Recipient receives: %1").arg(formatCents(payment)));
+        add_label(DigiDollarSendWidget::tr("Service fee: %1 (effective %2%)")
+            .arg(formatCents(fee), PaymasterEffectivePercent(fee, payment)));
+        add_label(DigiDollarSendWidget::tr("Total from your wallet: %1")
+            .arg(formatCents(offer.find_value("user_total_cents").getInt<qint64>())));
+        const QString reason = offer.find_value("fee_limit_reason").get_str() == "percentage"
+            ? DigiDollarSendWidget::tr("Above your %1% limit after rounding to 0.01 DD.")
+                  .arg(QString::number(offer.find_value("maximum_service_fee_bps").getInt<int>() / 100.0, 'f', 2))
+            : DigiDollarSendWidget::tr("Above your current service-fee allowance of %1 per payment or rolling day.")
+                  .arg(formatCents(offer.find_value("available_service_fee_cents").getInt<qint64>()));
+        auto* reason_label = add_label(reason);
+        reason_label->setObjectName("paymasterExcludedOfferReason");
+        reason_label->setFont(font);
+        reason_label->setProperty("offerCardEmphasis", true);
+        card->setAccessibleName(title->text());
+        card->setAccessibleDescription(DigiDollarSendWidget::tr("Not selectable. %1").arg(reason));
+        cards->layout()->addWidget(card);
+    }
+    section->setProperty("renderedExcludedOffers", contents);
+}
+
 void PaymasterSendWidget::renderOfferCards()
 {
-    if (m_privacy || m_offerPreview.empty()) { clearOfferCards(); return; }
+    if (m_privacy) { clearOfferCards(); return; }
+    renderExcludedOfferCards();
+    m_offerCardsFrame->findChild<QWidget*>("paymasterSelectableOffers")->setVisible(!m_offerPreview.empty());
+    if (m_offerPreview.empty()) {
+        ClearOfferWidgets(m_offerCardsLayout);
+        m_offerCardsFrame->setProperty("renderedOfferCards", QVariant{});
+        updateOfferCheckControls();
+        return;
+    }
     auto offers = m_offerPreview.getValues();
     std::stable_sort(offers.begin(), offers.end(), [](const UniValue& lhs, const UniValue& rhs) {
         const bool lhs_failed = lhs.find_value("recommendation_deprioritized").isTrue();
@@ -2566,7 +2685,7 @@ void PaymasterSendWidget::renderOfferCards()
         updateOfferCheckControls();
         return;
     }
-    clearOfferCards();
+    ClearOfferWidgets(m_offerCardsLayout);
     int selected{0};
     if (m_offerManuallySelected) {
         bool found{false};
@@ -2675,7 +2794,7 @@ void PaymasterSendWidget::invalidatePaymasterOfferPreview(bool preserve_choice)
     if (!preserve_choice) setPaymasterNotice(QString{});
     ++m_paymasterOfferPreviewGeneration;
     if (m_offerExpiryTimer) m_offerExpiryTimer->stop();
-    if (m_offerCheckFrame) m_offerCheckFrame->setProperty("excludedOffersText", QString{});
+    if (m_offerCardsFrame) m_offerCardsFrame->setProperty("excludedOffers", QVariant{});
     const bool had_preview =
         m_offerCheckState != OfferCheckState::NOT_CHECKED ||
         m_paymasterPreviewRecipientCents >= 0 ||
@@ -2909,25 +3028,10 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
             }
             int row{0};
             UniValue eligible_offers{UniValue::VARR};
-            QStringList excluded_offers;
-            int excluded_count{0};
+            UniValue excluded_offers{UniValue::VARR};
             for (const UniValue& offer : result.getValues()) {
                 if (offer.find_value("eligible").isFalse()) {
-                    // Keep a large public directory from expanding the status
-                    // card indefinitely; all entries were validated above.
-                    if (++excluded_count > 5) continue;
-                    const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
-                    const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
-                    const QString description = DigiDollarSendWidget::tr("%1 · %2: service fee %3 (effective %4%).")
-                        .arg(QString::fromStdString(offer.find_value("display_name").get_str()),
-                             guard->friendlyFundingModel(QString::fromStdString(offer.find_value("funding_model").get_str())),
-                             guard->formatCents(fee), PaymasterEffectivePercent(fee, payment));
-                    const QString reason = offer.find_value("fee_limit_reason").get_str() == "percentage"
-                        ? DigiDollarSendWidget::tr("Above your %1% limit after cent rounding.")
-                              .arg(QString::number(offer.find_value("maximum_service_fee_bps").getInt<int>() / 100.0, 'f', 2))
-                        : DigiDollarSendWidget::tr("Above your current service-fee allowance of %1 per payment or rolling day.")
-                              .arg(guard->formatCents(offer.find_value("available_service_fee_cents").getInt<qint64>()));
-                    excluded_offers.push_back(description + QLatin1Char(' ') + reason);
+                    excluded_offers.push_back(offer);
                     continue;
                 }
                 eligible_offers.push_back(offer);
@@ -2983,15 +3087,11 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 }
                 ++row;
             }
-            if (excluded_count > 5) excluded_offers.push_back(
-                DigiDollarSendWidget::tr("%1 more advertised offers exceed your fee limits.").arg(excluded_count - 5));
-            guard->m_offerCheckFrame->setProperty("excludedOffersText", excluded_offers.isEmpty() ? QString{} :
-                DigiDollarSendWidget::tr("Other advertised offers are unavailable within your fee limits:") +
-                    QLatin1Char('\n') + excluded_offers.join(QLatin1Char('\n')));
+            guard->m_offerCardsFrame->setProperty("excludedOffers", excluded_offers.empty() ? QByteArray{} : QByteArray::fromStdString(excluded_offers.write()));
             guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
                                        row == 0 ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
                                                                                                                                 DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
-            // Rejected entries are explanatory text only. They never enter the
+            // Rejected entries are display-only cards. They never enter the
             // selectable preview or the request's provider/offer bindings.
             guard->m_offerPreview = eligible_offers;
             if (!guard->m_privacy) guard->renderOfferCards();
@@ -5347,7 +5447,8 @@ void PaymasterSendWidget::applyPaymasterPrivacy()
 {
     if (!m_paymasterSessionFrame || !m_offersTable) return;
     if (m_privacy) clearOfferCards();
-    else if (!m_offerPreview.empty() && m_offerCardsLayout->count() == 0) renderOfferCards();
+    else if ((!m_offerPreview.empty() || !m_offerCardsFrame->property("excludedOffers").toByteArray().isEmpty()) &&
+             m_offerCardsFrame->property("renderedOfferCards").isNull()) renderOfferCards();
     updateOfferCheckControls();
     m_paymasterNotice->setVisible(!m_privacy && !m_paymasterNotice->text().isEmpty());
 
