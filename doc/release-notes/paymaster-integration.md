@@ -571,3 +571,9 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
 - Explain public offers excluded by actual rounded fees, percentage limits or
   remaining fee allowance. Both eligible models from one provider remain
   selectable; diagnostic exclusions cannot be selected or authorize a payment.
+- Split public-offer cards into counted selectable and muted fee-excluded
+  sections. Show every returned exclusion, with costs and reason, without
+  selection controls; preserve unchanged cards in both sections on refresh.
+- Display client fee limits in DD using exact integer-cent input bindings.
+  Clarify that provider display loading is independent of Core service startup
+  and cached announcements; published offers do not confirm live readiness.

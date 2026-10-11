@@ -1523,8 +1523,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and reuses unchanged cards to preserve geometry, focus and selection. Invalid
   responses/expired generations still clear the preview. Empty-list messages
   describe current matching offers separately from a previous failed attempt.
-- Opt-in `getpaymasteroffers` fee diagnostics display excluded models outside
-  the selectable cards. Same-provider models keep separate offer IDs; actual
+- Opt-in `getpaymasteroffers` fee diagnostics display excluded models as muted
+  comparison cards in a separate counted section, without selection controls.
+  All returned exclusions appear; unchanged eligible/excluded cards are reused.
+  The fee-limit modal displays DD with integer-cent bindings. Same-provider
+  models keep separate offer IDs; actual
   rounded fees and wallet limits explain exclusions without expanding authority.
 - [Flow audit](doc/design/paymaster-flow-audit.md): explicit fallback/resume,
   complete session-list loading with progress, concrete errors, explicit retry

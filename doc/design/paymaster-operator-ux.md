@@ -35,8 +35,14 @@ from current customer work. Client offer cards remain in place during directory
 reads; unchanged replies retain their widget identity, focus and selection. The
 preparation gate remains busy during a read, and expiry/invalid replies still
 remove eligibility immediately.
-Fee-excluded models remain visible as bounded plain-text diagnostics beside
-eligible cards; only eligible provider/offer IDs enter preparation. Settings
+Fee-excluded models have their own muted comparison cards below the selectable
+section, with counts, recipient/fee/outflow and the exclusion reason. They have
+no selection control; only eligible provider/offer IDs enter preparation. The
+bounded preview displays all returned exclusions, not only the first five.
+Unchanged cards in both sections retain their widget identity on refresh.
+Client fee-limit dialogs display DD while retaining exact integer-cent values.
+Initial provider reads explicitly describe display loading, separately from
+Core's independent autostart/service and clients' cached announcements. Settings
 and setup do not advertise the parked private sponsorship option. An actual
 saved legacy value stays unsupported until explicitly changed and reviewed.
 

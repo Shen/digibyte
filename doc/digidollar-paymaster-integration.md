@@ -216,8 +216,10 @@ percentage limit), and `available_service_fee_cents` (the minimum of requested,
 absolute and remaining-day limits). The default response remains eligible-only.
 Privacy, amount and announcement-validity filters still apply. These fields
 grant no payment authority; preparation and signing recheck the normal limits.
-Qt separates rejected entries into explanatory text and never includes them in
-selectable offer bindings. Both eligible models of one provider retain their
+Qt separates rejected entries into muted, non-selectable comparison cards with
+the fee and exclusion reason, and never includes them in selectable offer
+bindings. Counts distinguish the two sections; all entries returned by the
+bounded preview are shown. Both eligible models of one provider retain their
 distinct offer IDs; only the lower-cost eligible offer is recommended.
 
 Offer objects additionally contain the boolean `recommendation_deprioritized`.

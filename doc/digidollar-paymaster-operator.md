@@ -208,6 +208,17 @@ changing the amount, fee/privacy inputs or wallet requires a new selection.
 An expired or unavailable selected offer is reported rather than silently
 replaced. Offer lists remain local previews, not reachability guarantees.
 
+The **Paymaster offers** area separates **Selectable · within your fee limits**
+from **Excluded · above your fee limits**, with the count in each section.
+Excluded offers appear as muted comparison cards without a selection button.
+They show the same provider, payment model, recipient amount, rounded service
+fee and total, plus the percentage or current payment/day allowance that blocks
+selection. Both models of one provider can appear in different sections. All
+entries returned by the bounded amount/privacy/announcement preview are shown;
+this is not a list of every provider on the network. Exclusions alone never
+enable Send payment. Editing approved limits still requires an explicit save;
+the client dialog displays **DD**, with exact 0.01-DD increments internally.
+
 Failed unsigned provider contacts and authenticated provider rejections populate
 this wallet's local history. Signed transfers remain protected after rejection;
 a later confirmed payment replaces its failed/advisory outcome with success.
@@ -282,7 +293,12 @@ assistant is optional when the saved settings are unchanged. Wallet unlock,
 node synchronization, confirmed liquidity and current budget checks still apply.
 While the initial status queries are pending, the overview shows **Reading
 provider status** with an animated activity bar, the current check and elapsed
-loading time. The bar has no percentage or remaining-time estimate because
+loading time. This means the display is reading current status, not that Core
+is necessarily still starting the provider. A provider started automatically
+with the wallet can already be serving requests during this read; earlier
+public announcements can also remain visible until expiry. Initial model
+indicators say **Reading current readiness** instead of inferring a service
+pause from an unfinished display read. The bar has no percentage or remaining-time estimate because
 queries can take different amounts of time and follow-up steps can vary. The
 local display timer makes no additional RPC calls. Controls become available
 automatically when the query chain finishes; there is no fixed 30-second

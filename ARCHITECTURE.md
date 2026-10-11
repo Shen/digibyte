@@ -2253,6 +2253,13 @@ review state, while actual saved work retains its wait/confirmation state.
 
 The Qt RPC busy gate keeps operator pages paintable across asynchronous
 status/finance reads, including navigation, resizing and window exposure.
+Initial loading describes an unfinished display read independently of Core
+autostart/service operation or cached public announcements. Client offer
+presentation separates eligible selectable cards from muted fee-rejected
+comparison cards. Only eligible IDs enter preparation; counts and reasons are
+display diagnostics. Both sections reuse unchanged widgets during refresh and
+clear on invalidation/expiry/privacy. Client fee-limit inputs display DD through
+the existing exact integer-cent spin box; RPC units and approvals are unchanged.
 Foreground commands remain gated; a poll lasting two seconds shows its
 current read and elapsed time without discarding the last validated snapshot.
 Valid snapshots update the existing presentation directly; only invalid status

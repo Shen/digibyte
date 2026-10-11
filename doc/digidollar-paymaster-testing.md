@@ -4226,3 +4226,49 @@ Core cases, four focused RPC/CLI Regtests and the full Paymaster Qt suite.
 Allow minutes to tens of minutes. Success requires exit 0, all selected cases
 present, each functional report ending in `Tests successful` and no Qt failures
 or skips. Without `-Build`, first build the matching source revision.
+
+## Counted selectable/excluded cards and DD limits (2026-10-11)
+
+This follow-up changes only Paymaster Qt code and its existing tests. The
+read-only operator RPC reports an active, ready provider while the display
+is being refreshed; reading display status is independent of Core autostart
+and cached public announcements. No operator wallet, policy or payment was
+changed during the investigation. The current preview RPC and its previously
+verified percentage/absolute fee enforcement remain unchanged.
+
+Eight targeted Qt selections pass: offer preview/plain text, malformed and
+all-rejected previews, automatic refresh, client percentage/DD limits, delayed
+provider startup, live overview, offer cards and the current-offer preparation
+gate. This is 20 cases, or 36 report entries including initialization/cleanup,
+with no failures or skips. Cases check both models from one provider, separate
+counts, seven visible excluded offers, no selection controls/bindings for
+rejections, no selection change when a rejected card is clicked, expiry/privacy
+clearing and unchanged-widget/focus/geometry retention in both sections.
+DD input `1.25`/`12.34` saves exactly 125/1234 cents; recommended defaults remain
+100/1000 cents and 100 basis points. The two preparation-gate data rows initially
+had an obsolete empty-list text expectation from the earlier status wording;
+it was corrected to the current matching-offer message without weakening the
+blocked-payment assertions. All eight selections passed on the final objects.
+
+Three selected MSVC `/WX` compiles and isolated Qt/application links passed.
+Visual checks in both themes found and corrected native-palette inheritance in
+the muted cards; final whole-form captures confirm readable comparison cards.
+Source/object/binary/link-input/report hashes and the helper are retained under
+`build_msvc/paymaster-refresh-check/offer-presentation`. PowerShell 5.1 helper
+parsing and `git diff --check` pass. No full fresh solution build, full Qt/Core
+suite, new functional run, formatter/linter or sanitizer/fuzz run is claimed.
+
+The expensive normal build and broader matrix remain an operator check. Close
+normal client/provider instances and allow any active build to finish, then run:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\offer-presentation\build-and-check.ps1 -Build -FullQtTests
+```
+
+Prerequisites are the existing MSVC v143 14.43.34808, Windows SDK, static Qt
+5.15.10, vcpkg and Python. Allow minutes to tens of minutes. The helper builds
+with one worker and runs the six client-policy Core cases, four focused RPC/CLI
+Regtests and full Paymaster Qt suite. Success is exit 0, every selected case
+present, functional reports ending in `Tests successful`, and zero Qt
+failures/skips. Without `-Build`, matching normal binaries must already exist.
