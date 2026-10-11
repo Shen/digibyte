@@ -4,6 +4,7 @@
 
 #include <bip324.h>
 #include <chainparams.h>
+#include <crypto/sha256.h>
 #include <key.h>
 #include <pubkey.h>
 #include <span.h>
@@ -34,7 +35,8 @@ void TestBIP324PacketVector(
     const std::string& mid_recv_garbage_hex,
     const std::string& out_session_id_hex,
     const std::string& out_ciphertext_hex,
-    const std::string& out_ciphertext_endswith_hex)
+    const std::string& out_ciphertext_endswith_hex,
+    const std::string& out_ciphertext_sha256_hex = {})
 {
     // Convert input from hex to char/byte vectors/arrays.
     const auto in_priv_ours = ParseHex(in_priv_ours_hex);
@@ -82,6 +84,12 @@ void TestBIP324PacketVector(
     }
     std::vector<std::byte> ciphertext(contents.size() + cipher.EXPANSION);
     cipher.Encrypt(contents, in_aad, in_ignore, ciphertext);
+
+    if (!out_ciphertext_sha256_hex.empty()) {
+        std::array<unsigned char, CSHA256::OUTPUT_SIZE> digest;
+        CSHA256().Write(UCharCast(ciphertext.data()), ciphertext.size()).Finalize(digest.data());
+        BOOST_CHECK_EQUAL(HexStr(digest), out_ciphertext_sha256_hex);
+    }
 
     // Verify ciphertext. Note that the test vectors specify either out_ciphertext (for short
     // messages) or out_ciphertext_endswith (for long messages), so only check the relevant one.
@@ -279,7 +287,11 @@ BOOST_AUTO_TEST_CASE(packet_test_vectors) {
         "f4d511d0c616a3aaaf528e2d3d6b2db2",
         "1b5732a9d2daabf0b32c7602154ee3468492c1f6db68a7cfe6171367b77ecd61",
         "",
-        "634f04e0e12d9cd4458872e6b0f0920d1f804ca78a79cb73c23620625906857a9fe1c3cf355b8cd67b45d36ccb7c968450e9aad5fedcf82789b336d035ec8f8de89182ad536a805ae7aec5745123335ba46cbb19e96092d7362e6c7b0be73ce1b8a521736ccbe7a04e74d7db01e6fe3acad50eb7d4bd8e0d85b975d1ce443672");
+        "634f04e0e12d9cd4458872e6b0f0920d1f804ca78a79cb73c23620625906857a9fe1c3cf355b8cd67b45d36ccb7c968450e9aad5fedcf82789b336d035ec8f8de89182ad536a805ae7aec5745123335ba46cbb19e96092d7362e6c7b0be73ce1b8a521736ccbe7a04e74d7db01e6fe3acad50eb7d4bd8e0d85b975d1ce443672",
+        // Independently derived with Python EllSwift and ChaCha20Poly1305,
+        // using DigiByte's existing HKDF salt and mainnet magic. Check the
+        // entire packet, including its encrypted length and authentication tag.
+        "53736b18a79e0512e95686bfbe94c3c8362e5002a92bec936313ddd57ff53f7c");
     TestBIP324PacketVector(
         1024,
         "f90e080c64b05824c5a24b2501d5aeaf08af3872ee860aa80bdcd430f7b63494",
