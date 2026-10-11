@@ -103,7 +103,10 @@ jobs:
           ./autogen.sh
           ./configure --disable-bench --disable-fuzz --disable-fuzz-binary \
                       --with-gui=no --disable-man --disable-zmq --without-utils --without-daemon
-          make -j$(nproc) -C src test/test_digibyte
+          # Preserve the original default build targets as well as the newly
+          # enabled wallet/tests. Building only test_digibyte can omit sources
+          # belonging to other default targets from the CodeQL database.
+          make -j$(nproc) -C src
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
