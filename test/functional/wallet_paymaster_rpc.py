@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hmac
 import http.client
 import json
+import sqlite3
 from decimal import Decimal
 import time
 from urllib.parse import quote, urlsplit
@@ -63,6 +64,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
                             help="Run capability, failed-preparation and paused-provider cancellation contracts only")
         parser.add_argument("--client-protection-only", action="store_true",
                             help="Run percentage-cap persistence, RPC/CLI and pre-signature checks only")
+        parser.add_argument("--legacy-client-policy-only", action="store_true",
+                            help="Run authentic v1 client-policy reload and upgrade through RPC and CLI only")
         parser.add_argument("--restricted-disabled-only", action="store_true",
                             help="Run disabled Restricted RPC/CLI contracts without executing payments")
 
@@ -118,6 +121,45 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(provider.getpaymasterinfo(), info_before)
         assert_snapshot_equal(
             before, value_snapshot(self.nodes[0], provider, client, recipient_wallet))
+
+    def check_legacy_client_policy(self):
+        self.log.info("Authentic v1 client limits remain readable and explicitly upgrade through RPC and CLI")
+        node = self.nodes[1]
+        key = b"\x0epmclientsafety"
+        limits = {"maximum_service_fee_per_transaction_cents": 100,
+                  "maximum_service_fee_per_day_cents": 1000}
+        for use_cli in (False, True):
+            name = "legacy_cli" if use_cli else "legacy_rpc"
+            node.createwallet(wallet_name=name, descriptors=True, load_on_startup=False)
+            client = node.get_wallet_rpc(name)
+            client.setpaymasterclientsafetypolicy(limits)
+            client.unloadwallet()
+            path = node.wallets_path / name / "wallet.dat"
+            # Modify only an unloaded disposable test wallet. This is the exact
+            # pre-percentage layout, not a v2 record with an omitted JSON field.
+            with sqlite3.connect(path) as database:
+                encoded = database.execute("SELECT value FROM main WHERE key=?", (key,)).fetchone()[0]
+                assert_equal(encoded[:2], b"\x02\x00")
+                assert_equal(len(encoded), 30)
+                database.execute("UPDATE main SET value=? WHERE key=?", (b"\x01\x00" + encoded[2:-4], key))
+            node.loadwallet(name)
+            api = node.cli(f"-rpcwallet={name}") if use_cli else node.get_wallet_rpc(name)
+            status = api.getpaymasterclientsafetystatus()
+            assert_equal(status["configured"], True)
+            assert_equal(status["policy"]["maximum_service_fee_per_transaction_cents"], 100)
+            assert_equal(status["policy"]["maximum_service_fee_per_day_cents"], 1000)
+            assert "maximum_service_fee_bps" not in status["policy"]
+            assert_equal(api.getpaymasteroffers(100), [])
+            saved = api.setpaymasterclientsafetypolicy({**limits, "maximum_service_fee_bps": 100})
+            assert_equal(saved["maximum_service_fee_bps"], 100)
+            assert_equal(api.setpaymasterclientsafetypolicy(limits)["maximum_service_fee_bps"], 100)
+            node.get_wallet_rpc(name).unloadwallet()
+            with sqlite3.connect(path) as database:
+                encoded = database.execute("SELECT value FROM main WHERE key=?", (key,)).fetchone()[0]
+                assert_equal(encoded[:2], b"\x02\x00")
+                assert_equal(len(encoded), 30)
+            node.loadwallet(name)
+            assert_equal(api.getpaymasterclientsafetystatus()["policy"]["maximum_service_fee_bps"], 100)
 
     def check_client_percentage_protection(self, harness, provider, client):
         self.log.info("Client percentage approval is preserved and enforced through RPC and CLI")
@@ -221,6 +263,9 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_equal(client.listdigidollarsendsessions(), sessions)
 
     def run_test(self):
+        if self.options.legacy_client_policy_only:
+            self.check_legacy_client_policy()
+            return
         harness = PaymasterFunctionalHarness(self)
         provider, client = harness.create_wallets()
         info = harness.fund_and_configure(

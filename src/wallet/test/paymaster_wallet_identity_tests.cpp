@@ -80,6 +80,20 @@ struct ProviderSettingsV1 {
     }
 };
 
+/** Authentic client-policy disk layout before percentage limits were added. */
+struct ClientSafetyPolicyV1 {
+    uint16_t version{1};
+    DDCents maximum_service_fee_per_transaction{100};
+    DDCents maximum_service_fee_per_day{1000};
+    int64_t updated_at{100};
+
+    SERIALIZE_METHODS(ClientSafetyPolicyV1, obj)
+    {
+        READWRITE(obj.version, obj.maximum_service_fee_per_transaction,
+                  obj.maximum_service_fee_per_day, obj.updated_at);
+    }
+};
+
 /** Raw current-version shape used to prove that an out-of-range mode fails
  * closed while reading the wallet database. ProviderSettings itself refuses
  * to serialize such a value. */
@@ -100,6 +114,110 @@ struct RawProviderSettingsV2 {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(legacy_client_limits_upgrade_without_resetting_usage)
+{
+    ClientSafetyPolicyV1 legacy;
+    ClientFeeLedger ledger;
+    ledger.accounting_time_high_water = 200;
+    for (const auto state : {BudgetReservationState::RESERVED, BudgetReservationState::SPENT}) {
+        ClientFeeReservation reservation;
+        reservation.commit_key = state == BudgetReservationState::RESERVED ? uint256S("01") : uint256S("02");
+        reservation.service_fee = DDCents{7};
+        reservation.state = state;
+        reservation.reserved_at = 199;
+        reservation.updated_at = 200;
+        ledger.reservations.push_back(reservation);
+    }
+    auto raw_batch = m_wallet.GetDatabase().MakeBatch();
+    BOOST_REQUIRE(raw_batch->Write(DBKeys::PAYMASTER_CLIENT_SAFETY, legacy));
+    BOOST_REQUIRE(raw_batch->Write(DBKeys::PAYMASTER_CLIENT_FEES, ledger));
+    raw_batch.reset();
+
+    const auto before_read = GetMockableDatabase(m_wallet).m_records;
+    ClientSafetyPolicy policy;
+    BOOST_REQUIRE(GetPaymasterClientSafetyPolicy(m_wallet, policy));
+    BOOST_CHECK_EQUAL(policy.version, 1U);
+    BOOST_CHECK_EQUAL(policy.maximum_service_fee_per_transaction.value, 100);
+    BOOST_CHECK_EQUAL(policy.maximum_service_fee_per_day.value, 1000);
+    BOOST_CHECK_EQUAL(policy.maximum_service_fee_bps, -1);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_read);
+    std::string error;
+    BOOST_CHECK(CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{100}, error));
+    BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{101}, error));
+
+    ClientSafetyPolicy reviewed;
+    reviewed.maximum_service_fee_per_transaction = DDCents{100};
+    reviewed.maximum_service_fee_per_day = DDCents{1000};
+    reviewed.maximum_service_fee_bps = 100;
+    BOOST_REQUIRE_MESSAGE(SetPaymasterClientSafetyPolicy(m_wallet, reviewed, 150, error), error);
+    BOOST_REQUIRE(GetPaymasterClientSafetyPolicy(m_wallet, policy));
+    BOOST_CHECK_EQUAL(policy.version, ClientSafetyPolicy::CURRENT_VERSION);
+    BOOST_CHECK_EQUAL(policy.maximum_service_fee_bps, 100);
+    BOOST_CHECK_EQUAL(policy.updated_at, 200);
+    ClientFeeLedger after;
+    BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, after));
+    CDataStream expected{SER_DISK, 0}, actual{SER_DISK, 0};
+    expected << ledger;
+    actual << after;
+    BOOST_CHECK(expected.str() == actual.str());
+    BOOST_CHECK(CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{1}, error));
+    BOOST_CHECK(!CheckPaymasterClientServiceFee(m_wallet, DDCents{100}, DDCents{2}, error));
+
+    // The public RPC/CLI path must also preserve the percentage on omission
+    // and retain the exact spent/reserved entries while advancing its clock.
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.wallets.emplace_back(&m_wallet, [](CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    request.params = UniValue{UniValue::VARR};
+    UniValue limits{UniValue::VOBJ};
+    limits.pushKV("maximum_service_fee_per_transaction_cents", 100);
+    limits.pushKV("maximum_service_fee_per_day_cents", 1000);
+    request.params.push_back(limits);
+    const auto saved = setpaymasterclientsafetypolicy().HandleRequest(request);
+    BOOST_CHECK_EQUAL(saved.find_value("maximum_service_fee_bps").getInt<int>(), 100);
+    request.params.clear();
+    const auto status = getpaymasterclientsafetystatus().HandleRequest(request);
+    BOOST_CHECK(status.find_value("configured").isTrue());
+    BOOST_CHECK_EQUAL(status.find_value("active_reservations").getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(status.find_value("reserved_service_fee_cents").getInt<int>(), 7);
+    BOOST_CHECK_EQUAL(status.find_value("spent_service_fee_last_day_cents").getInt<int>(), 0);
+    // The old spent record is outside the current rolling day; it is retained.
+    BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, after));
+    BOOST_REQUIRE_EQUAL(after.reservations.size(), 2U);
+    BOOST_CHECK(after.reservations[0].state == BudgetReservationState::RESERVED);
+    BOOST_CHECK(after.reservations[1].state == BudgetReservationState::SPENT);
+    BOOST_CHECK_EQUAL(after.reservations[1].service_fee.value, 7);
+}
+
+BOOST_AUTO_TEST_CASE(client_limits_reject_corrupt_and_unknown_disk_versions)
+{
+    ClientSafetyPolicy policy;
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_CHECK(batch.ReadPaymasterClientSafetyPolicyWithStatus(policy) == DatabaseReadStatus::NOT_FOUND);
+    for (const uint16_t version : {uint16_t{1}, uint16_t{2}, uint16_t{3}, uint16_t{65535}}) {
+        auto raw_batch = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw_batch->Write(DBKeys::PAYMASTER_CLIENT_SAFETY, version));
+        const auto before = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK(batch.ReadPaymasterClientSafetyPolicyWithStatus(policy) ==
+            (version <= 2 ? DatabaseReadStatus::READ_ERROR : DatabaseReadStatus::UNSUPPORTED_VERSION));
+        ClientSafetyPolicy reviewed;
+        reviewed.maximum_service_fee_bps = 100;
+        std::string error;
+        BOOST_CHECK(!SetPaymasterClientSafetyPolicy(m_wallet, reviewed, 201, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY");
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    }
+    ClientSafetyPolicyV1 malformed;
+    malformed.maximum_service_fee_per_day = DDCents{1};
+    auto raw_batch = m_wallet.GetDatabase().MakeBatch();
+    BOOST_REQUIRE(raw_batch->Write(DBKeys::PAYMASTER_CLIENT_SAFETY, malformed));
+    BOOST_CHECK(batch.ReadPaymasterClientSafetyPolicyWithStatus(policy) == DatabaseReadStatus::READ_ERROR);
+}
 
 BOOST_AUTO_TEST_CASE(restricted_policy_disabled_without_rewriting_saved_state)
 {

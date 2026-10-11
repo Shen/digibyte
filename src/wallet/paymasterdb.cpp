@@ -1225,10 +1225,20 @@ bool WalletBatch::WritePaymasterClientSafetyPolicy(
 DatabaseReadStatus WalletBatch::ReadPaymasterClientSafetyPolicyWithStatus(
     DigiDollar::Paymaster::ClientSafetyPolicy& policy)
 {
-    std::string error;
-    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+    using DigiDollar::Paymaster::ClientSafetyPolicy;
+    // Unlike provider/session records, the complete v1 client policy remains
+    // supported: it grants only its existing absolute fee limits. Do not route
+    // it through the current-version-only reader or silently add a percent cap.
+    policy = {};
+    const DatabaseReadStatus status = m_batch->ReadWithStatus(
         DBKeys::PAYMASTER_CLIENT_SAFETY, policy);
+    if ((status == DatabaseReadStatus::FOUND ||
+         status == DatabaseReadStatus::READ_ERROR) &&
+        policy.version != 1 && policy.version != ClientSafetyPolicy::CURRENT_VERSION) {
+        return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    }
     if (status != DatabaseReadStatus::FOUND) return status;
+    std::string error;
     return DigiDollar::Paymaster::ValidateClientSafetyPolicy(policy, error)
                ? DatabaseReadStatus::FOUND
                : DatabaseReadStatus::READ_ERROR;
