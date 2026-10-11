@@ -286,7 +286,7 @@ an exploit has been confirmed.
 |---|---|---|---|---|---|
 | TM-001 **confirmed** | Delayed/withheld final outcome; provider signed commit survives >24 h; subsequent ledger pruning removes its SPENT row. | Failed recovery; committed DD/DGB may remain bound. No theft/extra fee shown. | Exact final validation and budget firewall reject missing authority; probe reproduces rejection. | Retain authorization provenance independently of rolling accounting. Detect missing-row errors for retained commits. | Medium / medium / **medium** |
 | TM-002 **confirmed** | Valid public client repeatedly creates unique quotes and lets unsigned requests expire. | Persistent database growth and increasing wallet-lock work; indirect recovery delays. | Short quote life, input control proofs, active/rate limits and capacity replay cleanup. | No automatic bound on full expired session/attempt history. Compact only provably unsigned terminal records; monitor counts, disk and reconciliation latency. | Medium / medium / **medium** |
-| TM-003 **restore/wallet-only rollback protected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass, including unmarked renamed copies against the independent checkpoint. | No automatic history reconstruction or guard-clear API. Whole-datadir/matching-pair rollback, multiple independent stores and physical storage-failure tests remain boundaries. | Conditional on restore / high pre-fix / matching-pair rollback residual |
+| TM-003 **restore/wallet-only rollback protected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass, including unmarked renamed copies against the independent checkpoint. | No automatic history reconstruction or unconditional guard-clear API; current, quiescent backups have reviewed checkpoint-bound adoption. Whole-datadir/matching-pair rollback, multiple independent stores and physical storage-failure tests remain boundaries. | Conditional on restore / high pre-fix / matching-pair rollback residual |
 | TM-004 **channel binding implemented; wider testing open** | Active MITM terminates two BIP324 transports and relays authentic Paymaster artifacts. | Before channel binding, payment metadata could be observed; delays/drop remain possible. No modified spend demonstrated. | Mandatory provider signature over the locally observed BIP324 session ID, expected identity, genesis and fresh nonce; private queues are gated before Capacity/payment/recovery. Existing financial checks remain mandatory. | Real-cipher two-leg relay and focused network/payment checks are covered below. Full hostile TCP relay, fresh full binaries, independent review and traffic-analysis evaluation remain open. | Low selected confidentiality residual / low financial severity / continued verification |
 | TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
 | TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
@@ -432,7 +432,9 @@ variant proves conflicting authority, not an extra confirmed 0.3-DGB charge.
 The Paymaster helper and guard checks live in
 [`paymasteridentity.cpp`](../src/wallet/paymasteridentity.cpp), with codecs in
 [`paymasterdb.cpp`](../src/wallet/paymasterdb.cpp). The optional wallet record
-`pmrestoreguard` reuses the versioned provider-identity codec and is append-only.
+`pmrestoreguard` reuses the versioned provider-identity codec. Ordinary actions
+cannot remove it. Every explicit restore installs it again; only reviewed
+current-backup adoption can atomically remove it while advancing the checkpoint.
 Marker creation must commit successfully or restoration fails before loading.
 Missing identity means a client-only backup is unchanged; malformed identities
 are rejected. Malformed/unsupported markers fail closed and cannot be overwritten
@@ -477,15 +479,16 @@ executables were not replaced. Pre-fix proof remains in
 `build_msvc/paymaster-refresh-check/provider-backup/run-receipt.json` and its
 visible/offline observations; those failing runs are historical evidence.
 
-**Residual scope and availability cost.** No guard-clear RPC is provided: an
+**Residual scope and availability cost.** No unconditional guard-clear RPC is provided: an
 acknowledgement, a rescan, waiting 24 hours, or increasing limits cannot prove
-that an omitted signature is harmless. Continue service from the complete,
-current original provider wallet, not the quarantined image. If that source is
-lost, comprehensive history reconciliation/safe migration is still required;
-new provider activity and reserve release remain blocked. Pool entries in an
-old image may look locally unspent, but they confer no provider authority while
-the guard is active. Ordinary wallet key ownership is unchanged; this is not an
-OS-wide prohibition on spending a restored wallet.
+that an omitted signature is harmless. Continue service from the complete
+current original wallet, or use reviewed adoption only for a quiescent current
+backup matching independently retained state. Qualified recovery release can
+instead permanently retire the identity. Stale or uncertain images still need
+comprehensive history reconciliation/safe migration before new authority.
+Pool entries in an old image may look locally unspent, but they confer no
+provider authority while the guard is active. Ordinary wallet key ownership
+is unchanged; this is not an OS-wide prohibition on spending a restored wallet.
 
 Copying a wallet that already contains the guard preserves quarantine, even
 under a different wallet name and after a node restart. Unmarked wallet-only
@@ -521,9 +524,10 @@ new signatures and reserve spending. This conservative protection can require
 operator recovery after a failed broadcast even when funds were not lost; there
 is no blind fence-clear/reset RPC.
 
-Explicitly restored wallets remain permanently quarantined by `pmrestoreguard`.
-Their known exact signed recovery/accounting does not overwrite the original
-provider checkpoint. An unmarked mismatching copy cannot update Paymaster
+Explicitly restored wallets remain quarantined by `pmrestoreguard` until a
+reviewed current-backup adoption succeeds; stale or uncertain images remain
+blocked. Their known exact signed recovery/accounting does not overwrite the
+original provider checkpoint. An unmarked mismatching copy cannot update Paymaster
 records; use explicit restore for quarantined recovery of its retained exact
 history. These checks protect Paymaster authority, not every ordinary wallet
 spend made by an operator with the keys.
@@ -1001,3 +1005,46 @@ hostile two-leg TCP daemon proxy, Tor, full clean product/Qt build, sanitizer/fu
 physical durability and independent cryptographic review remain open. Matching
 wallet/checkpoint rollback and independent multi-host identity limits from the
 preceding section are unchanged.
+
+
+### Reviewed current-backup adoption (2026-10-11)
+
+`AdoptPaymasterBackup` in `wallet/paymasterprovider.cpp` reuses the read-only
+full-capital recovery validation without releasing any output. Adoption requires
+persistent stop, matching independently retained enrolled checkpoint, no pending
+native fence or retired identity, no drain work, fee/input/capacity reservations
+or unresolved maintenance, and confirmed owned unspent pool entries without
+manual locks. Policy, safety policy, budget ledger and liquidity policy must be
+present and validated. A missing budget ledger is explicitly rejected instead
+of becoming a new spending allowance. The plan binds network/wallet/provider,
+exact reserves, maintenance/budgets, policies and checkpoint revision.
+
+`WalletBatch::AdoptPaymasterCheckpoint` rechecks under the checkpoint lock,
+advances generation and random token, and erases quarantine in the same wallet
+transaction. The independent checkpoint is flushed before wallet commit. A
+write failure preserves quarantine; a failed commit after checkpoint advance
+leaves a conservative mismatch and forbids blind retries. Copies sharing this
+checkpoint store cannot both continue. Backup reminders are renewed, but no
+reserves, spent budgets, policy or payment history are cleared and no transaction
+is signed or broadcast. Provider enablement and autostart remain off.
+
+The local `adoptpaymasterbackup` RPC requires an unchanged reviewed plan and an
+explicit `independent_checkpoint:true` affirmation. GUI Settings / Wallet & backup
+uses that same RPC with an initially unchecked confirmation and separate start.
+A successful adoption is not a permanent exemption: the next explicit restore
+installs quarantine again. Stale/missing/corrupt checkpoints, unsupported markers,
+legacy unenrolled state and retired identities have no override path.
+
+The affirmation is an operator assertion, not a technical proof that storage
+was independently preserved. Joint wallet/checkpoint rollback and identities
+operated across independent stores remain the documented limits. Power-loss/
+physical durability testing and independent review remain release-gate work.
+
+Selected verification passes 14 Core cases / 562 assertions, the real-daemon
+RPC/CLI adoption regtest including a new payment after separate activation, and
+the targeted Qt readiness/confirmation function. Unit injection covers failed
+checkpoint writes and failed database commit, stale original state, retired
+identity, reserved funds and missing budgets. Final source/binary/report receipts
+and the complete-build operator command are documented in the
+[test runbook](digidollar-paymaster-testing.md#reviewed-current-backup-adoption-2026-10-11).
+The full fresh product build and broader Qt/backup suites are not claimed here.

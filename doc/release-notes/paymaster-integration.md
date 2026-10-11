@@ -536,3 +536,17 @@ fees, wire messages and signature/reservation safety rules are unchanged.
   hosted copies of one provider identity remain unsupported. Use separate
   identities or one signing authority behind transparent access points; an
   external durable witness/replicated financial ledger is future work.
+
+
+### Reviewed adoption of a current provider backup
+
+Restored provider wallets can review continued operation in Settings → Wallet &
+backup instead of being permanently quarantined merely for using Restore Wallet.
+Only current, complete, quiescent state matching an independently retained node
+checkpoint qualifies. Preview and explicit adoption are also available through
+`adoptpaymasterbackup` in RPC/CLI. Adoption fences older copies, preserves reserves
+and spent budgets, and leaves enablement/autostart off. An unchecked confirmation
+explains independent-checkpoint and sole-instance requirements. Stale or uncertain
+backups remain blocked; capital recovery/retirement remains separate. This does
+not detect a matching wallet/checkpoint pair rolled back together or coordinate
+independent provider hosts. No consensus, P2P or base-wallet schema change.

@@ -813,11 +813,13 @@ and reserve spending before autostart. An old image can omit money already spent
 or a signed payment still held by a client; a blockchain rescan cannot prove
 that history complete. Known exact signed transactions remain recoverable.
 Settings changes, higher fee limits and backup acknowledgement do not lift the
-block. There is currently no guard-clear command or automatic reconciliation of
-missing provider history. Continue from the complete current original provider
-wallet. If it is lost, keep the restored provider paused pending comprehensive
-recovery; do not manually release inputs or copy an old image to bypass the
-guard. A copied wallet that already contains the restore guard stays protected,
+block. There is no unconditional guard-clear command or automatic reconciliation
+of missing history. A complete current restored provider can instead request
+reviewed adoption against its independently retained current checkpoint, as
+described below. Otherwise continue from the complete current original provider
+wallet or keep the restored provider paused pending comprehensive recovery;
+do not manually release inputs or copy an old image to bypass the guard. A copied
+wallet that already contains the restore guard stays protected,
 including when renamed and loaded after a node restart. An old backup made
 before the guard was stored does not contain it. Enrolled wallets additionally
 have a safety generation checked against `<network datadir>/paymaster-checkpoints/`,
@@ -859,6 +861,47 @@ The daily and booking tables follow the selected light/dark theme, including
 alternating and selected rows. Amounts and counts align right; booking text and
 UTC dates align left. Columns and row heights fit their content, and the table
 can scroll horizontally when the window is narrow.
+
+### Adopt a current restored provider wallet
+
+After **File → Restore Wallet…**, open **Paymaster Network → Settings →
+Wallet & backup → Review restored provider wallet…**. The action appears for
+restoration quarantine. If needed, a separate confirmation stops the provider
+persistently first. The preview never releases reserves. Cancelling adoption
+leaves any confirmed stop in place and the wallet protected.
+
+Core requires a matching independently retained current node checkpoint, a
+synchronized chain, provider/autostart stopped, complete policies and budget
+ledger, no open payments or reserved budgets/inputs, no unfinished maintenance,
+and confirmed owned unspent unambiguous reserves without manual coin locks.
+Legacy images without an enrolled checkpoint and retired identities cannot be
+adopted. Missing financial records cannot become a fresh allowance.
+
+Review the retained identity and DGB/DD reserves. The initially unchecked
+confirmation requires you to affirm that the current checkpoint was preserved
+independently and this identity is not operated on another host. An old wallet
+and its old checkpoint restored together cannot establish freshness; a matching
+pair rollback remains undetectable locally.
+
+Approval advances the checkpoint before atomically removing quarantine. Older
+copies using the same checkpoint store cannot operate. Reserves, policies,
+spent budgets and history remain. No transaction, fee or budget reset occurs.
+Provider enablement and autostart stay off. Review settings and make a new
+full-wallet backup, then separately enable/start. A further explicit restore
+installs quarantine again, even for an already adopted wallet.
+
+RPC and ordinary CLI use the same review/execution:
+
+```sh
+digibyte-cli -rpcwallet=RESTORED stoppaymaster '{"persistent":true,"pause_setup":true}'
+digibyte-cli -rpcwallet=RESTORED adoptpaymasterbackup
+digibyte-cli -rpcwallet=RESTORED adoptpaymasterbackup '{"execute":true,"plan_id":"REVIEWED_PLAN_ID","independent_checkpoint":true}'
+```
+
+Execution rechecks the exact plan and checkpoint under its lock. After failure
+or a lost reply, check current status; never retry automatically or roll back
+the checkpoint. An interrupted commit can leave both copies blocked. Capital
+recovery and permanent retirement remain a separate alternative.
 
 ### A restored transfer still waits after the payment was confirmed
 

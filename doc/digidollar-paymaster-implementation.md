@@ -364,15 +364,17 @@ finance records keep DD income, DGB costs, pool principal, and optional oracle
 valuation separate. A backup acknowledgement records an operator action, not
 proof that a backup is usable.
 
-Explicit provider-wallet restore persists the append-only `pmrestoreguard`
+Explicit provider-wallet restore persists the durable `pmrestoreguard`
 through `MarkPaymasterProviderRestored` before `LoadWallet` can invoke callbacks
 or autostart. The codec reuses `ProviderIdentityRecord`; no base-wallet schema
 migration or wire change is needed. Quarantine is independent of descriptor
 wallet eligibility: known records remain readable, while new provider model
 availability, identity/transaction signing, quote admission and reserve spending
 are blocked. Exact known signed commits remain recoverable. Settings and backup
-acknowledgement cannot erase the marker; no override/history-reconstruction API
-is provided. Unmarked wallet-only rollback is checked by `wallet/paymastercheckpoint.cpp` against an independently flushed node-local generation. Whole-datadir rollback still requires separately retained state; see `paymaster-threat-model.md` (TM-003).
+acknowledgement cannot erase the marker; no unconditional override/history-
+reconstruction API is provided. Reviewed current-backup adoption may erase it
+only in the transaction that fences older copies by advancing the independent
+checkpoint, while preserving reserves and financial records. Unmarked wallet-only rollback is checked by `wallet/paymastercheckpoint.cpp` against an independently flushed node-local generation. Whole-datadir rollback still requires separately retained state; see `paymaster-threat-model.md` (TM-003).
 See [TM-003](paymaster-threat-model.md#tm-003-stale-provider-restore-forgets-expenditure-and-signed-inputs).
 
 `releasepaymastercapital {"recovery":true}` adds a narrow capital exit for a

@@ -1096,7 +1096,7 @@ or chain parameters.
 - `PaymasterStore` atomically persists sessions, exact append-only attempts,
   reservations, authorizations, provider commits/results, self-recovery raw
   transactions, outcome markers, and permanent idempotency tombstones.
-- `paymasteridentity.cpp` persists the append-only `pmrestoreguard` through `paymasterdb.cpp` before explicit `RestoreWallet` loads a provider backup. New provider signing and reserve spending are quarantined; known exact signed recovery remains available. `paymastercheckpoint.cpp` additionally detects unmarked wallet-only rollback using a versioned wallet counter and a node-local checkpoint bound to network/provider. WalletBatch only notifies Paymaster transaction boundaries; codecs atomically track financial records. Native reserve transactions use a pending fence. Whole-datadir rollback still needs independent retained state.
+- `paymasteridentity.cpp` persists the durable `pmrestoreguard` through `paymasterdb.cpp` before explicit `RestoreWallet` loads a provider backup. New provider signing and reserve spending are quarantined; known exact signed recovery remains available. `paymastercheckpoint.cpp` additionally detects unmarked wallet-only rollback using a versioned wallet counter and a node-local checkpoint bound to network/provider. WalletBatch only notifies Paymaster transaction boundaries; codecs atomically track financial records. Native reserve transactions use a pending fence. Whole-datadir rollback still needs independent retained state.
 - A current restored wallet can explicitly review `releasepaymastercapital {"recovery":true}` with all full-capital safeguards. Checkpoint version 2 binds and permanently retires its identity before release commits; guards/history remain. Non-blocking backup reminders do not advance financial generations. `wallet_paymaster_backup_exit.py` verifies RPC/CLI, restart, old-copy fencing and ordinary DD Send after release.
 - Integrates Paymaster and ordinary wallet locks, restores state at startup,
   reconciles mempool/confirmation/reorg observations, and prunes session detail
@@ -1141,6 +1141,12 @@ or chain parameters.
 - Produces user input-control proofs without exposing private key material.
 
 ### src/wallet/paymasterprovider.{h,cpp}
+- `AdoptPaymasterBackup` and `WalletBatch::AdoptPaymasterCheckpoint` implement
+  reviewed current-backup adoption using the full-capital read-only safeguards.
+  `adoptpaymasterbackup` is registered in wallet RPC and CLI JSON conversion;
+  Qt Settings / Wallet & backup confirms independent state before execution.
+  `wallet_paymaster_backup_adoption.py` covers RPC/CLI, retained reserves/budgets,
+  restart, stale/original copies and a new payment after separate activation.
 - Exact durable observations skip unchanged wallet updates after witness/state
   checks, preserving caches and notifications; changed state/metadata still
   reconciles. `RecoverDurablePaymasterCommits` has opt-in `bench` timing.

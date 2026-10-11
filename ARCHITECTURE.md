@@ -340,7 +340,7 @@ equivalence review. Verification is tracked in the
 ### Paymaster provider backup restoration
 
 Explicit `RestoreWallet` calls a Paymaster database helper before loading the
-copied image. Provider backups receive an append-only `pmrestoreguard`, encoded
+copied image. Provider backups receive a durable `pmrestoreguard`, encoded
 with the existing provider-identity type. Readiness, announcements, capacity and
 quote authority, provider signatures and reserve-spending paths fail closed.
 Known exact signed commits can still be replayed; client-only restore is unchanged.
@@ -357,6 +357,15 @@ existing full-capital release can explicitly retire the identity and release
 confirmed, unreserved pool outputs into the same wallet. All normal release
 checks and the restore guard remain. Checkpoint revision and retirement are
 bound to the atomic release; other copies sharing the checkpoint are fenced.
+`adoptpaymasterbackup` reuses the read-only full-capital safeguards for a
+quiescent current backup. Explicit execution binds the wallet plan, policies,
+budgets and independently retained checkpoint. It rejects retired/incomplete
+state, advances the generation/token under the checkpoint lock before commit,
+and atomically removes the restore guard. Pool, policies and spent budgets are
+retained; provider/autostart remain off. Missing financial records cannot reset
+allowances. Commit failure leaves a conservative mismatch; another explicit
+restore reinstalls quarantine. Matching-pair rollback and independent-host
+operation remain outside node-local detection.
 Backup reminders carry no financial authority and do not advance generations.
 See `doc/paymaster-capital-release.md` for recovery conditions and limitations.
 

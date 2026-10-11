@@ -110,6 +110,11 @@ Inspect `getpaymasterpoolinfo`, settings and a fresh preview: zero remaining poo
 outputs is distinguishable from an unsuccessful release. Historical records
 remain; they are not active funds. Create a full-wallet backup after completion.
 
+For continued service with a current quiescent backup, use the separate
+[reviewed backup adoption](digidollar-paymaster-operator.md#adopt-a-current-restored-provider-wallet).
+It keeps reserves and budgets; it does not retire the identity or release capital.
+The recovery release below remains permanent retirement.
+
 ## Capital recovery after restoring a provider wallet
 
 An explicit restore keeps new provider signatures blocked. A restored **current**

@@ -3973,3 +3973,87 @@ The full hostile two-leg TCP proxy, Tor, sanitizer/fuzz, physical storage-fault
 campaigns and independent cryptographic review remain separate open gates.
 Channel-authentication failure stops the affected network attempt; it must not
 erase prior signatures, durable authority or ambiguous-input reservations.
+
+## Reviewed current-backup adoption (2026-10-11)
+
+Baseline: `ee81ad5b73c5be7ee25f7bebb0d3a50b48fd76f6`. This follow-up adds
+`adoptpaymasterbackup` and the Settings / Wallet & backup review. It preserves
+prepared reserves, policies, spent budgets and payment history, clears restore
+quarantine only against the independently retained current checkpoint, fences
+older copies using that checkpoint store and leaves enablement/autostart off.
+See the [operator procedure](digidollar-paymaster-operator.md#adopt-a-current-restored-provider-wallet)
+and [threat-model conditions](paymaster-threat-model.md#reviewed-current-backup-adoption-2026-10-11).
+
+| Selected final check | Passed cases | Passed assertions |
+| --- | ---: | ---: |
+| `paymaster_wallet_identity_tests/current_backup_adoption_is_atomic_and_fences_old_copies` | 1 | 200 |
+| `paymaster_wallet_identity_tests/capital_recovery_release_is_atomic_and_retires_identity` | 1 | 128 |
+| `paymaster_wallet_security_tests/checkpoint*` and `provider_restore_guard_is_durable_and_blocks_new_signatures` | 12 | 234 |
+| **Core total** | **14** | **562** |
+
+The new unit case covers nine scenarios: success, checkpoint-write failure and
+retry, database-commit failure after checkpoint advance, reserved input,
+unfinished native spending, a concurrently advanced original copy, retired
+identity, reserved fee budget and a missing budget ledger. Failure keeps
+quarantine; a failed commit after checkpoint advance blocks blind retries and
+the original copy. Successful adoption retains the exact spent-budget ledger
+and pool entries. Another explicit restore reinstalls quarantine.
+
+`wallet_paymaster_backup_adoption.py --descriptors` passes against the isolated
+real daemon and CLI, with disposable SQLite wallets/regtest datadirs. RPC/CLI
+previews create no transaction or pool change. Execution requires an unchanged
+plan and explicit independent-checkpoint confirmation. Manual DGB coin locks
+block review; adoption preserves pool, safety status, transaction count and
+mempool. Restart retains the adopted state; original and stale restored copies
+cannot continue. A separately enabled provider completes a new signed payment.
+
+The targeted Qt function
+`PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguration`
+passes. Readiness and action visibility are checked in both themes. The added
+dialog flow checks an initially unchecked affirmation, disabled approval,
+cancel without execution and approval through the same RPC. The Qt report has
+three passing entries including initialization and cleanup; this is not the
+complete Paymaster Qt suite.
+
+Selected MSVC `/WX` compilation covers the changed checkpoint/provider and RPC
+sources, RPC registration/conversion, identity test, provider widget and widget
+test. Isolated links reuse existing unchanged objects/libraries; no complete
+fresh product build is claimed. Source/object/binary/report hashes and the
+worktree patch are retained in the workspace-local
+`build_msvc/paymaster-refresh-check/backup-adoption/run-receipt.json` and
+`reviewed-changes.patch`. Python syntax, PowerShell helper parsing and
+`git diff --check` pass. clang-format/flake8 are unavailable; no lint pass is
+claimed. Normal application executables and operator wallets were not changed.
+
+For the complete MSVC build, both older backup/recovery regtests and the entire
+Paymaster Qt suite, close normal client/provider instances and run from
+`D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\backup-adoption\build-and-check.ps1 -Build -FullQtTests
+```
+
+The workspace-local helper requires the existing MSVC v143 14.43.34808,
+Windows SDK, static Qt 5.15.10 at `D:\Qt51510\install`, vcpkg dependencies and
+Python setup. No new package is required. It regenerates MSVC projects, builds
+with one worker, runs three Core filters, the new adoption regtest,
+`wallet_paymaster_backup_exit.py --descriptors`,
+`wallet_paymaster_backup.py --descriptors --pending-offline`, and Paymaster Qt
+tests. Allow minutes to tens of minutes. Success is exit 0, at least 2/11/1
+passed Core cases respectively, all three functional reports ending in
+`Tests successful`, no Qt failures and a fresh source/binary/report receipt.
+Without `-Build`, the operator must first build the matching source revision.
+
+Portable targeted commands after a fresh build are:
+
+```text
+test_digibyte --run_test=paymaster_wallet_identity_tests/current_backup_adoption_is_atomic_and_fences_old_copies,capital_recovery_release_is_atomic_and_retires_identity --report_level=detailed
+test_digibyte --run_test=paymaster_wallet_security_tests/checkpoint*,provider_restore_guard_is_durable_and_blocks_new_signatures --report_level=detailed
+python -X utf8 test/functional/wallet_paymaster_backup_adoption.py --configfile=test/config.ini --descriptors
+```
+
+The complete build, full Qt suite and older functional scenarios against this
+follow-up remain operator checks. Physical power-loss/durability campaigns and
+independent review remain open. Adoption does not detect a jointly rolled-back
+wallet/checkpoint pair or coordinate a provider identity across independent
+hosts. The affirmation does not prove independent preservation.
