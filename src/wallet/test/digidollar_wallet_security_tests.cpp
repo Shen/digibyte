@@ -20,6 +20,7 @@
 #include <base58.h>
 #include <hash.h>
 #include <key.h>
+#include <key_io.h>
 #include <util/time.h>
 #include <util/strencodings.h>
 #include <streams.h>
@@ -27,6 +28,7 @@
 #include <test/util/source_root.h>
 #include <random.h>
 #include <script/script.h>
+#include <script/descriptor.h>
 #include <script/standard.h>
 #include <digidollar/scripts.h>
 
@@ -327,7 +329,7 @@ BOOST_AUTO_TEST_CASE(rh08_03a_foreign_descriptor_output_miss_is_cached)
     BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
 }
 
-BOOST_AUTO_TEST_CASE(dd_history_does_not_scan_descriptor_secrets_for_foreign_outputs)
+BOOST_AUTO_TEST_CASE(dd_history_preserves_full_ownership_checks_for_foreign_outputs)
 {
     {
         LOCK(m_wallet.cs_wallet);
@@ -362,10 +364,64 @@ BOOST_AUTO_TEST_CASE(dd_history_does_not_scan_descriptor_secrets_for_foreign_out
         const auto history = dd_wallet.GetDDTransactionHistory();
         BOOST_REQUIRE_EQUAL(history.size(), 1u);
         BOOST_CHECK_EQUAL(history.front().category, "send");
-        // A cold display read must not invoke IsDDOutputMine's wallet-wide
-        // private descriptor recovery scan or populate its negative cache.
-        BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 0u);
+        // The original complete ownership path must still reject a foreign
+        // output and remember that miss across subsequent history reads.
+        BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
     }
+}
+
+BOOST_AUTO_TEST_CASE(dd_history_recovers_missing_descriptor_address_key)
+{
+    CKey internal_key, leaf_key;
+    internal_key.MakeNewKey(true);
+    leaf_key.MakeNewKey(true);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        FlatSigningProvider provider;
+        std::string error;
+        // The descriptor's script tree makes its standard output differ from
+        // DD's key-only tweak. Recovering this DD output needs the original
+        // internal-key search, not standard wallet script ownership alone.
+        auto descriptor = Parse("tr(" + EncodeSecret(internal_key) + ",pk(" +
+                                    HexStr(leaf_key.GetPubKey()) + "))",
+                                provider, error, false);
+        BOOST_REQUIRE_MESSAGE(descriptor, error);
+        WalletDescriptor wallet_descriptor(std::move(descriptor), 0, 0, 1, 0);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, provider, "", false));
+    }
+
+    CMutableTransaction tx;
+    tx.SetDigiDollarType(DD_TX_TRANSFER);
+    tx.vin.emplace_back(COutPoint{GetRandHash(), 0});
+    tx.vout.emplace_back(0, DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{internal_key.GetPubKey()}, 123));
+    tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+                                    << CScriptNum(DD_TX_TRANSFER) << CScriptNum(123));
+    const auto tx_ref = MakeTransactionRef(tx);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsMine(tx.vout.front().scriptPubKey));
+        BOOST_REQUIRE(m_wallet.AddToWallet(tx_ref, TxStateInactive{}));
+    }
+    DDTransaction received;
+    received.txid = tx_ref->GetHash().GetHex();
+    received.category = "receive";
+    received.incoming = true;
+    received.amount = 123;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WriteDDTransaction(received));
+
+    DigiDollarWallet dd_wallet(&m_wallet);
+    const XOnlyPubKey output_key{Span{tx.vout.front().scriptPubKey}.subspan(2, 32)};
+    CKey recovered;
+    BOOST_CHECK(!dd_wallet.GetAddressKey(output_key, recovered));
+    const auto history = dd_wallet.GetDDTransactionHistory();
+    BOOST_REQUIRE_EQUAL(history.size(), 1u);
+    BOOST_CHECK_EQUAL(history.front().amount, 123);
+    BOOST_REQUIRE(dd_wallet.GetAddressKey(output_key, recovered));
+    BOOST_CHECK(recovered.GetPubKey() == internal_key.GetPubKey());
+    dd_wallet.LoadFromDatabase();
+    BOOST_REQUIRE(dd_wallet.GetAddressKey(output_key, recovered));
+    BOOST_CHECK(recovered.GetPubKey() == internal_key.GetPubKey());
 }
 
 BOOST_AUTO_TEST_CASE(dd_history_preserves_owned_output_rows_when_wallet_is_locked)
@@ -435,7 +491,7 @@ BOOST_AUTO_TEST_CASE(dd_history_preserves_owned_output_rows_when_wallet_is_locke
         const std::multiset<CAmount> expected_change{100, 200, 300};
         BOOST_CHECK(received == expected_received);
         BOOST_CHECK(change == expected_change);
-        BOOST_CHECK_EQUAL(dd_wallet->GetCachedForeignDDOutputCount(), 0u);
+        BOOST_CHECK_EQUAL(dd_wallet->GetCachedForeignDDOutputCount(), 1u);
     };
     check_history();
 

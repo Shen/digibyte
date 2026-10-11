@@ -2112,7 +2112,7 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
     // Synthesize per-output wallet history rows from wallet transactions. The
     // database stores one DDTransaction per txid, so multi-recipient receives
     // and redemption DD change need display rows built on demand.
-    if (m_wallet && !transaction_history.empty()) {
+    if (m_wallet) {
         LOCK(m_wallet->cs_wallet);
         std::set<std::string> txids_with_synthesized_rows;
         std::vector<DDTransaction> synthesized_rows;
@@ -2123,30 +2123,15 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
             }
         }
 
-        // History is a read-only display path. IsDDOutputMine also recovers
-        // missing private descriptor keys, scanning the whole keypool for a
-        // cold foreign output while holding wallet locks. Leave that recovery
-        // to transaction processing/rescan and use already known keys here.
-        // Encrypted owner records retain public keys, so no unlock is needed.
-        std::set<CPubKey> owner_pubkeys;
-        for (const auto& entry : dd_owner_keys) owner_pubkeys.insert(entry.second.GetPubKey());
-        for (const auto& entry : dd_crypted_owner_keys) owner_pubkeys.insert(entry.second.first);
-        std::set<std::array<unsigned char, 32>> owner_output_keys;
-        for (const auto& pubkey : owner_pubkeys) {
-            const auto tweaked = XOnlyPubKey{pubkey}.CreateTapTweak(nullptr);
-            if (!tweaked) continue;
-            std::array<unsigned char, 32> output_key;
-            std::copy(tweaked->first.begin(), tweaked->first.end(), output_key.begin());
-            owner_output_keys.insert(output_key);
-        }
-
-        auto is_local_dd_output = [this, &owner_output_keys](const CTxOut& txout) {
+        auto is_local_dd_output = [this](const CTxOut& txout, const uint256& txid) {
             if (!IsStandardDDTokenOutput(txout)) return false;
 
             std::array<unsigned char, 32> output_key;
             std::copy(txout.scriptPubKey.begin() + 2, txout.scriptPubKey.begin() + 34, output_key.begin());
-            return dd_address_keys.count(output_key) || dd_crypted_address_keys.count(output_key) ||
-                   owner_output_keys.count(output_key) || m_wallet->IsMine(txout.scriptPubKey);
+            const bool is_mine = m_wallet->IsMine(txout.scriptPubKey);
+            const bool has_plain_key = dd_address_keys.find(output_key) != dd_address_keys.end();
+            const bool has_crypted_key = dd_crypted_address_keys.find(output_key) != dd_crypted_address_keys.end();
+            return is_mine || has_plain_key || has_crypted_key || IsDDOutputMine(txout, txid);
         };
 
         auto append_local_output_rows = [&](const DDTransaction& base_tx,
@@ -2157,6 +2142,8 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
             const std::vector<CAmount> dd_amounts = ExtractDDMetadataAmounts(tx, tx_type);
             if (dd_amounts.empty()) return;
 
+            uint256 base_txid;
+            base_txid.SetHex(base_tx.txid);
             size_t dd_output_index = 0;
             for (const CTxOut& txout : tx.vout) {
                 if (!IsStandardDDTokenOutput(txout)) continue;
@@ -2164,7 +2151,7 @@ std::vector<DDTransaction> DigiDollarWallet::GetDDTransactionHistory() const {
                 const size_t amount_index = dd_output_index++;
                 if (amount_index >= dd_amounts.size()) continue;
                 if (amount_index >= max_dd_outputs) continue;
-                if (!is_local_dd_output(txout)) continue;
+                if (!is_local_dd_output(txout, base_txid)) continue;
 
                 CTxDestination dest;
                 std::string dd_address;
