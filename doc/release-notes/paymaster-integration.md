@@ -550,3 +550,11 @@ explains independent-checkpoint and sole-instance requirements. Stale or uncerta
 backups remain blocked; capital recovery/retirement remains separate. This does
 not detect a matching wallet/checkpoint pair rolled back together or coordinate
 independent provider hosts. No consensus, P2P or base-wallet schema change.
+
+- Preserve previously approved client service-fee limits stored in the complete
+  original v1 format. The Paymaster database reader now accepts this documented
+  legacy format, and explicit review can add a percentage cap without resetting
+  spent fees or signed-payment reservations. Corrupt and unknown formats remain
+  blocked. Related offer/limit dialogs provide actionable text.
+- Clarify near-tip block/index waits for a running provider and automatic refill.
+  New-payment readiness remains gated on exact wallet/index/chain agreement.

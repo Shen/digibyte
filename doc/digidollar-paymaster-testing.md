@@ -4073,8 +4073,10 @@ passes. Singular/plural Boost case-count recognition is also corrected. The
 before/after launch evidence, helper and binary/report hashes are retained in
 `backup-adoption/launcher-fix-receipt.json`.
 
-A complete Qt-suite repeat with the corrected launcher remains an operator
-check. No new build is needed for these helper-only corrections:
+The corrected full repeat in `backup-adoption/operator-20261011-131118-654Z`
+passes 453 Qt entries with no failures or skips, along with all 14 Core cases /
+562 assertions and the three backup functional scenarios on the normal binaries.
+The following command records that completed operator check:
 
 ```powershell
 .\build_msvc\paymaster-refresh-check\backup-adoption\build-and-check.ps1 -FullQtTests
@@ -4084,3 +4086,41 @@ Physical power-loss/durability campaigns and independent review remain open.
 Adoption does not detect a jointly rolled-back wallet/checkpoint pair or
 coordinate a provider identity across independent hosts. The affirmation does
 not prove independent preservation.
+
+## Legacy client-policy compatibility and block-update presentation (2026-10-11)
+
+`client-policy-compat/baseline-results.txt` reproduces the old reader rejecting
+a complete genuine v1 policy. The corrected isolated Core selection passes
+three cases / 82 assertions: `legacy_client_limits_upgrade_without_resetting_usage`,
+`client_limits_reject_corrupt_and_unknown_disk_versions` and the existing strict
+`provider_runtime_settings_are_current_only_and_fail_closed` regression. It
+checks preserved spent/reserved exposure, monotonic time, explicit upgrade,
+percentage omission and fail-closed corrupt/future disk formats.
+
+The related percentage/fee-ledger/write-failure selection adds three passing
+cases / 227 assertions (six Core cases / 309 assertions overall). Both targeted
+Qt functions pass, including the dark/light provider work-transition rows: seven
+entries, no failures/skips. Source, binary, normal-library and report hashes are
+recorded in `client-policy-compat/run-receipt.json`.
+
+The real-daemon `wallet_paymaster_rpc.py --legacy-client-policy-only` test passes
+with the corrected isolated daemon and normal CLI, using two unloaded temporary
+Regtest wallets with the exact original disk layout. It checks read/status/offer
+queries, explicit 1% approval, omission preservation and reload. The existing
+`--client-protection-only` scenario remains the signing/budget regression. Qt
+`paymasterClientPercentageLimits` additionally checks actionable policy errors
+and nonmodal background failures; `paymasterOperatorWorkTransitions` checks
+near-tip indexing versus larger lag and incomplete initial indexing.
+
+The workspace-local helper provides normal-product operator verification:
+
+```powershell
+Set-Location 'D:\Digibyte\digibyte-fork'
+.\build_msvc\paymaster-refresh-check\client-policy-compat\build-and-check.ps1 -Build
+```
+
+Close normal client/provider instances before `-Build`, and let any active build
+finish first. This is an incremental solution build followed by focused Core,
+Qt and two RPC/CLI Regtests; allow several minutes. Success requires exit 0,
+all selected cases present and no failures/skips in the targeted Qt functions.
+It does not replace full-suite, fuzz/sanitizer or physical-durability gates.

@@ -1047,4 +1047,23 @@ checkpoint writes and failed database commit, stale original state, retired
 identity, reserved funds and missing budgets. Final source/binary/report receipts
 and the complete-build operator command are documented in the
 [test runbook](digidollar-paymaster-testing.md#reviewed-current-backup-adoption-2026-10-11).
-The full fresh product build and broader Qt/backup suites are not claimed here.
+The subsequent normal-binary operator run in `backup-adoption/operator-20261011-131118-654Z`
+passes all 14 Core cases / 562 assertions, the three backup functional scenarios
+and 453 Qt entries with no failures/skips. A full clean cross-platform product
+build is not established by that incremental-build evidence.
+
+### Follow-up: legacy client-policy reader (2026-10-11)
+
+The generic current-version-only database codec rejected complete v1 client
+policies, despite their explicitly supported absolute-only approval. This
+blocked discovery, reconciliation and the setter's previous-policy check. The
+original reader fails the new isolated regression; a client-policy-specific
+reader accepts only fully decoded, valid v1/v2 policies. Other record readers
+retain their strict current-version check. This is a service-availability
+regression; no observed loss or unauthorized fee increase is claimed.
+
+Explicit upgrade preserves the spent/reserved ledger and monotonic accounting
+clock. Unknown, truncated and invalid records remain blocked. Core and genuine
+SQLite-wallet RPC/CLI regressions cover the change; GUI messages keep technical
+codes in diagnostics and explain the protected state. The separate near-tip
+provider display clarification changes no signing, sync or budget permission.

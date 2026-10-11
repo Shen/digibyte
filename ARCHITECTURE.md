@@ -18,7 +18,10 @@ indices, without permanent tombstones. It prunes at most 64 per pass; new quotes
 are refused at 8,192 retained provider sessions while exact retries remain
 available. Signed/recovery history retains its existing protection. These
 Paymaster-only changes introduce no consensus or wire change. Wallet-local
-Paymaster records may be extended without changing the base wallet schema.
+Paymaster records may be extended without changing the base wallet schema. Complete v1
+client fee policies retain their prior absolute approval; their dedicated reader
+permits explicit v2 percentage review without resetting the exposure ledger.
+Provider/session version gates remain strict.
 
 After a failed first prepare-only RPC, Qt reconciles the same wallet/request
 before offering another payment. A status-aware missing-session result clears

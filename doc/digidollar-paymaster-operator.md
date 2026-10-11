@@ -1270,3 +1270,18 @@ connection. Old peers fail closed; saved payment/recovery artifacts retain their
 original signatures. This prevents a decrypting intermediary from relaying a
 proof for its other channel. IP addresses, timing and public transaction data
 remain observable; the selected provider necessarily sees its own requests.
+
+### Existing client limits after a Paymaster update
+
+Older wallet-local service-fee limits remain valid in their complete v1 disk
+format. Send $DD shows the existing absolute approval and a percentage-review
+hint. Opening the dialog proposes 1%; only Save approves it and upgrades the
+record. Existing spent fees, signed-payment reservations and the monotonic
+accounting clock remain intact. Corrupt/truncated or unknown-version records
+remain blocked; do not erase the ledger or release signed inputs to repair them.
+
+A running provider may briefly wait after each new block while its wallet and
+transaction index catch up. Overview distinguishes this near-tip update from
+initial indexing or larger lag, and explains automatic resumption without
+calling it a configuration failure. Waiting models remain unavailable for new
+requests until Core verifies exact current data; the display grants no approval.

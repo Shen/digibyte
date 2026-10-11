@@ -2277,6 +2277,8 @@ versioned `ClientSafetyPolicy` and `CheckClientServiceFee`;
 `src/wallet/paymasterprovider.cpp` preserves saved approval and checks recovery
 return totals. `src/wallet/rpc/paymaster_discovery.cpp`,
 `paymaster_client.cpp`, and the Paymaster store enforce it across new authority.
+`src/wallet/paymasterdb.cpp` accepts fully decoded v1/v2 client fee policies
+without changing the stricter provider/session readers.
 `src/qt/paymastersendwidget.cpp` owns the 1% suggestion, legacy review hint and
 read-only observation after long signed waits. Regression entry points are
 listed under effective percentage limits in `doc/digidollar-paymaster-testing.md`.
