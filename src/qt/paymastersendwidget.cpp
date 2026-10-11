@@ -4076,7 +4076,7 @@ void PaymasterSendWidget::pollPaymasterSession()
             const bool unsigned_preparation = m_paymasterAuthorizationCommitment.isEmpty() &&
                 (m_paymasterArtifact.isEmpty() || m_paymasterArtifact == QStringLiteral("none"));
             if (unsigned_preparation) {
-                closeUnusablePaymasterOffer(DigiDollarSendWidget::tr("The provider did not complete preparation within two minutes."), /*allow_cancel=*/true);
+                closeUnusablePaymasterOffer(DigiDollarSendWidget::tr("Payment preparation did not complete within two minutes."), /*allow_cancel=*/true);
             } else {
                 observePaymasterOutcome();
             }
