@@ -609,7 +609,52 @@ BOOST_FIXTURE_TEST_CASE(dd_descriptor_public_match_requires_private_internal_key
         CKey recovered;
         BOOST_CHECK(!dd_wallet.GetAddressKey(output_key, recovered));
     }
-    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 2u);
+    // Only the unrelated leaf output is a proven descriptor miss. The public
+    // internal-key match must remain eligible for a later private-key import.
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
+}
+
+BOOST_FIXTURE_TEST_CASE(dd_descriptor_locked_probe_recovers_after_unlock, DDRegtestWalletSetup)
+{
+    CKey internal_key, leaf_key;
+    internal_key.MakeNewKey(true);
+    leaf_key.MakeNewKey(true);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.m_keypool_size = 2;
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        FlatSigningProvider provider;
+        std::string error;
+        auto descriptor = Parse("tr(" + EncodeSecret(internal_key) + ",pk(" +
+                                    HexStr(leaf_key.GetPubKey()) + "))", provider, error, false);
+        BOOST_REQUIRE_MESSAGE(descriptor, error);
+        WalletDescriptor wallet_descriptor(std::move(descriptor), 0, 0, 1, 0);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, provider, "", false));
+    }
+    m_wallet.EnsureDDWallet();
+    auto* dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet);
+    const auto script = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{internal_key.GetPubKey()}, 123);
+    const CTxOut output{0, script};
+    const XOnlyPubKey output_key{Span{script}.subspan(2, 32)};
+    const auto txid = GetRandHash();
+    BOOST_CHECK(!m_wallet.IsMine(script));
+
+    const SecureString passphrase{"dd-descriptor-recovery-test"};
+    BOOST_REQUIRE(m_wallet.EncryptWallet(passphrase));
+    BOOST_REQUIRE(m_wallet.IsLocked());
+    BOOST_CHECK(!dd_wallet->IsDDOutputMine(output, txid));
+    // The descriptor matches, but its private key is temporarily unavailable.
+    // Remembering this as a foreign output would suppress recovery on unlock.
+    BOOST_CHECK_EQUAL(dd_wallet->GetCachedForeignDDOutputCount(), 0u);
+    BOOST_REQUIRE(m_wallet.Unlock(passphrase));
+    BOOST_CHECK(dd_wallet->IsDDOutputMine(output, txid));
+    CKey recovered;
+    BOOST_REQUIRE(dd_wallet->GetAddressKey(output_key, recovered));
+    BOOST_CHECK(recovered.GetPubKey() == internal_key.GetPubKey());
+    dd_wallet->LoadFromDatabase();
+    BOOST_REQUIRE(dd_wallet->GetAddressKey(output_key, recovered));
+    BOOST_CHECK(recovered.GetPubKey() == internal_key.GetPubKey());
 }
 
 BOOST_AUTO_TEST_CASE(rh08_03b_foreign_mint_with_wallet_dgb_output_not_claimed)

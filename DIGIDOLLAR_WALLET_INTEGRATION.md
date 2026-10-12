@@ -589,6 +589,9 @@ a matching candidate still needs private-key proof and final output verification
 before a recovered DD address key is cached. History reads retain that recovery
 path for ordinary and Paymaster transfers alike. This optimization changes no
 wallet format, import requirements or confirmation rules.
+When a descriptor matches but its private key is unavailable (for example while
+locked), the output is left unresolved, not cached as foreign. Unlocking allows
+the normal private-key recovery and persistence checks to run again.
 
 ### Encrypted wallets
 

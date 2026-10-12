@@ -857,6 +857,7 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
         int spenddata_count = 0;
         int key_count = 0;
         bool found_target_in_scripts = false;
+        bool matched_descriptor_key = false;
 
         // Enumerate ALL P2TR scripts from all descriptor managers
         // This includes keys that were reserved via GetNewDestination but not used in transactions
@@ -880,6 +881,7 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                 // Check if THIS script has our target output_key (direct match - no tweak needed)
                 if (std::equal(output_key_bytes.begin(), output_key_bytes.end(), script_output_key.begin())) {
                     found_target_in_scripts = true;
+                    matched_descriptor_key = true;
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - output_key found directly in descriptor script\n");
 
                     // Get signing provider with keys for this script
@@ -943,6 +945,7 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                     continue;
                 }
 
+                matched_descriptor_key = true;
                 auto key_provider = desc_spk->GetSigningProviderWithKeys(script);
                 if (!key_provider) continue;
                 CKey test_key;
@@ -976,9 +979,12 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
             }
         }
 
-        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - no match found. Stats: spk_mans=%d, p2tr_scripts=%d, providers=%d, spenddata=%d, keys=%d, target_in_scripts=%d\n",
-                 spk_man_count, p2tr_script_count, provider_count, spenddata_count, key_count, found_target_in_scripts);
-        dd_foreign_output_keys.insert(output_key_array);
+        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - ownership not proven. Stats: spk_mans=%d, p2tr_scripts=%d, providers=%d, spenddata=%d, keys=%d, target_in_scripts=%d, descriptor_candidate=%d\n",
+                 spk_man_count, p2tr_script_count, provider_count, spenddata_count, key_count, found_target_in_scripts, matched_descriptor_key);
+        // A matching descriptor with an unavailable private key is unresolved,
+        // not foreign (for example while the wallet is locked). Keep requiring
+        // private-key proof, but allow a later unlocked read to recover it.
+        if (!matched_descriptor_key) dd_foreign_output_keys.insert(output_key_array);
     }
 
     return false;
