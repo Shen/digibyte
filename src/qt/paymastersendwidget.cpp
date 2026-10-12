@@ -2552,10 +2552,47 @@ QString PaymasterSendWidget::feeFundingProblem() const
             : DigiDollarSendWidget::tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically.");
 }
 
+bool PaymasterSendWidget::hasBalanceForOfferSearch() const
+{
+    const auto input = m_form.paymentInput();
+    // Discovery only needs the entered DD amount. Requiring the maximum fee
+    // here would hide affordable sponsored/cheaper offers. The selected offer's
+    // actual total and minimum change remain checked by paymentAmountProblem().
+    return m_form.m_balanceKnown && input.amount_valid && input.amount_cents > 0 &&
+           input.amount_cents <= std::llround(input.available_balance * 100);
+}
+
+void PaymasterSendWidget::updateOfferSearchBalance()
+{
+    // Reserved inputs can reduce the displayed balance during a live payment.
+    // That must never affect its review, cancellation or recovery controls.
+    if (!m_walletModel || !m_paymasterRequestId.isEmpty()) return;
+    const auto input = m_form.paymentInput();
+    const bool blocked = !m_form.m_balanceKnown || input.available_balance <= 0 ||
+                         (input.amount_valid && input.amount_cents > std::llround(input.available_balance * 100));
+    if (blocked) {
+        if (m_offerCheckState != OfferCheckState::NEEDS_BALANCE) {
+            // Also invalidate an in-flight directory reply; a balance change
+            // must not bring back an old green banner or selectable cards.
+            invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
+            m_offerCheckFrame->setProperty("refreshPending", false);
+        }
+        setOfferCheckStatus(OfferCheckState::NEEDS_BALANCE,
+            !m_form.m_balanceKnown
+                ? (m_form.m_balanceError.isEmpty()
+                       ? DigiDollarSendWidget::tr("Checking available $DD balance…")
+                       : DigiDollarSendWidget::tr("Available $DD balance could not be read."))
+                : DigiDollarSendWidget::tr("Not enough available $DD for this payment."));
+    } else if (m_offerCheckState == OfferCheckState::NEEDS_BALANCE) {
+        setOfferCheckStatus(OfferCheckState::NOT_CHECKED,
+            DigiDollarSendWidget::tr("Offers not checked. Check offers or wait for the automatic check."));
+    }
+}
+
 void PaymasterSendWidget::updateOfferCheckControls()
 {
     if (m_offerCardsFrame) {
-        m_offerCardsFrame->setVisible(preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
+        m_offerCardsFrame->setVisible(hasBalanceForOfferSearch() && preparesPaymasterPayment() && m_paymasterRequestId.isEmpty() &&
                                       !m_privacy && (!m_offerPreview.empty() || !m_offerCardsFrame->property("excludedOffers").toByteArray().isEmpty()));
         m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy && !historyBlocksPreparation());
     }
@@ -2567,11 +2604,13 @@ void PaymasterSendWidget::updateOfferCheckControls()
                                    m_offerCheckState == OfferCheckState::FAILED                                                 ? DigiDollarSendWidget::tr("Try again") :
                                    (m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::STALE) ? DigiDollarSendWidget::tr("Refresh offers") :
                                                                                                                                   DigiDollarSendWidget::tr("Check offers"));
-    m_refreshOffersButton->setEnabled(m_walletModel && !m_paymasterBusy &&
+    m_refreshOffersButton->setEnabled(m_walletModel && hasBalanceForOfferSearch() && !m_paymasterBusy &&
                                       !m_walletModel->digiDollarHistoryRefreshInProgress() &&
                                       !checking && m_paymasterRequestId.isEmpty());
     if (m_offerCheckHelp) {
-        if (!paymasterOnlySelected() && hasOwnDgbForFees()) {
+        if (m_offerCheckState == OfferCheckState::NEEDS_BALANCE) {
+            m_offerCheckHelp->setText(DigiDollarSendWidget::tr("A Paymaster supplies the DGB network fee. You still need the $DD to send. Offer checks resume automatically when enough $DD is available."));
+        } else if (!paymasterOnlySelected() && hasOwnDgbForFees()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("Automatic uses your DGB first. Core checks whether it covers the network fee; any Paymaster fallback requires approval of the exact fee."));
         } else if (m_offerCheckState == OfferCheckState::EMPTY) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No published offer currently matches this amount and your limits. Availability can change while provider capacity is reserved. Check again, use your own DGB, or review the amount and service-fee limits."));
@@ -2630,7 +2669,7 @@ void PaymasterSendWidget::updateOfferCheckIcon()
         const QString symbol = m_offerCheckState == OfferCheckState::FOUND                                                        ? QStringLiteral("✓") :
                                m_offerCheckState == OfferCheckState::FAILED || m_offerCheckState == OfferCheckState::NEEDS_AMOUNT ? QStringLiteral("!") :
                                m_offerCheckState == OfferCheckState::STALE                                                        ? QStringLiteral("↻") :
-                               m_offerCheckState == OfferCheckState::EMPTY                                                        ? QStringLiteral("—") :
+                               m_offerCheckState == OfferCheckState::EMPTY || m_offerCheckState == OfferCheckState::NEEDS_BALANCE ? QStringLiteral("—") :
                                                                                                                                     QStringLiteral("?");
         m_offerStateIcon->setText(symbol);
     }
@@ -2648,6 +2687,9 @@ void PaymasterSendWidget::setOfferCheckStatus(OfferCheckState state, const QStri
         m_offersUpdated->setToolTip(DigiDollarSendWidget::tr(
             "This is the local list update time, not a connection test. A stopped provider can remain listed until its last signed announcement expires (up to 10 minutes).") +
             QStringLiteral("\n") + QLocale().toString(checked_at, QLocale::LongFormat));
+    } else if (state == OfferCheckState::NEEDS_BALANCE) {
+        m_offersUpdated->setText(DigiDollarSendWidget::tr("Offer checks paused until the available $DD balance covers the amount."));
+        m_offersUpdated->setToolTip(QString{});
     } else {
         m_offersUpdated->setText(DigiDollarSendWidget::tr("Automatic check every 10 s while this form is open."));
         m_offersUpdated->setToolTip(QString{});
@@ -2933,7 +2975,7 @@ void PaymasterSendWidget::pollPaymasterOffers()
     // Direct connection or reserves funds. Invisible/active forms stay idle.
     if (!isVisible() || m_privacy || !paymasterModeSelected() || !m_walletModel ||
         m_paymasterBusy || !m_paymasterRequestId.isEmpty() ||
-        !m_sessionDiscoveryReady || !m_form.paymentInput().amount_valid) return;
+        !m_sessionDiscoveryReady || !hasBalanceForOfferSearch()) return;
     requestPaymasterOffers(/*background=*/true);
 }
 
@@ -2944,6 +2986,8 @@ void PaymasterSendWidget::refreshPaymasterOffers()
 
 void PaymasterSendWidget::requestPaymasterOffers(bool background)
 {
+    updateOfferSearchBalance();
+    if (m_offerCheckState == OfferCheckState::NEEDS_BALANCE) return;
     if (m_walletModel && (m_walletModel->digiDollarHistoryRefreshInProgress() ||
                          !m_walletModel->digiDollarHistoryRefreshError().isEmpty())) {
         m_historyDeferredRefresh = true;
@@ -2969,7 +3013,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
         invalidatePaymasterOfferPreview(/*preserve_choice=*/true);
     }
     const CAmount amount_cents = input.amount_cents;
-    if (!input.amount_valid) {
+    if (!input.amount_valid || amount_cents <= 0) {
         setOfferCheckStatus(OfferCheckState::NEEDS_AMOUNT, DigiDollarSendWidget::tr("Enter a valid $DD amount, then check offers."));
         m_form.showWarning(DigiDollarSendWidget::tr("Paymaster offers"), DigiDollarSendWidget::tr("Enter an amount before refreshing offers."));
         return;
@@ -2997,11 +3041,12 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
          subtract_from_amount](UniValue result, QString error) {
             if (!guard) return;
             if (guard->m_paymasterOfferPreviewGeneration !=
-                preview_generation) {
+                    preview_generation || !guard->hasBalanceForOfferSearch()) {
                 // Inputs changed while this asynchronous preview was in
                 // flight. Keep the invalidated state instead of presenting a
                 // response bound to the old amount or limits.
                 guard->setPaymasterBusy(false);
+                guard->updateOfferSearchBalance();
                 return;
             }
             guard->m_offersTable->setRowCount(0);
@@ -5254,6 +5299,7 @@ void PaymasterSendWidget::cancelPaymasterQuote()
 
 void PaymasterSendWidget::updateFeeDisplay()
 {
+    updateOfferSearchBalance();
     const auto input = m_form.paymentInput();
     const QString mode = feeMode();
     const double amount = input.amount_text.toDouble();

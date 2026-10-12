@@ -3002,7 +3002,10 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
             }
             throw std::runtime_error("unexpected Paymaster RPC");
         });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     send_widget.setWalletModel(mini_gui.walletModel.get());
+    send_widget.setAvailableDigiDollarBalanceForTesting(1000);
     commands.clear();
     parameters.clear();
 
@@ -3250,7 +3253,10 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
             }
             return offers;
         });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     send_widget.setWalletModel(mini_gui.walletModel.get());
+    send_widget.setAvailableDigiDollarBalanceForTesting(1000);
 
     QRadioButton* paymaster = send_widget.findChild<QRadioButton*>(
         QStringLiteral("feeFundingPaymaster"));
@@ -3381,7 +3387,9 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
     QVERIFY(QMetaObject::invokeMethod(
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
-    QVERIFY(refresh->isEnabled());
+    QVERIFY(!refresh->isEnabled()); // The new wallet's balance is still unknown.
+    QTRY_VERIFY(refresh->isEnabled()); // Its own balance read enables discovery.
+    QCOMPARE(table->rowCount(), 0); // The old-wallet preview remains discarded.
 
     offer_response = 0;
     QVERIFY(QMetaObject::invokeMethod(
@@ -7237,7 +7245,10 @@ void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
             throw;
         }
     });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
     QVERIFY2(client->isReady(), qPrintable(rpc_error));
     if (lost_reply) {
         auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
@@ -7597,7 +7608,10 @@ void PaymasterWidgetTests::paymasterClientReviewCancellation()
         result.pushKV("session", session);
         return result;
     });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
     form.findChild<QRadioButton*>("feeFundingPaymaster")->setChecked(true);
     address->setText(recipient);
     amount->setText("3.25");
@@ -8197,7 +8211,10 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
         ++unexpected;
         return UniValue{};
     });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
     form.findChild<QRadioButton*>(automatic ? "feeFundingAuto" : "feeFundingPaymaster")->setChecked(true);
     auto* timer = client->findChild<QTimer*>("paymasterOfferRefreshTimer");
     auto* expiry = client->findChild<QTimer*>("paymasterOfferExpiryTimer");
@@ -8249,6 +8266,161 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     QCOMPARE(table->rowCount(), 1);
     QVERIFY(table->item(0, 0)->text().contains(QStringLiteral("Fresh provider")));
     QCOMPARE(unexpected, 0); // Starting another entry sends no payment RPC.
+}
+
+void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance_data()
+{
+    QTest::addColumn<QString>("mode");
+    QTest::addColumn<bool>("own_dgb");
+    QTest::newRow("paymaster") << QStringLiteral("paymaster") << false;
+    QTest::newRow("automatic-no-dgb") << QStringLiteral("auto") << false;
+    QTest::newRow("automatic-own-dgb") << QStringLiteral("auto") << true;
+}
+
+void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance()
+{
+    QFETCH(QString, mode);
+    QFETCH(bool, own_dgb);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-offer-search-balance");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    if (own_dgb) gui.walletModel->pollBalanceChanged();
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    auto* timer = client->findChild<QTimer*>("paymasterOfferRefreshTimer");
+    timer->stop();
+    auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
+    auto* status = form.findChild<QLabel*>("paymasterOffersStatus");
+    auto* balance = form.findChild<QLabel*>("availableBalanceValue");
+    auto* icon = form.findChild<QLabel*>("paymasterOfferStateIcon");
+    auto* refresh = form.findChild<QPushButton*>("refreshPaymasterOffers");
+    auto* send = form.findChild<QPushButton*>("sendButton");
+    auto* amount = form.findChild<QLineEdit*>("amountEdit");
+    auto* table = form.findChild<QTableWidget*>("paymasterOffers");
+    int reads{0};
+    int unexpected{0};
+    int dialogs{0};
+    WalletModel::RpcCallback pending;
+    client->setPaymasterAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue&, WalletModel::RpcCallback callback) {
+        if (method == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+        else if (method == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+        else if (method == "getpaymasteroffers" && !pending) {
+            ++reads;
+            pending = std::move(callback);
+        } else {
+            ++unexpected;
+            callback({}, "Unexpected RPC");
+        }
+    });
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&, QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        ++dialogs;
+        return QMessageBox::Cancel;
+    });
+    const auto tick = [&] { return QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection); };
+    const auto check = [&] { return QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection); };
+    const auto reply = [&](bool subtract = false) {
+        UniValue offers{UniValue::VARR};
+        auto offer = PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 2,
+            subtract ? 323 : 325, false, QDateTime::currentSecsSinceEpoch() + 600);
+        offer.pushKV("subtract_paymaster_fee_from_amount", subtract);
+        offers.push_back(offer);
+        auto callback = std::move(pending);
+        pending = {};
+        if (callback) callback(offers, {});
+    };
+    form.show();
+    form.setWalletModel(gui.walletModel.get());
+    auto* fee_mode = form.findChild<QComboBox*>("paymasterFeeMode");
+    fee_mode->setCurrentIndex(fee_mode->findData(mode));
+    form.findChild<QLineEdit*>("addressEdit")->setText("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    amount->setText("3.25");
+    QCOMPARE(balance->text(), QStringLiteral("Loading…"));
+    QVERIFY(status->text().contains("Checking available $DD balance"));
+    QVERIFY(tick());
+    QVERIFY(check()); // Direct invocation cannot bypass the disabled button.
+    QCOMPARE(reads, 0);
+    QVERIFY(!refresh->isEnabled());
+    QVERIFY(cards->isHidden());
+    QVERIFY(!send->isEnabled());
+
+    // A failed real balance read is unknown, never an empty wallet.
+    QTRY_COMPARE(balance->text(), QStringLiteral("Balance unavailable"));
+    QVERIFY(status->text().contains("could not be read"));
+    QVERIFY(tick());
+    QCOMPARE(reads, 0);
+    wallet->EnsureDDWallet();
+    form.updateBalance();
+    QTRY_COMPARE(balance->text(), QStringLiteral("0.00 $DD"));
+    QVERIFY(status->text().contains("Not enough available $DD"));
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
+    QVERIFY(tick());
+    QVERIFY(check());
+    QCOMPARE(reads, 0);
+
+    // A real asynchronous balance refresh resumes the ordinary timer path.
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 1), 1000);
+    form.updateBalance();
+    QTRY_COMPARE(balance->text(), QStringLiteral("10.00 $DD"));
+    QVERIFY(tick());
+    QCOMPARE(reads, 1);
+    QVERIFY(pending);
+    reply();
+    QCOMPARE(table->rowCount(), 1);
+    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    QVERIFY(send->isEnabled());
+    QCOMPARE(cards->isHidden(), own_dgb);
+
+    // A refresh result arriving after funds disappear must not revive offers.
+    QVERIFY(tick());
+    QCOMPARE(reads, 2);
+    form.setAvailableDigiDollarBalanceForTesting(0);
+    QVERIFY(cards->isHidden());
+    QVERIFY(!send->isEnabled());
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(icon->text(), QStringLiteral("—"));
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    // Even if funds return before delivery, this superseded reply is stale.
+    reply();
+    QCOMPARE(table->rowCount(), 0);
+    QVERIFY(!client->hasCurrentPaymasterOffer());
+    QVERIFY(!client->isBusy());
+    form.setAvailableDigiDollarBalanceForTesting(0);
+    QVERIFY(tick());
+    QCOMPARE(reads, 2);
+    form.setAvailableDigiDollarBalanceForTesting(324);
+    QVERIFY(tick());
+    QCOMPARE(reads, 2); // Positive, but insufficient for the entered amount.
+
+    // Do not require the fee ceiling up front: the actual offer may be free
+    // or deducted. The existing actual-fee check must still block an overrun.
+    form.setAvailableDigiDollarBalanceForTesting(325);
+    QVERIFY(tick());
+    QCOMPARE(reads, 3);
+    reply();
+    QCOMPARE(send->isEnabled(), own_dgb);
+    if (!own_dgb) QVERIFY(client->paymentAmountProblem().contains("Not enough $DD"));
+    form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(true);
+    QVERIFY(tick());
+    reply(true);
+    QVERIFY(send->isEnabled());
+
+    // A live session owns its reserved funds; a zero compose balance cannot
+    // erase the session or prevent its independent cancellation/recovery UI.
+    client->setPaymasterSessionForTesting("INPUTS_RESERVED", "none", true, "recipient", 3.25);
+    form.setAvailableDigiDollarBalanceForTesting(0);
+    const int before_session_tick = reads;
+    QVERIFY(tick());
+    QCOMPARE(reads, before_session_tick);
+    QVERIFY(form.findChild<QLineEdit*>("addressEdit")->isReadOnly());
+    QVERIFY(cards->isHidden());
+    QCOMPARE(unexpected, 0);
+    QCOMPARE(dialogs, 0);
+    form.setWalletModel(nullptr);
 }
 
 void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
@@ -8306,7 +8478,10 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     rejected_offer.pushKV("maximum_service_fee_bps", 100);
     rejected_offer.pushKV("available_service_fee_cents", 100);
     available.push_back(rejected_offer);
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
     form.findChild<QRadioButton*>("feeFundingPaymaster")->setChecked(true);
     auto* amount = form.findChild<QLineEdit*>("amountEdit");
     amount->setText("3.25");
@@ -12956,7 +13131,10 @@ void PaymasterWidgetTests::paymasterClientPercentageLimits()
         }
         throw std::runtime_error("unexpected percentage test RPC");
     });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), 1000);
     form.setWalletModel(gui.walletModel.get());
+    form.setAvailableDigiDollarBalanceForTesting(1000);
     QVERIFY(client->m_clientSafetyStatus->text().contains("Percentage limit not configured"));
     bool reviewed{false};
     QTimer::singleShot(0, &form, [&] {

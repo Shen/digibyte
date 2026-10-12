@@ -121,7 +121,9 @@ private:
     Q_SLOT void loadSelectedPersistedPaymasterSession();
     void activatePersistedPaymasterSession(
         const QString& request_id);
-    enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, STALE, FAILED, NEEDS_AMOUNT };
+    enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, STALE, FAILED, NEEDS_AMOUNT, NEEDS_BALANCE };
+    bool hasBalanceForOfferSearch() const;
+    void updateOfferSearchBalance();
     void setOfferCheckStatus(OfferCheckState state, const QString& text);
     void updateOfferCheckControls();
     void clearOfferCards();

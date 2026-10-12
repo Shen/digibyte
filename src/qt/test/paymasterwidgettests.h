@@ -116,6 +116,8 @@ private Q_SLOTS:
     void paymasterClientPreparationCancellation_data();
     void paymasterClientPreparationCancellation();
     void paymasterClientOfferAutomaticRefresh();
+    void paymasterClientOfferSearchRequiresBalance_data();
+    void paymasterClientOfferSearchRequiresBalance();
     void paymasterClientNewTransferClearsOffers_data();
     void paymasterClientNewTransferClearsOffers();
     void paymasterClientOfferCards_data();
