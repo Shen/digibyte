@@ -583,6 +583,13 @@ tool, import them with
 DD position state is reconstructed from chain data, and spend keys are cached
 only when the imported descriptors can prove ownership of the DD output.
 
+The ownership fallback examines the complete descriptor range. It uses public
+Taproot data to reject nonmatching candidates before deriving private HD keys;
+a matching candidate still needs private-key proof and final output verification
+before a recovered DD address key is cached. History reads retain that recovery
+path for ordinary and Paymaster transfers alike. This optimization changes no
+wallet format, import requirements or confirmation rules.
+
 ### Encrypted wallets
 
 Encrypted wallets must call `walletpassphrase` before any RPC that derives,

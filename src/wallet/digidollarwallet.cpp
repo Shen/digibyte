@@ -907,8 +907,12 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: IsDDOutputMine - descriptor script matched but key extraction failed\n");
                 }
 
-                // Get signing provider with keys for this script
-                auto provider = desc_spk->GetSigningProviderWithKeys(script);
+                // Check the complete descriptor range using public data first.
+                // Expanding private HD keys for every foreign DD output holds
+                // cs_wallet unnecessarily and delays validation notifications.
+                // A public match is only a candidate: ownership still requires
+                // the original private-key recovery and output-key check below.
+                auto provider = desc_spk->GetSolvingProvider(script);
                 if (!provider) continue;
                 provider_count++;
 
@@ -933,8 +937,16 @@ bool DigiDollarWallet::IsDDOutputMine(const CTxOut& txout, const uint256& txid) 
                     continue;
                 }
 
+                const auto public_tweak = spenddata.internal_key.CreateTapTweak(nullptr);
+                if (!public_tweak || !std::equal(output_key_bytes.begin(), output_key_bytes.end(),
+                                                public_tweak->first.begin())) {
+                    continue;
+                }
+
+                auto key_provider = desc_spk->GetSigningProviderWithKeys(script);
+                if (!key_provider) continue;
                 CKey test_key;
-                if (!provider->GetKeyByXOnly(spenddata.internal_key, test_key)) {
+                if (!key_provider->GetKeyByXOnly(spenddata.internal_key, test_key)) {
                     continue;
                 }
                 key_count++;

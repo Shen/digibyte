@@ -40,6 +40,37 @@
 
 namespace wallet {
 
+namespace {
+struct DDRegtestWalletSetup : WalletTestingSetup {
+    DDRegtestWalletSetup() : WalletTestingSetup(ChainType::REGTEST) {}
+};
+
+// Delegate to a real parsed descriptor; count expensive private expansion
+// without adding test hooks to wallet or descriptor production code.
+struct DDDescriptorProbe final : Descriptor {
+    std::unique_ptr<Descriptor> descriptor;
+    mutable size_t private_expansions{0};
+    explicit DDDescriptorProbe(std::unique_ptr<Descriptor> desc) : descriptor(std::move(desc)) {}
+    bool IsRange() const override { return descriptor->IsRange(); }
+    bool IsSolvable() const override { return descriptor->IsSolvable(); }
+    std::string ToString(bool compat = false) const override { return descriptor->ToString(compat); }
+    bool IsSingleType() const override { return descriptor->IsSingleType(); }
+    bool ToPrivateString(const SigningProvider& provider, std::string& out) const override { return descriptor->ToPrivateString(provider, out); }
+    bool ToNormalizedString(const SigningProvider& provider, std::string& out, const DescriptorCache* cache = nullptr) const override { return descriptor->ToNormalizedString(provider, out, cache); }
+    bool Expand(int pos, const SigningProvider& provider, std::vector<CScript>& scripts, FlatSigningProvider& out, DescriptorCache* cache = nullptr) const override { return descriptor->Expand(pos, provider, scripts, out, cache); }
+    bool ExpandFromCache(int pos, const DescriptorCache& cache, std::vector<CScript>& scripts, FlatSigningProvider& out) const override { return descriptor->ExpandFromCache(pos, cache, scripts, out); }
+    void ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const override
+    {
+        ++private_expansions;
+        descriptor->ExpandPrivate(pos, provider, out);
+    }
+    std::optional<OutputType> GetOutputType() const override { return descriptor->GetOutputType(); }
+    std::optional<int64_t> ScriptSize() const override { return descriptor->ScriptSize(); }
+    std::optional<int64_t> MaxSatisfactionWeight(bool use_max_sig) const override { return descriptor->MaxSatisfactionWeight(use_max_sig); }
+    std::optional<int64_t> MaxSatisfactionElems() const override { return descriptor->MaxSatisfactionElems(); }
+};
+} // namespace
+
 BOOST_FIXTURE_TEST_SUITE(digidollar_wallet_security_tests, WalletTestingSetup)
 
 // =============================================================================
@@ -504,6 +535,81 @@ BOOST_AUTO_TEST_CASE(dd_history_preserves_owned_output_rows_when_wallet_is_locke
     // Reading persisted encrypted DD public keys must also work after reload.
     dd_wallet->LoadFromDatabase();
     check_history();
+}
+
+BOOST_FIXTURE_TEST_CASE(dd_descriptor_foreign_scan_does_not_expand_private_keys, DDRegtestWalletSetup)
+{
+    CKey internal_key, leaf_key, foreign_key;
+    CExtKey master_key, branch_key, child_key;
+    const auto seed = GetRandHash();
+    master_key.SetSeed(MakeByteSpan(seed));
+    BOOST_REQUIRE(master_key.Derive(branch_key, 0));
+    BOOST_REQUIRE(branch_key.Derive(child_key, 31));
+    internal_key = child_key.key;
+    leaf_key.MakeNewKey(true);
+    foreign_key.MakeNewKey(true);
+    FlatSigningProvider provider;
+    std::string error;
+    auto descriptor = Parse("tr(" + EncodeExtKey(master_key) + "/0/*,pk(" +
+                                HexStr(leaf_key.GetPubKey()) + "))", provider, error, false);
+    BOOST_REQUIRE_MESSAGE(descriptor, error);
+    auto probe = std::make_shared<DDDescriptorProbe>(std::move(descriptor));
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.m_keypool_size = 32;
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        WalletDescriptor wallet_descriptor(probe, 0, 0, 32, 0);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, provider, "", false));
+    }
+    probe->private_expansions = 0;
+    DigiDollarWallet dd_wallet(&m_wallet);
+    const auto foreign = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{foreign_key.GetPubKey()}, 123);
+    BOOST_CHECK(!dd_wallet.IsDDOutputMine(CTxOut{0, foreign}, GetRandHash()));
+    BOOST_CHECK_EQUAL(probe->private_expansions, 0u);
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 1u);
+
+    // The script-tree descriptor differs from DD's key-only output. The full
+    // fallback must still retrieve and persist its missing private DD key.
+    const auto owned = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{internal_key.GetPubKey()}, 123);
+    BOOST_CHECK(!m_wallet.IsMine(owned));
+    BOOST_REQUIRE(dd_wallet.IsDDOutputMine(CTxOut{0, owned}, GetRandHash()));
+    BOOST_CHECK_EQUAL(probe->private_expansions, 1u);
+    CKey recovered;
+    const XOnlyPubKey output_key{Span{owned}.subspan(2, 32)};
+    BOOST_REQUIRE(dd_wallet.GetAddressKey(output_key, recovered));
+    BOOST_CHECK(recovered.GetPubKey() == internal_key.GetPubKey());
+    BOOST_CHECK(dd_wallet.IsDDOutputMine(CTxOut{0, owned}, GetRandHash()));
+    BOOST_CHECK_EQUAL(probe->private_expansions, 1u);
+}
+
+BOOST_FIXTURE_TEST_CASE(dd_descriptor_public_match_requires_private_internal_key, DDRegtestWalletSetup)
+{
+    CKey internal_key, leaf_key;
+    internal_key.MakeNewKey(true);
+    leaf_key.MakeNewKey(true);
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        FlatSigningProvider provider;
+        std::string error;
+        // A public internal key can match the DD tweak, but an unrelated
+        // private script-leaf key must never turn it into spendable DD.
+        auto descriptor = Parse("tr(" + HexStr(internal_key.GetPubKey()) + ",pk(" +
+                                    EncodeSecret(leaf_key) + "))", provider, error, false);
+        BOOST_REQUIRE_MESSAGE(descriptor, error);
+        WalletDescriptor wallet_descriptor(std::move(descriptor), 0, 0, 1, 0);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, provider, "", false));
+    }
+    DigiDollarWallet dd_wallet(&m_wallet);
+    for (const auto& key : {internal_key, leaf_key}) {
+        const auto script = DigiDollar::CreateDigiDollarP2TR(XOnlyPubKey{key.GetPubKey()}, 123);
+        BOOST_CHECK(!m_wallet.IsMine(script));
+        const XOnlyPubKey output_key{Span{script}.subspan(2, 32)};
+        BOOST_CHECK(!dd_wallet.IsDDOutputMine(CTxOut{0, script}, GetRandHash()));
+        CKey recovered;
+        BOOST_CHECK(!dd_wallet.GetAddressKey(output_key, recovered));
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetCachedForeignDDOutputCount(), 2u);
 }
 
 BOOST_AUTO_TEST_CASE(rh08_03b_foreign_mint_with_wallet_dgb_output_not_claimed)
