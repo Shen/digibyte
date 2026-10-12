@@ -1,5 +1,76 @@
 # Paymaster build and test runbook
 
+## Save settings with expired provider status (2026-10-12)
+
+Settings suspends automatic polling, but `hasCompleteMutationSnapshots` expires
+the observation after 30 seconds. The old restart handler returned silently
+while the Save button remained enabled. Page navigation refreshed the state and
+temporarily made Save work again. Operator logs around 2026-10-12 20:51 UTC show
+funding-model rejections, but those do not establish a failed settings write:
+the demonstrated GUI failure precedes the first RPC.
+
+`applyWithProviderRestart` now refreshes incomplete/expired observations and
+retains the draft. The wallet-bound deferred operator-review queue continues
+only after the read chain finishes. It checks fresh status and wallet/identity
+context, then uses the existing stop/save/readback/start chain if still running.
+A stopped provider only saves; failed reads and declined restart show explicit
+feedback. Wallet/privacy invalidation cancels continuation. Original DigiByte
+scans, RPC validation, the freshness limit, autostart and spending bounds remain.
+
+`paymasterSettingsSaveRefreshesStaleStatus` has eleven deterministic rows: offer,
+processing mode, stopped, started/stopped during the read, declined restart,
+failed/malformed status, wallet/identity change and privacy. A test-only expiry
+hook avoids sleeping 31 seconds. Repeat clicks cannot duplicate the read or
+write, and draft controls survive the refresh. A separate comparison executable
+restores the original restart method while retaining the new test hook: the
+`offer` row fails at `pending` because no status RPC starts. This is an expected
+reproduction, not a passing test of the fix.
+
+The focused selection comprises **61 data cases**:
+
+| Qt function | Cases |
+|---|---:|
+| `paymasterSettingsSaveRefreshesStaleStatus` | 11 |
+| `paymasterSettingsRestart` | 19 |
+| `paymasterOfferPolicyTypedValues` | 10 |
+| `paymasterOfferSpendingLimitsReview` | 11 |
+| `paymasterOperatorBackgroundRefresh` | 2 |
+| `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` | 3 |
+| `paymasterPreparationContinuesAfterRefresh` | 5 |
+
+Workspace helpers, reports and source/binary hashes are under
+`build_msvc/paymaster-refresh-check/settings-save/`. Only the affected widget,
+test unit and generated test moc are compiled against existing Release
+libraries. Native Qt runs on a separate, never-activated desktop with disposable
+wallets. No running GUI, real wallet, configuration or logging setting is changed.
+
+Final local run `checks-20261012-211749Z` passed all 61 cases with unchanged
+source hashes, including explicit cancellation feedback. The expected original
+handler failure is retained in `checks-20261012-211625Z`. `verification.json`
+checks the final source/binary mapping and records both outcomes. Targeted
+compilation/linking and `git diff --check` passed.
+
+For full acceptance, close Regtest GUIs and ensure no build is running. From
+`D:\Digibyte\digibyte-fork`, with the installed MSVC 14.43.34808, Windows SDK
+10.0.26100.0 and Qt `D:\Qt51510\install`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\settings-save\run-selected.py --normal
+if ($LASTEXITCODE -ne 0) { throw 'Settings-save acceptance failed' }
+```
+
+Allow minutes to tens of minutes for build/full Qt and a few minutes for this
+selection. Require exit 0, all 61 selected cases passing, no selected skips and
+unchanged source hashes. Manual disposable-Regtest check: keep Offer settings
+open for over 30 seconds, switch between supported models with compatible saved
+budgets, and Save. Status checking must lead to explicit restart confirmation
+without navigation or a second click. Declining leaves the draft and provider
+unchanged; a failed read must not stop or modify it. Full-build/full-suite and
+manual acceptance remain operator tasks. Relevant guidance: root/src AGENTS,
+CLAUDE, DigiDollar architecture/maps, developer/Qt/test and formatting rules.
+
 ## Restricted new service disabled (2026-10-09)
 
 The new-service boundary is `CheckNewSponsorshipScope`, documented in

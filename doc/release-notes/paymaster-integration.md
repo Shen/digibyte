@@ -1,5 +1,14 @@
 # Paymaster integration release notes
 
+## Save provider settings after a longer edit (2026-10-12)
+
+The active **Save and restart provider…** button could silently do nothing
+after its status snapshot expired, because Settings intentionally suspends
+polling. Save now refreshes the status, retains the draft and then continues
+to restart review. Failed reads and changed wallet/identity state stop with
+visible feedback. The same handling applies to processing-mode settings;
+existing Core checks, autostart preferences and spending limits are unchanged.
+
 ## Setup and restored-wallet guidance (2026-10-12)
 
 Protected restored wallets are routed to recovery review before setup changes.

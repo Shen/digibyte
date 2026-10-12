@@ -167,6 +167,12 @@ confirmed Qt settings restart uses the existing atomic disable-and-stop RPC,
 preserving autostart, then saves, verifies via read-only status, enables and
 requests readiness-aware start. Wallet/generation/privacy guards cover the
 whole serialized chain; an ambiguous reply halts it without replay or rollback.
+Settings pages suspend automatic polling while edited. If the saved status has
+expired, Save first refreshes the complete operator snapshot and retains the
+draft, then schedules the review after the read chain completes. Wallet/identity
+changes and unavailable status stop before mutations with visible feedback.
+The fresh running state decides whether stop/save/verified restart is required;
+the 30-second freshness gate remains intact.
 No Core or RPC implementation change is required.
 The operational hero excludes backup reminders. getpaymasternodeconfig supplies
 nodewide effective source, editability/conflicts and pending restart changes to the

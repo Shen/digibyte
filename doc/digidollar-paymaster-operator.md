@@ -1189,6 +1189,14 @@ cleared together with the retirement balance summary. Toggling privacy must
 not restore those old notices. Failed or incomplete stop results retain their
 error explanation.
 
+While editing Settings, automatic status polling is suspended. If the last
+status is older than 30 seconds, **Save and restart provider…** first checks the
+current provider state without discarding edits. After a successful check it
+opens the restart confirmation; switching pages or clicking Save again is not
+necessary. A provider that is now stopped only saves the settings. Failed reads
+or wallet/identity changes stop before saving and show an explanation. The
+existing stop, exact save/readback and readiness-aware restart checks remain.
+
 The retirement dialog explains that reviewing full capital release is part
 of retirement; it no longer shows a disabled checkbox for that fixed step.
 The subsequent release still requires separate approval. In Stop Paymaster,

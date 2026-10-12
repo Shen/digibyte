@@ -2261,6 +2261,10 @@ Current oracle/MuSig2 fuzz source inventory:
   preserving painting and navigation. `paymasterProviderCommandLocksPages`
   covers repeat clicks, navigation/repaint during pending reads, errors and
   stale wallet completions. Slow polls expose the active read after two seconds.
+  Settings Save refreshes expired snapshots before offering restart, using the
+  shared deferred operator-review queue. `paymasterSettingsSaveRefreshesStaleStatus`
+  covers retained offer/runtime drafts, repeat clicks, changed running state,
+  refusal, unavailable status and wallet/identity/privacy invalidation.
 - `src/wallet/rpc/paymaster_client.cpp`: automatic nested submissions check
   readiness and perform final preflights without waiting on the scheduler's own
   validation queue. `automatic_submit_defers_before_wallet_or_index_wait` in
