@@ -86,6 +86,8 @@ private Q_SLOTS:
     void paymasterLiveOverview();
     void paymasterSettingsRestart_data();
     void paymasterSettingsRestart();
+    void paymasterSettingsSaveRefreshesStaleStatus_data();
+    void paymasterSettingsSaveRefreshesStaleStatus();
     void paymasterOperatorPollingPreservesDraftsAndThrottlesFinance();
     void paymasterOperatorBackgroundRefresh_data();
     void paymasterOperatorBackgroundRefresh();

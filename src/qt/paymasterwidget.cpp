@@ -4728,7 +4728,7 @@ public:
         m_withdraw_task->setToolTip({});
         m_preview_carrier_excess->setToolTip({});
         m_pending_handler_calls.clear();
-        m_pending_guided_review = {};
+        m_pending_operator_review = {};
         m_rpc_handler_depth = 0;
         m_active_rpc_handler_token = 0;
         m_next_rpc_handler_token = 0;
@@ -4945,7 +4945,7 @@ public:
             m_operation.reset(m_wallet_generation);
             m_guided_task.clear();
             m_failed_guided_task.clear();
-            m_pending_guided_review = {};
+            m_pending_operator_review = {};
             if (m_task_card) m_task_card->hide();
             m_task_error_details->clear();
             m_task_error_toggle->setChecked(false);
@@ -5439,6 +5439,8 @@ public:
     {
         applyLiquidityPoolEntries(pool_info, /*refresh_safety=*/false);
     }
+
+    void expireOperatorStatusForTesting() override { m_status_age.invalidate(); }
 
     void setMutationSnapshotsAvailableForTesting(
         bool provider_info, bool provider_safety, bool liquidity) override
@@ -9463,16 +9465,46 @@ private:
     void applyWithProviderRestart(std::function<void(bool)> apply, std::function<void(const QString&)> failed)
     {
         if (m_privacy) return;
-        if (!m_core_running) { apply(false); return; }
-        if (!hasCompleteMutationSnapshots() || m_busy || m_privacy) return;
+        if (m_busy || m_pending_operator_review || !hasRpcTransport()) {
+            failed(tr("Settings were not saved because another Paymaster operation is still pending or the wallet is unavailable. Your edits have been kept."));
+            return;
+        }
         const auto generation = m_wallet_generation;
         const auto settings_generation = m_settings_restart_generation;
+        if (!hasCompleteMutationSnapshots()) {
+            // Settings pages deliberately suspend polling while being edited.
+            // Refresh expired observations before deciding whether to restart;
+            // never silently drop Save or weaken the 30-second freshness gate.
+            const auto context = m_operator_snapshot;
+            failed(tr("Checking current provider status before saving. Your edits have been kept; no settings have been changed yet."));
+            m_pending_operator_review = [this, generation, settings_generation, context, apply, failed] {
+                if (generation != m_wallet_generation || settings_generation != m_settings_restart_generation || m_privacy) return;
+                if (!hasCompleteMutationSnapshots()) {
+                    failed(tr("Settings were not saved: current provider status could not be verified. Your edits have been kept. Retry saving after the status check succeeds."));
+                    return;
+                }
+                try {
+                    if (!context.isNull()) DigiDollar::Paymaster::CheckSetupContext(context, m_operator_snapshot);
+                } catch (const std::exception&) {
+                    failed(tr("The provider wallet or identity changed during the status check. No settings were saved; review the selected wallet before retrying."));
+                    return;
+                }
+                applyWithProviderRestart(apply, failed);
+            };
+            refreshOperatorStatus();
+            return;
+        }
+        if (!m_core_running) { apply(false); return; }
         setRpcBusyState(true);
         const auto answer = askPlainTextQuestion(this, tr("Save settings and restart Paymaster"),
             tr("Temporarily stop this Paymaster service, save the edited settings and start again after checking the saved values?\n\nNew requests pause briefly. Existing offers may become invalid and clients may need to request a new offer. Already signed payments and their reservations remain protected.\n\nThe saved autostart choice, reserves and spending limits are retained. If any step cannot be confirmed, no further step is attempted; review the status before resuming. DigiByte Core itself is not restarted."));
         if (generation != m_wallet_generation) return;
         setRpcBusyState(false);
-        if (answer != QMessageBox::Yes || m_privacy || settings_generation != m_settings_restart_generation || !hasRpcTransport()) return;
+        if (m_privacy || settings_generation != m_settings_restart_generation || !hasRpcTransport()) return;
+        if (answer != QMessageBox::Yes) {
+            failed(tr("Saving was cancelled. Your edits have been kept; the provider was not stopped."));
+            return;
+        }
         UniValue params{UniValue::VARR}; params.push_back(false);
         call("setpaymasterenabled", params, false, nullptr, [this, apply, failed, settings_generation](const UniValue& result) {
             if (m_privacy || settings_generation != m_settings_restart_generation) return;
@@ -11581,7 +11613,7 @@ private:
             if (m_guided_start_after) m_guided_review_text += tr("\nStart the provider automatically when these reserves are ready, within the saved spending limits. Autostart is unchanged.");
             else if (preparation && !m_core_enabled) m_guided_review_text += tr("\nEnable the saved provider configuration so Core can finish this task. The saved autostart choice remains in force.");
             renderCurrentTask();
-            m_pending_guided_review = [this, generation, params, command, task, context, proposed_policy, repair_targets] {
+            m_pending_operator_review = [this, generation, params, command, task, context, proposed_policy, repair_targets] {
                 if (generation != m_wallet_generation || m_privacy || m_guided_task != task || m_busy) return;
                 setRpcBusyState(true);
                 const auto answer = askPlainTextQuestion(this, m_operation.title, m_guided_review_text);
@@ -11612,7 +11644,7 @@ private:
                     executeGuidedTask(command, execution);
                 }
             };
-            showPendingGuidedReview();
+            showPendingOperatorReview();
         }, false, [this, task](const QString& error) {
             if (!waitForReserveReduction(error, [this, task] { previewGuidedTask(task); }))
                 failGuidedTask(error);
@@ -14893,16 +14925,16 @@ private:
         }
     }
 
-    void showPendingGuidedReview()
+    void showPendingOperatorReview()
     {
-        if (!m_pending_guided_review) return;
+        if (!m_pending_operator_review) return;
         const auto generation = m_wallet_generation;
         QTimer::singleShot(0, this, [this, generation] {
             // A refresh can start before this event is delivered. Keep the
             // review until that RPC chain finishes instead of losing it.
             if (generation != m_wallet_generation || m_busy || m_rpc_active) return;
-            auto review = std::move(m_pending_guided_review);
-            m_pending_guided_review = {};
+            auto review = std::move(m_pending_operator_review);
+            m_pending_operator_review = {};
             if (review) review();
         });
     }
@@ -14970,7 +15002,7 @@ private:
                 m_history_deferred_status = false;
                 QTimer::singleShot(0, this, [this] { refreshStatus(); });
             }
-            showPendingGuidedReview();
+            showPendingOperatorReview();
         }
     }
 
@@ -15166,7 +15198,7 @@ private:
     bool m_rpc_chain_foreground{false};
     bool m_active_rpc_background{false};
     int m_rpc_handler_depth{0};
-    std::function<void()> m_pending_guided_review;
+    std::function<void()> m_pending_operator_review;
     uint64_t m_active_rpc_handler_token{0};
     uint64_t m_next_rpc_handler_token{0};
     // Follow-up status calls requested by the currently executing handler are

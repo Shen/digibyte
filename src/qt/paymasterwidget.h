@@ -43,6 +43,7 @@ public:
     using RpcCallback = std::function<void(UniValue, QString)>;
     using AsyncRpcExecutor = std::function<void(const std::string&, const UniValue&, RpcCallback)>;
     virtual void setAsyncRpcExecutorForTesting(AsyncRpcExecutor executor) = 0;
+    virtual void expireOperatorStatusForTesting() = 0;
 };
 
 /** The returned panel is owned by its Qt parent. */

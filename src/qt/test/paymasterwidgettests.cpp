@@ -9516,6 +9516,138 @@ void PaymasterWidgetTests::paymasterSettingsRestart()
     if (scenario == "saved" || scenario == "autostart" || scenario == "runtime") QVERIFY(provider.find_value("running").isTrue());
 }
 
+void PaymasterWidgetTests::paymasterSettingsSaveRefreshesStaleStatus_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const char* scenario : {"offer", "runtime", "stopped", "became_running", "became_stopped", "decline",
+                                 "read_error", "malformed", "wallet_change", "identity_change", "privacy"})
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+}
+
+void PaymasterWidgetTests::paymasterSettingsSaveRefreshesStaleStatus()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("running", scenario != "stopped" && scenario != "became_running");
+    provider.pushKV("autostart", true);
+    provider.pushKV("service_state", provider.find_value("running").isTrue() ? "active" : "stopped");
+    snapshot.pushKV("provider", provider);
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        return method == "getpaymasteroperatorinfo" ? snapshot : PaymasterOverviewFinance();
+    });
+    panel->refreshStatus();
+    auto* save = panel->findChild<QPushButton*>("savePaymasterPolicy");
+    auto* status = panel->findChild<QLabel*>("paymasterPolicySaveStatus");
+    auto* paid = panel->findChild<QCheckBox*>("paymasterPolicyUserPaid");
+    auto* sponsored = panel->findChild<QCheckBox*>("paymasterPolicySponsored");
+    QVERIFY(save && status && paid && sponsored);
+    sponsored->setChecked(true);
+    paid->setChecked(false);
+    if (scenario == "runtime") {
+        auto* mode = panel->findChild<QComboBox*>("paymasterOperationMode");
+        mode->setCurrentIndex(mode->findData("manual"));
+        save = panel->findChild<QPushButton*>("savePaymasterRuntimeSettings");
+    }
+    // Deterministically reproduce the expired (>30 s) snapshot on Settings,
+    // where automatic polling is suspended. The freshness predicate is shared.
+    panel->expireOperatorStatusForTesting();
+    QVERIFY(save->isEnabled());
+    QStringList commands, mutations;
+    DigiDollarPaymasterWidget::RpcCallback pending;
+    panel->setAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback done) {
+        commands << QString::fromStdString(method);
+        if (method == "getpaymasteroperatorinfo") {
+            if (commands.size() == 1) { pending = std::move(done); return; }
+            snapshot.pushKV("provider", provider);
+            done(snapshot, {});
+            return;
+        }
+        if (method == "getpaymasterfinancestatus") { done(PaymasterOverviewFinance(), {}); return; }
+        mutations << QString::fromStdString(method);
+        if (method == "setpaymasterenabled") {
+            provider.pushKV("enabled", params[0].get_bool());
+            if (params[0].isFalse()) provider.pushKV("running", false);
+        } else if (method == "setpaymasterpolicy") {
+            QCOMPARE(params[0].find_value("funding_models").size(), size_t{1});
+            QCOMPARE(params[0].find_value("funding_models")[0].get_str(), std::string{"sponsored"});
+            QCOMPARE(params[0].find_value("fee_rate_bps").getInt<int>(), 0);
+            auto policy = params[0];
+            policy.pushKV("policy_hash", std::string(64, 'b'));
+            provider.pushKV("policy", policy);
+            done(policy, {});
+            return;
+        } else if (method == "setpaymasterruntimesettings") {
+            QCOMPARE(params[0].find_value("operation_mode").get_str(), std::string{"manual"});
+            QVERIFY(params[0].find_value("autostart").isNull());
+            provider.pushKV("operation_mode", "manual");
+        } else if (method == "startpaymaster") {
+            QVERIFY(params[0].find_value("wait_for_readiness").isTrue());
+            provider.pushKV("running", true);
+        } else { QFAIL("Unexpected mutation"); }
+        provider.pushKV("service_state", provider.find_value("running").isTrue() ? "active" : "stopped");
+        done(provider, {});
+    });
+    save->click();
+    QVERIFY(pending);
+    QCOMPARE(commands, QStringList{"getpaymasteroperatorinfo"});
+    QVERIFY(mutations.empty());
+    if (scenario != "runtime") QVERIFY(status->text().contains("Checking current provider status"));
+    save->click(); // Repeat clicks cannot queue another write/restart.
+    QCOMPARE(commands.size(), 1);
+    QVERIFY(!paid->isChecked() && sponsored->isChecked());
+    QVERIFY(!save->isEnabled());
+    if (scenario == "became_running") provider.pushKV("running", true);
+    if (scenario == "became_stopped") provider.pushKV("running", false);
+    if (scenario == "identity_change") provider.pushKV("provider_id", std::string(64, 'c'));
+    snapshot.pushKV("provider", provider);
+    if (scenario == "malformed") snapshot.pushKV("safety", UniValue{UniValue::VOBJ});
+    if (scenario == "wallet_change") panel->setWalletModel(nullptr);
+    if (scenario == "privacy") panel->setPrivacy(true);
+    const bool abort = scenario == "read_error" || scenario == "malformed" || scenario == "wallet_change" ||
+        scenario == "identity_change" || scenario == "privacy";
+    int reviews{0};
+    QTimer review;
+    review.setInterval(0);
+    connect(&review, &QTimer::timeout, [&] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            ++reviews;
+            dialog->done(scenario == "decline" || abort ? QMessageBox::No : QMessageBox::Yes);
+        }
+    });
+    review.start();
+    auto reply = std::move(pending);
+    pending = {};
+    reply(snapshot, scenario == "read_error" ? QStringLiteral("injected status failure") : QString{});
+    if (abort) {
+        if (scenario == "read_error" || scenario == "malformed")
+            QTRY_VERIFY(status->text().contains("could not be verified"));
+        else if (scenario == "identity_change")
+            QTRY_VERIFY(status->text().contains("identity changed"));
+        else QCoreApplication::processEvents();
+        QCOMPARE(reviews, 0);
+        QVERIFY(mutations.empty());
+        return;
+    }
+    const bool stopped = scenario == "stopped" || scenario == "became_stopped";
+    const auto write = scenario == "runtime" ? "setpaymasterruntimesettings" : "setpaymasterpolicy";
+    if (scenario == "decline") {
+        QTRY_COMPARE(reviews, 1);
+        QVERIFY(mutations.empty());
+        QVERIFY(save->isEnabled());
+        QVERIFY(!paid->isChecked() && sponsored->isChecked());
+        QVERIFY(status->text().contains("Saving was cancelled"));
+    } else {
+        const QStringList expected = stopped ? QStringList{write} : QStringList({"setpaymasterenabled", write, "setpaymasterenabled", "startpaymaster"});
+        QTRY_COMPARE(mutations.size(), expected.size());
+        QCOMPARE(mutations, expected);
+        QCOMPARE(reviews, stopped ? 0 : 1);
+        QCOMPARE(provider.find_value("running").get_bool(), !stopped);
+    }
+    QVERIFY(provider.find_value("autostart").isTrue());
+}
+
 void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
 {
     QFETCH(QString, theme);
