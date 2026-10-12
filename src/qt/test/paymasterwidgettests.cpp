@@ -1285,6 +1285,28 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
     restored_provider.pushKV("readiness_errors", std::move(restore_errors));
     auto* restore_summary = tab.findChild<QLabel*>("paymasterReadinessSummary");
     QVERIFY(restore_summary != nullptr);
+    const auto check_recovery_route = [&](const QString& expected) {
+        // If the routing regresses, close the unexpected wizard instead of
+        // leaving this test waiting for human input.
+        bool unexpected_wizard{false};
+        QTimer close_unexpected;
+        close_unexpected.setSingleShot(true);
+        QObject::connect(&close_unexpected, &QTimer::timeout, [&] {
+            if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                unexpected_wizard = true;
+                dialog->reject();
+            }
+        });
+        close_unexpected.start(0);
+        wizard->setEnabled(true);
+        wizard->click();
+        QVERIFY(!unexpected_wizard);
+        QVERIFY(provider_status->text().contains(expected));
+        auto* recovery_status = tab.findChild<QLabel*>("paymasterAdoptBackupStatus");
+        QVERIFY(recovery_status != nullptr);
+        QVERIFY(!recovery_status->isHidden());
+        QVERIFY(recovery_status->text().contains(expected));
+    };
     for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
         QFile css(":/css/" + theme);
         QVERIFY(css.open(QIODevice::ReadOnly));
@@ -1300,6 +1322,7 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
         QVERIFY(!adopt->isHidden());
         QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
         QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
+        check_recovery_route(QStringLiteral("New setup cannot remove the restoration protection"));
         for (const auto& gate : {"PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED",
                                  "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION",
                                  "PAYMASTER_PROVIDER_CHECKPOINT_RETIRED",
@@ -1314,6 +1337,7 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
             QVERIFY(restore_summary->text().contains(QStringLiteral("New payments and reserve spending are blocked")));
             QVERIFY(!next_step->text().contains(QStringLiteral("PAYMASTER_")));
             QVERIFY(!restore_summary->text().contains(QStringLiteral("PAYMASTER_")));
+            check_recovery_route(QStringLiteral("Do not delete or replace checkpoint files"));
         }
     }
     // The review cannot execute until the operator confirms independent state.
@@ -5565,6 +5589,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
 
     bool review_cancelled_without_writes{false};
     bool seven_numbered_pages{false};
+    bool current_backup_guidance{false};
+    bool no_unused_legacy_budget{false};
     QTimer::singleShot(0, [&] {
         auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
         if (!wizard || wizard->objectName() != QLatin1String("PaymasterSetupWizard")) {
@@ -5592,11 +5618,22 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         review_cancelled_without_writes = wizard->currentPage() &&
             wizard->currentPage()->objectName() ==
                 QLatin1String("paymasterSetupReviewPage");
+        if (auto* review = wizard->findChild<QLabel*>("paymasterSetupReview")) {
+            no_unused_legacy_budget = !review->text().contains(QStringLiteral("Inactive legacy sponsorship")) &&
+                !review->text().contains(QStringLiteral("Restricted sponsored"));
+        }
+        if (auto* help = wizard->findChild<QLabel*>("paymasterSetupBackupHelp")) {
+            current_backup_guidance = help->text().contains(QStringLiteral("paymaster-checkpoints")) &&
+                help->text().contains(QStringLiteral("only one host")) &&
+                help->text().contains(QStringLiteral("reserve preparation has completed"));
+        }
         wizard->reject();
     });
     guided_setup->click();
     QVERIFY(review_cancelled_without_writes);
     QVERIFY(seven_numbered_pages);
+    QVERIFY(current_backup_guidance);
+    QVERIFY(no_unused_legacy_budget);
     QCOMPARE(operating_policy_attempts, 0);
     QCOMPARE(safety_attempts, 0);
     QVERIFY(liquidity_policy.isNull());

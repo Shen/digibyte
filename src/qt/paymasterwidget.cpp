@@ -2335,7 +2335,8 @@ public:
             m_overview_backup_notice);
         auto* overview_backup_text = new QLabel(tr(
             "This provider identity, its private key, configuration, pool state and finance history are stored in this wallet. "
-            "Create a new full-wallet backup and keep it offline and confidential. A seed or descriptor export alone is not a complete Paymaster backup."),
+            "Create a new full-wallet backup and keep it offline and confidential. A seed or descriptor export alone is not a complete Paymaster backup.") + QLatin1Char('\n') + tr(
+            "For continued operation after restoration, Core also requires independently retained current state from the node's paymaster-checkpoints folder. Never restore an old wallet and its old checkpoint together to resume service. Use this provider identity on only one host. Before migration, pause the provider, resolve unfinished work, then create a current backup."),
             m_overview_backup_notice);
         overview_backup_text->setWordWrap(true);
         overview_backup_layout->addWidget(overview_backup_text);
@@ -12923,6 +12924,20 @@ private:
                 tr("Provider settings are still being loaded or another Paymaster operation is in progress. Wait for it to finish, then reopen the assistant so it can use the authoritative saved values."));
             return false;
         }
+        UniValue recovery_provider{UniValue::VOBJ}, recovery_errors{UniValue::VARR};
+        for (const auto& error : m_readiness_errors) recovery_errors.push_back(error.toStdString());
+        recovery_provider.pushKV("readiness_errors", recovery_errors);
+        recovery_provider.pushKV("last_service_error", m_last_service_error.toStdString());
+        const auto recovery = DigiDollar::Paymaster::SetupRecoveryIssue(recovery_provider);
+        if (!recovery.empty()) {
+            showOperatorPage(m_management_page);
+            setStatusLabel(m_backup_adopt_status, recovery == "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"
+                ? tr("This wallet was restored. Use Review restored provider wallet to check whether its current state can be adopted. New setup cannot remove the restoration protection.")
+                : tr("This provider's checkpoint needs review. New setup cannot repair missing or older financial state. Do not delete or replace checkpoint files; inspect the current provider diagnostics."), "action");
+            m_backup_adopt_status->show();
+            m_status->setText(m_backup_adopt_status->text());
+            return false;
+        }
         if (m_model && (!m_provider_info_snapshot_available ||
                         !m_provider_safety_snapshot_available ||
                         !m_liquidity_snapshot_available)) {
@@ -14173,7 +14188,10 @@ private:
         auto* setup_backup_text = new QLabel(tr(
             "The provider identity key, Paymaster settings, pool state and finance ledger are stored in this wallet. "
             "Create a complete wallet backup and keep it offline and confidential. A seed or descriptor export alone is not a complete Paymaster backup. "
-            "The reminder is important but does not block provider start."), setup_backup);
+            "The reminder is important but does not block provider start.") + QLatin1Char('\n') + tr(
+            "Back up again after reserve preparation has completed. Payment and reserve changes can make an earlier backup too old for continued provider operation.") + QLatin1Char('\n') + tr(
+            "For continued operation after restoration, Core also requires independently retained current state from the node's paymaster-checkpoints folder. Never restore an old wallet and its old checkpoint together to resume service. Use this provider identity on only one host. Before migration, pause the provider, resolve unfinished work, then create a current backup."), setup_backup);
+        setup_backup_text->setObjectName("paymasterSetupBackupHelp");
         setup_backup_text->setWordWrap(true);
         auto* setup_backup_id = new QLabel(setup_backup);
         setup_backup_id->setObjectName("paymasterSetupBackupProviderId");
@@ -14448,8 +14466,10 @@ private:
                     try {
                         const auto choices = wizard_choices();
                         review_text += tr("\nSaved inactive budgets remain disabled; their per-transfer ceiling is reduced if needed to fit the reviewed offer.");
-                        for (const auto& item : {std::pair{"user_paid", tr("User paid")}, {"public_sponsored", tr("Public sponsored")}, {"restricted_sponsored", tr("Restricted sponsored")}}) {
+                        for (const auto& item : {std::pair{"user_paid", tr("User paid")}, {"public_sponsored", tr("Public sponsored")}, {"restricted_sponsored", tr("Inactive legacy sponsorship")}}) {
                             const auto& limits = choices.safety.find_value(item.first);
+                            if (std::string{item.first} == "restricted_sponsored" &&
+                                std::all_of(limits.getValues().begin(), limits.getValues().end(), [](const UniValue& value) { return value.isNum() && value.getInt<int64_t>() == 0; })) continue;
                             review_text += tr("\n%1 limits: %2 DGB per transfer; %3 DGB reserved; %4 DGB/hour; %5 DGB/day; %6 transfers/hour and %7/day")
                                 .arg(item.second,
                                      dgbAmount(limits.find_value("maximum_network_fee_per_transaction_satoshis").getInt<int64_t>()),
