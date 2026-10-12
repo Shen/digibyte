@@ -4645,3 +4645,102 @@ processing. Long wallet ownership work can block the original validation queue,
 but those logs do not prove it was the sole cause. Cold-start/live relay timing,
 the normal full build/suites and sanitizer acceptance remain open until operator
 results are returned. No guaranteed network confirmation deadline is claimed.
+
+## Commit review of 10 and 11 October 2026
+
+The [58-commit inventory and findings](design/paymaster-integration-boundaries.md#review-of-the-1011-october-commits-2026-10-12)
+cover `dddcb761af^..c240efa122`, with surviving code inspected at `85f9b84422`.
+No new product-code defect was reproduced in the checked paths. This review
+preserves the original ownership/recovery, runtime-test and scan-build gates;
+historical temporary regressions are explicitly identified in the inventory.
+
+### Targeted verification
+
+The checks used the existing isolated executables under
+`build_msvc/paymaster-refresh-check/dd-refresh-review/`, with reused libraries.
+They did not perform a fresh full build or replace an installed executable.
+The binary SHA-256 values were:
+
+- Core: `274819b77a72d4449c9d3d35d4f069dbb9267f6182322de5e92b48062e251f8c`.
+- Qt: `6d38305124e5c3068605d04c689f29e6966ffad28e6d86e11bb494c02efded46`.
+
+**39 selected Core/Wallet cases / 11,408 assertions passed:**
+
+| Selection | Cases | Assertions | Principal coverage |
+|---|---:|---:|---|
+| `paymaster_transport_tests` | 9 | 1,660 | Two-leg BIP324 relay, identity/proof substitution, ordering, final-send enforcement, disconnect and expiry |
+| `paymaster_wallet_security_tests` | 17 | 9,007 | Checkpoint rollback/concurrency, restore guards, pending native work, SQLite faults, unsigned-history cleanup, budget aging and competing quotes |
+| `paymaster_wallet_identity_tests` | 2 | 229 | Legacy client limits and atomic current-backup adoption |
+| `paymaster_wallet_store_tests` | 6 | 412 | Recovery-fee repair, late results, percentage approval and write failures |
+| `paymaster_provider_tests` | 4 | 49 | Restricted-mode gate, rounded percentage math, non-expiring open reservations and clock rollback |
+| `paymaster_wallet_psbt_tests` | 1 | 51 | Authentic malicious providers cannot replace the locally reconstructed transaction |
+
+**Seven Qt functions / 34 data cases passed**, excluding `initTestCase` and
+`cleanupTestCase` from that count:
+
+- `paymasterSettingsRestart`: 19 scenarios, including lost replies, canceled
+  review, changed wallet, privacy transitions and saved autostart.
+- `paymasterClientOfferCards`: four selection/exclusion cases.
+- `paymasterClientOfferPreviewUsesExactRpcAndPlainText` and
+  `paymasterClientOfferAutomaticRefresh`: one case each.
+- `paymasterLiveOverview` and `paymasterFundsOperatorPresentation`: four
+  theme/width combinations each, retaining their exposure, geometry and status
+  assertions.
+- `paymasterFinancesAndBackupWorkflow`: one case.
+
+The local evidence folder is
+`build_msvc/paymaster-refresh-check/october-commit-review/`. Reports retain the
+initial failures as well as the successful runs:
+
+- `run-20261012-174808Z`: all 39 Core cases passed; the subsequent minimal-plugin
+  Qt modal test crashed, so the combined receipt correctly says `passed=false`.
+- `run-20261012-175344Z`: the first four Qt functions passed on the Windows
+  platform; the first Overview window failed exposure because the launcher hid
+  it. The other three Overview rows passed. This receipt also remains failed.
+- `run-20261012-175549Z`: the minimal-plugin layout attempt failed all four
+  geometry rows; it is not a successful Windows layout check.
+- `run-20261012-175727Z`: Overview, Funds and Finances/Backup all passed on a
+  temporary, never-activated native Windows desktop. `receipt.json` records
+  source, binary and report hashes. The local `run-selected.py` lists every
+  selected case and rejects unknown selectors.
+
+### Windows GUI test platform and operator follow-up
+
+The local Qt 5.15.10 Windows `QMessageBox::showEvent` calls
+`qt_getWindowsSystemMenu`, which dereferences the platform native interface.
+The minimal plugin does not supply that interface. The observed access
+violation was localized in this Qt function and reproduced with the normal
+test binary; the same restart test passes with `QT_QPA_PLATFORM=windows`.
+This is the previously documented test-platform limitation, not evidence of
+an unsafe provider restart. The minimal plugin also does not reproduce native
+Windows font/theme geometry.
+
+The local `dd-refresh-latency/build-and-check.ps1` now selects the Windows
+platform for `-FullQtTests`. Its `run-qt-desktop.py` wrapper runs native tests on
+a separate Windows desktop without calling `SwitchDesktop`, preserves the
+child exit code and closes the desktop afterward. This permits actual window
+exposure without hiding the first test window or showing test dialogs on the
+operator's desktop. Wrapper syntax and all four Overview rows passed. The
+product's Qt code and test assertions were not changed to accommodate the
+test environment. These helpers are workspace-local, ignored build artifacts.
+
+For a matching normal build and full Qt acceptance, close the two Regtest GUIs
+normally and ensure no other build is running. From `D:\Digibyte\digibyte-fork`,
+with the installed MSVC/SDK/Qt dependencies listed above:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\october-commit-review\run-selected.py --normal --core-only
+if ($LASTEXITCODE -ne 0) { throw 'Commit-review Core selection failed' }
+```
+
+The build/full Qt run takes minutes to tens of minutes; the 39-case Core
+selection takes a few minutes on this workspace. Require successful build and
+native exits, no failed or unexpectedly skipped selected cases, and retained
+receipts. Tests deliberately excluded by the Boost case filter are expected
+and do not mean that the entire Core suite passed. Follow the
+[original-boundary runbook](#original-code-boundary-verification-2026-10-11)
+and [release gate](digidollar-paymaster-release-gate.md) for full Core,
+functional, sanitizer, fuzz and platform acceptance. Those broad runs and
+live-wallet performance acceptance were not repeated in this review.

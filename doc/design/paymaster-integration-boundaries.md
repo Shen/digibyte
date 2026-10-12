@@ -214,3 +214,169 @@ from the node, does not describe every node failure as ongoing loading, and
 retains current oracle-unavailable observations instead of replaying an older
 healthy snapshot when the balance refreshes. These are display/cache repairs;
 they do not change node health, index, minting or confirmation decisions.
+
+## Review of the 10–11 October commits (2026-10-12)
+
+Scope: the 58 commits in `dddcb761af^..c240efa122`, authored on 10 and 11
+October 2026 in Europe/Berlin, affecting 97 files (+11,806/−795 lines).
+The surviving implementation was checked at `85f9b84422`; the worktree was
+clean before this review. Both intermediate changes and subsequent corrections
+matter: the aggregate diff alone would hide the temporary history regression.
+The inventory below records every commit, including documentation-only commits.
+It is a focused correctness/integration review, not independent release approval
+or proof that the entire implementation is free of defects.
+
+### Findings and decisions
+
+1. **The ownership shortcut was inappropriate and is already removed.**
+   `8930d506eb` bypassed private descriptor-key recovery during DD history
+   reads. Faster presentation did not justify changing that ownership path.
+   `0267bda744` restores it. Keep the restoration, the subsequent Paymaster
+   history-worker coordination and the narrowly checked public-key prefilter
+   described above. No additional scan bypass or relaxed synchronization check
+   is justified by this review.
+2. **Legacy policy compatibility depends on the follow-up correction.**
+   The percentage limit is useful only if old approved absolute limits remain
+   readable. `8d6b5b8c9c` provides the explicit legacy-reader path. Current code
+   preserves the budget ledger and treats an absent old percentage approval as
+   absent; it does not silently approve the proposed 1%. Unknown/corrupt records
+   remain blocked. The selected legacy-policy regression passes.
+3. **The financial and persistence additions serve distinct necessary checks.**
+   Integer percentage checks use actual rounded fees and recipient amounts;
+   signing rechecks policy under the wallet lock. Recovery-fee repair requires
+   retained signed evidence, not a timeout or a terminal-looking UI state.
+   Recovery release and evidence pruning share the 240-confirmation boundary.
+   An initially suspected ordinary re-reservation after that boundary was not
+   reproduced: reconciliation subsequently prunes the eligible final session.
+   Do not remove the repair based on that suspicion. Provider budget aging may
+   recover an exact durable old commit; it cannot authorize a new payment.
+4. **Checkpoint protection is deliberately conservative, with explicit limits.**
+   The independent checkpoint advances before DB authority becomes durable;
+   uncertain writes block new authority. Native maintenance has a pending
+   operation fence. Release/adoption bind the reviewed plan and checkpoint
+   revision, reject unresolved work, and preserve liabilities. Ordinary wallets
+   without a provider identity do not acquire a checkpoint. Joint rollback of
+   wallet plus checkpoint and clones using separate checkpoint stores are still
+   outside this mechanism's detection guarantees. Adoption's independent-copy
+   declaration cannot cryptographically establish that independence.
+5. **Channel authentication must retain both enforcement boundaries.**
+   `316053ac89` binds provider identity, network, random challenge and local
+   BIP324 session before payment payloads. `1bd82bc0da` also enforces this in
+   `CConnman::PushMessage`, covering callers outside the usual send queue.
+   A valid proof never replaces local PSBT/manifest/value/signature checks.
+   Reconnection must authenticate again; disconnects cannot revive canceled
+   leases. The selected real-cipher, ordering and malicious-template tests pass.
+6. **The UI improvements are useful but do not establish remote readiness.**
+   A cached announcement can precede the provider view's completed status read
+   or survive a provider stopping. Distinguishing these states is correct;
+   the later history-worker coordination addresses the observed local wait.
+   Fee-rejected diagnostic rows are explicitly ineligible and cannot create
+   selectable radio controls. Restart requires pause acknowledgement, exact
+   save acknowledgement and readback before resume; uncertain replies stop the
+   sequence. These display/flow changes do not grant financial authority.
+7. **Keep the restored verification gates.** Runtime assertions, CodeQL build
+   coverage, unknown-suite rejection and full BIP324 ciphertext verification
+   must not be weakened to accommodate Paymaster. Functional expectation
+   changes were checked against disabled restricted-mode entry points and
+   reconciliation behavior; they do not justify deleting signed-recovery,
+   unrestricted transaction validation or original DD ownership tests.
+
+No additional reproducible product-code defect was established in these paths.
+Accordingly, this review makes no speculative C++ refactoring or financial-state
+change. It does correct the local DD verification helper's full-GUI platform
+selection and documents its reason in the testing guide. The initially failing
+GUI runs remain recorded rather than being counted as successful checks.
+
+Relevant source anchors include `CheckClientServiceFee`,
+`RestoreClientRecoveryFeeReservations`, `PruneFinalSession`,
+`RecoverDurablePaymasterCommit`, checkpoint `TrackCheckpoint`,
+`ReleasePaymasterCapital`, `AdoptPaymasterBackup`, `ValidateChannelProof`,
+`CConnman::PushMessage`, `applyWithProviderRestart` and
+`finishProviderSettingsRestart`. Their wallet/network/GUI callers, serialization
+and targeted tests were reviewed together; transport security was not treated
+as a substitute for independent financial validation.
+
+### Commit inventory
+
+“Retain” means the purpose and checked current paths are justified; it does not
+mean that every platform, concurrency interleaving or failure mode was executed.
+“Evidence” means the documentation/test claim retains its original source,
+binary and execution scope. A historical passing report is not current release
+acceptance. Follow-up references identify dependencies on later corrections.
+
+| Commit | Review disposition |
+|---|---|
+| `dddcb761af` | Retain: cached history is unverified, not falsely pending. |
+| `92ceba90cf` | Retain: operator state, payment models, capital and reviewed restart; selected GUI checks. |
+| `6579f82dec` | Retain: block new restricted sponsorship, preserve old signed/replay data. |
+| `34dc7be2ab` | Retain percentage approval; legacy reads require `8d6b5b8c9c`. |
+| `261bf155f4` | Retain: explicit fee/recovery controls do not release signed exposure on timeout. |
+| `b5e0eb9058` | Retain: evidence-based recovery-fee retention across reorgs. |
+| `6b65afdcc1` | Retain: persistence-failure assertions; not a physical power-loss simulation. |
+| `0d3f621dc2` | Retain: explicit reputation RPC result schema and reconciled functional expectations. |
+| `c342022f93` | Retain: exact durable commit recovery after ledger aging, no renewed spending allowance. |
+| `88c3ff065a` | Retain: bounded unsigned history; protected signed artifacts are excluded from cleanup. |
+| `9478107c93` | Evidence: security/change scope, subject to subsequent findings and corrections. |
+| `f63c5cc753` | Retain: durable restore quarantine before new provider signing. |
+| `4436a3339b` | Retain: GUI explains quarantine without bypassing it. |
+| `25fabdd4ab` | Retain: stale backup and copied-guard regressions. |
+| `f0c713525f` | Evidence: restore guarantees do not detect arbitrary unmarked rollback alone. |
+| `619a825846` | Retain: SQLite engine FULL/commit failures complement mock failures. |
+| `6fd192b42e` | Evidence: distinguishes SQLite checks from unexecuted physical storage tests. |
+| `70c3beecef` | Retain: independent provider checkpoint and scoped DB transaction integration. |
+| `ca436d97d7` | Retain: fence native reserve operations before possible broadcast. |
+| `da587404e7` | Retain: checkpoint explanations expose blocking conditions. |
+| `c3de080383` | Evidence: node-local rollback guarantees, not whole-system rollback immunity. |
+| `6ecfbaed4b` | Retain: exact-plan local capital release, no forced release of unresolved payments. |
+| `e3d3a23a7e` | Retain: explicit restored-capital review and permanent identity retirement. |
+| `3fb8cf6d07` | Retain: restored-capital exit tests preserve guards and reject stale plans. |
+| `b51c00797a` | Evidence: release is local availability, not an outgoing transfer. |
+| `32214dc918` | Retain: regression deliberately demonstrates the matching-pair rollback limit. |
+| `316053ac89` | Retain channel binding together with final-send enforcement `1bd82bc0da`. |
+| `2725df8269` | Evidence: channel binding and rollback limits remain separate guarantees. |
+| `1bd82bc0da` | Retain: final-send authentication check protects internal callers too. |
+| `36dd54f856` | Retain: authenticated malicious providers still fail independent template checks. |
+| `ee81ad5b73` | Evidence: targeted authentication results, not complete privacy/fuzz acceptance. |
+| `7b16d9a434` | Retain: reviewed current-backup adoption with matching independent checkpoint. |
+| `82721ad1d9` | Retain: explicit GUI adoption declaration/preview; no implicit restart. |
+| `cfa45b734f` | Evidence: adoption conditions and limitations are material requirements. |
+| `49f2085946` | Evidence: operator results apply to the recorded backup-adoption build. |
+| `8d6b5b8c9c` | Retain: necessary legacy client-policy compatibility correction. |
+| `0a1bd25b90` | Retain: actionable protection errors and transient block-update presentation. |
+| `4fac6a1601` | Evidence: legacy reader checks preserve previous approved limits and usage. |
+| `a4b7291047` | Retain: independent free slots remain usable without sharing reserved inputs. |
+| `56d7db45aa` | Retain: stable refresh and separate management/customer activity states. |
+| `476d6ea578` | Evidence: reserved-capacity and refresh results, not general throughput proof. |
+| `fe1852ddd8` | Retain: optional fee-rejected diagnostics remain explicitly ineligible. |
+| `6ef9652f71` | Retain: both public models explained; inactive restricted choice removed. |
+| `a32b2e02b1` | Evidence: model/diagnostic checks with recorded source and binary scope. |
+| `51a9b46261` | Retain: separate selectable/excluded cards and exact DD-denominated limits. |
+| `3e9db035cd` | Retain: loading a view differs from starting the service; scheduling follow-up needed. |
+| `5d32d19f80` | Evidence: presentation checks do not establish current remote availability. |
+| `8930d506eb` | Superseded: ownership-recovery bypass was inappropriate; restored by `0267bda744`. |
+| `cfa634d958` | Retain: local preparation delay is not automatically a provider failure. |
+| `ad620d65c4` | Historical diagnosis; shortcut recommendation superseded by boundary review. |
+| `360a7b3f8a` | Historical timing result; speed alone did not validate the ownership shortcut. |
+| `0267bda744` | Retain: full original DD ownership/key recovery restored. |
+| `0b130dc366` | Retain: original runtime assertions restored; outstanding failures stay visible. |
+| `f56cae84a9` | Retain: unmatched Qt suite filters fail instead of yielding false success. |
+| `d3ee3a7b98` | Retain: entire long BIP324 ciphertext is checked against the DigiByte vector. |
+| `3dafa5285a` | Retain: original scan build targets and shared-adapter triggers restored. |
+| `a1def452c9` | Retain: remove redundant disabled categorization; assumevalid remains registered. |
+| `c240efa122` | Evidence: records the corrected integration boundary and outstanding acceptance. |
+
+### Verification and remaining work
+
+The [commit-review test record](../digidollar-paymaster-testing.md#commit-review-of-10-and-11-october-2026)
+records the selected test functions, execution limits and Windows test-platform
+correction. The review used existing isolated binaries and retained source/binary
+hashes; it did not rebuild the entire reviewed tree or replace installed GUIs.
+
+The release gate remains open for fresh normal builds/full suites, the selected
+functional recovery/relay scenarios on matching executables, physical durable
+storage faults, deep reorgs beyond retained evidence, sustained-load/sanitizer/
+fuzz campaigns, a hostile daemon-to-daemon TCP relay and independent review.
+The known original runtime-threshold failures must be investigated without
+relaxing their assertions. Current cold-start/Own-DGB latency acceptance also
+remains an operator task. These are explicit limits of the evidence, not newly
+proven defects or grounds to weaken the existing DigiByte checks.
