@@ -113,6 +113,8 @@ private Q_SLOTS:
     void paymasterClientMutationDialogWalletBinding();
     void paymasterClientReviewCancellation_data();
     void paymasterClientReviewCancellation();
+    void paymasterClientPreparationCancellation_data();
+    void paymasterClientPreparationCancellation();
     void paymasterClientOfferAutomaticRefresh();
     void paymasterClientNewTransferClearsOffers_data();
     void paymasterClientNewTransferClearsOffers();

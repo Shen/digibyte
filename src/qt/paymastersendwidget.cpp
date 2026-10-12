@@ -837,6 +837,8 @@ void PaymasterSendWidget::connectSignals()
             this, &PaymasterSendWidget::cancelPaymasterQuote);
     connect(m_paymasterPrimaryButton, &QPushButton::clicked,
             this, &PaymasterSendWidget::onPaymasterPrimaryAction);
+    connect(m_cancelPreparationButton, &QPushButton::clicked,
+            this, &PaymasterSendWidget::requestPaymasterPreparationCancellation);
     connect(m_paymasterMoreButton, &QPushButton::toggled,
             m_paymasterSecondaryActions, &QFrame::setVisible);
     connect(m_paymasterTechnicalButton, &QPushButton::toggled,
@@ -1386,6 +1388,11 @@ void PaymasterSendWidget::setupFeeSection()
     disclosure_row->addWidget(m_paymasterMoreButton);
     disclosure_row->addWidget(m_paymasterTechnicalButton);
     disclosure_row->addStretch();
+    m_cancelPreparationButton = new QPushButton(DigiDollarSendWidget::tr("Cancel preparation"), m_paymasterSessionFrame);
+    m_cancelPreparationButton->setObjectName("cancelPaymasterPreparation");
+    m_cancelPreparationButton->setToolTip(DigiDollarSendWidget::tr(
+        "Stop requesting the offer. Your funds remain protected until Core confirms safe unsigned cancellation."));
+    disclosure_row->addWidget(m_cancelPreparationButton);
     session_layout->addLayout(disclosure_row, 6, 0, 1, 2);
 
     m_paymasterSecondaryActions = new QFrame(m_paymasterSessionFrame);
@@ -1575,6 +1582,9 @@ void PaymasterSendWidget::updateHistoryWaitState()
 
 QString PaymasterSendWidget::friendlyPaymasterSessionStatus() const
 {
+    if (m_paymasterPreparationCancelRequested) {
+        return DigiDollarSendWidget::tr("Cancellation requested. Waiting for the current wallet operation to finish, then checking safe unsigned closure. No payment will be approved by this preparation.");
+    }
     if (m_paymasterBusy) {
         return DigiDollarSendWidget::tr("Core is securely checking the current Paymaster transfer. Please wait.");
     }
@@ -1684,6 +1694,9 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
     m_form.setPaymasterFormFocus(focus);
 
     updateOfferCheckControls();
+    m_cancelPreparationButton->setVisible(focus &&
+        (canCancelPaymasterPreparation() || m_paymasterPreparationCancelRequested));
+    m_cancelPreparationButton->setEnabled(canCancelPaymasterPreparation());
     if (!focus) return;
 
     m_paymasterTransferValue->setText(
@@ -1834,8 +1847,11 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
         m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Preparing payment…"));
     }
     if (live_recovery) m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Preparing recovery…"));
+    if (m_paymasterPreparationCancelRequested) {
+        m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Canceling preparation…"));
+    }
     m_paymasterPrimaryButton->setEnabled(
-        !m_paymasterBusy && !live_preparation && !live_recovery && primary_allowed &&
+        !m_paymasterBusy && !m_paymasterPreparationCancelRequested && !live_preparation && !live_recovery && primary_allowed &&
         (!action_needs_wallet || m_walletModel));
     applyPaymasterPrivacy();
 }
@@ -3399,6 +3415,7 @@ void PaymasterSendWidget::executePaymasterTransfer(
     QPointer<PaymasterSendWidget> guard{this};
     m_paymasterActiveSendParams = buildPaymasterSendParams(address, amount_cents);
     m_paymasterSendTemplate = m_paymasterActiveSendParams;
+    updatePaymasterFocusMode();
     // Local wallet/chain lock waits before the first reply are not provider
     // preparation time. Core independently bounds transport and quote expiry.
     m_paymasterActiveSendStarted.invalidate();
@@ -3410,10 +3427,13 @@ void PaymasterSendWidget::executePaymasterTransfer(
     UniValue initial_options = m_paymasterActiveSendParams[6];
     if (retry_transport) initial_options.pushKV("retry_transport", true);
     initial_params.push_back(std::move(initial_options));
+    const uint64_t send_generation = ++m_paymasterSendGeneration;
+    const QString request_id = m_paymasterRequestId;
     executePaymasterRpcAsync("senddigidollar", std::move(initial_params),
-                             [guard, address, amount_cents](UniValue result, QString error) {
-                                 if (guard) {
-                                     if (error == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED")) {
+                             [guard, address, amount_cents, send_generation, request_id](UniValue result, QString error) {
+                                 if (guard && guard->m_paymasterSendGeneration == send_generation && guard->m_paymasterRequestId == request_id) {
+                                     ++guard->m_paymasterSendGeneration;
+                                     if (error == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED") && !guard->m_paymasterPreparationCancelRequested) {
                                          guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
                                          guard->setPaymasterBusy(false);
                                          return;
@@ -3431,6 +3451,15 @@ void PaymasterSendWidget::executePaymasterTransfer(
 void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QString& error,
                                                  const QString& address, CAmount amount_cents)
 {
+    if (m_paymasterPreparationCancelRequested) {
+        // The prepare-only RPC has now returned. Remember any durable state,
+        // but never review, unlock, sign or advance its late offer. A fresh Core
+        // read must resolve even a failed/lost first reply before closing.
+        if (error.isEmpty()) updatePaymasterSessionView(result);
+        setPaymasterBusy(false);
+        finishPaymasterPreparationCancellation();
+        return;
+    }
     if (!error.isEmpty()) {
         if (error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_REQUIRED")) ||
             error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH")) ||
@@ -4209,9 +4238,13 @@ void PaymasterSendWidget::pollPaymasterSession()
         const QString address = QString::fromStdString(params[0].get_str());
         const CAmount amount_cents = params[1].getInt<int64_t>();
         setPaymasterBusy(true);
+        const uint64_t send_generation = ++m_paymasterSendGeneration;
+        const QString request_id = m_paymasterRequestId;
         executePaymasterRpcAsync("senddigidollar", params,
-                                 [guard = QPointer<PaymasterSendWidget>(this), address, amount_cents](UniValue result, QString error) {
-                                     if (guard) guard->handlePaymasterResult(result, error, address, amount_cents);
+                                 [guard = QPointer<PaymasterSendWidget>(this), address, amount_cents, send_generation, request_id](UniValue result, QString error) {
+                                     if (!guard || guard->m_paymasterSendGeneration != send_generation || guard->m_paymasterRequestId != request_id) return;
+                                     ++guard->m_paymasterSendGeneration;
+                                     guard->handlePaymasterResult(result, error, address, amount_cents);
                                  });
         return;
     }
@@ -4587,6 +4620,42 @@ void PaymasterSendWidget::abandonUnsignedPaymasterSession()
     cancelUnsignedPaymasterSession(/*confirm=*/true);
 }
 
+bool PaymasterSendWidget::canCancelPaymasterPreparation() const
+{
+    // Only an explicitly started, strictly prepare-only Paymaster call can be
+    // interrupted here. Ordinary DGB-funded sends and approved/signed payments
+    // retain their existing workflow. Core still decides whether funds unlock.
+    if (!m_walletModel || m_privacy || m_paymasterPreparationCancelRequested ||
+        m_paymasterRequestId.isEmpty() || m_paymasterRecoveryActive ||
+        !m_paymasterAuthorizationCommitment.isEmpty() ||
+        (!m_paymasterArtifact.isEmpty() && m_paymasterArtifact != QLatin1String("none")) ||
+        IsTerminalPaymasterState(m_paymasterSessionState) ||
+        !m_paymasterActiveSendParams.isArray() || m_paymasterActiveSendParams.size() != 7) return false;
+    const UniValue& options = m_paymasterActiveSendParams[6];
+    return options.find_value("prepare_only").isTrue() &&
+        options.find_value("authorization_commitment").isNull() &&
+        options.find_value("fee_mode").isStr() && options.find_value("fee_mode").get_str() == "paymaster" &&
+        options.find_value("request_id").isStr() && options.find_value("request_id").get_str() == m_paymasterRequestId.toStdString();
+}
+
+void PaymasterSendWidget::requestPaymasterPreparationCancellation()
+{
+    if (!canCancelPaymasterPreparation()) return;
+    m_paymasterPreparationCancelRequested = true;
+    stopPaymasterPolling();
+    updatePaymasterFocusMode();
+    // Do not race a still-running first RPC: a premature NOT_FOUND read could
+    // release compose focus before that RPC creates its durable reservation.
+    if (!m_paymasterBusy) finishPaymasterPreparationCancellation();
+}
+
+void PaymasterSendWidget::finishPaymasterPreparationCancellation()
+{
+    if (!m_paymasterPreparationCancelRequested || m_paymasterBusy) return;
+    m_paymasterPreparationCancelRequested = false;
+    closeUnusablePaymasterOffer(DigiDollarSendWidget::tr("You requested cancellation of payment preparation."));
+}
+
 void PaymasterSendWidget::cancelUnsignedPaymasterSession(bool confirm)
 {
     if (!m_walletModel || m_paymasterBusy || m_paymasterRequestId.isEmpty() ||
@@ -4763,6 +4832,7 @@ void PaymasterSendWidget::clearUnsignedPaymasterSession()
 
 void PaymasterSendWidget::clearClosedPaymasterSession()
 {
+    m_paymasterPreparationCancelRequested = false;
     m_paymasterClosureReason.clear();
     stopPaymasterPolling();
     m_paymasterSendTemplate = UniValue{};
@@ -5714,6 +5784,7 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         // state. This is the Paymaster-local operation token across close and
         // wallet switch boundaries.
         ++m_paymasterWalletGeneration;
+        m_paymasterPreparationCancelRequested = false;
         m_paymasterClosureReason.clear();
         setPaymasterNotice(QString{});
         m_sessionDiscoveryReady = false;

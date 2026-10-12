@@ -3706,7 +3706,7 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     if (outcome == QStringLiteral("empty_preview")) {
         QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
         QCOMPARE(send_widget.findChild<QTableWidget*>("paymasterOffers")->rowCount(), 0);
-        QVERIFY(send_widget.findChild<QLabel*>("paymasterOffersStatus")->text().contains("No public offer"));
+        QVERIFY(send_widget.findChild<QLabel*>("paymasterOffersStatus")->text().contains("No matching public Paymaster offer"));
         auto* prepare = send_widget.findChild<QPushButton*>("sendButton");
         QVERIFY(!prepare->isEnabled());
         QVERIFY(prepare->toolTip().contains("Wait for a current Paymaster offer"));
@@ -7176,13 +7176,16 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
 void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip_data()
 {
     QTest::addColumn<bool>("lost_reply");
-    QTest::newRow("reopened") << false;
-    QTest::newRow("lost-first-reply") << true;
+    QTest::addColumn<bool>("cancel_preparation");
+    QTest::newRow("reopened") << false << false;
+    QTest::newRow("lost-first-reply") << true << false;
+    QTest::newRow("cancel-preparation-before-first-reply") << true << true;
 }
 
 void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
 {
     QFETCH(bool, lost_reply);
+    QFETCH(bool, cancel_preparation);
     TestChain100Setup test;
     auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
     test.m_node.wallet_loader = loader.get();
@@ -7220,6 +7223,7 @@ void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
                                           DigiDollar::Paymaster::FeeMode::PAYMASTER, GetTime(), session, error) != wallet::CreatePaymasterSessionResult::CREATED) {
                 throw std::runtime_error(error);
             }
+            if (cancel_preparation) client->requestPaymasterPreparationCancellation();
             throw std::runtime_error("reply lost after durable request creation");
         }
         if (command == "resolvepaymastersession") actions.push_back(QString::fromStdString(params[1].get_str()));
@@ -13147,6 +13151,209 @@ void PaymasterWidgetTests::paymasterWaitsForFullHistory()
     QCOMPARE(history_replies, unload_scan_model ? 0 : 2);
     QVERIFY(history_ok);
     QVERIFY(client->m_paymasterRequestId.isEmpty());
+}
+
+void PaymasterWidgetTests::paymasterClientPreparationCancellation_data()
+{
+    QTest::addColumn<QString>("outcome");
+    for (const char* outcome : {"first_quote", "between_polls", "during_poll", "lost_first_reply", "no_session", "malformed_first",
+                                "lost_cancel_reply", "malformed_cancel_reply", "refused", "signed_elsewhere", "status_error",
+                                "malformed_status", "known_session_missing", "unlock_canceled", "wallet_switch", "privacy", "own_dgb", "approved"}) {
+        QTest::newRow(outcome) << QString::fromLatin1(outcome);
+    }
+}
+
+void PaymasterWidgetTests::paymasterClientPreparationCancellation()
+{
+    QFETCH(QString, outcome);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-prepare-cancel");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    auto* cancel = form.findChild<QPushButton*>("cancelPaymasterPreparation");
+    auto* address = form.findChild<QLineEdit*>("addressEdit");
+    auto* amount = form.findChild<QLineEdit*>("amountEdit");
+    QVERIFY(cancel && address && amount);
+    const QString recipient{"RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"};
+    QString request_id;
+    WalletModel::RpcCallback pending_send;
+    WalletModel::RpcCallback pending_cancel;
+    QStringList actions;
+    int sends{0};
+    int dialogs{0};
+    bool closed{false};
+    bool rpc_valid{true};
+    const auto snapshot = [&] {
+        auto result = closed ? PaymasterSessionView("FAILED", "none", "REJECTED") :
+            outcome == "signed_elsewhere" ? PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED") :
+            PaymasterSessionView("AWAITING_USER_SIGNATURE", "none", "QUOTED");
+        if (closed) result.pushKV("requires_attention", false);
+        auto session = result.find_value("session");
+        session.pushKV("request_id", request_id.toStdString());
+        result.pushKV("session", session);
+        return result;
+    };
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&,
+                                        QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        ++dialogs;
+        return QMessageBox::Yes; // A late review must never reach this handler.
+    });
+    client->setPaymasterAsyncRpcExecutorForTesting([&](const std::string& command, const UniValue& params, WalletModel::RpcCallback callback) {
+        if (command == "getpaymasterclientsafetystatus") { callback(PaymasterClientSafetyStatus(), {}); return; }
+        if (command == "listdigidollarsendsessions") { callback(EmptyPaymasterSessionList(), {}); return; }
+        if (command == "getpaymasteroffers") { callback(PaymasterPublicOffers(), {}); return; }
+        if (command == "senddigidollar") {
+            ++sends;
+            rpc_valid &= params[6].find_value("prepare_only").isTrue() && params[6].find_value("authorization_commitment").isNull();
+            request_id = QString::fromStdString(params[6].find_value("request_id").get_str());
+            pending_send = std::move(callback);
+            return;
+        }
+        if (command != "resolvepaymastersession" || params[0].find_value("request_id").get_str() != request_id.toStdString()) {
+            rpc_valid = false;
+            callback({}, QStringLiteral("Unexpected RPC"));
+            return;
+        }
+        const QString action = QString::fromStdString(params[1].get_str());
+        actions.push_back(action);
+        if (action == "abandon_unsigned") {
+            pending_cancel = std::move(callback);
+        } else if (action != "refresh") {
+            rpc_valid = false;
+            callback({}, QStringLiteral("Unexpected mutation"));
+        } else if (outcome == "no_session" || outcome == "known_session_missing") {
+            callback({}, QStringLiteral("PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found"));
+        } else if (outcome == "status_error") {
+            callback({}, QStringLiteral("Status unavailable"));
+        } else if (outcome == "malformed_status") {
+            callback(UniValue{UniValue::VOBJ}, {});
+        } else {
+            callback(snapshot(), {});
+        }
+    });
+    form.setWalletModel(gui.walletModel.get());
+    form.findChild<QRadioButton*>("feeFundingPaymaster")->setChecked(true);
+    address->setText(recipient);
+    amount->setText("3.25");
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    client->refreshPaymasterOffers();
+    QVERIFY(client->hasCurrentPaymasterOffer());
+    client->send(recipient, 325);
+    QVERIFY(pending_send);
+    QVERIFY(client->isBusy());
+    QVERIFY(!cancel->isHidden());
+    QVERIFY(cancel->isEnabled());
+    QVERIFY(address->isReadOnly());
+
+    const auto prepared = [&] {
+        auto result = PaymasterAuthorizationResult(true, std::string(64, 'c'), "AWAITING_USER_SIGNATURE", "none");
+        result.pushKV("request_id", request_id.toStdString());
+        return result;
+    };
+    if (outcome == "own_dgb" || outcome == "approved") {
+        // The control cannot turn an ordinary spend or prior approval into an
+        // unsigned cancellation, even if invoked programmatically.
+        if (outcome == "approved") client->m_paymasterAuthorizationCommitment = QString(64, 'c');
+        else {
+            UniValue params{UniValue::VARR};
+            for (size_t i = 0; i < 6; ++i) params.push_back(client->m_paymasterActiveSendParams[i]);
+            auto options = client->m_paymasterActiveSendParams[6];
+            options.pushKV("fee_mode", "dgb");
+            params.push_back(options);
+            client->m_paymasterActiveSendParams = params;
+        }
+        client->updatePaymasterFocusMode();
+        QVERIFY(cancel->isHidden());
+        client->requestPaymasterPreparationCancellation();
+        QVERIFY(!client->m_paymasterPreparationCancelRequested);
+        QVERIFY(actions.isEmpty());
+        form.setWalletModel(nullptr);
+        pending_send(prepared(), {});
+        QCOMPARE(dialogs, 0);
+        return;
+    }
+    const bool between_polls = outcome == "between_polls" || outcome == "known_session_missing";
+    if (between_polls || outcome == "during_poll") {
+        auto result = PaymasterAuthorizationResult(false, "", "CREATED", "none");
+        result.pushKV("request_id", request_id.toStdString());
+        pending_send(result, {});
+        QVERIFY(!client->isBusy());
+        client->m_paymasterPollTimer->stop();
+        QVERIFY(cancel->isEnabled());
+        if (outcome == "during_poll") {
+            client->pollPaymasterSession();
+            QVERIFY(client->isBusy());
+            QCOMPARE(sends, 2);
+        }
+    }
+    cancel->click();
+    cancel->click(); // Repeated clicks must not enqueue another mutation.
+    QVERIFY(!client->m_paymasterPollTimer->isActive());
+    QVERIFY(client->m_paymasterActiveSendParams.isNull());
+    QVERIFY(address->isReadOnly());
+    if (!between_polls) {
+        QVERIFY(actions.isEmpty()); // In particular, no premature NOT_FOUND read.
+        QVERIFY(client->m_paymasterPreparationCancelRequested);
+        QVERIFY(!cancel->isEnabled());
+        QVERIFY(form.findChild<QLabel*>("paymasterSessionNextStep")->text().contains("Cancellation requested"));
+        if (outcome == "wallet_switch") {
+            form.setWalletModel(nullptr);
+            form.setWalletModel(gui.walletModel.get());
+        }
+        if (outcome == "privacy") form.setPrivacy(true);
+        const bool failed_reply = outcome == "lost_first_reply" || outcome == "no_session";
+        pending_send(outcome == "malformed_first" ? UniValue{UniValue::VOBJ} : prepared(),
+                     failed_reply ? QStringLiteral("Reply lost") :
+                     outcome == "unlock_canceled" ? QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED") : QString{});
+    }
+    const int sends_at_cancel = sends;
+    const QStringList actions_before_late_reply = actions;
+    pending_send(prepared(), {}); // A duplicate old reply cannot resurrect review.
+    QCOMPARE(actions, actions_before_late_reply);
+    QCOMPARE(dialogs, 0);
+    if (pending_cancel) {
+        QVERIFY(address->isReadOnly());
+        QVERIFY(client->isBusy());
+        closed = outcome != "refused";
+        pending_cancel(outcome == "malformed_cancel_reply" ? UniValue{} : snapshot(),
+                       outcome == "lost_cancel_reply" || outcome == "refused" ? QStringLiteral("Cancellation reply unavailable") : QString{});
+    }
+    QVERIFY(rpc_valid);
+    QCOMPARE(dialogs, 0);
+    QCOMPARE(sends, sends_at_cancel);
+    QVERIFY(!client->isBusy());
+    if (outcome == "wallet_switch") {
+        QVERIFY(actions.isEmpty());
+        QVERIFY(client->m_paymasterRequestId.isEmpty());
+        QVERIFY(!client->m_paymasterPreparationCancelRequested);
+        return;
+    }
+    const bool protected_outcome = outcome == "signed_elsewhere" || outcome == "status_error" ||
+        outcome == "malformed_status" || outcome == "known_session_missing" || outcome == "refused" || outcome == "privacy";
+    if (protected_outcome) {
+        QCOMPARE(client->m_paymasterRequestId, request_id);
+        QVERIFY(address->isReadOnly());
+        QVERIFY(client->m_paymasterActiveSendParams.isNull());
+        QVERIFY(!client->m_paymasterPollTimer->isActive());
+        QCOMPARE(actions.count("abandon_unsigned"), outcome == "refused" ? 1 : 0);
+    } else {
+        QVERIFY(client->m_paymasterRequestId.isEmpty());
+        QVERIFY(!address->isReadOnly());
+        QCOMPARE(address->text(), recipient);
+        QCOMPARE(amount->text(), QStringLiteral("3.25"));
+        QCOMPARE(actions.count("abandon_unsigned"), outcome == "no_session" ? 0 : 1);
+        const QString notice = form.findChild<QLabel*>("paymasterTransferNotice")->text();
+        QVERIFY(notice.contains(outcome == "no_session" ? "No Paymaster transfer was created" : "No payment was sent"));
+        if (closed) QVERIFY(notice.contains("provider may keep its offer reservation until expiry"));
+    }
+    pending_send(prepared(), {});
+    QCOMPARE(sends, sends_at_cancel);
+    QCOMPARE(dialogs, 0);
 }
 
 void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()

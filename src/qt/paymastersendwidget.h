@@ -163,6 +163,9 @@ private:
     Q_SLOT void fallbackPaymasterSession();
     Q_SLOT void recoverPaymasterSessionToSelf();
     Q_SLOT void abandonUnsignedPaymasterSession();
+    bool canCancelPaymasterPreparation() const;
+    void requestPaymasterPreparationCancellation();
+    void finishPaymasterPreparationCancellation();
     void cancelUnsignedPaymasterSession(bool confirm);
     void clearUnsignedPaymasterSession();
     /** Clear presentation only after Core confirms absence or unsigned closure. */
@@ -264,6 +267,7 @@ private:
     QPushButton* m_cancelQuoteButton{nullptr};
     QLabel* m_paymasterNextStepValue{nullptr};
     QPushButton* m_paymasterPrimaryButton{nullptr};
+    QPushButton* m_cancelPreparationButton{nullptr};
     QPushButton* m_paymasterMoreButton{nullptr};
     QPushButton* m_paymasterTechnicalButton{nullptr};
     QFrame* m_paymasterSecondaryActions{nullptr};
@@ -300,10 +304,12 @@ private:
     qint64 m_paymasterPreviewTotalCents{-1};
     uint64_t m_paymasterOfferPreviewGeneration{0};
     uint64_t m_paymasterWalletGeneration{0};
+    uint64_t m_paymasterSendGeneration{0};
     uint64_t m_clientSafetyRefreshGeneration{0};
     bool m_sendAllSpendableDD{false};
     qint64 m_paymasterRecoveryMaximumServiceFeeCents{0};
     bool m_paymasterBusy{false};
+    bool m_paymasterPreparationCancelRequested{false};
     bool m_paymasterSessionPersisted{false};
     bool m_paymasterUnsignedClosed{false};
     bool m_paymasterOfferReadyForReview{false};
