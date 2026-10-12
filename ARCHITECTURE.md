@@ -1609,6 +1609,10 @@ Financial journals retain ownership across socket failure.
 Request admission limits defer individual capacity/quote requests in the fair
 inbox without imposing a provider-wide drain. Client unsigned cancellation is
 local; provider reservations retain their existing expiry and signing guards.
+Qt can request cancellation during unsigned preparation, including an in-flight
+first reply. It stops local continuation, waits for that RPC to return, then
+uses fresh Core capabilities and durable read-back before releasing the form.
+It neither interrupts canonical wallet checks nor unlocks inputs itself.
 See [capacity and migration](doc/digidollar-paymaster-connection-capacity.md)
 for total connection/FD budgets, source map and verification limits.
 

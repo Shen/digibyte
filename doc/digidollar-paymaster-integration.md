@@ -56,6 +56,28 @@ merely because its provider is offline. Qt clears only a confirmed uncreated
 local attempt or an authoritatively closed unsigned request, preserving the
 recipient and amount for the user's next decision.
 
+### Canceling preparation in Qt
+
+The current-transfer panel offers **Cancel preparation** while a locally started
+Paymaster request is still prepare-only. A click stops automatic continuation
+immediately. If a wallet RPC is running, the panel acknowledges the request and
+waits for that call to return before checking the same UUID. Checking absence
+before the first call finishes would race durable session creation.
+
+A late offer cannot open payment approval. Qt then uses the existing fresh
+Core capability check, at most one `abandon_unsigned` call and durable read-back.
+Lost or malformed replies do not release the form on their own. Unknown status,
+an unexpectedly missing known session or a signature created elsewhere keeps
+the transfer protected for explicit status/recovery actions. Closing/switching
+wallets invalidates callbacks; cancellation is not assumed to have completed.
+
+After confirmed closure, recipient and amount remain editable. The provider
+may retain its offer reservation until expiry; local unsigned cancellation
+does not send a payment or charge a service fee. An already approved/signed
+payment and an ordinary own-DGB send do not use this preparation control.
+Canonical history checks, Core signature rules and reservation guards are
+unchanged. The button does not forcibly interrupt a wallet operation or scan.
+
 ## Explicit transport retry
 
 `senddigidollar` accepts the optional boolean `retry_transport` in its Paymaster

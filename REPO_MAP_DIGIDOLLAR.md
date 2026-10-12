@@ -1605,6 +1605,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   Read-back resolves lost replies; a persistent inline notice explains closure
   or protected recovery without duplicate error modals. Session-database read
   failures explain the protected state inline and reconcile read-only.
+- The main-view `Cancel preparation` control can stop a live prepare-only
+  Paymaster request before its first reply or between asynchronous phases.
+  An in-flight RPC finishes before status lookup/cancellation; late send replies
+  cannot reopen review. Only Core-confirmed absence or unsigned closure releases
+  composition. Ordinary DGB-funded sends and approved payments are excluded.
 - Explicit Paymaster mode starts through Send payment, without an initial
   confirmation modal. Automatic with own DGB retains direct-spend confirmation. The
   queued-quote part of AWAITING_USER_SIGNATURE continues automatically and

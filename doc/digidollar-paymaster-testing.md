@@ -4744,3 +4744,72 @@ and do not mean that the entire Core suite passed. Follow the
 and [release gate](digidollar-paymaster-release-gate.md) for full Core,
 functional, sanitizer, fuzz and platform acceptance. Those broad runs and
 live-wallet performance acceptance were not repeated in this review.
+
+## Canceling active unsigned preparation (2026-10-12)
+
+The Paymaster-only Qt change adds a main-panel cancellation request while the
+initial prepare-only RPC or a subsequent preparation phase is active. It waits
+for an in-flight RPC to return before status lookup, uses the existing Core
+unsigned-cancellation capability and reads back the durable result. Repeated
+or superseded send replies cannot re-enter review/signing. Canonical DD history,
+ordinary own-DGB sends, Core store rules and transport deadlines are unchanged.
+
+Focused acceptance comprises:
+
+| Qt function | Data cases | Coverage |
+|---|---:|---|
+| `paymasterClientPreparationCancellation` | 18 | First/late exact offer, between polls/during a poll, lost or malformed first reply, authoritative absence, unexpectedly missing known session, lost/malformed cancellation response, refusal, signature created elsewhere, bad status, unlock cancellation, wallet switch, privacy and exclusion of own-DGB/prior approval |
+| `paymasterClientCoreCancellationRoundTrip` | 3 | Existing reopened/lost-first-reply cases plus explicit cancellation before the first reply, using real Core RPC/store operations in disposable Regtest wallets |
+| `paymasterClientReviewCancellation` | 20 | Existing review cancellation, expiry/countdown, protected state and lost-reply behavior |
+| `paymasterClientLiveSendProgressesAcrossAsyncPhases` | 16 | Existing unsigned and authorized continuations, errors and wallet/privacy binding |
+| `paymasterClientDelayedCallbackIgnoresWalletClose` | 1 | Old-wallet callbacks cannot update the current view |
+| `paymasterPreparationClockStartsWithFirstReply` | 1 | Local history/lock waits do not consume the unsigned transport-preparation budget |
+
+The narrow Windows build replaces five Qt objects in a separate test executable
+using existing Release libraries; it does not replace an installed GUI. Sources,
+binary and reports are hashed by the workspace-local helper under
+`build_msvc/paymaster-refresh-check/prepare-cancel/`. Tests use native Windows Qt
+on a separate, never-activated desktop. No live wallet is canceled or signed.
+
+The existing `empty_preview` continuation case initially failed because it
+still expected `No public offer`; the unchanged normal executable reproduced
+the same failure. Commit `56d7db45aa` had already changed the display to
+`No matching public Paymaster offer currently listed`. Only that stale test
+expectation was corrected; the empty list, disabled send and zero preparation
+calls remain asserted. Initial failures and the corrected rerun are retained.
+
+Local focused verification passed **59 distinct data cases** across
+`checks-20261012-195931Z` and `checks-20261012-200657Z` in that directory. The
+final run repeats all 18 preparation-cancellation cases (including the actual
+`dgb` RPC mode), the corrected `empty_preview` case and the wallet-close/history
+clock checks. Product source hashes are identical across both runs; only test
+fixture values changed. `verification.json` records the per-case union and
+receipts. Final isolated Qt SHA256:
+`4e6ae3a2949d538d05b352551ee7feb13c76731235e7b937eb34a7bc795851b0`.
+`git diff --check` passed. This is a focused result, not a completed full suite.
+
+Relevant guidance: root/source `AGENTS.md`, `CLAUDE.md`, contribution and map
+guides, Qt/developer notes (no blocking GUI work), formatting/translation rules,
+test READMEs and the Paymaster integration boundaries. Full builds/suites remain
+operator tasks under the workspace instructions.
+
+For normal-build/full-Qt acceptance, close both Regtest GUIs and ensure no other
+build is running. From `D:\Digibyte\digibyte-fork`, with the installed MSVC
+14.43.34808, Windows SDK 10.0.26100.0 and Qt `D:\Qt51510\install`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\prepare-cancel\run-selected.py --normal
+if ($LASTEXITCODE -ne 0) { throw 'Preparation cancellation checks failed' }
+```
+
+The build/full suite takes minutes to tens of minutes; the focused selection
+takes several minutes. Require exit 0, the exact case counts above, no failures
+or skipped selected cases, and unchanged source hashes. After that, manually
+prepare a Regtest offer, cancel during preparation, and verify that no approval
+dialog appears, the recipient/amount remain and editing resumes only after
+confirmed closure. A provider-side reservation may remain until expiry. A
+request made during a local scan waits for that operation; it does not abort
+the scan. Normal-build/full-suite and this manual acceptance remain operator
+tasks; isolated GUI tests do not establish network/load acceptance.

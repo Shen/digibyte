@@ -1,5 +1,16 @@
 # Paymaster integration release notes
 
+## Cancel unsigned preparation from the send panel (2026-10-12)
+
+The Paymaster transfer panel now offers **Cancel preparation** before payment
+approval, including while the first wallet reply is outstanding. Cancellation
+stops further preparation and waits for the current RPC before Core checks and
+closes the unsigned request. Late replies cannot reopen an approval dialog.
+Recipient and amount remain available after confirmed closure; unknown or
+signed outcomes retain their protections. Provider reservations may remain
+until expiry. This changes Paymaster GUI coordination only; original DD
+history checks, ordinary own-DGB sends and Core cancellation rules remain.
+
 ## Paymaster waits for the original DD history read (2026-10-12)
 
 New GUI preparation now waits before request creation while canonical DD
