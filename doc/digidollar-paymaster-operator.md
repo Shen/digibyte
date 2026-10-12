@@ -240,15 +240,31 @@ changing the amount, fee/privacy inputs or wallet requires a new selection.
 An expired or unavailable selected offer is reported rather than silently
 replaced. Offer lists remain local previews, not reachability guarantees.
 
-The **Paymaster offers** area separates **Selectable · within your fee limits**
-from **Excluded · above your fee limits**, with the count in each section.
+The **Paymaster offers** area separates **Selectable · within your balance and
+fee limits** from **Unavailable · balance or fee limits**, with counts for both.
 Excluded offers appear as muted comparison cards without a selection button.
 They show the same provider, payment model, recipient amount, rounded service
 fee and total, plus the percentage or current payment/day allowance that blocks
-selection. Both models of one provider can appear in different sections. All
+selection. The same section includes offers whose total exceeds the available
+DD or would leave positive change below the minimum. For example, 16.43 DD
+cannot fund a 16.43-DD recipient plus a 0.09-DD fee: that offer is unavailable,
+not recommended. Deducting the fee requires a fresh preview with a lower
+recipient amount. Both models of one provider can appear in different sections. All
 entries returned by the bounded amount/privacy/announcement preview are shown;
 this is not a list of every provider on the network. Exclusions alone never
-enable Send payment. Editing approved limits still requires an explicit save;
+enable Send payment. Balance changes update this classification immediately;
+a manual choice that becomes unavailable requires another selection. The
+funding warning appears by the amount, without repetition in the cost summary.
+Automatic with spendable own DGB keeps its direct path and explains the
+conditional fallback. Without own DGB it shows the selected Paymaster costs,
+just like explicit Paymaster mode. General fee ceilings in both the summary and
+first confirmation use the lowest current transfer, daily and percentage limit;
+fee deduction calculates the percentage against the reduced recipient amount.
+A changed remaining daily allowance invalidates the old directory preview.
+While service-fee protection is being reread, or if that read fails, the old
+ready indication is withdrawn and Send remains blocked until status is valid.
+No green availability claim is made when all
+listed offers are excluded. Editing approved limits still requires an explicit save;
 the client dialog displays **DD**, with exact 0.01-DD increments internally.
 
 Failed unsigned provider contacts and authenticated provider rejections populate

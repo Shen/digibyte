@@ -1583,8 +1583,8 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   A prominent public-offer headline/checkmark and rotating pending-check symbol
   distinguish outcomes from secondary timing and preparation text. The animation
   pauses while hidden or in privacy mode, stops on completion or wallet changes,
-  and never sends RPCs. The checkmark confirms discovery, not transport,
-  fee-limit or privacy eligibility. New explicit-Paymaster requests require a
+  and never sends RPCs. The checkmark requires a selected, funded preview and
+  completed client readiness checks; it does not authenticate provider readiness. New explicit-Paymaster requests require a
   current nonempty preview; invalidation immediately disables preparation.
   Automatic without cached spendable DGB uses the same gate. Send payment first
   prepares an exact Paymaster offer; own DGB retains direct-spend confirmation.
@@ -1596,8 +1596,17 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   Public-offer polling and manual refresh wait for known spendable DD covering
   the entered amount. Unknown, failed and insufficient balances have neutral
   status text; stale in-flight previews cannot restore cards after balance loss.
-  The timer resumes when funded. Actual offer fees remain checked separately,
-  allowing sponsored offers and fee deduction without requiring the fee ceiling.
+  The timer resumes when funded. `updateOfferEligibility` partitions validated
+  announcements by fee limits and `offerFundingProblem` (actual total and minimum
+  change), allowing sponsored offers and deduction without requiring the fee
+  ceiling. Unfundable offers remain non-selectable comparison cards. Balance
+  changes immediately update selection, counts, table, status and send gating.
+  A lost manual selection cannot silently bind another provider. Automatic with
+  own DGB keeps its direct path; without own DGB its summary uses the selected
+  Paymaster preview. `effectiveServiceFeeCap` shares the transfer/day/percentage
+  ceiling with the first confirmation, including reduced-recipient deduction.
+  `paymasterClientOfferFundingConsistency` and `paymasterClientFeeCeilingConsistency`
+  test these modes and changing daily allowance.
   Monetary labels show DD without repeating integer-cent values. The editable
   client ceiling uses DD with a read-only percentage comparison. Offer rows and
   exact approval show the actual fee's effective recipient-based percentage;

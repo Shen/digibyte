@@ -68,12 +68,21 @@ first reply is reconciled by UUID. Explicitly initiated alternative recovery
 also advances its bound preparation and accepted signature through bounded
 polling; restored sessions remain read-only. These changes add no durable journal.
 
-The Paymaster compose gate compares the selected current public offer's total
-with the cached DD balance, including fee deduction. It adds no wallet reads or
+The Paymaster compose gate and offer list compare each current public offer's
+total with the cached DD balance, including fee deduction. It adds no wallet reads or
 authority and preserves Automatic's own-DGB path. A positive remainder below
 the network's minimum DD output also blocks preparation: no separate valid
-input could remain unspent within that remainder. The amount hint, cost summary
-and send gate use the same Paymaster check. Errors from a safely closed
+input could remain unspent within that remainder. The amount hint and send gate use the same Paymaster check. Unfundable offers
+remain muted comparison cards, outside the selectable/recommended set. Balance
+changes reclassify the validated announcements without network work or reviving
+expired previews. A lost manual choice requires another explicit selection.
+The funding warning appears once, near the amount; the cost summary shows the
+selected preview in Paymaster mode and Automatic without spendable own DGB.
+The shared display ceiling includes per-transfer, remaining daily and percentage
+bounds, solving the reduced-recipient percentage for fee deduction. A changed
+remaining daily allowance invalidates previews evaluated against the old budget.
+Pending or failed safety-status reads immediately withdraw the old green
+availability indication and Send readiness until a valid status returns. Errors from a safely closed
 or uncreated attempt clear when its amount or fee settings change; active-session
 diagnostics remain protected. Core still validates inputs and minimum change.
 

@@ -1,5 +1,19 @@
 # Paymaster integration release notes
 
+## Consistent send-form offer availability (2026-10-13)
+
+Offer cards, counts, recommendation and the Send gate now apply the same
+necessary DD funding check, including the actual fee and minimum change.
+Unfundable offers remain visible as unavailable comparison cards. Balance
+changes update the list immediately, and an invalidated manual choice requires
+a new selection. The repeated funding warning is removed from the cost summary.
+Automatic without own DGB shows the selected Paymaster costs; Automatic with
+own DGB retains its direct-payment behavior. Summary and first confirmation
+share the effective transfer/day/percentage ceiling, and a changed daily
+allowance invalidates stale previews. Pending or failed safety-status reads
+immediately withdraw the old readiness indication. Core authorization, input checks,
+fee limits, scans and durable payment handling are unchanged.
+
 ## Save provider settings after a longer edit (2026-10-12)
 
 The active **Save and restart provider…** button could silently do nothing

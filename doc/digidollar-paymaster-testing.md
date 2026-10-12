@@ -1,5 +1,93 @@
 # Paymaster build and test runbook
 
+## Consistent offer funding display (2026-10-13)
+
+Regression: with 16.43 DD available, a 16.43-DD recipient and a 0.09-DD
+service fee, Send was correctly blocked but the offer remained green,
+selectable and recommended. The funding warning also appeared twice.
+`updateOfferEligibility` now uses the same necessary funding check as the
+compose guard. Unfundable and fee-rejected advertisements are comparison-only;
+only funded candidates enter the selection/binding set. Balance changes update
+this partition, while expiry, wallet changes and live-session protection remain.
+A manual choice that becomes unavailable is not silently replaced.
+
+Automatic without spendable own DGB uses the selected Paymaster cost summary;
+with own DGB it retains the conditional direct-payment path. The common
+`effectiveServiceFeeCap` also aligns summary and first confirmation across
+transfer caps, remaining daily allowance and percentage limits, including fee
+deduction. A changed daily allowance invalidates an old preview. Core input,
+signature, budget, history and durable-session rules are not changed.
+
+The focused selection contains **62 Qt data cases**:
+
+| Qt function | Cases |
+|---|---:|
+| `paymasterClientOfferFundingConsistency` | 42 |
+| `paymasterClientFeeCeilingConsistency` | 1 |
+| `paymasterClientOfferCards` | 4 |
+| `paymasterClientPreparationRequiresCurrentOffer` | 2 |
+| `paymasterClientFundingBalanceChanges` | 1 |
+| `paymasterClientOfferSearchRequiresBalance` | 3 |
+| `paymasterClientOfferAutomaticRefresh` | 1 |
+| `paymasterClientOfferPreviewUsesExactRpcAndPlainText` | 1 |
+| `paymasterClientOfferPreviewInvalidatesAndHandlesFailures` | 1 |
+| `paymasterClientNewTransferClearsOffers` | 4 |
+| `paymasterClientPercentageLimits` | 1 |
+| `DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix` | 1 |
+
+The 42 rows cross Own DGB/Automatic/Paymaster, own DGB present/absent, and
+shortfall/exact coverage/sub-minimum change/fee deduction/sponsoring/fee rejection/
+empty directory. Exact coverage also rejects a cheaper sponsored alternative
+that would leave invalid change. The ceiling test checks eight bounds in both
+Automatic and Paymaster confirmation, then a changing daily allowance and
+delayed, failed and recovered safety-status reads. Existing
+cases cover delayed replies, repeated refresh without card recreation, lost
+manual selection, privacy, wallet changes, expiry and direct-call send guards.
+The containing DigiDollar tab test checks the updated Automatic-without-own-DGB
+summary and wallet-emptying wording as part of its existing mode-switch coverage.
+
+Workspace helpers, screenshots and source/binary receipts are in
+`build_msvc/paymaster-refresh-check/offer-consistency/`. Only the changed Qt
+units, the owning send form and generated test moc are compiled and linked
+against existing Release libraries. Tests use disposable wallets and a separate,
+never-activated desktop. Running GUIs and real wallet files are not changed.
+The initial 42-row run produced 42 passing rows, but its wrapper timed out at
+180 seconds before the 192-second test finished; it is not an exit-confirmed
+acceptance result. The helper now permits 300 seconds per selected function.
+
+Code commit `683964868d` passed **61 Paymaster rows** in `checks-20261012-220019Z`
+and the containing **DigiDollar tab case** in `checks-20261012-220725Z`, all with
+exit 0 and no skipped cases. Source hashes remain current. The first executable
+is retained as `paymaster-focused-qt.exe`; the second also rebuilds the containing
+DigiDollar test unit. Both use the same changed production object. The latter
+test also had one independently stale recovery-button label: its expectation is
+now the already-existing **Prepare return to this wallet…**, with no recovery
+behavior change. `verification.json` records both binaries, current source and
+object hashes, and the expected original-renderer failure in
+`checks-20261012-220133Z` (duplicate warning). The comparison retains HEAD's
+renderer and call sites, adding only an unused ceiling helper to link the new
+tests. Targeted compilation/linking, dark/light Qt screenshot inspection and
+`git diff --check` passed.
+
+
+For full acceptance, close Regtest GUIs and ensure no build is active. From
+`D:\Digibyte\digibyte-fork`, with installed MSVC 14.43.34808, Windows SDK
+10.0.26100.0 and Qt `D:\Qt51510\install`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\offer-consistency\run-selected.py --normal
+if ($LASTEXITCODE -ne 0) { throw 'Offer funding regression failed' }
+```
+
+Runtime: minutes to tens of minutes for the build/full suite, about five minutes
+for the focused matrix. Require exit 0, all 62 data cases present, no failures
+or skips, and unchanged source hashes. Manually verify the 16.43-DD example,
+fee deduction, a usable sponsored alternative, switching fee modes, and a
+balance update without clicking Refresh. The rebuilt full GUI/Qt suite and
+operator acceptance remain separate from the isolated local tests.
+
 ## Save settings with expired provider status (2026-10-12)
 
 Settings suspends automatic polling, but `hasCompleteMutationSnapshots` expires
