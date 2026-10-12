@@ -209,6 +209,116 @@ BOOST_AUTO_TEST_CASE(cli_menus_retry_and_confirmation_never_approves_an_empty_an
     BOOST_CHECK_THROW(SetupConfirm(eof, output, "Apply"), std::runtime_error);
     BOOST_CHECK_THROW(SetupSelect(eof, output, "Processing", items, "automatic"), std::runtime_error);
 }
+BOOST_AUTO_TEST_CASE(cli_legacy_model_requires_an_explicit_supported_selection)
+{
+    const std::vector<SetupMenuItem> items{{"user_paid", "User paid", "DD fee"}, {"sponsored", "Public sponsored", "No DD fee"}, {"both", "Both", "Separate budgets"}};
+    std::ostringstream output;
+    std::istringstream input{"\nrestricted\n?\n2\n"};
+    BOOST_CHECK_EQUAL(SetupSelect(input, output, "Replace unsupported saved model", items, ""), "sponsored");
+    BOOST_CHECK(output.str().find("explicit choice is required") != std::string::npos);
+    BOOST_CHECK(output.str().find("[selected]") == std::string::npos);
+    std::istringstream cancelled{"\n"};
+    BOOST_CHECK_THROW(SetupSelect(cancelled, output, "Model", items, ""), std::runtime_error);
+    BOOST_CHECK_THROW(SetupSelect(cancelled, output, "Model", items, "invalid"), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(recovery_protection_blocks_setup_before_a_pause_or_policy_write)
+{
+    for (const auto* code : {"PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED", "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED", "PAYMASTER_PROVIDER_CHECKPOINT_RETIRED", "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION"}) {
+        auto snapshot = Snapshot();
+        auto provider = snapshot.find_value("provider");
+        UniValue errors{UniValue::VARR};
+        errors.push_back("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+        errors.push_back(code);
+        provider.pushKV("readiness_errors", errors);
+        snapshot.pushKV("provider", provider);
+        BOOST_CHECK_EQUAL(SetupRecoveryIssue(provider), code);
+        BOOST_CHECK_EXCEPTION(BuildSetupPlan(snapshot, Choices()), std::runtime_error,
+            [&](const auto& error) { return std::string{error.what()}.find(code) == 0; });
+        provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+        provider.pushKV("last_service_error", code);
+        BOOST_CHECK_EQUAL(SetupRecoveryIssue(provider), code);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cli_backup_adoption_requires_review_and_never_retries_uncertain_execution)
+{
+    for (const auto& scenario : {"accept", "cancel", "cancel_stop", "stop_then_cancel", "stop_then_accept", "checkpoint", "bad_preview", "provider_changed", "wallet_changed", "restarted", "lost_reply", "wrong_receipt", "failed_readback"}) {
+        BOOST_TEST_CONTEXT(scenario) {
+            auto snapshot = Snapshot();
+            auto provider = snapshot.find_value("provider");
+            provider.pushKV("provider_id", std::string(64, 'a'));
+            const std::string fault{scenario};
+            const bool needs_stop = fault == "cancel_stop" || fault == "stop_then_cancel" || fault == "stop_then_accept";
+            for (const auto* key : {"enabled", "running", "autostart"}) provider.pushKV(key, needs_stop);
+            UniValue errors{UniValue::VARR};
+            errors.push_back(fault == "checkpoint" ? "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED" : "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+            provider.pushKV("readiness_errors", errors);
+            snapshot.pushKV("provider", provider);
+            auto live = snapshot;
+            UniValue preview{UniValue::VOBJ};
+            preview.pushKV("provider_id", std::string(64, 'a'));
+            preview.pushKV("plan_id", std::string(64, 'b'));
+            preview.pushKV("executed", false);
+            preview.pushKV("provider_stopped", true);
+            preview.pushKV("pool_entries", 4);
+            preview.pushKV("dgb_satoshis", 50000000);
+            preview.pushKV("dd_cents", 400);
+            preview.pushKV("network_fee_satoshis", 0);
+            if (fault == "bad_preview") preview.pushKV("pool_entries", "invalid");
+            if (fault == "provider_changed") preview.pushKV("provider_id", std::string(64, 'c'));
+            int reads{0}, stops{0}, previews{0}, executions{0};
+            const CliRpc rpc = [&](const std::string& method, const UniValue& params, const std::optional<std::string>& wallet) {
+                BOOST_REQUIRE(wallet.has_value());
+                BOOST_CHECK_EQUAL(*wallet, "provider");
+                if (method == "getpaymasteroperatorinfo") {
+                    ++reads;
+                    if (fault == "wallet_changed" && reads == 2) live.pushKV("wallet_generation", "reloaded");
+                    if (fault == "restarted" && reads == 2) {
+                        auto p = live.find_value("provider"); p.pushKV("running", true); live.pushKV("provider", p);
+                    }
+                    if (fault == "failed_readback" && executions) throw std::runtime_error("lost status");
+                    return live;
+                }
+                if (method == "stoppaymaster") {
+                    ++stops;
+                    BOOST_CHECK(params[0].find_value("persistent").isTrue());
+                    BOOST_CHECK(params[0].find_value("pause_setup").isTrue());
+                    auto p = live.find_value("provider");
+                    for (const auto* key : {"enabled", "running", "autostart"}) p.pushKV(key, false);
+                    live.pushKV("provider", p);
+                    return p;
+                }
+                if (method != "adoptpaymasterbackup") throw std::runtime_error("Unexpected mutation: " + method);
+                if (params.empty()) { ++previews; return preview; }
+                ++executions;
+                BOOST_CHECK(params[0].find_value("execute").isTrue());
+                BOOST_CHECK(params[0].find_value("independent_checkpoint").isTrue());
+                BOOST_CHECK_EQUAL(params[0].find_value("plan_id").get_str(), std::string(64, 'b'));
+                auto p = live.find_value("provider"); p.pushKV("readiness_errors", UniValue{UniValue::VARR}); live.pushKV("provider", p);
+                if (fault == "lost_reply") throw std::runtime_error("reply lost after commit");
+                auto result = preview;
+                result.pushKV("executed", true);
+                if (fault == "wrong_receipt") result.pushKV("plan_id", std::string(64, 'c'));
+                return result;
+            };
+            const bool cancelled = fault == "cancel" || fault == "cancel_stop" || fault == "stop_then_cancel";
+            const bool accepted = fault == "accept" || fault == "stop_then_accept";
+            std::istringstream input{fault == "stop_then_cancel" ? "yes\n\n" : cancelled ? "\n" : "yes\nyes\n"};
+            std::ostringstream output;
+            if (cancelled || accepted) BOOST_CHECK_EQUAL(RunBackupAdoption(input, output, "provider", snapshot, rpc), accepted);
+            else BOOST_CHECK_THROW(RunBackupAdoption(input, output, "provider", snapshot, rpc), std::runtime_error);
+            const bool sent = accepted || fault == "lost_reply" || fault == "wrong_receipt" || fault == "failed_readback";
+            BOOST_CHECK_EQUAL(executions, sent ? 1 : 0);
+            BOOST_CHECK_EQUAL(stops, fault == "stop_then_cancel" || fault == "stop_then_accept" ? 1 : 0);
+            BOOST_CHECK_EQUAL(previews, fault == "checkpoint" || fault == "cancel_stop" ? 0 : 1);
+            if (accepted) {
+                BOOST_CHECK(output.str().find("0.50000000 DGB and 4.00 DD") != std::string::npos);
+                BOOST_CHECK(live.find_value("provider").find_value("running").isFalse());
+            }
+        }
+    }
+}
 BOOST_AUTO_TEST_CASE(cli_currency_and_percentage_inputs_are_exact_and_retry_invalid_values)
 {
     const auto field = [](const std::string& key) -> SetupField {

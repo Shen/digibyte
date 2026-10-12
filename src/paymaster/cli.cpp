@@ -20,6 +20,72 @@
 #include <vector>
 
 namespace DigiDollar::Paymaster {
+bool RunBackupAdoption(std::istream& input, std::ostream& output, const std::string& wallet, const UniValue& snapshot, const CliRpc& rpc)
+{
+    const UniValue empty{UniValue::VARR};
+    const auto params = [](const UniValue& value) { UniValue result{UniValue::VARR}; result.push_back(value); return result; };
+    const auto current = [&] {
+        auto result = rpc("getpaymasteroperatorinfo", empty, wallet);
+        CheckSetupContext(snapshot, result);
+        return result;
+    };
+    auto state = current();
+    if (SetupRecoveryIssue(state.find_value("provider")) != "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")
+        throw std::runtime_error("This wallet cannot enter backup adoption. Inspect its current restoration/checkpoint status; do not reset the checkpoint.");
+    const auto stopped = [](const UniValue& value) {
+        const auto& provider = value.find_value("provider");
+        return provider.find_value("enabled").isFalse() && provider.find_value("running").isFalse() && provider.find_value("autostart").isFalse();
+    };
+    if (!stopped(state)) {
+        if (!SetupConfirm(input, output, "Stop the provider and autostart persistently before reviewing adoption? Reserves stay prepared")) return false;
+        current();
+        UniValue options{UniValue::VOBJ};
+        options.pushKV("persistent", true);
+        options.pushKV("pause_setup", true);
+        rpc("stoppaymaster", params(options), wallet);
+        state = current();
+        if (!stopped(state)) throw std::runtime_error("Provider stop was not confirmed; adoption was not attempted.");
+    }
+    const auto preview = rpc("adoptpaymasterbackup", empty, wallet);
+    const auto hex = [](const UniValue& value) {
+        return value.isStr() && value.get_str().size() == 64 && std::all_of(value.get_str().begin(), value.get_str().end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    };
+    if (!preview.isObject() || !preview.find_value("executed").isFalse() || !preview.find_value("provider_stopped").isTrue() ||
+        !hex(preview.find_value("plan_id")) || !hex(preview.find_value("provider_id")) ||
+        preview.find_value("provider_id").write() != state.find_value("provider").find_value("provider_id").write() ||
+        !preview.find_value("network_fee_satoshis").isNum() || preview.find_value("network_fee_satoshis").getInt<int64_t>() != 0)
+        throw std::runtime_error("Incomplete backup-adoption review; no adoption was authorized.");
+    for (const auto* key : {"pool_entries", "dgb_satoshis", "dd_cents"})
+        if (!preview.find_value(key).isNum() || preview.find_value(key).getInt<int64_t>() < 0)
+            throw std::runtime_error("Invalid backup-adoption amounts; no adoption was authorized.");
+    output << "Provider: " << preview.find_value("provider_id").get_str()
+           << "\nRetain " << OperatorAmount(preview.find_value("dgb_satoshis").getInt<int64_t>()) << " DGB and "
+           << SetupFormatNumber(preview.find_value("dd_cents").getInt<int64_t>(), 2) << " DD in "
+           << preview.find_value("pool_entries").getInt<int64_t>() << " reserves. No transaction or network fee is created.\n"
+           << "Identity, policies, spent budgets and history remain. The provider stays stopped; starting is a separate decision.\n"
+           << "Only a current checkpoint preserved independently of this wallet can establish freshness. Restoring an old wallet and its old checkpoint together cannot do so.\n";
+    if (!SetupConfirm(input, output, "Confirm independently preserved current checkpoint, sole use of this provider identity, and adoption of exactly this wallet")) return false;
+    state = current();
+    if (!stopped(state) || SetupRecoveryIssue(state.find_value("provider")) != "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")
+        throw std::runtime_error("Provider recovery state changed; review again before adopting.");
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("execute", true);
+    options.pushKV("independent_checkpoint", true);
+    options.pushKV("plan_id", preview.find_value("plan_id"));
+    try {
+        const auto result = rpc("adoptpaymasterbackup", params(options), wallet);
+        if (!result.find_value("executed").isTrue() || !result.find_value("provider_stopped").isTrue()) throw std::runtime_error("Unexpected adoption result");
+        for (const auto* key : {"plan_id", "provider_id", "pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis"})
+            if (!SetupMatches(preview.find_value(key), result.find_value(key))) throw std::runtime_error("Adoption result differs from review");
+        state = current();
+        if (!stopped(state) || !SetupRecoveryIssue(state.find_value("provider")).empty()) throw std::runtime_error("Adopted state was not confirmed");
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string{"Adoption could not be confirmed. Inspect current provider status; do not retry automatically. "} + error.what());
+    }
+    output << "Current backup adopted. Older copies sharing this checkpoint are blocked. Review settings and create a new full-wallet backup before separately starting.\n";
+    return true;
+}
+
 namespace {
 class OperatorCli
 {
@@ -185,6 +251,17 @@ class OperatorCli
         }
         std::cout << "Send funds from your funding wallet to the matching address. This setup does not send from another wallet.\n";
     }
+    void OperatorBackup(const std::string& wallet, const UniValue& context)
+    {
+        std::cout << "Keep a complete current wallet backup offline and confidential; a seed/descriptor export omits provider records.\n"
+                  << "The node also keeps safety state in its network data directory's paymaster-checkpoints folder. Adoption requires independently retained CURRENT checkpoint state. Never roll an old wallet and checkpoint back together to resume service.\n"
+                  << "Payment and reserve changes can make a backup too old for continued provider operation. Before migration, pause the provider, resolve unfinished work, then back up. Never run this provider identity on two hosts.\n";
+        if (!OperatorConfirm("Create a full-wallet backup now? (path is on the node host)")) return;
+        const auto path = OperatorPrompt("Backup destination");
+        CheckSetupContext(context, OperatorCall("getpaymasteroperatorinfo", UniValue{UniValue::VARR}, wallet));
+        OperatorCall("backupwallet", OperatorParams({UniValue{path}}), wallet);
+        std::cout << "Wallet backup completed. It is not an independent checkpoint or a guarantee of later adoption.\n";
+    }
     bool OperatorAwaitSetup(const std::string& wallet, const UniValue& context, bool require_running)
     {
         std::cout << "Checking incoming funds, approved reserve preparation and readiness every 2 seconds.\n"
@@ -313,14 +390,25 @@ public:
         }
         CheckSetupContext(snapshot, snapshot);
         if (!OperatorConfirm("Use this node, network and provider wallet?")) return EXIT_FAILURE;
-        if (snapshot.find_value("provider").find_value("settings_present").isTrue()) {
-            const auto action = OperatorSelect("This wallet already has provider settings. What would you like to do?", {
+        const auto recovery = SetupRecoveryIssue(snapshot.find_value("provider"));
+        if (snapshot.find_value("provider").find_value("settings_present").isTrue() || !recovery.empty()) {
+            std::vector<SetupMenuItem> actions{
                 {"status", "Show current status", "Read the saved state without changing operation or spending permissions."},
                 {"resume", "Resume using saved settings", "Keep your offer, identity and limits; explicitly enable and start the provider."},
                 {"setup", "Review or change setup", "Walk through saved values. Applying changes pauses the provider during setup."},
                 {"pause", "Pause provider", "Disable operation and autostart persistently. Already signed transactions can still confirm."},
                 {"unlock", "Unlock for operation", "Choose continuous or timed access to the entire provider wallet."},
-                {"backup", "Back up the complete provider wallet", "Protect the identity, settings, pool records and finance history together."}}, "status");
+                {"backup", "Back up the complete provider wallet", "Protect the identity, settings, pool records and finance history together."}};
+            if (!recovery.empty()) {
+                std::cout << "Wallet recovery must be reviewed before setup or restart: " << recovery << '\n'
+                          << "New setup cannot repair missing financial history or an old checkpoint. Do not delete or replace checkpoint files.\n";
+                actions.erase(std::remove_if(actions.begin(), actions.end(), [](const auto& item) {
+                    return item.value == "resume" || item.value == "setup" || item.value == "unlock";
+                }), actions.end());
+                if (recovery == "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED")
+                    actions.push_back({"adopt", "Review current restored wallet", "Preview adoption against an independently retained current checkpoint; separate approval required. The provider stays stopped."});
+            }
+            const auto action = OperatorSelect("Provider wallet actions", actions, "status");
             if (action != "setup") {
                 if (action == "pause") {
                     if (!OperatorConfirm("Persistently pause provider and new pool signatures? Signed transactions can still confirm.")) return EXIT_FAILURE;
@@ -339,8 +427,11 @@ public:
                         OperatorCall("startpaymaster", OperatorParams({options}), wallet);
                         if (!OperatorAwaitSetup(wallet, snapshot, true)) return EXIT_FAILURE;
                     }
+                } else if (action == "adopt") {
+                    if (!RunBackupAdoption(std::cin, std::cout, wallet, snapshot, m_rpc)) return EXIT_FAILURE;
+                    OperatorBackup(wallet, snapshot);
                 } else if (action == "backup")
-                    OperatorCall("backupwallet", OperatorParams({UniValue{OperatorPrompt("Full-wallet backup destination on the node")}}), wallet);
+                    OperatorBackup(wallet, snapshot);
                 else if (action != "status")
                     throw std::runtime_error("Unknown operator action");
                 const auto current = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
@@ -406,8 +497,10 @@ public:
         if (restricted_saved || OperatorCustomize("Customer offer")) {
             const bool paid_before = OperatorAllowsModel(choices.policy, "user_paid");
             const bool sponsored_before = OperatorAllowsModel(choices.policy, "sponsored");
-            const auto selected = paid_before ? (sponsored_before ? "both" : "user_paid") :
-                restricted_saved ? "" : "sponsored";
+            // Even a mixed legacy offer needs explicit consent before its
+            // private sponsorship could become public.
+            const auto selected = restricted_saved ? "" :
+                paid_before ? (sponsored_before ? "both" : "user_paid") : "sponsored";
             const auto mode = OperatorSelect("Who pays for this service?", {
                 {"user_paid", "Customer pays a DD service fee (recommended)", "You supply DGB network fees and receive the configured percentage in DD. Income and costs use different assets."},
                 {"sponsored", "You sponsor public payments", "You pay the DGB network fee and receive no DD service fee. Anyone may request service within your limits."},
@@ -621,7 +714,6 @@ public:
             OperatorOperatingUnlock(wallet, snapshot);
         }
         if (funding == "addresses") OperatorFundingAddresses(wallet, snapshot);
-        if (OperatorConfirm("Create a full-wallet backup now? (path is on the node host)")) OperatorCall("backupwallet", OperatorParams({UniValue{OperatorPrompt("Backup destination")}}), wallet);
         if (start_requested) {
             CheckSetupContext(snapshot, OperatorCall("getpaymasteroperatorinfo", empty, wallet));
             UniValue options{UniValue::VOBJ};
@@ -641,6 +733,11 @@ public:
         const auto final_status = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
         CheckSetupContext(snapshot, final_status);
         OperatorBriefStatus(final_status);
+        if (InspectSetupProgress(final_status, false).complete) {
+            OperatorBackup(wallet, final_status);
+        } else {
+            std::cout << "Setup or reserve preparation is still incomplete. After it completes, use -paymastersetup (backup) to save the resulting wallet state. You can also back up now through that menu, but an interim backup does not prove completed setup.\n";
+        }
         if (!start_requested) std::cout << "Configuration saved. No one-time start was requested; the saved autostart setting shown above remains effective.\n";
         std::cout << "Verify external reachability from an independent node; local readiness is not an external payment test.\n";
         return EXIT_SUCCESS;

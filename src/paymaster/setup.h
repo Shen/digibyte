@@ -57,6 +57,8 @@ struct SetupChoices {
 void CheckSetupChoices(const SetupChoices& choices);
 /** Proposed CLI defaults only: callers must obtain explicit approval to apply. */
 SetupChoices SetupCliDefaults(const UniValue& snapshot);
+/** Restoration/checkpoint protection takes precedence over ordinary setup. */
+std::string SetupRecoveryIssue(const UniValue& provider);
 struct SetupMenuItem {
     std::string value, title, explanation;
 };
@@ -68,6 +70,7 @@ struct SetupField {
 const std::vector<SetupField>& SetupFields();
 std::string SetupFormatNumber(int64_t value, int decimals);
 std::string SetupPrompt(std::istream& input, std::ostream& output, const std::string& label, const std::string& current = {});
+/** An empty current value requires an explicit selection; Enter cannot select a model. */
 std::string SetupSelect(std::istream& input, std::ostream& output, const std::string& label, const std::vector<SetupMenuItem>& items, const std::string& current);
 bool SetupConfirm(std::istream& input, std::ostream& output, const std::string& label);
 int64_t SetupReadNumber(std::istream& input, std::ostream& output, const SetupField& field, int64_t current);

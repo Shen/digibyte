@@ -4,6 +4,7 @@
 #define DIGIBYTE_PAYMASTER_CLI_H
 
 #include <functional>
+#include <iosfwd>
 #include <optional>
 #include <string>
 #include <univalue.h>
@@ -14,6 +15,8 @@ namespace DigiDollar::Paymaster {
 /** Reuse the CLI's existing transport, authentication and argument conversion. */
 using CliRpc = std::function<UniValue(const std::string&, const UniValue&, const std::optional<std::string>&)>;
 int RunCli(bool setup, const ArgsManager& args, const std::string& rpc_host, const CliRpc& rpc);
+/** Explicit, wallet-bound recovery review; never starts a provider or retries execution. */
+bool RunBackupAdoption(std::istream& input, std::ostream& output, const std::string& wallet, const UniValue& snapshot, const CliRpc& rpc);
 } // namespace DigiDollar::Paymaster
 
 #endif // DIGIBYTE_PAYMASTER_CLI_H

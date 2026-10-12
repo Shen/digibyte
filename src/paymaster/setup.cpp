@@ -177,14 +177,16 @@ std::string SetupPrompt(std::istream& input, std::ostream& output, const std::st
 }
 std::string SetupSelect(std::istream& input, std::ostream& output, const std::string& label, const std::vector<SetupMenuItem>& items, const std::string& current)
 {
-    if (items.empty() || std::none_of(items.begin(), items.end(), [&](const auto& item) { return item.value == current; })) throw std::runtime_error("Invalid setup menu default");
+    if (items.empty() || (!current.empty() && std::none_of(items.begin(), items.end(), [&](const auto& item) { return item.value == current; }))) throw std::runtime_error("Invalid setup menu default");
     for (;;) {
         output << '\n' << label << '\n';
         for (size_t i = 0; i < items.size(); ++i) {
             const auto& item = items[i];
             output << "  " << i + 1 << ") " << item.title << (item.value == current ? " [selected]" : "") << "\n     " << item.explanation << '\n';
         }
-        const auto answer = ToLower(SetupPrompt(input, output, "Choose a number or name; Enter keeps the selection (? repeats help)", current));
+        const auto answer = ToLower(SetupPrompt(input, output, current.empty()
+            ? "Choose a number or name; an explicit choice is required (? repeats help)"
+            : "Choose a number or name; Enter keeps the selection (? repeats help)", current));
         for (size_t i = 0; i < items.size(); ++i)
             if (answer == items[i].value || answer == std::to_string(i + 1)) return items[i].value;
         if (answer != "?") output << "Please choose one of the listed options. Your earlier choices are retained.\n";
@@ -601,6 +603,21 @@ std::string OperatorSummary(const UniValue& snapshot)
         result += "\n" + item.find_value("state").get_str() + ": " + item.find_value("code").get_str() + " -> " + explain(item);
     return result + "\nExternal reachability and payment operation are not established by local readiness.\n";
 }
+std::string SetupRecoveryIssue(const UniValue& provider)
+{
+    std::string issue;
+    const auto inspect = [&](const UniValue& value) {
+        if (!value.isStr()) return;
+        const auto code = value.get_str();
+        if (code.rfind("PAYMASTER_PROVIDER_CHECKPOINT_", 0) == 0) issue = code;
+        else if (issue.empty() && code == "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED") issue = code;
+    };
+    const auto& errors = provider.find_value("readiness_errors");
+    if (errors.isArray()) for (const auto& error : errors.getValues()) inspect(error);
+    inspect(provider.find_value("last_service_error"));
+    return issue;
+}
+
 void CheckSetupContext(const UniValue& expected, const UniValue& current)
 {
     if (!current.find_value("schema_version").isNum() || current.find_value("schema_version").getInt<int>() != 1) throw std::runtime_error("PAYMASTER_SETUP_STATUS_VERSION");
@@ -738,6 +755,8 @@ void CheckSetupChoices(const SetupChoices& choices)
 std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoices& choices)
 {
     CheckSetupContext(snapshot, snapshot);
+    const auto recovery = SetupRecoveryIssue(snapshot.find_value("provider"));
+    if (!recovery.empty()) throw std::runtime_error(recovery + ": review wallet recovery before changing setup; do not reset its checkpoint");
     CheckSetupChoices(choices);
     const auto& provider = snapshot.find_value("provider");
     if (provider.find_value("provider_id").isNull() && !IsValidPaymasterDisplayName(choices.display_name))
