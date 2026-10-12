@@ -372,6 +372,13 @@ Overview next action and Settings → Wallet & backup controls. Manual
 expert mode remains available. Setup does not store
 passwords, and no password belongs in a command argument, file, or log.
 
+Restoration or checkpoint protection changes this menu: setup, resume and
+operating unlock are withheld until recovery has been reviewed. A wallet with
+restoration quarantine can choose **adopt — Review current restored wallet**.
+Checkpoint faults instead require diagnosis; new setup cannot repair or erase
+missing financial history. Qt likewise directs a protected wallet to Settings
+→ Wallet & backup before opening its setup assistant.
+
 ## CLI choices for continuous operation
 
 The CLI assistant uses seven numbered stages: wallet, connection, customer offer,
@@ -383,6 +390,8 @@ separators. DD amounts use DD, DGB amounts use DGB, and service fees use percent
 (for example `0.50` means 0.50%, not 50%). Percent fees must use 0.10% steps.
 
 The supported offer choices are customer-paid, public sponsored, or both.
+When no supported saved model exists, the CLI requires an explicit selection;
+Enter cannot select a replacement automatically.
 Settings and setup offer only the supported public scope. An actual old saved
 private scope appears as an unsupported saved setting, never as a new service
 option; changing it still requires explicit review.
@@ -515,6 +524,11 @@ with an explanation. A wallet reload invalidates the monitor. Ctrl+C closes the
 CLI only: accepted funding and an accepted start request remain in Core; use
 Pause provider to stop new authorized work. Local completion does not prove
 external reachability.
+
+After verified setup and reserve completion, the CLI offers a full-wallet
+backup of the resulting state. If setup is still waiting, return to its
+**backup** action after completion. That action also permits an interim copy,
+but such a copy does not prove completed setup or later recovery eligibility.
 
 ## Guided daily tasks
 
@@ -867,6 +881,15 @@ reminder opens that section; Income & costs has no second backup panel. The
 central controls remain available after a successful backup. Both backup methods
 refer to the complete provider wallet, including its financial records.
 
+Create a new backup after reserve preparation and before migration. Payment
+and reserve changes can make an earlier backup too old to resume service.
+The node's network data directory also contains `paymaster-checkpoints`:
+continued operation after restoration requires independently retained current
+checkpoint state. A wallet backup is not that independent checkpoint. Never
+restore an old wallet and its old checkpoint together to resume service. Before
+migration, pause the provider, resolve unfinished work and make a current
+backup; never operate the same provider identity on two hosts.
+
 Explicit GUI/RPC restoration of a provider backup blocks new Paymaster payments
 and reserve spending before autostart. An old image can omit money already spent
 or a signed payment still held by a client; a blockchain rescan cannot prove
@@ -948,6 +971,21 @@ spent budgets and history remain. No transaction, fee or budget reset occurs.
 Provider enablement and autostart stay off. Review settings and make a new
 full-wallet backup, then separately enable/start. A further explicit restore
 installs quarantine again, even for an already adopted wallet.
+
+The interactive CLI offers the same review after normal wallet restoration:
+
+```sh
+digibyte-cli -rpcwallet=RESTORED -paymastersetup
+```
+
+Confirm the node/wallet, select **adopt**, then review the exact identity and
+DGB/DD reserves. If necessary, stopping the provider requires a separate
+approval. Enter declines both approvals. The final approval affirms independent
+current checkpoint retention and sole use of the identity. The assistant
+checks wallet generation, identity, the execution receipt and stopped state;
+it never repeats an uncertain execution or starts the provider. A successful
+adoption offers a fresh full-wallet backup. File import itself still uses the
+ordinary **Restore Wallet** / `restorewallet` workflow, outside Paymaster setup.
 
 RPC and ordinary CLI use the same review/execution:
 

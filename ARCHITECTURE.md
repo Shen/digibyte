@@ -2133,6 +2133,18 @@ There is no consensus, wire-protocol or wallet-format change. See the
 Operator CLI orchestration is owned by `paymaster/cli.cpp`; `digibyte-cli.cpp`
 passes its existing authenticated transport into the per-invocation adapter.
 Both front ends continue using the same setup validation and finite profiles.
+Restoration and checkpoint protection take precedence over setup: the common
+plan builder refuses configuration changes, and Qt routes the operator to the
+wallet recovery controls. CLI setup offers a separate current-backup adoption
+review through the existing RPC. It binds the preview and execution to the
+wallet generation and provider identity, requires explicit independent-checkpoint
+approval, verifies the receipt and stopped readback, and never retries execution
+after an uncertain response. Adoption does not start the provider. Unsupported
+legacy offer models require an explicit supported selection; Enter cannot turn
+private sponsorship into public sponsorship. CLI backup is offered after
+verified setup/reserve completion, with the existing backup action available
+for interim copies. Both front ends explain the separate current checkpoint
+and single-host identity requirement. Core recovery rules are unchanged.
 Wallet startup reconciliation and recurring maintenance/service scheduling live
 in `wallet/rpc/paymaster_integration.cpp`. The generic wallet loader calls these
 at the original lifecycle points, preserving startup order, intervals and bounds.

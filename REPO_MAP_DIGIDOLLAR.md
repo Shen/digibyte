@@ -2161,6 +2161,8 @@ Current oracle/MuSig2 fuzz source inventory:
   or configuration mutations. GUI preview and apply share one choices builder.
   Operator diagnostics classify active finite-preparation step reasons before
   generic missing-slot symptoms, preserving unknown/conflict failures.
+  `SetupRecoveryIssue` gives checkpoint/restoration protection precedence over
+  setup writes; menus without a supported saved default require explicit choice.
 - `src/paymaster/provider_policy.cpp`: pure provider offer, safety, quote-limit
   and liquidity validation shared by Core and setup without server dependencies.
 - `src/qt/paymasterwidget.cpp`: guided/advanced earnings payout requires the
@@ -2178,6 +2180,12 @@ Current oracle/MuSig2 fuzz source inventory:
   per-invocation callback; there is no second HTTP/RPC client or global callback.
   `InspectSetupProgress` in `paymaster/setup.cpp` classifies
   funding, confirmed reserves, blocked requirements and actual start completion.
+  `RunBackupAdoption` reviews the existing current-backup adoption RPC with
+  explicit independent-checkpoint consent, wallet/identity binding and stopped
+  readback. It does not start or retry an uncertain adoption. Backup prompts
+  follow verified completion; the backup menu also permits interim copies.
+  `src/test/paymaster_setup_tests.cpp` covers declined approvals, stale contexts,
+  malformed reviews, checkpoint guards and lost/mismatched adoption replies.
 - `src/qt/paymasterwidget.cpp`: common setup adapter, operator overview, node
   configuration review, persistent pause/resume, continuous-by-default or timed
   operating unlock and report import.

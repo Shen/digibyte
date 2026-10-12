@@ -1,5 +1,19 @@
 # Paymaster integration release notes
 
+## Setup and restored-wallet guidance (2026-10-12)
+
+Protected restored wallets are routed to recovery review before setup changes.
+CLI setup now guides current-backup adoption through the existing Core RPC,
+with separate stop/adoption approval, exact wallet/identity binding and receipt
+verification. It does not restart the provider or retry uncertain execution.
+Unsupported saved sponsorship requires an explicit supported selection.
+Fresh GUI setup omits unused legacy sponsorship budgets; existing nonzero
+legacy budgets remain visible for review. Backup guidance explains the current
+independent checkpoint and single-host identity requirement. CLI backup is
+offered after verified setup/reserve completion; interim backups remain
+available separately. Core scans, recovery checks and financial rules are
+unchanged. See the [operator guide](../digidollar-paymaster-operator.md).
+
 ## Show send-form offers only when the DD amount is funded (2026-10-12)
 
 The send form pauses Paymaster offer checks and hides offer cards while the DD

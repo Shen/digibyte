@@ -4890,3 +4890,72 @@ normal-build/full-suite and manual GUI acceptance remain operator tasks under
 the repository's local instructions. Relevant guidance is root/src `AGENTS.md`,
 `CLAUDE.md`, the DigiDollar architecture/maps, Qt/developer/test notes and the
 translation/formatting rules.
+
+## Setup refresh and current-backup CLI review (2026-10-12)
+
+The setup update is confined to Paymaster setup/CLI, its Qt adapter and tests.
+Restoration/checkpoint protection blocks the common setup plan before writes;
+Qt directs the operator to wallet recovery. The CLI uses the existing
+`adoptpaymasterbackup` preview/execute RPC, requiring separate stop/adoption
+approval, independent current checkpoint confirmation, an unchanged wallet
+generation/provider, an exact receipt and stopped readback. It never starts
+the provider or repeats an uncertain adoption. The original wallet loader,
+history scans, index checks and financial rules are unchanged.
+
+Local checks under `build_msvc/paymaster-refresh-check/setup-refresh/` passed:
+
+- **26 setup unit cases / 449 assertions**, including explicit selection for an
+  unsupported model, restoration/checkpoint guards and 13 adoption scenarios:
+  accept/decline, stop approval, malformed previews, changed identities/wallets,
+  restarted provider, lost replies, mismatched receipts and failed readback.
+- **28 Qt data cases in nine functions**: external readiness/recovery routing,
+  guided setup bounds/retries and theme, finances/backup, operating unlock,
+  node connection, full-history wait, preparation-fee recovery and start intent.
+  Fresh review omits unused legacy budgets and includes current backup guidance.
+- Targeted MSVC compilation/linking and `git diff --check`.
+
+Only five affected translation units were compiled, using existing Release
+libraries. Tests use disposable wallets and a separate, never-activated Windows
+desktop. No live wallet, installed GUI or node configuration was changed.
+`checks-20261012-210142Z` holds the Qt run. During that run the CLI mixed-legacy
+default was tightened; Qt-linked sources remained unchanged. The final CLI
+was recompiled and all setup unit cases passed again in
+`checks-20261012-210313Z`. `verification.json` checks these source/binary mappings.
+These are focused adapter tests, not a new full product or live adoption test.
+
+For normal-build acceptance, close the Regtest GUIs and ensure no build is
+running. From `D:\Digibyte\digibyte-fork`, with the installed MSVC 14.43.34808,
+Windows SDK 10.0.26100.0 and Qt `D:\Qt51510\install`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\setup-refresh\run-selected.py --normal
+if ($LASTEXITCODE -ne 0) { throw 'Setup acceptance failed' }
+```
+
+Allow minutes to tens of minutes for the build/full suite and a few minutes
+for the focused checks. Require exit 0, all 26 unit cases and 28 Qt data cases
+passing, no selected skips and unchanged source hashes. The full build/full Qt
+suite and manual acceptance remain operator tasks under the local repository
+instructions. In disposable Regtest wallets, check new setup, existing-provider
+review, declined approvals and current-backup adoption through both front ends.
+Restored checkpoint faults must not offer a setup workaround; successful
+adoption must remain stopped until separately started. Back up after confirmed
+reserve preparation; never test these paths with live funds.
+
+Relevant guidance: root/src `AGENTS.md`, `CLAUDE.md`, contribution/developer/Qt
+and test notes, DigiDollar architecture/maps and translation/formatting rules.
+
+### Transient network-statistics message investigated alongside setup
+
+Operator Regtest logs contain `DigiDollar circulating supply is unavailable
+from retained metadata` from `getdigidollarstats`, for example on the client at
+2026-10-12 20:43:58 and 20:45:36 UTC. The stats RPC's failure check matches the
+upstream v9.26.7 path. `DigiDollarStatsIndex::LookUpStats` can return no result
+for index lag, absent metadata or unknown supply; the message alone does not
+distinguish these. A tip change between index synchronization and lookup is
+a possible transient cause, not proven by these logs. The GUI wording was
+changed in `3721a996833d`; a successful later 30-second refresh clears it.
+No statistics, validation or synchronization code was changed in this setup
+update, and no unavailable value is presented as a verified health result.
