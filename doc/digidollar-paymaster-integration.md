@@ -230,6 +230,18 @@ the wallet's per-transaction ceiling and remaining rolling-day budget. The
 rechecks the policy and provider state; an empty preview is not proof that no
 provider could become eligible after local state changes.
 
+In the send form, public-offer checks wait until the available DD balance is
+known and covers the entered amount. Loading or unreadable balances are not
+shown as zero; insufficient funds produce a neutral explanation instead of a
+green offer banner. Both automatic and manual directory checks pause, and
+existing cards are cleared when the balance becomes unknown or insufficient.
+Late directory replies cannot restore them. Once funds cover the amount,
+checks resume on the next ordinary 10-second tick or a manual refresh.
+The actual selected fee still has to fit the balance; the maximum fee ceiling
+is not required up front, so free offers and fee deduction remain usable.
+This presentation gate does not alter the RPC directory, network browsing,
+active-session handling, canonical wallet scans or Core payment checks.
+
 Optional `include_fee_rejected=true` includes otherwise matching, current public
 offers rejected by fee limits. This read-only diagnostic marks each entry with
 `eligible`; false entries carry `fee_limit_reason` (`percentage` or

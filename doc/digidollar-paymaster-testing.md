@@ -4813,3 +4813,80 @@ confirmed closure. A provider-side reservation may remain until expiry. A
 request made during a local scan waits for that operation; it does not abort
 the scan. Normal-build/full-suite and this manual acceptance remain operator
 tasks; isolated GUI tests do not establish network/load acceptance.
+
+## Send-form offer discovery requires available DD (2026-10-12)
+
+Only `paymastersendwidget.{cpp,h}` changes production behavior. The form uses
+the existing asynchronous DD balance snapshot; it does not add a wallet scan,
+relax a Core check or alter active payment sessions. Before directory reads,
+the balance must be known and cover the entered DD amount. The selected
+offer's actual fee and change constraints remain separate checks. Loading,
+failed reads and insufficient funds show neutral status text and hide cards.
+Balance loss invalidates in-flight previews, even if funds return before their
+reply arrives. Checks resume through the normal visible-form timer/manual path.
+
+`paymasterClientOfferSearchRequiresBalance` covers explicit Paymaster and
+Automatic with/without own DGB. Each of its three rows checks a real unreadable
+balance, an initialized empty wallet, a real asynchronous funding refresh,
+zero/insufficient funds, a delayed reply after loss and return of funds, actual
+fee coverage, fee deduction, and preservation of an active reserved session.
+Directory calls and unexpected mutations/dialogs are counted. Existing offer
+fixtures explicitly seed their previously implicit available DD; the wallet
+switch case now waits for the new wallet's own balance read.
+
+Focused acceptance uses these Qt functions:
+
+| Function | Data cases |
+|---|---:|
+| `paymasterClientOfferSearchRequiresBalance` | 3 |
+| `paymasterClientOfferAutomaticRefresh` | 1 |
+| `paymasterClientOfferPreviewUsesExactRpcAndPlainText` | 1 |
+| `paymasterClientOfferPreviewInvalidatesAndHandlesFailures` | 1 |
+| `paymasterClientPreparationRequiresCurrentOffer` | 2 |
+| `paymasterClientFundingBalanceChanges` | 1 |
+| `paymasterClientNewTransferClearsOffers` | 4 |
+| `paymasterClientOfferCards` | 4 |
+| `paymasterClientPercentageLimits` | 1 |
+| `paymasterClientCoreCancellationRoundTrip` | 3 |
+| `paymasterClientReviewCancellation` | 20 |
+| `paymasterClientPreparationCancellation` | 18 |
+| `paymasterClientLiveSendProgressesAcrossAsyncPhases` | 16 |
+
+Workspace helpers and hashed receipts are under
+`build_msvc/paymaster-refresh-check/offer-balance/`. The narrow compile links a
+separate Qt test executable against the existing Release libraries. Native
+Qt tests run on a separate, never-activated Windows desktop with disposable
+test wallets; they do not use or replace the operator's live GUIs/wallets.
+
+Local verification passed **75 distinct data cases in 13 functions** across
+`checks-20261012-202625Z` and `checks-20261012-203303Z`. Both runs have identical
+final source and binary hashes, with no source changes during execution.
+`verification.json` checks this mapping and case totals. Isolated Qt SHA256:
+`86a47ebf8f3b0b25dfad68e297743309d64ae956c09524f7cb0db817ed1041ab`.
+The targeted compile/link and `git diff --check` passed. Earlier failed preview
+fixture runs are retained: explicit funding was initially inserted in the
+wrong setup branch, then the wallet-switch expectation needed to wait for the
+new balance. Both were corrected and that complete function passed again.
+
+For full normal-build acceptance, close the Regtest GUIs and ensure no other
+build is running. From `D:\Digibyte\digibyte-fork`, using the installed MSVC
+14.43.34808, Windows SDK 10.0.26100.0 and Qt `D:\Qt51510\install`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+python .\build_msvc\paymaster-refresh-check\offer-balance\run-selected.py --normal
+if ($LASTEXITCODE -ne 0) { throw 'Offer-balance checks failed' }
+```
+
+Allow minutes to tens of minutes for the build/full suite and several minutes
+for the focused selection. Require exit 0, all 75 selected data cases passing,
+no selected skips, and unchanged source hashes. Manual Regtest acceptance:
+with 0 DD and a valid amount, neither automatic nor manual checks may show a
+green offer banner or cards. Fund/confirm DD, or reduce an excessive amount;
+the next normal check must populate offers. Own DGB alone must not bypass the
+DD requirement. Check fee deduction and normal own-DGB sending too. Full
+normal-build/full-suite and manual GUI acceptance remain operator tasks under
+the repository's local instructions. Relevant guidance is root/src `AGENTS.md`,
+`CLAUDE.md`, the DigiDollar architecture/maps, Qt/developer/test notes and the
+translation/formatting rules.

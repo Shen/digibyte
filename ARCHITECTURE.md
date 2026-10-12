@@ -1613,6 +1613,9 @@ Qt can request cancellation during unsigned preparation, including an in-flight
 first reply. It stops local continuation, waits for that RPC to return, then
 uses fresh Core capabilities and durable read-back before releasing the form.
 It neither interrupts canonical wallet checks nor unlocks inputs itself.
+Compose-only offer discovery waits for a known spendable DD balance covering
+the entered amount. Balance loss invalidates previews and pending directory
+replies; it does not change active payment sessions or Core validation.
 See [capacity and migration](doc/digidollar-paymaster-connection-capacity.md)
 for total connection/FD budgets, source map and verification limits.
 

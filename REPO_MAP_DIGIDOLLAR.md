@@ -1593,6 +1593,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   Paymaster funding in the immutable request; existing sessions retain their
   separate actions. Exact fee-input sufficiency remains a Core decision.
   Preparation rechecks Core state; exact-offer approval remains mandatory.
+  Public-offer polling and manual refresh wait for known spendable DD covering
+  the entered amount. Unknown, failed and insufficient balances have neutral
+  status text; stale in-flight previews cannot restore cards after balance loss.
+  The timer resumes when funded. Actual offer fees remain checked separately,
+  allowing sponsored offers and fee deduction without requiring the fee ceiling.
   Monetary labels show DD without repeating integer-cent values. The editable
   client ceiling uses DD with a read-only percentage comparison. Offer rows and
   exact approval show the actual fee's effective recipient-based percentage;

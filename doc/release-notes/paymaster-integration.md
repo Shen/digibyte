@@ -1,5 +1,14 @@
 # Paymaster integration release notes
 
+## Show send-form offers only when the DD amount is funded (2026-10-12)
+
+The send form pauses Paymaster offer checks and hides offer cards while the DD
+balance is loading, unavailable or too small for the entered amount. It shows
+a neutral balance explanation and resumes checks when enough DD is available.
+Late preview replies cannot restore stale offers after funds disappear.
+The actual service fee is still checked separately, including fee deduction;
+public directory RPCs, existing payment sessions and Core checks are unchanged.
+
 ## Cancel unsigned preparation from the send panel (2026-10-12)
 
 The Paymaster transfer panel now offers **Cancel preparation** before payment
