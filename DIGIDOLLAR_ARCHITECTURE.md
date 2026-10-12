@@ -536,6 +536,8 @@ data before expensive private HD expansion for a candidate. A public match alone
 never establishes ownership; private internal-key retrieval, final DD output
 verification and recovered-key persistence remain required. This reduces work
 under wallet locks for foreign outputs without changing validation or spending.
+A descriptor match without an available private key is not cached as foreign;
+ownership can be rechecked after unlock without accepting public data as proof.
 
 ### 4.3 Address Validation System
 
@@ -857,10 +859,12 @@ class DigiDollarTab : public QWidget {
 - ✅ Recent transaction summary
 - 🔄 Real-time balance updates (minor notification gap)
 
-Overview RPC workers preserve structured RPC exceptions for the original waiting
-state. Unavailable data clears the health snapshot and old percentage text;
-malformed responses remain errors. Index readiness and minting checks stay in
-the original RPC/consensus paths.
+Overview RPC workers preserve structured RPC exceptions for a waiting state
+that reports unavailable statistics without assuming synchronization will fix
+the failure. Unavailable data clears the health snapshot and old percentage
+text; malformed responses remain errors, including amount-parsing exceptions.
+An oracle-unavailable response replaces any older healthy snapshot. Index
+readiness and minting checks stay in the original RPC/consensus paths.
 
 #### **2. Send Widget** (`/src/qt/digidollarsendwidget.cpp`)
 **Status: ✅ 100% Complete**

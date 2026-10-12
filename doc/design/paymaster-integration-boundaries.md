@@ -202,3 +202,15 @@ The [DD refresh runbook](../digidollar-paymaster-testing.md#dd-refresh-latency-a
 records the regression counterexample, targeted tests and outstanding normal
 build/live acceptance. Isolated tests do not establish production throughput
 or that every possible relay delay has been eliminated.
+
+Follow-up review found that the existing negative cache could classify a
+matching descriptor as foreign when its private key was unavailable while
+locked. Such candidates now remain unresolved and retry the original proof
+after unlock. The optimization still excludes unrelated private derivations;
+it grants no ownership or spending permission from public keys alone.
+
+The Overview also distinguishes parsing exceptions from exceptions received
+from the node, does not describe every node failure as ongoing loading, and
+retains current oracle-unavailable observations instead of replaying an older
+healthy snapshot when the balance refreshes. These are display/cache repairs;
+they do not change node health, index, minting or confirmation decisions.

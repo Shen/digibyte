@@ -2321,9 +2321,15 @@ keys for a matching candidate. The private internal key and final DD output
 tweak are still verified and recovered keys are persisted as before. This
 avoids unnecessary private derivation for foreign outputs while `cs_wallet`
 is held; it does not bypass validation notifications or synchronization.
+If a descriptor matches but its private key is unavailable, the output remains
+unresolved rather than entering the foreign-output cache. Unlocking can then
+recover the key through the same complete proof path.
 
 The asynchronous Overview RPC bridge carries structured RPC exceptions to
-the original waiting branch instead of turning them into generic errors.
+the waiting presentation instead of turning them into generic errors. It says
+statistics are unavailable, without promising that synchronization will fix it.
 Unavailable or malformed network data clears the health snapshot and old
-collateralization text. No supply estimate, zero-health fallback, minting
+collateralization text. Parsing errors remain errors even when thrown as RPC
+objects. Valid oracle-unavailable observations replace older health snapshots.
+No supply estimate, zero-health fallback, minting
 permission or consensus rule is introduced.

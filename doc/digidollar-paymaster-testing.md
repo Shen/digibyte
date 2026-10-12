@@ -4569,7 +4569,7 @@ recovered, verified and cached with one expansion. A second new test rejects
 ownership when only the matching public internal key and an unrelated private
 script-leaf key are present. These tests introduce no production test hooks.
 
-The six selected wallet cases pass **74/74 assertions**, including the original
+The initial six selected wallet cases passed **74/74 assertions**, including the original
 complete foreign-output history, descriptor recovery/persistence, locked and
 reloaded wallet history, and foreign miss cache cases. Nine selected GUI cases
 pass, including two new tests: one exercises an actual structured exception
@@ -4579,6 +4579,29 @@ The seven existing cases cover mint/oracle states, health polling, busy-wallet
 responsiveness, stored/live history and wallet binding. Six selected compile
 units and two isolated test links succeeded; the baseline link is a deliberately
 failing counterexample, not a passing product test.
+
+The follow-up review against `bc1e2b4ab7` adds a locked descriptor recovery
+case. Before correction it fails with exit 201: the unavailable private key
+leaves a foreign-cache entry and recovery still fails after unlock. Matching
+descriptors are now left unresolved until private-key proof becomes possible.
+All **seven wallet cases / 88 assertions** pass after correction, including
+the existing private-expansion and public-only rejection probes.
+
+The extended malformed-health GUI test also fails against the previous object
+(exit 1): `AmountFromValue` throws a structured exception that the renderer
+incorrectly treats as waiting. Received node exceptions now remain separate
+from parsing failures. The test additionally covers a current oracle-unavailable
+snapshot surviving balance-triggered rendering. All nine selected GUI cases
+pass after correction. Node exceptions report unavailable statistics without
+assuming every failure will resolve through synchronization.
+
+Follow-up evidence is in
+`build_msvc/paymaster-refresh-check/dd-refresh-review/`: four changed translation
+units were compiled and both isolated test binaries relinked; the unchanged Qt
+test helper/moc objects and normal libraries were reused. Its receipt records
+the source, object, binary and library hashes and both expected failing probes.
+The existing `dd-refresh-latency/build-and-check.ps1` operator helper now requires
+the additional unlock case and **88/88** assertions.
 
 Workspace evidence and the operator helper are under
 `build_msvc/paymaster-refresh-check/dd-refresh-latency/`. The receipt records
@@ -4601,7 +4624,7 @@ before the normal build replaces their executable. From
 
 The normal build and complete Qt suite are operator tasks (minutes to tens of
 minutes, depending on incremental objects and hardware). Success requires exit
-zero, all six named wallet cases/74 assertions, all nine named GUI cases, no
+zero, all seven named wallet cases/88 assertions, all nine named GUI cases, no
 failed full Qt cases and the generated `receipt.json`. A run without `-Build`
 only checks existing binaries and does not prove they match changed sources.
 For broad unit acceptance, add `-FullUnitTests`; the original DCA/health runtime

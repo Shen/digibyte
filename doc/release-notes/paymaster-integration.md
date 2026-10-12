@@ -621,10 +621,13 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
 ### DD refresh latency and network-status errors (2026-10-12)
 
 - Preserve structured RPC failures across asynchronous Overview reads. Missing
-  network data uses the original waiting state; malformed responses remain
-  errors. Clear obsolete collateralization percentages when data is unavailable.
+  network data reports unavailability in the waiting state; malformed responses
+  remain errors, including amount-parsing failures. Clear obsolete percentages
+  and replace older snapshots when the oracle becomes unavailable.
 - Avoid private HD derivation for nonmatching foreign DD outputs. The complete
   descriptor search, private-key proof, final output verification and missing
   key recovery remain in place; native sends and validation gates are unchanged.
+- Keep matching descriptors with unavailable private keys out of the foreign
+  output cache, so missing DD keys can be recovered after wallet unlock.
 - Add Regtest descriptor probes and GUI regression coverage; full normal-build
   and live cold-start acceptance remain separate operator checks.
