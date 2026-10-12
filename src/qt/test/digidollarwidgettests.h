@@ -25,6 +25,8 @@ private Q_SLOTS:
     void failedMintsKeepTheirWalletStatus();
     void digiDollarControlsStayReadableInBothThemes();
     void overviewExplainsMintAvailability();
+    void overviewRpcErrorsKeepWaitingState();
+    void overviewMalformedHealthDoesNotReuseSnapshot();
     void overviewPaymasterReservationUsesConditionalBalanceBreakdown();
     void watchOnlyDigiDollarBalanceHiddenInWalletModel();
     void privateKeyDisabledWalletCannotGenerateDigiDollarAddress();

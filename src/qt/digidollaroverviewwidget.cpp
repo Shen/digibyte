@@ -73,26 +73,27 @@ enum RecentTransactionRole {
 
 // The node outlives its GUI models, as in WalletModel's asynchronous RPC bridge.
 // Only value results cross back to Qt; no widget is touched by this worker.
-void ReadOverviewRpc(ClientModel* model, std::string command, std::function<void(UniValue, QString)> callback)
+void ReadOverviewRpc(ClientModel* model, std::string command, std::function<void(UniValue, QString, UniValue)> callback)
 {
     QPointer<ClientModel> guard{model};
     auto* node = &model->node();
     QThread* thread = QThread::create([guard, node, command = std::move(command), callback = std::move(callback)]() mutable {
         if (!guard) return;
         UniValue result;
+        UniValue rpc_error;
         QString error;
         try {
             result = node->executeRpc(command, UniValue{UniValue::VARR}, "");
         } catch (const UniValue& e) {
-            error = QString::fromStdString(e.write());
+            rpc_error = e;
         } catch (const std::exception& e) {
             error = QString::fromUtf8(e.what());
         } catch (...) {
             error = QStringLiteral("Unknown overview status error");
         }
         if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback), result = std::move(result), error = std::move(error)]() mutable {
-            if (guard) callback(std::move(result), std::move(error));
+        QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback), result = std::move(result), error = std::move(error), rpc_error = std::move(rpc_error)]() mutable {
+            if (guard) callback(std::move(result), std::move(error), std::move(rpc_error));
         }, Qt::QueuedConnection);
     });
     QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
@@ -886,11 +887,11 @@ void DigiDollarOverviewWidget::updateOraclePrice()
         m_oracleRefreshInFlight = true;
         const auto generation = m_nodeGeneration;
         QPointer<DigiDollarOverviewWidget> guard{this};
-        ReadOverviewRpc(m_clientModel, "getoracleprice", [guard, generation](UniValue result, QString error) {
+        ReadOverviewRpc(m_clientModel, "getoracleprice", [guard, generation](UniValue result, QString error, UniValue rpc_error) {
             if (!guard || guard->m_nodeGeneration != generation) return;
             guard->m_oracleRefreshInFlight = false;
             try {
-                guard->m_oraclePrice = error.isEmpty() ? result.find_value("price_micro_usd").getInt<int64_t>() / 1000000.0 : 0.0;
+                guard->m_oraclePrice = error.isEmpty() && rpc_error.isNull() ? result.find_value("price_micro_usd").getInt<int64_t>() / 1000000.0 : 0.0;
             } catch (const std::exception&) {
                 guard->m_oraclePrice = 0.0;
             }
@@ -935,6 +936,7 @@ void DigiDollarOverviewWidget::updateSystemHealth()
         m_dcaLevelValue->setText("N/A");
         m_errLevelValue->setText("N/A");
         m_systemHealthBar->setValue(0);
+        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
         return;
     }
 
@@ -942,16 +944,20 @@ void DigiDollarOverviewWidget::updateSystemHealth()
     m_healthRefreshInFlight = true;
     const auto generation = m_nodeGeneration;
     QPointer<DigiDollarOverviewWidget> guard{this};
-    ReadOverviewRpc(m_clientModel, "getdigidollarstats", [guard, generation](UniValue result, QString error) {
+    ReadOverviewRpc(m_clientModel, "getdigidollarstats", [guard, generation](UniValue result, QString error, UniValue rpc_error) {
         if (!guard || guard->m_nodeGeneration != generation) return;
         guard->m_healthRefreshInFlight = false;
-        if (!guard->m_privacy) guard->applySystemHealth(result, error);
+        if (!guard->m_privacy) guard->applySystemHealth(result, error, rpc_error);
     });
 }
 
-void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const QString& error)
+void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const QString& error, const UniValue& rpc_error)
 {
     try {
+        // Preserve RPC exceptions across the worker boundary. Converting them
+        // to runtime_error mislabels temporarily unavailable index data as a
+        // malformed response instead of the original waiting state.
+        if (!rpc_error.isNull()) throw rpc_error;
         if (!error.isEmpty()) throw std::runtime_error(error.toStdString());
         // Use the node's next-block decision, including the activation rules.
         // A missing quote also prevents a health check; name the missing price first.
@@ -1069,6 +1075,7 @@ void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const Q
         m_dcaLevelValue->setText("Loading...");
         m_errLevelValue->setText("Loading...");
         m_systemHealthBar->setValue(0);
+        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
     } catch (const std::exception& e) {
         m_healthSnapshot = UniValue{};
         m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
@@ -1081,6 +1088,7 @@ void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const Q
         m_dcaLevelValue->setText("Unknown");
         m_errLevelValue->setText("Unknown");
         m_systemHealthBar->setValue(0);
+        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.what());
     }
 }

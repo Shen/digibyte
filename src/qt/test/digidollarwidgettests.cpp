@@ -8130,6 +8130,62 @@ void DigiDollarWidgetTests::sendWidgetSaysWhyAnAmountIsRefused()
     QVERIFY2(!sendButton->isEnabled(), "an amount the form refuses must leave the Send button off");
 }
 
+void DigiDollarWidgetTests::overviewRpcErrorsKeepWaitingState()
+{
+    TestChain100Setup test(ChainType::REGTEST,
+        {"-digidollaractivationheight=1000", "-digidollarstatsindex=0"});
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    m_node.setContext(&test.m_node);
+    DigiDollarMiniGUI gui(m_node);
+    DigiDollarOverviewWidget overview;
+    // Simulate an earlier successful read. An RPC exception must clear its
+    // percent text, rather than combine an old percentage with an error.
+    overview.m_systemHealthBar->setFormat("248.0% Collateralization");
+    overview.setClientModel(gui.clientModel.get());
+    QVERIFY(overview.m_healthRefreshInFlight);
+    QTRY_VERIFY(!overview.m_healthRefreshInFlight);
+    QTRY_VERIFY(!overview.m_oracleRefreshInFlight);
+    // getdigidollarstats throws a structured RPC exception before activation.
+    // This exercises the actual worker/Qt boundary, not just its renderer.
+    QVERIFY(overview.m_systemHealthValue->text().contains("Loading"));
+    QCOMPARE(overview.m_networkTotalDDValue->text(), QStringLiteral("Loading..."));
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+    QVERIFY(overview.m_healthSnapshot.isNull());
+    QVERIFY(overview.m_mintStatusLabel->text().contains("unknown"));
+}
+
+void DigiDollarWidgetTests::overviewMalformedHealthDoesNotReuseSnapshot()
+{
+    BasicTestingSetup test(ChainType::REGTEST);
+    DigiDollarOverviewWidget overview;
+    UniValue valid;
+    QVERIFY(valid.read(R"({"minting_restricted_reason":"none","health_percentage":248,
+        "health_status":"normal","total_collateral_dgb":6464,"total_dd_supply":130000,
+        "is_emergency":false,"oracle_available":true,"dca_tier":{"multiplier":1},
+        "err_tier":{"ratio":1,"burn_multiplier":1}})"));
+    const auto check_valid = [&] {
+        overview.applySystemHealth(valid, {});
+        QCOMPARE(overview.m_systemHealthValue->text(), QStringLiteral("248% Collateralized"));
+        QVERIFY(overview.m_systemHealthBar->format().contains("248.0%"));
+        QVERIFY(overview.m_healthSnapshot.isObject());
+    };
+    check_valid();
+    overview.applySystemHealth(UniValue{UniValue::VOBJ}, {});
+    QVERIFY(overview.m_systemHealthValue->text().contains("Status unavailable"));
+    QVERIFY(overview.m_healthSnapshot.isNull());
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+    QVERIFY(overview.m_mintStatusLabel->text().contains("unknown"));
+    check_valid();
+    overview.applySystemHealth({}, QStringLiteral("Transport unavailable"));
+    QVERIFY(overview.m_healthSnapshot.isNull());
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+    check_valid();
+    overview.setClientModel(nullptr);
+    overview.updateSystemHealth();
+    QVERIFY(overview.m_healthSnapshot.isNull());
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+}
+
 void DigiDollarWidgetTests::overviewExplainsMintAvailability()
 {
     TestChain100Setup test(ChainType::REGTEST,

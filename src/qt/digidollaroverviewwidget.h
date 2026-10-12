@@ -72,6 +72,7 @@ private Q_SLOTS:
     void activateRecentTransaction(QListWidgetItem* item);
 
 private:
+    friend class DigiDollarWidgetTests;
     void setupUI();
     void setupBalanceSection();
     /** Keep the legacy balance layout unless a Paymaster reservation exists. */
@@ -82,7 +83,7 @@ private:
     void connectSignals();
     void addDemoTransactions(); // For demo purposes only
     void updateSystemHealthIfDue(bool force);
-    void applySystemHealth(const UniValue& result, const QString& error);
+    void applySystemHealth(const UniValue& result, const QString& error, const UniValue& rpc_error = {});
     void renderOraclePrice();
     void populateRecentTransactions(const UniValue& result);
 
