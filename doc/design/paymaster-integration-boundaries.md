@@ -169,3 +169,36 @@ Paymaster GUI cases use disposable wallets and the real history worker. See
 the [history-wait runbook](../digidollar-paymaster-testing.md#paymaster-coordination-with-full-dd-history-2026-10-12)
 for the final evidence and operator acceptance steps. The normal installed
 GUI is not automatically replaced by an isolated test build.
+
+### Safe DD ownership optimization and network-status repair (2026-10-12)
+
+The shared DD ownership fallback performed private HD expansion for every
+descriptor script even when its public internal key could not produce the
+examined DD output. A foreign output can therefore hold `cs_wallet` longer
+than necessary; wallet validation callbacks need that same lock, and the
+original bounded validation queue can then delay other node work. Live logs
+also showed an Own DGB transaction reaching processing on the peer minutes
+after local acceptance. They do not establish that ownership derivation was
+the only source of that delay.
+
+The correction keeps the complete descriptor search, all earlier ownership
+checks and the negative cache. It uses the existing public solving provider
+to reject nonmatching candidates before private expansion. A public match
+does **not** establish ownership: the original private internal-key lookup,
+final DD tweak verification and recovered-key persistence still run. Original
+history construction, wallet/chain synchronization, validation queue limits,
+relay, confirmation rules and Paymaster financial protections are unchanged.
+This is a narrow shared-wallet performance fix, rather than a Paymaster-only
+shortcut around DD security checks.
+
+Separately, the Paymaster integration's asynchronous Overview bridge had
+converted structured RPC exceptions to text, redirecting them from the
+original waiting handler into the generic error handler. The bridge now
+preserves their type. Failure clears both the health snapshot and its old
+percentage label; malformed results still fail. The statistics RPC and index
+readiness requirements remain unchanged.
+
+The [DD refresh runbook](../digidollar-paymaster-testing.md#dd-refresh-latency-and-status-errors-2026-10-12)
+records the regression counterexample, targeted tests and outstanding normal
+build/live acceptance. Isolated tests do not establish production throughput
+or that every possible relay delay has been eliminated.

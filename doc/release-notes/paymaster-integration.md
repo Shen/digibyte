@@ -617,3 +617,14 @@ independent provider hosts. No consensus, P2P or base-wallet schema change.
   check the SHA256 of the entire encrypted packet in addition to its suffix.
 - Document necessary shared hooks and outstanding full-build, performance and
   dynamic checks in the [boundary review](../design/paymaster-integration-boundaries.md).
+
+### DD refresh latency and network-status errors (2026-10-12)
+
+- Preserve structured RPC failures across asynchronous Overview reads. Missing
+  network data uses the original waiting state; malformed responses remain
+  errors. Clear obsolete collateralization percentages when data is unavailable.
+- Avoid private HD derivation for nonmatching foreign DD outputs. The complete
+  descriptor search, private-key proof, final output verification and missing
+  key recovery remain in place; native sends and validation gates are unchanged.
+- Add Regtest descriptor probes and GUI regression coverage; full normal-build
+  and live cold-start acceptance remain separate operator checks.

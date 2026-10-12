@@ -2311,3 +2311,19 @@ unpruned recovery sessions before new approval and during final reconciliation.
 Restoration is atomic with the caller's transition and never raises saved limits;
 already-spent fees retain their original accounting date.
 No consensus or base DigiByte transaction rules are changed by this protection.
+
+### DD history contention and overview errors (2026-10-12)
+
+Canonical DD history still performs complete wallet ownership checks and missing
+descriptor-key recovery. Its `IsDDOutputMine` fallback checks public Taproot
+spend data across the complete descriptor range before requesting private HD
+keys for a matching candidate. The private internal key and final DD output
+tweak are still verified and recovered keys are persisted as before. This
+avoids unnecessary private derivation for foreign outputs while `cs_wallet`
+is held; it does not bypass validation notifications or synchronization.
+
+The asynchronous Overview RPC bridge carries structured RPC exceptions to
+the original waiting branch instead of turning them into generic errors.
+Unavailable or malformed network data clears the health snapshot and old
+collateralization text. No supply estimate, zero-health fallback, minting
+permission or consensus rule is introduced.

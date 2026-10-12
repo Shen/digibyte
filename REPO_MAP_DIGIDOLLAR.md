@@ -1040,6 +1040,10 @@ or chain parameters.
 ### src/wallet/digidollarwallet.cpp
 - Full implementation of DigiDollarWallet (~2000+ lines)
 - Integrates with wallet database, transaction builders, signing, mempool
+- `IsDDOutputMine` retains its complete descriptor fallback and private-key
+  recovery. Public Taproot spend data rejects nonmatching candidates before
+  expensive private HD expansion; a candidate still requires the original
+  private internal key, final DD tweak verification and recovered-key storage.
 
 ### src/wallet/ddcoincontrol.h / .cpp
 - `wallet::DDCoinControl` (class) → manual DD UTXO selection for transactions
@@ -1481,6 +1485,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/qt/digidollaroverviewwidget.cpp/h
 - `DigiDollarOverviewWidget` → DD balance overview and system health display.
+  Asynchronous RPC reads preserve structured RPC exceptions, so unavailable
+  network data retains the original waiting state. Malformed responses remain
+  errors; both failure paths clear the health snapshot and old percentage text.
   With no Paymaster-reserved DD it preserves the original compact balance
   layout. While a client session or live provider carrier pool protects DD, it
   temporarily splits the display into ordinary available, Paymaster-reserved,
@@ -1864,7 +1871,7 @@ present in the tree but not compiled into the current unit-test binary.
 | `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records; simulated begin/write/commit failures for fee-policy approval, signature persistence, fallback, cancellation and self-recovery, including lost replies and protection of newly reserved inputs |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, malicious client/provider persistence failures, durable restore quarantine, and real SQLite page-limit/commit-denial rollback and exact retry |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
-| `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries; full history ownership checks, descriptor-only missing-address-key recovery/persistence, self-send/receive/redemption-change rows and locked/reloaded key recognition |
+| `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries; full history ownership checks, descriptor-only missing-address-key recovery/persistence, self-send/receive/redemption-change rows and locked/reloaded key recognition; HD descriptor probe counts private expansions and rejects public-only/leaf-key ownership |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |
 | `digidollar_wallet_lock_safety_tests.cpp` | The wallet never asks the chain a question while holding its own lock: UTXO rebuild, abandon, expired-mint release and rescan |
 | `digidollar_wave16_persistence_tests.cpp` | Restart restores positions, DD UTXOs and owner/address keys; a crash after broadcast keeps the owner key on disk; a locked encrypted wallet refuses DD key decryption |

@@ -4544,3 +4544,81 @@ unknown remote-node lock waits are not identified as history waits by this
 adapter. Actual transport/quote failures remain bounded; signed ambiguity still
 retains inputs and uses read-only outcome resolution. The original runtime
 test failures recorded in the boundary review remain open, not waived.
+
+## DD refresh latency and status errors (2026-10-12)
+
+The scoped fixes address two different paths:
+
+- The asynchronous Overview bridge now preserves structured RPC errors. Missing
+  network statistics retain the original waiting presentation; malformed results
+  remain errors. Both paths discard the health snapshot and stale percentage
+  text. No estimate replaces missing supply/health data or authorizes minting.
+- The complete `IsDDOutputMine` descriptor fallback checks public Taproot spend
+  data before expensive private HD expansion for a matching candidate. Private
+  internal-key recovery, the final DD tweak check, key persistence, negative
+  ownership caching and original history construction remain intact. Wallet
+  locks, validation callbacks, queue bounds, relay and confirmation rules are
+  unchanged.
+
+The new Regtest descriptor probe wraps a real ranged private descriptor with
+32 keys. Against the previous full fallback object, a foreign output caused
+32 private expansions and the test failed its three cost-counter assertions
+(exit 201); ownership/recovery assertions still passed. With the fix, the foreign
+output causes zero expansions, and a missing own DD key at HD index 31 is
+recovered, verified and cached with one expansion. A second new test rejects
+ownership when only the matching public internal key and an unrelated private
+script-leaf key are present. These tests introduce no production test hooks.
+
+The six selected wallet cases pass **74/74 assertions**, including the original
+complete foreign-output history, descriptor recovery/persistence, locked and
+reloaded wallet history, and foreign miss cache cases. Nine selected GUI cases
+pass, including two new tests: one exercises an actual structured exception
+through the asynchronous RPC bridge; the other checks malformed responses,
+transport failures, disconnected state and recovery after a valid response.
+The seven existing cases cover mint/oracle states, health polling, busy-wallet
+responsiveness, stored/live history and wallet binding. Six selected compile
+units and two isolated test links succeeded; the baseline link is a deliberately
+failing counterexample, not a passing product test.
+
+Workspace evidence and the operator helper are under
+`build_msvc/paymaster-refresh-check/dd-refresh-latency/`. The receipt records
+source, object, binary and explicit library hashes. Isolated links combine the
+changed objects with existing build libraries; they are not a full rebuild or
+live-performance acceptance. Failed preliminary compile trials do not count
+as successful verification. Formatter executables were unavailable; formatting
+was inspected against the repository configuration.
+
+### Normal build and live acceptance
+
+Prerequisites: the workspace's existing MSVC v143 14.43.34808, SDK 10.0.26100.0,
+Qt 5.15.10 and static dependencies; no competing build. Close both Regtest GUIs
+before the normal build replaces their executable. From
+`D:\Digibyte\digibyte-fork`:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+```
+
+The normal build and complete Qt suite are operator tasks (minutes to tens of
+minutes, depending on incremental objects and hardware). Success requires exit
+zero, all six named wallet cases/74 assertions, all nine named GUI cases, no
+failed full Qt cases and the generated `receipt.json`. A run without `-Build`
+only checks existing binaries and does not prove they match changed sources.
+For broad unit acceptance, add `-FullUnitTests`; the original DCA/health runtime
+failures noted in the boundary review remain open and must not be waived.
+
+After building, repeat the cold-start scenario with the provider/client and
+their same wallets. First prepare a Paymaster offer only to the exact review
+dialog; cancel without signing. Then the operator can repeat the ordinary
+Own DGB transfer in Regtest. Record local acceptance, peer mempool appearance,
+the block that includes it and the subsequent GUI refresh. Both nodes should
+agree on confirmations and the display should update after a confirmed block
+without a wallet switch/restart. Check actual confirmations with
+`getrawtransaction "<txid>" true` on each node; additional blocks alone do not
+prove inclusion. Do not use live/mainnet funds for this acceptance.
+
+Live logs previously showed a delay between local Own DGB acceptance and peer
+processing. Long wallet ownership work can block the original validation queue,
+but those logs do not prove it was the sole cause. Cold-start/live relay timing,
+the normal full build/suites and sanitizer acceptance remain open until operator
+results are returned. No guaranteed network confirmation deadline is claimed.

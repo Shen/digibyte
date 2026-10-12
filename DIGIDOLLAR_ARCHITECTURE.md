@@ -530,6 +530,13 @@ std::vector<COutput> SelectDDCoins(CAmount target) {
 
 **Key Innovation**: Solves the challenge of tracking DigiDollar amounts through transfers by maintaining explicit UTXO-to-amount mapping rather than relying on position-based assumptions.
 
+DD history retains complete ownership checks, including reconstruction of missing
+DD address keys from descriptors. The descriptor fallback checks public Taproot
+data before expensive private HD expansion for a candidate. A public match alone
+never establishes ownership; private internal-key retrieval, final DD output
+verification and recovered-key persistence remain required. This reduces work
+under wallet locks for foreign outputs without changing validation or spending.
+
 ### 4.3 Address Validation System
 
 #### **Real-Time Validation** (`/src/qt/digidollarsendwidget.cpp`)
@@ -849,6 +856,11 @@ class DigiDollarTab : public QWidget {
 - ✅ System health indicators (network-wide UTXO scanning)
 - ✅ Recent transaction summary
 - 🔄 Real-time balance updates (minor notification gap)
+
+Overview RPC workers preserve structured RPC exceptions for the original waiting
+state. Unavailable data clears the health snapshot and old percentage text;
+malformed responses remain errors. Index readiness and minting checks stay in
+the original RPC/consensus paths.
 
 #### **2. Send Widget** (`/src/qt/digidollarsendwidget.cpp`)
 **Status: ✅ 100% Complete**
