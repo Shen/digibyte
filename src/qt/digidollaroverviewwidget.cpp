@@ -953,11 +953,29 @@ void DigiDollarOverviewWidget::updateSystemHealth()
 
 void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const QString& error, const UniValue& rpc_error)
 {
+    const auto show_unavailable = [this](bool waiting) {
+        m_healthSnapshot = UniValue{};
+        m_mintStatusLabel->setText(tr("Mint availability is unknown. Check node synchronization and diagnostics."));
+        const auto kind = waiting ? DigiDollarStatus::Kind::WAITING : DigiDollarStatus::Kind::ERR;
+        DigiDollarStatus::SetText(m_systemHealthValue, kind);
+        DigiDollarStatus::SetText(m_dcaLevelValue, kind);
+        DigiDollarStatus::SetText(m_errLevelValue, kind);
+        m_systemHealthValue->setText(waiting ? tr("… Network statistics unavailable") : tr("✕ Status unavailable"));
+        m_networkTotalDDValue->setText(tr("Unavailable"));
+        m_networkTotalCollateralValue->setText(tr("Unavailable"));
+        m_dcaLevelValue->setText(tr("Unknown"));
+        m_errLevelValue->setText(tr("Unknown"));
+        m_systemHealthBar->setValue(0);
+        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
+    };
+    // Keep node-reported unavailability separate from malformed responses.
+    // An RPC failure alone does not prove that synchronization will resolve it.
+    if (!rpc_error.isNull()) {
+        LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", rpc_error.write());
+        show_unavailable(/*waiting=*/true);
+        return;
+    }
     try {
-        // Preserve RPC exceptions across the worker boundary. Converting them
-        // to runtime_error mislabels temporarily unavailable index data as a
-        // malformed response instead of the original waiting state.
-        if (!rpc_error.isNull()) throw rpc_error;
         if (!error.isEmpty()) throw std::runtime_error(error.toStdString());
         // Use the node's next-block decision, including the activation rules.
         // A missing quote also prevents a health check; name the missing price first.
@@ -1015,6 +1033,9 @@ void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const Q
         m_networkTotalCollateralValue->setTextFormat(Qt::RichText);
         m_networkTotalCollateralValue->setText(QString("<span style='color: #00FF88; font-weight: bold;'>%1</span><span style='color: white;'> DGB</span>").arg(dgbFormatted));
 
+        // Retain the latest validated observation even when its oracle is
+        // unavailable. A later balance refresh must not restore old health.
+        m_healthSnapshot = result;
         if (!oracleAvailable) {
             DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
             DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::WAITING);
@@ -1060,36 +1081,12 @@ void DigiDollarOverviewWidget::applySystemHealth(const UniValue& result, const Q
         int barValue = std::min(100, static_cast<int>((healthPercent * 100) / 500));
         m_systemHealthBar->setValue(barValue);
         m_systemHealthBar->setFormat(QString("%1% Collateralization").arg(QString::number(healthPercent, 'f', 1)));
-        m_healthSnapshot = result;
-
     } catch (const UniValue& e) {
-        m_healthSnapshot = UniValue{};
-        LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.write());
-        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
-        DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::WAITING);
-        DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::WAITING);
-        DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::WAITING);
-        m_systemHealthValue->setText(tr("… Loading…"));
-        m_networkTotalDDValue->setText("Loading...");
-        m_networkTotalCollateralValue->setText("Loading...");
-        m_dcaLevelValue->setText("Loading...");
-        m_errLevelValue->setText("Loading...");
-        m_systemHealthBar->setValue(0);
-        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
+        LogPrintf("DigiDollar: updateSystemHealth invalid response - %s\n", e.write());
+        show_unavailable(/*waiting=*/false);
     } catch (const std::exception& e) {
-        m_healthSnapshot = UniValue{};
-        m_mintStatusLabel->setText(tr("Mint availability is unknown. Wait for synchronization and try again."));
-        DigiDollarStatus::SetText(m_systemHealthValue, DigiDollarStatus::Kind::ERR);
-        DigiDollarStatus::SetText(m_dcaLevelValue, DigiDollarStatus::Kind::ERR);
-        DigiDollarStatus::SetText(m_errLevelValue, DigiDollarStatus::Kind::ERR);
-        m_systemHealthValue->setText(tr("✕ Status unavailable"));
-        m_networkTotalDDValue->setText("Error");
-        m_networkTotalCollateralValue->setText("Error");
-        m_dcaLevelValue->setText("Unknown");
-        m_errLevelValue->setText("Unknown");
-        m_systemHealthBar->setValue(0);
-        m_systemHealthBar->setFormat(tr("Collateralization unknown"));
         LogPrintf("DigiDollar: updateSystemHealth RPC error - %s\n", e.what());
+        show_unavailable(/*waiting=*/false);
     }
 }
 

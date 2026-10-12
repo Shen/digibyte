@@ -8147,8 +8147,8 @@ void DigiDollarWidgetTests::overviewRpcErrorsKeepWaitingState()
     QTRY_VERIFY(!overview.m_oracleRefreshInFlight);
     // getdigidollarstats throws a structured RPC exception before activation.
     // This exercises the actual worker/Qt boundary, not just its renderer.
-    QVERIFY(overview.m_systemHealthValue->text().contains("Loading"));
-    QCOMPARE(overview.m_networkTotalDDValue->text(), QStringLiteral("Loading..."));
+    QVERIFY(overview.m_systemHealthValue->text().contains("Network statistics unavailable"));
+    QCOMPARE(overview.m_networkTotalDDValue->text(), QStringLiteral("Unavailable"));
     QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
     QVERIFY(overview.m_healthSnapshot.isNull());
     QVERIFY(overview.m_mintStatusLabel->text().contains("unknown"));
@@ -8176,9 +8176,30 @@ void DigiDollarWidgetTests::overviewMalformedHealthDoesNotReuseSnapshot()
     QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
     QVERIFY(overview.m_mintStatusLabel->text().contains("unknown"));
     check_valid();
+    UniValue invalid_amount = valid;
+    invalid_amount.pushKV("total_collateral_dgb", "not-an-amount");
+    overview.applySystemHealth(invalid_amount, {});
+    // AmountFromValue throws UniValue too. This is a malformed response, not
+    // a structured exception received from the node by the RPC worker.
+    QVERIFY(overview.m_systemHealthValue->text().contains("Status unavailable"));
+    QVERIFY(overview.m_healthSnapshot.isNull());
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+    check_valid();
     overview.applySystemHealth({}, QStringLiteral("Transport unavailable"));
     QVERIFY(overview.m_healthSnapshot.isNull());
     QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Collateralization unknown"));
+    check_valid();
+    UniValue no_oracle = valid;
+    no_oracle.pushKV("oracle_available", false);
+    no_oracle.pushKV("minting_restricted_reason", "oracle_unavailable");
+    overview.applySystemHealth(no_oracle, {});
+    QVERIFY(overview.m_healthSnapshot.isObject());
+    QVERIFY(!overview.m_healthSnapshot["oracle_available"].get_bool());
+    // Balance delivery re-renders the stored snapshot. It must not restore a
+    // previous successful health/price observation after the oracle vanished.
+    overview.applySystemHealth(overview.m_healthSnapshot, {});
+    QVERIFY(overview.m_mintStatusLabel->text().contains("oracle price"));
+    QCOMPARE(overview.m_systemHealthBar->format(), QStringLiteral("Oracle price unavailable"));
     check_valid();
     overview.setClientModel(nullptr);
     overview.updateSystemHealth();
