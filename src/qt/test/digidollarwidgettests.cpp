@@ -4721,8 +4721,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(!clientSafetyFrame->isHidden());
     QVERIFY(!subtractPaymasterFee->isHidden());
     QVERIFY(!subtractPaymasterFee->isChecked());
-    QVERIFY(feeExplanation->text().contains(QStringLiteral("first tries")));
-    QVERIFY(feeSummary->text().contains(QStringLiteral("Paymaster only if needed")));
+    QVERIFY(feeExplanation->text().contains(QStringLiteral("No spendable DGB is currently available")));
+    QVERIFY(feeSummary->text().contains(QStringLiteral("Paid in DGB by the selected provider")));
     QVERIFY(feeSummary->text().contains(QStringLiteral("1.00 $DD")));
     QLineEdit* sendAmount = sendPage->findChild<QLineEdit*>("amountEdit");
     DigiDollarSendWidget* sendForm =
@@ -4737,7 +4737,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     useAvailableBalance->click();
     QCOMPARE(sendAmount->text(), QStringLiteral("50.00"));
     QVERIFY(subtractPaymasterFee->isChecked());
-    QVERIFY(feeSummary->text().contains(QStringLiteral("Exact total $DD outflow")));
+    QVERIFY(feeSummary->text().contains(QStringLiteral("Total $DD outflow")));
     QVERIFY(feeSummary->text().contains(
         QStringLiteral("Calculated from the exact offer before signing")));
     QVERIFY(feeSummary->text().contains(QStringLiteral("Wallet emptying")));
@@ -4920,7 +4920,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         QStringLiteral("RDtestRecipient"), 5.0, QString{}, QString{},
         {QStringLiteral("refresh"), QStringLiteral("retry_same"),
          QStringLiteral("cancel_to_self")}, true);
-    QCOMPARE(sessionPrimary->text(), QStringLiteral("Start safe recovery"));
+    QCOMPARE(sessionPrimary->text(), QStringLiteral("Prepare return to this wallet…"));
     QVERIFY(sessionAbandon->isHidden());
     QVERIFY(sessionFallback->isHidden());
     QVERIFY(sessionRecover->isHidden()); // This action is already the primary action.

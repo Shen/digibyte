@@ -1217,7 +1217,7 @@ void PaymasterSendWidget::setupFeeSection()
     selectable->setObjectName("paymasterSelectableOffers");
     auto* selectable_layout = new QVBoxLayout(selectable);
     selectable_layout->setContentsMargins(0, 0, 0, 0);
-    auto* selectable_heading = new QLabel(DigiDollarSendWidget::tr("Selectable · within your fee limits"), selectable);
+    auto* selectable_heading = new QLabel(DigiDollarSendWidget::tr("Selectable · within your balance and fee limits"), selectable);
     selectable_heading->setFont(cards_font);
     selectable_layout->addWidget(selectable_heading);
     auto* selectable_cards = new QWidget(selectable);
@@ -1231,10 +1231,10 @@ void PaymasterSendWidget::setupFeeSection()
     excluded->setObjectName("paymasterExcludedOffersFrame");
     auto* excluded_layout = new QVBoxLayout(excluded);
     excluded_layout->setContentsMargins(0, 8, 0, 0);
-    auto* excluded_heading = new QLabel(DigiDollarSendWidget::tr("Excluded · above your fee limits"), excluded);
+    auto* excluded_heading = new QLabel(DigiDollarSendWidget::tr("Unavailable · balance or fee limits"), excluded);
     excluded_heading->setFont(cards_font);
     excluded_layout->addWidget(excluded_heading);
-    auto* excluded_help = new QLabel(DigiDollarSendWidget::tr("These published offers are shown for comparison. They cannot be selected with your current limits."), excluded);
+    auto* excluded_help = new QLabel(DigiDollarSendWidget::tr("These published offers are shown for comparison. They cannot be selected with your current balance and fee limits."), excluded);
     excluded_help->setWordWrap(true);
     excluded_layout->addWidget(excluded_help);
     auto* excluded_cards = new QWidget(excluded);
@@ -2140,7 +2140,8 @@ void PaymasterSendWidget::refreshClientSafetyStatus()
             if (guard->m_clientSafetyConfigured) {
                 if (guard->m_clientSafetyMaximumBps != maximum_bps ||
                     guard->m_clientSafetyMaximumPerTransaction != maximum_per_transaction ||
-                    guard->m_clientSafetyMaximumPerDay != maximum_per_day) {
+                    guard->m_clientSafetyMaximumPerDay != maximum_per_day ||
+                    guard->m_clientSafetyAvailableTodayCents != available_cents) {
                     guard->invalidatePaymasterOfferPreview();
                 }
                 guard->m_clientSafetyMaximumPerTransaction =
@@ -2219,6 +2220,10 @@ void PaymasterSendWidget::updateClientSafetyDisplay()
         }
     }
     m_clientSafetyFrame->setAccessibleDescription(m_clientSafetyStatus->text());
+    // Pending/failed policy reads must immediately withdraw the old readiness
+    // indication, including before an asynchronous refresh returns.
+    updateOfferCheckControls();
+    m_form.updateSendButton();
 }
 
 void PaymasterSendWidget::setPaymasterBusy(bool busy)
@@ -2515,24 +2520,44 @@ QString PaymasterSendWidget::paymentAmountProblem() const
     // offer. Core still checks the actual inputs and authenticates the quote.
     // Automatic with own DGB must retain its direct-payment path.
     if (!m_paymasterRequestId.isEmpty() || !m_form.m_balanceKnown ||
-        !preparesPaymasterPayment() || !hasMatchingPaymasterOffer()) return {};
-    const qint64 available = std::llround(m_form.paymentInput().available_balance * 100);
-    const qint64 shortfall = m_paymasterPreviewTotalCents - available;
-    if (shortfall > 0) {
-        if (m_privacy) return DigiDollarSendWidget::tr("Not enough $DD for the selected offer. Disable privacy mode to review payment costs.");
-        return DigiDollarSendWidget::tr(
-            "Not enough $DD for the selected offer. Total: %1; available: %2; missing: %3. "
-            "Reduce the amount, deduct the service fee from the amount, or choose a cheaper offer.")
-            .arg(formatCents(m_paymasterPreviewTotalCents), formatCents(available), formatCents(shortfall));
+        !preparesPaymasterPayment()) return {};
+    if (hasMatchingPaymasterOffer()) {
+        const QString problem = offerFundingProblem(m_paymasterPreviewTotalCents);
+        return !problem.isEmpty() && m_privacy
+            ? DigiDollarSendWidget::tr("The available $DD cannot fund this offer. Disable privacy mode to review payment costs.") : problem;
     }
-    const qint64 remaining = available - m_paymasterPreviewTotalCents;
+    // When every fee-eligible offer is unfundable, explain the cheapest one.
+    // Excluded entries never become provider bindings or authorize a payment.
+    qint64 cheapest{-1};
+    if (m_offerCheckState == OfferCheckState::UNAVAILABLE) {
+        for (const auto& offer : m_advertisedOffers.getValues()) {
+            if (offer.find_value("eligible").isFalse()) continue;
+            const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
+            if (cheapest < 0 || total < cheapest) cheapest = total;
+        }
+    }
+    const QString problem = cheapest < 0 ? QString{} : offerFundingProblem(cheapest);
+    return !problem.isEmpty() && m_privacy
+        ? DigiDollarSendWidget::tr("The available $DD cannot fund this offer. Disable privacy mode to review payment costs.") : problem;
+}
+
+QString PaymasterSendWidget::offerFundingProblem(qint64 total_cents) const
+{
+    const qint64 available = std::llround(m_form.paymentInput().available_balance * 100);
+    const qint64 shortfall = total_cents - available;
+    if (shortfall > 0) {
+        return DigiDollarSendWidget::tr(
+            "Not enough $DD for this offer. Total: %1; available: %2; missing: %3. "
+            "Reduce the amount, deduct the service fee from the amount, or choose a cheaper offer.")
+            .arg(formatCents(total_cents), formatCents(available), formatCents(shortfall));
+    }
+    const qint64 remaining = available - total_cents;
     const CAmount minimum = Params().GetDigiDollarParams().minOutputAmount;
     // Every spendable DD output is at least the consensus minimum. If the
     // entire remaining balance is smaller, leaving a separate input unspent
     // cannot avoid sub-minimum change. No coin selection or wallet lock is
     // needed for this necessary (not sufficient) funding check.
     if (remaining > 0 && remaining < minimum) {
-        if (m_privacy) return DigiDollarSendWidget::tr("This payment would leave $DD change below the minimum. Disable privacy mode to review payment costs.");
         return DigiDollarSendWidget::tr(
             "This payment would leave %1, below the minimum $DD change of %2. "
             "Reduce the total by at least %3, or use \"Empty wallet with Paymaster\" to leave no change.")
@@ -2545,6 +2570,12 @@ QString PaymasterSendWidget::feeFundingProblem() const
 {
     const QString problem = paymentAmountProblem();
     if (!problem.isEmpty()) return problem;
+    if (paymasterModeSelected() && m_offerCheckState == OfferCheckState::UNAVAILABLE) {
+        return DigiDollarSendWidget::tr("No listed Paymaster offer fits your balance and fee limits. Review the unavailable offers below.");
+    }
+    if (paymasterModeSelected() && hasCurrentPaymasterOffer() && !hasMatchingPaymasterOffer()) {
+        return DigiDollarSendWidget::tr("Choose an available Paymaster offer before preparing this payment.");
+    }
     return !paymasterModeSelected()
         ? DigiDollarSendWidget::tr("No spendable DGB for the network fee. Add DGB or select Paymaster funding.")
         : paymasterOnlySelected()
@@ -2600,7 +2631,7 @@ void PaymasterSendWidget::updateOfferCheckControls()
     m_offerCheckFrame->setVisible(paymasterModeSelected() && m_paymasterRequestId.isEmpty());
     const bool checking = m_offerCheckState == OfferCheckState::CHECKING || m_offerCheckFrame->property("refreshPending").toBool();
     m_refreshOffersButton->setText(checking                                                                                     ? DigiDollarSendWidget::tr("Checking…") :
-                                   m_offerCheckState == OfferCheckState::EMPTY                                                  ? DigiDollarSendWidget::tr("Check again") :
+                                   (m_offerCheckState == OfferCheckState::EMPTY || m_offerCheckState == OfferCheckState::UNAVAILABLE) ? DigiDollarSendWidget::tr("Check again") :
                                    m_offerCheckState == OfferCheckState::FAILED                                                 ? DigiDollarSendWidget::tr("Try again") :
                                    (m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::STALE) ? DigiDollarSendWidget::tr("Refresh offers") :
                                                                                                                                   DigiDollarSendWidget::tr("Check offers"));
@@ -2612,6 +2643,12 @@ void PaymasterSendWidget::updateOfferCheckControls()
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("A Paymaster supplies the DGB network fee. You still need the $DD to send. Offer checks resume automatically when enough $DD is available."));
         } else if (!paymasterOnlySelected() && hasOwnDgbForFees()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("Automatic uses your DGB first. Core checks whether it covers the network fee; any Paymaster fallback requires approval of the exact fee."));
+        } else if (m_offerCheckState == OfferCheckState::UNAVAILABLE) {
+            m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No offer is selectable with your current balance and fee limits. Review the reasons below, reduce the amount, or deduct the service fee from the amount."));
+        } else if (m_offerCheckState == OfferCheckState::FOUND && !hasMatchingPaymasterOffer()) {
+            m_offerCheckHelp->setText(DigiDollarSendWidget::tr("Choose an available offer below. Your previous choice is no longer usable for this payment."));
+        } else if (m_offerCheckState == OfferCheckState::FOUND && !isReady()) {
+            m_offerCheckHelp->setText(DigiDollarSendWidget::tr("Offers are listed for comparison. Preparation remains blocked until the wallet checks and service-fee settings are ready."));
         } else if (m_offerCheckState == OfferCheckState::EMPTY) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No published offer currently matches this amount and your limits. Availability can change while provider capacity is reserved. Check again, use your own DGB, or review the amount and service-fee limits."));
         } else if (!paymasterOnlySelected() && !hasCurrentPaymasterOffer()) {
@@ -2646,8 +2683,10 @@ void PaymasterSendWidget::updateOfferCheckIcon()
 {
     if (!m_offerStateIcon || !m_offerIconTimer) return;
     m_offerIconTimer->stop();
+    const bool usable_offer = m_offerCheckState == OfferCheckState::FOUND &&
+        preparesPaymasterPayment() && isReady() && hasMatchingPaymasterOffer();
     const auto kind = m_privacy                                          ? DigiDollarStatus::Kind::INFO :
-                      m_offerCheckState == OfferCheckState::FOUND        ? DigiDollarStatus::Kind::SUCCESS :
+                      usable_offer                                       ? DigiDollarStatus::Kind::SUCCESS :
                       m_offerCheckState == OfferCheckState::CHECKING     ? DigiDollarStatus::Kind::WAITING :
                       m_offerCheckState == OfferCheckState::FAILED       ? DigiDollarStatus::Kind::ERR :
                       m_offerCheckState == OfferCheckState::NEEDS_AMOUNT ? DigiDollarStatus::Kind::ACTION :
@@ -2666,10 +2705,12 @@ void PaymasterSendWidget::updateOfferCheckIcon()
         renderOfferSpinner();
         if (m_offerStateIcon->isVisible()) m_offerIconTimer->start();
     } else {
-        const QString symbol = m_offerCheckState == OfferCheckState::FOUND                                                        ? QStringLiteral("✓") :
+        const bool neutral = m_offerCheckState == OfferCheckState::EMPTY || m_offerCheckState == OfferCheckState::NEEDS_BALANCE ||
+                             m_offerCheckState == OfferCheckState::UNAVAILABLE || m_offerCheckState == OfferCheckState::FOUND;
+        const QString symbol = kind == DigiDollarStatus::Kind::SUCCESS                                                           ? QStringLiteral("✓") :
                                m_offerCheckState == OfferCheckState::FAILED || m_offerCheckState == OfferCheckState::NEEDS_AMOUNT ? QStringLiteral("!") :
                                m_offerCheckState == OfferCheckState::STALE                                                        ? QStringLiteral("↻") :
-                               m_offerCheckState == OfferCheckState::EMPTY || m_offerCheckState == OfferCheckState::NEEDS_BALANCE ? QStringLiteral("—") :
+                               neutral                                                                                          ? QStringLiteral("—") :
                                                                                                                                     QStringLiteral("?");
         m_offerStateIcon->setText(symbol);
     }
@@ -2680,7 +2721,7 @@ void PaymasterSendWidget::setOfferCheckStatus(OfferCheckState state, const QStri
     m_offerCheckState = state;
     m_offersStatus->setText(text);
     m_offersStatus->setAccessibleDescription(text);
-    if (state == OfferCheckState::FOUND || state == OfferCheckState::EMPTY) {
+    if (state == OfferCheckState::FOUND || state == OfferCheckState::EMPTY || state == OfferCheckState::UNAVAILABLE) {
         const QDateTime checked_at = QDateTime::currentDateTime();
         m_offersUpdated->setText(DigiDollarSendWidget::tr("List updated: %1 · Automatic check every 10 s")
                                      .arg(QLocale().toString(checked_at.time(), QLocale::LongFormat)));
@@ -2725,6 +2766,7 @@ void PaymasterSendWidget::selectOfferCard(int index, bool manual)
 {
     if (index < 0 || static_cast<size_t>(index) >= m_offerPreview.size()) return;
     const UniValue& offer = m_offerPreview[index];
+    if (!m_form.m_balanceKnown || !offerFundingProblem(offer.find_value("user_total_cents").getInt<qint64>()).isEmpty()) return;
     m_selectedOfferProvider = QString::fromStdString(offer.find_value("provider_id").get_str());
     m_selectedOfferId = QString::fromStdString(offer.find_value("offer_id").get_str());
     m_offerManuallySelected = manual;
@@ -2733,6 +2775,78 @@ void PaymasterSendWidget::selectOfferCard(int index, bool manual)
     m_paymasterPreviewTotalCents = offer.find_value("user_total_cents").getInt<qint64>();
     updateFeeDisplay();
     m_form.updateSendButton();
+}
+
+void PaymasterSendWidget::updateOfferEligibility()
+{
+    if (!m_paymasterRequestId.isEmpty() || !hasBalanceForOfferSearch()) return;
+    const qint64 available = std::llround(m_form.paymentInput().available_balance * 100);
+    if (m_offerBalanceCents == available) return;
+    if (!m_advertisedOffers.empty() &&
+        (!m_offerPreviewClock.isValid() || !m_offerExpiryTimer->isActive() ||
+         m_offerPreviewClock.elapsed() >= m_offerExpiryTimer->interval())) {
+        expirePaymasterOfferPreview();
+        return;
+    }
+    // Set this before rendering: choosing a card also updates the cost summary.
+    m_offerBalanceCents = available;
+    m_offerPreview = UniValue{UniValue::VARR};
+    UniValue excluded_offers{UniValue::VARR};
+    m_offersTable->setRowCount(0);
+    m_paymasterPreviewRecipientCents = -1;
+    m_paymasterPreviewServiceFeeCents = -1;
+    m_paymasterPreviewTotalCents = -1;
+    int row{0};
+    for (const auto& offer : m_advertisedOffers.getValues()) {
+        const QString funding_problem = offerFundingProblem(offer.find_value("user_total_cents").getInt<qint64>());
+        if (offer.find_value("eligible").isFalse() || !funding_problem.isEmpty()) {
+            UniValue excluded = offer;
+            // Local display diagnostics only. The original validated directory
+            // entries are retained to re-evaluate later balance changes.
+            excluded.pushKV("funding_problem", funding_problem.toStdString());
+            excluded_offers.push_back(std::move(excluded));
+            continue;
+        }
+        m_offerPreview.push_back(offer);
+        m_offersTable->insertRow(row);
+        const QString provider = QString::fromStdString(offer.find_value("display_name").get_str());
+        const QString model = QString::fromStdString(offer.find_value("funding_model").get_str());
+        const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
+        const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
+        const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
+        const int fee_rate_bps = offer.find_value("fee_rate_bps").getInt<int>();
+        const qint64 maximum_service_fee_cents = offer.find_value("maximum_user_paid_service_fee_cents").getInt<qint64>();
+        const bool enough = offer.find_value("reputation_sufficient_data").get_bool();
+        const QString reputation = enough
+            ? DigiDollarSendWidget::tr("%1%").arg(offer.find_value("success_rate_basis_points").getInt<int>() / 100.0, 0, 'f', 2)
+            : DigiDollarSendWidget::tr("New provider — not enough history yet");
+        const qint64 expiry = offer.find_value("expires_at").getInt<qint64>();
+        QString fee_display = DigiDollarSendWidget::tr("%1 (≈ %2%)").arg(formatCents(fee), PaymasterEffectivePercent(fee, payment));
+        if (maximum_service_fee_cents > 0) {
+            fee_display += DigiDollarSendWidget::tr(" · max %1").arg(formatCents(maximum_service_fee_cents));
+        }
+        const QStringList cells{provider, friendlyFundingModel(model), fee_display, formatCents(total), reputation,
+                                QDateTime::fromSecsSinceEpoch(expiry).toLocalTime().toString(Qt::ISODate)};
+        for (int column = 0; column < cells.size(); ++column) {
+            auto* item = new QTableWidgetItem(cells[column]);
+            item->setToolTip(QString::fromStdString(offer.find_value("provider_id").get_str()) + QStringLiteral("\n") +
+                             QString::fromStdString(offer.find_value("policy_hash").get_str()) +
+                             DigiDollarSendWidget::tr("\nRate: %1%; maximum service fee: %2")
+                                 .arg(QString::number(fee_rate_bps / 100.0, 'f', 2),
+                                      maximum_service_fee_cents == 0 ? DigiDollarSendWidget::tr("no cap") : formatCents(maximum_service_fee_cents)));
+            m_offersTable->setItem(row, column, item);
+        }
+        ++row;
+    }
+    m_offerCardsFrame->setProperty("excludedOffers", excluded_offers.empty() ? QByteArray{} : QByteArray::fromStdString(excluded_offers.write()));
+    const auto state = row > 0 ? OfferCheckState::FOUND :
+        m_advertisedOffers.empty() ? OfferCheckState::EMPTY : OfferCheckState::UNAVAILABLE;
+    setOfferCheckStatus(state, row > 0
+        ? DigiDollarSendWidget::tr("Paymaster offers within balance and fee limits: %1").arg(row)
+        : m_advertisedOffers.empty()
+            ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.")
+            : DigiDollarSendWidget::tr("Published Paymaster offers are currently unavailable for this payment."));
+    if (!m_privacy) renderOfferCards();
 }
 
 void PaymasterSendWidget::renderExcludedOfferCards()
@@ -2745,7 +2859,7 @@ void PaymasterSendWidget::renderExcludedOfferCards()
     // selectable preview, a provider binding or a financial authorization.
     if (!contents.isEmpty() && (!offers.read(contents.toStdString()) || !offers.isArray())) offers = UniValue{UniValue::VARR};
     m_offerCardsFrame->findChild<QLabel*>("paymasterOffersSummary")->setText(
-        DigiDollarSendWidget::tr("%1 selectable · %2 excluded by fee limits")
+        DigiDollarSendWidget::tr("%1 selectable · %2 unavailable")
             .arg(static_cast<qulonglong>(m_offerPreview.size())).arg(static_cast<qulonglong>(offers.size())));
     section->setVisible(!offers.empty());
     if (contents == section->property("renderedExcludedOffers").toByteArray()) return;
@@ -2779,7 +2893,9 @@ void PaymasterSendWidget::renderExcludedOfferCards()
         font.setBold(true);
         title->setFont(font);
         title->setProperty("offerCardEmphasis", true);
-        add_label(DigiDollarSendWidget::tr("Not selectable · fee limit exceeded"));
+        const bool fee_excluded = offer.find_value("eligible").isFalse();
+        add_label(fee_excluded ? DigiDollarSendWidget::tr("Not selectable · fee limit exceeded")
+                               : DigiDollarSendWidget::tr("Not selectable · insufficient balance or invalid change"));
         const QString provider_id = QString::fromStdString(offer.find_value("provider_id").get_str());
         add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)))->setToolTip(provider_id);
         const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
@@ -2789,11 +2905,19 @@ void PaymasterSendWidget::renderExcludedOfferCards()
             .arg(formatCents(fee), PaymasterEffectivePercent(fee, payment)));
         add_label(DigiDollarSendWidget::tr("Total from your wallet: %1")
             .arg(formatCents(offer.find_value("user_total_cents").getInt<qint64>())));
-        const QString reason = offer.find_value("fee_limit_reason").get_str() == "percentage"
-            ? DigiDollarSendWidget::tr("Above your %1% limit after rounding to 0.01 DD.")
+        QString reason;
+        if (fee_excluded) {
+            reason = offer.find_value("fee_limit_reason").get_str() == "percentage"
+                ? DigiDollarSendWidget::tr("Above your %1% limit after rounding to 0.01 DD.")
                   .arg(QString::number(offer.find_value("maximum_service_fee_bps").getInt<int>() / 100.0, 'f', 2))
             : DigiDollarSendWidget::tr("Above your current service-fee allowance of %1 per payment or rolling day.")
                   .arg(formatCents(offer.find_value("available_service_fee_cents").getInt<qint64>()));
+        }
+        const QString funding_problem = QString::fromStdString(offer.find_value("funding_problem").get_str());
+        if (!funding_problem.isEmpty()) {
+            if (!reason.isEmpty()) reason += QStringLiteral("\n");
+            reason += funding_problem;
+        }
         auto* reason_label = add_label(reason);
         reason_label->setObjectName("paymasterExcludedOfferReason");
         reason_label->setFont(font);
@@ -2849,8 +2973,8 @@ void PaymasterSendWidget::renderOfferCards()
             }
         }
         if (!found) {
-            m_offerManuallySelected = false;
-            setPaymasterNotice(DigiDollarSendWidget::tr("The selected offer is no longer available. Review the new recommendation before sending."));
+            selected = -1;
+            setPaymasterNotice(DigiDollarSendWidget::tr("The selected offer is no longer available for this payment. Choose another available offer before sending."));
         }
     }
     for (int index = 0; index < static_cast<int>(offers.size()); ++index) {
@@ -2930,7 +3054,7 @@ void PaymasterSendWidget::renderOfferCards()
         m_offerCardsLayout->addWidget(card);
     }
     const bool manual = m_offerManuallySelected;
-    m_offerSelectionGroup->button(selected)->setChecked(true);
+    if (selected >= 0) m_offerSelectionGroup->button(selected)->setChecked(true);
     selectOfferCard(selected, manual);
     m_offerCardsFrame->setProperty("renderedOfferCards", QByteArray::fromStdString(contents));
     updateOfferCheckControls();
@@ -2956,6 +3080,8 @@ void PaymasterSendWidget::invalidatePaymasterOfferPreview(bool preserve_choice)
     m_paymasterPreviewServiceFeeCents = -1;
     m_paymasterPreviewTotalCents = -1;
     m_offerPreview = UniValue{UniValue::VARR};
+    m_advertisedOffers = UniValue{UniValue::VARR};
+    m_offerBalanceCents = -1;
     clearOfferCards();
     if (!preserve_choice) {
         m_selectedOfferProvider.clear();
@@ -3004,7 +3130,7 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                              DigiDollarSendWidget::tr("another Paymaster operation is still active"));
         return;
     }
-    const bool keep_display = m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::EMPTY;
+    const bool keep_display = m_offerCheckState == OfferCheckState::FOUND || m_offerCheckState == OfferCheckState::EMPTY || m_offerCheckState == OfferCheckState::UNAVAILABLE;
     if (keep_display) {
         // A directory read grants no authority. Keep the last display and its
         // expiry timer; busy still blocks preparation until validation ends.
@@ -3189,87 +3315,24 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 fail_malformed();
                 return;
             }
-            int row{0};
-            UniValue eligible_offers{UniValue::VARR};
-            UniValue excluded_offers{UniValue::VARR};
-            for (const UniValue& offer : result.getValues()) {
-                if (offer.find_value("eligible").isFalse()) {
-                    excluded_offers.push_back(offer);
-                    continue;
-                }
-                eligible_offers.push_back(offer);
-                guard->m_offersTable->insertRow(row);
-                const QString provider = QString::fromStdString(offer.find_value("display_name").get_str());
-                const QString model = QString::fromStdString(offer.find_value("funding_model").get_str());
-                const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
-                const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
-                const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
-                const int fee_rate_bps =
-                    offer.find_value("fee_rate_bps").getInt<int>();
-                const qint64 maximum_service_fee_cents =
-                    offer.find_value(
-                        "maximum_user_paid_service_fee_cents")
-                        .getInt<qint64>();
-                if (row == 0) {
-                    guard->m_paymasterPreviewRecipientCents = payment;
-                    guard->m_paymasterPreviewServiceFeeCents = fee;
-                    guard->m_paymasterPreviewTotalCents = total;
-                }
-                const bool enough = offer.find_value("reputation_sufficient_data").get_bool();
-                QString reputation = enough
-                    ? DigiDollarSendWidget::tr("%1%").arg(offer.find_value("success_rate_basis_points").getInt<int>() / 100.0, 0, 'f', 2)
-                    : DigiDollarSendWidget::tr("New provider — not enough history yet");
-                const qint64 expiry = offer.find_value("expires_at").getInt<qint64>();
-                QString fee_display =
-                    DigiDollarSendWidget::tr("%1 (≈ %2%)")
-                        .arg(guard->formatCents(fee),
-                             PaymasterEffectivePercent(
-                                 fee, offer.find_value("payment_cents")
-                                          .getInt<qint64>()));
-                if (maximum_service_fee_cents > 0) {
-                    fee_display += DigiDollarSendWidget::tr(" · max %1")
-                                       .arg(guard->formatCents(
-                                           maximum_service_fee_cents));
-                }
-                const QStringList cells{provider, guard->friendlyFundingModel(model),
-                                        fee_display, guard->formatCents(total), reputation,
-                                        QDateTime::fromSecsSinceEpoch(expiry).toLocalTime().toString(Qt::ISODate)};
-                for (int column = 0; column < cells.size(); ++column) {
-                    auto* item = new QTableWidgetItem(cells[column]);
-                    item->setToolTip(QString::fromStdString(offer.find_value("provider_id").get_str()) +
-                                     QStringLiteral("\n") +
-                                     QString::fromStdString(offer.find_value("policy_hash").get_str()) +
-                                     DigiDollarSendWidget::tr("\nRate: %1%; maximum service fee: %2")
-                                         .arg(QString::number(fee_rate_bps / 100.0,
-                                                              'f', 2),
-                                              maximum_service_fee_cents == 0
-                                                  ? DigiDollarSendWidget::tr("no cap")
-                                                  : guard->formatCents(
-                                                        maximum_service_fee_cents)));
-                    guard->m_offersTable->setItem(row, column, item);
-                }
-                ++row;
-            }
-            guard->m_offerCardsFrame->setProperty("excludedOffers", excluded_offers.empty() ? QByteArray{} : QByteArray::fromStdString(excluded_offers.write()));
-            guard->setOfferCheckStatus(row == 0 ? OfferCheckState::EMPTY : OfferCheckState::FOUND,
-                                       row == 0 ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.") : row == 1 ? DigiDollarSendWidget::tr("Public Paymaster offer found") :
-                                                                                                                                DigiDollarSendWidget::tr("Public Paymaster offers found: %1").arg(row));
-            // Rejected entries are display-only cards. They never enter the
-            // selectable preview or the request's provider/offer bindings.
-            guard->m_offerPreview = eligible_offers;
-            if (!guard->m_privacy) guard->renderOfferCards();
+            guard->m_advertisedOffers = result;
+            guard->m_offerBalanceCents = -1;
             if (!result.empty()) {
                 qint64 earliest_expiry = std::numeric_limits<qint64>::max();
                 for (const auto& offer : result.getValues()) {
                     earliest_expiry = std::min(earliest_expiry, offer.find_value("expires_at").getInt<qint64>());
                 }
                 const qint64 remaining_seconds = earliest_expiry - QDateTime::currentSecsSinceEpoch();
-                if (remaining_seconds <= 0) guard->expirePaymasterOfferPreview();
-                else {
+                if (remaining_seconds <= 0) {
+                    guard->expirePaymasterOfferPreview();
+                    guard->setPaymasterBusy(false);
+                    return;
+                } else {
                     guard->m_offerPreviewClock.start();
                     guard->m_offerExpiryTimer->start(static_cast<int>(std::min<qint64>(remaining_seconds, std::numeric_limits<int>::max() / 1000) * 1000));
                 }
             }
+            guard->updateOfferEligibility();
             guard->setPaymasterBusy(false);
             guard->updateFeeDisplay();
             guard->applyPaymasterPrivacy();
@@ -3328,7 +3391,7 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     options.pushKV("maximum_provider_attempts", m_maxAttemptsSpin->value());
     options.pushKV("privacy", m_privacyCombo->currentData().toString().toStdString());
     options.pushKV("selection", m_selectionCombo->currentData().toString().toStdString());
-    if (hasCurrentPaymasterOffer() && preparesPaymasterPayment() && !m_selectedOfferProvider.isEmpty()) {
+    if (hasMatchingPaymasterOffer() && preparesPaymasterPayment() && !m_selectedOfferProvider.isEmpty()) {
         options.pushKV("preferred_provider_id", m_selectedOfferProvider.toStdString());
         options.pushKV("preferred_offer_id", m_selectedOfferId.toStdString());
     }
@@ -5297,12 +5360,30 @@ void PaymasterSendWidget::cancelPaymasterQuote()
     updatePaymasterFocusMode();
 }
 
+qint64 PaymasterSendWidget::effectiveServiceFeeCap() const
+{
+    qint64 cap = m_feeCapSpin->value();
+    if (!m_clientSafetyStatusKnown || !m_clientSafetyConfigured) return cap;
+    cap = std::min({cap, m_clientSafetyMaximumPerTransaction, m_clientSafetyAvailableTodayCents});
+    const auto input = m_form.paymentInput();
+    if (m_clientSafetyMaximumBps >= 0 && input.amount_valid && input.amount_cents > 0 &&
+        input.amount_cents <= DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS) {
+        // Presentation only. For fee deduction, fee <= (gross - fee) * rate.
+        // The validated amount/rate bounds keep this integer product in range.
+        const qint64 denominator = 10000 + (subtractFee() ? m_clientSafetyMaximumBps : 0);
+        cap = std::min(cap, input.amount_cents * m_clientSafetyMaximumBps / denominator);
+    }
+    return cap;
+}
+
 void PaymasterSendWidget::updateFeeDisplay()
 {
     updateOfferSearchBalance();
+    if (!m_advertisedOffers.empty()) updateOfferEligibility();
     const auto input = m_form.paymentInput();
     const QString mode = feeMode();
     const double amount = input.amount_text.toDouble();
+    const qint64 effective_fee_cap = effectiveServiceFeeCap();
     const bool subtract_fee = paymasterModeSelected() &&
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked();
     if (m_feeCapPercent) {
@@ -5314,15 +5395,15 @@ void PaymasterSendWidget::updateFeeDisplay()
             m_feeCapPercent->setText(DigiDollarSendWidget::tr("With fee deduction, the effective percentage is shown with the exact recipient amount in the offer."));
         } else {
             m_feeCapPercent->setText(DigiDollarSendWidget::tr("Fee limit ≈ %1% of the recipient amount. This is your ceiling, not the provider's price.")
-                .arg(PaymasterEffectivePercent(m_feeCapSpin->value(), input.amount_cents)));
+                .arg(PaymasterEffectivePercent(effective_fee_cap, input.amount_cents)));
         }
     }
     const bool exact_preview = hasMatchingPaymasterOffer();
     const QString recipient_amount = m_form.formatDDAmount(amount);
-    const QString maximum_fee = formatCents(m_feeCapSpin->value());
+    const QString maximum_fee = formatCents(effective_fee_cap);
     const QString maximum_outflow = subtract_fee
         ? m_form.formatDDAmount(amount)
-        : m_form.formatDDAmount(amount + m_feeCapSpin->value() / 100.0);
+        : m_form.formatDDAmount(amount + effective_fee_cap / 100.0);
     const QString remaining_balance = m_form.formatDDAmount(std::max(0.0, input.available_balance - amount));
     const QString fallback_recipient = exact_preview
         ? formatCents(m_paymasterPreviewRecipientCents)
@@ -5353,7 +5434,7 @@ void PaymasterSendWidget::updateFeeDisplay()
             "<tr><td><b>Maximum wallet outflow</b></td><td>%1</td></tr>"
             "</table>").arg(recipient_amount));
         m_feeSummary->setToolTip(dgb_status);
-    } else if (mode == QStringLiteral("auto")) {
+    } else if (mode == QStringLiteral("auto") && hasOwnDgbForFees()) {
         m_feeValue->setText(DigiDollarSendWidget::tr("~0.1 DGB, or at most %1").arg(maximum_fee));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Fee funding:"));
         m_feeModeExplanation->setText(DigiDollarSendWidget::tr(
@@ -5388,11 +5469,20 @@ void PaymasterSendWidget::updateFeeDisplay()
         m_feeValue->setText(exact_preview ? formatCents(m_paymasterPreviewServiceFeeCents)
                                         : DigiDollarSendWidget::tr("Exact provider quote; at most %1").arg(maximum_fee));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Service fee:"));
-        m_feeModeExplanation->setText(DigiDollarSendWidget::tr(
+        m_feeModeExplanation->setText(mode == QStringLiteral("auto")
+            ? DigiDollarSendWidget::tr("Selected: Automatic. No spendable DGB is currently available, so a Paymaster is needed. The selected offer is a preview; you approve the exact provider and fee before signing.")
+            : DigiDollarSendWidget::tr(
             "Selected: Paymaster. A provider must supply the DGB network fee. A sponsored offer costs no "
             "$DD service fee; a user-paid offer may charge up to the limit shown below. "
             "The exact provider and fee are shown again before signing."));
-        if (subtract_fee) {
+        if (!exact_preview && (m_offerCheckState == OfferCheckState::UNAVAILABLE || m_offerCheckState == OfferCheckState::FOUND)) {
+            m_feeSummary->setText(DigiDollarSendWidget::tr(
+                "<table cellspacing=\"3\">"
+                "<tr><td><b>Entered amount</b></td><td>%1</td></tr>"
+                "<tr><td><b>Paymaster offer</b></td><td>No selectable offer chosen</td></tr>"
+                "<tr><td><b>Service fee and total</b></td><td>Choose an available offer to see payment costs</td></tr>"
+                "</table>").arg(recipient_amount));
+        } else if (subtract_fee) {
             m_feeSummary->setText(DigiDollarSendWidget::tr(
                 "<table cellspacing=\"3\">"
                 "<tr><td><b>Total $DD outflow</b></td><td>%1</td></tr>"
@@ -5433,11 +5523,7 @@ void PaymasterSendWidget::updateFeeDisplay()
             "Enter a recipient and a valid $DD amount to compare payment costs."));
         m_feeSummary->setToolTip(QString{});
     }
-    const QString amount_problem = paymentAmountProblem();
-    DigiDollarStatus::SetBanner(m_feeSummary, amount_problem.isEmpty() ? DigiDollarStatus::Kind::INFO : DigiDollarStatus::Kind::ACTION);
-    if (!amount_problem.isEmpty()) {
-        m_feeSummary->setText(m_feeSummary->text() + QStringLiteral("<p><b>! %1</b></p>").arg(amount_problem.toHtmlEscaped()));
-    }
+    DigiDollarStatus::SetBanner(m_feeSummary, DigiDollarStatus::Kind::INFO);
     updateOfferCheckControls();
     QString amountText = input.amount_text;
     if (!amountText.isEmpty()) {
@@ -5548,13 +5634,7 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
     question_string.append(DigiDollarSendWidget::tr("Selected fee method"));
     question_string.append("</b><br />");
     if (automatic) {
-        qint64 effective_fee_cap = m_feeCapSpin->value();
-        if (m_clientSafetyStatusKnown && m_clientSafetyConfigured) {
-            effective_fee_cap = std::min(effective_fee_cap,
-                                         m_clientSafetyMaximumPerTransaction);
-            effective_fee_cap = std::min(effective_fee_cap,
-                                         m_clientSafetyAvailableTodayCents);
-        }
+        const qint64 effective_fee_cap = effectiveServiceFeeCap();
         question_string.append(DigiDollarSendWidget::tr("Automatic: use this wallet's DGB first."));
         question_string.append("<br />");
         question_string.append(DigiDollarSendWidget::tr(
@@ -5572,13 +5652,7 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
             "This is a safety ceiling, not an expected fee. If Paymaster fallback is needed, "
             "a separate confirmation shows the exact provider, payment model, service fee and total before signing."));
     } else if (paymaster_only) {
-        qint64 effective_fee_cap = m_feeCapSpin->value();
-        if (m_clientSafetyStatusKnown && m_clientSafetyConfigured) {
-            effective_fee_cap = std::min(effective_fee_cap,
-                                         m_clientSafetyMaximumPerTransaction);
-            effective_fee_cap = std::min(effective_fee_cap,
-                                         m_clientSafetyAvailableTodayCents);
-        }
+        const qint64 effective_fee_cap = effectiveServiceFeeCap();
         question_string.append(DigiDollarSendWidget::tr("Paymaster required: a provider must supply the DGB network fee."));
         question_string.append("<br />");
         question_string.append(DigiDollarSendWidget::tr("Maximum permitted service fee for this request: %1")

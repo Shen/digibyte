@@ -2978,6 +2978,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
             if (command == "getpaymasterclientsafetystatus") {
                 return PaymasterClientSafetyStatus();
             }
+            if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
             commands.push_back(QString::fromStdString(command));
             parameters.push_back(params);
             if (command == "getpaymasteroffers") {
@@ -3086,7 +3087,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
              QStringLiteral("New provider — not enough history yet"));
     // The checkmark denotes finding public offers, not payment authorization.
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("ready"));
-    QCOMPARE(status->text(), QStringLiteral("Public Paymaster offers found: 2"));
+    QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 2"));
     auto* updated = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOffersUpdated"));
     auto* help = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOfferCheckHelp"));
     QVERIFY(help && help->textFormat() == Qt::PlainText);
@@ -3103,7 +3104,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
         rejected_fee_seen |= label->text().contains("effective 1.23%");
     }
     QVERIFY(rejected_fee_seen);
-    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("2 selectable · 1 excluded by fee limits"));
+    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("2 selectable · 1 unavailable"));
     auto* client = send_widget.findChild<PaymasterSendWidget*>();
     const QString selected_offer = client->m_selectedOfferId;
     QTest::mouseClick(rejected_card, Qt::LeftButton);
@@ -3126,6 +3127,14 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(frame && advanced && icon && animation && refresh);
     QVERIFY(advanced->isHidden());
     QVERIFY(!frame->isHidden()); // Search status is visible without expert settings.
+    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    client->m_sessionDiscoveryReady = false;
+    client->updateOfferCheckControls();
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
+    QVERIFY(help->text().contains("Preparation remains blocked"));
+    client->m_sessionDiscoveryReady = true;
+    client->updateOfferCheckControls();
     QCOMPARE(icon->text(), QStringLiteral("✓"));
     QVERIFY(!animation->isActive());
     QCOMPARE(icon->accessibleName(), status->text());
@@ -3383,12 +3392,12 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewInvalidatesAndHandlesFailu
     QVERIFY(QMetaObject::invokeMethod(
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterOffers", Qt::DirectConnection));
     QCOMPARE(table->rowCount(), 0);
-    QVERIFY(status->text().contains("No matching public"));
+    QVERIFY(status->text().contains("currently unavailable"));
     QVERIFY(send_widget.findChild<QLabel*>("paymasterExcludedOfferReason")->text().contains("Above your 1.00% limit"));
     QCOMPARE(send_widget.findChild<QWidget*>("paymasterExcludedOfferCards")->layout()->count(), 7);
     QVERIFY(!send_widget.findChild<QFrame*>("paymasterOfferCardsFrame")->isHidden());
     QVERIFY(send_widget.findChild<QWidget*>("paymasterSelectableOffers")->isHidden());
-    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("0 selectable · 7 excluded by fee limits"));
+    QCOMPARE(send_widget.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("0 selectable · 7 unavailable"));
     QVERIFY(!send_widget.findChild<QRadioButton*>("paymasterOfferChoice0"));
     QVERIFY(send_widget.findChild<QTimer*>("paymasterOfferExpiryTimer")->isActive());
 
@@ -7984,8 +7993,9 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     form.setAvailableDigiDollarBalanceForTesting(325);
     QVERIFY(!prepare->isEnabled());
     QVERIFY(prepare->toolTip().contains("Not enough $DD"));
-    QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("action"));
-    QVERIFY(summary->text().contains("Total: 3.27 $DD; available: 3.25 $DD; missing: 0.02 $DD"));
+    QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("info"));
+    QVERIFY(amount_hint->text().contains("Total: 3.27 $DD; available: 3.25 $DD; missing: 0.02 $DD"));
+    QVERIFY(!summary->text().contains("Not enough $DD"));
     QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
     prepare->click();
     client->send(recipient, 325);
@@ -8021,10 +8031,10 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
         form.setAvailableDigiDollarBalanceForTesting(325 + remainder);
         const bool blocked = remainder > 0 && remainder < 100;
         QCOMPARE(prepare->isEnabled(), !blocked);
-        QCOMPARE(summary->property("statusKind").toString(), blocked ? QStringLiteral("action") : QStringLiteral("info"));
+        QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("info"));
         if (blocked) {
             QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
-            QVERIFY(summary->text().contains("below the minimum $DD change"));
+            QVERIFY(!summary->text().contains("below the minimum $DD change"));
         } else {
             QVERIFY(amount_hint->text().contains("within the send limits"));
         }
@@ -8408,7 +8418,7 @@ void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance()
     QVERIFY(pending);
     reply();
     QCOMPARE(table->rowCount(), 1);
-    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    QCOMPARE(icon->text(), own_dgb ? QStringLiteral("—") : QStringLiteral("✓"));
     QVERIFY(send->isEnabled());
     QCOMPARE(cards->isHidden(), own_dgb);
 
@@ -8572,7 +8582,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     reply(available);
     QVERIFY(!animation->isActive());
     QCOMPARE(icon->text(), QStringLiteral("✓"));
-    QCOMPARE(status->text(), QStringLiteral("Public Paymaster offer found"));
+    QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 1"));
     QCOMPARE(table->rowCount(), 1); // A late announcement appears without a click.
     QCOMPARE(reads, 2);
     auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
@@ -8596,7 +8606,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         QVERIFY(!cards->isHidden());
         QVERIFY(cards->isEnabled());
         QVERIFY(expiry->isActive());
-        QCOMPARE(status->text(), QStringLiteral("Public Paymaster offer found"));
+        QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 1"));
         QVERIFY(!animation->isActive());
         QCoreApplication::processEvents();
         QCOMPARE(cards->geometry(), geometry);
@@ -13086,6 +13096,232 @@ void PaymasterWidgetTests::paymasterOfferFormAlignment()
 }
 
 
+void PaymasterWidgetTests::paymasterClientFeeCeilingConsistency()
+{
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-fee-ceiling");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    UniValue status = PaymasterClientSafetyStatus();
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasterclientsafetystatus") return status;
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") return PaymasterPublicOffers(params[0].getInt<int64_t>());
+        throw std::runtime_error("Unexpected fee ceiling mutation");
+    });
+    form.setWalletModel(gui.walletModel.get());
+    gui.walletModel->pollBalanceChanged();
+    form.setAvailableDigiDollarBalanceForTesting(10000000);
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
+    struct Example { qint64 amount; qint64 bps; qint64 per_transfer; qint64 per_day; bool deduct; qint64 expected; };
+    const Example examples[]{
+        {1643, 200, 100, 1000, false, 32}, {200, 100, 100, 1000, false, 2},
+        {200, 100, 100, 1000, true, 1}, {1643, 200, 100, 5, false, 5},
+        {1643, 200, 7, 1000, false, 7}, {1643, 0, 100, 1000, false, 0},
+        {1643, -1, 100, 1000, false, 100}, {10000000, 10000, 100, 1000, true, 100},
+    };
+    for (const QString& mode : {QStringLiteral("auto"), QStringLiteral("paymaster")}) {
+        auto* combo = form.findChild<QComboBox*>("paymasterFeeMode");
+        combo->setCurrentIndex(combo->findData(mode));
+        for (const auto& example : examples) {
+            form.findChild<QLineEdit*>("amountEdit")->setText(QString::number(example.amount / 100.0, 'f', 2));
+            form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(example.deduct);
+            client->m_clientSafetyMaximumBps = example.bps;
+            client->m_clientSafetyMaximumPerTransaction = example.per_transfer;
+            client->m_clientSafetyAvailableTodayCents = example.per_day;
+            client->updateFeeDisplay();
+            QCOMPARE(client->effectiveServiceFeeCap(), example.expected);
+            const QString fee = client->formatCents(example.expected);
+            QVERIFY(form.findChild<QLabel*>("feeFundingSummary")->text().contains(fee));
+            bool reviewed{false};
+            QTimer::singleShot(0, &form, [&] {
+                auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                QVERIFY(dialog->text().contains(fee));
+                reviewed = true;
+                dialog->reject();
+            });
+            QVERIFY(!client->showConfirmationDialog(recipient, example.amount / 100.0));
+            QVERIFY(reviewed);
+        }
+    }
+    form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(false);
+    form.findChild<QLineEdit*>("amountEdit")->setText("2.00");
+    client->refreshClientSafetyStatus();
+    client->refreshPaymasterOffers();
+    QVERIFY(client->hasCurrentPaymasterOffer());
+    // A concurrent payment changes the remaining daily allowance. A directory
+    // result evaluated against the old budget must no longer be selectable.
+    status.pushKV("spent_service_fee_last_day_cents", 1);
+    status.pushKV("available_service_fee_today_cents", 999);
+    client->refreshClientSafetyStatus();
+    QVERIFY(!client->hasCurrentPaymasterOffer());
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
+    client->refreshPaymasterOffers();
+    auto* send = form.findChild<QPushButton*>("sendButton");
+    auto* offer_status = form.findChild<QLabel*>("paymasterOffersStatus");
+    QVERIFY(send->isEnabled());
+    WalletModel::RpcCallback pending_status;
+    client->setPaymasterAsyncRpcExecutorForTesting([&](const std::string& command, const UniValue&, WalletModel::RpcCallback callback) {
+        QVERIFY(command == "getpaymasterclientsafetystatus");
+        QVERIFY(!pending_status);
+        pending_status = std::move(callback);
+    });
+    client->refreshClientSafetyStatus();
+    QVERIFY(pending_status);
+    QVERIFY(!send->isEnabled());
+    QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("info"));
+    auto failed = std::move(pending_status);
+    pending_status = {};
+    failed({}, QStringLiteral("status unavailable"));
+    QVERIFY(!send->isEnabled());
+    QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("info"));
+    client->refreshClientSafetyStatus();
+    QVERIFY(pending_status);
+    auto recovered = std::move(pending_status);
+    pending_status = {};
+    recovered(status, {});
+    QVERIFY(send->isEnabled());
+    QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("ready"));
+
+}
+
+void PaymasterWidgetTests::paymasterClientOfferFundingConsistency_data()
+{
+    QTest::addColumn<QString>("mode");
+    QTest::addColumn<bool>("own_dgb");
+    QTest::addColumn<QString>("scenario");
+    for (const QString& mode : {QStringLiteral("dgb"), QStringLiteral("auto"), QStringLiteral("paymaster")}) {
+        for (bool own : {false, true}) {
+            for (const QString& scenario : {QStringLiteral("short"), QStringLiteral("exact"), QStringLiteral("change"),
+                                           QStringLiteral("deducted"), QStringLiteral("sponsor"), QStringLiteral("fee-limit"), QStringLiteral("empty")}) {
+                QTest::newRow(qPrintable(mode + (own ? "-own-" : "-no-dgb-") + scenario)) << mode << own << scenario;
+            }
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterClientOfferFundingConsistency()
+{
+    QFETCH(QString, mode);
+    QFETCH(bool, own_dgb);
+    QFETCH(QString, scenario);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-offer-funding");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    const bool deduct = scenario == "deducted";
+    const qint64 balance = scenario == "exact" ? 1652 : scenario == "change" ? 1653 : 1643;
+    UniValue offers{UniValue::VARR};
+    if (scenario != "empty") {
+        auto offer = PaymasterOffer("Paid provider", std::string(64, 'b'), "user_paid", 9,
+                                   deduct ? 1634 : 1643, false, QDateTime::currentSecsSinceEpoch() + 600, 50);
+        offer.pushKV("subtract_paymaster_fee_from_amount", deduct);
+        if (scenario == "fee-limit") {
+            offer.pushKV("eligible", false);
+            offer.pushKV("fee_limit_reason", "percentage");
+            offer.pushKV("maximum_service_fee_bps", 50);
+            offer.pushKV("available_service_fee_cents", 100);
+        }
+        offers.push_back(offer);
+    }
+    if (scenario == "sponsor" || scenario == "exact") {
+        // Exact paid coverage leaves sub-minimum change with the free offer.
+        offers.push_back(PaymasterOffer("Sponsor", std::string(64, 'c'), "sponsored", 0, 1643,
+                                       false, QDateTime::currentSecsSinceEpoch() + 600));
+    }
+    int mutations{0};
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") return offers;
+        ++mutations;
+        return UniValue{};
+    });
+    wallet->EnsureDDWallet();
+    wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), balance);
+    form.setWalletModel(gui.walletModel.get());
+    if (own_dgb) gui.walletModel->pollBalanceChanged();
+    QCOMPARE(client->hasOwnDgbForFees(), own_dgb);
+    form.setAvailableDigiDollarBalanceForTesting(balance);
+    auto* mode_combo = form.findChild<QComboBox*>("paymasterFeeMode");
+    mode_combo->setCurrentIndex(mode_combo->findData(mode));
+    form.findChild<QLineEdit*>("addressEdit")->setText("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("amountEdit")->setText("16.43");
+    form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(deduct);
+    if (mode != "dgb") QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+    const bool funded_offer = scenario == "exact" || scenario == "deducted" || scenario == "sponsor";
+    const bool direct = mode != "paymaster" && own_dgb;
+    const bool ready = direct || (mode != "dgb" && funded_offer);
+    auto* send = form.findChild<QPushButton*>("sendButton");
+    auto* summary = form.findChild<QLabel*>("feeFundingSummary");
+    auto* hint = form.findChild<QLabel*>("amountValidationLabel");
+    auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
+    auto* status = form.findChild<QLabel*>("paymasterOffersStatus");
+    QCOMPARE(send->isEnabled(), ready);
+    QVERIFY(!summary->text().contains("Not enough $DD"));
+    QVERIFY(!summary->text().contains("below the minimum $DD change"));
+    QCOMPARE(summary->property("statusKind").toString(), QStringLiteral("info"));
+    if (mode == "dgb" || direct || scenario == "empty") QVERIFY(cards->isHidden());
+    if (mode != "dgb") {
+        QCOMPARE(client->m_offerPreview.size(), funded_offer ? size_t{1} : size_t{0});
+        QCOMPARE(form.findChild<QTableWidget*>("paymasterOffers")->rowCount(), funded_offer ? 1 : 0);
+        QCOMPARE(form.findChild<QLabel*>("paymasterRecommendedOffer") != nullptr, funded_offer);
+        if (!funded_offer || direct) QVERIFY(status->property("statusKind").toString() != "ready");
+        if (!funded_offer && scenario != "empty") {
+            auto* rejected = form.findChild<QFrame*>("paymasterExcludedOfferCard0");
+            QVERIFY(rejected);
+            QVERIFY(rejected->findChildren<QAbstractButton*>().isEmpty());
+            const QString reason = rejected->findChild<QLabel*>("paymasterExcludedOfferReason")->text();
+            QVERIFY(reason.contains(scenario == "change" ? "below the minimum" : "missing: 0.09 $DD"));
+            if (scenario == "fee-limit") QVERIFY(reason.contains("Above your 0.50% limit"));
+            QCOMPARE(form.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("0 selectable · 1 unavailable"));
+        }
+    }
+    if (mode != "dgb" && !direct && funded_offer) {
+        QVERIFY(summary->text().contains(deduct ? "16.34 $DD" : "16.43 $DD"));
+        QVERIFY(summary->text().contains(scenario == "sponsor" ? "0.00 $DD" : "0.09 $DD"));
+        QVERIFY(!summary->text().contains("17.43")); // No unrelated fee-cap total.
+    }
+    if (direct) QVERIFY(!hint->text().contains("Not enough $DD"));
+    if (!ready) {
+        // Neither a synthetic click nor the public slot may bypass the guard.
+        send->click();
+        client->send(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"), 1643);
+        QCOMPARE(mutations, 0);
+    }
+    const QString screenshots = qEnvironmentVariable("DIGIBYTE_QT_TEST_SCREENSHOT_DIR");
+    if (!screenshots.isEmpty() && mode == "auto" && !own_dgb && (scenario == "short" || scenario == "sponsor")) {
+        form.setObjectName("digiDollarTab");
+        QFile css(":/css/dark");
+        QVERIFY(css.open(QIODevice::ReadOnly));
+        form.setStyleSheet(QString::fromUtf8(css.readAll()));
+        form.resize(1200, 1800);
+        form.show();
+        QTest::qWait(20);
+        QVERIFY(form.grab().save(screenshots + "/offer-funding-" + scenario + ".png"));
+    }
+    // Privacy never leaks excluded costs; restoring it retains the classification.
+    client->setPrivacy(true);
+    QVERIFY(cards->isHidden());
+    QVERIFY(!hint->text().contains("0.09"));
+    QVERIFY(!summary->text().contains("16.43"));
+    client->setPrivacy(false);
+    QCOMPARE(send->isEnabled(), ready);
+    QCOMPARE(mutations, 0);
+}
+
 void PaymasterWidgetTests::paymasterClientOfferCards_data()
 {
     QTest::addColumn<QString>("theme");
@@ -13171,24 +13407,23 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     form.setAvailableDigiDollarBalanceForTesting(325);
     auto* funding_summary = form.findChild<QLabel*>("feeFundingSummary");
     auto* funding_send = form.findChild<QPushButton*>("sendButton");
-    QVERIFY(!funding_send->isEnabled()); // Explicit higher-fee choice costs 3.30.
-    QVERIFY(funding_summary->text().contains("Not enough $DD"));
-    auto* amount_hint = form.findChild<QLabel*>("amountValidationLabel");
-    QCOMPARE(amount_hint->text(), QStringLiteral("! ") + client->paymentAmountProblem());
-    QCOMPARE(funding_summary->property("statusKind").toString(), QStringLiteral("action"));
+    QVERIFY(!funding_send->isEnabled()); // The manual higher-fee choice became unavailable.
+    QVERIFY(!funding_summary->text().contains("Not enough $DD"));
+    QCOMPARE(funding_summary->property("statusKind").toString(), QStringLiteral("info"));
+    QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice2"));
+    QCOMPARE(client->m_paymasterPreviewTotalCents, qint64{-1});
+    QCOMPARE(form.findChild<QLabel*>("paymasterOffersSummary")->text(), QStringLiteral("2 selectable · 2 unavailable"));
+    QVERIFY(funding_send->toolTip().contains("Choose an available"));
     form.findChild<QRadioButton*>("paymasterOfferChoice0")->click();
     QVERIFY(funding_send->isEnabled()); // The sponsored offer costs only 3.25.
-    QVERIFY(!funding_summary->text().contains("Not enough $DD"));
-    QVERIFY(amount_hint->text().contains("within the send limits"));
-    form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
-    QVERIFY(!funding_send->isEnabled());
+    QVERIFY(form.findChild<QLabel*>("amountValidationLabel")->text().contains("within the send limits"));
     client->setPrivacy(true);
     QVERIFY(!funding_send->toolTip().contains("3.30"));
     QVERIFY(!funding_summary->text().contains("3.30"));
     QVERIFY(cards->isHidden());
     QVERIFY(!form.findChild<QRadioButton*>("paymasterOfferChoice0"));
     client->setPrivacy(false);
-    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice0")->isChecked());
     form.resize(width, 1600);
     form.show();
     QTest::qWait(20);

@@ -121,7 +121,10 @@ private:
     Q_SLOT void loadSelectedPersistedPaymasterSession();
     void activatePersistedPaymasterSession(
         const QString& request_id);
-    enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, STALE, FAILED, NEEDS_AMOUNT, NEEDS_BALANCE };
+    enum class OfferCheckState { NOT_CHECKED, CHECKING, FOUND, EMPTY, UNAVAILABLE, STALE, FAILED, NEEDS_AMOUNT, NEEDS_BALANCE };
+    QString offerFundingProblem(qint64 total_cents) const;
+    qint64 effectiveServiceFeeCap() const;
+    void updateOfferEligibility();
     bool hasBalanceForOfferSearch() const;
     void updateOfferSearchBalance();
     void setOfferCheckStatus(OfferCheckState state, const QString& text);
@@ -241,6 +244,8 @@ private:
     QVBoxLayout* m_offerCardsLayout{nullptr};
     QButtonGroup* m_offerSelectionGroup{nullptr};
     UniValue m_offerPreview{UniValue::VARR};
+    UniValue m_advertisedOffers{UniValue::VARR};
+    qint64 m_offerBalanceCents{-1};
     QString m_selectedOfferProvider;
     QString m_selectedOfferId;
     bool m_offerManuallySelected{false};

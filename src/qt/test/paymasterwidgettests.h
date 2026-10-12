@@ -122,6 +122,9 @@ private Q_SLOTS:
     void paymasterClientOfferSearchRequiresBalance();
     void paymasterClientNewTransferClearsOffers_data();
     void paymasterClientNewTransferClearsOffers();
+    void paymasterClientFeeCeilingConsistency();
+    void paymasterClientOfferFundingConsistency_data();
+    void paymasterClientOfferFundingConsistency();
     void paymasterClientOfferCards_data();
     void paymasterClientOfferCards();
     void paymasterAppNumberFormat();
