@@ -33,6 +33,13 @@ struct OfferCandidate {
     DDCents user_total;
     ReliabilitySummary reliability;
     int64_t latency_ewma_ms{0};
+    /** New preparation needs a full ordinary intent lifetime. Retained
+     * attempts keep their original deadlines and never use this to renew. */
+    bool HasPreparationWindow(int64_t now) const
+    {
+        return TimeDeltaExceeds(announcement_expires_at, now,
+                               DEFAULT_QUOTE_TTL_SECONDS - 1);
+    }
     // Advisory preference only; a first unsuccessful provider attempt must not
     // win automatic selection over a provider without that local history.
     bool IsRecommendationDeprioritized() const

@@ -30,6 +30,8 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         self.add_wallet_options(parser, legacy=False)
         parser.add_argument("--client-without-change", action="store_true",
                             help="Run payment/restart recovery without client change; reserve-only scenarios use the default variant")
+        parser.add_argument("--announcement-refresh-only", action="store_true",
+                            help="Only test announcement renewal and quote preparation without mining")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -67,11 +69,75 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         assert_equal(provider.getpaymasterinfo()["running"], False)
         return result
 
+    def check_announcement_refresh_without_mining(self, harness):
+        provider, client = harness.provider, harness.client
+        harness.fund_client_dd(1643)
+        self.wait_chain_ready()
+        assert_equal(provider.startpaymaster()["running"], True)
+        preview_options = {"subtract_paymaster_fee_from_amount": True}
+        self.wait_until(lambda: bool(client.getpaymasteroffers(1643, preview_options)))
+        old_offer = client.getpaymasteroffers(1643, preview_options)[0]
+        tips = [node.getbestblockhash() for node in self.nodes]
+        mempools = [node.getrawmempool() for node in self.nodes]
+        for node in self.nodes:
+            node.setmocktime(old_offer["expires_at"] - 4)
+        recipient = provider.getdigidollaraddress()
+        options = {
+            "fee_mode": "paymaster",
+            "request_id": "e5147297-9473-4cb6-98fc-000000000001",
+            "maximum_paymaster_fee_cents": 100,
+            "subtract_paymaster_fee_from_amount": True,
+            "prepare_only": True,
+        }
+        # An old/manual provider still advertises an unexpired offer. It must
+        # not cause a new four-second intent or reserve the client's inputs.
+        assert_raises_rpc_error(-4, "PAYMASTER_ANNOUNCEMENT_EXPIRING",
+                                client.senddigidollar, recipient, 1643, "", 0,
+                                None, "cents", options)
+        assert_equal(client.getdigidollarsendsession({
+            "request_id": options["request_id"]})["reserved_user_inputs"], [])
+
+        self.stop_provider(provider)
+        provider.setpaymasterruntimesettings({"operation_mode": "automatic", "autostart": False})
+        assert_equal(provider.startpaymaster()["running"], True)
+        self.wait_until(lambda: any(offer["expires_at"] > old_offer["expires_at"]
+                                   for offer in client.getpaymasteroffers(1643, preview_options)))
+        old_offer = client.getpaymasteroffers(1643, preview_options)[0]
+        for node in self.nodes:
+            node.setmocktime(old_offer["expires_at"] - 120)
+        self.wait_until(lambda: any(offer["expires_at"] > old_offer["expires_at"]
+                                   for offer in client.getpaymasteroffers(1643, preview_options)))
+        renewed = client.getpaymasteroffers(1643, preview_options)[0]
+        assert_equal(renewed["provider_id"], old_offer["provider_id"])
+        assert_equal(renewed["offer_id"], old_offer["offer_id"])
+        # Cross the old deadline without a block. The replacement must remain
+        # usable and the exact-gross payment must reach review without signing.
+        for node in self.nodes:
+            node.setmocktime(old_offer["expires_at"] + 2)
+        options["request_id"] = "e5147297-9473-4cb6-98fc-000000000002"
+        prepared = {}
+
+        def ready_for_review():
+            nonlocal prepared
+            prepared = client.senddigidollar(recipient, 1643, "", 0, None, "cents", options)
+            return prepared.get("authorization_required", False)
+
+        self.wait_until(ready_for_review, timeout=60)
+        assert_equal(prepared["payment_cents"], 1634)
+        assert_equal(prepared["service_fee_cents"], 9)
+        assert_equal(prepared["user_total_cents"], 1643)
+        assert_equal([node.getbestblockhash() for node in self.nodes], tips)
+        assert_equal([node.getrawmempool() for node in self.nodes], mempools)
+        self.log.info("Announcement renewed and exact offer prepared without mining or payment authorization")
+
     def run_test(self):
         harness = PaymasterFunctionalHarness(self)
         provider, client = harness.create_wallets()
         harness.fund_and_configure(
-            operation_mode="manual", carrier_cents=1_000)
+            operation_mode="manual", carrier_cents=3_000 if self.options.announcement_refresh_only else 1_000)
+        if self.options.announcement_refresh_only:
+            self.check_announcement_refresh_without_mining(harness)
+            return
 
         self.log.info("An authorized submit survives an abrupt provider process exit")
         initial_client_cents = 101 if self.options.client_without_change else 500

@@ -295,4 +295,29 @@ BOOST_AUTO_TEST_CASE(rejects_extreme_timestamps_without_overflow)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_ANNOUNCEMENT_TIME");
 }
 
+BOOST_AUTO_TEST_CASE(local_announcement_refresh_precedes_preparation_expiry)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    const auto provider = GetPaymasterId(XOnlyPubKey{key.GetPubKey()});
+    const auto genesis = uint256S("13");
+    constexpr int64_t now{500000};
+    Directory directory;
+    BOOST_CHECK(directory.NeedsRefresh(provider, now));
+    auto announcement = SignedAnnouncement(key, genesis, 1, now);
+    BOOST_REQUIRE(directory.AddValidated(announcement, now));
+    const int64_t refresh_at = announcement.expires_at - 2 * DEFAULT_QUOTE_TTL_SECONDS;
+    BOOST_CHECK(!directory.NeedsRefresh(provider, refresh_at - 1));
+    BOOST_CHECK(directory.NeedsRefresh(provider, refresh_at));
+    // Same identity, reserves and reference block; time alone requires renewal.
+    auto renewed = SignedAnnouncement(key, genesis, 2, refresh_at);
+    BOOST_REQUIRE(directory.AddValidated(renewed, refresh_at));
+    BOOST_CHECK(!directory.NeedsRefresh(provider, announcement.expires_at));
+    BOOST_CHECK(!directory.AddValidated(announcement, refresh_at));
+    BOOST_CHECK(directory.NeedsRefresh(provider, renewed.expires_at));
+    directory.RemoveExpired(renewed.expires_at);
+    BOOST_CHECK(directory.NeedsRefresh(provider, renewed.expires_at));
+    BOOST_CHECK(directory.NeedsRefresh(provider, std::numeric_limits<int64_t>::max()));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

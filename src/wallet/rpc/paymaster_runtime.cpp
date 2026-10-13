@@ -655,6 +655,7 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         }
     }
 
+    const int64_t announcement_now = GetTime();
     const bool announcement_refresh_required =
         previous.state == ProviderServiceState::DRAIN_ONLY ||
         previous.state == ProviderServiceState::WAITING_FOR_UNLOCK ||
@@ -662,13 +663,20 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         previous.state == ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL ||
         previous.state == ProviderServiceState::REPLENISHING_LIQUIDITY ||
         previous.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION ||
-        previous.state == ProviderServiceState::FAULT;
+        previous.state == ProviderServiceState::FAULT ||
+        manager->GetDirectory().NeedsRefresh(identity.provider_id,
+                                            announcement_now);
     if (accept_new_requests && announcement_refresh_required) {
+        // Refresh by wall clock even when the chain tip does not change.
+        // Serialize the fresh readiness check and signing with other provider
+        // work; never renew a stale readiness snapshot.
+        ProviderWorkGuard announcement_guard{*manager, wallet.GetName(), identity.provider_id};
+        if (!announcement_guard.Acquired()) return;
         ProviderReadiness resumed = GetProviderReadiness(
             wallet, context, /*wait_for_sync=*/false);
         std::string announcement_error;
         if (!PublishCurrentProviderAnnouncement(
-                wallet, context, resumed, GetTime(), nullptr,
+                wallet, context, resumed, announcement_now, nullptr,
                 announcement_error)) {
             accept_new_requests = false;
             state = ProviderServiceState::WAITING_FOR_READINESS;

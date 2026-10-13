@@ -777,6 +777,10 @@ RPCHelpMan requestpaymasterquote()
             }
             std::shared_ptr<DirectLease> reservation_lease;
             if (!resume_attempt) {
+                if (!candidate.HasPreparationWindow(now)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR,
+                                       "PAYMASTER_ANNOUNCEMENT_EXPIRING");
+                }
                 auto* transport_node = wallet->chain().context();
                 if (!transport_node || !transport_node->connman) throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context unavailable");
                 const auto transport = transport_node->connman->RequestPaymasterConnection(
@@ -1184,6 +1188,10 @@ RPCHelpMan requestpaymasterquote()
                 }
                 quote_request.restricted_descriptor = restricted_descriptor;
                 quote_request.restricted_capability = restricted_capability;
+                if (quote_request.intent.expires_at <= now) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                       "PAYMASTER_QUOTE_REQUEST_EXPIRED");
+                }
                 if (!ValidateQuoteRequestEnvelope(quote_request, Params().GenesisBlock().GetHash(),
                                                   now, error)) {
                     throw JSONRPCError(RPC_INVALID_PARAMETER, error);

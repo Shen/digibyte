@@ -7099,7 +7099,7 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
 void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* outcome : {"input_selection", "small_change", "legacy_input_error", "provider_unreachable", "exchange_incomplete", "legacy_absence", "read_failure", "unsupported_version"}) {
+    for (const char* outcome : {"input_selection", "small_change", "legacy_input_error", "provider_unreachable", "exchange_incomplete", "announcement_expiring", "request_expired", "legacy_absence", "read_failure", "unsupported_version"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
 }
@@ -7149,6 +7149,8 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
             last_subtract_fee = params[6].find_value("subtract_paymaster_fee_from_amount").isTrue();
             if (outcome == QLatin1String("provider_unreachable")) throw std::runtime_error("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE");
             if (outcome == QLatin1String("exchange_incomplete")) throw std::runtime_error("PAYMASTER_DIRECT_CONNECTION_FAILED");
+            if (outcome == QLatin1String("announcement_expiring")) throw std::runtime_error("PAYMASTER_ANNOUNCEMENT_EXPIRING");
+            if (outcome == QLatin1String("request_expired")) throw std::runtime_error("PAYMASTER_QUOTE_REQUEST_EXPIRED");
             if (outcome == QLatin1String("legacy_input_error")) throw std::runtime_error("Insufficient confirmed DigiDollar inputs");
             if (outcome == QLatin1String("small_change")) throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Selected DD input change is below minimum DigiDollar output. Change: 1 cents, Minimum: 100 cents");
             throw std::runtime_error("PAYMASTER_DD_INPUT_SELECTION_FAILED: Insufficient confirmed DD balance");
@@ -7202,6 +7204,8 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
     } else {
         QVERIFY(notice.contains("No Paymaster transfer was created"));
         if (outcome == QLatin1String("input_selection")) QVERIFY(notice.contains("Insufficient confirmed DD balance"));
+        if (outcome == QLatin1String("announcement_expiring")) QVERIFY(notice.contains("refreshed offer"));
+        if (outcome == QLatin1String("request_expired")) QVERIFY(notice.contains("expired"));
         if (outcome == QLatin1String("exchange_incomplete")) {
             QVERIFY(notice.contains("admission limit"));
             QVERIFY(!notice.contains("offline"));

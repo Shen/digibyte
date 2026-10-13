@@ -55,6 +55,7 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QRadioButton>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include <QSpinBox>
 #include <QScrollArea>
@@ -3569,6 +3570,14 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
         return;
     }
     if (!error.isEmpty()) {
+        // Retain a stable diagnostic when safe unsigned closure replaces the
+        // technical panel. Do not log RPC payloads or arbitrary remote text.
+        const QRegularExpression code_pattern{QStringLiteral("^PAYMASTER_[A-Z0-9_]{1,96}(?=$|[^A-Z0-9_])")};
+        const auto code_match = code_pattern.match(error);
+        if (code_match.hasMatch()) {
+            LogPrintf("Paymaster client preparation/continuation failed: %s\n",
+                      code_match.captured().toStdString());
+        }
         if (error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_REQUIRED")) ||
             error.contains(QStringLiteral("PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH")) ||
             error.contains(QStringLiteral("PAYMASTER_CLIENT_AUTHORIZATION_EXPIRED")) ||
@@ -3631,6 +3640,8 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const QS
             else if (error.startsWith(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: ")))
                 reason = DigiDollarSendWidget::tr("The payment and Paymaster fee cannot be funded with the current $DD inputs. %1")
                              .arg(error.mid(QStringLiteral("PAYMASTER_DD_INPUT_SELECTION_FAILED: ").size()));
+            else if (error.contains(QStringLiteral("PAYMASTER_ANNOUNCEMENT_EXPIRING")))
+                reason = DigiDollarSendWidget::tr("The published offer is too close to expiry to prepare a payment. Wait for a refreshed offer and try again.");
             else if (expired) reason = DigiDollarSendWidget::tr("The provider offer expired before the payment could continue.");
             else if (error.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER")))
                 reason = DigiDollarSendWidget::tr("No usable provider offer remains for this attempt.");

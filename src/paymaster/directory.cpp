@@ -217,6 +217,15 @@ bool Directory::AddValidated(Announcement announcement, int64_t now)
     return true;
 }
 
+bool Directory::NeedsRefresh(const PaymasterId& provider_id, int64_t now) const
+{
+    LOCK(m_mutex);
+    const auto it = m_announcements.find(provider_id);
+    return it == m_announcements.end() ||
+           !TimeDeltaExceeds(it->second.expires_at, now,
+                            2 * DEFAULT_QUOTE_TTL_SECONDS);
+}
+
 std::vector<Announcement> Directory::List(int64_t now,
                                           size_t maximum,
                                           uint64_t rotation) const

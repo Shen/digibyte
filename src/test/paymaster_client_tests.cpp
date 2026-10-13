@@ -405,4 +405,30 @@ BOOST_AUTO_TEST_CASE(unsigned_intent_rejects_replay_unsafe_and_expired_parameter
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_INTENT_PARAMETERS");
 }
 
+BOOST_AUTO_TEST_CASE(new_preparation_requires_a_full_announcement_window)
+{
+    constexpr int64_t now{500000};
+    CKey key;
+    auto announcement = MakeAnnouncement(key, uint256S("71"), FundingModel::USER_PAID, 50, now);
+    announcement.expires_at = now + 4;
+    std::string error;
+    auto offers = BuildGrossOfferCandidates({announcement}, DDCents{1643},
+        FUNDING_MODEL_USER_PAID, DDCents{100}, {}, now, error);
+    BOOST_REQUIRE_EQUAL(offers.size(), 1U);
+    BOOST_CHECK_EQUAL(offers[0].payment.value, 1634);
+    BOOST_CHECK_EQUAL(offers[0].service_fee.value, 9);
+    BOOST_CHECK(!offers[0].HasPreparationWindow(now));
+    // The announcement is authentic and unexpired, but four seconds must not
+    // become the entire authentication, Capacity and quote exchange window.
+    announcement.sequence++;
+    announcement.expires_at = now + ANNOUNCEMENT_TTL_SECONDS;
+    offers = BuildGrossOfferCandidates({announcement}, DDCents{1643},
+        FUNDING_MODEL_USER_PAID, DDCents{100}, {}, now, error);
+    BOOST_REQUIRE_EQUAL(offers.size(), 1U);
+    BOOST_CHECK(offers[0].HasPreparationWindow(now));
+    BOOST_CHECK(offers[0].HasPreparationWindow(announcement.expires_at - DEFAULT_QUOTE_TTL_SECONDS));
+    BOOST_CHECK(!offers[0].HasPreparationWindow(announcement.expires_at - DEFAULT_QUOTE_TTL_SECONDS + 1));
+    BOOST_CHECK(!offers[0].HasPreparationWindow(announcement.expires_at));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

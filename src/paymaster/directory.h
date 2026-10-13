@@ -119,6 +119,10 @@ public:
      * validation. AddValidated repeats it atomically with insertion. */
     bool AcceptsAdmissionOutpoints(const Announcement& announcement, int64_t now) const;
     bool AddValidated(Announcement announcement, int64_t now);
+    /** Renew local provider announcements before a normal preparation window
+     * can be truncated. Callers must recheck full provider readiness before
+     * publishing a replacement; this only reads the cache. */
+    bool NeedsRefresh(const PaymasterId& provider_id, int64_t now) const;
     /** Return at most maximum active announcements, rotating the first entry
      * without copying the remainder of the bounded directory. */
     std::vector<Announcement> List(
