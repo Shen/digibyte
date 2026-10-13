@@ -1,5 +1,16 @@
 # Paymaster integration release notes
 
+## Renew provider offers without new blocks (2026-10-13)
+
+Automatic providers now renew public announcements before expiry even when the
+chain tip does not change. Renewal retains all readiness and admission checks
+and is serialized with other provider work. Clients reject a new preparation
+with less than one ordinary intent lifetime remaining before reserving inputs.
+Existing requests and signatures keep their original deadlines. Qt explains
+near-expiry offers and expired requests, and retains bounded technical error
+codes in the normal log without payment data. Mining remains necessary for
+payment and reserve confirmations; no core or consensus rule changes.
+
 ## Consistent send-form offer availability (2026-10-13)
 
 Offer cards, counts, recommendation and the Send gate now apply the same

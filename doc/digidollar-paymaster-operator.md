@@ -277,6 +277,17 @@ remains usable; a subsequently confirmed payment removes this initial-failure
 demotion. User cancellation, local connection limits and wallet locking do not
 penalize a provider. This local history is advisory, not a public reputation score.
 
+An automatic running provider renews its announcement when two minutes of its
+ten-minute lifetime remain, subject to the full current readiness checks. This
+uses wall-clock time and does not require mining. A new client request needs at
+least one minute of announcement lifetime before reserving inputs. If the
+announcement is too close to expiry, wait for a refreshed offer and try again;
+the client does not extend an existing request or approve a payment by itself.
+In Regtest, mining is still required to confirm payments and newly created
+reserves. It is not required just to obtain a quote from already confirmed free
+reserves. Preparation errors log a bounded `PAYMASTER_...` code without payment
+amounts, addresses, request payloads or arbitrary remote error text.
+
 Stopping a provider does not instantly withdraw already relayed announcements.
 They can remain in clients' local lists until their signed expiry, at most ten
 minutes after creation. A list refresh is not a reachability test. Qt identifies

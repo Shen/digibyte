@@ -854,6 +854,10 @@ or chain parameters.
   submit, Capacity, quote, and recovery messages.
 - `paymaster_runtime.cpp` owns provider start/stop and automatic service cycles,
   including guarded readiness rechecks and offer refresh after temporary drain.
+  `Directory::NeedsRefresh` also triggers guarded renewal before public
+  announcement expiry without requiring a new block. New client attempts use
+  `OfferCandidate::HasPreparationWindow` before input reservation; exact retained
+  attempts never extend their deadlines.
   Routine synchronization transitions use opt-in `bench` logging; other pause
   reasons retain the normal log.
 - `paymaster_integration.cpp` owns startup reconciliation, bounded recurring

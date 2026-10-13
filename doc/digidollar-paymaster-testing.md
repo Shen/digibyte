@@ -1,5 +1,69 @@
 # Paymaster build and test runbook
 
+## Quote expiry without mining (2026-10-13)
+
+A preparation started shortly before its cached announcement expired. The
+persisted intent had only four seconds left; the provider produced a valid
+quote one second before that deadline, and the next client poll rejected the
+expired request as `PAYMASTER_INVALID_QUOTE_REQUEST`. Offline validation of the
+retained, unapproved provider claim reproduced this distinction: quote and
+Capacity checks passed, while the request envelope failed at the recorded
+client failure time. No payment signature or broadcast existed. The normal
+debug logs had not retained the preparation error code.
+
+The automatic provider now refreshes its ten-minute announcement with two
+minutes remaining under the provider work guard and full readiness checks.
+New attempts require at least one ordinary quote lifetime before reserving
+inputs. Existing intent expiry stays binding, with a specific expired-request
+error. Qt logs only bounded stable error codes and explains near-expiry offers.
+
+Focused verification of code commit `b77749ee4e` against existing Release
+libraries:
+
+- `paymaster_directory_tests` and `paymaster_client_tests`: **22 cases, 332
+  assertions passed**. Includes clock-only renewal, monotonic sequence retention,
+  the four-second gross-payment example and the 60/59-second boundary.
+- `paymasterClientUncreatedRequestReturnsToCompose`: **10 Qt rows passed**,
+  including the two new timing errors and preserved read-failure protections.
+- `wallet_paymaster_lifecycle.py --announcement-refresh-only`: **passed** with
+  two disposable Regtest nodes. The manual stale offer is refused without client
+  input reservations; the automatic provider then renews without a new block,
+  and a 16.43-DD gross request reaches exact review with 16.34 DD to the recipient
+  and 0.09 DD fee. Both chain tips and mempools remain unchanged throughout the
+  renewal/preparation scenario. No payment authorization is given.
+
+Local artifacts are under
+`build_msvc/paymaster-refresh-check/quote-expiry/`: `unit-tests.txt`,
+`checks-20261013-053605Z/receipt.json`, `functional-2.txt`, `regtest-2/`, and
+`verification.json`. The first functional fixture attempted a running-provider
+mode change and correctly hit `PAYMASTER_STOP_PROVIDER_BEFORE_MODE_CHANGE`;
+the passing fixture performs the required explicit stop/start before testing
+clock-only renewal. The separate `quote-diagnosis/` artifacts contain only the
+affected Paymaster attempt, no wallet keys; they are local, not release fixtures.
+
+Full build, full Qt tests and the complete lifecycle variants remain operator
+acceptance work. Close the Regtest GUIs and ensure no build is running. From
+`D:\Digibyte\digibyte-fork`, with MSVC 14.43.34808, Windows SDK 10.0.26100.0,
+Qt `D:\Qt51510\install` and the configured Python functional-test environment:
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+if (-not $?) { throw 'Build or full Qt acceptance failed' }
+$env:DIGIBYTED = (Resolve-Path 'build_msvc/x64/Release/digibyted.exe').Path
+$env:DIGIBYTECLI = (Resolve-Path 'build_msvc/x64/Release/digibyte-cli.exe').Path
+python -X utf8 test/functional/wallet_paymaster_lifecycle.py --announcement-refresh-only --configfile=test/config.ini
+if ($LASTEXITCODE -ne 0) { throw 'Announcement renewal regression failed' }
+python -X utf8 test/functional/wallet_paymaster_lifecycle.py --configfile=test/config.ini
+if ($LASTEXITCODE -ne 0) { throw 'Lifecycle regression failed' }
+```
+
+Runtime: minutes to tens of minutes for the full build/Qt suite; the focused
+Regtest case took about 16 seconds locally. Require exit 0, no failed/skipped
+selected tests, and exact-offer review without mining. A separate real GUI
+check should leave a ready provider running for more than ten minutes without
+mining, then prepare an offer. Mining is still required to confirm a payment
+or newly prepared reserves; these checks are unchanged.
+
 ## Consistent offer funding display (2026-10-13)
 
 Regression: with 16.43 DD available, a 16.43-DD recipient and a 0.09-DD

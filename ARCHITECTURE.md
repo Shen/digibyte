@@ -8,6 +8,15 @@
 
 ## Paymaster architecture in this branch
 
+Automatic providers renew their signed public announcement by wall clock when
+at most two ordinary quote lifetimes remain, including while the chain tip is
+unchanged. Renewal holds the provider work guard and repeats full readiness,
+identity and admission-proof checks. New client attempts require one complete
+ordinary intent lifetime before reserving inputs; existing attempts retain
+their original expiry. Expired quote requests have a specific error, and Qt
+records only bounded stable Paymaster error codes when unsigned closure removes
+the technical panel. No expiry, confirmation or signature check is relaxed.
+
 Provider recovery separates the rolling 24-hour expenditure ledger from the
 lifetime of a signed transaction. A missing aged SPENT row may be validated
 read-only from its exact retained local commit/manifest; current reservations
