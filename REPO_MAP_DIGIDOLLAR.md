@@ -1650,6 +1650,12 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
   and DD reads. `walletShared()` retains the wallet interface for bounded jobs.
   Paymaster-specific signing orchestration lives in `qt/paymasterwallet.cpp`.
+- Ordinary DGB availability also separates provider-pool reserves from free
+  and other unavailable funds. Overview, Send and Coin Control share the
+  background `interfaces::WalletBalances` snapshot; `wallet/interfaces.cpp`
+  applies existing funding eligibility without changing RPC ownership totals.
+  DD collateral remains on the DD page. `WalletTests::dgbBalanceBreakdown`
+  covers the displays, reserve overlap, pending successors and unreadable pools.
 - `getDigiDollarReceiveRequestsAsync()` reads stored receive requests on a worker
   with a shared wallet reference, returning the snapshot on the model's Qt thread.
 - `getDigiDollarBalanceAsync()` reads Core's spendable DD snapshot away from

@@ -1118,7 +1118,7 @@ restoring an old matching wallet/checkpoint pair; it is a diagnostic test.
 ### src/interfaces/wallet.h
 - `interfaces::Wallet` (class) → abstract wallet interface for GUI and RPC
   - `encryptWallet()` / `lock()` / `unlock()` / `changeWalletPassphrase()` → encryption operations
-  - `getBalance()` → returns wallet balance breakdown (confirmed, unconfirmed, immature)
+  - `getBalance()` → trusted spendable ownership total; `getBalances()` / `tryGetBalances()` additionally return pending/immature and watch-only ownership plus ordinary DGB availability (`WalletBalanceAvailability`: available, provider-pool reserved, other unavailable, validity); implemented read-only in `wallet/interfaces.cpp` using the existing selection rules
   - `getCoins()` → returns available UTXOs
   - `createTransaction()` → builds and signs a transaction
   - `commitTransaction()` → broadcasts a signed transaction
@@ -1464,12 +1464,12 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 - `digibyteunits.cpp` → DGB unit conversion (DGB, mDGB, µDGB, sat)
 - `digibyteaddressvalidator.cpp` → validates DigiByte addresses in input fields
 - `digibytestrings.cpp` → translation strings registered with Qt's translation system
-- `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks. DGB Max/Send queries the existing eligible-input balance, including Paymaster reserves and ordinary locks, instead of the cached ownership total; covered by `qt/test/wallettests.cpp`.
+- `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks. DGB Max/Send queries current eligible inputs; a shared background balance snapshot supplies Overview, Send and Coin Control with available, Paymaster-reserved and other unavailable amounts, preserving ownership totals. A five-second refresh detects reservations without new blocks, with single-flight reads and stale-result rejection; covered by `qt/test/wallettests.cpp`.
 - `clientmodel.cpp` → bridges node state (peers, blocks, sync progress) to Qt model
 - `sendcoinsdialog.cpp` → send coins dialog with address, amount, fee controls
 - `receivecoinsdialog.cpp` → generate receive addresses with QR codes
 - `transactiontablemodel.cpp` → displays transaction history in table view
-- `overviewpage.cpp` → main wallet overview (balances, recent transactions)
+- `overviewpage.cpp` → main wallet overview (ordinary DGB availability, provider reserves, other unavailable, pending, immature and ownership totals; privacy and watch-only columns; recent transactions)
 - `optionsdialog.cpp` → node settings dialog (network, wallet, display)
 - `rpcconsole.cpp` → built-in RPC console and peer info panel
 - `paymentserver.cpp` → BIP 21 URI and payment protocol handler

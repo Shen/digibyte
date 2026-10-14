@@ -1,17 +1,30 @@
 # Paymaster operator workflow
 
-Current UI candidate: integration/paymaster-v9.26.7, 2026-10-12.
+Current UI candidate: integration/paymaster-v9.26.7, 2026-10-14.
 The task-oriented redesign has separate verification; earlier results do not
 validate this revision. This is not a release approval.
 
 ## Sending ordinary DGB from the provider wallet
 
-The normal DGB balance includes coins held in Paymaster admission and payment
-reserves. Those coins remain wallet-owned but cannot fund an ordinary send
-while reserved. **Use available balance** now fills only the amount eligible
+The DGB views distinguish **Available**, **Reserved for Paymaster**, **Other
+unavailable**, **Pending**, **Immature** and **Wallet total**. Reserve and other
+unavailable rows are hidden when zero. Admission and payment reserves remain
+wallet-owned but cannot fund an ordinary send while reserved. **Available**
+excludes them and other coins excluded from automatic selection (including
+manual locks); it is shown before the outgoing fee. Pending and immature coins
+are separate, not added to the reserve row. DigiDollar collateral remains on
+the DigiDollar page and is not added to the ordinary DGB total.
+
+**Use available balance** fills only the amount currently eligible
 for ordinary funding and enables **Subtract fee from amount**. The recipient
 therefore receives that available amount less the actual network fee. The
-normal balance display continues to show the ownership total.
+**Wallet total** continues to show ordinary DGB ownership, including reserves,
+other unavailable, pending and immature funds. Overview, Send and Coin Control
+use the same snapshot. A reserve/lock change without a new block is refreshed
+in the background within the next five-second interval when the wallet lock is
+available. If the pool cannot be read, availability is shown as **Unavailable**;
+the ownership total does not become zero. Coin Control does not list or unlock
+provider-pool reserves.
 
 For example, a 10-DGB balance containing 0.90 DGB of provider reserves leaves
 9.10 DGB before the outgoing transaction fee. Earlier builds could fill the

@@ -11,7 +11,17 @@
 Qt DGB Max/Send queries the existing wallet eligible-input balance on demand,
 including provider-pool and ordinary coin-lock exclusions. The cached ownership
 balance remains the total-balance display; it is not a spend-all estimate.
-This GUI integration changes no wallet selection, reservation or signing rule.
+`interfaces::WalletBalances` additionally partitions trusted ordinary DGB into
+automatically available, provider-pool reserved and other unavailable amounts,
+using the existing selection rules under the same wallet lock. Pending and
+immature ownership remain separate. Qt Overview, Send and Coin Control share
+this snapshot; unreadable pool data makes availability unknown. A single
+background read per model preserves non-blocking lock acquisition and refreshes
+reservations at most every five seconds without block/transaction notifications.
+Newer send results/notifications supersede an in-flight snapshot. Reserve-only
+changes emit `dgbBalanceChanged`, preserving the ownership signal that drives DD
+history views. No DD history scan is added. This GUI integration changes no wallet selection, reservation,
+RPC ownership, signing or consensus rule.
 
 Automatic providers renew their signed public announcement by wall clock when
 at most two ordinary quote lifetimes remain, including while the chain tip is

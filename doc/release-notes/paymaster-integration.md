@@ -1,5 +1,15 @@
 # Paymaster integration release notes
 
+## Separate DGB availability from ownership (2026-10-14)
+
+Overview, Send and Coin Control now distinguish ordinary DGB available before
+fees from Paymaster reserves and other unavailable funds. Pending and immature
+funds stay separate; the ownership total is preserved and DigiDollar collateral
+remains on the DigiDollar page. Unknown pool data displays unavailable amounts,
+not a zero/free reserve. Background snapshots also detect reserve changes
+without a new block and retain the existing non-blocking wallet-lock check.
+Funding, RPC totals, reserve release, signing and consensus rules are unchanged.
+
 ## Respect reserved DGB in the send maximum (2026-10-14)
 
 Qt **Use available balance** and the ordinary DGB send precheck now query the

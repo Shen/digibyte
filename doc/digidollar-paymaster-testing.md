@@ -1,5 +1,53 @@
 # Paymaster build and test runbook
 
+## DGB balance breakdown and reservation refresh (2026-10-14)
+
+The follow-up to the maximum-send correction adds a read-only availability
+partition to the wallet interface and a shared Qt snapshot. Ordinary ownership,
+RPC totals, funding and Paymaster protection remain unchanged. A single worker
+per model reads with the existing try-lock and checks reserve/lock changes every
+five seconds without requiring a new block. Newer notifications/send results
+supersede older snapshots. Reserve-only updates use `dgbBalanceChanged`, not
+the ownership signal connected to DigiDollar history readers.
+
+Focused Windows verification of code commit `33095d4b59` recompiles ten affected wallet/Qt/test/meta-object
+translation units and generates three isolated UIC headers, then links against
+the existing Release libraries. Only `WalletTests` is run on this isolated
+binary: the enlarged snapshot/model layouts require a normal complete build
+before running unrelated tests or installing a product executable.
+
+- `WalletTests::dgbBalanceBreakdown`: checks Overview, Send and Coin Control
+  against real wallet-interface results; ownership sums, an overlapping pool
+  and manual lock, separate ordinary locks, active/terminal pool states, privacy,
+  pending successors, unreleased immature funds, corrupt pool data and recovery.
+  Pool release refreshes without a block/transaction notification. A busy wallet
+  does not block the Qt event loop or turn the cached balance into zero. Pure
+  availability changes emit no ownership signal that would trigger DD history.
+- `WalletTests::walletTests`: existing normal DGB sends, Max (including freshly
+  locked coins, all coins locked, unlock, fee deduction and explicit selection),
+  and watch-only PSBT preparation. Added watch-only availability/lock checks.
+
+Both selected functions passed with exit 0 and no failures or skips. Qt's
+setup/cleanup passes are not additional test functions. Local reports and
+source/binary hashes are under
+`build_msvc/paymaster-refresh-check/dgb-balance-breakdown/`.
+No live-wallet reserve was changed and no installed binary was replaced.
+
+Full product rebuild, full Qt regression and operator visual acceptance remain
+outstanding. From `D:\Digibyte\digibyte-fork`, with all Regtest GUIs closed and
+no other build running, use the configured MSVC 14.43.34808 / Qt 5.15.10 toolchain
+(minutes to tens of minutes):
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+```
+
+Require exit 0, a passing `WalletTests::dgbBalanceBreakdown` in the full Qt
+report, and no failed/skipped selected checks. After restart, compare Available,
+Reserved for Paymaster and Wallet total across Overview/Send/Coin Control; the
+available amount is before fees. DigiDollar collateral remains separate. Review
+the maximum-send preview without authorizing a live-wallet test payment.
+
 ## Ordinary DGB maximum excludes provider reserves (2026-10-14)
 
 Read-only operator diagnosis found an exact 0.90-DGB difference between the
@@ -10,8 +58,10 @@ used the cached ownership total without selected inputs, while Core funding
 correctly excluded the pool. This explains an `Insufficient funds` failure even
 with fee deduction; the normal node logs contained no matching GUI error line.
 
-The model now queries the existing eligible-input balance for Max/Send only.
-Periodic balance display, funding rules, pool protection and signing are unchanged.
+At code commit `7f9d5f8cf8`, the model queries the existing eligible-input balance
+for Max/Send only. That commit leaves the periodic display unchanged; the
+subsequent balance breakdown is documented above. Funding rules, pool protection
+and signing are unchanged in both corrections.
 `WalletTests::walletTests` extends the existing maximum-balance checks to cover
 a newly locked input without a balance-cache refresh, unlock, all inputs locked,
 fee deduction and explicit coin selection. Existing ordinary sends and watch-only
