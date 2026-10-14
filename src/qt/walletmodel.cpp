@@ -308,7 +308,7 @@ WalletModel::SendCoinsReturn WalletModel::prepareTransaction(WalletModelTransact
         return DuplicateAddress;
     }
 
-    // If no coin was manually selected, use the cached balance
+    // Use the same eligible inputs as funding, including provider-pool locks.
     // Future: can merge this call with 'createTransaction'.
     CAmount nBalance = getAvailableBalance(&coinControl);
 
@@ -724,19 +724,12 @@ uint256 WalletModel::getLastBlockProcessed() const
 
 CAmount WalletModel::getAvailableBalance(const CCoinControl* control)
 {
-    // No selected coins, return the cached balance
-    if (!control || !control->HasSelected()) {
-        const interfaces::WalletBalances& balances = getCachedBalance();
-        CAmount available_balance = balances.balance;
-        // if wallet private keys are disabled, this is a watch-only wallet
-        // so, let's include the watch-only balance.
-        if (balances.have_watch_only && m_wallet->privateKeysDisabled()) {
-            available_balance += balances.watch_only_balance;
-        }
-        return available_balance;
-    }
-    // Fetch balance from the wallet, taking into account the selected coins
-    return wallet().getAvailableBalance(*control);
+    // The cached ownership balance also counts locked coins and Paymaster
+    // reserves. Query eligible inputs only on demand (Max/Send), not while
+    // refreshing the ordinary balance display.
+    CCoinControl default_control;
+    default_control.fAllowWatchOnly = m_wallet->privateKeysDisabled();
+    return wallet().getAvailableBalance(control ? *control : default_control);
 }
 
 // DigiDollar method implementations

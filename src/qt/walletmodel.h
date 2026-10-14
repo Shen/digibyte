@@ -164,8 +164,8 @@ public:
     // Retrieve the cached wallet balance
     interfaces::WalletBalances getCachedBalance() const;
 
-    // If coin control has selected outputs, searches the total amount inside the wallet.
-    // Otherwise, uses the wallet's cached available balance.
+    // Query eligible wallet inputs using the supplied coin control, excluding
+    // unavailable reserves instead of using the cached ownership balance.
     CAmount getAvailableBalance(const wallet::CCoinControl* control);
 
     // DigiDollar specific methods

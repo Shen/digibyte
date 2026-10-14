@@ -152,7 +152,7 @@ void CompareBalance(WalletModel& walletModel, CAmount expected_balance, QLabel* 
 // 'useAvailableBalance' should fill the amount edit box with the total available balance
 // Case 2: With coin control selected coins.
 // 'useAvailableBalance' should fill the amount edit box with the sum of the selected coins values.
-void VerifyUseAvailableBalance(SendCoinsDialog& sendCoinsDialog, const WalletModel& walletModel)
+void VerifyUseAvailableBalance(SendCoinsDialog& sendCoinsDialog, WalletModel& walletModel)
 {
     // Verify first entry amount and "useAvailableBalance" button
     QVBoxLayout* entries = sendCoinsDialog.findChild<QVBoxLayout*>("entries");
@@ -162,6 +162,37 @@ void VerifyUseAvailableBalance(SendCoinsDialog& sendCoinsDialog, const WalletMod
     // Now click "useAvailableBalance", check updated balance (the entire wallet balance should be set)
     Q_EMIT send_entry->useAvailableBalance(send_entry);
     QVERIFY(send_entry->getValue().amount == walletModel.getCachedBalance().balance);
+
+    // Locking an input does not change ownership or the cached balance. Max
+    // and the send precheck must nevertheless use only currently eligible coins.
+    const CAmount owned_balance = walletModel.getCachedBalance().balance;
+    const auto available_coins = walletModel.wallet().listCoins();
+    QVERIFY(!available_coins.empty());
+    QVERIFY(!available_coins.begin()->second.empty());
+    const auto& [first_outpoint, first_output] = available_coins.begin()->second.front();
+    QVERIFY(walletModel.wallet().lockCoin(first_outpoint, /*write_to_db=*/false));
+    Q_EMIT send_entry->useAvailableBalance(send_entry);
+    QCOMPARE(send_entry->getValue().amount, owned_balance - first_output.txout.nValue);
+    QVERIFY(send_entry->getValue().fSubtractFeeFromAmount);
+    QCOMPARE(walletModel.getCachedBalance().balance, owned_balance);
+    QCOMPARE(walletModel.getAvailableBalance(nullptr), send_entry->getValue().amount);
+    QVERIFY(walletModel.wallet().unlockCoin(first_outpoint));
+    Q_EMIT send_entry->useAvailableBalance(send_entry);
+    QCOMPARE(send_entry->getValue().amount, owned_balance);
+
+    // When every input is unavailable, Max must clear an old amount.
+    for (const auto& [destination, outputs] : available_coins) {
+        for (const auto& [outpoint, output] : outputs) {
+            QVERIFY(walletModel.wallet().lockCoin(outpoint, /*write_to_db=*/false));
+        }
+    }
+    Q_EMIT send_entry->useAvailableBalance(send_entry);
+    QCOMPARE(send_entry->getValue().amount, CAmount{0});
+    for (const auto& [destination, outputs] : available_coins) {
+        for (const auto& [outpoint, output] : outputs) {
+            QVERIFY(walletModel.wallet().unlockCoin(outpoint));
+        }
+    }
 
     // Now manually select two coins and click on "useAvailableBalance". Then check updated balance
     // (only the sum of the selected coins should be set).
