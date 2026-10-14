@@ -1,5 +1,36 @@
 # Paymaster build and test runbook
 
+## Overview balance formatting (2026-10-14)
+
+Following the DGB breakdown below, both overview cards now use consistent
+amount/unit alignment, row fonts and thin-space grouping. DD's reservation
+subtotal is explicitly confirmed-only. Leading DGB formatter padding is removed
+in Overview so selectable labels do not clip units in narrow watch-only columns.
+Balance calculation and wallet/core checks are unchanged.
+
+Relevant guidance: repository/src instructions, Qt README and translation
+policy, architecture/maps, contribution/developer notes and the Windows Qt
+workflow. Isolated MSVC 14.43 / Qt 5.15.10 builds compiled the two affected Qt
+translation units and linked against existing libraries. Five existing selected
+functions passed, with no failures/skips:
+
+- `WalletTests::dgbBalanceBreakdown` and `WalletTests::walletTests` (both repeated
+  successfully after the final DGB padding correction).
+- `DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBreakdown`.
+- `DigiDollarWidgetTests::privacyOverviewMaskTests`.
+- `DigiDollarWidgetTests::overviewUsdValueShowsUsdSuffixWhenPrivacyOff`.
+
+A separate native Qt preview loaded both source themes and rendered the real
+overview widgets with synthetic values: ordinary/reserved balances, watch-only,
+privacy, unavailable amounts and large balances. Its column/font/text-width
+checks passed; rendered images were also inspected, including the corrected
+watch-only clipping case. These are presentation checks, not live-wallet tests.
+Reports, images and isolated binaries are under
+`build_msvc/paymaster-refresh-check/balance-format/`.
+`git diff --check` passed. No installed GUI was replaced. A complete product
+rebuild/full Qt regression was not run for this presentation revision; use the
+operator build command below after any other build has finished.
+
 ## DGB balance breakdown and reservation refresh (2026-10-14)
 
 The follow-up to the maximum-send correction adds a read-only availability

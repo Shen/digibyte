@@ -1469,7 +1469,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 - `sendcoinsdialog.cpp` → send coins dialog with address, amount, fee controls
 - `receivecoinsdialog.cpp` → generate receive addresses with QR codes
 - `transactiontablemodel.cpp` → displays transaction history in table view
-- `overviewpage.cpp` → main wallet overview (ordinary DGB availability, provider reserves, other unavailable, pending, immature and ownership totals; privacy and watch-only columns; recent transactions)
+- `overviewpage.cpp` → main wallet overview (ordinary DGB availability, provider reserves, other unavailable, pending, immature and ownership totals; privacy and watch-only columns; recent transactions). Overview amount labels remove leading formatter padding and use right-aligned columns in both themes, matching DigiDollar balance typography without changing accounting.
 - `optionsdialog.cpp` → node settings dialog (network, wallet, display)
 - `rpcconsole.cpp` → built-in RPC console and peer info panel
 - `paymentserver.cpp` → BIP 21 URI and payment protocol handler

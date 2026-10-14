@@ -53,6 +53,18 @@
 #include <QThread>
 
 namespace {
+QString FormatBalanceAmount(double amount, int decimals, const QString& unit)
+{
+    // Match the ordinary DGB overview's thin-space grouping without changing
+    // the existing decimal rounding or converting floating-point balances.
+    QString value = QString::number(amount, 'f', decimals);
+    const int start = value.startsWith('-') ? 1 : 0;
+    for (int i = value.indexOf('.') - 3; i > start; i -= 3) {
+        value.insert(i, QChar(THIN_SP_CP));
+    }
+    return value + ' ' + unit;
+}
+
 static const QString MAX_EXPECTED_BLOCKCHAIN_DD_SUPPLY = QStringLiteral("11,000,000,000.00 $DD");
 static const QString MAX_EXPECTED_BLOCKCHAIN_DGB_LOCKED = QStringLiteral("21,000,000,000.00 DGB");
 static constexpr int TOTALS_VALUE_HORIZONTAL_PADDING = 36;
@@ -205,9 +217,6 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     QVBoxLayout* frameVLayout = new QVBoxLayout(m_balanceFrame);
     frameVLayout->setObjectName("frameVLayout");
 
-    // Add top stretch to center content vertically
-    frameVLayout->addStretch(1);
-
     // Title with status indicator layout (similar to main wallet)
     QHBoxLayout* titleLayout = new QHBoxLayout();
     titleLayout->setObjectName("titleLayout");
@@ -246,7 +255,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     // These rows are only shown while confirmed DD is protected by a
     // Paymaster session or provider carrier pool. Wallets not using
     // Paymaster retain the original compact balance layout unchanged.
-    m_ddPaymasterReservedLabel = new QLabel(tr("Reserved for Paymaster"), this);
+    m_ddPaymasterReservedLabel = new QLabel(tr("Reserved for Paymaster:"), this);
     m_ddPaymasterReservedLabel->setObjectName("ddPaymasterReservedLabel");
     m_ddPaymasterReservedValue = new QLabel("0.00 $DD", this);
     m_ddPaymasterReservedValue->setObjectName("ddPaymasterReservedValue");
@@ -256,7 +265,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
     m_ddPaymasterReservedValue->setToolTip(tr(
         "Confirmed DigiDollar protected for active Paymaster transfers or provider carrier liquidity. It remains yours but cannot be used by an unrelated send."));
 
-    m_ddWalletTotalLabel = new QLabel(tr("Wallet total"), this);
+    m_ddWalletTotalLabel = new QLabel(tr("Confirmed total:"), this);
     m_ddWalletTotalLabel->setObjectName("ddWalletTotalLabel");
     m_ddWalletTotalValue = new QLabel("0.00 $DD", this);
     m_ddWalletTotalValue->setObjectName("ddWalletTotalValue");
@@ -319,7 +328,7 @@ void DigiDollarOverviewWidget::setupBalanceSection()
 
     frameVLayout->addLayout(m_balanceLayout);
 
-    // Add bottom stretch to center content vertically
+    // Keep the balance rows at the top when the adjacent status panel is taller.
     frameVLayout->addStretch(1);
 
     // REMOVED: m_mainLayout->addWidget(m_balanceFrame);
@@ -1385,17 +1394,17 @@ void DigiDollarOverviewWidget::activateRecentTransaction(QListWidgetItem* item)
 
 QString DigiDollarOverviewWidget::formatDDAmount(double amount) const
 {
-    return QString::number(amount, 'f', 2) + " $DD";
+    return FormatBalanceAmount(amount, 2, QStringLiteral("$DD"));
 }
 
 QString DigiDollarOverviewWidget::formatDGBAmount(double amount) const
 {
-    return QString::number(amount, 'f', 8) + " DGB";
+    return FormatBalanceAmount(amount, 8, QStringLiteral("DGB"));
 }
 
 QString DigiDollarOverviewWidget::formatUSDAmount(double amount) const
 {
-    return QString::number(amount, 'f', 2) + " $USD";
+    return FormatBalanceAmount(amount, 2, QStringLiteral("$USD"));
 }
 
 void DigiDollarOverviewWidget::setMonospacedFont(bool use_embedded_font)

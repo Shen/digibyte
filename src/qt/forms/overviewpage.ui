@@ -112,7 +112,7 @@
           <item>
            <layout class="QGridLayout" name="gridLayout">
             <property name="spacing">
-             <number>12</number>
+             <number>6</number>
             </property>
             <item row="4" column="2">
              <widget class="QLabel" name="labelWatchPending">
@@ -200,7 +200,7 @@
             <item row="7" column="0">
              <widget class="QLabel" name="labelTotalText">
               <property name="text">
-               <string>Total:</string>
+               <string>Wallet total:</string>
               </property>
              </widget>
             </item>
@@ -357,7 +357,7 @@
              <widget class="QLabel" name="labelPaymasterReservedText">
               <property name="toolTip"><string>DGB dedicated to the Paymaster provider pool, including ready reserves. These coins are unavailable for ordinary payments.</string></property>
               <property name="text"><string>Reserved for Paymaster:</string></property>
-              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
              </widget>
             </item>
             <item row="2" column="1">
@@ -378,7 +378,7 @@
              <widget class="QLabel" name="labelOtherUnavailableText">
               <property name="toolTip"><string>Other trusted DGB excluded from automatic coin selection, including manually locked coins. Pending and immature funds are shown separately.</string></property>
               <property name="text"><string>Other unavailable:</string></property>
-              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
              </widget>
             </item>
             <item row="3" column="1">

@@ -1499,8 +1499,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   With no Paymaster-reserved DD it preserves the original compact balance
   layout. While a client session or live provider carrier pool protects DD, it
   temporarily splits the display into ordinary available, Paymaster-reserved,
-  and gross wallet total; wallet USD valuation continues to use the gross
-  wallet-owned amount.
+  and confirmed wallet total (labelled `Confirmed total`); wallet USD valuation
+  continues to use confirmed wallet-owned DD, excluding pending. The balance
+  grid shares the DGB overview's right-aligned typography in both themes;
+  local amount formatters preserve decimal precision and group thousands.
   Balance, collateral and wallet mint-capability reads run on a worker, coalesce
   pending refreshes and discard replies from a detached wallet. Hidden balance
   callbacks return without reading Core; oracle and network-health queries also

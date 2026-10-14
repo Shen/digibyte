@@ -1418,8 +1418,8 @@ background-color:rgba(255, 255, 255, 0.15);
     min-width:160px;
     background-color:transparent;
     color:#003366;
-    margin-left:20px;
-    margin-top:10px;
+    margin-left:0px;
+    margin-top:0px;
     margin-right:5px;
     padding-right:5px;
     font-weight:bold;
@@ -1431,116 +1431,63 @@ background-color:rgba(255, 255, 255, 0.15);
     margin-left:3px;
     }
 
-    QWidget .QFrame#frame .QLabel#labelSpendable { /* Spendable Header */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:9pt;
-    margin-left:18px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelWatchonly { /* Watch-only Header */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:9pt;
-    margin-left:16px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelBalanceText { /* Available Balance Label */
+    /* Balance columns: equal type sizes keep amounts and units aligned. */
+    QWidget .QFrame#frame .QLabel#labelSpendable,
+    QWidget .QFrame#frame .QLabel#labelWatchonly {
     qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width:160px;
-    background-color:#003366;
-    color:#ffffff;
-    margin-right:5px;
-    padding-right:5px;
-    font-size:10pt;
+    font-size: 9pt;
+    margin: 0px;
+    }
+
+    QWidget .QFrame#frame .QLabel#labelBalanceText,
+    QWidget .QFrame#frame .QLabel#labelPaymasterReservedText,
+    QWidget .QFrame#frame .QLabel#labelOtherUnavailableText,
+    QWidget .QFrame#frame .QLabel#labelPendingText,
+    QWidget .QFrame#frame .QLabel#labelImmatureText,
+    QWidget .QFrame#frame .QLabel#labelTotalText {
+    qproperty-alignment: 'AlignVCenter | AlignRight';
+    min-width: 160px;
+    min-height: 28px;
+    font-size: 10pt;
+    font-weight: normal;
+    background-color: #ffffff;
+    color: #003366;
+    margin-right: 5px;
+    padding: 0px 5px;
+    border-radius: 6px;
+    }
+
+    QWidget .QFrame#frame .QLabel#labelBalanceText {
+    background-color: #003366;
+    color: #ffffff;
     font-weight: bold;
-    min-height:35px;
-    border-radius: 6px;
     }
 
-    QWidget .QFrame#frame .QLabel#labelBalance { /* Available Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:14pt;
-    color:#003366;
-    margin-left:0px;
+    QWidget .QFrame#frame .QLabel#labelBalance,
+    QWidget .QFrame#frame .QLabel#labelPaymasterReserved,
+    QWidget .QFrame#frame .QLabel#labelOtherUnavailable,
+    QWidget .QFrame#frame .QLabel#labelUnconfirmed,
+    QWidget .QFrame#frame .QLabel#labelImmature,
+    QWidget .QFrame#frame .QLabel#labelTotal,
+    QWidget .QFrame#frame .QLabel#labelWatchAvailable,
+    QWidget .QFrame#frame .QLabel#labelWatchPaymasterReserved,
+    QWidget .QFrame#frame .QLabel#labelWatchOtherUnavailable,
+    QWidget .QFrame#frame .QLabel#labelWatchPending,
+    QWidget .QFrame#frame .QLabel#labelWatchImmature,
+    QWidget .QFrame#frame .QLabel#labelWatchTotal {
+    qproperty-alignment: 'AlignVCenter | AlignRight';
+    min-height: 28px;
+    font-size: 11pt;
+    font-weight: normal;
+    color: #003366;
+    background-color: transparent;
+    margin: 0px;
+    padding: 0px;
+    }
+
+    QWidget .QFrame#frame .QLabel#labelBalance,
+    QWidget .QFrame#frame .QLabel#labelWatchAvailable {
     font-weight: bold;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelWatchAvailable { /* Watch-only Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:9pt;
-    color:#003366;
-    margin-left:16px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelPendingText { /* Pending Balance Label */
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width:160px;
-    font-size:11pt;
-    background-color:#fff;
-    color:#003366;
-    margin-right:5px;
-    padding-right:5px;
-    border-radius: 6px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelUnconfirmed { /* Pending Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:13pt;
-    color:#003366;
-    margin-left:0px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelWatchPending { /* Watch-only Pending Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:11pt;
-    margin-left:16px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelImmatureText { /* Immature Balance Label */
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width:160px;
-    font-size:11pt;
-    background-color:#fff;
-    color:#003366;
-    margin-right:5px;
-    padding-right:5px;
-    border-radius: 6px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelImmature { /* Immature Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:13pt;
-    color:#003366;
-    margin-left:0px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelWatchImmature { /* Watch-only Immature Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:11pt;
-    margin-left:16px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelTotalText { /* Total Balance Label */
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width:160px;
-    font-size:11pt;
-    background-color:#fff;
-    color:#003366;
-    margin-right:5px;
-    padding-right:5px;
-    border-radius: 6px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelTotal { /* Total Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:13pt;
-    color:#003366;
-    margin-left:0px;
-    }
-
-    QWidget .QFrame#frame .QLabel#labelWatchTotal { /* Watch-only Total Balance */
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size:11pt;
-    margin-left:16px;
     }
 
     /* PRIVATESEND WIDGET */
@@ -4586,80 +4533,55 @@ DigiDollarOverviewWidget .QFrame#balanceFrame > .QLabel {
     min-height: 20px;
 }
 
-/* Balance Labels - Match main Overview tab styling */
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceLabel {
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width: 160px;
-    background-color: #123f2b;
-    color: #ffffff;
-    margin-right: 5px;
-    padding-right: 5px;
-    font-size: 10pt;
-    font-weight: bold;
-    min-height: 35px;
-    border-radius: 6px;
-}
-
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceValue {
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
+/* Balance columns use the same typography and spacing as the DGB overview. */
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#balanceTitle {
+    min-height: 30px;
     font-size: 14pt;
-    color: #123f2b;
-    margin-left: 0px;
     font-weight: bold;
 }
 
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPendingLabel {
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width: 160px;
-    font-size: 11pt;
-    background-color: #ffffff;
-    color: #123f2b;
-    margin-right: 5px;
-    padding-right: 5px;
-    border-radius: 6px;
-}
-
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPendingValue {
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size: 13pt;
-    color: #123f2b;
-    margin-left: 0px;
-}
-
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#dgbCollateralLabel {
-    qproperty-alignment: 'AlignVCenter | AlignRight';
-    min-width: 160px;
-    font-size: 11pt;
-    background-color: #ffffff;
-    color: #123f2b;
-    margin-right: 5px;
-    padding-right: 5px;
-    border-radius: 6px;
-}
-
-DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#dgbCollateralValue {
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size: 13pt;
-    color: #123f2b;
-    margin-left: 0px;
-}
-
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPaymasterReservedLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddWalletTotalLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPendingLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#dgbCollateralLabel,
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#usdValueLabel {
     qproperty-alignment: 'AlignVCenter | AlignRight';
     min-width: 160px;
-    font-size: 11pt;
+    min-height: 28px;
+    font-size: 10pt;
+    font-weight: normal;
     background-color: #ffffff;
     color: #123f2b;
     margin-right: 5px;
-    padding-right: 5px;
+    padding: 0px 5px;
     border-radius: 6px;
 }
 
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceLabel {
+    background-color: #123f2b;
+    color: #ffffff;
+    font-weight: bold;
+}
+
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceValue,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPaymasterReservedValue,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddWalletTotalValue,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPendingValue,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#dgbCollateralValue,
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#usdValueValue {
-    qproperty-alignment: 'AlignVCenter | AlignLeft';
-    font-size: 13pt;
+    qproperty-alignment: 'AlignVCenter | AlignRight';
+    min-height: 28px;
+    font-size: 11pt;
+    font-weight: normal;
     color: #123f2b;
-    margin-left: 0px;
+    background-color: transparent;
+    margin: 0px;
+    padding: 0px;
+}
+
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceValue {
+    font-weight: bold;
 }
 
 /* System Health Frame - Compact */
@@ -6080,6 +6002,8 @@ DigiDollarRedeemWidget QFrame#positionInfoFrame {
 }
 
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddBalanceLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPaymasterReservedLabel,
+DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddWalletTotalLabel,
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#ddPendingLabel,
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#dgbCollateralLabel,
 DigiDollarOverviewWidget .QFrame#balanceFrame .QLabel#usdValueLabel,

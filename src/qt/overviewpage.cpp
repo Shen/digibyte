@@ -262,30 +262,35 @@ OverviewPage::~OverviewPage()
 void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
 {
     DigiByteUnit unit = walletModel->getOptionsModel()->getDisplayUnit();
+    const auto format_amount = [&](CAmount amount) {
+        // The labels align the column. Leading fill characters can clip the
+        // unit in selectable labels when a watch-only column shares the width.
+        return DigiByteUnits::formatWithPrivacy(unit, amount, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy).trimmed();
+    };
     const auto availability = [&](const interfaces::WalletBalanceAvailability& part, CAmount amount) {
-        return part.valid ? DigiByteUnits::formatWithPrivacy(unit, amount, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy) : tr("Unavailable");
+        return part.valid ? format_amount(amount) : tr("Unavailable");
     };
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {
             ui->labelBalance->setText(availability(balances.watch_only, balances.watch_only.available));
-            ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelUnconfirmed->setText(format_amount(balances.unconfirmed_watch_only_balance));
+            ui->labelImmature->setText(format_amount(balances.immature_watch_only_balance));
+            ui->labelTotal->setText(format_amount(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
         } else {
             ui->labelBalance->setText(availability(balances.spendable, balances.spendable.available));
-            ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance + balances.unconfirmed_balance + balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelUnconfirmed->setText(format_amount(balances.unconfirmed_balance));
+            ui->labelImmature->setText(format_amount(balances.immature_balance));
+            ui->labelTotal->setText(format_amount(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
             ui->labelWatchAvailable->setText(availability(balances.watch_only, balances.watch_only.available));
-            ui->labelWatchPending->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelWatchImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelWatchTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelWatchPending->setText(format_amount(balances.unconfirmed_watch_only_balance));
+            ui->labelWatchImmature->setText(format_amount(balances.immature_watch_only_balance));
+            ui->labelWatchTotal->setText(format_amount(balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance));
         }
     } else {
         ui->labelBalance->setText(availability(balances.spendable, balances.spendable.available));
-        ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-        ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-        ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance + balances.unconfirmed_balance + balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+        ui->labelUnconfirmed->setText(format_amount(balances.unconfirmed_balance));
+        ui->labelImmature->setText(format_amount(balances.immature_balance));
+        ui->labelTotal->setText(format_amount(balances.balance + balances.unconfirmed_balance + balances.immature_balance));
     }
     // only show immature (newly mined) balance if it's non-zero, so as not to complicate things
     // for the non-mining users

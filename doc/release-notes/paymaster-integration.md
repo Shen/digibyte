@@ -1,5 +1,16 @@
 # Paymaster integration release notes
 
+## Consistent overview balance formatting (2026-10-14)
+
+DGB and DigiDollar overview cards now use aligned amount/unit columns and
+consistent row fonts, including Paymaster reserves, unavailable funds and
+watch-only DGB. Both themes cover the additional rows. DigiDollar overview
+amounts use the same thin-space thousands grouping as DGB; precision remains
+eight decimals for DGB and two for DD/USD. DD's reservation subtotal is labelled
+**Confirmed total**, distinguishing it from the DGB **Wallet total**, which
+also includes pending and immature funds. Balance calculation, reservation,
+funding and privacy rules are unchanged.
+
 ## Separate DGB availability from ownership (2026-10-14)
 
 Overview, Send and Coin Control now distinguish ordinary DGB available before

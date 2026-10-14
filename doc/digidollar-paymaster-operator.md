@@ -6,6 +6,14 @@ validate this revision. This is not a release approval.
 
 ## Sending ordinary DGB from the provider wallet
 
+The DGB and DigiDollar overview cards align their amounts and units to the
+right, use consistent row typography and group thousands with thin spaces in
+both themes. DGB keeps eight decimal places; DD and USD keep two. The DD
+reservation breakdown labels its subtotal **Confirmed total** (available plus
+reserved DD); pending DD is separate and excluded from the USD valuation.
+The DGB **Wallet total** also includes pending and immature funds. Matching
+presentation does not change these different accounting meanings.
+
 The DGB views distinguish **Available**, **Reserved for Paymaster**, **Other
 unavailable**, **Pending**, **Immature** and **Wallet total**. Reserve and other
 unavailable rows are hidden when zero. Admission and payment reserves remain
