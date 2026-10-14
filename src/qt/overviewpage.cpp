@@ -205,6 +205,11 @@ OverviewPage::OverviewPage(const PlatformStyle *platformStyle, QWidget *parent) 
     ui->labelWatchPending->installEventFilter(this);
     ui->labelWatchImmature->installEventFilter(this);
     ui->labelWatchTotal->installEventFilter(this);
+    for (auto* label : {ui->labelPaymasterReserved, ui->labelPaymasterReservedText,
+                        ui->labelOtherUnavailable, ui->labelOtherUnavailableText,
+                        ui->labelWatchPaymasterReserved, ui->labelWatchOtherUnavailable}) {
+        label->installEventFilter(this);
+    }
 
     // use a SingleColorIcon for the "out of sync warning" icon
     QIcon icon = m_platform_style->SingleColorIcon(QStringLiteral(":/icons/warning"));
@@ -257,24 +262,27 @@ OverviewPage::~OverviewPage()
 void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
 {
     DigiByteUnit unit = walletModel->getOptionsModel()->getDisplayUnit();
+    const auto availability = [&](const interfaces::WalletBalanceAvailability& part, CAmount amount) {
+        return part.valid ? DigiByteUnits::formatWithPrivacy(unit, amount, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy) : tr("Unavailable");
+    };
     if (walletModel->wallet().isLegacy()) {
         if (walletModel->wallet().privateKeysDisabled()) {
-            ui->labelBalance->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelBalance->setText(availability(balances.watch_only, balances.watch_only.available));
             ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
         } else {
-            ui->labelBalance->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelBalance->setText(availability(balances.spendable, balances.spendable.available));
             ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance + balances.unconfirmed_balance + balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
-            ui->labelWatchAvailable->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+            ui->labelWatchAvailable->setText(availability(balances.watch_only, balances.watch_only.available));
             ui->labelWatchPending->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelWatchImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
             ui->labelWatchTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.watch_only_balance + balances.unconfirmed_watch_only_balance + balances.immature_watch_only_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
         }
     } else {
-        ui->labelBalance->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
+        ui->labelBalance->setText(availability(balances.spendable, balances.spendable.available));
         ui->labelUnconfirmed->setText(DigiByteUnits::formatWithPrivacy(unit, balances.unconfirmed_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
         ui->labelImmature->setText(DigiByteUnits::formatWithPrivacy(unit, balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
         ui->labelTotal->setText(DigiByteUnits::formatWithPrivacy(unit, balances.balance + balances.unconfirmed_balance + balances.immature_balance, DigiByteUnits::SeparatorStyle::ALWAYS, m_privacy));
@@ -288,6 +296,24 @@ void OverviewPage::setBalance(const interfaces::WalletBalances& balances)
     ui->labelImmature->setVisible(showImmature || showWatchOnlyImmature);
     ui->labelImmatureText->setVisible(showImmature || showWatchOnlyImmature);
     ui->labelWatchImmature->setVisible(!walletModel->wallet().privateKeysDisabled() && showWatchOnlyImmature); // show watch-only immature balance
+
+    const bool watch_primary = walletModel->wallet().isLegacy() && walletModel->wallet().privateKeysDisabled();
+    const bool watch_column = walletModel->wallet().isLegacy() && !watch_primary && balances.have_watch_only;
+    const auto& part = watch_primary ? balances.watch_only : balances.spendable;
+    const bool show_reserved = !part.valid || part.paymaster_reserved != 0 ||
+        (watch_column && (!balances.watch_only.valid || balances.watch_only.paymaster_reserved != 0));
+    const bool show_other = !part.valid || part.other_unavailable != 0 ||
+        (watch_column && (!balances.watch_only.valid || balances.watch_only.other_unavailable != 0));
+    ui->labelPaymasterReserved->setText(availability(part, part.paymaster_reserved));
+    ui->labelOtherUnavailable->setText(availability(part, part.other_unavailable));
+    ui->labelWatchPaymasterReserved->setText(availability(balances.watch_only, balances.watch_only.paymaster_reserved));
+    ui->labelWatchOtherUnavailable->setText(availability(balances.watch_only, balances.watch_only.other_unavailable));
+    ui->labelPaymasterReservedText->setVisible(show_reserved);
+    ui->labelPaymasterReserved->setVisible(show_reserved);
+    ui->labelWatchPaymasterReserved->setVisible(watch_column && show_reserved);
+    ui->labelOtherUnavailableText->setVisible(show_other);
+    ui->labelOtherUnavailable->setVisible(show_other);
+    ui->labelWatchOtherUnavailable->setVisible(watch_column && show_other);
 }
 
 // show/hide watch-only labels
@@ -300,8 +326,11 @@ void OverviewPage::updateWatchOnlyLabels(bool showWatchOnly)
     ui->labelWatchPending->setVisible(showWatchOnly);   // show watch-only pending balance
     ui->labelWatchTotal->setVisible(showWatchOnly);     // show watch-only total balance
 
-    if (!showWatchOnly)
+    if (!showWatchOnly) {
         ui->labelWatchImmature->hide();
+        ui->labelWatchPaymasterReserved->hide();
+        ui->labelWatchOtherUnavailable->hide();
+    }
 }
 
 void OverviewPage::setClientModel(ClientModel *model)
@@ -343,7 +372,7 @@ void OverviewPage::setWalletModel(WalletModel *model)
         LimitTransactionRows();
         // Keep up to date with wallet
         setBalance(model->getCachedBalance());
-        connect(model, &WalletModel::balanceChanged, this, &OverviewPage::setBalance);
+        connect(model, &WalletModel::dgbBalanceChanged, this, &OverviewPage::setBalance);
 
         connect(model->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &OverviewPage::updateDisplayUnit);
 
@@ -421,6 +450,10 @@ void OverviewPage::setMonospacedFont(bool use_embedded_font)
     ui->labelWatchPending->setFont(f);
     ui->labelWatchImmature->setFont(f);
     ui->labelWatchTotal->setFont(f);
+    ui->labelPaymasterReserved->setFont(f);
+    ui->labelOtherUnavailable->setFont(f);
+    ui->labelWatchPaymasterReserved->setFont(f);
+    ui->labelWatchOtherUnavailable->setFont(f);
 }
 
 bool OverviewPage::eventFilter(QObject *obj, QEvent *event)

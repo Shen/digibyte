@@ -365,6 +365,13 @@
     </widget>
    </item>
    <item>
+    <widget class="QLabel" name="labelWalletBalances">
+     <property name="text"><string/></property>
+     <property name="wordWrap"><bool>true</bool></property>
+     <property name="toolTip"><string>Wallet amounts before fees. Paymaster pool reserves are excluded from the input list and cannot be unlocked here. Other unavailable funds include manually locked coins. DigiDollar collateral is shown separately on the DigiDollar page.</string></property>
+    </widget>
+   </item>
+   <item>
     <widget class="CoinControlTreeWidget" name="treeWidget">
      <property name="contextMenuPolicy">
       <enum>Qt::CustomContextMenu</enum>

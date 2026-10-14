@@ -161,7 +161,7 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             }
         }
 
-        connect(_model, &WalletModel::balanceChanged, this, &SendCoinsDialog::setBalance);
+        connect(_model, &WalletModel::dgbBalanceChanged, this, &SendCoinsDialog::setBalance);
         connect(_model->getOptionsModel(), &OptionsModel::displayUnitChanged, this, &SendCoinsDialog::refreshBalance);
         refreshBalance();
 
@@ -718,14 +718,16 @@ void SendCoinsDialog::setBalance(const interfaces::WalletBalances& balances)
 {
     if(model && model->getOptionsModel())
     {
-        CAmount balance = balances.balance;
+        const auto* part = &balances.spendable;
+        ui->labelBalanceName->setText(tr("Available:"));
         if (model->wallet().hasExternalSigner()) {
-            ui->labelBalanceName->setText(tr("External balance:"));
+            ui->labelBalanceName->setText(tr("Available with external signer:"));
         } else if (model->wallet().isLegacy() && model->wallet().privateKeysDisabled()) {
-            balance = balances.watch_only_balance;
-            ui->labelBalanceName->setText(tr("Watch-only balance:"));
+            part = &balances.watch_only;
+            ui->labelBalanceName->setText(tr("Available watch-only:"));
         }
-        ui->labelBalance->setText(DigiByteUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), balance));
+        ui->labelBalance->setText(part->valid ? DigiByteUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), part->available) : tr("Unavailable"));
+        ui->labelBalanceDetails->setText(model->getDGBBalanceSummary(/*include_available=*/false));
     }
 }
 

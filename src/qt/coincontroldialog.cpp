@@ -52,6 +52,12 @@ CoinControlDialog::CoinControlDialog(CCoinControl& coin_control, WalletModel* _m
     platformStyle(_platformStyle)
 {
     ui->setupUi(this);
+    const auto update_balances = [this] {
+        ui->labelWalletBalances->setText(model->getDGBBalanceSummary());
+    };
+    connect(model, &WalletModel::dgbBalanceChanged, this, update_balances);
+    connect(model->getOptionsModel(), &OptionsModel::displayUnitChanged, this, update_balances);
+    update_balances();
 
     // context menu
     contextMenu = new QMenu(this);
@@ -246,6 +252,8 @@ void CoinControlDialog::lockCoin()
 
     COutPoint outpt(uint256S(contextMenuItem->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), contextMenuItem->data(COLUMN_ADDRESS, VOutRole).toUInt());
     model->wallet().lockCoin(outpt, /* write_to_db = */ true);
+    model->updateTransaction();
+    model->pollBalanceChanged();
     contextMenuItem->setDisabled(true);
     contextMenuItem->setIcon(COLUMN_CHECKBOX, platformStyle->SingleColorIcon(":/icons/lock_closed"));
     updateLabelLocked();
@@ -256,6 +264,8 @@ void CoinControlDialog::unlockCoin()
 {
     COutPoint outpt(uint256S(contextMenuItem->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), contextMenuItem->data(COLUMN_ADDRESS, VOutRole).toUInt());
     model->wallet().unlockCoin(outpt);
+    model->updateTransaction();
+    model->pollBalanceChanged();
     contextMenuItem->setDisabled(false);
     contextMenuItem->setIcon(COLUMN_CHECKBOX, QIcon());
     updateLabelLocked();

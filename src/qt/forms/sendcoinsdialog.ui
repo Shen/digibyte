@@ -1152,7 +1152,8 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 satos
       </spacer>
      </item>
      <item>
-      <layout class="QHBoxLayout" name="horizontalLayout_2">
+      <layout class="QVBoxLayout" name="verticalLayoutBalance">
+       <item><layout class="QHBoxLayout" name="horizontalLayout_2">
        <property name="spacing">
         <number>3</number>
        </property>
@@ -1165,7 +1166,7 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 satos
           </sizepolicy>
          </property>
          <property name="text">
-          <string>Balance:</string>
+          <string>Available:</string>
          </property>
         </widget>
        </item>
@@ -1186,6 +1187,15 @@ Note:  Since the fee is calculated on a per-byte basis, a fee rate of "100 satos
          <property name="textInteractionFlags">
           <set>Qt::LinksAccessibleByMouse|Qt::TextSelectableByKeyboard|Qt::TextSelectableByMouse</set>
          </property>
+        </widget>
+       </item>
+      </layout></item>
+       <item>
+        <widget class="QLabel" name="labelBalanceDetails">
+         <property name="text"><string/></property>
+         <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+         <property name="wordWrap"><bool>true</bool></property>
+         <property name="toolTip"><string>Available DGB is shown before the transaction fee. Paymaster reserves cannot be selected for ordinary payments. DigiDollar collateral is shown separately on the DigiDollar page.</string></property>
         </widget>
        </item>
       </layout>

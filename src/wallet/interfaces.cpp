@@ -22,6 +22,7 @@
 #include <wallet/fees.h>
 #include <wallet/types.h>
 #include <wallet/load.h>
+#include <wallet/paymasterstore.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
 #include <wallet/spend.h>
@@ -399,6 +400,10 @@ public:
     }
     WalletBalances getBalances() override
     {
+        // Ownership, selection eligibility and pool membership must describe
+        // the same wallet state. This is a read-only GUI snapshot, not a change
+        // to GetBalance(), RPC ownership totals or the funding rules.
+        LOCK(m_wallet->cs_wallet);
         const auto bal = GetBalance(*m_wallet);
         WalletBalances result;
         result.balance = bal.m_mine_trusted;
@@ -410,6 +415,40 @@ public:
             result.unconfirmed_watch_only_balance = bal.m_watchonly_untrusted_pending;
             result.immature_watch_only_balance = bal.m_watchonly_immature;
         }
+
+        std::set<COutPoint> pool_inputs;
+        const auto pool_status = GetPaymasterProviderPoolInputs(*m_wallet, pool_inputs);
+        if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) {
+            return result; // Unknown availability must not look like a free or empty pool.
+        }
+        CCoinControl control;
+        control.fAllowWatchOnly = true;
+        for (const auto& coin : AvailableCoins(*m_wallet, &control).All()) {
+            auto& part = (m_wallet->IsMine(coin.txout) & ISMINE_SPENDABLE) ? result.spendable : result.watch_only;
+            part.available += coin.txout.nValue;
+        }
+
+        // Only count reserves already included in the trusted ownership total.
+        // A pending successor, immature coin or spent/foreign entry must not be
+        // counted twice. Use the actual wallet output, not the recorded nominal value.
+        std::set<uint256> trusted_parents;
+        for (const auto& outpoint : pool_inputs) {
+            const auto it = m_wallet->mapWallet.find(outpoint.hash);
+            if (it == m_wallet->mapWallet.end() || outpoint.n >= it->second.tx->vout.size()) continue;
+            const auto& wtx = it->second;
+            if (m_wallet->IsSpent(outpoint) || m_wallet->IsTxImmatureCoinBase(wtx) ||
+                m_wallet->GetTxDepthInMainChain(wtx) < 0 || !CachedTxIsTrusted(*m_wallet, wtx, trusted_parents)) continue;
+            const auto& output = wtx.tx->vout[outpoint.n];
+            if (m_wallet->IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE) && m_wallet->IsSpentKey(output.scriptPubKey)) continue;
+            result.spendable.paymaster_reserved += OutputGetCredit(*m_wallet, output, ISMINE_SPENDABLE);
+            result.watch_only.paymaster_reserved += OutputGetCredit(*m_wallet, output, ISMINE_WATCH_ONLY);
+        }
+        const auto complete = [](interfaces::WalletBalanceAvailability& part, CAmount owned) {
+            part.other_unavailable = owned - part.available - part.paymaster_reserved;
+            part.valid = part.other_unavailable >= 0;
+        };
+        complete(result.spendable, result.balance);
+        complete(result.watch_only, result.watch_only_balance);
         return result;
     }
     bool tryGetBalances(WalletBalances& balances, uint256& block_hash) override

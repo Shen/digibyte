@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QElapsedTimer>
 
 enum class OutputType;
 
@@ -248,6 +249,9 @@ public:
     // Get available DGB balance for collateral
     CAmount getAvailableDGBBalance() const;
 
+    //! Ordinary DGB ownership breakdown, using the shared display snapshot.
+    QString getDGBBalanceSummary(bool include_available = true) const;
+
     // Validate DigiDollar address
     bool validateDigiDollarAddress(const QString& address) const;
 
@@ -326,6 +330,9 @@ private:
 
     // Cache some values to be able to detect changes
     interfaces::WalletBalances m_cached_balances;
+    QElapsedTimer m_balance_refresh_timer;
+    bool m_balance_refresh_in_flight{false};
+    uint64_t m_balance_revision{0};
     EncryptionStatus cachedEncryptionStatus{Unencrypted};
     QTimer* timer;
 
@@ -357,6 +364,10 @@ Q_SIGNALS:
 
     // Signal that balance in wallet changed
     void balanceChanged(const interfaces::WalletBalances& balances);
+
+    //! Ordinary DGB display changed, including reservations without ownership changes.
+    //! Kept separate so reserve-only changes do not trigger DD history reads.
+    void dgbBalanceChanged(const interfaces::WalletBalances& balances);
 
     // Signal that DigiDollar wallet state changed and DD widgets should refresh.
     void digiDollarChanged();

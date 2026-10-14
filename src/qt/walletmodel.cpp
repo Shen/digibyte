@@ -11,6 +11,7 @@
 
 #include <qt/addresstablemodel.h>
 #include <qt/clientmodel.h>
+#include <qt/digibyteunits.h>
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
@@ -202,38 +203,83 @@ void WalletModel::updateStatus()
 
 void WalletModel::pollBalanceChanged()
 {
-    // Avoid recomputing wallet balances unless a TransactionChanged or
-    // BlockTip notification was received.
-    if (!fForceCheckBalanceChanged && m_cached_last_update_tip == getLastBlockProcessed()) return;
-
-    // Try to get balances and return early if locks can't be acquired. This
-    // avoids the GUI from getting stuck on periodical polls if the core is
-    // holding the locks for a longer time - for example, during a wallet
-    // rescan.
-    interfaces::WalletBalances new_balances;
-    uint256 block_hash;
-    if (!m_wallet->tryGetBalances(new_balances, block_hash)) {
-        return;
-    }
-
-    if (fForceCheckBalanceChanged || block_hash != m_cached_last_update_tip) {
-        fForceCheckBalanceChanged = false;
-
-        // Balance and number of transactions might have changed
-        m_cached_last_update_tip = block_hash;
-
-        checkBalanceChanged(new_balances);
-        if(transactionTableModel)
-            transactionTableModel->updateConfirmations();
-    }
+    if (m_balance_refresh_in_flight) return;
+    const bool changed = fForceCheckBalanceChanged || m_cached_last_update_tip != getLastBlockProcessed();
+    // Pool reservations and lockunspent can change without a new transaction or
+    // block. Bound this additional read to once per five seconds, off the GUI thread.
+    if (!changed && m_balance_refresh_timer.isValid() && m_balance_refresh_timer.elapsed() < 5000) return;
+    m_balance_refresh_timer.start();
+    m_balance_refresh_in_flight = true;
+    fForceCheckBalanceChanged = false;
+    const auto revision = m_balance_revision;
+    const auto wallet = m_wallet;
+    QPointer<WalletModel> guard{this};
+    QThread* thread = QThread::create([guard, wallet, changed, revision] {
+        interfaces::WalletBalances balances;
+        uint256 block_hash;
+        bool read{false};
+        try {
+            // Keep the existing non-blocking lock acquisition during rescans.
+            read = wallet->tryGetBalances(balances, block_hash);
+        } catch (const std::exception& e) {
+            LogPrint(BCLog::QT, "DGB balance snapshot failed: %s\n", e.what());
+        } catch (...) {
+            LogPrint(BCLog::QT, "DGB balance snapshot failed\n");
+        }
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard, [guard, balances, block_hash, read, changed, revision] {
+            if (!guard) return;
+            guard->m_balance_refresh_in_flight = false;
+            // A synchronous send or a newer notification may have overtaken this read.
+            if (!read || revision != guard->m_balance_revision || guard->fForceCheckBalanceChanged) {
+                guard->fForceCheckBalanceChanged = true;
+                return;
+            }
+            const bool update_confirmations = changed || block_hash != guard->m_cached_last_update_tip;
+            guard->m_cached_last_update_tip = block_hash;
+            guard->checkBalanceChanged(balances);
+            if (update_confirmations && guard->transactionTableModel) guard->transactionTableModel->updateConfirmations();
+        }, Qt::QueuedConnection);
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
 }
 
 void WalletModel::checkBalanceChanged(const interfaces::WalletBalances& new_balances)
 {
-    if (new_balances.balanceChanged(m_cached_balances)) {
+    ++m_balance_revision;
+    const bool ownership_changed = new_balances.balanceChanged(m_cached_balances);
+    const bool availability_changed = new_balances.spendable != m_cached_balances.spendable ||
+        new_balances.watch_only != m_cached_balances.watch_only;
+    if (ownership_changed || availability_changed) {
         m_cached_balances = new_balances;
-        Q_EMIT balanceChanged(new_balances);
+        if (ownership_changed) Q_EMIT balanceChanged(new_balances);
+        Q_EMIT dgbBalanceChanged(new_balances);
     }
+}
+
+QString WalletModel::getDGBBalanceSummary(bool include_available) const
+{
+    const bool watch = m_wallet->isLegacy() && m_wallet->privateKeysDisabled();
+    const auto& balances = m_cached_balances;
+    const auto& part = watch ? balances.watch_only : balances.spendable;
+    const auto format = [this](CAmount amount) {
+        return DigiByteUnits::formatWithUnit(optionsModel->getDisplayUnit(), amount);
+    };
+    QStringList lines;
+    if (include_available) lines << tr("Available: %1").arg(part.valid ? format(part.available) : tr("Unavailable"));
+    if (!part.valid) {
+        lines << tr("Availability is unknown. Reserved funds remain protected.");
+    } else {
+        if (part.paymaster_reserved) lines << tr("Reserved for Paymaster: %1").arg(format(part.paymaster_reserved));
+        if (part.other_unavailable) lines << tr("Other unavailable: %1").arg(format(part.other_unavailable));
+    }
+    const CAmount pending = watch ? balances.unconfirmed_watch_only_balance : balances.unconfirmed_balance;
+    const CAmount immature = watch ? balances.immature_watch_only_balance : balances.immature_balance;
+    if (pending) lines << tr("Pending: %1").arg(format(pending));
+    if (immature) lines << tr("Immature: %1").arg(format(immature));
+    lines << tr("Wallet total: %1").arg(format((watch ? balances.watch_only_balance : balances.balance) + pending + immature));
+    return lines.join(QLatin1Char('\n'));
 }
 
 interfaces::WalletBalances WalletModel::getCachedBalance() const
@@ -724,9 +770,8 @@ uint256 WalletModel::getLastBlockProcessed() const
 
 CAmount WalletModel::getAvailableBalance(const CCoinControl* control)
 {
-    // The cached ownership balance also counts locked coins and Paymaster
-    // reserves. Query eligible inputs only on demand (Max/Send), not while
-    // refreshing the ordinary balance display.
+    // Max/Send must use current eligibility even if reservations changed since
+    // the last background display snapshot.
     CCoinControl default_control;
     default_control.fAllowWatchOnly = m_wallet->privateKeysDisabled();
     return wallet().getAvailableBalance(control ? *control : default_control);

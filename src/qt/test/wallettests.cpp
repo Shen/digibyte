@@ -12,6 +12,7 @@
 #include <qt/digibyteamountfield.h>
 #include <qt/digibyteunits.h>
 #include <qt/clientmodel.h>
+#include <qt/coincontroldialog.h>
 #include <qt/optionsmodel.h>
 #include <qt/overviewpage.h>
 #include <qt/platformstyle.h>
@@ -29,6 +30,8 @@
 #include <validation.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
+#include <paymaster/provider.h>
 
 #include <chrono>
 #include <memory>
@@ -287,6 +290,7 @@ public:
         RemoveWallet(context, wallet, /* load_on_start= */ std::nullopt);
         sendCoinsDialog.setModel(walletModel.get());
         transactionView.setModel(walletModel.get());
+        walletModel->startPollBalance();
     }
 
 };
@@ -316,6 +320,7 @@ void TestGUI(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wal
 
     // Update walletModel cached balance which will trigger an update for the 'labelBalance' QLabel.
     walletModel.pollBalanceChanged();
+    QTRY_VERIFY(walletModel.getCachedBalance().spendable.valid);
     // Check balance in send dialog
     CompareBalance(walletModel, walletModel.wallet().getBalance(), sendCoinsDialog.findChild<QLabel*>("labelBalance"));
 
@@ -354,6 +359,7 @@ void TestGUI(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wal
     OverviewPage overviewPage(platformStyle.get());
     overviewPage.setWalletModel(&walletModel);
     walletModel.pollBalanceChanged(); // Manual balance polling update
+    QTRY_COMPARE(walletModel.getCachedBalance().balance, walletModel.wallet().getBalance());
     CompareBalance(walletModel, walletModel.wallet().getBalance(), overviewPage.findChild<QLabel*>("labelBalance"));
 
     // Check Request Payment button
@@ -452,9 +458,23 @@ void TestGUIWatchOnly(interfaces::Node& node, TestChain100Setup& test)
 
     // Update walletModel cached balance which will trigger an update for the 'labelBalance' QLabel.
     walletModel.pollBalanceChanged();
+    QTRY_VERIFY(walletModel.getCachedBalance().watch_only.valid);
     // Check balance in send dialog
     CompareBalance(walletModel, walletModel.wallet().getBalances().watch_only_balance,
                    sendCoinsDialog.findChild<QLabel*>("labelBalance"));
+
+    const auto watch_coins = walletModel.wallet().listCoins();
+    QVERIFY(!watch_coins.empty() && !watch_coins.begin()->second.empty());
+    const auto& [watch_outpoint, watch_output] = watch_coins.begin()->second.front();
+    const CAmount watch_owned = walletModel.getCachedBalance().watch_only_balance;
+    QVERIFY(walletModel.wallet().lockCoin(watch_outpoint, false));
+    walletModel.updateTransaction();
+    QTRY_COMPARE(walletModel.getCachedBalance().watch_only.available, watch_owned - watch_output.txout.nValue);
+    QCOMPARE(walletModel.getCachedBalance().watch_only.other_unavailable, watch_output.txout.nValue);
+    CompareBalance(walletModel, watch_owned - watch_output.txout.nValue, sendCoinsDialog.findChild<QLabel*>("labelBalance"));
+    QVERIFY(walletModel.wallet().unlockCoin(watch_outpoint));
+    walletModel.updateTransaction();
+    QTRY_COMPARE(walletModel.getCachedBalance().watch_only.available, watch_owned);
 
     // Set change address
     sendCoinsDialog.getCoinControl()->destChange = GetDestinationForKey(test.coinbaseKey.GetPubKey(), OutputType::LEGACY);
@@ -525,6 +545,151 @@ void WalletTests::walletTests()
     }
 #endif
     TestGUI(m_node);
+}
+
+void WalletTests::dgbBalanceBreakdown()
+{
+    using namespace DigiDollar::Paymaster;
+    TestChain100Setup test;
+    for (int i = 0; i < 5; ++i) test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test);
+    std::unique_ptr<const PlatformStyle> style(PlatformStyle::instantiate("other"));
+    MiniGUI gui(m_node, style.get());
+    gui.initModelForWallet(m_node, wallet, style.get());
+    auto& model = *gui.walletModel;
+    OverviewPage overview(style.get());
+    overview.setClientModel(gui.clientModel.get());
+    overview.setWalletModel(&model);
+    wallet::CCoinControl control;
+    CoinControlDialog coins(control, &model, style.get());
+
+    // Synthetic, owned taproot outputs in a wallet fixture. No transaction is
+    // funded, signed or broadcast by these display checks.
+    CMutableTransaction funding;
+    ProviderPoolEntry entry;
+    {
+        LOCK(wallet->cs_wallet);
+        const auto address = wallet->GetNewDestination(OutputType::BECH32M, "balance test");
+        QVERIFY(address);
+        funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
+        funding.vout.emplace_back(COIN, GetScriptForDestination(*address));
+        funding.vout.emplace_back(2 * COIN, GetScriptForDestination(*address));
+        QVERIFY(wallet->AddToWallet(MakeTransactionRef(funding),
+            wallet::TxStateConfirmed{wallet->GetLastBlockHash(), wallet->GetLastBlockHeight(), 0}));
+        entry.outpoint = COutPoint{funding.GetHash(), 0};
+        entry.script_pub_key = funding.vout[0].scriptPubKey;
+        entry.dgb_value = DGBSatoshis{COIN};
+        entry.updated_at = 1;
+    }
+    const auto owned = model.wallet().getBalances();
+    QVERIFY(owned.spendable.valid);
+    QCOMPARE(owned.spendable.available, model.getAvailableBalance(nullptr));
+    QVERIFY(owned.immature_balance > 0);
+    model.updateTransaction();
+    QTRY_COMPARE(model.getCachedBalance().balance, owned.balance);
+    QSignalSpy ownership_changes(&model, &WalletModel::balanceChanged);
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({entry}));
+    QVERIFY(model.wallet().lockCoin(entry.outpoint, false)); // pool + ordinary lock must count only once
+    const COutPoint locked{funding.GetHash(), 1};
+    QVERIFY(model.wallet().lockCoin(locked, false));
+    model.updateTransaction();
+    model.pollBalanceChanged();
+    QTRY_COMPARE(model.getCachedBalance().spendable.paymaster_reserved, COIN);
+    auto balances = model.getCachedBalance();
+    QCOMPARE(balances.balance, owned.balance);
+    QCOMPARE(balances.spendable.other_unavailable, 2 * COIN);
+    QCOMPARE(balances.spendable.available, owned.balance - 3 * COIN);
+    QCOMPARE(balances.immature_balance, owned.immature_balance);
+    CompareBalance(model, balances.spendable.available, overview.findChild<QLabel*>("labelBalance"));
+    CompareBalance(model, COIN, overview.findChild<QLabel*>("labelPaymasterReserved"));
+    CompareBalance(model, 2 * COIN, overview.findChild<QLabel*>("labelOtherUnavailable"));
+    CompareBalance(model, owned.balance + owned.immature_balance, overview.findChild<QLabel*>("labelTotal"));
+    CompareBalance(model, balances.spendable.available, gui.sendCoinsDialog.findChild<QLabel*>("labelBalance"));
+    QVERIFY(coins.findChild<QLabel*>("labelWalletBalances")->text().contains("Reserved for Paymaster:"));
+    QVERIFY(gui.sendCoinsDialog.findChild<QLabel*>("labelBalanceDetails")->text().contains("Other unavailable:"));
+    QVERIFY(ownership_changes.isEmpty()); // Reserve-only changes must not request DD history.
+    overview.setPrivacy(true);
+    QVERIFY(!overview.findChild<QLabel*>("labelPaymasterReserved")->text().contains("1.00000000"));
+    overview.setPrivacy(false);
+    CompareBalance(model, COIN, overview.findChild<QLabel*>("labelPaymasterReserved"));
+
+    // Every protected pool state remains reserved; terminal states do not.
+    // Manual overlap remains present, so the combined unavailable total stays fixed.
+    for (const auto state : {PoolEntryState::AVAILABLE, PoolEntryState::RESERVED,
+                            PoolEntryState::COMMITTED, PoolEntryState::INVALIDATED,
+                            PoolEntryState::SPENT, PoolEntryState::RELEASED}) {
+        auto variant = entry;
+        variant.state = state;
+        if (state == PoolEntryState::RESERVED || state == PoolEntryState::COMMITTED) variant.reservation_id = uint256::ONE;
+        QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({variant}));
+        const auto snapshot = model.wallet().getBalances();
+        const bool active = state == PoolEntryState::AVAILABLE || state == PoolEntryState::RESERVED || state == PoolEntryState::COMMITTED;
+        QCOMPARE(snapshot.spendable.paymaster_reserved, active ? COIN : CAmount{0});
+        QCOMPARE(snapshot.spendable.other_unavailable, active ? 2 * COIN : 3 * COIN);
+        QCOMPARE(snapshot.balance, owned.balance);
+    }
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({entry}));
+
+    // A release without a block/transaction notification is picked up by the
+    // bounded periodic refresh. The still-manual lock moves it to Other unavailable.
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+    QTimer refresh;
+    connect(&refresh, &QTimer::timeout, &model, &WalletModel::pollBalanceChanged);
+    refresh.start(50);
+    QTRY_COMPARE_WITH_TIMEOUT(model.getCachedBalance().spendable.paymaster_reserved, CAmount{0}, 7000);
+    QCOMPARE(model.getCachedBalance().spendable.other_unavailable, 3 * COIN);
+
+    // A busy wallet does not block Qt or temporarily report zero funds.
+    {
+        LOCK(wallet->cs_wallet);
+        model.updateTransaction();
+        model.pollBalanceChanged();
+        bool event_processed{false};
+        QTimer::singleShot(0, [&] { event_processed = true; });
+        QTest::qWait(100);
+        QVERIFY(event_processed);
+        QCOMPARE(model.getCachedBalance().balance, owned.balance);
+    }
+    QVERIFY(model.wallet().unlockCoin(entry.outpoint));
+    QVERIFY(model.wallet().unlockCoin(locked));
+    model.updateTransaction();
+    QTRY_COMPARE(model.getCachedBalance().spendable.available, owned.balance);
+    QVERIFY(ownership_changes.isEmpty());
+
+    // A pool output that is pending is counted in Pending, never also Reserved.
+    CMutableTransaction pending{funding};
+    pending.vin[0].prevout.n = 1;
+    pending.vout.resize(1);
+    {
+        LOCK(wallet->cs_wallet);
+        QVERIFY(wallet->AddToWallet(MakeTransactionRef(pending), wallet::TxStateInMempool{}));
+    }
+    auto pending_entry = entry;
+    pending_entry.outpoint = COutPoint{pending.GetHash(), 0};
+    pending_entry.state = PoolEntryState::PENDING_SUCCESSOR;
+    pending_entry.reservation_id = pending_entry.origin_commit_key = uint256::ONE;
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({pending_entry}));
+    balances = model.wallet().getBalances();
+    QCOMPARE(balances.unconfirmed_balance, COIN);
+    QCOMPARE(balances.spendable.paymaster_reserved, CAmount{0});
+    QCOMPARE(balances.balance, owned.balance);
+
+    // Corrupt safety data keeps ownership readable, but availability is unknown
+    // on all three surfaces. It must not be displayed as an empty/free pool.
+    QVERIFY(wallet->GetDatabase().MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, std::string{"corrupt"}));
+    model.updateTransaction();
+    QTRY_VERIFY(!model.getCachedBalance().spendable.valid);
+    QCOMPARE(model.getCachedBalance().balance, owned.balance);
+    QCOMPARE(overview.findChild<QLabel*>("labelBalance")->text(), QStringLiteral("Unavailable"));
+    QCOMPARE(gui.sendCoinsDialog.findChild<QLabel*>("labelBalance")->text(), QStringLiteral("Unavailable"));
+    QVERIFY(coins.findChild<QLabel*>("labelWalletBalances")->text().contains("Availability is unknown"));
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+    model.updateTransaction();
+    QTRY_VERIFY(model.getCachedBalance().spendable.valid);
+    refresh.stop();
 }
 
 void WalletTests::sendValidationExplainsInvalidFields()

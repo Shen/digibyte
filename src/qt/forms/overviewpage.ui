@@ -114,7 +114,7 @@
             <property name="spacing">
              <number>12</number>
             </property>
-            <item row="2" column="2">
+            <item row="4" column="2">
              <widget class="QLabel" name="labelWatchPending">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
@@ -133,7 +133,7 @@
               </property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="4" column="1">
              <widget class="QLabel" name="labelUnconfirmed">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
@@ -152,7 +152,7 @@
               </property>
              </widget>
             </item>
-            <item row="3" column="2">
+            <item row="5" column="2">
              <widget class="QLabel" name="labelWatchImmature">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
@@ -171,14 +171,14 @@
               </property>
              </widget>
             </item>
-            <item row="4" column="0" colspan="2">
+            <item row="6" column="0" colspan="2">
              <widget class="Line" name="line">
               <property name="orientation">
                <enum>Qt::Horizontal</enum>
               </property>
              </widget>
             </item>
-            <item row="4" column="2">
+            <item row="6" column="2">
              <widget class="Line" name="lineWatchBalance">
               <property name="sizePolicy">
                <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
@@ -197,14 +197,14 @@
               </property>
              </widget>
             </item>
-            <item row="5" column="0">
+            <item row="7" column="0">
              <widget class="QLabel" name="labelTotalText">
               <property name="text">
                <string>Total:</string>
               </property>
              </widget>
             </item>
-            <item row="3" column="1">
+            <item row="5" column="1">
              <widget class="QLabel" name="labelImmature">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
@@ -223,7 +223,7 @@
               </property>
              </widget>
             </item>
-            <item row="2" column="3">
+            <item row="4" column="3">
              <spacer name="horizontalSpacer_2">
               <property name="orientation">
                <enum>Qt::Horizontal</enum>
@@ -236,20 +236,20 @@
               </property>
              </spacer>
             </item>
-            <item row="3" column="0">
+            <item row="5" column="0">
              <widget class="QLabel" name="labelImmatureText">
               <property name="text">
                <string>Immature:</string>
               </property>
              </widget>
             </item>
-            <item row="5" column="1">
+            <item row="7" column="1">
              <widget class="QLabel" name="labelTotal">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
               </property>
               <property name="toolTip">
-               <string>Your current total balance</string>
+               <string>Ordinary DGB ownership: available, Paymaster reserves, other unavailable, pending and immature funds. DigiDollar collateral is accounted for separately on the DigiDollar page.</string>
               </property>
               <property name="text">
                <string notr="true">21 000 000 000.00000000 DGB</string>
@@ -262,7 +262,7 @@
               </property>
              </widget>
             </item>
-            <item row="5" column="2">
+            <item row="7" column="2">
              <widget class="QLabel" name="labelWatchTotal">
               <property name="cursor">
                <cursorShape>IBeamCursor</cursorShape>
@@ -304,7 +304,7 @@
                <cursorShape>IBeamCursor</cursorShape>
               </property>
               <property name="toolTip">
-               <string>Your current spendable balance</string>
+               <string>DGB available for automatic coin selection before the transaction fee. Paymaster reserves and other unavailable coins are excluded.</string>
               </property>
               <property name="text">
                <string notr="true">21 000 000 000.00000000 DGB</string>
@@ -336,7 +336,7 @@
               </property>
              </widget>
             </item>
-            <item row="2" column="0">
+            <item row="4" column="0">
              <widget class="QLabel" name="labelPendingText">
               <property name="text">
                <string>Pending:</string>
@@ -351,6 +351,48 @@
               <property name="alignment">
                <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
               </property>
+             </widget>
+            </item>
+                       <item row="2" column="0">
+             <widget class="QLabel" name="labelPaymasterReservedText">
+              <property name="toolTip"><string>DGB dedicated to the Paymaster provider pool, including ready reserves. These coins are unavailable for ordinary payments.</string></property>
+              <property name="text"><string>Reserved for Paymaster:</string></property>
+              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+             </widget>
+            </item>
+            <item row="2" column="1">
+             <widget class="QLabel" name="labelPaymasterReserved">
+              <property name="toolTip"><string>DGB dedicated to the Paymaster provider pool, including ready reserves. These coins are unavailable for ordinary payments.</string></property>
+              <property name="text"><string notr="true">0.00000000 DGB</string></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+             </widget>
+            </item>
+            <item row="2" column="2">
+             <widget class="QLabel" name="labelWatchPaymasterReserved">
+              <property name="toolTip"><string>DGB dedicated to the Paymaster provider pool, including ready reserves. These coins are unavailable for ordinary payments.</string></property>
+              <property name="text"><string notr="true">0.00000000 DGB</string></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+             </widget>
+            </item>
+            <item row="3" column="0">
+             <widget class="QLabel" name="labelOtherUnavailableText">
+              <property name="toolTip"><string>Other trusted DGB excluded from automatic coin selection, including manually locked coins. Pending and immature funds are shown separately.</string></property>
+              <property name="text"><string>Other unavailable:</string></property>
+              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+             </widget>
+            </item>
+            <item row="3" column="1">
+             <widget class="QLabel" name="labelOtherUnavailable">
+              <property name="toolTip"><string>Other trusted DGB excluded from automatic coin selection, including manually locked coins. Pending and immature funds are shown separately.</string></property>
+              <property name="text"><string notr="true">0.00000000 DGB</string></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
+             </widget>
+            </item>
+            <item row="3" column="2">
+             <widget class="QLabel" name="labelWatchOtherUnavailable">
+              <property name="toolTip"><string>Other trusted DGB excluded from automatic coin selection, including manually locked coins. Pending and immature funds are shown separately.</string></property>
+              <property name="text"><string notr="true">0.00000000 DGB</string></property>
+              <property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
              </widget>
             </item>
            </layout>

@@ -21,6 +21,7 @@ class WalletTests : public QObject
 
 private Q_SLOTS:
     void walletTests();
+    void dgbBalanceBreakdown();
     void sendValidationExplainsInvalidFields();
 };
 

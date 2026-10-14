@@ -371,7 +371,23 @@ struct WalletAddress
     }
 };
 
-//! Collection of wallet balances.
+//! Partition of the trusted ownership balance for ordinary DGB sending.
+//! Pending and immature coins remain in their existing, separate categories.
+struct WalletBalanceAvailability
+{
+    CAmount available{0};
+    CAmount paymaster_reserved{0};
+    CAmount other_unavailable{0};
+    bool valid{false};
+
+    bool operator!=(const WalletBalanceAvailability& other) const
+    {
+        return available != other.available || paymaster_reserved != other.paymaster_reserved ||
+               other_unavailable != other.other_unavailable || valid != other.valid;
+    }
+};
+
+//! Collection of wallet balances. Ownership totals retain their original meaning.
 struct WalletBalances
 {
     CAmount balance = 0;
@@ -381,13 +397,16 @@ struct WalletBalances
     CAmount watch_only_balance = 0;
     CAmount unconfirmed_watch_only_balance = 0;
     CAmount immature_watch_only_balance = 0;
+    WalletBalanceAvailability spendable;
+    WalletBalanceAvailability watch_only;
 
     bool balanceChanged(const WalletBalances& prev) const
     {
         return balance != prev.balance || unconfirmed_balance != prev.unconfirmed_balance ||
                immature_balance != prev.immature_balance || watch_only_balance != prev.watch_only_balance ||
                unconfirmed_watch_only_balance != prev.unconfirmed_watch_only_balance ||
-               immature_watch_only_balance != prev.immature_watch_only_balance;
+               immature_watch_only_balance != prev.immature_watch_only_balance ||
+               have_watch_only != prev.have_watch_only;
     }
 };
 
