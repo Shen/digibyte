@@ -4,6 +4,23 @@ Current UI candidate: integration/paymaster-v9.26.7, 2026-10-12.
 The task-oriented redesign has separate verification; earlier results do not
 validate this revision. This is not a release approval.
 
+## Sending ordinary DGB from the provider wallet
+
+The normal DGB balance includes coins held in Paymaster admission and payment
+reserves. Those coins remain wallet-owned but cannot fund an ordinary send
+while reserved. **Use available balance** now fills only the amount eligible
+for ordinary funding and enables **Subtract fee from amount**. The recipient
+therefore receives that available amount less the actual network fee. The
+normal balance display continues to show the ownership total.
+
+For example, a 10-DGB balance containing 0.90 DGB of provider reserves leaves
+9.10 DGB before the outgoing transaction fee. Earlier builds could fill the
+full 10 DGB and then fail with `Insufficient funds`, even with fee deduction.
+Use the corrected GUI or choose a smaller amount covered by the free coins.
+To withdraw provider capital itself, use the existing guarded reserve-release
+flow under **Funds & reserves** first; an ordinary send does not release it.
+Pausing the provider alone preserves its prepared reserves.
+
 ## Provider history and delayed transfers
 
 An already signed provider transaction can be recovered after its expenditure

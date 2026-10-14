@@ -1,5 +1,15 @@
 # Paymaster integration release notes
 
+## Respect reserved DGB in the send maximum (2026-10-14)
+
+Qt **Use available balance** and the ordinary DGB send precheck now query the
+existing wallet funding balance, excluding Paymaster reserves and ordinary
+coin locks. Previously they used the cached ownership total when no inputs
+were selected, so a maximum-value send could fail even with fee deduction.
+The total-balance display, coin-control selection semantics, reserve protection
+and signing checks remain unchanged. This is a GUI integration correction;
+it does not release reserves or change wallet/consensus funding rules.
+
 ## Renew provider offers without new blocks (2026-10-13)
 
 Automatic providers now renew public announcements before expiry even when the

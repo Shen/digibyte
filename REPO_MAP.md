@@ -1464,7 +1464,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 - `digibyteunits.cpp` → DGB unit conversion (DGB, mDGB, µDGB, sat)
 - `digibyteaddressvalidator.cpp` → validates DigiByte addresses in input fields
 - `digibytestrings.cpp` → translation strings registered with Qt's translation system
-- `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks
+- `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks. DGB Max/Send queries the existing eligible-input balance, including Paymaster reserves and ordinary locks, instead of the cached ownership total; covered by `qt/test/wallettests.cpp`.
 - `clientmodel.cpp` → bridges node state (peers, blocks, sync progress) to Qt model
 - `sendcoinsdialog.cpp` → send coins dialog with address, amount, fee controls
 - `receivecoinsdialog.cpp` → generate receive addresses with QR codes

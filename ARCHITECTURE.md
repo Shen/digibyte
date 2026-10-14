@@ -8,6 +8,11 @@
 
 ## Paymaster architecture in this branch
 
+Qt DGB Max/Send queries the existing wallet eligible-input balance on demand,
+including provider-pool and ordinary coin-lock exclusions. The cached ownership
+balance remains the total-balance display; it is not a spend-all estimate.
+This GUI integration changes no wallet selection, reservation or signing rule.
+
 Automatic providers renew their signed public announcement by wall clock when
 at most two ordinary quote lifetimes remain, including while the chain tip is
 unchanged. Renewal holds the provider work guard and repeats full readiness,

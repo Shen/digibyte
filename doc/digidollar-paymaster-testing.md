@@ -1,5 +1,51 @@
 # Paymaster build and test runbook
 
+## Ordinary DGB maximum excludes provider reserves (2026-10-14)
+
+Read-only operator diagnosis found an exact 0.90-DGB difference between the
+wallet ownership balance and safe, spendable ordinary outputs: 0.30 DGB of
+admission reserves and 0.60 DGB of operational reserves. The provider pool was
+ready with three slots and no readiness errors. `WalletModel::getAvailableBalance`
+used the cached ownership total without selected inputs, while Core funding
+correctly excluded the pool. This explains an `Insufficient funds` failure even
+with fee deduction; the normal node logs contained no matching GUI error line.
+
+The model now queries the existing eligible-input balance for Max/Send only.
+Periodic balance display, funding rules, pool protection and signing are unchanged.
+`WalletTests::walletTests` extends the existing maximum-balance checks to cover
+a newly locked input without a balance-cache refresh, unlock, all inputs locked,
+fee deduction and explicit coin selection. Existing ordinary sends and watch-only
+PSBT checks remain in the same test.
+
+Focused Windows verification of code commit `7f9d5f8cf8` used two locally recompiled translation units
+(`walletmodel.cpp`, `wallettests.cpp`) and existing Release libraries:
+
+- Original model plus the new regression: **failed at the expected maximum-value
+  comparison**, exit 1.
+- Corrected model plus the same regression: **passed**, exit 0, no skipped tests.
+  Each run took about eight seconds. Qt's three reported passes include setup
+  and cleanup; this is one selected test function, not the full Qt suite.
+- Source/diff checks passed. Live wallets were only queried; no operator coins
+  were locked, released, signed or sent by the diagnosis/test. Installed binaries
+  were not replaced.
+
+Local source and binary hashes and reports are in
+`build_msvc/paymaster-refresh-check/dgb-max-balance/receipt.json`,
+`baseline-wallet.txt` and `fixed-wallet.txt`. A full rebuild and full Qt suite
+remain operator acceptance work. Close the Regtest GUIs and any active build,
+then run from `D:\Digibyte\digibyte-fork` with the existing configured MSVC/Qt
+toolchain (minutes to tens of minutes):
+
+```powershell
+.\build_msvc\paymaster-refresh-check\dd-refresh-latency\build-and-check.ps1 -Build -FullQtTests
+```
+
+Require exit 0 and no failed/skipped selected tests. After restarting the rebuilt
+GUI, **Use available balance** must leave provider reserves out and select fee
+deduction; the total-balance label still includes wallet-owned reserves. Inspect
+the filled amount and exact confirmation without approving a test transfer from
+an operator wallet. The isolated tests already use disposable wallets.
+
 ## Quote expiry without mining (2026-10-13)
 
 A preparation started shortly before its cached announcement expired. The
