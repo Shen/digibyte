@@ -61,7 +61,8 @@ recovery can race the original transaction and needs chain confirmation.
 The full refill target is not a readiness gate when confirmed free capacity
 exists. Available funds outside reserves may still be too small to fund another
 whole slot plus fee. Unknown statistics/readiness must be shown as unknown,
-not zero funds or completed synchronization. Regtest needs explicit mining.
+not zero funds or completed synchronization. Confirmation depends on validated
+network blocks; local test mining is covered in the test-network supplement.
 
 See [operator guide](../digidollar-paymaster-operator.md),
 [client contract](../digidollar-paymaster-integration.md),
@@ -76,3 +77,9 @@ provider, application-developer and Core-review workflows. The
 states. Operator setup/restart examples, client response handling and the
 Windows build recipe supplement the concise references; they do not change
 runtime behavior or renew historical test evidence.
+
+Operational guides now use Mainnet as their primary context, with public-provider
+and client configurations, explicit network selection, dedicated Direct versus
+local RPC endpoints, and startup checks. [Testnet26 and Regtest](../digidollar-paymaster-test-networks.md)
+are separate supplementary instructions. This changes documentation, not
+network defaults, validation rules or release acceptance.

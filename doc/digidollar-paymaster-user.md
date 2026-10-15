@@ -5,6 +5,12 @@ operate a provider or create a provider identity. Provider setup belongs in the
 [operator guide](digidollar-paymaster-operator.md); application/RPC use belongs
 in the [client contract](digidollar-paymaster-integration.md).
 
+The steps below assume Mainnet and real DGB/DD. Use the Mainnet wallet and a
+recipient address for that network; Mainnet DD addresses start with `DD`.
+For practice, use separate test funds and the
+[Testnet/Regtest guide](digidollar-paymaster-test-networks.md). Test wallets and
+providers do not supply funds or offers to Mainnet.
+
 A DD payment needs a DGB network fee. A Paymaster supplies that DGB and may
 charge an additional DD service fee. A sponsored offer charges no DD service
 fee; the provider still pays the network fee. You still need spendable DD for
@@ -24,8 +30,8 @@ remain necessary in every mode.
 
 ## Make a payment
 
-1. Select the sending wallet and open **DigiDollar > Send DD**. Wait until the
-   wallet balance is known. Enter the DD recipient and amount; check the address
+1. Confirm the Mainnet network and sending wallet, then open
+   **DigiDollar > Send DD**. Wait until the wallet balance is known. Enter the DD recipient and amount; check the address
    carefully. This flow supports one recipient.
 2. Choose the network-fee mode above. For Paymaster, review **service-fee limits**:
    the per-payment DD limit, rolling-day DD limit and maximum effective percentage.
@@ -101,9 +107,12 @@ simple undo: the original and a recovery transaction may compete for confirmatio
 
 First check the current transfer rather than creating another one. Wallet
 history/index checks, provider availability and block confirmation are separate
-waits. On regtest, a test operator must mine blocks; normal waiting cannot create
-a confirmation without blocks. An uncreated preparation step is not fixed by
-mining alone.
+waits. On Mainnet, miners include transactions in blocks and your node must
+receive and validate those blocks. Check synchronization and the retained
+transaction's state; a quoted offer's expiry is not a payment-confirmation
+deadline. An uncreated preparation step is not fixed by waiting for blocks alone.
+The [test-network supplement](digidollar-paymaster-test-networks.md) explains
+public Testnet and explicit Regtest mining separately.
 
 For diagnosis, record the build/version, network, approximate time, visible
 phase and whether you approved the exact offer. Include the request/session or

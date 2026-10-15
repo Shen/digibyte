@@ -5,6 +5,12 @@ This is a reproducible verification index, not a running work log. The
 from checks still required for a candidate. Full pre-consolidation command/log
 history is available with `git show e7c2c8c4bd:doc/digidollar-paymaster-testing.md`.
 
+Operational documentation primarily targets Mainnet. Run the tests here in
+isolated test environments, not with a Mainnet wallet. The
+[Testnet/Regtest supplement](digidollar-paymaster-test-networks.md) provides
+manual test configurations; a test pass does not establish public Mainnet
+reachability or replace the candidate's release gates.
+
 ## Preparation and result recording
 
 Read repository instructions, [test guidance](../test/README.md),

@@ -4,6 +4,15 @@ Integration version is 1. Use authenticated local wallet RPC and inspect
 `getpaymasterclientinfo` from the selected build. There is one DD recipient;
 this document does not establish an HTTP adapter or batch-payment contract.
 
+Examples target Mainnet. Before preparing an order, verify `network` is `main`
+and `genesis_hash` from `getpaymasterclientinfo` matches the intended chain.
+Use the selected wallet endpoint and Mainnet DD recipient address. Keep backend
+credentials, wallets and persisted orders separated by network; a test request
+must not be replayed against a Mainnet wallet. For integration tests, explicitly
+select [Testnet or Regtest](digidollar-paymaster-test-networks.md) and validate
+that network instead. JSON examples below authorize real Mainnet spending when
+completed through the acceptance step; they are not automatic test fixtures.
+
 ## Entry point and units
 
 ```text

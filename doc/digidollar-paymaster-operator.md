@@ -1,17 +1,23 @@
 # Paymaster operator guide
 
-Read [node prerequisites](digidollar-paymaster.md) first. GUI and interactive CLI
-use shared setup decisions and persisted Core policy. Automatic provider work
-runs in the daemon; neither a GUI nor CLI watch must remain open.
+This guide targets Mainnet operators. Read the
+[Mainnet node configuration](digidollar-paymaster.md#mainnet-provider-configuration)
+first. GUI and interactive CLI use shared setup decisions and persisted Core
+policy. Automatic provider work runs in the daemon; neither a GUI nor CLI watch
+must remain open.
 
 ## First provider setup
 
-Before setup, establish the selected network, node data directory and provider
-wallet. The same wallet name on another node is not the same provider. Use a
-fresh identity for each independent provider; do not clone a running wallet.
-The [local regtest example](digidollar-paymaster.md#local-regtest-example) supplies
-connection settings for a test environment. Public deployment needs a reachable
-advertised endpoint and an appropriately secured local RPC service.
+Before setup, confirm Mainnet (`getblockchaininfo.chain` is `main`), the node
+data directory and provider wallet. The same wallet name on another node is
+not the same provider. Use a fresh identity for each independent provider;
+do not clone a running wallet.
+The node needs a reachable advertised Direct endpoint and local authenticated
+RPC for administration. Verify the listener externally as described in
+[Mainnet startup checks](digidollar-paymaster.md#start-and-verify-mainnet-operation).
+Rehearsals use the separate [Testnet/Regtest guide](digidollar-paymaster-test-networks.md);
+select that test network and its wallet consistently instead of using the
+Mainnet commands below.
 
 Have confirmed DGB for reserve principal **and transaction fees**, and DD for
 carrier reserves when offering user-paid service that needs them. Funding the
@@ -21,7 +27,8 @@ Do not move collateral or another session's reserved funds to make it pass.
 
 ### GUI sequence
 
-1. Load/select the provider wallet, open **DigiDollar > Paymaster Network** and
+1. Start the Mainnet GUI with its intended data directory, load/select the
+   provider wallet, open **DigiDollar > Paymaster Network** and
    wait for current wallet/history/index readiness. A loading status does not
    create a second setup requirement.
 2. Configure the node connection if needed. Review the bind address and advertised
@@ -47,33 +54,34 @@ before assuming the running offer changed.
 
 ### CLI sequence
 
-The following assumes `digibyte-cli` is on PATH and the intended node uses the
-default data directory/network. For another node, add the same `-datadir`,
-network selector and custom `-rpcport` to **every** command. A GUI node must run
+The following assumes `digibyte-cli` is on PATH and the intended Mainnet node
+uses the default data directory. If using a custom directory or port, add the
+same `-datadir` and custom `-rpcport` to **every** command. A GUI node must run
 with `server=1` for external CLI access. On Windows, use `&` and the explicit
-`.exe` path when it is not on PATH; see the regtest example.
+`.exe` path when it is not on PATH; see the
+[Mainnet PowerShell examples](digidollar-paymaster.md#start-and-verify-mainnet-operation).
 
 First inspect connectivity and wallet selection (read-only):
 
 ```sh
-digibyte-cli getblockchaininfo
-digibyte-cli listwallets
-digibyte-cli -rpcwallet=provider getwalletinfo
+digibyte-cli -chain=main getblockchaininfo
+digibyte-cli -chain=main listwallets
+digibyte-cli -chain=main -rpcwallet=provider getwalletinfo
 ```
 
 `provider` is a wallet-name placeholder. If this is a new setup with no wallet,
 the terminal assistant can select or create an encrypted descriptor wallet:
 
 ```sh
-digibyte-cli -paymastersetup
+digibyte-cli -chain=main -paymastersetup
 ```
 
 For an existing known wallet, select it explicitly:
 
 ```sh
-digibyte-cli -rpcwallet=provider -paymastersetup
-digibyte-cli -rpcwallet=provider -paymasterstatus
-digibyte-cli -rpcwallet=provider -paymasterstatus -watch
+digibyte-cli -chain=main -rpcwallet=provider -paymastersetup
+digibyte-cli -chain=main -rpcwallet=provider -paymasterstatus
+digibyte-cli -chain=main -rpcwallet=provider -paymasterstatus -watch
 ```
 
 These are alternative entry points, not a sequence that must stay running.
@@ -95,10 +103,10 @@ wizard values are suggestions, not network constants or future fee estimates.
 Use these status views with the same node/wallet arguments as setup:
 
 ```sh
-digibyte-cli -rpcwallet=provider getpaymasteroperatorinfo
-digibyte-cli -rpcwallet=provider getpaymasterliquiditystatus
-digibyte-cli -rpcwallet=provider getpaymastersafetystatus
-digibyte-cli -rpcwallet=provider getpaymasterfinancestatus
+digibyte-cli -chain=main -rpcwallet=provider getpaymasteroperatorinfo
+digibyte-cli -chain=main -rpcwallet=provider getpaymasterliquiditystatus
+digibyte-cli -chain=main -rpcwallet=provider getpaymastersafetystatus
+digibyte-cli -chain=main -rpcwallet=provider getpaymasterfinancestatus
 ```
 
 `getpaymasteroperatorinfo` is a strictly read-only operations snapshot.
@@ -184,7 +192,7 @@ counters overlap stages and must not be summed into a payment count.
 | Reading provider status | Local snapshot loading; autostart may already be serving. Check Core status. |
 | Waiting for history/index | Canonical checks remain necessary; do not disable scans. |
 | Refill needs wallet funds | Inspect confirmed funds outside reserves, complete missing slots and fee allowance. Existing capacity may still work. |
-| Waiting for confirmation | Inspect retained txid, mempool and block progress. Regtest requires mining. |
+| Waiting for confirmation | Inspect retained txid, mempool, peer connectivity and validated block progress. Mainnet miners confirm transactions; offer expiry is not a confirmation deadline. |
 | Saved task without transaction | No confirmation is pending for that step; inspect prerequisites/funding. |
 | Offer exchange failed | Inspect the same client request and provider Activity/logs before retrying. |
 | Network statistics unavailable | Unknown snapshot, not zero supply or proof of lost funds; check synchronization/index diagnostics. |

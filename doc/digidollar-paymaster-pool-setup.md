@@ -1,5 +1,10 @@
 # Paymaster pool setup and recurring refill
 
+This guide assumes the [Mainnet operator setup](digidollar-paymaster-operator.md).
+Funding and refill spend real DGB/DD; example counts and fee ceilings require
+operator review. Use separate [test networks](digidollar-paymaster-test-networks.md)
+for rehearsals of the same approval and recovery workflow.
+
 Pools separate admission from operational liquidity. DGB slots fund network
 fees; DD carrier slots support nonzero service fees below the minimum DD output.
 Free sponsorship does not need a DD carrier for a service fee. Usable slots
@@ -45,8 +50,9 @@ recurring maintenance approval. New signatures require wallet unlock.
 Exact signed bytes survive response loss, rejection and restart. A known signed
 step is not recreated merely because broadcast/confirmation failed. Children
 need confirmed parents. Funding status distinguishes confirmed/unconfirmed
-funds; a shortfall estimate can include the full approved fee ceiling. Regtest
-confirmation requires explicit mining.
+funds; a shortfall estimate can include the full approved fee ceiling.
+On Mainnet, retained transactions need confirmation in network-mined blocks.
+Confirmation delays do not authorize recreating a signed funding step.
 
 ## Recurring automatic refill
 

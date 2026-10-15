@@ -6,6 +6,14 @@ not a release certification. See the [release gate](doc/digidollar-paymaster-rel
 
 ## Scope and integration rule
 
+These guides primarily describe **Mainnet operation**. Unless a section says
+otherwise, node/CLI examples select `-chain=main` and payments use real DGB/DD.
+Start with the [Mainnet node configuration](doc/digidollar-paymaster.md#mainnet-provider-configuration)
+and [operator setup](doc/digidollar-paymaster-operator.md#first-provider-setup).
+[Testnet and Regtest](doc/digidollar-paymaster-test-networks.md) are supplementary
+test environments, with separate wallets, funds, endpoints and configuration.
+This documentation target does not change the release acceptance recorded above.
+
 A Paymaster contributes DGB inputs to an ordinary DigiDollar transfer so that
 the sender can pay without suitable DGB. Each party signs its own inputs after
 checking the complete transaction. The provider sponsors the network fee or
@@ -33,8 +41,8 @@ source; translated builds may display localized labels.
 | Provider operator: first GUI or headless setup | [Operator guide](doc/digidollar-paymaster-operator.md#first-provider-setup) | [Node configuration](doc/digidollar-paymaster.md#node-prerequisites), [pool funding](doc/digidollar-paymaster-pool-setup.md) |
 | Operator: restart, pause, refill or investigate a failure | [Routine operation](doc/digidollar-paymaster-operator.md#routine-operation-and-restart) | [Diagnosis](doc/digidollar-paymaster-operator.md#diagnosis), [capital release](doc/paymaster-capital-release.md) |
 | Application developer: integrate payment RPCs | [Client contract](doc/digidollar-paymaster-integration.md) | [Result handling](doc/digidollar-paymaster-integration.md#response-handling-for-applications), same-build RPC help |
-| Core developer: change protocol, wallet or recovery | [User guide](doc/digidollar-paymaster-user.md) | Wallet payment steps, fee examples and waiting/cancellation states. |
-| [Implementation](doc/digidollar-paymaster-implementation.md) | [Change ownership](doc/digidollar-paymaster-implementation.md#change-ownership-and-verification), boundaries and threat model |
+| Core developer: change protocol, wallet or recovery | [Implementation](doc/digidollar-paymaster-implementation.md) | [Change ownership](doc/digidollar-paymaster-implementation.md#change-ownership-and-verification), boundaries and threat model |
+| Tester: rehearse on a public or local test chain | [Testnet and Regtest](doc/digidollar-paymaster-test-networks.md) | [Test runbook](doc/digidollar-paymaster-testing.md) |
 | Reviewer: establish what was actually verified | [Release gate](doc/digidollar-paymaster-release-gate.md) | [Test runbook](doc/digidollar-paymaster-testing.md), exact source/binary revision |
 | Builder: compile or diagnose a Windows build | [Build entry points](doc/digidollar-paymaster-testing.md#build-entry-points) | [MSVC prerequisites](build_msvc/README.md) |
 | AI assistant: locate the right sources and avoid unsupported assumptions | [Evidence and AI-assisted work](#evidence-and-ai-assisted-work) | The relevant task row above, then its source/test references |
@@ -43,7 +51,9 @@ source; translated builds may display localized labels.
 
 The same evidence rules apply to people and AI tools:
 
-1. Establish the checked-out commit and dirty changes. For a running node,
+1. Establish the checked-out commit, dirty changes and intended network. General
+   operational examples target Mainnet; test fixtures do not establish Mainnet
+   fees, timing, activation or availability. For a running node,
    establish the executable/build too; new source or documentation does not
    update an already running binary.
 2. Read applicable repository/path instructions, this task index and the one
@@ -85,6 +95,8 @@ commit history.
 | [Client contract](doc/digidollar-paymaster-integration.md) | Prepare, authorize, resume, cancel and interpret payment status. |
 | [Node and RPC reference](doc/digidollar-paymaster.md) | Configuration, units, prerequisites and method groups. |
 | [Operator guide](doc/digidollar-paymaster-operator.md) | GUI/CLI setup, encrypted wallets, operation and diagnosis. |
+| [User guide](doc/digidollar-paymaster-user.md) | Wallet payment steps, fee examples and waiting/cancellation states. |
+| [Testnet and Regtest](doc/digidollar-paymaster-test-networks.md) | Separate public-test and local-test configurations and confirmation behavior. |
 | [Pool setup and refill](doc/digidollar-paymaster-pool-setup.md) | Finite funding versus recurring whole-slot maintenance. |
 | [Connection capacity](doc/digidollar-paymaster-connection-capacity.md) | Dedicated transport, admission and identity binding. |
 | [Capital release](doc/paymaster-capital-release.md) | Retire protected liquidity or release an individual carrier. |
