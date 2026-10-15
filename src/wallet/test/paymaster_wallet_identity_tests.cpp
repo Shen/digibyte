@@ -1470,6 +1470,186 @@ BOOST_AUTO_TEST_CASE(maintenance_cancellation_rpc_keeps_running_provider_and_oth
     }
 }
 
+BOOST_AUTO_TEST_CASE(rebalance_saved_targets_preserve_underfilled_categories)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "rebalance-test", CreateMockableWalletDatabase()};
+    ProviderIdentityRecord identity;
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{100000};
+    policy.maximum_network_fee = DGBSatoshis{20000000};
+    ProviderLiquidityPolicy liquidity;
+    liquidity.target_admission_dgb = liquidity.target_operational_dgb = 3;
+    liquidity.target_admission_carriers = liquidity.target_operational_carriers = 3;
+    liquidity.updated_at = 102;
+    std::string error;
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "Saved target release", 100, identity, error));
+        BOOST_REQUIRE(SetPaymasterProviderPolicy(provider_wallet, policy, 101, error));
+        BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(provider_wallet, liquidity, 102, error));
+    }
+    WalletContext context;
+    Manager manager{true};
+    context.chain = m_node.chain.get(); context.args = m_node.args;
+    context.wallets.emplace_back(&provider_wallet, [](CWallet*) {});
+    context.paymaster = &manager;
+    JSONRPCRequest request;
+    request.context = &context;
+    const auto invoke = [&](const UniValue& options) {
+        request.params = UniValue{UniValue::VARR}; request.params.push_back(options);
+        return rebalancepaymasterpool().HandleRequest(request);
+    };
+    // Empty, all underfilled, DGB excess with DD missing, DD excess with DGB
+    // missing, and excess in both admission categories with no operating slots.
+    for (const auto& counts : {std::vector<int>{0, 0, 0, 0}, {1, 1, 1, 1},
+                              {4, 0, 0, 0}, {0, 0, 4, 0}, {4, 0, 4, 0}}) {
+        std::vector<ProviderPoolEntry> entries;
+        {
+            LOCK(provider_wallet.cs_wallet);
+            const auto destination = provider_wallet.GetNewDestination(OutputType::BECH32M, "pool bookkeeping fixture");
+            BOOST_REQUIRE(destination);
+            CMutableTransaction funding;
+            funding.vin.emplace_back(COutPoint{GetRandHash(), 0});
+            for (size_t category = 0; category < counts.size(); ++category) {
+                for (int i = 0; i < counts[category]; ++i) {
+                    ProviderPoolEntry entry;
+                    entry.purpose = category % 2 ? PoolPurpose::OPERATIONAL : PoolPurpose::ADMISSION;
+                    entry.asset = category < 2 ? PoolAsset::DGB : PoolAsset::DD_CARRIER;
+                    entry.dgb_value = DGBSatoshis{category < 2 ? 20000000 : 0};
+                    entry.carrier_value = DDCents{category < 2 ? 0 : 100};
+                    entry.script_pub_key = GetScriptForDestination(*destination);
+                    entry.outpoint.n = funding.vout.size();
+                    entry.confirmation_height = 1;
+                    entry.updated_at = 103;
+                    funding.vout.emplace_back(entry.dgb_value.value, entry.script_pub_key);
+                    entries.push_back(entry);
+                }
+            }
+            // These are synthetic confirmed pool records for selection tests;
+            // no transaction spending them is authorized by this fixture.
+            if (!entries.empty()) {
+                const auto tx = MakeTransactionRef(funding);
+                BOOST_REQUIRE(provider_wallet.AddToWallet(tx, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+                for (auto& entry : entries) entry.outpoint.hash = tx->GetHash();
+                provider_wallet.SetLastBlockProcessed(1, Params().GenesisBlock().GetHash());
+            }
+            BOOST_REQUIRE(WalletBatch{provider_wallet.GetDatabase()}.WritePaymasterProviderPool(entries));
+        }
+        for (bool dgb_only : {true, false}) {
+            UniValue options{UniValue::VOBJ};
+            for (const auto* key : {"admission_dgb_slots", "operational_dgb_slots", "admission_carrier_slots", "operational_carrier_slots"})
+                options.pushKV(key, 3);
+            options.pushKV("dgb_only", dgb_only);
+            options.pushKV("maximum_fee_satoshis", 1000000);
+            // Preserve the explicit unsaved-target contract.
+            BOOST_CHECK_EXCEPTION(invoke(options), UniValue, [](const UniValue& e) {
+                return e.find_value("message").get_str() == "PAYMASTER_REBALANCE_INCREASE_USE_PREPARE";
+            });
+            options.pushKV("expected_liquidity_updated_at", 102);
+            const auto before = GetMockableDatabase(provider_wallet).m_records;
+            const auto preview = invoke(options);
+            const int dgb = std::max(0, counts[0] - 3);
+            const int dd = dgb_only ? 0 : std::max(0, counts[2] - 3);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_admission_dgb_slots").getInt<int>(), dgb);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_admission_carrier_slots").getInt<int>(), dd);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_operational_dgb_slots").getInt<int>(), 0);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_operational_carrier_slots").getInt<int>(), 0);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_dgb_satoshis").getInt<int64_t>(), dgb * 20000000);
+            BOOST_CHECK_EQUAL(preview.find_value("retired_carrier_cents").getInt<int64_t>(), dd * 100);
+            BOOST_CHECK_EQUAL(preview.find_value("maximum_total_fee_satoshis").getInt<int64_t>(), (dgb + dd) * 1000000);
+            BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+            auto stale = options;
+            stale.pushKV("expected_liquidity_updated_at", 101);
+            BOOST_CHECK_EXCEPTION(invoke(stale), UniValue, [](const UniValue& e) {
+                return e.find_value("message").get_str() == "PAYMASTER_LIQUIDITY_POLICY_CHANGED";
+            });
+            stale = options; stale.pushKV("operational_dgb_slots", 4);
+            BOOST_CHECK_EXCEPTION(invoke(stale), UniValue, [](const UniValue& e) {
+                return e.find_value("message").get_str() == "PAYMASTER_LIQUIDITY_POLICY_CHANGED";
+            });
+            if (dgb == 0 && dd == 0) {
+                options.pushKV("execute", true);
+                options.pushKV("plan_id", preview.find_value("plan_id"));
+                BOOST_CHECK(invoke(options).find_value("executed").isFalse());
+                BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+            }
+        }
+        if (!entries.empty()) {
+            entries.front().state = PoolEntryState::RESERVED;
+            entries.front().reservation_id = GetRandHash();
+            {
+                LOCK(provider_wallet.cs_wallet);
+                BOOST_REQUIRE(WalletBatch{provider_wallet.GetDatabase()}.WritePaymasterProviderPool(entries));
+            }
+            UniValue options;
+            BOOST_REQUIRE(options.read(R"({"admission_dgb_slots":3,"operational_dgb_slots":3,"admission_carrier_slots":3,"operational_carrier_slots":3,"dgb_only":true,"expected_liquidity_updated_at":102})"));
+            BOOST_CHECK_EXCEPTION(invoke(options), UniValue, [](const UniValue& e) {
+                return e.find_value("message").get_str() == "PAYMASTER_REBALANCE_ACTIVE_RESERVATIONS";
+            });
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rebalance_saved_targets_do_not_assert_provider_readiness)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "rebalance-retained-target", CreateMockableWalletDatabase()};
+    ProviderIdentityRecord identity;
+    std::string error;
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
+    policy.min_payment = DDCents{100}; policy.max_payment = DDCents{100000};
+    policy.maximum_network_fee = DGBSatoshis{20000000};
+    ProviderLiquidityPolicy liquidity;
+    liquidity.target_admission_carriers = 3;
+    liquidity.target_operational_carriers = 0; // Explicitly released last DD slot.
+    liquidity.updated_at = 102;
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "Retained targets", 100, identity, error));
+        BOOST_REQUIRE(SetPaymasterProviderPolicy(provider_wallet, policy, 101, error));
+        BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(provider_wallet, liquidity, 102, error));
+        BOOST_REQUIRE(WalletBatch{provider_wallet.GetDatabase()}.WritePaymasterProviderPool({}));
+    }
+    WalletContext context;
+    context.chain = m_node.chain.get(); context.args = m_node.args;
+    context.wallets.emplace_back(&provider_wallet, [](CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    for (bool sponsored : {false, true}) {
+        if (sponsored) {
+            policy.funding_models = FUNDING_MODEL_SPONSORED;
+            policy.sponsorship_scope = SponsorshipScope::PUBLIC;
+            BOOST_REQUIRE(SetPaymasterProviderPolicy(provider_wallet, policy, 103, error));
+        }
+        UniValue options{UniValue::VOBJ};
+        options.pushKV("admission_dgb_slots", liquidity.target_admission_dgb);
+        options.pushKV("operational_dgb_slots", liquidity.target_operational_dgb);
+        options.pushKV("admission_carrier_slots", liquidity.target_admission_carriers);
+        options.pushKV("operational_carrier_slots", liquidity.target_operational_carriers);
+        request.params = UniValue{UniValue::VARR}; request.params.push_back(options);
+        BOOST_CHECK_EXCEPTION(rebalancepaymasterpool().HandleRequest(request), UniValue, [sponsored](const UniValue& e) {
+            return e.find_value("message").get_str() == (sponsored ? "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS" : "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+        });
+        options.pushKV("expected_liquidity_updated_at", 102);
+        request.params = UniValue{UniValue::VARR}; request.params.push_back(options);
+        const auto before = GetMockableDatabase(provider_wallet).m_records;
+        const auto preview = rebalancepaymasterpool().HandleRequest(request);
+        BOOST_CHECK(preview.find_value("executed").isFalse());
+        BOOST_CHECK_EQUAL(preview.find_value("retired_carrier_cents").getInt<int64_t>(), 0);
+        BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(capital_release_cancels_only_reviewed_uncreated_funding)
 {
     ScopedPaymasterMockTime clock{2000};

@@ -2610,7 +2610,7 @@ RPCHelpMan rebalancepaymasterpool()
                                                                                                                     {"dgb_only", RPCArg::Type::BOOL, RPCArg::Default{false}, "Preserve every DD carrier; retire only excess DGB"},
                                                                                                                      {"maximum_fee_satoshis", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Explicit positive fee ceiling per retirement transaction"},
                                                                                                                      {"recommend_fee", RPCArg::Type::BOOL, RPCArg::Default{false}, "Preview only: propose a finite fee ceiling from current transaction estimates; does not approve spending or change refill limits"},
-                                                                                                                     {"expected_liquidity_updated_at", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Require this saved liquidity revision and its exact targets"},
+                                                                                                                     {"expected_liquidity_updated_at", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Require this saved liquidity revision and its exact targets; retain underfilled categories without creating missing reserves"},
                                                                                                                      {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Commit the reviewed retirement transactions"},
                                                                                                                     {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
                                                                                                                 }},
@@ -2714,11 +2714,14 @@ RPCHelpMan rebalancepaymasterpool()
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_POLICY_NOT_FOUND");
             }
             const bool user_paid = PolicyAllowsFundingModel(policy, FundingModel::USER_PAID);
-            if (!dgb_only && user_paid && (admission_carriers < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
+            // An exact saved target may deliberately retain fewer carriers
+            // after a slot release/model change. Releasing excess neither
+            // enables the provider nor establishes payment readiness.
+            if (expected_revision.isNull() && !dgb_only && user_paid && (admission_carriers < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
                               operational_carriers < 1)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
             }
-            if (!dgb_only && !user_paid && (admission_carriers != 0 || operational_carriers != 0)) {
+            if (expected_revision.isNull() && !dgb_only && !user_paid && (admission_carriers != 0 || operational_carriers != 0)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
             }
             std::vector<ProviderPoolEntry> entries;
@@ -2763,17 +2766,21 @@ RPCHelpMan rebalancepaymasterpool()
             const auto operational_dgb = candidates(PoolPurpose::OPERATIONAL, PoolAsset::DGB);
             const auto admission_dd = candidates(PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER);
             const auto operational_dd = candidates(PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER);
-            if (admission > static_cast<int>(admission_dgb.size()) ||
+            if (expected_revision.isNull() && (admission > static_cast<int>(admission_dgb.size()) ||
                 operational > static_cast<int>(operational_dgb.size()) ||
                 (!dgb_only && (admission_carriers > static_cast<int>(admission_dd.size()) ||
-                operational_carriers > static_cast<int>(operational_dd.size())))) {
+                operational_carriers > static_cast<int>(operational_dd.size()))))) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_REBALANCE_INCREASE_USE_PREPARE");
             }
 
             std::vector<const ProviderPoolEntry*> retire_dgb;
             std::vector<const ProviderPoolEntry*> retire_dd;
             const auto retire_tail = [](const auto& available, int keep, auto& retired) {
-                retired.insert(retired.end(), available.begin() + keep, available.end());
+                // A reviewed saved target is a retention floor, not a request
+                // to create missing slots. Another category can have excess
+                // even while this one is empty or below its target.
+                if (available.size() > static_cast<size_t>(keep))
+                    retired.insert(retired.end(), available.begin() + keep, available.end());
             };
             retire_tail(admission_dgb, admission, retire_dgb);
             retire_tail(operational_dgb, operational, retire_dgb);
@@ -2932,6 +2939,10 @@ RPCHelpMan rebalancepaymasterpool()
             if (ParseHashV(supplied_plan, "plan_id") != plan_id) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                                    "PAYMASTER_POOL_PLAN_CHANGED");
+            }
+            if (retire_dgb.empty() && retire_dd.empty()) {
+                result.pushKV("executed", false);
+                return result;
             }
 
             if (!GetPaymasterIdentity(*wallet, identity)) {
