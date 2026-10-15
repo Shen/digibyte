@@ -10535,7 +10535,8 @@ void PaymasterWidgetTests::paymasterStopAndRelease_data()
         QTest::newRow(qPrintable(QStringLiteral("retire_") + decision)) << QString::fromLatin1(decision) << true;
     }
     for (const char* decision : {"cancel_stop", "cancel_release", "release", "blocked", "bad_receipt", "privacy", "wallet_change", "stop_error", "bad_stop",
-                                "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool"})
+                                "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool",
+                                "uncreated_release", "uncreated_cancel", "uncreated_bad_receipt", "uncreated_missing_count"})
         QTest::newRow(qPrintable(QStringLiteral("retire_") + decision)) << QString::fromLatin1(decision) << true;
 }
 
@@ -10572,6 +10573,9 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
             const bool execute = params.size() > 0 && params[0].find_value("execute").isTrue();
             execute ? ++executions : ++previews;
             const bool recovery = params.size() > 0 && params[0].find_value("recovery").isTrue();
+            const bool cancel_uncreated = params.size() > 0 && params[0].find_value("cancel_uncreated").isTrue();
+            if (cancel_uncreated != (retire && !recovery))
+                throw std::runtime_error("Only ordinary retirement reviews cancellation of uncreated funding");
             if (decision.startsWith(QLatin1String("recovery_"))) {
                 if (!recovery) throw std::runtime_error("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
                 if (decision == QLatin1String("recovery_blocked")) throw std::runtime_error("PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
@@ -10588,6 +10592,9 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
             result.pushKV("dgb_satoshis", decision == "empty_pool" ? 0 : 100000000);
             result.pushKV("dd_cents", decision == "empty_pool" ? 0 : 425);
             result.pushKV("network_fee_satoshis", 0);
+            if (decision != "uncreated_missing_count")
+                result.pushKV("uncreated_maintenance", decision.startsWith("uncreated_")
+                    ? (execute && decision == "uncreated_bad_receipt" ? 2 : 1) : 0);
             result.pushKV("recovery_release", recovery && !(execute && decision == "recovery_bad_receipt"));
             return result;
         }
@@ -10640,9 +10647,14 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
                 QVERIFY(review->text().contains("normal Send pages"));
             }
             reviewed = true;
+            if (decision.startsWith("uncreated_")) {
+                QVERIFY(review->text().contains("Also cancel 1 reserve-funding task"));
+                QVERIFY(review->text().contains("Signed work is not cancelled"));
+            }
             if (decision == QLatin1String("privacy")) panel->setPrivacy(true);
             if (decision == QLatin1String("wallet_change")) panel->setWalletModel(nullptr);
-            review->done(decision == QLatin1String("cancel_release") || decision == QLatin1String("recovery_cancel") ? QMessageBox::No : QMessageBox::Yes);
+            review->done(decision == QLatin1String("cancel_release") || decision == QLatin1String("recovery_cancel") ||
+                         decision == QLatin1String("uncreated_cancel") ? QMessageBox::No : QMessageBox::Yes);
         }
     });
     answer.start(10);
@@ -10650,13 +10662,18 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
     answer.stop();
     QVERIFY(default_checked_correctly);
     QCOMPARE(writes.count(QStringLiteral("stop")), decision == "cancel_stop" || decision == "stop_error" ? 0 : 1);
-    const bool approved = QStringList{"release", "bad_receipt", "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool", "recovery_release", "recovery_bad_receipt", "recovery_changed"}.contains(decision);
+    const bool approved = QStringList{"release", "bad_receipt", "balance_error", "bad_dgb", "bad_dd", "backup_cancelled", "empty_pool", "recovery_release", "recovery_bad_receipt", "recovery_changed", "uncreated_release", "uncreated_bad_receipt"}.contains(decision);
     QCOMPARE(executions, approved ? 1 : 0);
     const bool stop_confirmed = !QStringList{"cancel_stop", "stop_only", "stop_error", "bad_stop"}.contains(decision);
     QCOMPARE(previews, stop_confirmed ? (decision.startsWith(QLatin1String("recovery_")) ? 2 : 1) : 0);
     if (approved) QVERIFY(reviewed);
     if (decision == QLatin1String("release")) QVERIFY(status->text().contains(retire ? "Review the remaining funds" : "all reviewed pool capital"));
     if (decision == QLatin1String("bad_receipt")) QVERIFY(status->text().contains("unclear"));
+    if (decision == "uncreated_bad_receipt") QVERIFY(status->text().contains("unclear"));
+    if (decision == "uncreated_missing_count") {
+        QVERIFY(!reviewed);
+        QVERIFY(status->text().contains("preview is invalid"));
+    }
     if (decision == QLatin1String("blocked")) QVERIFY(status->text().contains("capital was not released"));
     if (decision == QLatin1String("recovery_release")) QVERIFY(status->text().contains("identity permanently retired"));
     if (decision == QLatin1String("recovery_bad_receipt")) QVERIFY(status->text().contains("unclear"));
@@ -10670,7 +10687,7 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
     }
     if (decision == "stop_error" || decision == "bad_stop") QVERIFY(status->text().contains("Stop not confirmed"));
     const bool balance_review = retire && approved && decision != "bad_receipt" &&
-        decision != "recovery_bad_receipt" && decision != "recovery_changed";
+        decision != "recovery_bad_receipt" && decision != "recovery_changed" && decision != "uncreated_bad_receipt";
     QCOMPARE(balance_reads, balance_review ? 1 : 0);
     auto* summary = panel->findChild<QGroupBox*>("paymasterRetirementSummary");
     auto* balances = panel->findChild<QLabel*>("paymasterRetirementBalances");
@@ -10883,6 +10900,8 @@ void PaymasterWidgetTests::paymasterRetirementLateResults()
                 QCOMPARE(parameters[0].find_value("plan_id").get_str(), std::string(64, 'c'));
             }
             result.pushKV("executed", current == "execute");
+            QVERIFY(parameters[0].find_value("cancel_uncreated").isTrue());
+            result.pushKV("uncreated_maintenance", 0);
             result.pushKV("plan_id", std::string(64, 'c'));
             result.pushKV("pool_entries", 0);
             result.pushKV("dgb_satoshis", 0);

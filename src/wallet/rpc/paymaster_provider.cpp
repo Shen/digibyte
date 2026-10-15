@@ -793,6 +793,7 @@ RPCHelpMan releasepaymastercapital()
         "First stop persistently with stoppaymaster {\"persistent\":true,\"pause_setup\":true}.\n"
         "No payment, network fee, wallet deletion or forced reservation release is performed.\n"
         "Open payments, reservations, unresolved maintenance, manual coin locks and unconfirmed outputs block the entire operation.\n"
+        "With cancel_uncreated=true, the reviewed release also cancels planned reserve funding with no saved transaction. Signed, ambiguous and withdrawal work still blocks release. This option is unavailable for restored-wallet recovery.\n"
         "Execution requires the unchanged preview plan. Recurring paid-maintenance consent is revoked; identity, targets, budgets and recovery history remain.\n"
         "An explicitly restored wallet can request recovery release only with a matching independently retained checkpoint and no unfinished work. This permanently retires the provider identity; it never clears signing guards or sends funds.\n"
         "A replay after success fails PLAN_CHANGED; inspect pool state and obtain a new preview, never abandon signed work.\n",
@@ -800,6 +801,7 @@ RPCHelpMan releasepaymastercapital()
             {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Release the reviewed capital"},
             {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
             {"recovery", RPCArg::Type::BOOL, RPCArg::Default{false}, "Recover a matching restored wallet's capital while permanently retiring this provider identity"},
+            {"cancel_uncreated", RPCArg::Type::BOOL, RPCArg::Default{false}, "Include cancellation of provably uncreated reserve-funding tasks in this exact release plan"},
         }}},
         RPCResult{RPCResult::Type::OBJ, "", "Capital release preview or receipt", {
             {RPCResult::Type::BOOL, "executed", "Whether the atomic wallet update completed"},
@@ -808,6 +810,7 @@ RPCHelpMan releasepaymastercapital()
             {RPCResult::Type::NUM, "dgb_satoshis", "DGB pool capital"},
             {RPCResult::Type::NUM, "dd_cents", "DD carrier capital including earnings"},
             {RPCResult::Type::NUM, "network_fee_satoshis", "Always zero; wallet-local release"},
+            {RPCResult::Type::NUM, "uncreated_maintenance", "Number of uncreated funding tasks to cancel, or cancelled by this execution"},
             {RPCResult::Type::BOOL, "recovery_release", "The reviewed release permanently retires this restored provider identity"},
         }},
         RPCExamples{HelpExampleCli("releasepaymastercapital", "")},
@@ -822,9 +825,11 @@ RPCHelpMan releasepaymastercapital()
             if (!options.isNull()) RPCTypeCheckObj(options, {
                 {"execute", UniValueType(UniValue::VBOOL)}, {"plan_id", UniValueType(UniValue::VSTR)},
                 {"recovery", UniValueType(UniValue::VBOOL)},
+                {"cancel_uncreated", UniValueType(UniValue::VBOOL)},
             }, true, true);
             const bool execute = options.find_value("execute").isTrue();
             const bool recovery = options.find_value("recovery").isTrue();
+            const bool cancel_uncreated = options.find_value("cancel_uncreated").isTrue();
             uint256 plan;
             if (execute) {
                 if (options.find_value("plan_id").isNull())
@@ -845,7 +850,7 @@ RPCHelpMan releasepaymastercapital()
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_MUST_BE_STOPPED");
             PaymasterCapitalRelease release;
             std::string error;
-            if (!ReleasePaymasterCapital(*wallet, execute, plan, GetTime(), release, error, recovery))
+            if (!ReleasePaymasterCapital(*wallet, execute, plan, GetTime(), release, error, recovery, cancel_uncreated))
                 throw JSONRPCError(RPC_WALLET_ERROR, error);
             UniValue result{UniValue::VOBJ};
             result.pushKV("executed", execute);
@@ -854,6 +859,7 @@ RPCHelpMan releasepaymastercapital()
             result.pushKV("dgb_satoshis", release.dgb_satoshis);
             result.pushKV("dd_cents", release.dd_cents);
             result.pushKV("network_fee_satoshis", 0);
+            result.pushKV("uncreated_maintenance", release.uncreated_maintenance);
             result.pushKV("recovery_release", release.recovery_release);
             return result;
         },

@@ -212,17 +212,20 @@ bool GetPaymasterProviderPoolEntries(
 /** Wallet-local, fee-free release of all quiescent pool capital. The caller
  * holds the provider work guard and verifies the runtime is stopped. Neither
  * preview nor execution signs, broadcasts, abandons or erases recovery data.
- * A changed plan (including a replay after success) must be reviewed again. */
+ * A changed plan (including a replay after success) must be reviewed again.
+ * cancel_uncreated explicitly includes uncreated reserve funding in that
+ * review; it cannot cancel signed/ambiguous work or be used for recovery. */
 struct PaymasterCapitalRelease {
     uint256 plan_id;
     int64_t dgb_satoshis{0};
     int64_t dd_cents{0};
     uint32_t entries{0};
+    uint32_t uncreated_maintenance{0};
     bool recovery_release{false};
 };
 bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
                             int64_t now, PaymasterCapitalRelease& result, std::string& error,
-                            bool recovery = false);
+                            bool recovery = false, bool cancel_uncreated = false);
 
 /** Review/adopt a current restored provider using an independently retained
  * checkpoint. Reuses the full quiescent-capital checks without releasing any

@@ -1717,11 +1717,15 @@ bool SetPaymasterProviderPoolEntries(CWallet& wallet,
 
 bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expected_plan,
                             int64_t now, PaymasterCapitalRelease& result, std::string& error,
-                            bool recovery)
+                            bool recovery, bool cancel_uncreated)
 {
     LOCK(wallet.cs_wallet);
     result = {};
     error.clear();
+    if (recovery && cancel_uncreated) {
+        error = "PAYMASTER_CAPITAL_RECOVERY_CANNOT_CANCEL_MAINTENANCE";
+        return false;
+    }
     uint256 checkpoint_revision;
     if (recovery) {
         if (!CheckPaymasterCapitalRecoveryCheckpoint(wallet.GetDatabase(), checkpoint_revision, error)) return false;
@@ -1768,11 +1772,36 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     const auto maintenance_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
     if (maintenance_status != DatabaseReadStatus::FOUND && maintenance_status != DatabaseReadStatus::NOT_FOUND)
         return fail("PAYMASTER_CAPITAL_DATABASE_READ");
+    std::vector<uint256> uncreated_maintenance;
+    std::set<CScript> uncreated_scripts;
     for (const auto& record : maintenance.records) {
+        if (cancel_uncreated && record.state == ProviderMaintenanceState::PLANNED &&
+            record.transaction_id.IsNull() && record.actual_fee.value == 0 &&
+            record.source_inputs.empty() && !record.outputs.empty() &&
+            (record.kind == ProviderMaintenanceKind::REPLENISH_DGB ||
+             record.kind == ProviderMaintenanceKind::REPLENISH_CARRIER || record.IsPreparation())) {
+            for (const auto& output : record.outputs) uncreated_scripts.insert(output.script_pub_key);
+            uncreated_maintenance.push_back(record.operation_id);
+            continue;
+        }
         if (record.state != ProviderMaintenanceState::CONFIRMED && record.state != ProviderMaintenanceState::RELEASED)
             return fail("PAYMASTER_CAPITAL_OPEN_MAINTENANCE");
         if (!record.transaction_id.IsNull() && !confirmed(record.transaction_id))
             return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
+    }
+    // A lost reply can leave a signed wallet transaction without a journal
+    // txid. Reject even a partial script match, regardless of confirmation,
+    // abandonment, amount or conflict. Scan once for all candidate tasks.
+    // The caller holds the work guard and we hold cs_wallet, so no funding
+    // signature can race this check and the atomic release.
+    if (!uncreated_scripts.empty()) {
+        for (const auto& [txid, wallet_tx] : wallet.mapWallet) {
+            if (!wallet_tx.tx) return fail("PAYMASTER_CAPITAL_OPEN_MAINTENANCE");
+            for (const auto& output : wallet_tx.tx->vout) {
+                if (uncreated_scripts.count(output.scriptPubKey))
+                    return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
+            }
+        }
     }
     for (const auto& entry : pool) {
         if (entry.state == PoolEntryState::SPENT || entry.state == PoolEntryState::RELEASED) continue;
@@ -1805,12 +1834,19 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     }
     // Bind the exact persisted state, identity, network and wallet. No preview
     // record or authorization is written; all prerequisites are rechecked above.
-    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster capital release v2"}
+    result.uncreated_maintenance = uncreated_maintenance.size();
+    result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster capital release v3"}
         << Params().GenesisBlock().GetHash() << wallet.GetName() << identity.provider_id
         << settings << liquidity << pool << maintenance << budgets
-        << recovery << checkpoint_revision).GetHash();
+        << recovery << checkpoint_revision << cancel_uncreated).GetHash();
     if (!execute) return true;
     if (expected_plan.IsNull() || expected_plan != result.plan_id) return fail("PAYMASTER_CAPITAL_PLAN_CHANGED");
+    for (const auto& operation_id : uncreated_maintenance) {
+        if (!ReleaseProviderMaintenanceBudget(maintenance, operation_id, now, error)) return false;
+        for (auto& record : maintenance.records) {
+            if (record.operation_id == operation_id) record.preparation_error.clear();
+        }
+    }
     for (auto& entry : pool) {
         if (entry.state != PoolEntryState::AVAILABLE) continue;
         entry.state = PoolEntryState::RELEASED;
@@ -1834,6 +1870,7 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
         return fail("PAYMASTER_CAPITAL_RECOVERY_CHECKPOINT_CHANGED");
     }
     if (!batch.WritePaymasterProviderPool(pool) ||
+        (!uncreated_maintenance.empty() && !batch.WritePaymasterMaintenanceLedger(maintenance)) ||
         (liquidity_status == DatabaseReadStatus::FOUND && !batch.WritePaymasterLiquidityPolicy(liquidity)) ||
         !WriteProviderBackupReminder(batch, identity, now, error)) {
         batch.TxnAbort();

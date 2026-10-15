@@ -11120,16 +11120,21 @@ private:
     {
         if (m_privacy || !hasRpcTransport()) return;
         UniValue preview_params{UniValue::VARR};
-        if (recovery) {
+        if (recovery || retire) {
             UniValue options{UniValue::VOBJ};
-            options.pushKV("recovery", true);
+            if (recovery) options.pushKV("recovery", true);
+            else options.pushKV("cancel_uncreated", true);
             preview_params.push_back(options);
         }
         call("releasepaymastercapital", preview_params, false, nullptr, [this, retire, recovery](const UniValue& preview) {
             if (m_privacy) return;
-            const auto valid = [](const UniValue& result) {
+            const auto valid = [retire, recovery](const UniValue& result) {
                 if (!IsHex256Field(result, "plan_id") || !result.find_value("executed").isBool()) return false;
                 if (!result.find_value("recovery_release").isNull() && !result.find_value("recovery_release").isBool()) return false;
+                qint64 uncreated{0};
+                if (retire && !recovery &&
+                    (!GetInt64Field(result, "uncreated_maintenance", uncreated) ||
+                     uncreated < 0 || uncreated > std::numeric_limits<int>::max())) return false;
                 for (const auto* key : {"pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis"}) {
                     qint64 value{0};
                     if (!GetInt64Field(result, key, value) || value < 0) return false;
@@ -11146,6 +11151,10 @@ private:
                     .arg(compactDgbAmount(financeNumber(preview, "dgb_satoshis")), ddAmount(financeNumber(preview, "dd_cents")))
                     .arg(financeNumber(preview, "pool_entries"));
             if (recovery) review += tr("\n\nRecovery release permanently retires this provider identity, including other copies using this node's checkpoint. Signing protections remain active. Afterwards, use the normal Send pages to transfer the released funds. Cancelling makes no retirement or release change.");
+            if (retire && !recovery && financeNumber(preview, "uncreated_maintenance") > 0) {
+                review += tr("\n\nAlso cancel %n reserve-funding task(s) for which no transaction has been created. Signed work is not cancelled.", nullptr,
+                             static_cast<int>(financeNumber(preview, "uncreated_maintenance")));
+            }
             const auto answer = askPlainTextQuestion(this,
                 recovery ? tr("Recover capital and retire provider identity") : tr("Release all operating capital"), review);
             if (generation != m_wallet_generation || m_privacy) return;
@@ -11158,11 +11167,12 @@ private:
             options.pushKV("execute", true);
             options.pushKV("plan_id", preview.find_value("plan_id"));
             if (recovery) options.pushKV("recovery", true);
+            else if (retire) options.pushKV("cancel_uncreated", true);
             params.push_back(options);
             call("releasepaymastercapital", params, false, nullptr, [this, preview, valid, retire](const UniValue& result) {
                 if (m_privacy) return;
                 bool matches = valid(result) && result.find_value("executed").isTrue();
-                for (const auto* key : {"plan_id", "pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis", "recovery_release"})
+                for (const auto* key : {"plan_id", "pool_entries", "dgb_satoshis", "dd_cents", "network_fee_satoshis", "recovery_release", "uncreated_maintenance"})
                     matches &= result.find_value(key).write() == preview.find_value(key).write();
                 setStatusLabel(m_operator_stop_status, matches
                     ? (preview.find_value("recovery_release").isTrue()
