@@ -33,8 +33,8 @@ records only bounded stable Paymaster error codes when unsigned closure removes
 the technical panel. No expiry, confirmation or signature check is relaxed.
 Previously relayed announcements can remain listed until their signed expiry
 after operational reserves are exhausted. Qt uses neutral discovery status and
-per-card expiry, explaining that availability can change before expiry and is
-checked automatically during preparation. Matching a client's balance and fee
+per-card expiry countdowns, explaining that availability can change before expiry
+and is checked automatically during preparation. Matching a client's balance and fee
 limits is not proof of live provider capacity.
 Automatic replenishment reports a definite shortage of ordinary spendable
 capital separately from other transaction-construction failures. It retains

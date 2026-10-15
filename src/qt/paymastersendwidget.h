@@ -132,6 +132,7 @@ private:
     void clearOfferCards();
     void renderOfferCards();
     void renderExcludedOfferCards();
+    void updateOfferCountdowns();
     void selectOfferCard(int index, bool manual);
     void updateOfferCheckIcon();
     void renderOfferSpinner();
@@ -363,6 +364,7 @@ private:
     QTimer* m_offerIconTimer{nullptr};
     int m_offerIconFrame{0};
     QTimer* m_offerExpiryTimer{nullptr};
+    QTimer* m_offerCountdownTimer{nullptr};
     QElapsedTimer m_offerPreviewClock;
     OfferCheckState m_offerCheckState{OfferCheckState::NOT_CHECKED};
     QString m_paymasterTransportState;

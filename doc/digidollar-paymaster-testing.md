@@ -5465,3 +5465,31 @@ checks take seconds to roughly one minute once built. For manual acceptance,
 confirm two complete free slots below a target of three with insufficient
 ordinary refill capital: offers should renew and preparation should reach exact
 authorization, while the separate refill requirement remains visible.
+
+## Offer recommendation and expiry countdown (2026-10-15)
+
+Four affected/header-dependent GUI translation units compiled with MSVC 14.43
+and Qt 5.15.10 into an isolated Qt executable. Seven data cases passed across
+`paymasterClientOfferCards` (dark/light, 720/1200 pixels),
+`paymasterClientOfferAutomaticRefresh`,
+`paymasterClientOfferPreviewUsesExactRpcAndPlainText`, and
+`paymasterClientOfferPreviewInvalidatesAndHandlesFailures`.
+
+Coverage checks the restored recommendation badge and its cheapest-fee tooltip,
+including the existing failed-attempt exception. Countdown checks cover distinct
+per-offer deadlines in selectable/excluded cards, decreasing seconds without RPC
+reads, an unchanged expiry interval, stable card objects/geometry/focus/selection,
+hidden/privacy states, expiry during a pending refresh and wallet closure. Existing
+fee, manual-binding, stale-generation and invalid-reply checks remain passing.
+Native screenshots were generated for both widths/themes; the narrow dark and
+wide light views were inspected. Badge mouse interaction is checked separately
+from its tooltip, so enabling hover does not prevent card selection.
+
+Tests ran on a separate Windows desktop with existing Release libraries; live
+wallets and installed programs were unchanged. The complete build, full Qt suite
+and cross-platform checks remain unrun. Root/src instructions, architecture/maps,
+developer notes, Qt/test guides and translation/formatting rules were applied.
+After the normal build documented above, use the same Qt test selector loop with
+the four function names listed here. Expect seven data cases, no selected skips
+and exit 0 (roughly one minute). Local evidence is in
+`build_msvc/paymaster-refresh-check/offer-countdown`.

@@ -1,5 +1,14 @@
 # Paymaster integration release notes
 
+## Clearer offer recommendation and expiry (2026-10-15)
+
+Offer cards again use **Recommended**, with a tooltip explaining the lowest
+selectable service fee and any existing preference after an incomplete attempt.
+The absolute **Listed until** date is replaced by **Expires in MM:SS** on both
+selectable and unavailable comparison cards. The countdown updates locally
+without rebuilding cards, changing selection or issuing requests. Existing
+expiration, provider checks and manual-selection rules remain unchanged.
+
 ## Use confirmed capacity below the refill target (2026-10-15)
 
 A provider with usable confirmed reserves no longer stops renewing offers merely

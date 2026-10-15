@@ -8560,7 +8560,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     UniValue available{UniValue::VARR};
     available.push_back(PaymasterOffer("Provider", std::string(64, 'b'), "user_paid", 2, 325, false, QDateTime::currentSecsSinceEpoch() + 60));
     auto rejected_offer = PaymasterOffer("Filtered provider", std::string(64, 'c'), "user_paid", 4, 325, false,
-        QDateTime::currentSecsSinceEpoch() + 60, 100);
+        available[0].find_value("expires_at").getInt<int64_t>() + 60, 100);
     rejected_offer.pushKV("eligible", false);
     rejected_offer.pushKV("fee_limit_reason", "percentage");
     rejected_offer.pushKV("maximum_service_fee_bps", 100);
@@ -8628,12 +8628,29 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QCOMPARE(reads, 2);
     auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
     auto* expiry = client->findChild<QTimer*>("paymasterOfferExpiryTimer");
+    auto* countdown_timer = client->findChild<QTimer*>("paymasterOfferCountdownTimer");
     auto* choice = form.findChild<QRadioButton*>("paymasterOfferChoice0");
     QVERIFY(cards && expiry && expiry->isActive() && choice);
+    QVERIFY(countdown_timer && countdown_timer->isActive());
+    QCOMPARE(countdown_timer->interval(), 1000);
     QPointer<QWidget> original_card = form.findChild<QWidget*>("paymasterOfferCard0");
     QPointer<QWidget> original_excluded = form.findChild<QWidget*>("paymasterExcludedOfferCard0");
     QVERIFY(original_card);
     QVERIFY(original_excluded);
+    auto* countdown = original_card->findChild<QLabel*>("paymasterOfferCountdown");
+    auto* excluded_countdown = original_excluded->findChild<QLabel*>("paymasterOfferCountdown");
+    QVERIFY(countdown && excluded_countdown);
+    QVERIFY(countdown->text().startsWith("Expires in "));
+    QVERIFY(countdown->toolTip().contains("may become unavailable before"));
+    const auto remaining = [](const QLabel* label) {
+        const auto parts = label->text().section(' ', -1).split(':');
+        return parts.size() == 2 ? parts[0].toInt() * 60 + parts[1].toInt() : -1;
+    };
+    QCOMPARE(remaining(excluded_countdown) - remaining(countdown), 60);
+    form.hide();
+    QVERIFY(!countdown_timer->isActive());
+    form.show();
+    QVERIFY(countdown_timer->isActive());
     for (const QString& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
         QFile css(":/css/" + theme);
         QVERIFY(css.open(QIODevice::ReadOnly));
@@ -8642,6 +8659,18 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         const QRect geometry = cards->geometry();
         choice->setFocus();
         QWidget* focus_before = QApplication::focusWidget();
+        const int seconds_before = remaining(countdown);
+        const int reads_before = reads;
+        const int deadline_interval = expiry->interval();
+        QTRY_VERIFY(remaining(countdown) < seconds_before);
+        QVERIFY(remaining(countdown) >= 0);
+        QCOMPARE(remaining(excluded_countdown) - remaining(countdown), 60);
+        QCOMPARE(reads, reads_before); // Countdown ticks never query Core.
+        QCOMPARE(expiry->interval(), deadline_interval); // Never renew the expiry.
+        QCOMPARE(form.findChild<QWidget*>("paymasterOfferCard0"), original_card.data());
+        QCOMPARE(cards->geometry(), geometry);
+        QCOMPARE(QApplication::focusWidget(), focus_before);
+        QVERIFY(choice->isChecked());
         QVERIFY(tick());
         QVERIFY(pending);
         QVERIFY(!cards->isHidden());
@@ -8670,6 +8699,8 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QVERIFY(tick());
     QVERIFY(QMetaObject::invokeMethod(expiry, "timeout", Qt::DirectConnection));
     QVERIFY(original_card.isNull());
+    QVERIFY(!countdown_timer->isActive());
+    QVERIFY(!form.findChild<QLabel*>("paymasterOfferCountdown"));
     QCOMPARE(table->rowCount(), 0);
     reply(available);
     QCOMPARE(table->rowCount(), 0); // Expired generation cannot repopulate cards.
@@ -8677,6 +8708,11 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QVERIFY(tick());
     reply(available);
     QVERIFY(form.findChild<QWidget*>("paymasterOfferCard0"));
+    client->setPrivacy(true);
+    QVERIFY(!countdown_timer->isActive());
+    QVERIFY(!form.findChild<QLabel*>("paymasterOfferCountdown"));
+    client->setPrivacy(false);
+    QVERIFY(countdown_timer->isActive());
     QVERIFY(tick());
     reply({}, "node unavailable");
     QVERIFY(!animation->isActive());
@@ -8715,6 +8751,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QVERIFY(icon->isHidden());
     reply(available);
     QCOMPARE(table->rowCount(), 0); // Old wallet results cannot repopulate the view.
+    QVERIFY(!countdown_timer->isActive());
     form.setWalletModel(gui.walletModel.get());
     client->setPaymasterSessionForTesting("CREATED", "none", true, {}, 0);
     const int active_reads = reads;
@@ -13471,7 +13508,11 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     QVERIFY(cards && !cards->isHidden());
     QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'b'));
     QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice0")->isChecked());
-    QVERIFY(form.findChild<QLabel*>("paymasterRecommendedOffer"));
+    auto* recommended = form.findChild<QLabel*>("paymasterRecommendedOffer");
+    QVERIFY(recommended);
+    QCOMPARE(recommended->text(), QStringLiteral("Recommended"));
+    QVERIFY(recommended->toolTip().contains("Cheaper offers are ranked lower"));
+    QVERIFY(!recommended->testAttribute(Qt::WA_TransparentForMouseEvents));
     auto* first = form.findChild<QFrame*>("paymasterOfferCard0");
     QStringList texts;
     for (auto* label : first->findChildren<QLabel*>()) {
@@ -13492,6 +13533,12 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     QVERIFY(refresh());
     QCOMPARE(form.findChild<QFrame*>("paymasterOfferCard0")->property("providerId").toString(), QString(64, 'e'));
     QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice2")->isChecked());
+    recommended = form.findChild<QLabel*>("paymasterRecommendedOffer");
+    QCOMPARE(recommended->text(), QStringLiteral("Recommended"));
+    QCOMPARE(recommended->toolTip(), QStringLiteral("Currently the lowest service fee among selectable offers for this payment."));
+    QTest::mouseClick(recommended, Qt::LeftButton);
+    QVERIFY(form.findChild<QRadioButton*>("paymasterOfferChoice0")->isChecked());
+    form.findChild<QRadioButton*>("paymasterOfferChoice2")->click();
     form.setAvailableDigiDollarBalanceForTesting(325);
     auto* funding_summary = form.findChild<QLabel*>("feeFundingSummary");
     auto* funding_send = form.findChild<QPushButton*>("sendButton");

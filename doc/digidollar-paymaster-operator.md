@@ -331,9 +331,15 @@ withdraw already relayed announcements. An empty operational pool prevents
 renewal and fresh capacity authorization, even if admission reserves remain.
 They can remain in clients' local lists until their signed expiry, at most ten
 minutes after creation. A list refresh is not a reachability test. Qt identifies
-the local list update and announcement expiry separately. A normal information
-note explains that offers may become unavailable before expiry and availability
-is checked automatically during preparation. Endpoint/proxy failures have a
+the local list update and announcement expiry separately. Offer cards show
+**Expires in MM:SS**, updated every second without another directory request or
+rebuilding the cards. This includes unavailable comparison offers. The countdown
+does not extend an announcement; the existing expiry still invalidates the preview.
+**Recommended** identifies the existing preferred offer. Its tooltip explains
+the lowest selectable service fee; if a cheaper provider was ranked lower after
+an incomplete attempt, it explains that exception. Manual choice is preserved.
+A normal information note explains that offers may become unavailable before
+expiry and availability is checked automatically during preparation. Endpoint/proxy failures have a
 specific connection message.
 
 Automatic refill needs ordinary spendable funds outside the protected pool.

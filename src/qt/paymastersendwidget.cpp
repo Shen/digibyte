@@ -112,6 +112,19 @@ private:
     QRadioButton* m_button{nullptr};
 };
 
+QLabel* OfferCountdownLabel(QWidget* parent, qint64 expires_at)
+{
+    auto* label = new QLabel(parent);
+    label->setObjectName("paymasterOfferCountdown");
+    label->setProperty("offerCardText", true);
+    label->setProperty("expiresAt", expires_at);
+    label->setTextFormat(Qt::PlainText);
+    label->setWordWrap(true);
+    label->setToolTip(DigiDollarSendWidget::tr(
+        "The offer may become unavailable before this countdown ends. Availability is checked when you prepare the payment."));
+    return label;
+}
+
 bool IsClientSafetyPolicyError(const QString& error)
 {
     return error == QLatin1String("PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED") ||
@@ -765,13 +778,14 @@ void PaymasterSendWidget::resizeEvent(QResizeEvent* event)
 void PaymasterSendWidget::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    updateOfferCheckIcon();
+    updateOfferCheckControls();
 }
 
 void PaymasterSendWidget::hideEvent(QHideEvent* event)
 {
     QWidget::hideEvent(event);
     if (m_offerIconTimer) m_offerIconTimer->stop();
+    if (m_offerCountdownTimer) m_offerCountdownTimer->stop();
 }
 
 void PaymasterSendWidget::connectSignals()
@@ -1155,6 +1169,10 @@ void PaymasterSendWidget::setupFeeSection()
     m_offerExpiryTimer->setObjectName("paymasterOfferExpiryTimer");
     m_offerExpiryTimer->setSingleShot(true);
     connect(m_offerExpiryTimer, &QTimer::timeout, this, &PaymasterSendWidget::expirePaymasterOfferPreview);
+    m_offerCountdownTimer = new QTimer(this);
+    m_offerCountdownTimer->setObjectName("paymasterOfferCountdownTimer");
+    m_offerCountdownTimer->setInterval(1000);
+    connect(m_offerCountdownTimer, &QTimer::timeout, this, &PaymasterSendWidget::updateOfferCountdowns);
     auto* offer_refresh_timer = new QTimer(this);
     offer_refresh_timer->setObjectName("paymasterOfferRefreshTimer");
     offer_refresh_timer->setInterval(10000);
@@ -2628,6 +2646,14 @@ void PaymasterSendWidget::updateOfferCheckControls()
                                       !m_privacy && (!m_offerPreview.empty() || !m_offerCardsFrame->property("excludedOffers").toByteArray().isEmpty()));
         m_offerCardsFrame->setEnabled((!m_paymasterBusy || m_offerCheckFrame->property("refreshPending").toBool()) && !m_privacy && !historyBlocksPreparation());
     }
+    if (m_offerCountdownTimer) {
+        updateOfferCountdowns();
+        if (m_offerCardsFrame && m_offerCardsFrame->isVisible() && !m_privacy && m_offerExpiryTimer->isActive()) {
+            if (!m_offerCountdownTimer->isActive()) m_offerCountdownTimer->start();
+        } else {
+            m_offerCountdownTimer->stop();
+        }
+    }
     if (!m_offerCheckFrame) return;
     m_offerCheckFrame->setVisible(paymasterModeSelected() && m_paymasterRequestId.isEmpty());
     const bool checking = m_offerCheckState == OfferCheckState::CHECKING || m_offerCheckFrame->property("refreshPending").toBool();
@@ -2751,6 +2777,7 @@ void PaymasterSendWidget::expirePaymasterOfferPreview()
 
 void PaymasterSendWidget::clearOfferCards()
 {
+    if (m_offerCountdownTimer) m_offerCountdownTimer->stop();
     if (m_offerCardsFrame) m_offerCardsFrame->setProperty("renderedOfferCards", QVariant{});
     if (!m_offerCardsLayout) return;
     ClearOfferWidgets(m_offerCardsLayout);
@@ -2760,6 +2787,28 @@ void PaymasterSendWidget::clearOfferCards()
     excluded->hide();
     m_offerCardsFrame->findChild<QLabel*>("paymasterOffersSummary")->clear();
     m_offerCardsFrame->hide();
+}
+
+void PaymasterSendWidget::updateOfferCountdowns()
+{
+    if (m_privacy || !m_offerCardsFrame || !m_offerPreviewClock.isValid() || m_advertisedOffers.empty()) return;
+    qint64 earliest_expiry = std::numeric_limits<qint64>::max();
+    for (const auto& offer : m_advertisedOffers.getValues()) {
+        earliest_expiry = std::min(earliest_expiry, offer.find_value("expires_at").getInt<qint64>());
+    }
+    // Reuse the validated preview's monotonic deadline. Drawing a countdown
+    // cannot extend its lifetime, rebuild cards or trigger a directory request.
+    const qint64 remaining_ms = std::max<qint64>(0, m_offerExpiryTimer->interval() - m_offerPreviewClock.elapsed());
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (auto* label : m_offerCardsFrame->findChildren<QLabel*>("paymasterOfferCountdown")) {
+        const qint64 expires_at = label->property("expiresAt").toLongLong();
+        const qint64 seconds = std::max<qint64>(0, std::min(expires_at - now,
+            expires_at - earliest_expiry + (remaining_ms + 999) / 1000));
+        const QString duration = QStringLiteral("%1:%2").arg(seconds / 60, 2, 10, QLatin1Char('0'))
+                                                       .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+        label->setText(seconds > 0 ? DigiDollarSendWidget::tr("Expires in %1").arg(duration)
+                                   : DigiDollarSendWidget::tr("Expired"));
+    }
 }
 
 void PaymasterSendWidget::selectOfferCard(int index, bool manual)
@@ -2898,6 +2947,7 @@ void PaymasterSendWidget::renderExcludedOfferCards()
                                : DigiDollarSendWidget::tr("Not selectable · insufficient balance or invalid change"));
         const QString provider_id = QString::fromStdString(offer.find_value("provider_id").get_str());
         add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)))->setToolTip(provider_id);
+        layout->addWidget(OfferCountdownLabel(card, offer.find_value("expires_at").getInt<qint64>()));
         const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
         const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
         add_label(DigiDollarSendWidget::tr("Recipient receives: %1").arg(formatCents(payment)));
@@ -3012,20 +3062,24 @@ void PaymasterSendWidget::renderOfferCards()
         heading->addWidget(choice);
         heading->addWidget(title, 1);
         if (index == 0) {
-            auto* recommended = add_label(DigiDollarSendWidget::tr("Suggested for checking"));
+            auto* recommended = add_label(DigiDollarSendWidget::tr("Recommended"));
             recommended->setObjectName("paymasterRecommendedOffer");
             recommended->setProperty("feeChoiceBadge", true);
             recommended->setProperty("offerCardText", false);
-            recommended->setToolTip(DigiDollarSendWidget::tr("Lowest service fee among providers without a first failed attempt, when available. Local history is advisory; availability is checked before signing."));
+            recommended->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+            const bool cheaper_deprioritized = std::any_of(offers.begin(), offers.end(), [&](const UniValue& other) {
+                return other.find_value("service_fee_cents").getInt<qint64>() < offer.find_value("service_fee_cents").getInt<qint64>();
+            });
+            recommended->setToolTip(cheaper_deprioritized
+                ? DigiDollarSendWidget::tr("Lowest service fee among selectable offers without an earlier incomplete attempt. Cheaper offers are ranked lower because an earlier attempt did not complete.")
+                : DigiDollarSendWidget::tr("Currently the lowest service fee among selectable offers for this payment."));
             heading->addWidget(recommended);
         }
         layout->addLayout(heading);
         auto* identity = add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)));
         identity->setToolTip(provider_id);
         layout->addWidget(identity);
-        layout->addWidget(add_label(DigiDollarSendWidget::tr("Listed until: %1")
-            .arg(QDateTime::fromSecsSinceEpoch(offer.find_value("expires_at").getInt<qint64>())
-                     .toLocalTime().toString(Qt::ISODate))));
+        layout->addWidget(OfferCountdownLabel(card, offer.find_value("expires_at").getInt<qint64>()));
         const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
         const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
         const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
