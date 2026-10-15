@@ -7479,6 +7479,60 @@ void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
     QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().contains("provider may keep its offer reservation until expiry"));
 }
 
+void PaymasterWidgetTests::paymasterManualSubmitConfirmation_data()
+{
+    QTest::addColumn<QString>("decision");
+    for (const char* decision : {"approve", "decline", "wallet_change", "privacy", "stale", "paused"})
+        QTest::newRow(decision) << QString::fromLatin1(decision);
+}
+
+void PaymasterWidgetTests::paymasterManualSubmitConfirmation()
+{
+    QFETCH(QString, decision);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    int submissions{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "processpaymastersubmits") ++submissions;
+        throw std::runtime_error("test response unavailable");
+        return UniValue{};
+    });
+    panel->setMutationSnapshotsAvailableForTesting(true, true, true);
+    UniValue running;
+    QVERIFY(running.read(R"({"wallet_eligible":true,"enabled":true,"ready":true,"running":true,
+        "wallet_locked":false,"operation_mode":"manual","service_state":"manual","readiness_errors":[]})"));
+    panel->setReadinessStatusForTesting(running);
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    for (int i = 0; i < pages->count(); ++i) pages->widget(i)->setEnabled(true);
+    auto* action = panel->findChild<QPushButton*>("paymasterProcessOneSubmit");
+    QVERIFY(action);
+    action->setEnabled(true);
+    bool reviewed{false};
+    QTimer::singleShot(0, panel.get(), [&] {
+        auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        reviewed = true;
+        QVERIFY(!action->isEnabled());
+        if (decision == "wallet_change") panel->setWalletModel(nullptr);
+        else if (decision == "privacy") panel->setPrivacy(true);
+        else if (decision == "stale") panel->setMutationSnapshotsAvailableForTesting(false, false, false);
+        else if (decision == "paused") {
+            running.pushKV("running", false);
+            panel->setReadinessStatusForTesting(running);
+        }
+        dialog->done(decision == "decline" ? QMessageBox::Cancel : QMessageBox::Yes);
+    });
+    // The injected RPC error must not open a second modal warning.
+    QTimer close_error;
+    connect(&close_error, &QTimer::timeout, panel.get(), [] {
+        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+            if (box->icon() == QMessageBox::Warning) box->accept();
+    });
+    close_error.start(5);
+    action->click();
+    QVERIFY(reviewed);
+    QCOMPARE(submissions, decision == "approve" ? 1 : 0);
+}
+
 void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding_data()
 {
     QTest::addColumn<bool>("pause");

@@ -71,6 +71,8 @@ private Q_SLOTS:
     void paymasterInjectedRpcCoversConfigurationWorkflows();
     void paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflows();
     void paymasterManualActivityUsesExpectedRpcAndReadableStates();
+    void paymasterManualSubmitConfirmation_data();
+    void paymasterManualSubmitConfirmation();
     void paymasterFinancesAndBackupWorkflow();
     void paymasterFinanceOperatorPresentation_data();
     void paymasterFinanceOperatorPresentation();

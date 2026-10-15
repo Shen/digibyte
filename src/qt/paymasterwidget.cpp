@@ -12930,21 +12930,25 @@ private:
                 tr("Processing Paymaster submissions"))) {
             return;
         }
-        if (!hasCompleteMutationSnapshots() || !m_core_running ||
+        if (m_busy || !hasRpcTransport() || !hasCompleteMutationSnapshots() || !m_core_running ||
             m_core_locked) {
             m_activity_action_result->setText(tr(
                 "No submission was processed because the current provider snapshots or unlocked runtime state are incomplete."));
             updateProviderButtons();
             return;
         }
-        if (askPlainTextQuestion(
+        const auto generation = m_wallet_generation;
+        setRpcBusyState(true);
+        const auto answer = askPlainTextQuestion(
                 this, tr("Process one submitted Paymaster payment?"),
                 tr("Core will validate one waiting client-signed submission. If it exactly "
                    "matches the durable authorization, this action may sign provider inputs, "
                    "spend reserved DGB within your safety policy, and broadcast the transaction.\n\n"
-                   "Continue?")) != QMessageBox::Yes) {
-            return;
-        }
+                   "Continue?"));
+        if (generation != m_wallet_generation) return;
+        setRpcBusyState(false);
+        if (answer != QMessageBox::Yes || m_privacy || !hasRpcTransport() ||
+            !hasCompleteMutationSnapshots() || !m_core_running || m_core_locked) return;
         call("processpaymastersubmits", {}, true, m_activity_output,
              [this](const UniValue& result) {
                  m_activity_action_result->setText(
