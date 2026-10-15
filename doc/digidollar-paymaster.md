@@ -233,6 +233,7 @@ methods are not an alternative way to bypass their authorization boundaries.
 | Liquidity | `setpaymasterliquiditypolicy`, `getpaymasterliquiditystatus`, `preparepaymasterpool`, `rebalancepaymasterpool`, `getpaymasterpoolinfo` |
 | Finance/reservations | `getpaymasterfinancestatus`, `listpaymasterreservations`, `cancelpaymasterquote` |
 | Retirement/backup | `releasepaymastercapital`, `withdrawpaymastercarrier`, `acknowledgepaymasterproviderbackup`, `adoptpaymasterbackup` |
+| Cancel uncreated reserve funding | `cancelpaymastermaintenance` (review exact operation IDs; execution also disables automatic refill) |
 | Discovery/reliability | `listpaymasters`, `getpaymasteroffers`, `getpaymasterreputation`, `clearpaymasterreputation` |
 | Client | `getpaymasterclientinfo`, `senddigidollar`, `getdigidollarsendsession`, `listdigidollarsendsessions`, `resolvepaymastersession` |
 | Low-level protocol | `requestpaymasterquote`, `walletprocesspaymasterpsbt`, `submitpaymasterdigidollar`, `processpaymasterresult`, `processpaymastersubmits`, `processpaymasterrequests` |

@@ -225,3 +225,9 @@ been confirmed, not that funds were released. Confirmed Stop/Pause blocks refill
 execution while retaining its preferences; completing retirement also turns off
 automatic refill and revokes its fee approval. Failed stop attempts remove their
 temporary priority rather than leaving an invisible permanent pause.
+
+To cancel only uncreated reserve funding without retiring the provider, use
+**Cancel uncreated reserve work** in the management-task card. It previews the
+selected DGB/DD operations and turns automatic refill off on confirmation.
+Existing reserves and signed transactions remain protected. GUI and headless
+RPC steps are documented under [cancellation](digidollar-paymaster-pool-setup.md#cancellation-and-verification).

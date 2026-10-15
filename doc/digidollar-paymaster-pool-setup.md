@@ -79,6 +79,33 @@ protected by known signatures or ambiguous broadcast. Manual locks and restore
 guards remain authoritative. Use [capital release](paymaster-capital-release.md)
 for retirement.
 
+The management-task card offers **Cancel uncreated reserve work** for pending
+DGB/DD funding, including recurring refill and finite setup. Review the exact
+operations and unused fee allowance before confirming. Core atomically closes
+only those operations and turns recurring refill off to prevent recreation.
+Existing reserves, provider enablement/autostart, signed work and payments stay
+unchanged. Re-enable refill explicitly in its settings when wanted. The separate
+setup fee-review workflow can still cancel and replace a finite setup plan.
+
+For CLI/RPC, select `operation_id` values from
+`getpaymasteroperatorinfo.provider.active_operations`, then preview:
+
+```json
+{"method":"cancelpaymastermaintenance","params":[{"operation_ids":["<operation_id>"]}]}
+```
+
+Inspect `operation_ids`, `plan_id` and `released_fee_budget_satoshis`. Submit the
+same selection with `execute:true` and that exact `plan_id` to confirm. A changed
+plan requires a fresh review. Withdrawal, signed and ambiguous operations cannot
+be cancelled this way. Core checks wallet transactions as well as the journal;
+a missing journal transaction ID alone does not establish safe cancellation.
+The command signs/sends nothing and requires no wallet unlock. A lost execution
+reply requires a fresh status read, not an assumption of success.
+
+Task names follow the current saved operation kind and asset, not a preceding
+GUI action. No remaining active work clears a stale waiting/blocked task even
+when reserve capacity is still zero; cancellation does not imply ready reserves.
+
 Functional coverage: `wallet_paymaster_pool_setup.py`,
 `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_operator.py`,
 `wallet_paymaster_readiness.py`. Wallet store/identity tests cover persisted

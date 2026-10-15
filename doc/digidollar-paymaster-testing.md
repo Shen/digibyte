@@ -122,6 +122,7 @@ is not that many independent feature cases.
 | Signed recovery and budget retention | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`. |
 | Finite setup, whole-slot refill, below-target readiness | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`. |
 | Restore/adoption/retirement and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
+| Selected uncreated funding cancellation | `paymaster_wallet_identity_tests/maintenance_cancellation*`: DGB/DD setup/refill, exact selection/preview, lost-reply signature evidence, write rollback, commit-failure checkpoint protection, provider-work exclusion and retained signed work. Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: review/decline, wallet/privacy switches, malformed receipts, unrelated old titles and zero-capacity cancellation. |
 | GUI cancellation, affordability, async snapshots, setup | `src/qt/test/paymasterwidgettests.cpp`, DigiDollar/overview Qt fixtures. |
 | Ordinary behavior and historical migration | DGB/DD wallet tests plus the historical compatibility group below. |
 

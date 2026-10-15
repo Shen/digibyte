@@ -994,6 +994,7 @@ Authentication Methods:
 | `getdigidollarsendsession` / `resolvepaymastersession` | `wallet/rpc/paymaster_client.cpp` | Inspect, retry, fall back, or recover a session safely |
 | `createpaymasteridentity` / `setpaymasterpolicy` / `preparepaymasterpool` | `wallet/rpc/paymaster_provider.cpp` | Configure a wallet-scoped provider and its isolated pools |
 | `setpaymasterliquiditypolicy` / `getpaymasterliquiditystatus` | `wallet/rpc/paymaster_provider.cpp` | Configure finite automatic pool-maintenance targets/budgets and inspect confirmed, pending, or missing capacity |
+| `cancelpaymastermaintenance` | `wallet/rpc/paymaster_provider.cpp`, `wallet/paymasterprovider.cpp` | Review and atomically cancel selected uncreated reserve funding and disable recurring refill; retain signed/ambiguous work and existing reserves |
 | `withdrawpaymastercarrier` | `wallet/rpc/paymaster_provider.cpp` | Preview and execute wallet-owned carrier-excess consolidation or release one stopped-provider carrier slot |
 | `createrestrictedpaymasterdescriptor` | `wallet/rpc/paymaster_provider.cpp` | Retained Restricted descriptor endpoint; new issuance is disabled |
 | `startpaymaster` / `stoppaymaster` / `getpaymasterinfo` | `wallet/rpc/paymaster_runtime.cpp`, `wallet/rpc/paymaster_provider.cpp` | Operate and inspect an explicitly enabled provider |

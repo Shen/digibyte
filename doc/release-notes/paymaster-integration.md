@@ -26,6 +26,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   required after restart; no saved passphrase for automatic restart.
 - Guarded backup restoration, independent rollback checkpoint, reviewed adoption
   and safe retirement/capital release.
+- Management task titles follow saved DGB/DD funding or withdrawal work and
+  clear stale waiting states after cancellation. GUI and
+  `cancelpaymastermaintenance` provide reviewed cancellation of uncreated
+  reserve funding, atomically disabling refill while preserving signed work.
 - Stop and retirement take priority over new automatic/provider work while
   allowing the current work owner to finish. Priority is scoped to the request;
   timeout or failed persistence cannot silently confirm a stop or leave a block.

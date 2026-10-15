@@ -857,6 +857,10 @@ units share internal helpers. `paymasterdb.cpp` persists wallet records;
 - Produces user input-control proofs without exposing private key material.
 
 ### src/wallet/paymasterprovider.{h,cpp}
+- `CancelPaymasterMaintenance` provides wallet-bound, reviewed cancellation of
+  selected uncreated DGB/DD setup/refill operations. It rejects signing evidence
+  in the wallet and journal, atomically disables refill and releases only the
+  selected fee allowances; exposed by `cancelpaymastermaintenance` in wallet RPC.
 - `AdoptPaymasterBackup` and `WalletBatch::AdoptPaymasterCheckpoint` implement
   reviewed current-backup adoption using the full-capital read-only safeguards.
   `adoptpaymasterbackup` is registered in wallet RPC and CLI JSON conversion;
@@ -1064,6 +1068,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 Provider setup, settings, status, funds, activity and finance UI backed by
 Core/shared setup. Service readiness is separate from maintenance progress.
+Saved task titles follow operation kind/asset; completed or cancelled work
+cannot retain an unrelated action title or a blocked card with no active work.
+The shared task card previews cancellation of uncreated setup/refill work;
+wallet/privacy generation checks and exact Core receipts bind approval/results.
 See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h
