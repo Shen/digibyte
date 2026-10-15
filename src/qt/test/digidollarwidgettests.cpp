@@ -109,6 +109,7 @@
 #include <QRadioButton>
 #include <QListWidget>
 #include <QTableWidget>
+#include <QTranslator>
 #include <QStyleOptionViewItem>
 #include <QTreeWidget>
 #include <QTextDocumentFragment>
@@ -3413,15 +3414,68 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
 
     ModalOverlay overlay(true, nullptr);
     const auto old_header = QDateTime::currentDateTime().addDays(-30);
+    const auto progress = overlay.findChild<QLabel*>("percentageProgress");
+    const auto remaining = overlay.findChild<QLabel*>("numberOfBlocksLeft");
+    const auto speed = overlay.findChild<QLabel*>("progressIncreasePerH");
+    const auto eta = overlay.findChild<QLabel*>("expectedTimeLeft");
+    QCOMPARE(progress->text(), QStringLiteral("Waiting for header information…"));
+    // Reproduce the screenshot exactly: startup reports only genesis, then a
+    // saturated transaction estimate arrives before any usable header update.
+    overlay.setKnownBestHeight(0, old_header, false);
+    overlay.tipUpdate(0, old_header, 1.0);
+    QCOMPARE(progress->text(), QStringLiteral("Waiting for header information…"));
+    QCOMPARE(remaining->text(), QStringLiteral("Not known yet"));
+    QCOMPARE(overlay.findChild<QLabel*>("newestBlockDate")->text(), QStringLiteral("No blocks processed yet"));
+    QCOMPARE(speed->text(), QStringLiteral("—"));
+    QCOMPARE(eta->text(), QStringLiteral("Not enough information yet"));
     overlay.setKnownBestHeight(20000, old_header, false);
     overlay.tipUpdate(0, old_header.addDays(-1), 1.0);
-    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("Unknown"));
-    QVERIFY(overlay.findChild<QLabel*>("expectedTimeLeft")->text().contains("Syncing Headers"));
-    overlay.setKnownBestHeight(21000, QDateTime::currentDateTime(), false);
+    QCOMPARE(progress->text(), QStringLiteral("Synchronizing headers: 20000 processed"));
+    overlay.setKnownBestHeight(21000, old_header, false);
+    QCOMPARE(progress->text(), QStringLiteral("Synchronizing headers: 21000 processed"));
+    overlay.setKnownBestHeight(22000, QDateTime::currentDateTime(), false);
+    overlay.tipUpdate(20000, QDateTime::currentDateTime(), 1.0);
+    QCOMPARE(progress->text(), QStringLiteral("Blocks processed: 20000 of 22000"));
+    QCOMPARE(remaining->text(), QStringLiteral("2000"));
+    QCOMPARE(eta->text(), QStringLiteral("Not enough information yet"));
     overlay.tipUpdate(20000, QDateTime::currentDateTime(), 0.5);
-    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("50.00%"));
-    overlay.setKnownBestHeight(22000, old_header, true);
-    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("Unknown"));
+    QCOMPARE(progress->text(), QStringLiteral("50.00%"));
+    QCOMPARE(eta->text(), QStringLiteral("Calculating…"));
+    overlay.setKnownBestHeight(22001, QDateTime::currentDateTime(), false);
+    overlay.tipUpdate(21000, QDateTime::currentDateTime(), 0.6);
+    QVERIFY(speed->text().endsWith("%")); // Header updates retain the sampling history.
+    overlay.setKnownBestHeight(23000, old_header, true);
+    QCOMPARE(progress->text(), QStringLiteral("Pre-synchronizing headers: 23000 processed"));
+    QCOMPARE(speed->text(), QStringLiteral("—"));
+    overlay.tipUpdate(22001, QDateTime::currentDateTime(), 1.0);
+    QCOMPARE(progress->text(), QStringLiteral("100.00%"));
+    QCOMPARE(remaining->text(), QStringLiteral("0"));
+    // A block notification can precede its corresponding header notification.
+    overlay.tipUpdate(22002, QDateTime::currentDateTime(), 1.0);
+    QCOMPARE(progress->text(), QStringLiteral("Waiting for header information…"));
+
+    if (qEnvironmentVariableIsSet("DIGIBYTE_QT_SYNC_QA_DIR")) {
+        QTranslator translator;
+        const QString directory = qEnvironmentVariable("DIGIBYTE_QT_SYNC_QA_DIR");
+        QVERIFY(translator.load(directory + "/digibyte_de.qm"));
+        struct TranslationGuard {
+            QTranslator& translator;
+            explicit TranslationGuard(QTranslator& value) : translator(value) { QCoreApplication::installTranslator(&translator); }
+            ~TranslationGuard() { QCoreApplication::removeTranslator(&translator); }
+        } translation_guard{translator};
+        ModalOverlay startup(true, nullptr);
+        startup.resize(1000, 480);
+        startup.tipUpdate(0, old_header, 1.0);
+        QCOMPARE(startup.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("Warte auf Header-Informationen…"));
+        QVERIFY(startup.grab().save(directory + "/startup.png"));
+        startup.setKnownBestHeight(20000, old_header, false);
+        QVERIFY(startup.grab().save(directory + "/headers.png"));
+        startup.resize(640, 480);
+        QVERIFY(startup.grab().save(directory + "/headers-narrow.png"));
+        for (const auto* label : {startup.findChild<QLabel*>("percentageProgress"), startup.findChild<QLabel*>("expectedTimeLeft")}) {
+            QVERIFY(label->width() >= label->fontMetrics().horizontalAdvance(label->text()));
+        }
+    }
 
     const qint64 health_refresh_ms = whileWalletBusy([&] {
         auto* overview = tab.findChild<DigiDollarOverviewWidget*>();

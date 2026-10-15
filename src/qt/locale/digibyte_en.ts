@@ -1676,6 +1676,38 @@ The migration process will create a backup of the wallet before migrating. This 
         <source>Unknown. Pre-syncing Headers (%1, %2%)…</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>No blocks processed yet</source>
+        <translation>No blocks processed yet</translation>
+    </message>
+    <message>
+        <source>Waiting for header information…</source>
+        <translation>Waiting for header information…</translation>
+    </message>
+    <message>
+        <source>Blocks processed: %1 of %2</source>
+        <translation>Blocks processed: %1 of %2</translation>
+    </message>
+    <message>
+        <source>Calculating…</source>
+        <translation>Calculating…</translation>
+    </message>
+    <message>
+        <source>Not known yet</source>
+        <translation>Not known yet</translation>
+    </message>
+    <message>
+        <source>Not enough information yet</source>
+        <translation>Not enough information yet</translation>
+    </message>
+    <message>
+        <source>Synchronizing headers: %1 processed</source>
+        <translation>Synchronizing headers: %1 processed</translation>
+    </message>
+    <message>
+        <source>Pre-synchronizing headers: %1 processed</source>
+        <translation>Pre-synchronizing headers: %1 processed</translation>
+    </message>
 </context>
 <context>
     <name>OpenURIDialog</name>

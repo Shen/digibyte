@@ -4,7 +4,11 @@
   longer wait for header validation to release `cs_main`. During contention the
   display remains conservatively unknown/syncing; all validation and spending
   checks are unchanged. While headers are still behind, the synchronization
-  overlay no longer presents the transaction estimate as 100% complete.
+  overlay no longer presents the transaction estimate as 100% complete. This
+  includes startup before the first header notification: it shows an explicit
+  waiting state, then processed header counts. Saturated estimates with blocks
+  still outstanding show block counts. German text and narrow layouts are
+  supported; genesis is not presented as the last newly processed block.
 
 ## Clearer offer recommendation and expiry (2026-10-15)
 

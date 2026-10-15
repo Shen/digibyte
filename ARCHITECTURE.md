@@ -14,7 +14,10 @@ the snapshot unavailable: cold tip getters return unknown, and DigiDollar
 polling/transaction notifications conservatively treat the GUI as syncing.
 Core tip notifications continue to populate the existing caches. These display
 hints never authorize spending or replace Core IBD/consensus checks. Header
-synchronization suppresses misleading transaction-based completion estimates.
+synchronization displays the processed header count; genesis-only startup shows
+an explicit waiting state. A saturated transaction estimate with blocks still
+outstanding shows processed/known block counts instead of 100%. Timing samples
+are reset between phases, while normal block-download estimates are retained.
 
 Qt DGB Max/Send queries the existing wallet eligible-input balance on demand,
 including provider-pool and ordinary coin-lock exclusions. The cached ownership

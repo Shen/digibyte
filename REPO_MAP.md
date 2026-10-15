@@ -1467,6 +1467,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 - `digibytestrings.cpp` → translation strings registered with Qt's translation system
 - `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks. DGB Max/Send queries current eligible inputs; a shared background balance snapshot supplies Overview, Send and Coin Control with available, Paymaster-reserved and other unavailable amounts, preserving ownership totals. A five-second refresh detects reservations without new blocks, with single-flight reads and stale-result rejection; covered by `qt/test/wallettests.cpp`.
 - `clientmodel.cpp` → bridges node state (peers, blocks, sync progress) to Qt model; cold tip reads and GUI IBD polling use nonblocking snapshots, treating contention as unknown/syncing
+- `modaloverlay.cpp` → synchronization display distinguishes waiting for headers, processed header counts, and block verification; unavailable estimates never imply completion
 - `sendcoinsdialog.cpp` → send coins dialog with address, amount, fee controls
 - `receivecoinsdialog.cpp` → generate receive addresses with QR codes
 - `transactiontablemodel.cpp` → displays transaction history in table view

@@ -1119,6 +1119,38 @@ Das Signieren ist nur mit Adressen vom Typ 'Legacy' möglich.</translation>
         <source>Unknown. Syncing Headers (%1, %2%)...</source>
         <translation>Unbekannt. Synchronisiere Headers (%1, %2%)...</translation>
     </message>
+    <message>
+        <source>No blocks processed yet</source>
+        <translation>Noch keine Blöcke verarbeitet</translation>
+    </message>
+    <message>
+        <source>Waiting for header information…</source>
+        <translation>Warte auf Header-Informationen…</translation>
+    </message>
+    <message>
+        <source>Blocks processed: %1 of %2</source>
+        <translation>Blöcke verarbeitet: %1 von %2</translation>
+    </message>
+    <message>
+        <source>Calculating…</source>
+        <translation>Wird berechnet…</translation>
+    </message>
+    <message>
+        <source>Not known yet</source>
+        <translation>Noch nicht bekannt</translation>
+    </message>
+    <message>
+        <source>Not enough information yet</source>
+        <translation>Noch nicht genügend Daten</translation>
+    </message>
+    <message>
+        <source>Synchronizing headers: %1 processed</source>
+        <translation>Header-Synchronisation: %1 verarbeitet</translation>
+    </message>
+    <message>
+        <source>Pre-synchronizing headers: %1 processed</source>
+        <translation>Header-Vorsynchronisation: %1 verarbeitet</translation>
+    </message>
 </context>
 <context>
     <name>OpenURIDialog</name>
