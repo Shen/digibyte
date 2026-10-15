@@ -1,5 +1,20 @@
 # Paymaster integration release notes
 
+## Refill complete slots with limited funds (2026-10-15)
+
+Automatic refill can now fund fewer complete reserve slots when ordinary
+wallet funds do not cover the full missing target. For example, 0.30 DGB can
+fund one missing 0.20-DGB slot plus its fee instead of waiting for enough
+capital for all three slots. Individual slot amounts and the saved target
+remain unchanged. Pending batches confirm before the next batch is planned;
+each batch retains normal wallet checks and finite maintenance-fee limits.
+The exact smaller plan is persisted before signing for restart recovery.
+
+The Paymaster page and liquidity RPC distinguish required reserve capital,
+available ordinary funds and missing capital; network fees are additional.
+Protected reserves, signed work and existing provider readiness gates retain
+their protection. No base-wallet funding or consensus code is changed.
+
 ## Drained reserves and cached offers (2026-10-15)
 
 Automatic refill now distinguishes a definite shortage of free wallet capital

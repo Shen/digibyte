@@ -348,6 +348,22 @@ pending blockchain transaction. Qt shows the funding requirement instead of
 indeterminate preparation progress. Signed work and protected reserves retain
 their existing handling.
 
+Refill can proceed in smaller batches of **complete reserve slots**. For
+example, if three operational slots of 0.20 DGB are missing and 0.30 DGB is
+available outside the protected pool, it creates one 0.20-DGB slot if the
+remaining funds cover the network fee. It never divides the available funds
+among undersized slots. Admission slots take priority within each asset;
+each DD carrier still holds 1.00 DD. The saved target remains three, and the
+remaining two slots are filled when sufficient funds are available. Each batch
+must confirm before the next is planned; all batches share the existing
+rolling fee budgets. The existing provider readiness gates still apply.
+
+When waiting for funds, the Paymaster page shows the capital needed for the
+missing target, ordinary available funds and their difference. Fees are
+additional. Thus a positive ordinary DGB balance can coexist with a refill
+shortfall: it may cover only some slots, or not even one slot plus its fee.
+Reserved admission capital is not ordinary funding for operational slots.
+
 The normal Overview action changes with the current cause: start/resume,
 unlock, review a limit, review reserves, inspect progress or open diagnostics.
 An unknown/incomplete result never shows a start action. A locked wallet can

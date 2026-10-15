@@ -960,6 +960,29 @@ void PaymasterWidgetTests::paymasterLiquidityMaintenanceStatesAreReadable()
         QCOMPARE(maintenance_card->property("statusKind").toString(), QStringLiteral("action"));
         QVERIFY(approve->isHidden()); // Already approved; adding funds needs no new fee approval.
         QCOMPARE(refill_changes, 0);
+
+        auto liquidity = PaymasterLiquidityStatus("replenishing_liquidity", true, true, 1);
+        UniValue funding{UniValue::VOBJ};
+        funding.pushKV("required_dgb_satoshis", 60000000);
+        funding.pushKV("available_dgb_satoshis", 30000000);
+        funding.pushKV("shortfall_dgb_satoshis", 30000000);
+        funding.pushKV("required_dd_cents", 300);
+        funding.pushKV("available_dd_cents", 100);
+        funding.pushKV("shortfall_dd_cents", 200);
+        liquidity.pushKV("refill_funding", funding);
+        tab.setPaymasterLiquidityStatusForTesting(liquidity);
+        QVERIFY(next_step->text().contains("fewer complete reserve slots"));
+        QVERIFY(next_step->text().contains("never funded with partial amounts"));
+        QVERIFY(next_step->text().contains("unchanged target"));
+        if (QString::fromLatin1(reason) == QLatin1String("PAYMASTER_POOL_WAITING_DGB")) {
+            QVERIFY(next_step->text().contains("0.60000000 DGB"));
+            QVERIFY(next_step->text().contains("0.30000000 DGB"));
+            QVERIFY(next_step->text().contains("Network fees are additional"));
+        } else {
+            QVERIFY(next_step->text().contains("3.00 DD"));
+            QVERIFY(next_step->text().contains("Missing capital: 2.00 DD"));
+        }
+        QCOMPARE(refill_changes, 0);
     }
 
     tab.setPaymasterLiquidityStatusForTesting(PaymasterLiquidityStatus(

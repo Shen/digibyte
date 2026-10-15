@@ -8407,6 +8407,27 @@ private:
                 .arg(model_text, minimum, maximum, pricing).arg(m_quote_ttl->value()).arg(network_fee, persistence));
     }
 
+    QString refillFundingExplanation(const QString& error) const
+    {
+        const auto& funding = m_overview_liquidity_snapshot.find_value("refill_funding");
+        const bool dgb = error == QLatin1String("PAYMASTER_POOL_WAITING_DGB");
+        qint64 required{0}, available{0}, shortfall{0};
+        if (GetInt64Field(funding, dgb ? "required_dgb_satoshis" : "required_dd_cents", required) &&
+            GetInt64Field(funding, dgb ? "available_dgb_satoshis" : "available_dd_cents", available) &&
+            GetInt64Field(funding, dgb ? "shortfall_dgb_satoshis" : "shortfall_dd_cents", shortfall) &&
+            required >= 0 && available >= 0 && shortfall == std::max<qint64>(0, required - available)) {
+            const QString amounts = dgb
+                ? tr("DGB capital to reach the saved reserve target: %1 DGB. Confirmed funds available outside the protected reserves: %2 DGB. Missing capital: %3 DGB. Network fees are additional.")
+                      .arg(dgbAmount(required)).arg(dgbAmount(available)).arg(dgbAmount(shortfall))
+                : tr("DD capital to reach the saved reserve target: %1 DD. Funds available outside the protected reserves: %2 DD. Missing capital: %3 DD. DGB is also required for network fees.")
+                      .arg(PaymasterFormatDD(required)).arg(PaymasterFormatDD(available)).arg(PaymasterFormatDD(shortfall));
+            return amounts + QStringLiteral("\n") + tr("Automatic refill creates fewer complete reserve slots when funds cannot cover all missing slots and their fees. It waits for confirmation before continuing toward the unchanged target. Individual slots are never funded with partial amounts. The saved fee limits still apply. No transaction has been created for the remaining refill.");
+        }
+        return dgb
+            ? tr("Not enough confirmed, spendable DGB outside the protected reserves to refill them. Add DGB for the missing reserve capital and its network fee. Smaller refills are attempted within the saved limits; no refill transaction has been created.")
+            : tr("Not enough spendable DD outside the protected reserves to refill them. Add DD for the missing reserves and DGB for the network fee. Smaller refills are attempted within the saved limits; no refill transaction has been created.");
+    }
+
     QString readinessExplanation(const QString& error) const
     {
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_RETIRED"))
@@ -8451,10 +8472,9 @@ private:
             return tr("Review and explicitly approve finite automatic liquidity-maintenance limits under Operating capital.");
         if (error == QLatin1String("PAYMASTER_PAYMENT_CAPACITY_IN_USE"))
             return tr("Operating capacity is temporarily in use. Automatic refill stays enabled.");
-        if (error == QLatin1String("PAYMASTER_POOL_WAITING_DGB"))
-            return tr("Not enough confirmed, spendable DGB outside the protected reserves to refill them. Add DGB for the missing reserve capital and its network fee. Automatic refill retries within the saved limits; no refill transaction has been created.");
-        if (error == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS"))
-            return tr("Not enough spendable DD outside the protected reserves to refill them. Add DD for the missing reserves and DGB for the network fee. Automatic refill retries within the saved limits; no refill transaction has been created.");
+        if (error == QLatin1String("PAYMASTER_POOL_WAITING_DGB") ||
+            error == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS"))
+            return refillFundingExplanation(error);
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"))
             return tr("Wait for the automatically prepared replacement liquidity to confirm.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") ||

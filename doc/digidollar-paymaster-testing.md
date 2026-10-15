@@ -5346,3 +5346,59 @@ For subsequent manual acceptance, drain only ordinary funds in disposable
 Regtest wallets, consume the last operational reserve, and check that old
 announcements expire without renewal. Confirm newly supplied ordinary funding
 and verify automatic refill resumes within the unchanged approval.
+
+## Partial refill with complete slots (2026-10-15)
+
+Targeted MSVC 14.43/Qt 5.15.10 checks passed in the isolated
+`build_msvc/paymaster-refresh-check/drained-reserves` test executables:
+
+- Four wallet cases, 141 assertions: a 0.30-DGB ordinary input funds exactly
+  one whole 0.20-DGB slot instead of three; after confirmation and added funds,
+  the remaining two whole slots are created. Transaction and rolling fee limits
+  still reject excess cost. Protected admission outputs remain unspent, and a
+  lost receipt recovers the exact partial plan without a duplicate transaction.
+- A DD carrier refill with one ordinary DD and a protected carrier creates one
+  complete 1-DD admission carrier, preserving admission priority and leaving
+  the other missing slots unfilled. The status reports ordinary funds separately
+  from protected reserves. Empty-wallet retries and obsolete-plan recovery pass.
+- Three Qt data cases in two functions: liquidity-maintenance text and operator
+  work transitions in both themes. Tests cover capital/shortfall amounts, fees
+  being additional, whole-slot wording, the unchanged target and read-only
+  navigation. The native Qt checks ran on a separate test desktop.
+- Six affected translation units compiled against existing Release libraries;
+  both isolated test executables linked and `git diff --check` passed.
+
+These tests exercise local construction, signing, wallet commit and journal
+reconciliation. They do not replace a networked Regtest confirmation/restart
+test or a full build/full suite. Live nodes, wallets and installed programs were
+not changed. Relevant guidance was the root/src instructions, contribution and
+developer notes, DigiDollar architecture/maps, Qt/test documentation, and
+formatting/translation rules.
+
+For manual acceptance in disposable Regtest wallets, leave enough ordinary DGB
+for one complete missing operational slot and its fee. Check one pending slot
+and two still missing, mine its confirmation, then add and confirm enough funds
+for the remainder. Verify the saved target and slot amounts never change,
+protected admission funds remain untouched, and later batches still obey the
+rolling fee ceilings. Repeat with only one ordinary DD available for missing
+carriers. A restart during a pending batch must recover it without issuing a
+second refill for those same slots. Existing readiness gates remain required.
+
+After a normal build, run the focused checks from the repository root:
+
+```powershell
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/partial_dgb_refill_funds_whole_slots_and_preserves_recovery:paymaster_wallet_identity_tests/partial_carrier_refill_preserves_whole_slots_and_admission_priority:paymaster_wallet_identity_tests/empty_wallet_refill_waits_for_funds_without_duplicate_plans:paymaster_wallet_identity_tests/obsolete_refill_release_recovers_transactions_first' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Partial refill wallet checks failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+foreach ($case in @('paymasterLiquidityMaintenanceStatesAreReadable', 'paymasterOperatorWorkTransitions')) {
+    $env:DIGIBYTE_QT_TEST_FUNCTION = $case
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Partial refill Qt check failed: $case" }
+}
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE
+```
+
+Use the normal Windows prerequisites/build command above or
+`build_msvc/README.md`. A full build/full suite takes minutes to tens of minutes;
+these focused checks take seconds once built. Require exit 0, all four wallet
+cases and all three Qt data cases passing, with no selected case skipped.
