@@ -351,6 +351,19 @@ per-transaction/hour/day DGB fee limits. Manual pool operations and withdrawals
 bind execution to a preview so a stale plan cannot silently spend different
 resources.
 
+Recurring DGB and DD-carrier replenishment may reduce an unfunded batch to
+fewer whole outputs, preserving the admission-first order, per-slot values and
+saved targets. It uses ordinary unsigned DGB construction or the existing typed
+DD funding planner; normal signing, commit, protected-input exclusion and fee
+checks remain authoritative. An atomic maintenance-ledger write releases the
+old unsigned plan and reserves the exact smaller plan before signing. Already
+broadcast work is recovered, never resized. Pending replacements count toward
+the target and are confirmed before another missing batch is planned. Each
+batch consumes the existing transaction/hour/day maintenance budget.
+The optional `refill_funding` status object reports required capital for the
+missing slots, confirmed ordinary available DGB/spendable DD and their
+shortfalls; network fees are additional, not a quoted or authorized amount.
+
 Provider operation requires explicit wallet configuration and start. Automatic
 queue processing and optional autostart are separate settings. Wallet locking
 pauses signing; automatic service does not authorize client payments. Temporary

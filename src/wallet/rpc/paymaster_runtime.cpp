@@ -600,6 +600,14 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                 accept_new_requests = false;
                 state = ProviderServiceState::WAITING_FOR_READINESS;
                 first_error = "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE";
+            } else if (missing_dgb + missing_carriers > 0 &&
+                       admission_dgb.pending + operational_dgb.pending +
+                       admission_carriers.pending + operational_carriers.pending > 0) {
+                // A partial refill must confirm before planning the remainder.
+                // Pending outputs already count toward the saved targets.
+                accept_new_requests = false;
+                state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
+                first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
             } else if (missing_dgb + missing_carriers > 0) {
                 accept_new_requests = false;
                 if (!liquidity.have_liquidity_policy ||

@@ -40,6 +40,14 @@ Automatic replenishment reports a definite shortage of ordinary spendable
 capital separately from other transaction-construction failures. It retains
 the unsigned maintenance plan and its bounded approval for retry without
 unlocking protected reserves or bypassing normal wallet funding checks.
+If ordinary funds cannot cover the full missing target, recurring maintenance
+can create fewer complete slots, prioritizing admission slots within each
+asset. Slot values and saved targets remain unchanged. Before signing, the
+smaller exact output plan replaces the unsigned plan atomically in the
+maintenance journal; released history and all fee limits are retained. Pending
+slots count toward the target and confirm before the next batch is planned.
+Liquidity status optionally reports missing target capital, ordinary available
+funds and the capital shortfall, with network fees explicitly additional.
 
 Provider recovery separates the rolling 24-hour expenditure ledger from the
 lifetime of a signed transaction. A missing aged SPENT row may be validated

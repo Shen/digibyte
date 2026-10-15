@@ -885,6 +885,8 @@ or chain parameters.
   approval, and finite fee ceilings. `getpaymasterliquiditystatus` reports
   ready/pending/missing slots, maintenance state/accounting, carrier principal,
   and withdrawable carrier excess; `getpaymasterinfo` embeds that summary.
+  Optional `refill_funding` fields separate missing target capital, ordinary
+  available DGB/DD and capital shortfalls; network fees are additional.
 - Manual preparation and rebalancing return a policy/pool-bound `plan_id` that
   must be echoed for execution. They share the wallet provider-work guard with
   automatic maintenance, reject operational DGB slots below the advertised fee
@@ -895,6 +897,10 @@ or chain parameters.
   restartable DGB/carrier maintenance, creates only missing targets, and blocks
   new requests until confirmed capacity is available while still allowing safe
   completion of durable submissions.
+  Recurring refill can atomically replace an unsigned plan with fewer complete
+  slots when ordinary funds cannot cover all missing targets. Slot values,
+  admission-first order and fee budgets remain intact; pending batches confirm
+  before planning the remaining slots.
 - `withdrawpaymastercarrier` binds execution to the unchanged latest preview.
   `all_excess` retains exactly 1.00 DD in each replacement carrier and combines
   only wallet-owned excess under the maintenance budget; `release_slot` is a

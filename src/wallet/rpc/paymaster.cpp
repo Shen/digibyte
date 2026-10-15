@@ -1156,7 +1156,7 @@ UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletConte
 }
 
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
-                                       int64_t now)
+                                       int64_t now, CWallet* wallet)
 {
     using namespace DigiDollar::Paymaster;
     const ProviderLiquidityPolicy policy = readiness.have_liquidity_policy
@@ -1274,6 +1274,32 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
     result.pushKV("maintenance_fee_spent_last_day_satoshis", spent_day);
     result.pushKV("carrier_base_cents", carrier_base);
     result.pushKV("carrier_withdrawable_excess_cents", carrier_excess);
+    if (wallet && readiness.have_policy && missing > 0) {
+        // Capital only, not a fee quote or authorization. Pending replacements
+        // already count toward the targets and must not be requested twice.
+        int64_t required_dgb{0};
+        for (size_t i = 0; i < admission_dgb.missing; ++i) {
+            checked_add(required_dgb, MIN_ADMISSION_DGB_SATOSHIS);
+        }
+        for (size_t i = 0; i < operational_dgb.missing; ++i) {
+            checked_add(required_dgb, std::max<int64_t>(MIN_ADMISSION_DGB_SATOSHIS, operational_dgb_minimum));
+        }
+        const int64_t required_dd = 100 * (admission_carriers.missing + operational_carriers.missing);
+        LOCK(wallet->cs_wallet);
+        CCoinControl control;
+        control.m_min_depth = 1;
+        const CAmount available_dgb = AvailableCoins(*wallet, &control).GetTotalAmount();
+        const auto* dd_wallet = wallet->GetDDWallet();
+        const CAmount available_dd = dd_wallet ? dd_wallet->GetSpendableDDBalance() : 0;
+        UniValue funding{UniValue::VOBJ};
+        funding.pushKV("required_dgb_satoshis", required_dgb);
+        funding.pushKV("available_dgb_satoshis", available_dgb);
+        funding.pushKV("shortfall_dgb_satoshis", std::max<int64_t>(0, required_dgb - available_dgb));
+        funding.pushKV("required_dd_cents", required_dd);
+        funding.pushKV("available_dd_cents", available_dd);
+        funding.pushKV("shortfall_dd_cents", std::max<int64_t>(0, required_dd - available_dd));
+        result.pushKV("refill_funding", std::move(funding));
+    }
     result.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
     return result;
 }
@@ -2332,6 +2358,55 @@ GetProviderFinanceTransactionFee(CWallet& wallet,
     return DigiDollar::Paymaster::DGBSatoshis{debit - value_out};
 }
 
+// The caller holds the provider work guard and has reconciled existing work.
+// Replace only an unsigned plan, atomically retaining its released history and
+// reserving the exact smaller output set before any transaction is signed.
+static bool ReduceReplenishmentPlan(
+    CWallet& wallet,
+    const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
+    DigiDollar::Paymaster::ProviderMaintenanceRecord& operation,
+    size_t output_count,
+    std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    if (output_count == operation.outputs.size()) return true;
+    if (output_count == 0 || output_count > operation.outputs.size() ||
+        operation.state != ProviderMaintenanceState::PLANNED ||
+        !operation.transaction_id.IsNull() || operation.IsPreparation()) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_RESERVATION";
+        return false;
+    }
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderMaintenanceLedger ledger;
+    if (!batch.ReadPaymasterMaintenanceLedger(ledger)) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+        return false;
+    }
+    const auto original = std::find_if(ledger.records.begin(), ledger.records.end(),
+        [&](const ProviderMaintenanceRecord& record) { return record.operation_id == operation.operation_id; });
+    if (original == ledger.records.end() || original->state != ProviderMaintenanceState::PLANNED ||
+        !original->transaction_id.IsNull() || original->plan_id != operation.plan_id ||
+        original->outputs != operation.outputs || original->maximum_fee != operation.maximum_fee) {
+        error = "PAYMASTER_MAINTENANCE_OPERATION_CONFLICT";
+        return false;
+    }
+    ProviderMaintenanceRecord smaller{operation};
+    do {
+        smaller.operation_id = GetRandHash();
+    } while (smaller.operation_id.IsNull());
+    smaller.outputs.resize(output_count);
+    smaller.plan_id = MaintenancePlanId(smaller.kind, smaller.outputs, policy);
+    if (!ReleaseProviderMaintenanceBudget(ledger, operation.operation_id, GetTime(), error) ||
+        !ReserveProviderMaintenanceBudget(ledger, policy, smaller, GetTime(), error)) return false;
+    if (!batch.WritePaymasterMaintenanceLedger(ledger)) {
+        error = "PAYMASTER_DATABASE_WRITE";
+        return false;
+    }
+    operation = std::move(smaller);
+    return true;
+}
+
 // Paid DGB replenishment reserves its worst-case maintenance fee before wallet
 // construction. The durable plan record makes a crash after broadcast
 // distinguishable from a request to create a second replacement transaction.
@@ -2413,8 +2488,9 @@ bool RunAutomaticDGBReplenishment(
                 return false;
             });
         const bool plan_matches =
-            outputs_match && planned_admission == missing_admission &&
-            planned_operational == missing_operational &&
+            outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
+            planned_admission <= missing_admission &&
+            planned_operational <= missing_operational &&
             operation->maximum_fee ==
                 policy.maximum_maintenance_fee_per_transaction &&
             operation->plan_id ==
@@ -2498,15 +2574,44 @@ bool RunAutomaticDGBReplenishment(
     // broadcast fee precheck. Wait for confirmed funding before signing.
     coin_control.m_min_depth = 1;
     auto created = CreateTransaction(wallet, recipients, /*change_pos=*/-1,
-                                     coin_control, /*sign=*/true);
+                                     coin_control, /*sign=*/false);
+    if (!created) {
+        CAmount available;
+        {
+            LOCK(wallet.cs_wallet);
+            available = AvailableCoins(wallet, &coin_control).GetTotalAmount();
+        }
+        // Admission outputs come first. Keep their priority, then create as
+        // many operational outputs as ordinary funding (including fees) permits.
+        // Never change a reserve's value or use the protected pool as funding.
+        while (!created && recipients.size() > 1) {
+            required_dgb -= recipients.back().nAmount;
+            recipients.pop_back();
+            if (required_dgb >= available) continue; // A positive fee is also needed.
+            created = CreateTransaction(wallet, recipients, /*change_pos=*/-1,
+                                        coin_control, /*sign=*/false);
+        }
+    }
     if (!created) {
         // Diagnose a definite capital shortfall using ordinary coin selection:
         // protected reserves, locked coins and unconfirmed change stay excluded.
         // Other construction failures must not masquerade as missing capital.
         LOCK(wallet.cs_wallet);
-        error = AvailableCoins(wallet, &coin_control).GetTotalAmount() < required_dgb
+        error = AvailableCoins(wallet, &coin_control).GetTotalAmount() <= required_dgb
             ? "PAYMASTER_POOL_WAITING_DGB"
             : "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED";
+        return false;
+    }
+    if (created->fee > operation->maximum_fee.value) {
+        error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
+        return false;
+    }
+    if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
+    // Run the normal signed construction again against current wallet inputs;
+    // all ordinary transaction, fee, signature and size checks remain in force.
+    created = CreateTransaction(wallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
+    if (!created) {
+        error = "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED";
         return false;
     }
     if (created->fee > operation->maximum_fee.value) {
@@ -2672,8 +2777,9 @@ bool RunAutomaticCarrierReplenishment(
                 return false;
             });
         const bool plan_matches =
-            outputs_match && planned_admission == missing_admission &&
-            planned_operational == missing_operational &&
+            outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
+            planned_admission <= missing_admission &&
+            planned_operational <= missing_operational &&
             operation->maximum_fee ==
                 policy.maximum_maintenance_fee_per_transaction &&
             operation->plan_id ==
@@ -2759,10 +2865,19 @@ bool RunAutomaticCarrierReplenishment(
 
     DDTransferPlan plan;
     std::string plan_error;
-    if (!dd_wallet->PlanFundedDigiDollarTransfer(
+    bool funded = dd_wallet->PlanFundedDigiDollarTransfer(
             recipients, plan, plan_error,
             /*preset_dd_inputs=*/nullptr,
-            /*allow_paymaster_pool_inputs=*/false)) {
+            /*allow_paymaster_pool_inputs=*/false);
+    while (!funded && recipients.size() > 1 &&
+           (plan.error_code == DDTransferPlanError::INSUFFICIENT_DD_INPUTS ||
+            plan.error_code == DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS)) {
+        recipients.pop_back();
+        funded = dd_wallet->PlanFundedDigiDollarTransfer(
+            recipients, plan, plan_error, /*preset_dd_inputs=*/nullptr,
+            /*allow_paymaster_pool_inputs=*/false);
+    }
+    if (!funded) {
         // Preserve the ordinary planner's funding diagnosis without parsing
         // display text or changing its protected-pool selection rules.
         error = plan.error_code == DDTransferPlanError::INSUFFICIENT_DD_INPUTS
@@ -2777,6 +2892,8 @@ bool RunAutomaticCarrierReplenishment(
         error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
         return false;
     }
+
+    if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
 
     LOCK(wallet.cs_wallet);
     PaymasterCheckpointOperation checkpoint{wallet};
@@ -5461,6 +5578,14 @@ std::vector<RPCResult> ProviderLiquidityStatusResults()
         {RPCResult::Type::NUM, "maintenance_fee_spent_last_day_satoshis", "Confirmed maintenance fees in the rolling day"},
         {RPCResult::Type::NUM, "carrier_base_cents", "DigiDollar base value retained in available carriers"},
         {RPCResult::Type::NUM, "carrier_withdrawable_excess_cents", "DigiDollar carrier value available for excess withdrawal"},
+        {RPCResult::Type::OBJ, "refill_funding", /*optional=*/true, "Capital still needed to reach saved targets; network fees are additional. Smaller refills may proceed within existing approvals.", {
+            {RPCResult::Type::NUM, "required_dgb_satoshis", "DGB capital for missing reserves, excluding pending replacements and network fees"},
+            {RPCResult::Type::NUM, "available_dgb_satoshis", "Confirmed ordinary DGB eligible for refill; protected reserves and locked coins excluded"},
+            {RPCResult::Type::NUM, "shortfall_dgb_satoshis", "Missing DGB capital before additional network fees"},
+            {RPCResult::Type::NUM, "required_dd_cents", "DD capital for missing carriers, excluding pending replacements"},
+            {RPCResult::Type::NUM, "available_dd_cents", "Ordinary spendable DD outside protected reserves"},
+            {RPCResult::Type::NUM, "shortfall_dd_cents", "Missing DD capital"},
+        }},
         {RPCResult::Type::ARR, "readiness_errors", "Outstanding liquidity readiness gates",
          {{RPCResult::Type::STR, "", "Stable Paymaster readiness error"}}},
     };

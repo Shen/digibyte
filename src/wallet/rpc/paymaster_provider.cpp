@@ -777,7 +777,7 @@ RPCHelpMan getpaymasterliquiditystatus()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
-            auto result = ProviderLiquidityStatusToJSON(readiness, GetTime());
+            auto result = ProviderLiquidityStatusToJSON(readiness, GetTime(), wallet.get());
             result.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness,
                 AutomaticProviderStateIsSynchronized(*wallet)));
             return result;
@@ -3714,7 +3714,7 @@ RPCHelpMan getpaymasterinfo()
             result.pushKV("pool", std::move(pool));
             result.pushKV(
                 "liquidity",
-                ProviderLiquidityStatusToJSON(readiness, GetTime()));
+                ProviderLiquidityStatusToJSON(readiness, GetTime(), wallet.get()));
             if (readiness.have_identity) {
                 result.pushKV("provider_id", readiness.identity.provider_id.GetHex());
                 result.pushKV("identity_key", HexStr(readiness.identity.identity_key));
@@ -3858,7 +3858,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             pool_summary.pushKV("complete_operational_slots", uint64_t(readiness.pool.complete_operational_slots));
             provider.pushKV("pool", pool_summary);
             provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
-            auto liquidity = ProviderLiquidityStatusToJSON(readiness, now);
+            auto liquidity = ProviderLiquidityStatusToJSON(readiness, now, wallet.get());
             liquidity.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness, synchronized));
             for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
                 auto counts = liquidity.find_value(key);

@@ -257,7 +257,7 @@ UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletConte
                                         const ProviderReadiness& readiness, bool synchronized = false);
 UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now);
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
-                                       int64_t now);
+                                       int64_t now, CWallet* wallet = nullptr);
 uint256 CarrierWithdrawalPlanId(
     const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan);
 std::optional<uint32_t> FindMaintenanceOutputIndex(
