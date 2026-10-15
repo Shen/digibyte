@@ -620,6 +620,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, policies, slots and budgets. |
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
+| `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
 | `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and endpoint diagnostics. |
 

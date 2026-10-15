@@ -27,6 +27,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Guarded backup restoration, independent rollback checkpoint, reviewed adoption
   and safe retirement/capital release.
 
+The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
+terminal-only CLI assistant examples separately. RPC names and assistant calls
+are help references, not additional node startup arguments.
+
 ## Compatibility and migration
 
 The result remains an ordinary DD transfer under existing validation. Minting,

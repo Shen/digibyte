@@ -5,6 +5,16 @@ Start with the [developer guide](../PAYMASTER.md), then the
 [client contract](digidollar-paymaster-integration.md). Exact RPC schemas/defaults
 come from `digibyte-cli help <method>` in the selected build.
 
+## Built-in help
+
+The GUI Command-line options dialog and node `-help` contain a dedicated
+Paymaster section: startup flags, node RPCs, wallet RPCs and terminal-only CLI
+assistant examples. Commands shown there are informational; RPC names and CLI
+assistant invocations are not additional node startup arguments. Wallet entries
+are omitted in builds without wallet support. Use console `help <command>` or
+`digibyte-cli help <command>` for the full RPC schema, selecting the intended
+wallet for wallet commands. `digibyte-cli -help` documents its own switches.
+
 ## Node prerequisites
 
 Paymaster requires DigiDollar/Paymaster enablement, unpruned storage, txindex,
