@@ -1,4 +1,4 @@
-# Paymaster node configuration and RPC reference
+# Paymaster Mainnet node configuration and RPC reference
 
 Start with the [documentation guide](../PAYMASTER.md), then the
 [operator guide](digidollar-paymaster-operator.md) or
@@ -17,10 +17,31 @@ wallet for wallet commands. `digibyte-cli -help` documents its own switches.
 
 ## Node prerequisites
 
-Paymaster requires DigiDollar/Paymaster enablement, unpruned storage, txindex,
-V2 transport and chain/wallet readiness. Example configuration:
+The operational examples target Mainnet. Paymaster requires DigiDollar/Paymaster
+enablement, unpruned storage, a synchronized txindex, V2 transport and current
+chain/wallet readiness. Use the build selected for your network and follow the
+[DigiDollar upgrade and activation guidance](digidollar-operations.md).
+Enabling Paymaster does not bypass activation, history or signature checks.
+
+A previously pruned node needs the missing block data again before it can meet
+the unpruned/txindex requirements. Allow initial synchronization and index work
+to finish; changing `prune=0` does not recreate deleted blocks immediately.
+
+## Mainnet provider configuration
+
+Create or deliberately update `digibyte.conf` in the intended data directory;
+see [configuration locations and precedence](digibyte-conf.md). Keep global
+settings before `[main]`. Back up an existing configuration before editing and
+review command-line overrides. Do not combine `chain=main` with a test-network
+selector.
+
+This is a public IPv4 provider template. Before starting, replace
+**`LOCAL_NUMERIC_IP`** with an IPv4 address assigned to the provider host and
+**`PUBLIC_NUMERIC_IP`** with its routable public IPv4 address. These are
+intentionally invalid placeholders, not working endpoints.
 
 ```ini
+chain=main
 server=1
 digidollar=1
 paymaster=1
@@ -29,97 +50,154 @@ txindex=1
 v2transport=1
 maxconnections=125
 paymastermaxoutbound=1
-```
 
-A provider also configures `paymastermaxinbound=16`, dedicated `paymasterbind`
-and reachable advertised `paymasterendpoint`. Put network-specific bind/port
-values in the relevant network section. Direct, P2P and RPC ports must differ.
-Loopback endpoints are for local tests, not public discovery.
-
-Multiple local regtest instances require separate data directories, P2P/RPC
-ports and provider Direct ports. Connect ordinary P2P nodes to the same test
-chain. Providers need independent identities/state; do not clone a live wallet.
-New nodes still perform normal header/block/history checks. Mine explicitly
-on regtest.
-
-For high privacy configure Tor/proxy and reachable onion service; no silent
-clearnet fallback. A ready local listener does not prove external reachability.
-See [connection capacity](digidollar-paymaster-connection-capacity.md).
-
-## Local regtest example
-
-This is a loopback-only test configuration, not a public provider deployment.
-Use new dedicated directories, or deliberately adapt existing configurations;
-do not replace a live node's configuration blindly. Create each directory before
-starting its node and put that node's settings in its own `digibyte.conf`.
-
-For the provider, combine the common settings above with:
-
-```ini
-regtest=1
-[regtest]
-port=18444
-rpcport=18443
+[main]
+port=12024
+rpcport=14022
 listen=1
-bind=127.0.0.1
 paymastermaxinbound=16
-paymasterbind=127.0.0.1:18450
-paymasterendpoint=127.0.0.1:18450
+paymasterbind=LOCAL_NUMERIC_IP:12025
+paymasterendpoint=PUBLIC_NUMERIC_IP:12025
 ```
 
-For a client, use the same common settings with:
+The three interfaces have different purposes:
+
+| Interface | Mainnet configuration above | Reachability |
+|---|---|---|
+| Ordinary DigiByte P2P | TCP 12024, network default | Peers exchange blocks and discovery announcements. Allow inbound if serving peers. |
+| Paymaster Direct | TCP 12025, an operator-chosen example | Clients must reach this separate listener. Open/forward this TCP port to the provider. |
+| Wallet/node RPC | TCP 14022, network default | Keep local with normal cookie authentication; do not publish it for Paymaster clients. |
+
+`paymasterbind` is the **local** listener. Use a concrete interface address;
+the current Paymaster validation rejects wildcard binds such as `0.0.0.0` and
+`::`. On a host with a directly assigned public address, the local and public
+addresses can be the same; behind NAT, the local address is usually private.
+`paymasterendpoint` is the **externally reachable** address clients use. Behind
+NAT, forward that public endpoint to the local Direct listener. A private LAN
+address, loopback address, wildcard or DNS hostname is not a public advertised
+endpoint: the current interface accepts a numeric routable IP or an onion
+address with an explicit port. Use `[PUBLIC_IPV6]:12025` and a suitable IPv6
+bind for IPv6. Port 12025 is not a protocol default; choose another unused port
+if necessary, distinct from P2P and RPC, and update the bind/advertisement/routing
+together.
+
+Do not carry a local test `connect=127.0.0.1:...` or loopback P2P bind into this
+configuration. Use normal Mainnet peer discovery. Neither the public endpoint
+nor these flags create a provider identity, enable its wallet policy, fund pools
+or authorize signatures. Continue with [provider setup](digidollar-paymaster-operator.md#first-provider-setup).
+
+This template leaves RPC on its default local-only interface and uses the
+normal cookie; it contains no RPC credentials. Keep that restriction when
+adapting an existing configuration. Public RPC exposure is unnecessary for
+Paymaster; see [RPC security](JSON-RPC-interface.md#security). Use an appropriately
+secured local tunnel for remote administration.
+
+For high privacy, configure Tor/proxy and a separate reachable onion service
+for Direct instead of reusing this clearnet template. A local Tor forwarding
+bind uses the documented `=onion` suffix. See
+[connection capacity](digidollar-paymaster-connection-capacity.md#deployment-and-retry)
+and same-build help. High privacy must not silently fall back to clearnet.
+
+## Mainnet client configuration
+
+A wallet that only sends through providers does not need a public Direct
+listener or provider identity. Its node still needs the Paymaster prerequisites
+and ordinary P2P connectivity. A separate client's minimal configuration is:
 
 ```ini
-regtest=1
-[regtest]
-port=18445
-rpcport=18446
-listen=1
-bind=127.0.0.1
-connect=127.0.0.1:18444
+chain=main
+server=1
+digidollar=1
+paymaster=1
+prune=0
+txindex=1
+v2transport=1
+maxconnections=125
+paymastermaxoutbound=1
+
+[main]
+port=12024
+rpcport=14022
 ```
 
-Keep common settings before the `[regtest]` section. Do not copy provider
-Direct-listener settings onto clients. `connect` establishes ordinary P2P for
-blocks/discovery; the advertised Direct endpoint is used for provider requests.
-This does not create wallets, fund reserves, approve spending or mine blocks.
+Those default ports assume a separate host or no competing local node.
+Multiple nodes on one host need distinct data directories and listening ports;
+every provider also needs its own Direct endpoint and identity. A provider and
+client wallet can share a node, but select the intended wallet for every RPC.
+`server=1` permits external CLI use with the GUI; it does not enable provider
+service.
 
-For four local nodes, one possible collision-free allocation is:
+## Start and verify Mainnet operation
 
-| Node | P2P port | RPC port | Provider Direct endpoint | Ordinary P2P connection |
-|---|---:|---:|---|---|
-| Provider 1 | 18444 | 18443 | 127.0.0.1:18450 | Listens for the others |
-| Client 1 | 18445 | 18446 | None | `connect=127.0.0.1:18444` |
-| Provider 2 | 18447 | 18448 | 127.0.0.1:18451 | `connect=127.0.0.1:18444` |
-| Client 2 | 18449 | 18452 | None | `connect=127.0.0.1:18444` |
+The examples below assume installed binaries on PATH. Replace the absolute
+data-directory path with an existing directory containing the reviewed
+configuration. Start either the daemon or GUI, never both on one data directory.
 
-Give all four distinct data directories; each provider creates its own identity.
-Replace the corresponding ports in the two templates. This topology depends
-on Provider 1 for ordinary P2P connectivity; it is a local test example, not a
-resilient public topology. Confirm matching chain and progress with
-`getblockchaininfo`/`getpeerinfo` before investigating payment discovery.
+```sh
+digibyted -chain=main -datadir=/absolute/path/to/mainnet-data
+```
 
-From the repository root in PowerShell, after building, these are alternative
-ways to run the configured provider (replace the example directory):
+Use another terminal for CLI access. On Windows, an alternative GUI start from
+the repository root after building is:
 
 ```powershell
-& ./build_msvc/x64/Release/digibyte-qt.exe -regtest -datadir='D:/Digibyte/Regtest-Paymaster'
+& ./build_msvc/x64/Release/digibyte-qt.exe -chain=main -datadir='C:/DigiByte/Mainnet-Paymaster'
 ```
 
-For headless operation, run `digibyted.exe` with the same arguments instead of
-`digibyte-qt.exe`; do not open both on one data directory. Use another terminal
-for the assistant/status. With an existing wallet named `paymaster`:
+Replace that example directory first. For Windows headless operation substitute
+`digibyted.exe`; for RPC use `digibyte-cli.exe` with the same `-chain`/`-datadir`
+arguments. This PowerShell example reads node status without starting setup:
 
 ```powershell
-& ./build_msvc/x64/Release/digibyte-cli.exe -regtest -datadir='D:/Digibyte/Regtest-Paymaster' -rpcport=18443 -rpcwallet=paymaster -paymastersetup
+& ./build_msvc/x64/Release/digibyte-cli.exe -chain=main -datadir='C:/DigiByte/Mainnet-Paymaster' getblockchaininfo
 ```
 
-For Unix, use installed `digibyted`/`digibyte-cli` paths and an appropriate local
-data directory with the same arguments. CLI reads configuration/authentication
-from that directory; mismatching it, the network or RPC port can reach the wrong
-node or fail authentication. These examples use the normal local cookie rather
-than putting RPC passwords in a script. Public RPC exposure is not needed for
-a public Paymaster endpoint; see [RPC security](JSON-RPC-interface.md).
+With installed CLI tools, run these non-spending checks against the same node:
+
+```sh
+digibyte-cli -chain=main -datadir=/absolute/path/to/mainnet-data getblockchaininfo
+digibyte-cli -chain=main -datadir=/absolute/path/to/mainnet-data getindexinfo
+digibyte-cli -chain=main -datadir=/absolute/path/to/mainnet-data getdigidollardeploymentinfo
+digibyte-cli -chain=main -datadir=/absolute/path/to/mainnet-data getpaymasternodeconfig
+```
+
+Confirm `chain` is `main`, initial block download has finished, txindex is
+synchronized, and DigiDollar is active for this chain. After wallet setup,
+inspect `getpaymasteroperatorinfo` with the intended `-rpcwallet`: node readiness
+alone does not establish wallet/provider readiness or available reserves.
+
+From an independent Mainnet node with Paymaster/V2 enabled, replace the endpoint
+in this explicit network probe:
+
+```sh
+digibyte-cli -chain=main checkpaymasterendpoint 'PUBLIC_NUMERIC_IP:12025'
+```
+
+`transport_ready=true` observes V2/Paymaster transport at that time. The probe
+does not authenticate the provider identity, reserve capacity or verify a
+payment. An actual payment still requires the normal exact-offer checks and
+authorization. A local listener status alone is not an external reachability
+test.
+
+Use the [GUI/CLI operator workflow](digidollar-paymaster-operator.md) to review
+identity, finite limits, reserve funding, autostart and unlock behavior. Mainnet
+funding and payments spend real funds; sample slot counts and fee ceilings are
+examples to review, not fixed recommended operating costs. Reserve creation,
+refill and payments confirm in network-mined blocks. A wallet timeout or an
+announcement countdown does not determine confirmation or safe input release.
+
+## Supplementary test environments
+
+For public Testnet26 and isolated local Regtest configurations, see
+[Testnet and Regtest](digidollar-paymaster-test-networks.md). Keep their
+directories, wallets and credentials separate from Mainnet.
+
+### Local regtest example
+
+The [local Regtest example](digidollar-paymaster-test-networks.md#local-regtest-example)
+includes the two-node configuration, optional four-node port allocation and
+explicit mining requirement. It is supplementary test guidance, not the
+provider deployment template above.
 
 ## RPC scope and side effects
 

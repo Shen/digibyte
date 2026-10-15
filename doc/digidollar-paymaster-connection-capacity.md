@@ -47,6 +47,13 @@ wallet signing keys. Capacity proof precedes full payment-intent processing.
 
 ## Deployment and retry
 
+Use the [Mainnet provider template](digidollar-paymaster.md#mainnet-provider-configuration)
+for public deployment. The Direct port is chosen by the operator, independently
+of the network's default P2P/RPC ports. The
+[test-network supplement](digidollar-paymaster-test-networks.md) describes
+separate Testnet26 and Regtest endpoints; only Regtest permits loopback
+advertisements.
+
 Advertise an endpoint reachable by the intended clients. Local readiness and
 external reachability are different measurements. Use a separate onion service
 for Direct where required; high privacy must not silently become clearnet.
