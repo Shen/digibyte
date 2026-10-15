@@ -478,6 +478,55 @@ BOOST_AUTO_TEST_CASE(provider_sync_observation_preserves_unresolved_gates)
     }
 }
 
+BOOST_AUTO_TEST_CASE(provider_refill_admission_requires_current_payment_readiness)
+{
+    using namespace paymaster_rpc::internal;
+    ProviderReadiness readiness;
+    readiness.ready = readiness.pool_ready = true;
+    readiness.pool.complete_operational_slots = 2; // Target three, but two complete slots can serve.
+    const std::vector<ProviderServiceStatus> refill_waits{
+        {ProviderServiceState::REPLENISHING_LIQUIDITY, "PAYMASTER_POOL_WAITING_DGB"},
+        {ProviderServiceState::REPLENISHING_LIQUIDITY, "PAYMASTER_POOL_WAITING_FUNDS"},
+        {ProviderServiceState::REPLENISHING_LIQUIDITY, "PAYMASTER_MAINTENANCE_FEE_EXCEEDED"},
+        {ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL, "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED"},
+        {ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL, "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"},
+        {ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION, "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"},
+        {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED"},
+    };
+    for (const auto& status : refill_waits) {
+        BOOST_CHECK(ProviderCanServeDuringRefill(status, readiness, true));
+        BOOST_CHECK(!ProviderCanServeDuringRefill(status, readiness, false));
+        auto blocked = readiness;
+        blocked.ready = false;
+        BOOST_CHECK(!ProviderCanServeDuringRefill(status, blocked, true));
+        blocked = readiness;
+        blocked.pool_ready = false;
+        BOOST_CHECK(!ProviderCanServeDuringRefill(status, blocked, true));
+        blocked = readiness;
+        blocked.pool.complete_operational_slots = 0;
+        BOOST_CHECK(!ProviderCanServeDuringRefill(status, blocked, true));
+        // Even an inconsistent snapshot with ready=true cannot hide a gate.
+        for (const auto* error : {"PAYMASTER_WALLET_LOCKED", "PAYMASTER_PROVIDER_SYNCING",
+                                 "PAYMASTER_ADMISSION_DGB_MISSING", "PAYMASTER_OPERATIONAL_SLOT_MISSING",
+                                 "PAYMASTER_SAFETY_LIMIT_EXHAUSTED", "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED",
+                                 "PAYMASTER_INVALID_MAINTENANCE_LEDGER", "PAYMASTER_FUTURE_ERROR"}) {
+            blocked = readiness;
+            blocked.errors = {error};
+            BOOST_CHECK(!ProviderCanServeDuringRefill(status, blocked, true));
+        }
+        for (const auto state : {ProviderServiceState::FAULT, ProviderServiceState::DRAIN_ONLY,
+                                ProviderServiceState::WAITING_FOR_UNLOCK, ProviderServiceState::STOPPED}) {
+            BOOST_CHECK(!ProviderCanServeDuringRefill({state, status.last_error}, readiness, true));
+        }
+        for (const auto* error : {"", "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE",
+                                 "PAYMASTER_POOL_PREPARATION_PENDING", "PAYMASTER_MAINTENANCE_FEE_CHANGED",
+                                 "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED", "PAYMASTER_DATABASE_WRITE",
+                                 "PAYMASTER_SUBMIT_BINDING_MISMATCH", "PAYMASTER_FUTURE_ERROR"}) {
+            BOOST_CHECK(!ProviderCanServeDuringRefill({status.state, error}, readiness, true));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(paymaster_dd_reservations_are_owned_but_not_spendable)
 {
     m_wallet.EnsureDDWallet();

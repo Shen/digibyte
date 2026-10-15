@@ -360,6 +360,16 @@ old unsigned plan and reserves the exact smaller plan before signing. Already
 broadcast work is recovered, never resized. Pending replacements count toward
 the target and are confirmed before another missing batch is planned. Each
 batch consumes the existing transaction/hour/day maintenance budget.
+The runtime then rechecks full current payment readiness and synchronization
+under the same provider-work guard. An explicit allowlist of state/reason pairs
+permits independent confirmed capacity during expected refill waits: missing
+ordinary funds, maintenance approval/fee limits, disabled automatic refill or
+pending replacement confirmations. The service remains `active`, retaining
+`last_service_error` as a separate refill diagnosis. Unknown construction,
+signing, journal/database failures and unfinished explicit pool setup do not
+qualify. Existing announcement and fresh-request checks repeat their readiness
+and capacity validation; no pending slot or protected input becomes ordinary
+spendable funding. Refill targets and approvals remain unchanged.
 The optional `refill_funding` status object reports required capital for the
 missing slots, confirmed ordinary available DGB/spendable DD and their
 shortfalls; network fees are additional, not a quoted or authorized amount.

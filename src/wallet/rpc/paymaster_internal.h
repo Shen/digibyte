@@ -253,6 +253,9 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
 /** Current observation only; does not change worker state or grant authority. */
 DigiDollar::Paymaster::ProviderServiceStatus ProviderServiceStatusForObservation(
     DigiDollar::Paymaster::ProviderServiceStatus status, bool ready, bool synchronized);
+/** Only expected refill waits may coexist with fresh, complete payment readiness. */
+bool ProviderCanServeDuringRefill(const DigiDollar::Paymaster::ProviderServiceStatus& status,
+                                const ProviderReadiness& readiness, bool synchronized);
 UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
                                         const ProviderReadiness& readiness, bool synchronized = false);
 UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now);

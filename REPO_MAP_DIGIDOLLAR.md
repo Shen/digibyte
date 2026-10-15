@@ -901,6 +901,10 @@ or chain parameters.
   slots when ordinary funds cannot cover all missing targets. Slot values,
   admission-first order and fee budgets remain intact; pending batches confirm
   before planning the remaining slots.
+  Expected refill waits do not block independent confirmed capacity: the runtime
+  rechecks full readiness and synchronization under the work guard and retains
+  the separate refill diagnosis while active. Unknown faults and unfinished
+  explicit pool preparation remain blocking.
 - `withdrawpaymastercarrier` binds execution to the unchanged latest preview.
   `all_excess` retains exactly 1.00 DD in each replacement carrier and combines
   only wallet-owned excess under the maintenance budget; `release_slot` is a
@@ -1146,9 +1150,10 @@ or chain parameters.
   pass; manual providers remain operator-driven, locked wallets pause without
   consuming work, and opt-in autostart waits for readiness/unlock.
 - Startup and scheduled reconciliation recover historical pool successors and
-  durable maintenance transactions. The automatic pass repairs missing targets
-  before accepting new requests and exposes maintenance approval,
-  replenishment, and confirmation-wait service states.
+  durable maintenance transactions. The automatic pass attempts missing-target
+  repairs before processing requests. Full current payment readiness can keep
+  the service active through known refill waits, even below the saved target;
+  missing admission/payment capacity still blocks fresh requests.
 
 ### src/wallet/paymasteridentity.{h,cpp}
 - Creates and loads the wallet-managed untweaked BIP86/x-only provider identity
@@ -1948,6 +1953,7 @@ oracle P2P proof is `digidollar_wave20_oracle_p2p.py`.
 | File | Coverage Area |
 |------|--------------|
 | `wallet_paymaster_readiness.py` | Pre-session client/provider rejection with disabled Paymaster or inactive DigiDollar, pruning, missing txindex or BIP324, and unsafe high-privacy logging/proxy/capture configuration |
+| `wallet_paymaster_partial_capacity.py` | Two confirmed operational slots remain usable below a three-slot refill target with no ordinary funding; automatic announcement renewal, exact unsigned offer, unchanged policy and explicit stop |
 | `p2p_paymaster.py` | Paymaster activation/negotiation, V1 direct-message rejection and size limits; bounded malformed announcements over two real V2 peers across reconnects with ping and block-relay liveness |
 | `wallet_paymaster_lifecycle.py` | Abrupt provider-process termination after client authorization; older authorized-client SQLite backup reconciliation at startup with change or via exact txindex observation without change, across RPC/CLI entry points, with one fee and no duplicate payment; automatic DGB/carrier replenishment, pending-target accounting, restart idempotency, locked-wallet autostart pause, unlock continuation, confirmation promotion, and absence of duplicate maintenance transactions |
 | `wallet_paymaster_backup.py` | Real stale-provider SQLite restore with a durable pre-load quarantine: restart/autostart and manual start stay blocked; exact retained commits still replay through RPC/CLI; reserve preparation, retirement, withdrawal and capital release reject renewed authority. `--pending-offline` withholds a signed final from both mempools. Configuration changes cannot clear the guard; manual copying/renaming of an already guarded image preserves quarantine across load/restart. Client-only restore preserves DD balance and fee policy. |

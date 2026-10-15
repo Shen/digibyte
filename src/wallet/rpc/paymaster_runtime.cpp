@@ -367,6 +367,31 @@ RPCHelpMan stoppaymaster()
     };
 }
 
+bool paymaster_rpc::internal::ProviderCanServeDuringRefill(
+    const ProviderServiceStatus& status, const ProviderReadiness& readiness, bool synchronized)
+{
+    if (!synchronized || !readiness.ready || !readiness.pool_ready ||
+        !readiness.errors.empty() || readiness.pool.complete_operational_slots == 0) return false;
+    // These reasons concern additional reserves, not authority to spend the
+    // independent confirmed capacity that passed the full readiness checks.
+    // Unknown construction, journal, signing or database failures stay closed.
+    switch (status.state) {
+    case ProviderServiceState::REPLENISHING_LIQUIDITY:
+        return status.last_error == "PAYMASTER_POOL_WAITING_DGB" ||
+               status.last_error == "PAYMASTER_POOL_WAITING_FUNDS" ||
+               status.last_error == "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
+    case ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL:
+        return status.last_error == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
+               status.last_error == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED";
+    case ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION:
+        return status.last_error == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+    case ProviderServiceState::WAITING_FOR_READINESS:
+        return status.last_error == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED";
+    default:
+        return false;
+    }
+}
+
 // One bounded unit of work per queue keeps the validation scheduler responsive
 // and preserves fairness across wallets/providers. Temporary local failures
 // retain their lease for retry; permanent protocol failures are durably rejected
@@ -654,11 +679,25 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
                            }))) {
                 // Confirmed reserved slots still satisfy the refill target.
                 // They must not stop independent free slots from serving new
-                // requests. Keep the full readiness/confirmation gates for
-                // missing admission capacity and unconfirmed replacement work.
+                // requests. Pending replacements cannot themselves provide
+                // payment capacity; the fresh readiness check below decides
+                // whether independent confirmed slots remain usable.
                 accept_new_requests = false;
                 state = ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
                 first_error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+            }
+            if (!accept_new_requests) {
+                // A refill target is not a minimum payment capacity. Re-read
+                // after maintenance, under the same work guard: a transaction
+                // or reconciliation may have changed the available inputs.
+                const auto current = GetProviderReadiness(wallet, context, /*wait_for_sync=*/false);
+                if (ProviderCanServeDuringRefill({state, first_error}, current,
+                                                AutomaticProviderStateIsSynchronized(wallet))) {
+                    accept_new_requests = true;
+                    state = ProviderServiceState::ACTIVE;
+                    // Keep the refill diagnosis for its separate status card.
+                    // Announcement and request handlers repeat their checks.
+                }
             }
         }
     }
@@ -734,11 +773,9 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         }
     };
 
-    // A liquidity pause blocks new capacity proofs but must not strand the
-    // quote/recovery continuation that caused the reservation. The request
-    // handler itself skips fresh capacity messages unless readiness is fully
-    // restored. Drain-only providers still finish only already-authorized
-    // submissions and never create a new quote.
+    // A refill wait must not strand quote/recovery continuations. Fresh capacity
+    // requests always require full current readiness in the request handler.
+    // Drain-only providers still finish only already-authorized submissions.
     const bool process_request_continuations =
         state == ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL ||
         state == ProviderServiceState::REPLENISHING_LIQUIDITY ||
@@ -760,6 +797,8 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
             first_error == "PAYMASTER_PROVIDER_SYNCING") {
             LogPrint(BCLog::BENCH, "%s Paymaster automatic provider service waiting for synchronization: %s\n",
                      wallet.GetDisplayName(), first_error);
+        } else if (state == ProviderServiceState::ACTIVE) {
+            wallet.WalletLogPrintf("Paymaster reserve refill waiting while provider remains ready: %s\n", first_error);
         } else {
             wallet.WalletLogPrintf(
                 "Paymaster automatic provider service paused: %s\n",

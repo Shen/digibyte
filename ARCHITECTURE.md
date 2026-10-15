@@ -67,8 +67,13 @@ Provider/session version gates remain strict.
 The automatic provider distinguishes its refill target from admission capacity.
 Confirmed reserved operational slots count toward the target; independent free
 slots can continue serving requests when full wallet/index/policy readiness
-passes. Missing capital and unconfirmed replacements retain their existing
-maintenance gates. Overview separates this partial usage from paused admission.
+passes. Expected refill waits (capital, separate maintenance approval/fees,
+disabled automatic refill or replacement confirmations) do not block independent
+confirmed capacity. The runtime rechecks complete readiness and synchronization
+after maintenance under the work guard; announcement and request processing
+repeat their existing checks. Unknown faults and explicit unfinished setup remain
+blocking. The service can be active while its separate refill diagnosis remains
+visible. Overview separates this partial capacity from paused admission.
 Client directory refresh keeps the last displayed preview while preparation is
 blocked, retains its expiry timer, and reuses unchanged offer-card widgets.
 Read errors, malformed replies and stale generations still invalidate the preview.
