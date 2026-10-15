@@ -215,3 +215,9 @@ To retire, stop service, disable provider/autostart and resolve protected work,
 then preview and approve [capital release](paymaster-capital-release.md). That
 returns eligible reserves to ordinary selection without sending funds or
 erasing history.
+If a start could not fund its reserves, GUI retirement also reviews cancellation
+of funding tasks that created no transaction. CLI/RPC can request the same review
+with `releasepaymastercapital {"cancel_uncreated":true}`; repeat the option with
+the approved plan on execution. Signed or ambiguous work still blocks release.
+Stopping briefly waits for active provider work; a continuing busy error means
+the stop has not been confirmed, not that funds were released.

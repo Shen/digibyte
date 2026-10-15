@@ -26,6 +26,9 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   required after restart; no saved passphrase for automatic restart.
 - Guarded backup restoration, independent rollback checkpoint, reviewed adoption
   and safe retirement/capital release.
+- Retirement after an unfunded start waits briefly for competing provider work
+  and can explicitly cancel uncreated reserve-funding tasks in the reviewed
+  release. Signed/ambiguous work and restored-wallet guards remain enforced.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls

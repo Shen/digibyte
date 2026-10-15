@@ -1373,7 +1373,7 @@ present in the tree but not compiled into the current unit-test binary.
 
 | File | Coverage Area |
 |------|--------------|
-| `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records |
+| `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records; bounded provider stop and atomic, reviewed cancellation of uncreated reserve funding during retirement |
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs, role-limited signing, mutations before either party signs, and correctly signed malicious DD quotes rejected by independent client reconstruction |
 | `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records; simulated begin/write/commit failures for fee-policy approval, signature persistence, fallback, cancellation and self-recovery, including lost replies and protection of newly reserved inputs |
 | `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, malicious client/provider persistence failures, durable restore quarantine, and real SQLite page-limit/commit-denial rollback and exact retry |
