@@ -776,7 +776,7 @@ void DigiDollarOverviewWidget::updateBalance()
 {
     if (!isVisible() || !m_walletModel) return;
     // Skip updates during Initial Block Download - balance only matters when synced
-    if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+    if (m_clientModel && m_clientModel->isInitialBlockDownload()) {
         return;
     }
 
@@ -879,7 +879,7 @@ void DigiDollarOverviewWidget::refreshDigiDollarState()
 void DigiDollarOverviewWidget::updateOraclePrice()
 {
     // Skip updates during Initial Block Download - oracle price only matters when synced
-    if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+    if (m_clientModel && m_clientModel->isInitialBlockDownload()) {
         return;
     }
 
@@ -928,7 +928,7 @@ void DigiDollarOverviewWidget::renderOraclePrice()
 void DigiDollarOverviewWidget::updateSystemHealth()
 {
     // Skip updates during Initial Block Download - system health only matters when synced
-    if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+    if (m_clientModel && m_clientModel->isInitialBlockDownload()) {
         m_mintStatusLabel->setText(tr("Minting is unavailable while the wallet synchronizes."));
         return;
     }
@@ -1120,7 +1120,7 @@ void DigiDollarOverviewWidget::updateRecentTransactions()
 
     // During IBD retain the persisted rows but defer the expensive canonical
     // reconstruction until chain and wallet confirmation state are meaningful.
-    if (m_clientModel && m_clientModel->node().isInitialBlockDownload()) {
+    if (m_clientModel && m_clientModel->isInitialBlockDownload()) {
         return;
     }
 

@@ -302,6 +302,23 @@ public:
     {
         return chainman().IsInitialBlockDownload();
     }
+    bool tryGetGuiSyncState(interfaces::GuiSyncState& state) override
+    {
+        TRY_LOCK(::cs_main, lock);
+        if (!lock) return false;
+        interfaces::GuiSyncState snapshot;
+        if (const auto* tip = chainman().ActiveChain().Tip()) {
+            snapshot.block_height = tip->nHeight;
+            snapshot.block_hash = tip->GetBlockHash();
+        }
+        if (const auto* header = chainman().m_best_header) {
+            snapshot.header_height = header->nHeight;
+            snapshot.header_time = header->GetBlockTime();
+        }
+        snapshot.initial_download = chainman().IsInitialBlockDownload();
+        state = snapshot;
+        return true;
+    }
     bool isLoadingBlocks() override { return chainman().m_blockman.LoadingBlocks(); }
     void setNetworkActive(bool active) override
     {

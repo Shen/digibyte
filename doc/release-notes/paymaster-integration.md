@@ -1,5 +1,11 @@
 # Paymaster integration release notes
 
+- GUI synchronization: cold tip reads and DigiDollar overview IBD polling no
+  longer wait for header validation to release `cs_main`. During contention the
+  display remains conservatively unknown/syncing; all validation and spending
+  checks are unchanged. While headers are still behind, the synchronization
+  overlay no longer presents the transaction estimate as 100% complete.
+
 ## Clearer offer recommendation and expiry (2026-10-15)
 
 Offer cards again use **Recommended**, with a tooltip explaining the lowest

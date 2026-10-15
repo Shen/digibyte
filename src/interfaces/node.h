@@ -45,6 +45,7 @@ class Handler;
 class WalletLoader;
 
 struct BlockTip;
+struct GuiSyncState;
 
 //! Block and header tip information
 struct BlockAndHeaderTipInfo
@@ -274,6 +275,10 @@ public:
     //! accessible across processes.
     virtual node::NodeContext* context() { return nullptr; }
     virtual void setContext(node::NodeContext* context) { }
+
+    //! Nonblocking, coherent display snapshot. False means validation is busy;
+    //! the output is unchanged. Never use this GUI hint to authorize spending.
+    virtual bool tryGetGuiSyncState(GuiSyncState& state) = 0;
 };
 
 //! Return implementation of Node interface.
@@ -285,6 +290,14 @@ struct BlockTip {
     int block_height;
     int64_t block_time;
     uint256 block_hash;
+};
+
+struct GuiSyncState {
+    int block_height{-1};
+    uint256 block_hash;
+    int header_height{-1};
+    int64_t header_time{-1};
+    bool initial_download{true};
 };
 
 } // namespace interfaces

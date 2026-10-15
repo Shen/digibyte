@@ -141,7 +141,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
 void WalletView::processNewTransaction(const QModelIndex& parent, int start, int /*end*/)
 {
     // Prevent balloon-spam when initial block download is in progress
-    if (!clientModel || clientModel->node().isInitialBlockDownload()) {
+    if (!clientModel || clientModel->isInitialBlockDownload()) {
         return;
     }
 

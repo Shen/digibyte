@@ -155,11 +155,19 @@ void ModalOverlay::tipUpdate(int count, const QDateTime& blockDate, double nVeri
 
 void ModalOverlay::UpdateHeaderSyncLabel() {
     int est_headers_left = bestHeaderDate.secsTo(QDateTime::currentDateTime()) / Params().GetConsensus().nPowTargetSpacing;
+    if (est_headers_left >= HEADER_HEIGHT_DELTA_SYNC) {
+        ui->percentageProgress->setText(tr("Unknown"));
+        ui->progressIncreasePerH->setText(tr("Calculating… (Syncing Headers)"));
+        ui->expectedTimeLeft->setText(tr("Calculating… (Syncing Headers)"));
+    }
     ui->numberOfBlocksLeft->setText(tr("Unknown. Syncing Headers (%1, %2%)…").arg(bestHeaderHeight).arg(QString::number(100.0 / (bestHeaderHeight + est_headers_left) * bestHeaderHeight, 'f', 1)));
 }
 
 void ModalOverlay::UpdateHeaderPresyncLabel(int height, const QDateTime& blockDate) {
     int est_headers_left = blockDate.secsTo(QDateTime::currentDateTime()) / Params().GetConsensus().nPowTargetSpacing;
+    ui->percentageProgress->setText(tr("Unknown"));
+    ui->progressIncreasePerH->setText(tr("Calculating… (Syncing Headers)"));
+    ui->expectedTimeLeft->setText(tr("Calculating… (Syncing Headers)"));
     ui->numberOfBlocksLeft->setText(tr("Unknown. Pre-syncing Headers (%1, %2%)…").arg(height).arg(QString::number(100.0 / (height + est_headers_left) * height, 'f', 1)));
 }
 

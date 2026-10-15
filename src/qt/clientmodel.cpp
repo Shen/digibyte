@@ -90,61 +90,46 @@ int ClientModel::getNumConnections(unsigned int flags) const
 
 int ClientModel::getHeaderTipHeight() const
 {
-    if (cachedBestHeaderHeight == -1) {
-        // make sure we initially populate the cache via a cs_main lock
-        // otherwise we need to wait for a tip update
-        int height;
-        int64_t blockTime;
-        if (m_node.getHeaderTip(height, blockTime)) {
-            cachedBestHeaderHeight = height;
-            cachedBestHeaderTime = blockTime;
-        }
-    }
-    return cachedBestHeaderHeight;
+    const int cached = cachedBestHeaderHeight;
+    if (cached != -1) return cached;
+    interfaces::GuiSyncState state;
+    m_node.tryGetGuiSyncState(state);
+    return state.header_height;
 }
 
 int64_t ClientModel::getHeaderTipTime() const
 {
-    if (cachedBestHeaderTime == -1) {
-        int height;
-        int64_t blockTime;
-        if (m_node.getHeaderTip(height, blockTime)) {
-            cachedBestHeaderHeight = height;
-            cachedBestHeaderTime = blockTime;
-        }
-    }
-    return cachedBestHeaderTime;
+    const int64_t cached = cachedBestHeaderTime;
+    if (cached != -1) return cached;
+    interfaces::GuiSyncState state;
+    m_node.tryGetGuiSyncState(state);
+    return state.header_time;
 }
 
 int ClientModel::getNumBlocks() const
 {
-    if (m_cached_num_blocks == -1) {
-        m_cached_num_blocks = m_node.getNumBlocks();
-    }
-    return m_cached_num_blocks;
+    const int cached = m_cached_num_blocks;
+    if (cached != -1) return cached;
+    interfaces::GuiSyncState state;
+    m_node.tryGetGuiSyncState(state);
+    return state.block_height;
 }
 
 uint256 ClientModel::getBestBlockHash()
 {
-    uint256 tip{WITH_LOCK(m_cached_tip_mutex, return m_cached_tip_blocks)};
+    const uint256 cached{WITH_LOCK(m_cached_tip_mutex, return m_cached_tip_blocks)};
+    if (!cached.IsNull()) return cached;
+    interfaces::GuiSyncState state;
+    m_node.tryGetGuiSyncState(state);
+    return state.block_hash;
+}
 
-    if (!tip.IsNull()) {
-        return tip;
-    }
-
-    // Lock order must be: first `cs_main`, then `m_cached_tip_mutex`.
-    // The following will lock `cs_main` (and release it), so we must not
-    // own `m_cached_tip_mutex` here.
-    tip = m_node.getBestBlockHash();
-
-    LOCK(m_cached_tip_mutex);
-    // We checked that `m_cached_tip_blocks` is not null above, but then we
-    // released the mutex `m_cached_tip_mutex`, so it could have changed in the
-    // meantime. Thus, check again.
-    if (m_cached_tip_blocks.IsNull()) {
-        m_cached_tip_blocks = tip;
-    }
-    return m_cached_tip_blocks;
+bool ClientModel::isInitialBlockDownload() const
+{
+    interfaces::GuiSyncState state;
+    // Busy validation is conservatively treated as syncing for display/polling.
+    // Spending and consensus continue to use the authoritative Core checks.
+    return !m_node.tryGetGuiSyncState(state) || state.initial_download;
 }
 
 BlockSource ClientModel::getBlockSource() const

@@ -25,6 +25,7 @@
 #include <rpc/server.h>
 #include <script/interpreter.h>
 #include <qt/clientmodel.h>
+#include <qt/modaloverlay.h>
 #include <qt/optionsmodel.h>
 #include <qt/paymasterconfirmation.h>
 #include <qt/platformstyle.h>
@@ -3388,6 +3389,39 @@ void DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet()
     QVERIFY2(!watchdog_fired,
              qPrintable(QStringLiteral("Refreshing DD Overview waited for cs_wallet (%1 ms)").arg(overview_switch_ms)));
     qInfo("Refreshing DD Overview with cs_wallet held returned in %lld ms", overview_switch_ms);
+
+    // A freshly started node has no cached tips. None of these GUI reads may
+    // wait for a header batch holding cs_main, even before IBD has finished.
+    ClientModel cold_client(m_node, nullptr);
+    interfaces::GuiSyncState sync_snapshot;
+    QVERIFY(m_node.tryGetGuiSyncState(sync_snapshot));
+    QCOMPARE(sync_snapshot.block_height, m_node.getNumBlocks());
+    QCOMPARE(sync_snapshot.initial_download, m_node.isInitialBlockDownload());
+    bool cold_reads_pending{false};
+    const qint64 cold_sync_ms = whileWalletBusy([&] {
+        const bool snapshot_busy = !m_node.tryGetGuiSyncState(sync_snapshot);
+        cold_reads_pending = snapshot_busy && cold_client.isInitialBlockDownload() &&
+            cold_client.getNumBlocks() == -1 && cold_client.getHeaderTipHeight() == -1 &&
+            cold_client.getHeaderTipTime() == -1 && cold_client.getBestBlockHash().IsNull();
+    }, &cs_main);
+    QVERIFY2(!watchdog_fired, "Cold GUI synchronization reads waited for cs_main");
+    QVERIFY(cold_reads_pending);
+    QVERIFY(sync_snapshot.block_height >= 100); // Busy reads leave the output intact.
+    QCOMPARE(cold_client.getNumBlocks(), m_node.getNumBlocks());
+    QCOMPARE(cold_client.getBestBlockHash(), m_node.getBestBlockHash());
+    qInfo("Cold GUI synchronization reads returned in %lld ms", cold_sync_ms);
+
+    ModalOverlay overlay(true, nullptr);
+    const auto old_header = QDateTime::currentDateTime().addDays(-30);
+    overlay.setKnownBestHeight(20000, old_header, false);
+    overlay.tipUpdate(0, old_header.addDays(-1), 1.0);
+    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("Unknown"));
+    QVERIFY(overlay.findChild<QLabel*>("expectedTimeLeft")->text().contains("Syncing Headers"));
+    overlay.setKnownBestHeight(21000, QDateTime::currentDateTime(), false);
+    overlay.tipUpdate(20000, QDateTime::currentDateTime(), 0.5);
+    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("50.00%"));
+    overlay.setKnownBestHeight(22000, old_header, true);
+    QCOMPARE(overlay.findChild<QLabel*>("percentageProgress")->text(), QStringLiteral("Unknown"));
 
     const qint64 health_refresh_ms = whileWalletBusy([&] {
         auto* overview = tab.findChild<DigiDollarOverviewWidget*>();

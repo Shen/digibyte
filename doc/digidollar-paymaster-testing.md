@@ -5493,3 +5493,35 @@ After the normal build documented above, use the same Qt test selector loop with
 the four function names listed here. Expect seven data cases, no selected skips
 and exit 0 (roughly one minute). Local evidence is in
 `build_msvc/paymaster-refresh-check/offer-countdown`.
+
+
+### 2026-10-15: GUI responsiveness during initial header synchronization
+
+The two new local regtest nodes continued validating headers (around heights
+36,280 and 33,756 at 11:38 UTC), while status RPCs requiring `cs_main` timed out.
+Inspection identified GUI-thread IBD reads in the DigiDollar overview and cold
+ClientModel tip getters waiting on the same mutex as header validation.
+
+`tryGetGuiSyncState()` uses a nonblocking lock attempt and leaves its output
+unchanged when busy. GUI polling treats missing status conservatively; original
+validation, difficulty, history, spending and RPC checks remain unchanged.
+Header progress no longer inherits a misleading 100% transaction estimate.
+
+Seven affected C++ translation units compiled with MSVC 14.43 / Qt 5.15.10.
+An isolated Qt executable passed `DigiDollarWidgetTests::ddTabRefreshDoesNotWaitForBusyWallet`
+(3 QtTest passes including setup/cleanup, zero failures, 7.2 seconds). It holds
+`cs_main` on another thread with a bounded watchdog: cold IBD/header/height/hash
+reads returned in 0 ms, busy snapshots remained unchanged, and reads recovered
+after release. Existing wallet-lock navigation regressions passed. Overlay
+checks cover old headers plus a 100% block estimate, return to 50% block progress,
+and header presynchronization. The status-bar unknown-header guard was separately
+compiled. Evidence: `build_msvc/paymaster-refresh-check/gui-sync`.
+
+Applied root/src guidance, architecture/maps, developer GUI locking guidance,
+Qt/test and formatting/translation rules. Full build, complete Qt suite and
+cross-platform checks were not run. Installed binaries and live node settings
+were not changed. Use the normal Windows build command documented above after
+closing the GUIs; it needs the existing MSVC/SDK/Qt/vcpkg installation and may
+take several minutes. Success means MSBuild exit 0, followed by the selected Qt
+test above with zero failures. A fresh-node GUI startup remains the live check
+for responsiveness while the unchanged header validation continues.

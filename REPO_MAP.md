@@ -1300,6 +1300,7 @@ restoring an old matching wallet/checkpoint pair; it is a diagnostic test.
 
 ### src/node/interfaces.cpp
 - `NodeImpl` (class implements interfaces::Node) → connects the abstract Node interface to the real node subsystems
+  - `tryGetGuiSyncState()` → nonblocking display snapshot of block/header tips and IBD; busy validation leaves the output unchanged, without changing authoritative validation or spending checks
 - `ChainImpl` (class implements interfaces::Chain) → connects the abstract Chain interface to chainstate
 - `MakeNode()` / `MakeChain()` → factory functions
 
@@ -1465,7 +1466,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 - `digibyteaddressvalidator.cpp` → validates DigiByte addresses in input fields
 - `digibytestrings.cpp` → translation strings registered with Qt's translation system
 - `walletmodel.cpp` → bridges CWallet to Qt model for display/interaction; observes existing canonical DD history workers across wallets on the node for Paymaster GUI scheduling, without changing ownership or authorization checks. DGB Max/Send queries current eligible inputs; a shared background balance snapshot supplies Overview, Send and Coin Control with available, Paymaster-reserved and other unavailable amounts, preserving ownership totals. A five-second refresh detects reservations without new blocks, with single-flight reads and stale-result rejection; covered by `qt/test/wallettests.cpp`.
-- `clientmodel.cpp` → bridges node state (peers, blocks, sync progress) to Qt model
+- `clientmodel.cpp` → bridges node state (peers, blocks, sync progress) to Qt model; cold tip reads and GUI IBD polling use nonblocking snapshots, treating contention as unknown/syncing
 - `sendcoinsdialog.cpp` → send coins dialog with address, amount, fee controls
 - `receivecoinsdialog.cpp` → generate receive addresses with QR codes
 - `transactiontablemodel.cpp` → displays transaction history in table view
