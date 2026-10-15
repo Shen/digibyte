@@ -1072,6 +1072,10 @@ Saved task titles follow operation kind/asset; completed or cancelled work
 cannot retain an unrelated action title or a blocked card with no active work.
 The shared task card previews cancellation of uncreated setup/refill work;
 wallet/privacy generation checks and exact Core receipts bind approval/results.
+Individual DGB and combined reserve releases bind the saved target revision,
+validate exact amounts/fees and handle underfilled categories without creating
+reserves. Manual submission confirmation rechecks wallet generation, privacy
+and current runtime snapshots before dispatch.
 See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h

@@ -30,6 +30,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   clear stale waiting states after cancellation. GUI and
   `cancelpaymastermaintenance` provide reviewed cancellation of uncreated
   reserve funding, atomically disabling refill while preserving signed work.
+- Saved-target excess release retains underfilled reserve categories and returns
+  a no-op when nothing is available to release. DGB-only execution receipts use
+  the same exact amount/fee checks as combined release. Manual submission review
+  is invalidated by wallet, privacy or provider-readiness changes.
 - Stop and retirement take priority over new automatic/provider work while
   allowing the current work owner to finish. Priority is scoped to the request;
   timeout or failed persistence cannot silently confirm a stop or leave a block.

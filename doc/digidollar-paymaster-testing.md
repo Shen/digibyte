@@ -111,6 +111,23 @@ and relevant `DigiDollarWidgetTests` cases from the current fixture. Clear filte
 before claiming a complete Qt run. A targeted result including init/cleanup
 is not that many independent feature cases.
 
+For an operator-run full Paymaster GUI suite on the configured Windows build:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:QT_STYLE_OVERRIDE = 'Fusion'
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION -ErrorAction SilentlyContinue
+Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
+& ./build_msvc/x64/Release/test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
+```
+
+Run from the repository root after a successful current-revision build with
+tests enabled. Allow several minutes or longer; some fixtures build chains.
+Success requires exit code zero and no failed tests. This suite still does not
+replace the functional matrix, ordinary-wallet regressions or release gates.
+
 ## Coverage map
 
 | Invariant / behavior | Main test locations |
@@ -123,6 +140,8 @@ is not that many independent feature cases.
 | Finite setup, whole-slot refill, below-target readiness | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`. |
 | Restore/adoption/retirement and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
 | Selected uncreated funding cancellation | `paymaster_wallet_identity_tests/maintenance_cancellation*`: DGB/DD setup/refill, exact selection/preview, lost-reply signature evidence, write rollback, commit-failure checkpoint protection, provider-work exclusion and retained signed work. Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: review/decline, wallet/privacy switches, malformed receipts, unrelated old titles and zero-capacity cancellation. |
+| Excess release with missing reserves | `paymaster_wallet_identity_tests/rebalance_saved_targets_*`: empty/mixed DGB/DD pools, saved revision/target binding, previously released DD slots/model changes, no-op execution and retained reservation guards. Qt `paymasterGuidedCapitalTasks`, `paymasterReserveReduction`: DGB-only scope, exact amount/fee receipts and no-excess feedback. |
+| Manual provider signing approval | Qt `paymasterManualSubmitConfirmation`: approve/decline and wallet, privacy, stale-snapshot or paused-runtime changes during review. Core authorization and signing checks remain authoritative. |
 | GUI cancellation, affordability, async snapshots, setup | `src/qt/test/paymasterwidgettests.cpp`, DigiDollar/overview Qt fixtures. |
 | Ordinary behavior and historical migration | DGB/DD wallet tests plus the historical compatibility group below. |
 

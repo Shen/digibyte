@@ -72,6 +72,29 @@ Confirmed free capacity remains usable when further refill cannot reach its
 target. Payment readiness and maintenance funding/confirmation state are
 separate. Target count is not an all-or-nothing service gate.
 
+## Releasing excess reserves
+
+**Release excess DGB** keeps DD reserves unchanged. The combined release after
+reducing the saved target reviews excess in both assets. Both actions bind the
+preview and execution to the saved liquidity revision and its exact targets.
+An empty or underfilled reserve category is retained; it does not prevent
+releasing confirmed excess from another category. No missing reserve is created
+by a release. With no excess, the GUI reports that fact without approval or a
+transaction instead of asking the operator to prepare reserves first.
+
+Saved targets may also reflect an earlier individual DD-slot release or payment
+model. Keeping those targets during a release does not establish provider
+readiness; setup and payment admission still enforce their own requirements.
+
+The RPC equivalent is `rebalancepaymasterpool` with the saved slot targets and
+`expected_liquidity_updated_at` from `getpaymasterliquiditystatus.policy.updated_at`.
+Set `dgb_only:true` to preserve DD reserves. Review the returned plan and bounded
+fees before execution; changed targets/revisions require a fresh preview.
+Without the saved-revision binding, the RPC retains its strict target-reduction
+contract and rejects requested counts above the current available counts.
+Active reservations, confirmation requirements and signed-work guards still
+apply. A no-excess execution returns `executed:false`; it is not a payment.
+
 ## Cancellation and verification
 
 Pause future setup/maintenance explicitly. Cancellation must not release inputs
