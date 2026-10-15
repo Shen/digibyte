@@ -181,22 +181,16 @@ digibyte-cli getbalance
 
 ### Optional Paymaster integration
 
-This development branch also supports one-recipient provider-funded transfers
-through `senddigidollar` with explicit `amount_unit="cents"` and
-`options.fee_mode="paymaster"`. It is a two-step prepare/accept workflow, not a
-drop-in replacement for the direct withdrawal command or batch withdrawals.
-Use `getpaymasterclientinfo` for local support/readiness and the
-[client contract](doc/digidollar-paymaster-integration.md) for exact parameters,
-side effects, fee limits, recovery, confirmation and pruning behavior.
+Paymaster supports one-recipient DD transfers with provider-funded DGB fees,
+using the existing transfer validation. Integrations must persist the request
+ID, prepare, explicitly accept the exact authorization commitment, and inspect
+that same session after response loss. `final=true` alone does not mean the
+recipient was paid. Never create replacement requests blindly.
 
-Persist one request ID and the complete order before preparation. A withdrawal
-amount denotes `payment_cents`; the service fee is additional by default. Retain
-the accepted commitment and reserved inputs, resume the same request after
-response loss, and distinguish confirmed recipient payment from recovery or a
-terminal session. Apply the exchange's own confirmation/reorg policy; one local
-confirmation is the RPC's success threshold, not an exchange settlement policy.
-Existing service-fee limits do not implement customer or agent spending budgets.
-See the [release gate](doc/digidollar-paymaster-release-gate.md) before deployment.
+Use the version-1 [client contract](doc/digidollar-paymaster-integration.md)
+for units, readiness, fees, status and recovery. Protected wallet reserves are
+excluded from ordinary available balance. [PAYMASTER.md](PAYMASTER.md) links
+implementation, security boundaries and revision-specific verification.
 
 ### Withdrawal Limits
 

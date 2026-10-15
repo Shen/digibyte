@@ -21,28 +21,11 @@ They do not establish release readiness or completed public-network testing.
 
 ## Paymaster architecture in this branch
 
-The [client integration contract](doc/digidollar-paymaster-integration.md)
-uses the existing `senddigidollar` authorization flow. `getpaymasterclientinfo`
-reads capabilities/readiness; shared payment and recovery observations are
-computed from existing durable artifacts and the wallet chain snapshot. They
-introduce no consensus rule, agent budget, wire field, or persistent format.
-`final` marks a closed session; confirmed recipient payment determines success.
-
-The v9.26.6rc2 integration keeps the provider panel in
-`src/qt/paymasterwidget.cpp`, behind a small embedding interface. See the
-[integration notes](doc/digidollar-paymaster-v9.26.6rc2-integration.md) for scope
-and pending verification.
-
-For the Paymaster implementation at `a4f17f6315` on
-`integration/paymaster-v9.26.6rc2` (reviewed 2026-09-23), see the
-[developer starting point](PAYMASTER.md) and
-[implementation reference](doc/digidollar-paymaster-implementation.md).
-It adds collaborative DD transfer construction, wallet authorization and
-persistence, provider discovery, and direct P2P sessions. The resulting
-transaction is an ordinary `DD_TX_TRANSFER`. The broader branch also contains
-arithmetic portability changes in consensus source, which require separate
-equivalence review. Verification is tracked in the
-[Paymaster release gate](doc/digidollar-paymaster-release-gate.md).
+Paymaster adds collaborative DGB fee funding to ordinary DD transfers without
+replacing DigiDollar consensus, activation or wallet history checks. See
+[PAYMASTER.md](PAYMASTER.md), the [implementation](doc/digidollar-paymaster-implementation.md)
+and [integration boundaries](doc/design/paymaster-integration-boundaries.md).
+Current source behavior and dated release evidence are documented separately.
 
 ## Executive Summary
 
@@ -1752,28 +1735,9 @@ saved before transaction creation; confirmed-input funding avoids stempool-only
 change dependencies. See [automatic pool setup](doc/digidollar-paymaster-pool-setup.md)
 for fee authorization, V3/V4 persistence compatibility, and legacy adoption.
 
-## Paymaster operator workflow (feature candidate, 2026-09-27)
+## Paymaster operator workflow
 
-On `feature/paymaster-operator-workflow` from RC2 `1a08828ca1`,
-`paymaster/setup.{h,cpp}` owns UI-independent finite profiles, ordered setup,
-context/reply/persisted-state checks and status budget arithmetic. Its
-`CheckSetupChoices` runs the same pure offer, safety and liquidity validators
-as provider admission before producing any mutating step. These validators live
-in `paymaster/provider_policy.cpp`, independently of node, wallet, oracle and
-transaction machinery, so the CLI can link them without server dependencies.
-CLI and Qt use this common plan through their existing RPC adapters; the Qt
-wizard constructs preview and execution from the same choices. Core alone owns
-validation, signatures, reservations and existing journal persistence.
-The shared reserve draft editor offers 1/3/6-payment capacity presets and Manual
-counts, with three separate admission proofs and paired DGB/DD payment reserves
-for user-paid service. `SetupLiquidityPreset` supplies finite refill suggestions
-without granting authority. The wizard reviews refill limits independently of
-customer-payment budgets; loading existing values never reapplies a preset.
-`getpaymasteroperatorinfo` uses a non-reconciling, non-blocking readiness view;
-existing callers retain normal reconciliation. `stoppaymaster` can atomically
-persist autostart off and enabled false under ProviderWorkGuard before stopping.
-The node owns allowlisted active-config preview/backup/atomic apply, and a
-bounded Direct diagnostic using existing fresh-work quotas. External reports
-are historical operator evidence and confer no payment or identity assurance.
-There is no consensus, wire-protocol or wallet-format change. See the
-[operator guide and open acceptance](doc/digidollar-paymaster-operator.md).
+GUI/CLI setup and daemon-owned automatic operation are implemented. The
+[operator guide](doc/digidollar-paymaster-operator.md) covers current behavior;
+[pool setup](doc/digidollar-paymaster-pool-setup.md) distinguishes finite approval,
+recurring whole-slot refill and usable capacity below the target.

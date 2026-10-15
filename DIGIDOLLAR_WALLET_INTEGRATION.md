@@ -298,27 +298,16 @@ digibyte-cli senddigidollar "DDrecipientAddress..." 5000 "Payment for services"
 
 ### Optional Paymaster-funded transfers
 
-On this integration branch, the existing `senddigidollar` RPC accepts a seventh
-`options` argument after `amount_unit`. Use explicit `amount_unit="cents"` and
-`options.fee_mode="paymaster"` for external clients. `getpaymasterclientinfo`
-reports local support/readiness. Configure the existing finite client service-fee
-policy, prepare an order with a durable `request_id`, review its exact fee split,
-then repeat the same order with the accepted `authorization_commitment`.
-Preparation may reserve and communicate; signing leads to automatic submission.
+Paymaster supports one-recipient DD transfers with provider-funded DGB fees,
+using the existing transfer validation. Integrations must persist the request
+ID, prepare, explicitly accept the exact authorization commitment, and inspect
+that same session after response loss. `final=true` alone does not mean the
+recipient was paid. Never create replacement requests blindly.
 
-`payment_cents` is the recipient amount, `service_fee_cents` is additional by
-default, and `user_total_cents` is their sum. Paymaster `status="success"` requires
-validated local recipient confirmation; the direct-DGB response shown above
-retains its existing send/broadcast meaning. Inspect the same session after a
-lost response; do not allocate a replacement request ID. Recovery and pruned
-observations are separate from recipient success.
-
-These interfaces support a possible x402 extension, without implementing the
-x402 protocol or committing to an adapter. This does not add Paymaster batching
-to `sendmanydigidollar`, mint/redeem sponsorship or a total agent spending limit. The
-[client contract](doc/digidollar-paymaster-integration.md) defines side effects,
-retry/pruning behavior and status fields; the
-[operator guide](doc/digidollar-paymaster.md) covers configuration and Qt.
+Use the version-1 [client contract](doc/digidollar-paymaster-integration.md)
+for units, readiness, fees, status and recovery. Protected wallet reserves are
+excluded from ordinary available balance. [PAYMASTER.md](PAYMASTER.md) links
+implementation, security boundaries and revision-specific verification.
 
 ### Which fee settings DigiDollar transactions actually use
 

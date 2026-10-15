@@ -18,18 +18,14 @@
 
 ## DigiDollar Paymaster development branch
 
-For the purpose, current design, implementation plan, code review map, and
-verification status of this branch, start with
-**[DigiDollar Paymaster: developer starting point](PAYMASTER.md)**.
-The feature allows a separate provider to fund the DGB miner fee for an
-ordinary DigiDollar transfer. The linked release gate distinguishes dated
-test evidence from outstanding release acceptance. The current integration
-branch targets v9.26.6rc2 and provides the
-[version 1 client RPC contract](doc/digidollar-paymaster-integration.md). Its
-interfaces support a possible x402 extension without committing to its
-implementation. No x402 adapter or agent-wide spending budget is included. See the
-[operator guide](doc/digidollar-paymaster.md) and
-[build/test runbook](doc/digidollar-paymaster-testing.md).
+This fork integrates Paymaster with v9.26.7 on `integration/paymaster-v9.26.7`.
+A provider contributes the DGB fee to an ordinary DD transfer, with explicit
+client authorization. Start with the [developer guide](PAYMASTER.md) for scope,
+architecture, security boundaries and revision-specific verification.
+The [operator guide](doc/digidollar-paymaster-operator.md) covers GUI/CLI and
+headless operation; the [client contract](doc/digidollar-paymaster-integration.md)
+covers external wallet-RPC integrations. Release acceptance remains separate
+from selected regression results.
 
 # Development is now occurring on the DigiByte-Core repo
 

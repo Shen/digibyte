@@ -121,7 +121,7 @@ Index ALL DigiDollar and Oracle source files, wherever they live in the repo.
 |----------|-------|
 | `src/paymaster/` | Non-consensus collaborative builder, protocol objects, provider policy/pools, directory, wire validation, manager, sponsorship, reservations, selection, and local reputation |
 | `src/wallet/paymaster*.{cpp,h}` | Wallet identity, role-limited PSBT signing, provider operation, and durable session/reservation/commit/recovery storage |
-| `src/wallet/rpc/paymaster.{cpp,h}` | Wallet-scoped Paymaster client and provider RPCs |
+| `src/wallet/rpc/paymaster*.{cpp,h}` | Wallet-scoped Paymaster client and provider RPCs |
 | `src/rpc/digidollar.cpp` | Node `listpaymasters` and additive `senddigidollar` options integration |
 | `src/qt/digidollarsendwidget.*`, `src/qt/digidollartab.*`, `src/qt/walletmodel.*` | Asynchronous client flow and wallet-scoped provider console |
 
