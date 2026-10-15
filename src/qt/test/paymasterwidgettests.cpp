@@ -3098,9 +3098,9 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QCOMPARE(table->item(1, 1)->text(), QStringLiteral("Sponsored by provider"));
     QCOMPARE(table->item(1, 4)->text(),
              QStringLiteral("New provider — not enough history yet"));
-    // The checkmark denotes finding public offers, not payment authorization.
-    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("ready"));
-    QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 2"));
+    // A cached announcement is not a live capacity check, even when affordable.
+    QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
+    QCOMPARE(status->text(), QStringLiteral("Matching Paymaster offers: 2"));
     auto* updated = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOffersUpdated"));
     auto* help = send_widget.findChild<QLabel*>(QStringLiteral("paymasterOfferCheckHelp"));
     QVERIFY(help && help->textFormat() == Qt::PlainText);
@@ -3127,7 +3127,8 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(updated && help);
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(updated->toolTip().contains(QStringLiteral("up to 10 minutes")));
-    QVERIFY(help->text().contains(QStringLiteral("current provider readiness is not checked yet")));
+    QVERIFY(help->text().contains(QStringLiteral("Offers may become unavailable before the displayed expiry time")));
+    QVERIFY(help->text().contains(QStringLiteral("Availability is checked automatically when you prepare your payment")));
     QVERIFY(!status->text().contains(QStringLiteral("List updated:")));
     QVERIFY(help->text().contains(QStringLiteral("before signing")));
     QVERIFY(help->toolTip().contains(QStringLiteral("can still fail")));
@@ -3140,7 +3141,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(frame && advanced && icon && animation && refresh);
     QVERIFY(advanced->isHidden());
     QVERIFY(!frame->isHidden()); // Search status is visible without expert settings.
-    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
     client->m_sessionDiscoveryReady = false;
     client->updateOfferCheckControls();
     QCOMPARE(status->property("statusKind").toString(), QStringLiteral("info"));
@@ -3148,7 +3149,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(help->text().contains("Preparation remains blocked"));
     client->m_sessionDiscoveryReady = true;
     client->updateOfferCheckControls();
-    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
     QVERIFY(!animation->isActive());
     QCOMPARE(icon->accessibleName(), status->text());
     QCOMPARE(refresh->text(), QStringLiteral("Refresh offers"));
@@ -3195,7 +3196,7 @@ void PaymasterWidgetTests::paymasterClientOfferPreviewUsesExactRpcAndPlainText()
     QVERIFY(updated->toolTip().isEmpty());
     client->setPrivacy(false);
     QVERIFY(send_widget.findChild<QFrame*>("paymasterExcludedOfferCard0"));
-    QCOMPARE(icon->text(), QStringLiteral("✓"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
     QVERIFY(updated->text().contains(QStringLiteral("List updated:")));
     QVERIFY(QMetaObject::invokeMethod(send_widget.findChild<PaymasterSendWidget*>(),
                                       "expirePaymasterOfferPreview", Qt::DirectConnection));
@@ -8435,7 +8436,7 @@ void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance()
     QVERIFY(pending);
     reply();
     QCOMPARE(table->rowCount(), 1);
-    QCOMPARE(icon->text(), own_dgb ? QStringLiteral("—") : QStringLiteral("✓"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
     QVERIFY(send->isEnabled());
     QCOMPARE(cards->isHidden(), own_dgb);
 
@@ -8598,8 +8599,8 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
     QVERIFY(tick());
     reply(available);
     QVERIFY(!animation->isActive());
-    QCOMPARE(icon->text(), QStringLiteral("✓"));
-    QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 1"));
+    QCOMPARE(icon->text(), QStringLiteral("—"));
+    QCOMPARE(status->text(), QStringLiteral("Matching Paymaster offers: 1"));
     QCOMPARE(table->rowCount(), 1); // A late announcement appears without a click.
     QCOMPARE(reads, 2);
     auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
@@ -8623,7 +8624,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         QVERIFY(!cards->isHidden());
         QVERIFY(cards->isEnabled());
         QVERIFY(expiry->isActive());
-        QCOMPARE(status->text(), QStringLiteral("Paymaster offers within balance and fee limits: 1"));
+        QCOMPARE(status->text(), QStringLiteral("Matching Paymaster offers: 1"));
         QVERIFY(!animation->isActive());
         QCoreApplication::processEvents();
         QCOMPARE(cards->geometry(), geometry);
@@ -13232,7 +13233,7 @@ void PaymasterWidgetTests::paymasterClientFeeCeilingConsistency()
     pending_status = {};
     recovered(status, {});
     QVERIFY(send->isEnabled());
-    QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("ready"));
+    QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("info"));
 
 }
 

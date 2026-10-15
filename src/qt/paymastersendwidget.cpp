@@ -2655,7 +2655,7 @@ void PaymasterSendWidget::updateOfferCheckControls()
         } else if (!paymasterOnlySelected() && !hasCurrentPaymasterOffer()) {
             m_offerCheckHelp->setText(DigiDollarSendWidget::tr("No spendable DGB and no current Paymaster offer. Add DGB or wait for an offer; the button updates automatically."));
         } else {
-            m_offerCheckHelp->setText(m_offerCheckState == OfferCheckState::FOUND ? DigiDollarSendWidget::tr("Published offer · current provider readiness is not checked yet. A stopped or busy provider may still be listed until its announcement expires. Preparing checks the provider and may temporarily reserve $DD; you approve the exact provider and fee before signing.") :
+            m_offerCheckHelp->setText(m_offerCheckState == OfferCheckState::FOUND ? DigiDollarSendWidget::tr("Offers may become unavailable before the displayed expiry time. Availability is checked automatically when you prepare your payment. Preparing may temporarily reserve $DD; you approve the exact provider and fee before signing.") :
                                      m_offerCheckState == OfferCheckState::FAILED ? DigiDollarSendWidget::tr("Try the offer check again before preparing a payment.") :
                                      m_offerCheckState == OfferCheckState::STALE ? DigiDollarSendWidget::tr("The offer must be checked again before preparing a payment.") :
                                      DigiDollarSendWidget::tr("Preparation becomes available automatically when an offer is found."));
@@ -2684,10 +2684,9 @@ void PaymasterSendWidget::updateOfferCheckIcon()
 {
     if (!m_offerStateIcon || !m_offerIconTimer) return;
     m_offerIconTimer->stop();
-    const bool usable_offer = m_offerCheckState == OfferCheckState::FOUND &&
-        preparesPaymasterPayment() && isReady() && hasMatchingPaymasterOffer();
+    // Directory announcements are cached advertisements, not a live capacity
+    // check. A matching fee and balance must never imply provider readiness.
     const auto kind = m_privacy                                          ? DigiDollarStatus::Kind::INFO :
-                      usable_offer                                       ? DigiDollarStatus::Kind::SUCCESS :
                       m_offerCheckState == OfferCheckState::CHECKING     ? DigiDollarStatus::Kind::WAITING :
                       m_offerCheckState == OfferCheckState::FAILED       ? DigiDollarStatus::Kind::ERR :
                       m_offerCheckState == OfferCheckState::NEEDS_AMOUNT ? DigiDollarStatus::Kind::ACTION :
@@ -2843,7 +2842,7 @@ void PaymasterSendWidget::updateOfferEligibility()
     const auto state = row > 0 ? OfferCheckState::FOUND :
         m_advertisedOffers.empty() ? OfferCheckState::EMPTY : OfferCheckState::UNAVAILABLE;
     setOfferCheckStatus(state, row > 0
-        ? DigiDollarSendWidget::tr("Paymaster offers within balance and fee limits: %1").arg(row)
+        ? DigiDollarSendWidget::tr("Matching Paymaster offers: %1").arg(row)
         : m_advertisedOffers.empty()
             ? DigiDollarSendWidget::tr("No matching public Paymaster offer currently listed.")
             : DigiDollarSendWidget::tr("Published Paymaster offers are currently unavailable for this payment."));
@@ -3013,7 +3012,7 @@ void PaymasterSendWidget::renderOfferCards()
         heading->addWidget(choice);
         heading->addWidget(title, 1);
         if (index == 0) {
-            auto* recommended = add_label(DigiDollarSendWidget::tr("Recommended"));
+            auto* recommended = add_label(DigiDollarSendWidget::tr("Suggested for checking"));
             recommended->setObjectName("paymasterRecommendedOffer");
             recommended->setProperty("feeChoiceBadge", true);
             recommended->setProperty("offerCardText", false);
@@ -3024,6 +3023,9 @@ void PaymasterSendWidget::renderOfferCards()
         auto* identity = add_label(DigiDollarSendWidget::tr("Provider ID: %1…").arg(provider_id.left(12)));
         identity->setToolTip(provider_id);
         layout->addWidget(identity);
+        layout->addWidget(add_label(DigiDollarSendWidget::tr("Listed until: %1")
+            .arg(QDateTime::fromSecsSinceEpoch(offer.find_value("expires_at").getInt<qint64>())
+                     .toLocalTime().toString(Qt::ISODate))));
         const qint64 payment = offer.find_value("payment_cents").getInt<qint64>();
         const qint64 fee = offer.find_value("service_fee_cents").getInt<qint64>();
         const qint64 total = offer.find_value("user_total_cents").getInt<qint64>();
