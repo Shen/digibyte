@@ -198,6 +198,30 @@ private:
     std::vector<DirectMessage> m_messages;
 };
 
+/** Give a wallet-local stop priority over new provider work. Registration is
+ * immediate; the existing owner must still finish before TryAcquire succeeds.
+ * The scope must cover persistent pause and runtime stop. Destruction removes
+ * only this request, including on failure/timeout; it never releases another
+ * work owner's slot. No wallet lock or identity read is needed to register.
+ * Manager must outlive the guard, as it does for provider work/message leases. */
+class ProviderStopGuard final
+{
+public:
+    ProviderStopGuard(Manager& manager, const std::string& wallet_name);
+    ProviderStopGuard(const ProviderStopGuard&) = delete;
+    ProviderStopGuard& operator=(const ProviderStopGuard&) = delete;
+    ~ProviderStopGuard();
+    bool Requested() const noexcept { return m_requested; }
+    bool Acquired() const noexcept { return m_acquired; }
+    bool TryAcquire();
+
+private:
+    Manager& m_manager;
+    const std::string m_wallet_name;
+    bool m_requested{false};
+    bool m_acquired{false};
+};
+
 class Manager
 {
 public:
@@ -215,6 +239,8 @@ public:
             m_requested_provider_starts.clear();
             m_provider_work.clear();
             m_provider_service_status.clear();
+            // Outstanding stop guards retain their priority until destruction,
+            // including across a disable/enable cycle. They own their cleanup.
         }
     }
 
@@ -431,7 +457,8 @@ public:
     size_t RunningProviderCount() const;
     /** Serialize wallet-local provider work across the scheduler and expert
      * RPCs. Callers that operate only while stopped (for example releasing a
-     * carrier slot) may explicitly waive the runtime requirement. */
+     * carrier slot) may explicitly waive the runtime requirement. A pending
+     * stop still blocks both forms; only its stop guard may acquire next. */
     bool TryBeginProviderWork(const std::string& wallet_name,
                               const PaymasterId& provider_id,
                               bool require_running = true);
@@ -446,6 +473,7 @@ public:
 
 private:
     friend class DirectMessageLease;
+    friend class ProviderStopGuard;
     using RateWindow = std::deque<int64_t>;
 
     struct TokenBucket {
@@ -539,6 +567,7 @@ private:
     std::map<std::string, PaymasterId> m_provider_work GUARDED_BY(m_provider_mutex);
     std::map<std::string, ProviderServiceStatus> m_provider_service_status GUARDED_BY(m_provider_mutex);
     std::map<int64_t, ChannelExchange> m_channel_exchanges GUARDED_BY(m_direct_mutex);
+    std::map<std::string, const ProviderStopGuard*> m_provider_stop_requests GUARDED_BY(m_provider_mutex);
 };
 
 } // namespace DigiDollar::Paymaster

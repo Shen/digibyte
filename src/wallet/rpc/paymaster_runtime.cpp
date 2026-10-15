@@ -323,6 +323,7 @@ RPCHelpMan stoppaymaster()
     return RPCHelpMan{
         "stoppaymaster",
         "Stop the ephemeral Paymaster provider runtime for this wallet. Durable recovery records are retained. "
+        "A registered stop prevents new provider work while waiting up to five seconds for active work to finish. Timeout or failure removes this temporary priority; it does not confirm a stop or cancel signed work. "
         "Without options a saved autostart setting may start it again later. Use {\"persistent\":true,\"pause_setup\":true} for the normal persistent pause: disable autostart and provider configuration under the provider work guard before stopping. Existing reservations and signed transactions remain recoverable and can still confirm.\n",
         {{"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Persistent pause options", {
                                                                                                    {"persistent", RPCArg::Type::BOOL, RPCArg::Default{false}, "Disable saved autostart before stopping"},
@@ -342,27 +343,25 @@ RPCHelpMan stoppaymaster()
                 if (!options.find_value("pause_setup").isNull()) pause_setup = options.find_value("pause_setup").get_bool();
                 if (pause_setup && !persistent) throw JSONRPCError(RPC_INVALID_PARAMETER, "pause_setup requires persistent=true");
             }
-            ProviderIdentityRecord identity;
-            std::optional<ProviderWorkGuard> stop_guard;
-            if (context.paymaster && context.paymaster->Enabled() &&
-                GetPaymasterIdentity(*wallet, identity)) {
-                // A funding/readiness step can briefly own the provider even
-                // while it has no usable reserves. Wait for that owner to finish
-                // instead of making a normal stop/retirement fail immediately.
-                // Only guard acquisition is retried: no settings, signatures or
-                // reservations change until we hold the same exclusive guard.
+            std::optional<ProviderStopGuard> stop_guard;
+            if (context.paymaster && context.paymaster->Enabled()) {
+                // Register stop priority before waiting: no new start, refill
+                // or other provider work may overtake this request. The current
+                // owner still finishes under its exclusive guard. This scope
+                // retains priority through persistent pause and runtime stop;
+                // exceptions/timeouts release it without pretending to stop.
                 AssertLockNotHeld(cs_main);
                 AssertLockNotHeld(wallet->cs_wallet);
+                stop_guard.emplace(*context.paymaster, wallet->GetName());
+                if (!stop_guard->Requested())
+                    throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_BUSY");
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
                 do {
-                    stop_guard.emplace(*context.paymaster, wallet->GetName(),
-                                       identity.provider_id, /*require_running=*/false);
-                    if (stop_guard->Acquired()) break;
-                    stop_guard.reset();
+                    if (stop_guard->TryAcquire()) break;
                     if (!context.paymaster->Enabled()) break;
                     UninterruptibleSleep(std::chrono::milliseconds{25});
                 } while (std::chrono::steady_clock::now() < deadline);
-                if (!stop_guard) {
+                if (!stop_guard->Acquired()) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        "PAYMASTER_PROVIDER_BUSY");
                 }

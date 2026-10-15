@@ -3346,6 +3346,97 @@ BOOST_AUTO_TEST_CASE(manager_provider_work_is_serialized_and_status_is_ephemeral
     BOOST_CHECK(!manager.TryBeginProviderWork("provider-wallet", provider_id));
 }
 
+BOOST_AUTO_TEST_CASE(manager_provider_stop_has_priority_without_releasing_active_work)
+{
+    Manager manager{true};
+    const PaymasterId provider{uint256S("7511")};
+    const PaymasterId other{uint256S("7512")};
+    BOOST_REQUIRE(manager.StartProvider("wallet", provider));
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider));
+    BOOST_REQUIRE(manager.RequestProviderStart("wallet", provider));
+    {
+        ProviderStopGuard stop{manager, "wallet"};
+        BOOST_REQUIRE(stop.Requested());
+        BOOST_CHECK(!stop.TryAcquire());
+        BOOST_CHECK(manager.IsProviderRunning("wallet", provider));
+        BOOST_CHECK(manager.HasRequestedProviderStart("wallet", provider));
+        BOOST_CHECK(!manager.RequestProviderStart("wallet", provider));
+        BOOST_CHECK(!manager.CompleteProviderStart("wallet", provider));
+        {
+            ProviderStopGuard second_stop{manager, "wallet"};
+            BOOST_CHECK(!second_stop.Requested());
+            BOOST_CHECK(!second_stop.TryAcquire());
+        }
+        // Neither a duplicate stop nor a different identity may steal/clear
+        // the first stop's priority. Other wallets continue independently.
+        BOOST_CHECK(!manager.StartProvider("wallet", provider));
+        BOOST_CHECK(!manager.StartProvider("wallet", other));
+        BOOST_REQUIRE(manager.StartProvider("other-wallet", other));
+        BOOST_REQUIRE(manager.TryBeginProviderWork("other-wallet", other));
+        manager.EndProviderWork("other-wallet");
+        manager.EndProviderWork("wallet");
+        // Deterministic scheduler interleaving: ordinary work tries to acquire
+        // after the old owner exits, but before the waiting stop polls again.
+        BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider));
+        BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider, false));
+        BOOST_CHECK(!manager.TryBeginProviderWork("wallet", other, false));
+        BOOST_REQUIRE(stop.TryAcquire());
+        BOOST_CHECK(stop.TryAcquire());
+        manager.StopProvider("wallet");
+        BOOST_CHECK(!manager.IsProviderRunning("wallet", provider));
+        BOOST_CHECK(!manager.HasRequestedProviderStart("wallet", provider));
+        BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider, false));
+    }
+    // Priority and work ownership both end with the stop scope. Explicit
+    // stopped-provider actions can now acquire their ordinary guard again.
+    BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider));
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider, false));
+    manager.EndProviderWork("wallet");
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_stop_failure_cleans_up_only_its_own_request)
+{
+    Manager manager{true};
+    const PaymasterId provider{uint256S("7521")};
+    BOOST_REQUIRE(manager.StartProvider("wallet", provider));
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider));
+    try {
+        ProviderStopGuard stop{manager, "wallet"};
+        BOOST_REQUIRE(stop.Requested());
+        BOOST_CHECK(!stop.TryAcquire());
+        throw std::runtime_error("timeout before acquisition");
+    } catch (const std::runtime_error&) {
+    }
+    // Failed acquisition must leave the original work owner intact.
+    BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider));
+    manager.EndProviderWork("wallet");
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider));
+    manager.EndProviderWork("wallet");
+    try {
+        ProviderStopGuard stop{manager, "wallet"};
+        BOOST_REQUIRE(stop.Requested());
+        BOOST_REQUIRE(stop.TryAcquire());
+        throw std::runtime_error("persistent stop failed");
+    } catch (const std::runtime_error&) {
+    }
+    BOOST_CHECK(manager.IsProviderRunning("wallet", provider));
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider));
+    manager.EndProviderWork("wallet");
+    {
+        ProviderStopGuard stop{manager, "wallet"};
+        BOOST_REQUIRE(stop.Requested());
+        manager.SetEnabled(false);
+        BOOST_CHECK(!stop.TryAcquire());
+        manager.SetEnabled(true);
+        BOOST_CHECK(!manager.TryBeginProviderWork("wallet", provider, false));
+        BOOST_CHECK(!manager.StartProvider("wallet", provider));
+        BOOST_REQUIRE(stop.TryAcquire());
+    }
+    BOOST_REQUIRE(manager.StartProvider("wallet", provider));
+    BOOST_REQUIRE(manager.TryBeginProviderWork("wallet", provider));
+    manager.EndProviderWork("wallet");
+}
+
 BOOST_AUTO_TEST_CASE(manager_provider_inbox_leases_retry_then_acknowledge)
 {
     Manager manager{true};

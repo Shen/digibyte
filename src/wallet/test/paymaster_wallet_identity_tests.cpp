@@ -1156,7 +1156,7 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
     options.pushKV("persistent", true);
     options.pushKV("pause_setup", true);
     request.params.push_back(options);
-    for (bool timeout : {false, true}) {
+    for (const std::string scenario : {"success", "timeout", "database_failure"}) {
         ProviderSettings settings;
         settings.enabled = settings.autostart = true;
         settings.policy_hash = uint256::ONE;
@@ -1165,13 +1165,21 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
             LOCK(provider_wallet.cs_wallet);
             WalletBatch batch{provider_wallet.GetDatabase()};
             BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+            ProviderLiquidityPolicy liquidity;
+            liquidity.automatic_replenishment = true;
+            liquidity.paid_maintenance_approved = true;
+            liquidity.maximum_maintenance_fee_per_transaction = DGBSatoshis{10000000};
+            liquidity.maximum_maintenance_fee_per_hour = DGBSatoshis{20000000};
+            liquidity.maximum_maintenance_fee_per_day = DGBSatoshis{30000000};
+            liquidity.updated_at = 100;
+            BOOST_REQUIRE(batch.WritePaymasterLiquidityPolicy(liquidity));
         }
         std::optional<ProviderWorkGuard> owner;
         owner.emplace(manager, provider_wallet.GetName(), identity.provider_id, false);
         BOOST_REQUIRE(owner->Acquired());
         BOOST_REQUIRE(manager.RequestProviderStart(provider_wallet.GetName(), identity.provider_id));
         const auto before = GetMockableDatabase(provider_wallet).m_records;
-        if (timeout) {
+        if (scenario == "timeout") {
             BOOST_CHECK_EXCEPTION(stoppaymaster().HandleRequest(request), UniValue,
                 [](const UniValue& exception) {
                     return exception.find_value("message").get_str() == "PAYMASTER_PROVIDER_BUSY";
@@ -1180,13 +1188,38 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
             BOOST_CHECK(manager.HasRequestedProviderStart(provider_wallet.GetName(), identity.provider_id));
             BOOST_CHECK(!manager.TryBeginProviderWork(provider_wallet.GetName(), identity.provider_id, false));
             owner.reset();
+        } else if (scenario == "database_failure") {
+            owner.reset();
+            auto& db = GetMockableDatabase(provider_wallet);
+            db.FailWriteAt(0);
+            BOOST_CHECK_EXCEPTION(stoppaymaster().HandleRequest(request), UniValue,
+                [](const UniValue& exception) {
+                    return exception.find_value("message").get_str() == "PAYMASTER_DATABASE_WRITE";
+                });
+            db.ClearFailureInjection();
+            BOOST_CHECK(db.m_records == before);
+            BOOST_CHECK(manager.HasRequestedProviderStart(provider_wallet.GetName(), identity.provider_id));
+            ProviderWorkGuard after_failure{manager, provider_wallet.GetName(), identity.provider_id, false};
+            BOOST_CHECK(after_failure.Acquired());
         } else {
             std::promise<void> entered;
-            auto stopped = std::async(std::launch::async, [&] {
-                entered.set_value();
-                return stoppaymaster().HandleRequest(request);
-            });
-            entered.get_future().wait();
+            std::future<UniValue> stopped;
+            {
+                // Priority must register even while the current work holds
+                // the wallet mutex; fetching identity first would block it.
+                LOCK(provider_wallet.cs_wallet);
+                stopped = std::async(std::launch::async, [&] {
+                    entered.set_value();
+                    return stoppaymaster().HandleRequest(request);
+                });
+                entered.get_future().wait();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+                while (manager.RequestProviderStart(provider_wallet.GetName(), identity.provider_id) &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    UninterruptibleSleep(std::chrono::milliseconds{1});
+                }
+                BOOST_CHECK(!manager.RequestProviderStart(provider_wallet.GetName(), identity.provider_id));
+            }
             BOOST_CHECK(stopped.wait_for(std::chrono::milliseconds{150}) == std::future_status::timeout);
             // Other wallets remain independent while this stop waits.
             ProviderWorkGuard other{manager, "other-wallet", uint256::ONE, false};
@@ -1198,6 +1231,20 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
         BOOST_CHECK(!manager.HasRequestedProviderStart(provider_wallet.GetName(), identity.provider_id));
         BOOST_REQUIRE(GetPaymasterProviderSettings(provider_wallet, settings));
         BOOST_CHECK(!settings.enabled && !settings.autostart);
+        // Stop preserves refill preferences for explicit resumption, but
+        // neither automatic service nor finite setup may execute afterwards.
+        ProviderLiquidityPolicy liquidity;
+        {
+            LOCK(provider_wallet.cs_wallet);
+            BOOST_REQUIRE(WalletBatch{provider_wallet.GetDatabase()}.ReadPaymasterLiquidityPolicy(liquidity));
+        }
+        BOOST_CHECK(liquidity.automatic_replenishment && liquidity.paid_maintenance_approved);
+        const auto stopped_records = GetMockableDatabase(provider_wallet).m_records;
+        RunPaymasterProviderServiceCycle(context, provider_wallet);
+        RunPaymasterPoolPreparation(context, provider_wallet);
+        BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == stopped_records);
+        BOOST_CHECK(provider_wallet.mapWallet.empty());
+        BOOST_CHECK(!manager.IsProviderRunning(provider_wallet.GetName(), identity.provider_id));
     }
 }
 

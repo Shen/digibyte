@@ -1680,10 +1680,42 @@ bool Manager::HasOutboundDirectMessage(int64_t peer_id, const uint256& message_i
     return m_outbound_direct_ids.count(std::pair{peer_id, message_id}) != 0;
 }
 
+ProviderStopGuard::ProviderStopGuard(Manager& manager, const std::string& wallet_name)
+    : m_manager{manager}, m_wallet_name{wallet_name}
+{
+    LOCK(m_manager.m_provider_mutex);
+    if (!m_manager.Enabled()) return;
+    m_requested = m_manager.m_provider_stop_requests.emplace(wallet_name, this).second;
+}
+
+bool ProviderStopGuard::TryAcquire()
+{
+    LOCK(m_manager.m_provider_mutex);
+    const auto request = m_manager.m_provider_stop_requests.find(m_wallet_name);
+    if (!m_requested || !m_manager.Enabled() || request == m_manager.m_provider_stop_requests.end() ||
+        request->second != this) return false;
+    if (m_acquired) return true;
+    // The unique pending request excludes all new work. Once the old owner
+    // leaves, this scope alone owns the transition; no identity or work slot
+    // needs to be manufactured for stopping. Never evict an existing owner.
+    m_acquired = m_manager.m_provider_work.count(m_wallet_name) == 0;
+    return m_acquired;
+}
+
+ProviderStopGuard::~ProviderStopGuard()
+{
+    if (!m_requested) return;
+    LOCK(m_manager.m_provider_mutex);
+    const auto request = m_manager.m_provider_stop_requests.find(m_wallet_name);
+    if (request != m_manager.m_provider_stop_requests.end() && request->second == this)
+        m_manager.m_provider_stop_requests.erase(request);
+}
+
 bool Manager::StartProvider(const std::string& wallet_name, const PaymasterId& provider_id)
 {
     if (!Enabled() || provider_id.IsNull()) return false;
     LOCK(m_provider_mutex);
+    if (m_provider_stop_requests.count(wallet_name) != 0) return false;
     const auto existing = m_running_providers.find(wallet_name);
     if (existing != m_running_providers.end()) {
         return existing->second == provider_id;
@@ -1698,7 +1730,7 @@ bool Manager::CompleteProviderStart(const std::string& wallet_name,
     if (wallet_name.empty() || provider_id.IsNull()) return false;
     LOCK(m_provider_mutex);
     const auto work = m_provider_work.find(wallet_name);
-    if (!Enabled() || work == m_provider_work.end() ||
+    if (!Enabled() || m_provider_stop_requests.count(wallet_name) != 0 || work == m_provider_work.end() ||
         work->second != provider_id) {
         return false;
     }
@@ -1720,7 +1752,8 @@ bool Manager::RequestProviderStart(const std::string& wallet_name, const Paymast
 {
     LOCK(m_provider_mutex);
     const auto work = m_provider_work.find(wallet_name);
-    if (!Enabled() || provider_id.IsNull() || work == m_provider_work.end() || work->second != provider_id) return false;
+    if (!Enabled() || provider_id.IsNull() || m_provider_stop_requests.count(wallet_name) != 0 ||
+        work == m_provider_work.end() || work->second != provider_id) return false;
     m_requested_provider_starts[wallet_name] = provider_id;
     return true;
 }
@@ -1761,6 +1794,7 @@ bool Manager::TryBeginProviderWork(const std::string& wallet_name,
 {
     if (!Enabled() || wallet_name.empty() || provider_id.IsNull()) return false;
     LOCK(m_provider_mutex);
+    if (m_provider_stop_requests.count(wallet_name) != 0) return false;
     const auto running = m_running_providers.find(wallet_name);
     if ((require_running && running == m_running_providers.end()) ||
         (running != m_running_providers.end() &&
