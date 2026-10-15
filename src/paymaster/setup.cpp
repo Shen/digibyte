@@ -417,6 +417,8 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
                    service_error.get_str() == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED") {
             add(service_error.get_str(), "action_required", "budgets", "review_budget");
         } else if (service_error.get_str() == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
+                   service_error.get_str() == "PAYMASTER_POOL_WAITING_DGB" ||
+                   service_error.get_str() == "PAYMASTER_POOL_WAITING_FUNDS" ||
                    service_error.get_str() == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" ||
                    service_error.get_str() == "PAYMASTER_MAINTENANCE_FEE_EXCEEDED") {
             add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");

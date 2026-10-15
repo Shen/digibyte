@@ -2480,14 +2480,18 @@ bool RunAutomaticDGBReplenishment(
     }
 
     std::vector<CRecipient> recipients;
+    CAmount required_dgb{0};
     for (const ProviderMaintenanceOutput& output : operation->outputs) {
         CTxDestination destination;
         if (output.asset != PoolAsset::DGB ||
+            !MoneyRange(output.dgb_value.value) ||
+            output.dgb_value.value > MAX_MONEY - required_dgb ||
             !ExtractDestination(output.script_pub_key, destination)) {
             error = "PAYMASTER_INVALID_MAINTENANCE_OUTPUT";
             return false;
         }
         recipients.push_back({destination, output.dgb_value.value, false});
+        required_dgb += output.dgb_value.value;
     }
     CCoinControl coin_control;
     // As with finite setup, stem-only change is invisible to the ordinary
@@ -2496,7 +2500,13 @@ bool RunAutomaticDGBReplenishment(
     auto created = CreateTransaction(wallet, recipients, /*change_pos=*/-1,
                                      coin_control, /*sign=*/true);
     if (!created) {
-        error = util::ErrorString(created).original;
+        // Diagnose a definite capital shortfall using ordinary coin selection:
+        // protected reserves, locked coins and unconfirmed change stay excluded.
+        // Other construction failures must not masquerade as missing capital.
+        LOCK(wallet.cs_wallet);
+        error = AvailableCoins(wallet, &coin_control).GetTotalAmount() < required_dgb
+            ? "PAYMASTER_POOL_WAITING_DGB"
+            : "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED";
         return false;
     }
     if (created->fee > operation->maximum_fee.value) {
@@ -2753,7 +2763,13 @@ bool RunAutomaticCarrierReplenishment(
             recipients, plan, plan_error,
             /*preset_dd_inputs=*/nullptr,
             /*allow_paymaster_pool_inputs=*/false)) {
-        error = "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + plan_error;
+        // Preserve the ordinary planner's funding diagnosis without parsing
+        // display text or changing its protected-pool selection rules.
+        error = plan.error_code == DDTransferPlanError::INSUFFICIENT_DD_INPUTS
+            ? "PAYMASTER_POOL_WAITING_FUNDS"
+            : plan.error_code == DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS
+                ? "PAYMASTER_POOL_WAITING_DGB"
+                : "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + plan_error;
         return false;
     }
     if (plan.estimated_fee <= 0 ||

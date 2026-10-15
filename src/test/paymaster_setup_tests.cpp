@@ -596,6 +596,18 @@ BOOST_AUTO_TEST_CASE(operator_distinguishes_capacity_wait_from_errors)
     provider.pushKV("last_service_error", "PAYMASTER_MAINTENANCE_FEE_CHANGED");
     diagnostics = OperatorDiagnostics(provider, 0, 100);
     BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+    for (const auto* reason : {"PAYMASTER_POOL_WAITING_DGB", "PAYMASTER_POOL_WAITING_FUNDS"}) {
+        provider.pushKV("last_service_error", reason);
+        diagnostics = OperatorDiagnostics(provider, 0, 100);
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("state").get_str(), "action_required");
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "liquidity");
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "review_liquidity");
+        // Missing capital is actionable, but must never hide a genuine fault.
+        provider.pushKV("service_state", "error");
+        diagnostics = OperatorDiagnostics(provider, 0, 100);
+        BOOST_CHECK_EQUAL(diagnostics[0].find_value("action").get_str(), "inspect_error");
+        provider.pushKV("service_state", "replenishing_liquidity");
+    }
 }
 BOOST_AUTO_TEST_CASE(operator_work_transitions_preserve_real_errors)
 {

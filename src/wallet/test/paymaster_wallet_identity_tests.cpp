@@ -2158,6 +2158,68 @@ BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_recor
 }
 
 
+BOOST_AUTO_TEST_CASE(empty_wallet_refill_waits_for_funds_without_duplicate_plans)
+{
+    using namespace paymaster_rpc::internal;
+    ScopedPaymasterMockTime clock{2000};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderPolicy offer;
+    offer.funding_models = FUNDING_MODEL_SPONSORED;
+    offer.min_payment = DDCents{100};
+    offer.max_payment = DDCents{100000};
+    offer.maximum_network_fee = DGBSatoshis{20000000};
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterPolicy(offer));
+    ProviderLiquidityPolicy policy;
+    policy.paid_maintenance_approved = true;
+    policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{10000000};
+    policy.maximum_maintenance_fee_per_hour = DGBSatoshis{20000000};
+    policy.maximum_maintenance_fee_per_day = DGBSatoshis{30000000};
+    policy.updated_at = 1000;
+    std::string error;
+    uint256 operation_id;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        BOOST_CHECK(!RunAutomaticDGBReplenishment(m_wallet, policy, 0, 1, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_WAITING_DGB");
+        BOOST_CHECK(m_wallet.mapWallet.empty());
+        ProviderMaintenanceLedger ledger;
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+        const auto& record = ledger.records.front();
+        BOOST_CHECK(record.state == ProviderMaintenanceState::PLANNED);
+        BOOST_CHECK(record.transaction_id.IsNull());
+        BOOST_CHECK_EQUAL(record.actual_fee.value, 0);
+        if (attempt == 0) operation_id = record.operation_id;
+        else BOOST_CHECK(record.operation_id == operation_id);
+    }
+    m_wallet.EnsureDDWallet();
+    policy.target_admission_carriers = REQUIRED_ADMISSION_SLOTS;
+    policy.target_operational_carriers = 1;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        BOOST_CHECK(!RunAutomaticCarrierReplenishment(m_wallet, policy, 0, 1, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_WAITING_FUNDS");
+        BOOST_CHECK(m_wallet.mapWallet.empty());
+        ProviderMaintenanceLedger ledger;
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_REQUIRE_EQUAL(ledger.records.size(), 2U);
+        const auto& record = ledger.records.back();
+        BOOST_CHECK(record.state == ProviderMaintenanceState::PLANNED);
+        BOOST_CHECK(record.transaction_id.IsNull());
+        BOOST_CHECK_EQUAL(record.actual_fee.value, 0);
+        if (attempt == 0) operation_id = record.operation_id;
+        else BOOST_CHECK(record.operation_id == operation_id);
+    }
+    // Drained operational capacity must not publish or renew an announcement,
+    // regardless of the separate admission reserves or old directory entry.
+    WalletContext context;
+    ProviderReadiness readiness;
+    readiness.errors = {"PAYMASTER_OPERATIONAL_SLOT_MISSING"};
+    BOOST_CHECK(!PublishCurrentProviderAnnouncement(m_wallet, context, readiness, 2000, nullptr, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+}
+
 BOOST_AUTO_TEST_CASE(obsolete_refill_release_recovers_transactions_first)
 {
     ScopedPaymasterMockTime clock{2000};
