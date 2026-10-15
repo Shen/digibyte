@@ -14,10 +14,20 @@ sign a transaction, delete identity/history or delete the wallet.
    `dgb_satoshis` and `dd_cents`.
 4. Execute the exact reviewed plan using same-build RPC help for its options.
 
-`stoppaymaster` waits up to five seconds to acquire the same exclusive provider
-work guard used by funding and signing. A short background step no longer makes
-retirement fail immediately. If work remains busy, stop is not confirmed and no
-capital is released. The wait does not interrupt or bypass the active work.
+`stoppaymaster` first registers temporary stop priority for this wallet. New
+provider work, including automatic start and refill, cannot overtake that request.
+It waits up to five seconds for the current work owner to finish, then acquires
+exclusive ownership through persistent pause and runtime stop. Other wallets
+continue independently. The wait never interrupts signing or bypasses its guard.
+If work remains busy or persistence fails, stop is not confirmed and no capital
+is released. Scope cleanup removes the temporary priority so a failed attempt
+does not leave a hidden permanent block; an existing work owner is preserved.
+
+A confirmed GUI Stop/Pause disables provider enablement and autostart and clears
+one-shot start intent. This prevents automatic execution but retains saved refill
+preferences for explicit resumption. Completing retirement additionally disables
+automatic refill and revokes its fee approval. A bare RPC `stoppaymaster` without
+persistent options still allows saved autostart to resume later.
 
 Starting without enough funds can leave a planned reserve-funding task with no
 transaction. Normal GUI **Retire Paymaster** includes these tasks in its release
@@ -72,5 +82,7 @@ Relevant functional scenarios are `wallet_paymaster_backup_exit.py`,
 and `wallet_paymaster_lifecycle.py`.
 Targeted unit coverage includes `provider_stop_waits_for_work_without_bypassing_exclusion`
 and `capital_release_cancels_only_reviewed_uncreated_funding` in
-`paymaster_wallet_identity_tests`. Qt coverage is in `paymasterStopAndRelease`
-and `paymasterRetirementLateResults`.
+`paymaster_wallet_identity_tests`. The `manager_provider_stop_*` cases in
+`paymaster_wire_tests` cover stop priority, active-owner preservation, duplicate
+requests, failure cleanup and other-wallet independence. Qt coverage is in
+`paymasterStopAndRelease` and `paymasterRetirementLateResults`.

@@ -219,5 +219,9 @@ If a start could not fund its reserves, GUI retirement also reviews cancellation
 of funding tasks that created no transaction. CLI/RPC can request the same review
 with `releasepaymastercapital {"cancel_uncreated":true}`; repeat the option with
 the approved plan on execution. Signed or ambiguous work still blocks release.
-Stopping briefly waits for active provider work; a continuing busy error means
-the stop has not been confirmed, not that funds were released.
+Stopping immediately gives the request priority over new provider work and
+briefly waits for active work. A continuing busy error means the stop has not
+been confirmed, not that funds were released. Confirmed Stop/Pause blocks refill
+execution while retaining its preferences; completing retirement also turns off
+automatic refill and revokes its fee approval. Failed stop attempts remove their
+temporary priority rather than leaving an invisible permanent pause.

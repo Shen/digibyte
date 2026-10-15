@@ -26,6 +26,9 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   required after restart; no saved passphrase for automatic restart.
 - Guarded backup restoration, independent rollback checkpoint, reviewed adoption
   and safe retirement/capital release.
+- Stop and retirement take priority over new automatic/provider work while
+  allowing the current work owner to finish. Priority is scoped to the request;
+  timeout or failed persistence cannot silently confirm a stop or leave a block.
 - Retirement after an unfunded start waits briefly for competing provider work
   and can explicitly cancel uncreated reserve-funding tasks in the reviewed
   release. Signed/ambiguous work and restored-wallet guards remain enforced.
