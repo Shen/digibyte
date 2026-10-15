@@ -4,37 +4,135 @@ Read [node prerequisites](digidollar-paymaster.md) first. GUI and interactive CL
 use shared setup decisions and persisted Core policy. Automatic provider work
 runs in the daemon; neither a GUI nor CLI watch must remain open.
 
-## Setup and routine operation
+## First provider setup
 
-The GUI separates Overview, Funds & reserves, Activity, Income & costs and
-Settings. Configure identity/offer, budgets, liquidity and startup behavior,
-review the resulting plan, then approve it. User-paid and public-sponsored
-services can be enabled independently. New restricted sponsorship is disabled
-and is not silently converted to public.
+Before setup, establish the selected network, node data directory and provider
+wallet. The same wallet name on another node is not the same provider. Use a
+fresh identity for each independent provider; do not clone a running wallet.
+The [local regtest example](digidollar-paymaster.md#local-regtest-example) supplies
+connection settings for a test environment. Public deployment needs a reachable
+advertised endpoint and an appropriately secured local RPC service.
+
+Have confirmed DGB for reserve principal **and transaction fees**, and DD for
+carrier reserves when offering user-paid service that needs them. Funding the
+wallet is separate from authorizing the setup to allocate reserves. The preview
+reports what is missing; no fixed amount in this guide guarantees every setup.
+Do not move collateral or another session's reserved funds to make it pass.
+
+### GUI sequence
+
+1. Load/select the provider wallet, open **DigiDollar > Paymaster Network** and
+   wait for current wallet/history/index readiness. A loading status does not
+   create a second setup requirement.
+2. Configure the node connection if needed. Review the bind address and advertised
+   endpoint, apply the configuration plan, and restart the node explicitly if
+   requested. Check that the correct wallet is selected again after restart.
+3. Review identity and offer: display name, user-paid/public-sponsored models,
+   amount range, service fee and quote/network-fee limits. Create the persistent
+   identity only when needed; do not replace it for routine settings changes.
+4. Review finite payment/sponsorship limits and reserve targets. Choose whether
+   recurring paid refill is authorized and under which ceilings. Review the
+   separate finite initial funding plan before approving transaction creation.
+5. Choose autostart and unlock behavior deliberately. Review the final setup
+   summary, approve intended changes, and follow funding/confirmation progress.
+6. Verify current service readiness and actual free payment capacity, not only
+   that setup was accepted. Back up the resulting wallet. An open offer or an
+   announcement is not a successfully completed customer payment.
+
+Existing settings are available through Overview, Funds & reserves, Activity,
+Income & costs and Settings. Node configuration requires restart; running-provider
+offer changes use the reviewed save/restart path. Do not use tab changes as part
+of a save procedure. If a save fails, inspect its error/status and saved values
+before assuming the running offer changed.
+
+### CLI sequence
+
+The following assumes `digibyte-cli` is on PATH and the intended node uses the
+default data directory/network. For another node, add the same `-datadir`,
+network selector and custom `-rpcport` to **every** command. A GUI node must run
+with `server=1` for external CLI access. On Windows, use `&` and the explicit
+`.exe` path when it is not on PATH; see the regtest example.
+
+First inspect connectivity and wallet selection (read-only):
+
+```sh
+digibyte-cli getblockchaininfo
+digibyte-cli listwallets
+digibyte-cli -rpcwallet=provider getwalletinfo
+```
+
+`provider` is a wallet-name placeholder. If this is a new setup with no wallet,
+the terminal assistant can select or create an encrypted descriptor wallet:
+
+```sh
+digibyte-cli -paymastersetup
+```
+
+For an existing known wallet, select it explicitly:
 
 ```sh
 digibyte-cli -rpcwallet=provider -paymastersetup
 digibyte-cli -rpcwallet=provider -paymasterstatus
 digibyte-cli -rpcwallet=provider -paymasterstatus -watch
-digibyte-cli -rpcwallet=provider getpaymasteroperatorinfo
 ```
 
-Without an explicit wallet the assistant offers selection or encrypted
-descriptor-wallet creation. An explicitly selected unloaded wallet is loaded
-first. Setup requires a terminal; noninteractive use is rejected before setup
-mutations. Use individual RPCs for automation.
+These are alternative entry points, not a sequence that must stay running.
+The assistant covers wallet, connection, offer, costs/reserves, startup,
+review/apply and funding completion. Existing-provider entry defaults to status
+with explicit pause/resume, unlock, backup and settings actions. An explicitly
+selected unloaded wallet is loaded first. Enter declines the final mutation/
+funding review; type the requested confirmation to approve it.
 
-Stages are wallet, connection, offer, costs/reserves, startup, review/apply and
-funding completion. Existing-provider entry defaults to status, with explicit
-pause/resume, unlock, backup and settings actions. Saved values are preserved
-until reviewed changes are approved. Enter declines final mutation/funding
-review; type the requested confirmation to approve. Proposed wizard values are
-suggestions, not network constants or estimates of future fees.
+Setup requires a terminal and rejects noninteractive setup before mutation.
+Do not automate it by piping answers/passwords. Automation uses the documented
+individual RPCs and their explicit policy/plan/authorization contracts. `-watch`
+is only observation: ending it neither stops service nor disables refill.
+Saved settings are preserved until reviewed changes are accepted. Proposed
+wizard values are suggestions, not network constants or future fee estimates.
 
-Node connection changes are separately previewed, backed up and written to
-configuration. Applying the plan does not restart the node; restart is required
-for those settings. Running-provider offer changes use the reviewed save/restart
-path. Changing tabs must not be a prerequisite for saving.
+## Routine operation and restart
+
+Use these status views with the same node/wallet arguments as setup:
+
+```sh
+digibyte-cli -rpcwallet=provider getpaymasteroperatorinfo
+digibyte-cli -rpcwallet=provider getpaymasterliquiditystatus
+digibyte-cli -rpcwallet=provider getpaymastersafetystatus
+digibyte-cli -rpcwallet=provider getpaymasterfinancestatus
+```
+
+`getpaymasteroperatorinfo` is a strictly read-only operations snapshot.
+`getpaymasterfinancestatus` can reconcile persisted finance records with chain
+observations before returning them; it is not a mutation-free database read.
+Neither is approval for a new payment, reserve-funding transaction or service
+restart. Distinguish this bookkeeping from signing/spending authority in scripts.
+
+| Situation | Action | Check afterwards |
+|---|---|---|
+| Restart after an upgrade | Stop normally, replace the intended binary, restart with the same data directory/network and load the wallet. | Executable version, wallet selection, synchronization and restore/readiness state. Source changes alone do not update the process. |
+| Encrypted wallet after restart | Explicitly unlock through the GUI/terminal workflow. | Intended unlock duration and provider status; autostart cannot supply a saved passphrase. |
+| Change offered model or fee | Review saved policy, edit the offer and approve save/restart if running. | Read back the effective policy and current service state; existing client listings may be cached. |
+| Temporarily exhausted targets | Inspect free confirmed slots separately from missing refill capacity. | Existing free slots can serve; missing targets do not imply all service must stop. |
+| Pause future service and setup | Use the persistent pause action. | Service stopped, autostart/provider enablement paused; signed work still protected. |
+| Resume after persistent pause | Use the assistant's reviewed resume path or deliberately re-enable the configured provider and start it. | `startpaymaster` alone does not undo disabled provider policy; restore/unlock/readiness checks still apply. |
+
+For RPC automation, the normal persistent pause is this JSON-RPC method and
+parameter array; it is a **state-changing** operation, not a status check:
+
+```json
+{"method":"stoppaymaster","params":[{"persistent":true,"pause_setup":true}]}
+```
+
+Execute it on the selected wallet endpoint using your authenticated RPC client.
+It disables saved autostart/provider configuration and new setup signatures,
+then stops service. It does not revoke existing signatures or release protected
+funds. A bare `stoppaymaster` can be undone later by saved autostart. Complete
+node shutdown is a separate operation; stopping a provider does not stop the node.
+
+`startpaymaster` with `wait_for_readiness=true` can retain a one-shot start
+request during the current wallet load when accepted. It is not persistent
+autostart, a wallet unlock or permission to exceed saved limits. Inspect the
+returned state and errors; acceptance is not proof of immediately serving.
 
 ## Encrypted wallets and headless service
 
