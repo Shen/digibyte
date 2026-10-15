@@ -67,3 +67,12 @@ See [operator guide](../digidollar-paymaster-operator.md),
 [client contract](../digidollar-paymaster-integration.md),
 [threat model](../paymaster-threat-model.md) and
 [v9.26.7 checkpoint](../digidollar-paymaster-v9.26.7-integration.md).
+
+## Documentation navigation
+
+The [task index](../../PAYMASTER.md#choose-your-task) separates wallet-user,
+provider, application-developer and Core-review workflows. The
+[user guide](../digidollar-paymaster-user.md) explains payment/fee/cancellation
+states. Operator setup/restart examples, client response handling and the
+Windows build recipe supplement the concise references; they do not change
+runtime behavior or renew historical test evidence.

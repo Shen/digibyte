@@ -20,7 +20,7 @@
 
 This fork integrates Paymaster with v9.26.7 on `integration/paymaster-v9.26.7`.
 A provider contributes the DGB fee to an ordinary DD transfer, with explicit
-client authorization. Start with the [developer guide](PAYMASTER.md) for scope,
+client authorization. Start with the [documentation guide](PAYMASTER.md) for user/operator tasks, scope,
 architecture, security boundaries and revision-specific verification.
 The [operator guide](doc/digidollar-paymaster-operator.md) covers GUI/CLI and
 headless operation; the [client contract](doc/digidollar-paymaster-integration.md)
