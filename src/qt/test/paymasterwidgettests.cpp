@@ -949,6 +949,19 @@ void PaymasterWidgetTests::paymasterLiquidityMaintenanceStatesAreReadable()
             QStringLiteral("no transaction has been created"),
             Qt::CaseInsensitive));
 
+    for (const char* reason : {"PAYMASTER_POOL_WAITING_DGB", "PAYMASTER_POOL_WAITING_FUNDS"}) {
+        fee_exceeded.pushKV("last_service_error", reason);
+        tab.setPaymasterReadinessStatusForTesting(fee_exceeded);
+        tab.setPaymasterLiquidityStatusForTesting(PaymasterLiquidityStatus(
+            "replenishing_liquidity", true, true, 1));
+        QVERIFY(state->text().contains("waiting for wallet funds"));
+        QVERIFY(next_step->text().contains("outside the protected reserves"));
+        QVERIFY(next_step->text().contains("no refill transaction has been created"));
+        QCOMPARE(maintenance_card->property("statusKind").toString(), QStringLiteral("action"));
+        QVERIFY(approve->isHidden()); // Already approved; adding funds needs no new fee approval.
+        QCOMPARE(refill_changes, 0);
+    }
+
     tab.setPaymasterLiquidityStatusForTesting(PaymasterLiquidityStatus(
         "waiting_for_liquidity_confirmation", true, true, 0, 1));
     QVERIFY(state->text().contains(QStringLiteral("waiting for confirmation")));
@@ -9823,6 +9836,33 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
     review->click();
     QVERIFY(limits->isChecked());
     for (const auto& command : commands) QVERIFY(command.startsWith(QStringLiteral("get")));
+
+    for (const char* reason : {"PAYMASTER_POOL_WAITING_DGB", "PAYMASTER_POOL_WAITING_FUNDS"}) {
+        provider.pushKV("last_service_error", reason);
+        provider.pushKV("ready", false);
+        provider.pushKV("pool_ready", false);
+        auto liquidity = provider.find_value("liquidity");
+        liquidity.pushKV("maintenance_state", "replenishing_liquidity");
+        liquidity.pushKV("operational_dgb", PaymasterLiquiditySlotStatus(0, 0, 1, 1));
+        provider.pushKV("liquidity", liquidity);
+        UniValue errors{UniValue::VARR};
+        errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        provider.pushKV("readiness_errors", errors);
+        observe();
+        QCOMPARE(headline->text(), QStringLiteral("Reserve refill needs wallet funds"));
+        QVERIFY(hint->text().contains("outside the protected reserves"));
+        QCOMPARE(action->text(), QStringLiteral("View funds and reserves"));
+        QVERIFY(task_status->text().contains("no refill transaction has been created"));
+        QVERIFY(progress->isHidden());
+        auto* capital = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
+        QVERIFY(capital && capital->text().contains("refill needs wallet funds"));
+        commands.clear();
+        action->click();
+        for (const auto& command : commands) QVERIFY(command.startsWith(QStringLiteral("get")));
+        auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+        QVERIFY(pages);
+        QCOMPARE(pages->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+    }
 }
 
 void PaymasterWidgetTests::paymasterOperatorPollingPreservesDraftsAndThrottlesFinance()

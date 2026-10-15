@@ -4426,7 +4426,9 @@ public:
                 });
         connect(m_overview_operation_action, &QPushButton::clicked, this,
                 [this] {
-                    if (maintenanceFeeLimitExceeded()) {
+                    if (maintenanceWaitingForFunds()) {
+                        showOperatorPage(m_liquidity_page);
+                    } else if (maintenanceFeeLimitExceeded()) {
                         reviewMaintenanceFeeLimit();
                     } else if (!m_liquidity_targets_satisfy_provider_policy) {
                         showOperatorPage(m_liquidity_page);
@@ -5826,6 +5828,13 @@ private:
                    QLatin1String("PAYMASTER_MAINTENANCE_FEE_CHANGED");
     }
 
+    bool maintenanceWaitingForFunds() const
+    {
+        return m_service_state == QLatin1String("replenishing_liquidity") &&
+               (m_last_service_error == QLatin1String("PAYMASTER_POOL_WAITING_DGB") ||
+                m_last_service_error == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS"));
+    }
+
     void updateAutomaticRefreshTimer()
     {
         if (!m_setup_status_timer) return;
@@ -5865,6 +5874,8 @@ private:
         } else if (!m_core_ready && providerConfigurationComplete() &&
                    hasPassiveExternalWait()) {
             m_status->setText(tr("Provider fully configured — waiting for blockchain and node readiness. You do not need to change provider settings."));
+        } else if (maintenanceWaitingForFunds()) {
+            m_status->setText(readinessExplanation(m_last_service_error));
         } else if (providerConfigurationComplete() && liquidity_attention) {
             m_status->setText(tr("Provider settings are saved — restore the missing wallet liquidity before the service can accept transfers."));
         } else if (m_service_state == QLatin1String("waiting_for_maintenance_approval")) {
@@ -7726,6 +7737,10 @@ private:
                 next_step = tr(
                     "No transaction was created. The estimated network fee is above the saved per-transaction maintenance limit of %1 DGB. Review the limit and increase it only if that bounded cost is acceptable.")
                                 .arg(dgbAmount(fee_limit));
+            } else if (maintenanceWaitingForFunds()) {
+                status_kind = QStringLiteral("action");
+                state_text = tr("Automatic refill paused — waiting for wallet funds");
+                next_step = readinessExplanation(m_last_service_error);
             } else if (pending > 0) {
                 status_kind = QStringLiteral("waiting");
                 state_text = tr("Replacement liquidity is waiting for confirmation");
@@ -8436,6 +8451,10 @@ private:
             return tr("Review and explicitly approve finite automatic liquidity-maintenance limits under Operating capital.");
         if (error == QLatin1String("PAYMASTER_PAYMENT_CAPACITY_IN_USE"))
             return tr("Operating capacity is temporarily in use. Automatic refill stays enabled.");
+        if (error == QLatin1String("PAYMASTER_POOL_WAITING_DGB"))
+            return tr("Not enough confirmed, spendable DGB outside the protected reserves to refill them. Add DGB for the missing reserve capital and its network fee. Automatic refill retries within the saved limits; no refill transaction has been created.");
+        if (error == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS"))
+            return tr("Not enough spendable DD outside the protected reserves to refill them. Add DD for the missing reserves and DGB for the network fee. Automatic refill retries within the saved limits; no refill transaction has been created.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"))
             return tr("Wait for the automatically prepared replacement liquidity to confirm.");
         if (error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") ||
@@ -9096,6 +9115,7 @@ private:
             return tr(
                 "Automatic refill is paused because its estimated network fee exceeds the saved per-transaction maintenance limit. No transaction was created and no DGB was spent. Review the refill cost limit under Automation & reserves before retrying.");
         }
+        if (maintenanceWaitingForFunds()) return readinessExplanation(m_last_service_error);
         const QString error_suffix = m_last_service_error.isEmpty()
             ? QString{}
             : tr(" Stable error: %1").arg(m_last_service_error);
@@ -9801,6 +9821,8 @@ private:
                                   ? tr("Action required · targets are saved; approve the bounded refill cost")
                             : refill_fee_limit_exceeded
                                   ? tr("Action required · refill cost exceeds the approved limit")
+                            : maintenanceWaitingForFunds()
+                                  ? tr("Action required · refill needs wallet funds")
                             : refill_waiting_for_start
                                   ? tr("Action required · refill approved; start the provider to restore liquidity")
                             : liquidity_waiting
@@ -9810,7 +9832,7 @@ private:
                             : liquidity_ready ? QStringLiteral("ready")
                             : !m_liquidity_targets_satisfy_provider_policy
                                   ? QStringLiteral("action")
-                                  : refill_fee_limit_exceeded
+                                  : refill_fee_limit_exceeded || maintenanceWaitingForFunds()
                                         ? QStringLiteral("action")
                                   : liquidity_waiting
                                         ? QStringLiteral("waiting")
@@ -9825,6 +9847,8 @@ private:
                           ? tr("Approve refill costs")
                     : refill_fee_limit_exceeded
                           ? tr("Review refill cost limit")
+                    : maintenanceWaitingForFunds()
+                          ? tr("View funds and reserves")
                     : refill_waiting_for_start
                           ? tr("Start and restore liquidity")
                           : tr("Restore liquidity"));
@@ -9848,6 +9872,8 @@ private:
             operation_kind = QStringLiteral("action");
             operation_text = tr(
                 "Paused · automatic refill exceeds the approved cost limit");
+        } else if (maintenanceWaitingForFunds()) {
+            operation_text = tr("Action required · refill needs wallet funds");
         } else if (m_service_state.startsWith(QLatin1String("waiting_")) ||
                    m_service_state == QLatin1String("replenishing_liquidity")) {
             operation_kind = QStringLiteral("waiting");
@@ -9891,6 +9917,8 @@ private:
             } else if (refill_fee_limit_exceeded) {
                 m_overview_operation_action->setText(
                     tr("Review refill cost limit"));
+            } else if (maintenanceWaitingForFunds()) {
+                m_overview_operation_action->setText(tr("View funds and reserves"));
             } else if (refill_waiting_for_start) {
                 m_overview_operation_action->setText(
                     tr("Review liquidity"));
@@ -10197,6 +10225,12 @@ private:
                 ? tr("Check the missing capital and maximum fees, then approve once. Core will create the missing reserves and wait for confirmations.")
                 : tr("The saved DD reserve capacity is too low for your offer. The next step proposes the required capacity and shows the capital and fees before you approve. Your spending limits stay unchanged.");
             button = m_core_running ? tr("Restore reserves…") : tr("Restore reserves and start…");
+            if (maintenanceWaitingForFunds()) {
+                headline = tr("Reserve refill needs wallet funds");
+                hint = readinessExplanation(m_last_service_error);
+                button = tr("View funds and reserves");
+                kind = QStringLiteral("action");
+            }
         } else if (action == QLatin1String("review_budget")) {
             headline = tr("Spending limits need attention");
             hint = tr("Check the affected limit. Rolling budgets recover over time; limits are never raised automatically.");
@@ -10483,6 +10517,7 @@ private:
         else if (action == QLatin1String("review_budget"))
             showOperatorPage(m_operator_next_area == QLatin1String("liquidity") ? m_liquidity_page : m_safety_page);
         else if (action == QLatin1String("review_liquidity")) {
+            if (maintenanceWaitingForFunds()) { showOperatorPage(m_liquidity_page); return; }
             if (canReviewPreparationFee()) { cancelPoolPreparation(true); return; }
             if (m_operation.startNeedsReserveApproval() ||
                 (!m_operation.observed_work && m_operation.phase != PaymasterOperationController::Phase::Waiting))
@@ -11323,7 +11358,9 @@ private:
             ? tr("Waiting briefly for the current provider task. This release has not started. Core will recheck the same approved plan and fee limit.")
             : tr("3/5 · Applying the approved task. Please wait…"); break;
         case Phase::Waiting:
-            message = m_operation.required_confirmations > 0
+            message = maintenanceWaitingForFunds() && m_operation.required_confirmations == 0
+                ? readinessExplanation(m_last_service_error)
+                : m_operation.required_confirmations > 0
                 ? tr("4/5 · Waiting for confirmations: %1/%2. Continuation is automatic.")
                     .arg(m_operation.completed_confirmations).arg(m_operation.required_confirmations)
                 : m_operation.snapshot.find_value("provider").find_value("start_requested").isTrue()
@@ -11372,7 +11409,8 @@ private:
             message += tr("\nCombined progress of %1 reserve operations; individual transactions are listed in Activity.").arg(work.size());
         }
         m_task_status->setText(title + QStringLiteral("\n") + message);
-        m_task_progress->setVisible(m_operation.phase == Phase::Checking || m_operation.phase == Phase::Executing || m_operation.phase == Phase::Waiting);
+        m_task_progress->setVisible(m_operation.phase == Phase::Checking || m_operation.phase == Phase::Executing ||
+            (m_operation.phase == Phase::Waiting && (!maintenanceWaitingForFunds() || m_operation.required_confirmations > 0)));
         if (m_operation.phase == Phase::Waiting && m_operation.required_confirmations > 0) {
             m_task_progress->setRange(0, m_operation.required_confirmations);
             m_task_progress->setValue(m_operation.completed_confirmations);
