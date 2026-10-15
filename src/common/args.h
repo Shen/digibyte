@@ -63,6 +63,7 @@ enum class OptionsCategory {
     COMMANDS,
     REGISTER_COMMANDS,
     DIGIDOLLAR,
+    PAYMASTER,
     ORACLE,
 
     HIDDEN // Always the last option to avoid printing these in the help

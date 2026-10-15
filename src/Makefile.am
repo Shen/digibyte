@@ -168,6 +168,7 @@ DIGIBYTE_CORE_H = \
   paymaster/txbuilder.h \
   paymaster/client.h \
   paymaster/setup.h \
+  paymaster/help.h \
   paymaster/types.h \
   paymaster/reservation.h \
   paymaster/directory.h \

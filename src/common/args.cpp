@@ -7,6 +7,7 @@
 #include <chainparamsbase.h>
 #include <common/settings.h>
 #include <logging.h>
+#include <paymaster/help.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <univalue.h>
@@ -637,6 +638,9 @@ std::string ArgsManager::GetHelpMessage() const
             case OptionsCategory::DIGIDOLLAR:
                 usage += HelpMessageGroup("DigiDollar options:");
                 break;
+            case OptionsCategory::PAYMASTER:
+                usage += HelpMessageGroup("Paymaster startup options:");
+                break;
             case OptionsCategory::ORACLE:
                 usage += HelpMessageGroup("Oracle options:");
                 break;
@@ -657,6 +661,9 @@ std::string ArgsManager::GetHelpMessage() const
                 }
                 usage += HelpMessageOpt(name, arg.second.m_help_text);
             }
+        }
+        if (arg_map.first == OptionsCategory::PAYMASTER) {
+            usage += DigiDollar::Paymaster::GetCommandHelp();
         }
     }
     return usage;

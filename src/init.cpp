@@ -726,12 +726,12 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-digidollar", "Enable DigiDollar stablecoin features (activation follows the network's configured block height)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-digidollaractivationheight=<n>", "Set the buried DigiDollar deployment height together with the static DD/oracle/MuSig2 height gates, so DigiDollar activates at exactly this height (regtest only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
     argsman.AddArg("-ddthawdayheight=<n>", "Set the block height at which the DigiDollar Thaw Day rules take effect (regtest only; on any other network this option is a startup error, so keep it under a [regtest] section of the config file). Default: not scheduled.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-paymaster", "Enable DigiDollar Paymaster discovery, relay, and client support (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-paymastermaxoutbound=<n>", "Reserved outgoing Direct channels (default: 1, range: 0..4); included in maxconnections", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-paymastermaxinbound=<n>", "Maximum active provider Direct channels (default: 16, range: 0..16); requires paymasterbind", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-paymasterbind=<ip:port>[=onion]", "Bind a dedicated v2 Direct listener; repeat for additional addresses. Append =onion for a Tor forwarding target. Uses a shared bounded admission budget.", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-addpaymaster=<ip>", "Add a DigiDollar Paymaster endpoint for local validation; this bypasses discovery only", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
-    argsman.AddArg("-paymasterendpoint=<ip:port>", "Public P2P endpoint announced by an explicitly enabled Paymaster provider (loopback is allowed only on regtest)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::DIGIDOLLAR);
+    argsman.AddArg("-paymaster", "Enable DigiDollar Paymaster discovery, relay, and client support (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::PAYMASTER);
+    argsman.AddArg("-paymastermaxoutbound=<n>", "Reserved outgoing Direct channels (default: 1, range: 0..4); included in maxconnections", ArgsManager::ALLOW_ANY, OptionsCategory::PAYMASTER);
+    argsman.AddArg("-paymastermaxinbound=<n>", "Maximum active provider Direct channels (default: 16, range: 0..16); requires paymasterbind", ArgsManager::ALLOW_ANY, OptionsCategory::PAYMASTER);
+    argsman.AddArg("-paymasterbind=<ip:port>[=onion]", "Bind a dedicated v2 Direct listener; repeat for additional addresses. Append =onion for a Tor forwarding target. Uses a shared bounded admission budget.", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::PAYMASTER);
+    argsman.AddArg("-addpaymaster=<ip>", "Add a DigiDollar Paymaster endpoint for local validation; this bypasses discovery only", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::PAYMASTER);
+    argsman.AddArg("-paymasterendpoint=<ip:port>", "Public P2P endpoint announced by an explicitly enabled Paymaster provider (loopback is allowed only on regtest)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::PAYMASTER);
 
     // DigiDollar RPC commands (use 'help <command>' in console for details)
     argsman.AddArg("mintdigidollar", "Mint DigiDollars by locking DGB as collateral (RPC/console)", ArgsManager::ALLOW_ANY, OptionsCategory::DIGIDOLLAR);
