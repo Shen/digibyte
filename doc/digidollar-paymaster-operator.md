@@ -326,11 +326,27 @@ reserves. It is not required just to obtain a quote from already confirmed free
 reserves. Preparation errors log a bounded `PAYMASTER_...` code without payment
 amounts, addresses, request payloads or arbitrary remote error text.
 
-Stopping a provider does not instantly withdraw already relayed announcements.
+Stopping a provider or exhausting its operational reserves does not instantly
+withdraw already relayed announcements. An empty operational pool prevents
+renewal and fresh capacity authorization, even if admission reserves remain.
 They can remain in clients' local lists until their signed expiry, at most ten
 minutes after creation. A list refresh is not a reachability test. Qt identifies
-the local list update and announcement expiry separately and reports endpoint/
-proxy failures through a specific connection message.
+the local list update and announcement expiry separately. A normal information
+note explains that offers may become unavailable before expiry and availability
+is checked automatically during preparation. Endpoint/proxy failures have a
+specific connection message.
+
+Automatic refill needs ordinary spendable funds outside the protected pool.
+If confirmed DGB cannot cover the replacement reserve capital, it reports
+`PAYMASTER_POOL_WAITING_DGB`; insufficient spendable DD for replacement carriers
+reports `PAYMASTER_POOL_WAITING_FUNDS`. Other funding/construction failures
+remain separate diagnostics. Add the missing capital and allow funding to
+confirm, including DGB for network fees. The running, unlocked provider retries
+the saved plan within its existing approvals; no repeat setup or increased
+limit is required just to replenish the wallet. An uncreated refill is not a
+pending blockchain transaction. Qt shows the funding requirement instead of
+indeterminate preparation progress. Signed work and protected reserves retain
+their existing handling.
 
 The normal Overview action changes with the current cause: start/resume,
 unlock, review a limit, review reserves, inspect progress or open diagnostics.

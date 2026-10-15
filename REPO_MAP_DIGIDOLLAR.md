@@ -1542,6 +1542,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and reuses unchanged cards to preserve geometry, focus and selection. Invalid
   responses/expired generations still clear the preview. Empty-list messages
   describe current matching offers separately from a previous failed attempt.
+- Cached announcements use neutral status and visible per-card expiry, with a
+  plain-language note that offers may become unavailable before expiry and
+  availability is checked automatically during preparation.
 - Opt-in `getpaymasteroffers` fee diagnostics display excluded models as muted
   comparison cards in a separate counted section, without selection controls.
   All returned exclusions appear; unchanged eligible/excluded cards are reused.

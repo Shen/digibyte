@@ -1,5 +1,20 @@
 # Paymaster integration release notes
 
+## Drained reserves and cached offers (2026-10-15)
+
+Automatic refill now distinguishes a definite shortage of free wallet capital
+from an unknown service failure. GUI and CLI diagnostics identify the funding
+requirement; Qt directs the operator to funds and reserves without requesting
+another approval or implying that an uncreated transaction is confirming.
+The saved unsigned refill plan remains reusable within the existing limits.
+
+Client discovery now shows matching offers with a neutral status and visible
+expiry. A normal information note explains that offers may become unavailable
+before expiry and availability is checked automatically during preparation.
+Old announcements can remain visible until signed expiry;
+exhausted operational reserves already block renewal and fresh capacity.
+No protocol, ordinary-wallet funding, reservation or validation rule changes.
+
 ## Consistent overview balance formatting (2026-10-14)
 
 DGB and DigiDollar overview cards now use aligned amount/unit columns and

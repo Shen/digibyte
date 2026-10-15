@@ -5309,3 +5309,40 @@ a possible transient cause, not proven by these logs. The GUI wording was
 changed in `3721a996833d`; a successful later 30-second refresh clears it.
 No statistics, validation or synchronization code was changed in this setup
 update, and no unavailable value is presented as a verified health result.
+
+## Drained reserve diagnostics and cached announcements (2026-10-15)
+
+Focused checks passed using isolated MSVC test executables in
+`build_msvc/paymaster-refresh-check/drained-reserves`:
+
+- 13 Core cases / 149 assertions: the directory suite, operator diagnostics,
+  and `empty_wallet_refill_waits_for_funds_without_duplicate_plans`.
+  Repeated empty-wallet DGB and DD refill attempts retain one unsigned plan
+  per asset, spend no fee and create no wallet transaction. Missing operational
+  capacity prevents announcement publication. Unknown service faults retain
+  priority over the known funding requirement.
+- Nine Qt data cases in six functions: liquidity-maintenance messages,
+  operator work transitions in both themes, public offer presentation,
+  balance-gated discovery, automatic list refresh and fee-ceiling consistency.
+  Funding actions navigate without issuing mutation RPCs. An uncreated refill
+  has no confirmation progress; affordable advertisements remain neutral and
+  explain the automatic availability check. Existing expiry, privacy and
+  selection checks pass.
+- Seven affected translation units compiled with existing Release libraries;
+  `git diff --check` passed. Narrow/wide dark/light offer screenshots were
+  generated; the neutral banner and visible card expiry were inspected.
+
+After the final offer wording update and rebuilding the two affected Qt
+translation units,
+`paymasterClientOfferPreviewUsesExactRpcAndPlainText` and
+`paymasterClientOfferAutomaticRefresh` passed again. Narrow dark/light banners
+were visually checked.
+
+Qt checks used a separate, never-activated Windows desktop. These are targeted
+tests, not a full build or a new end-to-end refill recovery test. Live nodes
+were inspected read-only; their programs, wallets and settings were unchanged.
+The full build and full Qt acceptance suite were not run for this change.
+For subsequent manual acceptance, drain only ordinary funds in disposable
+Regtest wallets, consume the last operational reserve, and check that old
+announcements expire without renewal. Confirm newly supplied ordinary funding
+and verify automatic refill resumes within the unchanged approval.
