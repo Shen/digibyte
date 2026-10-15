@@ -45,6 +45,7 @@ inline std::string GetCommandHelp()
     usage += HelpMessageOpt("listpaymasterreservations", "List retained provider reservations");
     usage += HelpMessageOpt("cancelpaymasterquote", "Cancel an eligible quote under Core safety checks");
     usage += HelpMessageOpt("releasepaymastercapital", "Preview or execute guarded release of provider reserves");
+    usage += HelpMessageOpt("cancelpaymastermaintenance", "Review and cancel uncreated reserve funding; turn automatic refill off");
     usage += HelpMessageOpt("withdrawpaymastercarrier", "Review and release an eligible DD carrier");
     usage += HelpMessageOpt("acknowledgepaymasterproviderbackup", "Acknowledge a backup reminder; does not create a backup");
     usage += HelpMessageOpt("adoptpaymasterbackup", "Review or adopt an eligible restored provider wallet");

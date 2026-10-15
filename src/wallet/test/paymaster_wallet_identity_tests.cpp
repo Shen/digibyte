@@ -1248,6 +1248,228 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
     }
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_cancellation_is_selected_atomic_and_signature_safe)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Cancel reserve work", 100, identity, error));
+    WalletBatch batch{m_wallet.GetDatabase()};
+    ProviderLiquidityPolicy liquidity;
+    liquidity.automatic_replenishment = liquidity.paid_maintenance_approved = true;
+    liquidity.maximum_maintenance_fee_per_transaction = DGBSatoshis{20000000};
+    liquidity.maximum_maintenance_fee_per_hour = DGBSatoshis{100000000};
+    liquidity.maximum_maintenance_fee_per_day = DGBSatoshis{200000000};
+    liquidity.updated_at = 100;
+    BOOST_REQUIRE(batch.WritePaymasterLiquidityPolicy(liquidity));
+    ProviderMaintenanceLedger ledger;
+    std::vector<uint256> ids;
+    for (auto kind : {ProviderMaintenanceKind::REPLENISH_DGB, ProviderMaintenanceKind::REPLENISH_CARRIER,
+                      ProviderMaintenanceKind::PREPARE_DGB, ProviderMaintenanceKind::PREPARE_CARRIER}) {
+        ProviderMaintenanceRecord record;
+        record.kind = kind;
+        record.operation_id = GetRandHash();
+        record.plan_id = GetRandHash();
+        record.maximum_fee = DGBSatoshis{20000000};
+        record.created_at = record.updated_at = 1000;
+        if (record.IsPreparation()) {
+            record.preparation_authorization = GetRandHash();
+            record.preparation_request = GetRandHash();
+            record.preparation_error = "PAYMASTER_POOL_WAITING_FUNDS";
+        }
+        const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "uncreated funding");
+        BOOST_REQUIRE(destination);
+        ProviderMaintenanceOutput output;
+        output.purpose = PoolPurpose::OPERATIONAL;
+        output.script_pub_key = GetScriptForDestination(*destination);
+        const bool carrier = kind == ProviderMaintenanceKind::REPLENISH_CARRIER || kind == ProviderMaintenanceKind::PREPARE_CARRIER;
+        output.asset = carrier ? PoolAsset::DD_CARRIER : PoolAsset::DGB;
+        output.dgb_value = DGBSatoshis{carrier ? 0 : 20000000};
+        output.carrier_value = DDCents{carrier ? 200 : 0};
+        record.outputs = {output};
+        ledger.records.push_back(record);
+        ids.push_back(record.operation_id);
+    }
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    auto& db = GetMockableDatabase(m_wallet);
+    const auto before = db.m_records;
+    PaymasterMaintenanceCancellation result;
+    BOOST_REQUIRE(CancelPaymasterMaintenance(m_wallet, ids, false, {}, 2000, result, error));
+    BOOST_CHECK_EQUAL(result.released_fee_budget, 80000000);
+    const auto plan = result.plan_id;
+    BOOST_CHECK(db.m_records == before);
+    for (const std::vector<uint256>& invalid : {std::vector<uint256>{}, {ids[0], ids[0]}, {uint256{}}, {GetRandHash()}})
+        BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, invalid, false, {}, 2000, result, error));
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, {ids[0]}, true, plan, 2000, result, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_PLAN_CHANGED");
+    BOOST_CHECK(db.m_records == before);
+    // Selection changes, new journal state and changed approval invalidate a preview.
+    auto changed = ledger;
+    changed.records.front().maximum_fee = DGBSatoshis{10000000};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(changed));
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, true, plan, 2000, result, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_PLAN_CHANGED");
+    for (auto state : {ProviderMaintenanceState::BROADCAST, ProviderMaintenanceState::FAILED, ProviderMaintenanceState::CONFIRMED}) {
+        changed = ledger;
+        changed.records.front().state = state;
+        changed.records.front().transaction_id = GetRandHash();
+        BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(changed));
+        const auto saved = db.m_records;
+        BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, false, {}, 2000, result, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
+        BOOST_CHECK(db.m_records == saved);
+        // Independent uncreated work remains cancellable alongside a signed sibling.
+        BOOST_REQUIRE(CancelPaymasterMaintenance(m_wallet, {ids[1]}, false, {}, 2000, result, error));
+    }
+    changed = ledger;
+    changed.records.front().kind = ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+    changed.records.front().source_inputs = {COutPoint{GetRandHash(), 0}};
+    changed.records.front().withdrawal_excess_amount = DDCents{100};
+    changed.records.front().withdrawal_excess_script_pub_key = ledger.records.back().outputs.front().script_pub_key;
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(changed));
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, false, {}, 2000, result, error));
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    CMutableTransaction funding;
+    // A signed sibling's journal is also evidence, even with a missing wallet tx.
+    changed = ledger;
+    auto sibling = ledger.records.front();
+    sibling.operation_id = GetRandHash(); sibling.plan_id = GetRandHash();
+    sibling.state = ProviderMaintenanceState::BROADCAST; sibling.transaction_id = GetRandHash();
+    changed.records.push_back(sibling);
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(changed));
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, false, {}, 2000, result, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    funding.vin.emplace_back(COutPoint{GetRandHash(), 0});
+    funding.vout.emplace_back(1, ledger.records.front().outputs.front().script_pub_key);
+    const auto tx = MakeTransactionRef(funding);
+    BOOST_REQUIRE(m_wallet.AddToWallet(tx, TxStateInactive{}));
+    const auto signed_before = db.m_records;
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, true, plan, 2000, result, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+    BOOST_CHECK(db.m_records == signed_before);
+    m_wallet.mapWallet.erase(tx->GetHash()); // Synthetic lost-reply fixture only.
+    BOOST_REQUIRE(CancelPaymasterMaintenance(m_wallet, ids, false, {}, 2000, result, error));
+    const auto current_plan = result.plan_id;
+    const auto before_write = db.m_records;
+    for (size_t fail_at : {0U, 1U, 2U}) {
+        db.FailWriteAt(fail_at);
+        BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, true, current_plan, 2000, result, error));
+        db.ClearFailureInjection();
+        BOOST_CHECK(db.m_records == before_write);
+    }
+    BOOST_REQUIRE_MESSAGE(CancelPaymasterMaintenance(m_wallet, ids, true, current_plan, 2000, result, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    for (const auto& record : ledger.records) {
+        BOOST_CHECK(record.state == ProviderMaintenanceState::RELEASED);
+        BOOST_CHECK(record.preparation_error.empty());
+    }
+    BOOST_REQUIRE(batch.ReadPaymasterLiquidityPolicy(liquidity));
+    BOOST_CHECK(!liquidity.automatic_replenishment);
+    BOOST_CHECK(liquidity.paid_maintenance_approved);
+    BOOST_CHECK(m_wallet.mapWallet.empty());
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, ids, true, current_plan, 2000, result, error));
+    // A commit failure can advance the external checkpoint. Preserve the
+    // existing restore guard instead of allowing a blind fresh retry.
+    ledger.records.front().state = ProviderMaintenanceState::PLANNED;
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    const std::vector<uint256> retry_ids{ids.front()};
+    BOOST_REQUIRE(CancelPaymasterMaintenance(m_wallet, retry_ids, false, {}, 2000, result, error));
+    const auto retry_plan = result.plan_id;
+    const auto before_commit = db.m_records;
+    db.FailCommit();
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, retry_ids, true, retry_plan, 2000, result, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+    db.ClearFailureInjection();
+    BOOST_CHECK(db.m_records == before_commit);
+    BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
+    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, retry_ids, true, retry_plan, 2000, result, error));
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_cancellation_rpc_keeps_running_provider_and_other_work)
+{
+    using namespace paymaster_rpc::internal;
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "cancel-test", CreateMockableWalletDatabase()};
+    ProviderIdentityRecord identity;
+    std::string error;
+    ProviderMaintenanceRecord record;
+    record.operation_id = GetRandHash(); record.plan_id = GetRandHash();
+    record.maximum_fee = DGBSatoshis{20000000};
+    record.created_at = record.updated_at = 1000;
+    ProviderMaintenanceLedger ledger;
+    ProviderSettings settings;
+    settings.enabled = settings.autostart = true;
+    settings.policy_hash = uint256::ONE;
+    settings.updated_at = 100;
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "Cancellation RPC", 100, identity, error));
+        const auto destination = provider_wallet.GetNewDestination(OutputType::BECH32M, "funding");
+        BOOST_REQUIRE(destination);
+        ProviderMaintenanceOutput output;
+        output.script_pub_key = GetScriptForDestination(*destination);
+        output.dgb_value = DGBSatoshis{20000000};
+        record.outputs = {output};
+        ledger.records.push_back(record);
+        auto signed_work = record;
+        signed_work.operation_id = GetRandHash(); signed_work.plan_id = GetRandHash();
+        signed_work.transaction_id = GetRandHash(); signed_work.state = ProviderMaintenanceState::BROADCAST;
+        const auto signed_destination = provider_wallet.GetNewDestination(OutputType::BECH32M, "signed sibling");
+        BOOST_REQUIRE(signed_destination);
+        signed_work.outputs.front().script_pub_key = GetScriptForDestination(*signed_destination);
+        ledger.records.push_back(signed_work);
+        WalletBatch batch{provider_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+        BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+    }
+    Manager manager{true};
+    BOOST_REQUIRE(manager.StartProvider(provider_wallet.GetName(), identity.provider_id));
+    WalletContext context;
+    context.chain = m_node.chain.get(); context.args = m_node.args;
+    context.wallets.emplace_back(&provider_wallet, [](CWallet*) {});
+    context.paymaster = &manager;
+    JSONRPCRequest request;
+    request.context = &context;
+    UniValue options{UniValue::VOBJ}, ids{UniValue::VARR};
+    ids.push_back(record.operation_id.GetHex()); options.pushKV("operation_ids", ids);
+    request.params = UniValue{UniValue::VARR}; request.params.push_back(options);
+    {
+        ProviderWorkGuard owner{manager, provider_wallet.GetName(), identity.provider_id};
+        BOOST_REQUIRE(owner.Acquired());
+        BOOST_CHECK_EXCEPTION(cancelpaymastermaintenance().HandleRequest(request), UniValue,
+            [](const UniValue& e) { return e.find_value("message").get_str() == "PAYMASTER_PROVIDER_BUSY"; });
+    }
+    const auto before = GetMockableDatabase(provider_wallet).m_records;
+    const auto preview = cancelpaymastermaintenance().HandleRequest(request);
+    BOOST_CHECK(preview.find_value("executed").isFalse());
+    BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+    options.pushKV("plan_id", preview.find_value("plan_id")); options.pushKV("execute", true);
+    request.params = UniValue{UniValue::VARR}; request.params.push_back(options);
+    const auto receipt = cancelpaymastermaintenance().HandleRequest(request);
+    BOOST_CHECK(receipt.find_value("executed").isTrue());
+    BOOST_CHECK(receipt.find_value("automatic_refill_disabled").isTrue());
+    BOOST_CHECK(manager.IsProviderRunning(provider_wallet.GetName(), identity.provider_id));
+    {
+        LOCK(provider_wallet.cs_wallet);
+        WalletBatch batch{provider_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.ReadPaymasterSettings(settings));
+        BOOST_CHECK(settings.enabled && settings.autostart);
+        ProviderMaintenanceLedger after;
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(after));
+        BOOST_CHECK(after.records.front().state == ProviderMaintenanceState::RELEASED);
+        BOOST_CHECK(after.records.back().state == ledger.records.back().state);
+        BOOST_CHECK(after.records.back().transaction_id == ledger.records.back().transaction_id);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(capital_release_cancels_only_reviewed_uncreated_funding)
 {
     ScopedPaymasterMockTime clock{2000};

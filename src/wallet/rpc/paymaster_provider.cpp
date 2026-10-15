@@ -785,6 +785,67 @@ RPCHelpMan getpaymasterliquiditystatus()
     };
 }
 
+RPCHelpMan cancelpaymastermaintenance()
+{
+    return RPCHelpMan{
+        "cancelpaymastermaintenance",
+        "Preview cancellation of selected uncreated DGB/DD reserve-funding operations. Execution requires the unchanged plan_id. "
+        "Core rejects signed, ambiguous or withdrawal work and disables automatic refill in the same transaction to prevent replacement. "
+        "Provider enablement, autostart, existing reserves, payments and other operations are unchanged. No transaction is signed or sent.\n",
+        {{"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Exact cancellation selection", {
+            {"operation_ids", RPCArg::Type::ARR, RPCArg::Optional::NO, "One to 256 operation IDs from getpaymasteroperatorinfo", {
+                {"operation_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Saved funding operation"}}},
+            {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Execute the reviewed cancellation and turn automatic refill off"},
+            {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged cancellation preview required for execution"},
+        }}},
+        RPCResult{RPCResult::Type::OBJ, "", "Cancellation review or receipt", {
+            {RPCResult::Type::BOOL, "executed", "Whether cancellation was committed"},
+            {RPCResult::Type::STR_HEX, "plan_id", "Reviewed cancellation plan"},
+            {RPCResult::Type::ARR, "operation_ids", "Exact cancelled or reviewed operations", {
+                {RPCResult::Type::STR_HEX, "", "Operation ID"}}},
+            {RPCResult::Type::NUM, "released_fee_budget_satoshis", "Released or releasable fee allowance; not a payment or refund"},
+            {RPCResult::Type::BOOL, "automatic_refill_disabled", "Execution disables recurring refill"},
+        }},
+        RPCExamples{HelpExampleCli("cancelpaymastermaintenance", "'{\"operation_ids\":[\"<operation_id>\"]}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            auto wallet = GetWalletForJSONRPCRequest(request);
+            if (!wallet) return UniValue::VNULL;
+            auto& context = EnsureWalletContext(request.context);
+            if (!context.paymaster || !context.paymaster->Enabled())
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_DISABLED");
+            const auto& options = request.params[0];
+            RPCTypeCheckObj(options, {{"operation_ids", UniValueType(UniValue::VARR)},
+                {"execute", UniValueType(UniValue::VBOOL)}, {"plan_id", UniValueType(UniValue::VSTR)}}, true, true);
+            const auto& ids = options.find_value("operation_ids");
+            if (!ids.isArray() || ids.empty() || ids.size() > 256)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_INVALID_MAINTENANCE_SELECTION");
+            std::vector<uint256> operations;
+            for (const auto& id : ids.getValues()) operations.push_back(ParseHashV(id, "operation_id"));
+            const bool execute = options.find_value("execute").isTrue();
+            uint256 plan;
+            if (execute) plan = ParseHashV(options.find_value("plan_id"), "plan_id");
+            else if (!options.find_value("plan_id").isNull())
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_MAINTENANCE_PREVIEW_TAKES_NO_PLAN");
+            wallet->BlockUntilSyncedToCurrentChain();
+            ProviderIdentityRecord identity;
+            if (!GetPaymasterIdentity(*wallet, identity))
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_IDENTITY_NOT_FOUND");
+            ProviderWorkGuard guard{*context.paymaster, wallet->GetName(), identity.provider_id, false};
+            if (!guard.Acquired()) throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_PROVIDER_BUSY");
+            PaymasterMaintenanceCancellation review;
+            std::string error;
+            if (!CancelPaymasterMaintenance(*wallet, operations, execute, plan, GetTime(), review, error))
+                throw JSONRPCError(RPC_WALLET_ERROR, error);
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("executed", execute);
+            result.pushKV("plan_id", review.plan_id.GetHex());
+            result.pushKV("operation_ids", ids);
+            result.pushKV("released_fee_budget_satoshis", review.released_fee_budget);
+            result.pushKV("automatic_refill_disabled", execute);
+            return result;
+        }};
+}
+
 RPCHelpMan releasepaymastercapital()
 {
     return RPCHelpMan{

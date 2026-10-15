@@ -227,6 +227,17 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
                             int64_t now, PaymasterCapitalRelease& result, std::string& error,
                             bool recovery = false, bool cancel_uncreated = false);
 
+struct PaymasterMaintenanceCancellation {
+    uint256 plan_id;
+    int64_t released_fee_budget{0};
+};
+/** Cancel only explicitly selected, provably uncreated reserve funding and
+ * disable recurring refill atomically. Retains pools, provider settings and
+ * unrelated/signed work. Caller must hold the provider work guard. */
+bool CancelPaymasterMaintenance(CWallet& wallet, const std::vector<uint256>& operation_ids,
+                               bool execute, const uint256& expected_plan, int64_t now,
+                               PaymasterMaintenanceCancellation& result, std::string& error);
+
 /** Review/adopt a current restored provider using an independently retained
  * checkpoint. Reuses the full quiescent-capital checks without releasing any
  * reserve or changing spending budgets. Provider stays persistently stopped. */

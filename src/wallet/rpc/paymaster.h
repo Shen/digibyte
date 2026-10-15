@@ -120,6 +120,7 @@ RPCHelpMan getpaymasterfinancestatus();
 RPCHelpMan acknowledgepaymasterproviderbackup();
 RPCHelpMan withdrawpaymastercarrier();
 RPCHelpMan releasepaymastercapital();
+RPCHelpMan cancelpaymastermaintenance();
 RPCHelpMan adoptpaymasterbackup();
 RPCHelpMan preparepaymasterpool();
 RPCHelpMan rebalancepaymasterpool();
