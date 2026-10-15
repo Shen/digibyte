@@ -53,6 +53,7 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <map>
@@ -345,10 +346,23 @@ RPCHelpMan stoppaymaster()
             std::optional<ProviderWorkGuard> stop_guard;
             if (context.paymaster && context.paymaster->Enabled() &&
                 GetPaymasterIdentity(*wallet, identity)) {
-                stop_guard.emplace(
-                    *context.paymaster, wallet->GetName(),
-                    identity.provider_id, /*require_running=*/false);
-                if (!stop_guard->Acquired()) {
+                // A funding/readiness step can briefly own the provider even
+                // while it has no usable reserves. Wait for that owner to finish
+                // instead of making a normal stop/retirement fail immediately.
+                // Only guard acquisition is retried: no settings, signatures or
+                // reservations change until we hold the same exclusive guard.
+                AssertLockNotHeld(cs_main);
+                AssertLockNotHeld(wallet->cs_wallet);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+                do {
+                    stop_guard.emplace(*context.paymaster, wallet->GetName(),
+                                       identity.provider_id, /*require_running=*/false);
+                    if (stop_guard->Acquired()) break;
+                    stop_guard.reset();
+                    if (!context.paymaster->Enabled()) break;
+                    UninterruptibleSleep(std::chrono::milliseconds{25});
+                } while (std::chrono::steady_clock::now() < deadline);
+                if (!stop_guard) {
                     throw JSONRPCError(RPC_WALLET_ERROR,
                                        "PAYMASTER_PROVIDER_BUSY");
                 }

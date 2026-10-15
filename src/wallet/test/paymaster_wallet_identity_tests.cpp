@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
@@ -1126,6 +1127,78 @@ BOOST_AUTO_TEST_CASE(external_signer_wallet_is_rejected)
     }
     BOOST_CHECK(!CheckPaymasterProviderWallet(m_wallet, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_REJECTS_EXTERNAL_SIGNER");
+}
+
+BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
+{
+    using namespace paymaster_rpc::internal;
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "stop-test", CreateMockableWalletDatabase()};
+    ProviderIdentityRecord identity;
+    std::string error;
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "Stop test", 100, identity, error));
+    }
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.wallets.emplace_back(&provider_wallet, [](CWallet*) {});
+    context.paymaster = &manager;
+    JSONRPCRequest request;
+    request.context = &context;
+    request.params = UniValue{UniValue::VARR};
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("persistent", true);
+    options.pushKV("pause_setup", true);
+    request.params.push_back(options);
+    for (bool timeout : {false, true}) {
+        ProviderSettings settings;
+        settings.enabled = settings.autostart = true;
+        settings.policy_hash = uint256::ONE;
+        settings.updated_at = 100;
+        {
+            LOCK(provider_wallet.cs_wallet);
+            WalletBatch batch{provider_wallet.GetDatabase()};
+            BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+        }
+        std::optional<ProviderWorkGuard> owner;
+        owner.emplace(manager, provider_wallet.GetName(), identity.provider_id, false);
+        BOOST_REQUIRE(owner->Acquired());
+        BOOST_REQUIRE(manager.RequestProviderStart(provider_wallet.GetName(), identity.provider_id));
+        const auto before = GetMockableDatabase(provider_wallet).m_records;
+        if (timeout) {
+            BOOST_CHECK_EXCEPTION(stoppaymaster().HandleRequest(request), UniValue,
+                [](const UniValue& exception) {
+                    return exception.find_value("message").get_str() == "PAYMASTER_PROVIDER_BUSY";
+                });
+            BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+            BOOST_CHECK(manager.HasRequestedProviderStart(provider_wallet.GetName(), identity.provider_id));
+            BOOST_CHECK(!manager.TryBeginProviderWork(provider_wallet.GetName(), identity.provider_id, false));
+            owner.reset();
+        } else {
+            std::promise<void> entered;
+            auto stopped = std::async(std::launch::async, [&] {
+                entered.set_value();
+                return stoppaymaster().HandleRequest(request);
+            });
+            entered.get_future().wait();
+            BOOST_CHECK(stopped.wait_for(std::chrono::milliseconds{150}) == std::future_status::timeout);
+            // Other wallets remain independent while this stop waits.
+            ProviderWorkGuard other{manager, "other-wallet", uint256::ONE, false};
+            BOOST_CHECK(other.Acquired());
+            owner.reset();
+            BOOST_REQUIRE(stopped.get().find_value("running").isFalse());
+        }
+        BOOST_REQUIRE(stoppaymaster().HandleRequest(request).find_value("running").isFalse());
+        BOOST_CHECK(!manager.HasRequestedProviderStart(provider_wallet.GetName(), identity.provider_id));
+        BOOST_REQUIRE(GetPaymasterProviderSettings(provider_wallet, settings));
+        BOOST_CHECK(!settings.enabled && !settings.autostart);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
