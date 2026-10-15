@@ -3774,7 +3774,7 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     const bool automatic = outcome == QStringLiteral("auto_cancel");
     if (automatic) {
         mini_gui.walletModel->pollBalanceChanged();
-        QVERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
+        QTRY_VERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
     }
     mode->setCurrentIndex(mode->findData(automatic || outcome == QStringLiteral("auto_prepare") ? QStringLiteral("auto") : QStringLiteral("paymaster")));
     QCOMPARE(send_widget.findChild<QPushButton*>(QStringLiteral("sendButton"))->text(),
@@ -3828,7 +3828,7 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
         QCOMPARE(sends[0][6].find_value("fee_mode").get_str(), std::string{"paymaster"});
         // DGB arriving during preparation cannot switch this request to direct spending.
         mini_gui.walletModel->pollBalanceChanged();
-        QVERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
+        QTRY_VERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
     }
     auto* next_step = send_widget.findChild<QLabel*>(QStringLiteral("paymasterSessionNextStep"));
     QVERIFY(next_step);
@@ -8383,7 +8383,7 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
 
     QSignalSpy balances(gui.walletModel.get(), &WalletModel::balanceChanged);
     gui.walletModel->pollBalanceChanged();
-    QVERIFY(client->hasOwnDgbForFees());
+    QTRY_VERIFY(client->hasOwnDgbForFees());
     QVERIFY(!balances.isEmpty());
     QVERIFY(send->isEnabled()); // The balance signal updates the untouched form.
     QCOMPARE(send->text(), QStringLiteral("Send payment"));
@@ -8411,7 +8411,7 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     }
     gui.walletModel->updateTransaction();
     gui.walletModel->pollBalanceChanged();
-    QVERIFY(!client->hasOwnDgbForFees());
+    QTRY_VERIFY(!client->hasOwnDgbForFees());
     QVERIFY(!send->isEnabled());
     QCOMPARE(send->text(), QStringLiteral("Send payment"));
     QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
@@ -8546,7 +8546,10 @@ void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance()
     auto wallet = SetupDescriptorsWallet(m_node, test, "qt-offer-search-balance");
     DigiDollarMiniGUI gui(m_node);
     gui.initModelForWallet(m_node, wallet);
-    if (own_dgb) gui.walletModel->pollBalanceChanged();
+    if (own_dgb) {
+        gui.walletModel->pollBalanceChanged();
+        QTRY_VERIFY(gui.walletModel->getAvailableDGBBalance() > 0);
+    }
     DigiDollarSendWidget form(gui.platformStyle.get());
     auto* client = form.findChild<PaymasterSendWidget*>();
     auto* timer = client->findChild<QTimer*>("paymasterOfferRefreshTimer");
@@ -13465,6 +13468,7 @@ void PaymasterWidgetTests::paymasterClientFeeCeilingConsistency()
     });
     form.setWalletModel(gui.walletModel.get());
     gui.walletModel->pollBalanceChanged();
+    QTRY_VERIFY(client->hasOwnDgbForFees());
     form.setAvailableDigiDollarBalanceForTesting(10000000);
     const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
     form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
@@ -13601,7 +13605,10 @@ void PaymasterWidgetTests::paymasterClientOfferFundingConsistency()
     wallet->EnsureDDWallet();
     wallet->GetDDWallet()->AddDDUTXO(COutPoint(uint256::ONE, 99), balance);
     form.setWalletModel(gui.walletModel.get());
-    if (own_dgb) gui.walletModel->pollBalanceChanged();
+    if (own_dgb) {
+        gui.walletModel->pollBalanceChanged();
+        QTRY_VERIFY(client->hasOwnDgbForFees());
+    }
     QCOMPARE(client->hasOwnDgbForFees(), own_dgb);
     form.setAvailableDigiDollarBalanceForTesting(balance);
     auto* mode_combo = form.findChild<QComboBox*>("paymasterFeeMode");
