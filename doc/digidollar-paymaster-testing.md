@@ -5402,3 +5402,66 @@ Use the normal Windows prerequisites/build command above or
 `build_msvc/README.md`. A full build/full suite takes minutes to tens of minutes;
 these focused checks take seconds once built. Require exit 0, all four wallet
 cases and all three Qt data cases passing, with no selected case skipped.
+
+## Usable payment capacity below the refill target (2026-10-15)
+
+Targeted MSVC 14.43/Qt 5.15.10 verification passed with isolated executables;
+installed programs and live wallets were unchanged:
+
+- Three wallet cases / 303 assertions: the new refill-admission matrix plus
+  existing capacity-pause and synchronization-observation cases. Expected refill
+  waits require full fresh readiness, nonzero complete capacity and synchronization.
+  Locked, unsynchronized, incomplete, drain-only, stopped, unknown/faulted and
+  invalid-ledger snapshots remain blocked. Explicit setup and signing/database
+  failures cannot qualify as harmless refill waits.
+- Three Qt data cases in two functions: operator transitions in dark/light
+  themes and maintenance-state text. Active service and incomplete refill are
+  shown separately; the funding warning stays visible, navigation is read-only,
+  and faults retain priority. Tests used a separate Windows desktop.
+- `wallet_paymaster_partial_capacity.py --descriptors`: two disposable Regtest
+  nodes with two confirmed operational slots, target three and no ordinary DGB
+  available for refill. The provider stays active, renews an expired announcement
+  and completes a fresh Direct P2P request through exact unsigned authorization.
+  Cancellation causes no payment broadcast; the saved refill policy is unchanged.
+  Explicit stop prevents further renewal. Runtime was about 27 seconds.
+- The same functional test against the previous Release executable fails at
+  the active-provider assertion. Its log reports service paused for
+  `PAYMASTER_POOL_WAITING_DGB`; the corrected version logs the refill wait with
+  the provider still ready. This confirms the test detects the reported bug.
+- Four changed C++ translation units compiled, and isolated Core/Qt/daemon
+  executables linked. Python syntax checks and `git diff --check` passed.
+
+The complete solution build, full suites and cross-platform checks were not
+run. Python lint was not run because `flake8` is not installed; no dependency
+was installed for this task. Relevant guidance: root/src/functional instructions,
+contribution and developer notes, DigiDollar architecture/maps, test/Qt documents
+and formatting/translation rules.
+
+After closing running binaries, the operator can build from the repository root
+with the existing MSVC v143, static Qt 5.15.10 and vcpkg dependencies (minutes to
+tens of minutes; exit 0 required):
+
+```powershell
+& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' .\build_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /p:QtBaseDir=D:\Qt51510\install /p:VcpkgInstalledDir=D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/ /p:VcpkgManifestInstall=false /m:1 /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Full solution build failed' }
+& .\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/provider_refill_admission_requires_current_payment_readiness:paymaster_wallet_identity_tests/provider_automation_capacity_pause_preserves_approval:paymaster_wallet_identity_tests/provider_sync_observation_preserves_unresolved_gates' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Refill admission wallet checks failed' }
+$env:DIGIBYTED = "$PWD\build_msvc\x64\Release\digibyted.exe"
+$env:DIGIBYTECLI = "$PWD\build_msvc\x64\Release\digibyte-cli.exe"
+python test/functional/wallet_paymaster_partial_capacity.py --descriptors --configfile=test/config.ini
+if ($LASTEXITCODE -ne 0) { throw 'Partial capacity functional check failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+foreach ($case in @('paymasterLiquidityMaintenanceStatesAreReadable', 'paymasterOperatorWorkTransitions')) {
+    $env:DIGIBYTE_QT_TEST_FUNCTION = $case
+    & .\build_msvc\x64\Release\test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Partial capacity Qt check failed: $case" }
+}
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE, Env:DIGIBYTED, Env:DIGIBYTECLI
+```
+
+Require all three wallet cases (303 assertions), all three Qt data cases and the
+functional test to pass without a selected case being skipped. These focused
+checks take seconds to roughly one minute once built. For manual acceptance,
+confirm two complete free slots below a target of three with insufficient
+ordinary refill capital: offers should renew and preparation should reach exact
+authorization, while the separate refill requirement remains visible.

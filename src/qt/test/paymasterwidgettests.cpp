@@ -9886,6 +9886,26 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
         auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
         QVERIFY(pages);
         QCOMPARE(pages->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+        // Core may serve independent confirmed slots while the refill target
+        // remains incomplete. Keep the refill warning, not a provider outage.
+        provider.pushKV("service_state", "active");
+        provider.pushKV("ready", true);
+        provider.pushKV("pool_ready", true);
+        provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+        observe();
+        QCOMPARE(headline->text(), QString::fromUtf8("Provider is running · reserve refill pending"));
+        QVERIFY(hint->text().contains("Confirmed free reserves are available for new payments"));
+        QVERIFY(hint->text().contains("outside the protected reserves"));
+        QVERIFY(model_status->text().contains("accepting requests"));
+        QVERIFY(capital->text().contains("free payment reserves available; refill pending"));
+        QVERIFY(task_status->text().contains("no refill transaction has been created"));
+        commands.clear();
+        action->click();
+        for (const auto& command : commands) QVERIFY(command.startsWith(QStringLiteral("get")));
+        provider.pushKV("service_state", "error");
+        observe();
+        QCOMPARE(headline->text(), QStringLiteral("Status needs review"));
+        provider.pushKV("service_state", "replenishing_liquidity");
     }
 }
 

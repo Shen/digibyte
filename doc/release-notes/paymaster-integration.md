@@ -1,5 +1,16 @@
 # Paymaster integration release notes
 
+## Use confirmed capacity below the refill target (2026-10-15)
+
+A provider with usable confirmed reserves no longer stops renewing offers merely
+because it cannot fill every target slot. Two complete free slots can serve
+payments while a third awaits ordinary funds. Known refill waits retain their
+diagnosis and all maintenance limits; the GUI separates the active service from
+the outstanding refill. Unknown faults, unfinished explicit setup and missing
+payment readiness still block new admission. Full wallet/index, announcement,
+request, budget, confirmation and signature checks remain in place. No ordinary
+DigiByte wallet or consensus behavior changes.
+
 ## Refill complete slots with limited funds (2026-10-15)
 
 Automatic refill can now fund fewer complete reserve slots when ordinary

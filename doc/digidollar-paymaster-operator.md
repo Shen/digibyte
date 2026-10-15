@@ -358,6 +358,17 @@ remaining two slots are filled when sufficient funds are available. Each batch
 must confirm before the next is planned; all batches share the existing
 rolling fee budgets. The existing provider readiness gates still apply.
 
+The refill target is not the minimum needed to serve payments. With two complete
+confirmed free slots and a target of three, the provider can continue publishing
+offers and accepting requests even if ordinary funds cannot fill the third slot.
+All normal wallet, index, admission, payment-budget and request checks still apply.
+An unconfirmed or incomplete slot never counts as usable payment capacity.
+Expected refill waits (funds, maintenance approval/fees, disabled automatic refill
+or confirmations) remain visible separately from the active service. Unknown
+faults, unfinished explicit setup and missing payment readiness still stop new
+admission. **Provider is running · reserve refill pending** explains usable
+capacity alongside the remaining refill task; funding remains an operator action.
+
 When waiting for funds, the Paymaster page shows the capital needed for the
 missing target, ordinary available funds and their difference. Fees are
 additional. Thus a positive ordinary DGB balance can coexist with a refill
@@ -386,8 +397,9 @@ Both model cards continue to show their actual admission and budget readiness.
 requests when capacity or another current prerequisite prevents admission.
 An unsigned cancellation can leave the provider's reservation until offer expiry;
 the client funds are released separately. A saved refill target is not a demand
-that every slot stay unused. Missing capital and unconfirmed replacements still
-retain their existing maintenance gates. Historical committed outputs are not
+that every slot stay unused or that the full target be reached before any payment.
+Refill waits preserve all maintenance limits without blocking independent,
+confirmed capacity that passes full readiness. Historical committed outputs are not
 current work. Completed reserve management is labelled **Last completed
 management task**, separately from current customer work. After
 confirmation/release the display returns to the current operating state; an

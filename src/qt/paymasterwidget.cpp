@@ -5830,7 +5830,8 @@ private:
 
     bool maintenanceWaitingForFunds() const
     {
-        return m_service_state == QLatin1String("replenishing_liquidity") &&
+        return (m_service_state == QLatin1String("replenishing_liquidity") ||
+                m_service_state == QLatin1String("active")) &&
                (m_last_service_error == QLatin1String("PAYMASTER_POOL_WAITING_DGB") ||
                 m_last_service_error == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS"));
     }
@@ -10332,6 +10333,19 @@ private:
                 setStatusLabel(m_overview_liquidity_status, tr("Waiting · reserves need blockchain confirmation"), QStringLiteral("waiting"));
             }
             m_overview_liquidity_action->setText(tr("View progress"));
+        }
+        if (running && ready && !locked && provider.find_value("enabled").isTrue() &&
+            state == QLatin1String("active") && preparation_details.isEmpty() &&
+            area == QLatin1String("liquidity") &&
+            (action == QLatin1String("review_liquidity") || action == QLatin1String("review_budget") ||
+             action == QLatin1String("wait"))) {
+            headline = tr("Provider is running · reserve refill pending");
+            hint.prepend(tr("Confirmed free reserves are available for new payments within your saved limits. The refill target has not yet been reached. "));
+            button = tr("Review reserve refill");
+            action = QStringLiteral("review_liquidity");
+            kind = QStringLiteral("ready");
+            setStatusLabel(m_overview_liquidity_status,
+                           tr("Ready · free payment reserves available; refill pending"), QStringLiteral("ready"));
         }
         if (action == QLatin1String("wait") && area == QLatin1String("payments")) {
             const auto& recipient_limit = snapshot.find_value("safety").find_value("policy").find_value("maximum_active_quotes_per_recipient");
