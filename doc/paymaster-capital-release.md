@@ -1,195 +1,44 @@
-# Stop a provider and release its operating capital
+# Releasing Paymaster capital
 
-Start/resume and Pause belong to Qt **Overview**. Pause retains prepared pool
-capital and disables provider operation and autostart until an explicit resume.
-Under **Funds & reserves → Stop operation and release capital**, **Stop Paymaster…** offers an
-unchecked **Also review release of all operating capital** option. Stopping is
-confirmed first. A second review shows the exact DGB and DD amounts and pool
-output count before releasing anything. Declining this review leaves the
-provider stopped and its capital prepared.
-The node, its listeners and other wallets are not shut down by this wallet-local action.
+Protected reserves are excluded from ordinary coin selection. Wallet total
+includes them; available balance does not. Release makes eligible pool entries
+available to ordinary wallet use. It does **not** transfer funds, pay a fee,
+sign a transaction, delete identity/history or delete the wallet.
 
-## Settings and retirement
+## Whole-provider retirement
 
-Settings separates Offer, Spending limits, Operation & automation,
-Node connection, and Wallet & backup. Capital actions and retirement are visible
-in Funds & reserves. Its shared target/cost form has Save and Discard controls.
-Autostart and refill switches are immediate and mirrored on Overview; request
-processing remains a separate saved choice. Automatic request processing is not automatic startup,
-and neither is recurring paid reserve maintenance.
+1. Stop the provider, disable provider enablement and autostart.
+2. Resolve outstanding financial, maintenance and signed/ambiguous work. Ensure
+   chain/wallet readiness; unconfirmed signed authority cannot be ignored.
+3. Preview `releasepaymastercapital`. Inspect returned `plan_id`, `pool_entries`,
+   `dgb_satoshis` and `dd_cents`.
+4. Execute the exact reviewed plan using same-build RPC help for its options.
 
-**Retire Paymaster…** is a guided, non-destructive completion of the same
-stop/release workflow. The first confirmation stops the provider; the separate
-exact-amount review authorizes release. Open or signed work blocks release.
-After a matching execution receipt, wallet balances are read with `getbalances`
-and `getdigidollarbalance "" 0` (including pending DD). DGB trusted, untrusted
-pending, immature and optionally reuse-excluded amounts are listed separately;
-trusted is not labelled confirmed or wholly spendable. Balance observations are
-timestamped and are not a live or atomic snapshot. Malformed/failed reads never
-imply zero funds or completed retirement.
+Execution rechecks state under the work guard and wallet lock, then releases
+eligible entries atomically. Manual coin locks remain respected. Automatic
+refill is disabled and paid maintenance approval revoked; configured targets,
+budgets and history remain. A backup reminder records the material change.
 
-The completion panel opens the existing full-wallet backup workflow and points
-to **File → Close Wallet** as an optional manual step for a dedicated wallet.
-It never transfers funds, unloads the wallet, deletes files or erases identity
-records. A cancelled backup does not acknowledge success. A cleared Core backup
-reminder is not proof of an offline, recoverable archive. Preserve the wallet
-and backup for future incoming funds and recovery; never run an archived copy
-of the same identity alongside the original.
+If the reply is lost, inspect actual state. Replaying an obsolete plan can fail
+with `PAYMASTER_CAPITAL_PLAN_CHANGED`; it does not justify creating another
+operation blindly. Review a fresh preview if further release is needed.
 
-Wallet changes discard old RPC replies. Privacy mode halts further guided steps
-and hides/clears balance details. A mutation already dispatched may still finish;
-no blind retry or claim of rollback is made. After reopening, inspect persisted
-Core state; the archive checklist itself is not a persistent retirement record.
+## Individual DD carrier
 
-`releasepaymastercapital` is wallet-local: it changes eligible pool records to
-`released`, returning their outputs to ordinary wallet coin selection. It does
-not send coins to another address, sign a transaction, charge a network fee,
-remove the wallet, delete the provider identity or abandon a payment.
+`withdrawpaymastercarrier` supports a separately reviewed selected carrier
+outpoint. Releasing it reduces provider capacity; it is not permission to take
+inputs reserved by an active or ambiguous payment. Inspect the exact RPC plan
+and current guards. This differs from stopping/retiring the entire provider.
 
-## Releasing one DD reserve
+## Restoration
 
-**Funds & reserves → Release one DD reserve** reduces the saved DD payment
-capacity by one. This differs from releasing all capital during retirement.
-The GUI first refreshes the available confirmed reserves, binds the user's
-choice to its output, and obtains a fresh preview before approval. Core still
-rechecks availability when executing the reviewed plan.
+A restored provider wallet is guarded before autostart. An independent checkpoint
+helps detect an unmarked stale wallet copy. `adoptpaymasterbackup` supports only
+reviewed matching/quiescent states and cannot manufacture missing commit or
+budget history. Do not delete guards/checkpoints to make release succeed.
 
-If the reserve is no longer available, the task offers **Refresh reserves**
-and explains that it may be in use, unconfirmed, spent or already released.
-Refresh only reads status. It does not release a replacement reserve, bypass
-reservations, or resume a provider that was paused during the approved action.
-Technical error codes remain in an initially collapsed disclosure. A new
-release always needs another explicit selection and review.
-
-## CLI workflow
-
-Use the correct network, data directory and wallet on every invocation. For an
-isolated Regtest wallet, for example:
-
-```sh
-digibyte-cli -regtest -rpcwallet=PROVIDER stoppaymaster '{"persistent":true,"pause_setup":true}'
-digibyte-cli -regtest -rpcwallet=PROVIDER releasepaymastercapital
-```
-
-Review `pool_entries`, `dgb_satoshis`, `dd_cents` and the zero network fee. Only
-then submit the exact returned plan identifier:
-
-```sh
-digibyte-cli -regtest -rpcwallet=PROVIDER releasepaymastercapital '{"execute":true,"plan_id":"REVIEWED_PLAN_ID"}'
-```
-
-No preview creates an authorization record. Execution rechecks the current
-state while holding both the provider work guard and wallet lock. It atomically
-releases the whole eligible pool, disables automatic replenishment and revokes
-paid-maintenance approval, and updates the wallet-backup reminder. Targets,
-safety budgets, identity, accounting and recovery evidence remain stored.
-Restart does not reenable provider operation. A future restart of the *service*
-requires explicit setup/replenishment and approval again.
-
-## Fail-closed conditions and recovery
-
-- The runtime must be stopped; saved `enabled` and `autostart` must both be false.
-- Initial block download must be complete and the wallet caught up to the node.
-- Any open provider payment/capacity work, reserved budget/input, pending or
-  ambiguous pool entry, or unfinished maintenance blocks the **whole** release.
-- Signed payment and maintenance transactions must be confirmed. Current wallet
-  confirmation and spent state are checked, not only cached pool heights.
-- Manual coin locks are respected; this RPC does not override them.
-- An unreadable database record, changed policy/state or wrong plan rejects the
-  operation. Database-write/commit failure must not leave a partial release.
-
-Inspect Activity/recovery and pool-preparation status when blocked. Cancel only
-truly unsigned setup through the existing reviewed cancellation workflow; allow
-signed transactions to confirm or use their established recovery paths. A
-stopped provider does **not** imply it is safe to discard signatures or unlock
-reservations. Never delete the wallet to force a shutdown.
-
-A lost execution response is not an invitation to repeat blindly. The old plan
-changes after a successful release, and replay returns `PAYMASTER_CAPITAL_PLAN_CHANGED`.
-Inspect `getpaymasterpoolinfo`, settings and a fresh preview: zero remaining pool
-outputs is distinguishable from an unsuccessful release. Historical records
-remain; they are not active funds. Create a full-wallet backup after completion.
-
-For continued service with a current quiescent backup, use the separate
-[reviewed backup adoption](digidollar-paymaster-operator.md#adopt-a-current-restored-provider-wallet).
-It keeps reserves and budgets; it does not retire the identity or release capital.
-The recovery release below remains permanent retirement.
-
-## Capital recovery after restoring a provider wallet
-
-An explicit restore keeps new provider signatures blocked. A restored **current**
-wallet can nevertheless release its reserves into the same wallet if its saved
-checkpoint matches the independently retained node checkpoint and all the
-fail-closed conditions above pass. This is a separate recovery approval, not
-permission to resume the old provider. A stale wallet, missing checkpoint,
-unfinished native operation or unknown signed obligation prevents release.
-
-In **Funds & reserves**, stop persistently and choose the separate capital
-review (or **Retire Paymaster…**). When Core reports a restore quarantine, Qt
-requests a read-only recovery preview and explains that approval **permanently
-retires this provider identity**. Cancelling leaves the reserves and identity
-unchanged. Use the correct network, data directory and restored wallet for CLI:
-
-```sh
-digibyte-cli -regtest -rpcwallet=RESTORED stoppaymaster '{"persistent":true,"pause_setup":true}'
-digibyte-cli -regtest -rpcwallet=RESTORED releasepaymastercapital '{"recovery":true}'
-digibyte-cli -regtest -rpcwallet=RESTORED releasepaymastercapital '{"recovery":true,"execute":true,"plan_id":"REVIEWED_PLAN_ID"}'
-```
-
-Review the DGB/DD totals, zero fee, pool count and `recovery_release:true` before
-execution. The plan also binds the checkpoint revision, which is checked again
-under its file lock. Retirement advances the external checkpoint before the
-atomic wallet release commits. Other copies using this checkpoint store cannot
-resume. A failed wallet commit can leave the external checkpoint ahead; stop
-and review instead of rolling it back or automatically retrying. Version 1
-checkpoints remain readable and upgrade on a legitimate write; version 2
-preserves the bounded layout and adds the permanent retirement state. Older
-checkpoint-aware binaries reject version 2; do not downgrade or reset markers.
-
-`pmrestoreguard`, history and signing protections remain. Eligible pool entries
-become ordinary wallet funds, and refill/paid-maintenance consent is revoked.
-No signature, transaction, network fee or external transfer occurs. Afterwards
-use the normal DGB and DD Send pages; DD transactions still require normal DGB
-fees. Collateral, immature outputs and unresolved payments retain their normal
-restrictions. Create a new full-wallet backup and retain the checkpoint and
-recovery records. Future provider service needs a fresh identity in a new wallet.
-
-A backup success/acknowledgement only updates a non-blocking reminder; it does
-not advance financial authority or invalidate an otherwise current backup.
-Financial transitions which also update that reminder remain atomic and tracked.
-Matching state is meaningful only when the external checkpoint was retained
-independently. Restoring an old matching wallet/checkpoint pair together, or
-using the identity on independent hosts, remains outside local detection.
-
-## Regression coverage
-
-- `paymaster_wallet_identity_tests/capital_release_is_reviewed_atomic_and_fail_closed`:
-  pure preview, exact binding, unsafe states, pending outputs, stopped settings,
-  database-write/commit rollback, wallet-local release, no new transaction and replay.
-- `capital_recovery_release_is_atomic_and_retires_identity` additionally covers
-  matching recovery, stale original copies, reservation/native fences, changed
-  checkpoints, write/commit failures and permanent retirement without broadcast.
-- `wallet_paymaster_backup_exit.py --descriptors` uses real RPC and CLI, SQLite
-  backup/restore, pure read-only review, manual locks, exact execution,
-  restart, a blocked original copy and a complete ordinary DD transfer afterwards.
-  The two stale-backup variants separately require recovery release to fail.
-- `wallet_paymaster_pool_setup.py`, native and `--usecli`: rejects unfinished
-  Dandelion setup, exercises USER_PAID and sponsored pools via actual CLI,
-  changes a policy between preview/execute, checks values and zero fees,
-  rejects replay and verifies released pool/settings/identity after restart.
-- `PaymasterWidgetTests::paymasterStopAndRelease`: cancelled stop, stop only,
-  rejected release, success, Core blocker, mismatched receipt, privacy and wallet change.
-
-Test source is not a runtime PASS. Build and execution evidence must be recorded
-for the exact source snapshot before using the feature with a funded wallet.
-
-## Windows integration check (2026-09-30)
-
-Integration of `7ad04ea744` with the local guided-restoration changes exposed
-three Qt compile defects: duplicate retirement-layout locals, a local named
-`slots` colliding with Qt's keyword macro, and deleted counters still used by
-the advanced capacity editor. The integration fixes rename the locals and keep
-editor counters separate from the overview's saved per-pool readiness check.
-The existing local restoration and withdrawal changes remain in place.
-A complete build and execution of the new Core/RPC and Qt tests remain required;
-older binary test results do not validate this combined source revision.
+See [operator guide](digidollar-paymaster-operator.md),
+[threat model](paymaster-threat-model.md) and [tests](digidollar-paymaster-testing.md).
+Relevant functional scenarios are `wallet_paymaster_backup_exit.py`,
+`wallet_paymaster_backup_adoption.py`, `wallet_paymaster_checkpoint_rollback.py`
+and `wallet_paymaster_lifecycle.py`.

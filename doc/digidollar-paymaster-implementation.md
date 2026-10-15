@@ -1,705 +1,114 @@
-# DigiDollar Paymaster implementation reference
+# Paymaster implementation
 
-## Provider retention corrections (2026-10-10)
+See [the developer guide](../PAYMASTER.md) for scope and documentation baseline.
+The [client contract](digidollar-paymaster-integration.md) describes application use.
 
-The rolling 24-hour expenditure ledger is not the lifetime of a signed payment's
-authorization. When a SPENT row has aged out, a matching retained local commit
-and authorization manifest can validate only that exact historical execution.
-This fallback requires an accounting high-water more than 24 hours after commit,
-complete transaction/binding validation and no conflicting existing budget row.
-New RESERVED authorization checks remain unchanged; exact retries do not recreate
-budget rows or shift expenditure dates. Normal provider recovery and idempotent
-normal/alternative-provider final commits share the retained-evidence checks.
+## Transaction and fee model
 
-New provider quote admission is capped at 8,192 retained sessions per wallet,
-including signed history. Existing requests can continue. Periodic reconciliation
-atomically prunes up to 64 expired, unsigned provider sessions per pass after
-their complete retry/capacity window plus 24 hours. Referenced records and indices
-are validated before deletion. Signed, ambiguous, capability-bound and otherwise
-protected history remains intact. No permanent tombstone is added for expired
-unsigned requests; their original signed envelopes can no longer be replayed.
-No wire, consensus or database format changes are involved. See the
-[review and verification scope](paymaster-threat-model.md#follow-up-corrections-2026-10-10).
+The result is an ordinary `DD_TX_TRANSFER`. The client supplies DD inputs and
+the provider contributes DGB network-fee inputs. Each signs only its own inputs
+after checking the complete transaction. Consensus and script checks remain
+unchanged. There is one recipient; mint, redeem and batch sponsorship are absent.
 
-**Operator-workflow feature candidate (2026-09-27):**
-`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
-[shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). Its new-source
-build, Qt/functional reruns and real-Tor/24-hour acceptance remain open.
-The dated RC2 results below do not cover these changes.
-
-2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
-[Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
-includes the default single-channel queue, dedicated provider listener,
-DoS admission limits, recovery fixes and explicit transport retry. The updated
-Windows build passed 284 selected unit tests (10,767 assertions) and all nine
-focused functional tests. Qt, reference compatibility, real Tor/load and the
-wider release matrix remain open. Wire, consensus and journal formats are unchanged.
-
-**Source baseline:** `integration/paymaster-v9.26.6rc2` at `1789c803be`.
-**Transport/retry documentation refresh:** 2026-09-27; earlier full reference
-review: 2026-09-23. **Wire protocol:** V6.
-
-This reference describes the inspected implementation and the invariants a
-reviewer should check. It is not a new implementation proposal or a claim that
-the full release matrix has been rerun. Start with [PAYMASTER.md](../PAYMASTER.md)
-for the reading order, branch scope, and commit navigation. The
-[release gate](digidollar-paymaster-release-gate.md) records dated test evidence.
-
-## 1. Problem, scope, and participants
-
-DigiDollar outputs carry DD amounts while the miner fee is paid in DGB. The
-ordinary send path requires the sender's wallet to fund both. Paymaster adds a
-collaborative transfer in which the sender provides DD and a provider supplies
-DGB for the fee. Both parties retain their private keys.
-
-| Participant | Responsibility | Authority it does not receive |
-|---|---|---|
-| Client wallet | Select DD, authorize recipient and fee, validate the entire transaction, sign client inputs, retain recovery state. | No right to spend unreserved provider liquidity. |
-| Provider wallet | Prove identity/resources, issue a quote under local budgets, validate client authorization, sign provider inputs, commit and broadcast. | No discretionary custody or signing authority over client DD. |
-| Upgraded relay | Relay bounded admission announcements and directory requests. | No payment authorization or privileged consensus role. |
-| Existing validator/miner | Validate/mine the ordinary resulting DD transfer. | No requirement to run provider discovery or a Paymaster wallet. |
-
-The available economic models are `USER_PAID` and public `SPONSORED`.
-Sponsored payments have zero client service fee. Restricted `SPONSORED`
-remains implemented at the protocol/storage level but is disabled for new use.
-There is one recipient per Paymaster session. This path does not sponsor mint
-or redemption operations and does not add Paymaster batching to
-`sendmanydigidollar`.
-
-### Parked restricted sponsorship
-
-Since 2026-10-09, `CheckNewSponsorshipScope` in
-`src/paymaster/provider_policy.cpp` rejects new Restricted service with
-`PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED`. There is no runtime enable switch.
-Provider policy writes, setup preflight, readiness, descriptor issuance,
-capacity construction, new client requests, provider quote admission and first
-client authorization enforce this boundary. CLI uses the same RPC/Core gates;
-GUI and setup selectors cannot select Restricted. Client capabilities advertise
-only the `public` scope.
-
-Do not put this gate in `ValidateProviderPolicy`, serializers, signature checks
-or recovery validators. Those continue to read and verify saved Restricted
-policies, descriptors, capabilities, accounting and signed transfers. Already
-accepted exact authorizations retain their continuation/recovery paths; a saved
-quote without accepted authorization cannot acquire new spending authority.
-The provider can drain existing work but cannot admit new Restricted payments.
-Saved Restricted policies remain unchanged and are shown as unavailable. An
-operator must explicitly review a supported replacement; never silently turn
-private sponsorship into public sponsorship. Inactive Restricted budgets and
-historical finance records remain stored.
-
-The retained implementation is a foundation for future work, not an available
-voucher feature. A future fee-waiver voucher design must specify issuance,
-redemption, payment/provider binding, expiry, revocation and replay protection,
-separate finite sponsorship budgets, user consent, and matching GUI/RPC/CLI
-flows before this gate is changed. Preserve zero-fee `USER_PAID` semantics and
-existing accepted-transfer recovery. Re-enable only with end-to-end tests for
-authorization, cancellation, replay, budget accounting and restart recovery.
-
-## 2. Transaction construction and fee accounting
-
-DD values use integer cents; DGB values use satoshis. For a user-paid offer:
+Amounts are integer DD cents or DGB satoshis. Recipient bounds are
+100..10,000,000 cents and user total is at most 10,000,000 cents. Provider terms
+can narrow this range. The user-paid fee is rounded up:
 
 ```text
-percentage_fee_cents = ceil(recipient_amount_cents * fee_rate_bps / 10000)
-service_fee_cents = maximum_user_paid_service_fee_cents == 0
-   ? percentage_fee_cents
-   : min(percentage_fee_cents, maximum_user_paid_service_fee_cents)
-user_DD_in = recipient_DD + user_DD_change + service_fee_DD
-provider_DGB_in = provider_DGB_change + miner_fee_DGB
+fee_cents = ceil(payment_cents * fee_rate_bps / 10000)
 ```
 
-The provider may set `maximum_user_paid_service_fee_cents` to a positive DD
-amount to cap each user-paid fee; zero means uncapped. The value is persisted
-in the provider policy and included in its policy hash and signed V6 offer.
-Clients use the signed cap in offer selection, exact-gross calculations and
-quote validation. Sponsored offers always use zero.
+A positive `maximum_user_paid_service_fee_cents` caps that fee; zero means
+uncapped by this provider setting. Independent client absolute, percentage
+and rolling-day limits still apply. Public sponsorship charges zero DD fee.
+Both models can be advertised by one identity with distinct offer IDs.
 
-The implementation uses checked integer arithmetic and rejects invalid amounts
-and rates. Each DD output must remain between 100 and 10,000,000 cents. Inputs
-are resolved against their creating transactions and the local UTXO view;
-DD inputs must be confirmed. A quote or PSBT cannot substitute its own claimed
-prevout values for those checks.
+A nonzero fee below the minimum DD output needs a confirmed provider DD carrier.
+The provider receives carrier principal plus fee; the principal is not charged
+to the client. Free sponsorship does not need a carrier for a service fee.
+All resulting DD outputs must still satisfy ordinary validation.
 
-### Why a carrier is needed
+Fee deduction treats the entered amount as the exact total. Rounded cent gaps
+fail with `PAYMASTER_NO_EXACT_GROSS_OFFER`, rather than silently changing that
+total. Sweep uses spendable, unreserved inputs and the same authorization rules.
 
-A fee below 1 DD cannot be represented as its own DD output. For a positive
-fee below 100 cents, the provider contributes a confirmed DD carrier and
-receives its principal plus the service fee in a replacement carrier output.
+## Protocol sequence
 
-Example: the client has 20.00 DD and no DGB, sends 10.00 DD, and accepts a
-50-basis-point offer (0.5%, or 0.05 DD). The provider uses a 1.00 DD carrier.
+1. Signed announcements enter a bounded directory. Clients filter amount,
+   privacy, fee policy and local reliability information.
+2. A dedicated Direct connection authenticates the expected provider against
+   the local encrypted session, genesis and fresh challenge before revealing
+   capacity/payment metadata.
+3. Capacity admission precedes the full intent. Input-control proofs demonstrate
+   control without authorizing the collaborative payment.
+4. The exact quote binds provider, recipient, model, inputs/outputs, service
+   fee, expiry and authorization commitment.
+5. Explicit client acceptance permits signing/submission. The provider checks
+   the exact manifest, authorization, inputs, budgets and transaction before
+   signing its inputs and broadcasting.
+6. Both parties reconcile local chain/mempool observations. Lost replies use
+   durable replay/status, not another payment.
 
-| Asset | Inputs | Outputs / fee |
-|---|---|---|
-| DD | Client 20.00 + provider carrier 1.00 = 21.00 DD | Recipient 10.00 + client change 9.95 + provider carrier successor 1.05 = 21.00 DD |
-| DGB | Provider fee inputs | Provider DGB change plus the miner fee |
+Protocol version is 6; unchanged legacy Direct layouts accept version 5 only
+where explicitly supported. Signed offers/negotiation use the current format.
+Wallet record versions are independent of wire versions. Compatibility does
+not permit substituting unauthenticated transport for required channel proofs.
+Announcements last up to 600 seconds; quote default/maximum is 60 seconds.
+An announcement may become unavailable before expiry. Expiry does not prove
+already signed spending authority harmless.
 
-There is no 0.05-DD output. The provider earns 0.05 DD while retaining its
-1.00-DD principal. This is a carrier's accounting role; it is not newly minted
-DD or an exception to conservation. Zero-fee sponsorship needs no carrier for
-an unused service fee. Fees of at least 1 DD can use a normal provider-fee
-output, subject to the same output limits.
+## Durable state and recovery
 
-The builder finalizes all inputs and outputs before signing. Change scripts
-are explicit and wallet-owned; the normal collaborative client supplies no
-DGB inputs. Inspect [txbuilder.cpp](../src/paymaster/txbuilder.cpp),
-[types.cpp](../src/paymaster/types.cpp), and the output-role definitions in
-[txbuilder.h](../src/paymaster/txbuilder.h).
+The client persists a canonical request ID/order. Identical concurrent retries
+join it; material changes using the same ID fail. Sessions, reservations, exact
+commit evidence, budgets and final observations are persisted with their state
+transitions. Network/UI status alone must not release protected inputs.
 
-### Exact total outflow
+Unsigned cancellation closes only work proven unsigned. Late responses cannot
+revive approval after closure. Signed or ambiguous work remains protected and
+exposes only Core-permitted actions. Cancel-to-self is an on-chain recovery
+transaction, not an undo guarantee: the original transaction can still win.
 
-`subtract_paymaster_fee_from_amount=true` makes the supplied amount the exact
-DD outflow. Core finds a recipient amount whose rounded fee yields exactly
-that total, rejecting cent-rounding gaps with `PAYMASTER_NO_EXACT_GROSS_OFFER`.
-For example, 50.00 DD at 50 basis points becomes 49.75 DD to the recipient and
-0.25 DD fee. `send_all_spendable_dd=true` additionally binds the spendable input
-snapshot and rejects a changed balance before reservation. The
-[operator guide](digidollar-paymaster.md#exact-total-outflow-and-emptying-a-dd-wallet)
-documents the options and exclusions.
+Recovery fee exposure is retained through the 240-confirmation reorganization
+safety depth. A winning original payment is accounted once. Retained exact
+commit evidence can validate historical execution after rolling ledger entries
+expire, without authorizing new work or recreating budget.
 
-## 3. Discovery and payment sequence
+Provider admission is bounded at 8,192 retained sessions. Each cleanup pass
+removes at most 64 eligible expired unsigned sessions after their retry/capacity
+window plus retention interval. Signed, ambiguous and protected history is not
+discarded to admit new work.
 
-```mermaid
-sequenceDiagram
-    participant R as Upgraded relay
-    participant C as Client wallet
-    participant P as Provider wallet
-    participant N as DigiByte network
-    P->>R: Signed admission announcement
-    R->>C: Directory / admission proofs
-    Note over C: Filter locally and select one provider
-    C->>P: PMCAPREQ over isolated v2 connection
-    P->>C: PMCAPRESP with identity and operational proofs
-    Note over C: Validate and persist exact capacity snapshot
-    C->>P: PMQUOTEREQ with bound payment intent
-    Note over P: Validate intent and reserve pool / budget atomically
-    P->>C: PMQUOTERESP with exact transaction and fee
-    Note over C: Rebuild, authorize, sign client inputs, persist exact PSBT
-    C->>P: PMSUBMIT
-    Note over P: Revalidate, sign provider inputs, durably commit final bytes
-    P->>N: Broadcast ordinary DD_TX_TRANSFER
-    P->>C: Signed PMRESULT
-    Note over C: Verify final bytes, scripts, and local network observation
-    N-->>C: Mempool / block / reorganization observations
-```
+## Wallet lifecycle
 
-This diagram shows logical responsibilities; broadcast completion and result
-delivery are not an atomic network operation. A lost result must be recoverable
-from the durable provider commit.
+Protected DGB/DD reserves are excluded from ordinary coin selection and shown
+separately from available funds; wallet total includes them. Manual locks and
+DD collateral remain distinct. Finite setup and recurring refill have separate
+approvals. Refill may fund fewer complete slots, never deliberately partial
+slots, and confirmed free capacity remains usable below the refill target.
+See [pool setup](digidollar-paymaster-pool-setup.md).
 
-1. **Discovery:** `sendpmasters`, `getpmasters`, and `pmannounce` operate on
-   upgraded ordinary peers. The directory checks identity and dedicated,
-   confirmed admission resources. Admission liquidity is separate from the
-   operational pool. Only admission proofs are gossiped.
-2. **Selection:** offers are filtered for readiness, amount, funding model,
-   authorization, local reputation, privacy, and fee limits. Ranking uses exact
-   local totals. Only the selected provider receives operational requests.
-3. **Capacity:** before DD outpoints, payment intent, or restricted capability
-   are disclosed, V5 authenticates the provider and the exact operational
-   resource set. Verify genesis, identity signature, request/session binding,
-   nonce, reference block, expiry, BIP86 control proofs, creating transactions,
-   and live outpoints. Persist the validated snapshot.
-   Before even this exchange, authenticate the actual BIP324 channel with
-   `pmauthreq` / `pmauthresp` as described below; a valid Capacity signature on
-   another encrypted channel is not confidentiality protection.
-4. **Quote:** the signed intent binds the local order and user input-control
-   proofs. The quote must match the selected offer, policy, capacity, recipient,
-   fee, change, and complete unsigned transaction. The provider reserves pool
-   entries and fee budget atomically.
-5. **Client signing:** Core validates its local authorization manifest against
-   the trusted template. The client signs only its own DD inputs with
-   `SIGHASH_DEFAULT`. The exact signed PSBT and authorization become durable
-   before being sent. The high-level call must round-trip the exact
-   `authorization_commitment` returned by preparation before a new user
-   signature is possible; background work does not replace that acceptance.
-6. **Provider signing:** Core rechecks local policy, reservation, template,
-   client signatures, and live inputs. It signs only its own inputs and commits
-   final raw bytes, result bindings, pool successors, and budget transitions
-   before broadcast.
-7. **Result:** the client reconstructs the trusted template and verifies txid,
-   wtxid, all inputs/outputs and witnesses with actual prevouts. When needed,
-   mempool preflight must succeed. An authenticated provider claim alone is
-   insufficient to establish confirmation.
+Canonical wallet history/index checks remain prerequisites. Automatic work
+belongs to the daemon; Qt/CLI control the same persisted state. Restoration
+sets a durable guard before load callbacks, and an independent checkpoint
+helps detect stale wallet copies. See the [threat model](paymaster-threat-model.md).
 
-The [wire records](../src/paymaster/wire.h),
-[protocol records](../src/paymaster/protocol.h), and
-[P2P command names](../src/protocol.cpp) define the actual encoding. V6 is
-required for announcements and direct-channel negotiation. Direct Capacity,
-quote, submit and result payloads accept exactly V5 and V6: V6 changed signed
-offer fee caps, while those fully bound V5 payment layouts remained unchanged.
-Persisted V5 proof/quote bytes, signatures and replay barriers are retained and
-fully validated after upgrade. Replies preserve the supported request version.
-V0, V1–V4 and unknown future versions remain unsupported; inner authorization
-records still require their exact current versions. Alternative
-recovery uses `pmrecreq`, `pmrecresp`, `pmrecsub`, and `pmrecresult` on the
-isolated direct connection.
+## Source ownership
 
-## 4. Authorization and trust boundaries
-
-The local wallet and software are trusted; the remote party may be malicious.
-A transport connection does not authorize spending. Each wallet independently
-reconstructs the exact transaction and validates local authority immediately
-before a new signature.
-
-| Artifact | Binding reviewed before signing or execution |
+| Paths | Responsibility |
 |---|---|
-| `ValidatedCapacitySnapshot` | Authenticated provider and exact operational resources for the selected attempt. |
-| `ClientAuthorizationManifest` | Canonical local request, requested fee/privacy/selection modes, provider/offer/policy, capacity, user inputs, recipient/amount, wallet-owned change, fee ceiling, expiry and template. |
-| `ProviderAuthorizationManifest` | Validated intent, reserved provider inputs, provider-owned returns/change, exact fees, safety policy, and the precise budget reservation/commit key. |
-| `AlternativeRecoveryManifest` | Original session and inputs, distinct recovery provider, wallet-owned DD returns, bounded fee and inherited privacy. |
-| Durable provider commit | One exact final raw transaction and corresponding immutable authorization/accounting bindings. |
+| `src/paymaster/types.*`, `protocol.*`, `wire.*` | Typed records, commitments, bounded serialization. |
+| `src/paymaster/txbuilder.*`, `psbt.*` | Exact transaction/PSBT construction and validation. |
+| `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, budgets, reservations, sponsorship. |
+| `src/paymaster/client.*`, `directory.*`, `reputation.*`, `recovery.*`, `validation.*` | Discovery, selection, verification, retries/recovery. |
+| `src/paymaster/manager.*`, `transport.h`, `src/net.*`, `src/netbase.*` | Direct channels, queues and connection budgets. |
+| `src/wallet/paymasteridentity.*`, `paymasterpsbt.*`, `paymasterprovider.*` | Wallet keys, signatures and worker. |
+| `src/wallet/paymasterstore*`, `paymasterdb.cpp`, `paymastercheckpoint.*` | Atomic state, accounting, reconciliation, rollback protection. |
+| `src/wallet/rpc/paymaster*.cpp` | Wallet RPC orchestration and grouped implementations. |
+| `src/rpc/paymaster.cpp`, `src/rpc/digidollar.cpp` | Node configuration, diagnostics, directory/send entry points. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and interactive CLI. |
+| `src/qt/paymasterwidget.*`, `paymastersendwidget.*`, `paymasterwallet.*`, `paymasteramount.*` | Provider/send UI, wallet adapter and amounts. |
 
-Unknown PSBT fields, incorrect roles, substituted outputs, and non-default
-sighashes are rejected. RPC, GUI, automatic service, retry and recovery share
-these checks. New provider signatures require the current safety-policy
-binding. An already committed exact transaction retains the historical binding
-needed for completion; changing policy does not create new signing authority
-or invalidate an otherwise recoverable exact commit.
-
-Signed contradictory capacity or quote claims are stored as local evidence and
-block the provider locally. The first valid signed claim is staged as evidence
-before deeper validation; it does not itself authorize a spend. Database
-failures are kept distinct from invalid remote artifacts so work is not
-acknowledged and lost on an unsuccessful persistence operation.
-
-See [psbt.cpp](../src/paymaster/psbt.cpp),
-[reservation.h](../src/paymaster/reservation.h), and the
-[hardening plan](../DIGIDOLLAR_PAYMASTER_HARDENING_PLAN.md).
-
-## 5. Sessions, retries, and finality
-
-`request_id` is a canonical lowercase UUID bound to a canonical request hash.
-Repeating the same request resumes its session; conflicting reuse is rejected.
-A session owns its user inputs and can contain separate provider attempts.
-An attempt binds one provider, quote, capacity snapshot, and transaction
-template. A retry reuses exact persisted artifacts. Terminal high-level retries validate
-the same canonical order hash. After detail pruning, send replay needs the saved
-original input set; status reads do not. A pruned sweep uses status reads because
-explicit selected inputs are not allowed for sweeps.
-
-| State / phase | Meaning for the caller |
-|---|---|
-| `CREATED`, `INPUTS_RESERVED` | Request established and inputs protected. |
-| `AWAITING_WALLET_UNLOCK`, `AWAITING_USER_SIGNATURE` | The same session awaits local action; neither authorizes provider fallback by itself. |
-| `AUTHORIZED`, `PENDING_PROVIDER` | Signed authority may exist; protect inputs and inspect the pending phase. |
-| `USER_SIGNATURE_SENT` | The exact client PSBT is durable and may be at the provider. |
-| `PROVIDER_SIGNED_KNOWN`, `PENDING_NETWORK` | Provider signing/final commit is known, but network delivery or observation is incomplete. |
-| `STEMPOOL`, `MEMPOOL` | Transaction observed in a relay pool, not a confirmed payment. |
-| `CANCEL_MEMPOOL` | Recovery transaction is in the mempool; cancellation is still pending. |
-| `CONFIRMED`, `CANCELED_SAFE` | Persisted confirmed-payment or safe-cancellation state. The separate local payment view decides current recipient success, including after reorg or pruning. |
-| `FAILED`, `CONFLICTED` | Inspect the recorded reason and Core-derived allowed actions; do not infer that arbitrary inputs are free. |
-
-These are explanatory groups, not a complete transition table. The exact
-session and attempt enums and legal transitions are in
-[reservation.h](../src/paymaster/reservation.h) and
-[reservation.cpp](../src/paymaster/reservation.cpp). `DGB_COMMITTING` also
-exists for the ordinary DGB-funded session path.
-
-`resolvepaymastersession` exposes `refresh`, `retry_same`, `fallback`,
-`abandon_unsigned`, and `cancel_to_self`. Mutation must be present in the
-current Core-derived `allowed_actions`:
-
-- `fallback` is allowed only **before a user PSBT exists**, preserving the
-  reserved DD input set when moving to a new provider attempt.
-- `abandon_unsigned` releases only a session for which no transaction
-  authorization can exist. This is a local client action, not a Direct-protocol
-  cancellation notice. The provider can retain its unsigned offer reservation
-  until expiry; repeated local cancellations still count against its open-offer
-  limits during that interval.
-- `retry_same` creates no new quote, attempt, reservation or signature.
-- After signing, timeout does not release inputs. `cancel_to_self` prepares or
-  resumes one exact same-input return transaction. A distinct eligible
-  `USER_PAID` provider can supply DGB when the client has none. Signing requires
-  the exact recovery authorization commitment. A recovery confirmation is
-  reversible: original fee reservations and signed-input protection remain
-  until the existing 240-block reorganization safety depth.
-
-Remote messages cannot undo a final committed authorization. Separately, local
-chain reconciliation can roll back a confirmation after a reorganization and
-restore pending finance/pool state. This distinction is tested by
-[wallet_paymaster_reorg.py](../test/functional/wallet_paymaster_reorg.py).
-
-Client recovery fee repair also covers older unpruned sessions whose original
-fee was released after one confirmation. The common store helper validates the
-accepted manifest, exact user signature, session/input binding and recovery
-artifact before reinstating a released or aged-out fee row. New payment and
-recovery approvals include these liabilities before checking the daily cap;
-reinstatement never expands saved limits. Changes are staged under the wallet
-lock and committed with the caller's session/authorization transition. Existing
-spent rows are neither reset nor charged twice. Exact deeply confirmed original
-payments can settle even when a disconnected recovery left a canceled/conflicted
-session status. This does not extend recovery beyond pruned 240-block history.
-
-## 6. Persistence and provider operation
-
-`PaymasterStore` persists sessions, attempts, reservations, manifests, signed
-PSBTs, final transactions, budget ledgers, recovery and replay evidence in the
-wallet database. Related writes use atomic batches; missing or unreadable
-authority cannot be synthesized from a remote message. Most records require their
-exact current versions. The explicit exception is the V4 maintenance journal:
-V3 remains readable without new finite-setup authority. Other unsupported
-experimental Paymaster records fail closed;
-ordinary v9.26.5 wallet compatibility does not imply migration of old Paymaster
-state.
-
-Confirmation promotes wallet-owned carrier/DGB successors into usable provider
-liquidity. Reorganization and conflict reconciliation reverse that availability
-when necessary. Optional automatic maintenance tracks pending work and only
-fills missing targets. Paid maintenance requires explicit approval and finite
-per-transaction/hour/day DGB fee limits. Manual pool operations and withdrawals
-bind execution to a preview so a stale plan cannot silently spend different
-resources.
-
-Recurring DGB and DD-carrier replenishment may reduce an unfunded batch to
-fewer whole outputs, preserving the admission-first order, per-slot values and
-saved targets. It uses ordinary unsigned DGB construction or the existing typed
-DD funding planner; normal signing, commit, protected-input exclusion and fee
-checks remain authoritative. An atomic maintenance-ledger write releases the
-old unsigned plan and reserves the exact smaller plan before signing. Already
-broadcast work is recovered, never resized. Pending replacements count toward
-the target and are confirmed before another missing batch is planned. Each
-batch consumes the existing transaction/hour/day maintenance budget.
-The runtime then rechecks full current payment readiness and synchronization
-under the same provider-work guard. An explicit allowlist of state/reason pairs
-permits independent confirmed capacity during expected refill waits: missing
-ordinary funds, maintenance approval/fee limits, disabled automatic refill or
-pending replacement confirmations. The service remains `active`, retaining
-`last_service_error` as a separate refill diagnosis. Unknown construction,
-signing, journal/database failures and unfinished explicit pool setup do not
-qualify. Existing announcement and fresh-request checks repeat their readiness
-and capacity validation; no pending slot or protected input becomes ordinary
-spendable funding. Refill targets and approvals remain unchanged.
-The optional `refill_funding` status object reports required capital for the
-missing slots, confirmed ordinary available DGB/spendable DD and their
-shortfalls; network fees are additional, not a quoted or authorized amount.
-
-Provider operation requires explicit wallet configuration and start. Automatic
-queue processing and optional autostart are separate settings. Wallet locking
-pauses signing; automatic service does not authorize client payments. Temporary
-`DRAIN_ONLY` admission gates are re-evaluated under the provider work guard on
-service ticks, including quote/capacity expiry reconciliation. Full readiness
-and synchronized wallet/index state are required before resuming new requests;
-per-request safety checks remain authoritative. Recovery republishes the current
-validated offer without changing saved policy. RPC diagnostics distinguish this
-gate from local `ready=true`, including when no last error is present. Provider
-finance records keep DD income, DGB costs, pool principal, and optional oracle
-valuation separate. A backup acknowledgement records an operator action, not
-proof that a backup is usable.
-
-Explicit provider-wallet restore persists the durable `pmrestoreguard`
-through `MarkPaymasterProviderRestored` before `LoadWallet` can invoke callbacks
-or autostart. The codec reuses `ProviderIdentityRecord`; no base-wallet schema
-migration or wire change is needed. Quarantine is independent of descriptor
-wallet eligibility: known records remain readable, while new provider model
-availability, identity/transaction signing, quote admission and reserve spending
-are blocked. Exact known signed commits remain recoverable. Settings and backup
-acknowledgement cannot erase the marker; no unconditional override/history-
-reconstruction API is provided. Reviewed current-backup adoption may erase it
-only in the transaction that fences older copies by advancing the independent
-checkpoint, while preserving reserves and financial records. Unmarked wallet-only rollback is checked by `wallet/paymastercheckpoint.cpp` against an independently flushed node-local generation. Whole-datadir rollback still requires separately retained state; see `paymaster-threat-model.md` (TM-003).
-See [TM-003](paymaster-threat-model.md#tm-003-stale-provider-restore-forgets-expenditure-and-signed-inputs).
-
-`releasepaymastercapital {"recovery":true}` adds a narrow capital exit for a
-restored wallet matching the independently retained checkpoint. It reuses the
-full stopped/quiescent release checks; the reviewed plan also binds the exact
-checkpoint revision. `WalletBatch::RetirePaymasterCheckpoint` rechecks under
-the checkpoint lock and writes version 2's permanent retirement state in the
-same transaction as pool release. The external fence advances before commit;
-no signing guard or history is cleared. Version 1 remains readable. Backup
-reminders alone use ordinary `WriteIC`: recording backup success after copying
-the wallet must not make a current financial checkpoint stale. They have no
-spending authority. No wire, consensus or generic wallet format change is needed.
-
-`processpaymasterrequests` defers temporary capacity/quote admission-limit
-failures in the fair inbox (`deferred`, `deferral_reason`) without putting the
-whole service into drain-only mode. Every retry repeats the existing checks;
-request expiry and all saved limits remain unchanged. A throttled capacity
-request does not prevent processing an already admitted quote or recovery.
-Invalid/expired envelopes and permanently invalid capacity continuations are
-consumed as rejected requests. No signature or financial reservation is released
-by this inbox acknowledgement. The client may still need a fresh offer if the
-connection or original request expires while waiting.
-
-Eligible completed records are reduced to idempotency tombstones after the
-240-block reorganization safety depth. Ambiguous/unconfirmed/unreadable records
-are not automatically removed. Wallet encryption protects keys but does not
-add field-level encryption to Paymaster metadata and signed artifacts. See the
-[retention description](digidollar-paymaster.md#local-metadata-and-retention).
-
-## 7. Runtime and compatibility boundaries
-
-Client/provider readiness requires DigiDollar activation, Paymaster enabled,
-an unpruned node, fully synchronized `txindex`, and BIP324 v2. Provider wallets
-must be descriptor wallets with local private keys. Relay nodes do not need to
-operate such a wallet. `-paymaster=0` disables Paymaster discovery, relay and
-client support; provider startup remains explicit with the default enabled.
-
-Standard direct sessions require v2 without v1 fallback. High privacy adds an
-onion provider, Tor stream isolation, one provider attempt, and no clearnet
-fallback. Readiness also enforces capture/logging restrictions described in the
-operator guide. The provider still sees the transaction it co-signs, and the
-blockchain remains public.
-
-An old node can validate the final ordinary transfer but cannot relay the
-Paymaster discovery protocol. A topology connected only through old peers can
-therefore carry normal transactions while Paymaster selection remains
-unavailable. The dedicated old-bridge test deliberately injects an announcement
-and observes that it is not relayed; this differs from the normal old-leaf test
-where Paymaster announcements are not sent to that node.
-
-The overall branch includes arithmetic portability changes in consensus files;
-the [branch review note](../PAYMASTER.md#review-the-branch-in-bounded-pieces)
-explains why these still require separate equivalence review.
-
-## 8. Source map and RPC entry points
-
-| Area | Start here |
-|---|---|
-| Arithmetic and deterministic transaction | [types.cpp](../src/paymaster/types.cpp), [txbuilder.cpp](../src/paymaster/txbuilder.cpp) |
-| Protocol, PSBT and local authorization | [protocol.cpp](../src/paymaster/protocol.cpp), [psbt.cpp](../src/paymaster/psbt.cpp) |
-| Identity, admission and chainstate verification | [directory.cpp](../src/paymaster/directory.cpp), [validation.cpp](../src/paymaster/validation.cpp), [paymasteridentity.cpp](../src/wallet/paymasteridentity.cpp) |
-| P2P and bounded work queues | [wire.cpp](../src/paymaster/wire.cpp), [manager.cpp](../src/paymaster/manager.cpp), [net_processing.cpp](../src/net_processing.cpp) |
-| Client order and offer selection | [client.cpp](../src/paymaster/client.cpp), [reputation.cpp](../src/paymaster/reputation.cpp), [paymaster_discovery.cpp](../src/wallet/rpc/paymaster_discovery.cpp) |
-| Wallet state and atomic commits | [paymasterstore.h](../src/wallet/paymasterstore.h), [paymasterstore_client.cpp](../src/wallet/paymasterstore_client.cpp), [paymasterstore_provider.cpp](../src/wallet/paymasterstore_provider.cpp), [paymasterstore_finalization.cpp](../src/wallet/paymasterstore_finalization.cpp) |
-| Wallet record codecs | [paymasterdb.cpp](../src/wallet/paymasterdb.cpp), existing `WalletBatch` declarations and transaction semantics |
-| Send RPC integration | [paymaster_send.cpp](../src/wallet/rpc/paymaster_send.cpp), existing amount units, options and durable-session ordering |
-| Client capability and payment views | [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp), shared RPC schema/serialization in [paymaster.cpp](../src/wallet/rpc/paymaster.cpp), transient observation/status derivation in [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
-| Recovery, reconciliation and pruning | [recovery.cpp](../src/paymaster/recovery.cpp), [paymasterstore_recovery.cpp](../src/wallet/paymasterstore_recovery.cpp), [paymasterstore_reconciliation.cpp](../src/wallet/paymasterstore_reconciliation.cpp) |
-| Provider policies, budgets and liquidity | [provider.cpp](../src/paymaster/provider.cpp), [paymasterprovider.cpp](../src/wallet/paymasterprovider.cpp), [paymaster_provider.cpp](../src/wallet/rpc/paymaster_provider.cpp) |
-| Request/submit/result handlers and runtime | [paymaster_processing.cpp](../src/wallet/rpc/paymaster_processing.cpp), [paymaster_runtime.cpp](../src/wallet/rpc/paymaster_runtime.cpp), [paymaster_integration.cpp](../src/wallet/rpc/paymaster_integration.cpp) |
-| CLI operator workflow | [cli.cpp](../src/paymaster/cli.cpp), per-invocation transport callback from `digibyte-cli.cpp`; shared forms/validation remain in `paymaster/setup.cpp` |
-| Wallet signing bridge | [paymasterpsbt.cpp](../src/wallet/paymasterpsbt.cpp), [paymaster_client.cpp](../src/wallet/rpc/paymaster_client.cpp) |
-| Existing wallet integration and protection | [digidollarwallet.cpp](../src/wallet/digidollarwallet.cpp), [spend.cpp](../src/wallet/spend.cpp), [load.cpp](../src/wallet/load.cpp) |
-| Qt | [paymastersendwidget.cpp](../src/qt/paymastersendwidget.cpp), embedded by [digidollarsendwidget.cpp](../src/qt/digidollarsendwidget.cpp), provider panel in [paymasterwidget.cpp](../src/qt/paymasterwidget.cpp), shared signing adapter in [paymasterwallet.cpp](../src/qt/paymasterwallet.cpp), [walletmodel.cpp](../src/qt/walletmodel.cpp), [paymasterconfirmation.h](../src/qt/paymasterconfirmation.h) |
-
-The high-level entry is `senddigidollar` in
-[src/rpc/digidollar.cpp](../src/rpc/digidollar.cpp); the optional seventh `options`
-argument follows upstream `amount_unit` and preserves the upstream direct-DGB API. `fee_mode=auto`
-falls back only after a concrete insufficient-DGB preflight, not on wallet lock
-or unrelated failure. Lower-level quote/PSBT APIs are explicit multi-step
-interfaces and do not bypass Core authorization.
-
-| Caller | Principal RPCs |
-|---|---|
-| Client | `getpaymasterclientinfo`, `getpaymasteroffers`, `requestpaymasterquote`, `walletprocesspaymasterpsbt`, `submitpaymasterdigidollar`, `getdigidollarsendsession`, `listdigidollarsendsessions`, `resolvepaymastersession` |
-| Fee safety | `setpaymasterclientsafetypolicy`, `getpaymasterclientsafetystatus`, `setpaymastersafetypolicy`, `getpaymastersafetystatus` |
-| Provider setup/runtime | `createpaymasteridentity`, `setpaymasterpolicy`, `setpaymasterenabled`, `setpaymasterruntimesettings`, `startpaymaster`, `stoppaymaster`, `getpaymasterinfo` |
-| Liquidity/finance | `preparepaymasterpool`, `rebalancepaymasterpool`, `setpaymasterliquiditypolicy`, `getpaymasterliquiditystatus`, `withdrawpaymastercarrier`, `getpaymasterfinancestatus`, `acknowledgepaymasterproviderbackup` |
-
-This is a navigation inventory. Exact parameter/result schemas come from the
-`RPCHelpMan` definitions and `help <method>` on a binary built from the reviewed
-revision. Wallet registration is in [wallet.cpp](../src/wallet/rpc/wallet.cpp);
-`listpaymasters` is node-level. Units and examples are in the operator guide.
-
-### High-level payment authorization
-
-For a Paymaster path, `senddigidollar` without `authorization_commitment`
-prepares the exact authorization and returns without creating a new user
-signature. Once preparation is complete, the caller reviews the provider,
-funding model, recipient, amount, fee and returned commitment, then repeats
-the same request with that exact commitment. A mismatch is rejected. The
-`prepare_only` flag is a compatibility hint; setting it to false cannot bypass
-the missing-commitment guard. A headless application must implement this
-explicit acceptance step too.
-
-The additive [client integration contract](digidollar-paymaster-integration.md)
-defines `getpaymasterclientinfo`, the transient payment/recovery view, and common
-RPC/Qt status semantics. `success` requires validated local recipient confirmation;
-`final` alone is never sufficient. Open client service-fee reservations remain
-liabilities beyond 24 hours; only spent fees age out of the existing daily window.
-No agent budget, consensus rule, wire field or persistent version is added.
-
-Prepared, authorized and confirmed are different results. Read
-`authorization_required`, `authorization_accepted`, the session state and
-Core-derived actions; do not treat the first RPC response as a payment receipt.
-This does not change the ordinary direct-DGB path. See
-[paymaster_discovery.cpp](../src/wallet/rpc/paymaster_discovery.cpp) and the
-[operator example](digidollar-paymaster.md#prepare-and-authorize-a-paymaster-payment).
-
-## 9. Changes from the initial design
-
-| Design area | Current behavior / review implication |
-|---|---|
-| “V1” project label | Refers to the feature milestone; current wire protocol is V6, with individually versioned persistent records. |
-| Broad same-input fallback after signing | Ordinary provider fallback stops once a user PSBT exists. Signed ambiguity uses exact retry or explicitly authorized cancellation. |
-| General PSBT-based collaboration | Dedicated Paymaster validators, local manifests and role-limited wallet signing enforce the collaborative path. |
-| Basic pools and manual processing | Successor reuse, finite automatic liquidity maintenance, finance reporting, runtime modes and explicit autostart are implemented. |
-| One high-level automatic send | Paymaster selection/preparation returns an exact authorization commitment; a caller must explicitly round-trip it before a new user signature. |
-| Recipient amount plus fee | Optional exact-gross and all-spendable-DD modes now exist with checked cent rounding. |
-| Private/temporary protocol state | Durable recovery artifacts and metadata are not field-encrypted; retention must preserve safety and idempotency. |
-| Legacy compatibility | Ordinary old wallets/validators and old Paymaster wire/database formats are different compatibility questions; the latter have no implicit migration. |
-| Tests and acceptance | The 28 criteria are review identifiers, not a claim of current release approval. Dated local evidence, release-build reruns and external gates remain distinct. |
-
-## 10. Verification map and remaining work
-
-Additional security-boundary checks, dated local results and the remaining
-operator evidence are recorded in the [release gate](digidollar-paymaster-release-gate.md#additional-security-boundary-checks-2026-09-19).
-
-| Concern | Existing verification surface |
-|---|---|
-| Amounts, carriers, PSBT roles and mutation rejection | `src/test/paymaster_*_tests.cpp`, `src/wallet/test/paymaster_wallet_psbt_tests.cpp` |
-| Atomic authority, budgets, failures and restart | `src/wallet/test/paymaster_wallet_store_tests.cpp`, `src/wallet/test/paymaster_wallet_security_tests.cpp` |
-| Wallet maintenance and load | [paymaster_wallet_load_tests.cpp](../src/wallet/test/paymaster_wallet_load_tests.cpp) |
-| DGB-less payment and sponsored variants | [wallet_paymaster_provider.py](../test/functional/wallet_paymaster_provider.py) |
-| Multiple offers and selected-provider-only effects | [wallet_paymaster_offer_selection.py](../test/functional/wallet_paymaster_offer_selection.py) |
-| Contention, fallback boundary and single payment | [wallet_paymaster_failover.py](../test/functional/wallet_paymaster_failover.py) |
-| Confirmation, finance and pool rollback | [wallet_paymaster_reorg.py](../test/functional/wallet_paymaster_reorg.py) |
-| Activation, index and transport prerequisites | [wallet_paymaster_readiness.py](../test/functional/wallet_paymaster_readiness.py) |
-| RPC authentication/whitelists, wallet isolation, abrupt termination, older authorized-backup rejection, liquidity and restart | [wallet_paymaster_lifecycle.py](../test/functional/wallet_paymaster_lifecycle.py), [wallet_paymaster_rpc.py](../test/functional/wallet_paymaster_rpc.py) |
-| P2P and old-version compatibility | [p2p_paymaster.py](../test/functional/p2p_paymaster.py), [p2p_paymaster_v9_26_5_bridge.py](../test/functional/p2p_paymaster_v9_26_5_bridge.py), [wallet_v9_26_5_compatibility.py](../test/functional/wallet_v9_26_5_compatibility.py), [wallet_v9_26_5_inplace_upgrade.py](../test/functional/wallet_v9_26_5_inplace_upgrade.py) |
-| Qt authorization and displayed state | [paymasterwidgettests.cpp](../src/qt/test/paymasterwidgettests.cpp); DD boundary cases remain in [digidollarwidgettests.cpp](../src/qt/test/digidollarwidgettests.cpp) |
-| All `paymaster_*` suites under headless sanitizers and four bounded fuzz targets | [paymaster-security.yml](../.github/workflows/paymaster-security.yml) |
-
-After building the selected revision with wallet support using the repository's
-[platform instructions](README.md#building), a focused entry point is:
-
-```sh
-./src/test/test_digibyte --run_test=paymaster_types_tests,paymaster_txbuilder_tests,paymaster_psbt_tests --log_level=error --report_level=short
-python3 test/functional/test_runner.py --jobs=1 wallet_paymaster_readiness.py wallet_paymaster_provider.py wallet_paymaster_offer_selection.py wallet_paymaster_failover.py wallet_paymaster_reorg.py
-```
-
-These commands assume a configured Unix build with binaries in the normal
-build paths and the functional runner's generated configuration available.
-Use the repository's [functional-test instructions](../test/functional/README.md)
-for another build layout. They are review commands, not a claim that they were
-run for this documentation update. Full builds, regression suites, fuzzing and
-external compatibility environments belong to the agreed release matrix.
-
-Remaining acceptance work is to bind results to an exact release revision and
-binaries, rerun affected surfaces after later code changes, complete real-Tor
-deployment testing, and obtain or explicitly disposition independent review.
-The [release gate](digidollar-paymaster-release-gate.md) is the status record.
-
-## Finite automatic pool setup (integration branch update)
-
-The original direct `preparepaymasterpool` commit sequence is replaced by a
-finite command in the existing maintenance ledger. Both planned output sets
-are persisted before signing/broadcast, and reconciliation reuses wallet-saved
-transactions instead of constructing duplicates. Setup funding uses confirmed
-parents and does not alter the DigiByte fee precheck or Dandelion implementation.
-The existing wallet tick continues approved work even with provider autostart
-disabled. Recurring maintenance consent remains separate. See the
-[operator and persistence reference](digidollar-paymaster-pool-setup.md) for the
-new optional fields, explicit legacy adoption and verification commands.
-The September 20 operator run recorded passing selected setup/Paymaster runtime
-checks; see the dated [workflow review](digidollar-paymaster-edge-case-review.md).
-Those binaries predate the client integration package and do not verify the
-current head. Use the [build and test runbook](digidollar-paymaster-testing.md).
-
-### Workflow edge-case corrections (2026-09-20)
-
-AUTO dispatch preserves the database read status of live sessions and retained
-idempotency tombstones. Only `NOT_FOUND` permits the ordinary-funding fallback;
-an unreadable or unsupported existing record fails before coin selection.
-
-Finite setup accepts durable approval while provider operation is disabled,
-then waits for enablement before execution. Qt treats accepted/deferred work as
-pending and requires the new acceptance and fee-limit fields. Recurring DGB
-replenishment, like initial setup, requires confirmed funding. Failed signed
-setup transactions remain observable after conflicts and can rejoin their exact
-pool outputs after reconfirmation, without signing a replacement.
-
-Pool retirement stores `paymaster_retirement_provider` with each signed wallet
-transaction in `CommitTransaction`, before broadcast. Finance reconciliation
-reuses the existing transaction-cost reconstruction for these provider-bound
-markers and idempotent event IDs. A crash, a later asset-step failure or a failed
-finance write cannot erase this reconstruction source. No separate retirement
-database or binary record layout is introduced. DD retirement uses the existing
-plan/build API and checks the exact fee before commit; rejected saved bytes are
-retained. Old unmarked retirements with missing events cannot be inferred safely
-from arbitrary wallet sends and are not claimed as repaired history.
-The marker remains internal: the common wallet transaction JSON formatter omits
-it from `gettransaction`, `listtransactions` and `listsinceblock`, preserving
-the existing public response schemas. Before retirement execution, reconcile
-the maintenance journal so already-confirmed setup steps do not incorrectly
-block retirement as pending; genuinely pending setup still blocks it.
-
-`rebalancepaymasterpool` accepts an optional positive `maximum_fee_satoshis`
-for mixed DD/DGB retirement as well as DGB-only retirement. The plan binds this
-per-transaction ceiling and reports the combined maximum for the selected asset
-transactions. Both signed transaction fees are checked before the first commit.
-Optional `expected_liquidity_updated_at` requires that saved liquidity revision
-and its exact four targets under the wallet lock. A changed revision or target
-requires a fresh preview. Calls without these options retain their existing
-behavior; retirement does not change recurring refill authorization.
-
-The optional preview-only `recommend_fee` estimates the selected DGB retirement
-with the wallet's signed-size/fee estimator and the DD retirement with the
-existing funded DD planner. No addresses or signatures are created; pool
-confirmation refresh is non-persistent for previews. The response adds
-`estimated_dgb_fee_satoshis`, `estimated_dd_fee_satoshis` and
-`wallet_maximum_fee_satoshis`. The proposed per-transaction ceiling covers the
-larger estimate plus 10%, rounded up to 0.01 DGB, retains any larger explicit
-draft ceiling, and never exceeds the unchanged wallet-wide limit. The total
-bound covers both selected asset transactions. Execute with `recommend_fee`
-omitted/false, the returned ceiling and the exact reviewed plan; combining
-recommendation and execution is rejected. Existing calls remain compatible.
-The provider work guard still serializes both preview and execution. Explicit
-busy and retirement fee-limit rejections precede the first transaction commit.
-Qt retries only the exact `PAYMASTER_PROVIDER_BUSY` rejection, up to three
-times at 750 ms, bound to the same wallet, task generation, plan and ceiling.
-Unknown or lost replies never trigger execution retries. An explicit retirement
-fee-limit rejection offers a new fee calculation and review; it does not
-authorize an increased fee or change recurring maintenance budgets.
-
-
-Regression details and runtime acceptance are tracked in
-[the edge-case review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).
-
-### Client percentage approval and unresolved outcomes
-
-`ClientSafetyPolicy` wallet records use version 2. Version 1 remains readable
-with `maximum_service_fee_bps = -1` (legacy absolute-only approval). A new
-explicit percentage is 0..10000 basis points; zero allows only zero service
-fees. RPC omission preserves any saved cap. No migration grants a percentage
-approval automatically. Older binaries cannot validate version 2 and must not
-be used to rewrite these records.
-
-`CheckClientServiceFee` compares actual integer DD cents:
-`service_fee * 10000 <= recipient_amount * maximum_service_fee_bps`, alongside
-the absolute ceiling. The recipient amount is the net amount when the fee is
-deducted. This deliberately rejects rounding that exceeds the approved effective
-percentage. Wallet-side checks cover discovery, selection, durable acceptance
-and the final client signing boundary. Recovery fees use the total DD returned
-to wallet-owned outputs. Existing signed artifacts retain their observation,
-replay and recovery paths; elapsed time never releases their inputs.
-
-Qt ends an unsigned live preparation after two minutes only through Core's
-fresh `abandon_unsigned` capability. Signed send/retry/recovery continuations
-switch to read-only `refresh` polling after that interval. Transient read errors
-are inline and retried, while malformed state remains fail-closed. Durable
-session creation time also makes the return-to-wallet action prominent after
-restart. Failed/conflicted sessions with unresolved authority remain observed.
-Recovery preparation and any signing still use the existing exact review flow.
-
-An authenticated remote unsigned-abort message is **not implemented**. Local
-closure cannot prove that a remote provider has released a reservation. A future
-extension must bind identity, session/attempt, quote and nonce, persist replay
-protection, and atomically reject release once any client spending authority is
-accepted. Until that protocol exists, provider reservations expire under the
-existing bounded quote/capacity rules; they are never freed on an unauthenticated
-notification or solely on a client UI timeout.
-
-## Provider channel authentication
-
-New direct channels require `CAP_CHANNEL_AUTH` in addition to the outbound
-Direct marker; the accepted provider half acknowledges channel authentication.
-Before sending Capacity or any financial/recovery payload, the client sends
-`pmauthreq`: version 1, genesis, expected provider, local BIP324 session ID and
-fresh random nonce. It contains no payment identifiers, recipient, amount or
-inputs. The provider rejects a different local session ID before queueing it.
-Its wallet worker signs `DigiByte Paymaster BIP324 Channel v1` over the complete
-challenge and returns `pmauthresp` with the x-only identity key and 64-byte
-Schnorr signature. The client independently matches the entire challenge,
-provider-ID/key binding and signature. Only then is the channel ready.
-
-A reconnect, including a result/recovery retry, requires a fresh proof. A
-peer lacking this capability receives no financial metadata. The eight-entry
-process-local queue accepts one challenge per socket, expires stale work and
-removes it on disconnect. Manual operation also authenticates automatically;
-this separate signature authorizes no payment and changes no persisted V5/V6
-artifacts. Signing keys remain wallet-owned behind lock/restore gates. A
-transparent encrypted-byte proxy works; a two-leg decrypting relay fails the
-local-session comparison. Existing manifests, prevout validation, signature
-modes and financial budgets remain independent requirements.
+Store code is split into provider/client/finalization/recovery/reconciliation/
+reputation units; RPC code into provider/client/discovery/processing/runtime/
+integration/send units. Review callers and shared helpers together.

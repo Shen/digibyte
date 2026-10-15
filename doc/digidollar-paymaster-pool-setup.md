@@ -1,38 +1,13 @@
-# Automatic finite Paymaster pool setup
+# Paymaster pool setup and recurring refill
 
-Setup prerequisites reviewed against `1789c803be` on
-`integration/paymaster-v9.26.6rc2`, 2026-09-27. Dated pool-setup test evidence
-is separated from current acceptance below.
+Pools separate admission from operational liquidity. DGB slots fund network
+fees; DD carrier slots support nonzero service fees below the minimum DD output.
+Free sponsorship does not need a DD carrier for a service fee. Usable slots
+require confirmed, free inputs valid for the request.
 
-`preparepaymasterpool` authorizes a finite setup, independently of recurring
-liquidity maintenance and provider service startup. Its default call remains a
-read-only preview. Execution persists the exact output scripts before either
-transaction is created. The existing wallet stores signed transactions; the
-existing maintenance ledger stores their pool purpose, fee ceiling, request
-binding, policy/identity/network binding, and progress.
+## Finite approved setup
 
-## Prerequisites and scope
-
-This procedure prepares wallet liquidity; it does not configure an incoming
-Direct listener or start provider service. Follow the
-[provider setup](digidollar-paymaster.md#provider-setup) for the eligible wallet,
-identity, operating policy, finite safety limits and enabled state. Use the
-same provider wallet for every call (`digibyte-cli -rpcwallet=<wallet>`).
-Fund it with sufficient confirmed DGB and, for USER_PAID, confirmed DD; the
-preview reports the required principal and fee ceiling.
-
-Before serving clients, configure the
-[dedicated Direct listener and connection budget](digidollar-paymaster-connection-capacity.md#provider-configuration-and-migration)
-and restart the node. With default 1 outgoing / 16 provider channels, the
-effective `maxconnections` must be at least 45. A finished pool does not resolve
-missing listener, endpoint or transport capacity. Check `getpaymasterinfo`
-readiness separately and start explicitly unless autostart was deliberately
-enabled. A stopped service with `autostart=false` can still complete an already
-approved finite setup as described below.
-
-## Preview, authorize, observe
-
-Example options for USER_PAID (amounts in integer satoshis or DD cents):
+`preparepaymasterpool` previews a finite plan. Example options:
 
 ```json
 {
@@ -44,231 +19,61 @@ Example options for USER_PAID (amounts in integer satoshis or DD cents):
 }
 ```
 
-1. Call `preparepaymasterpool` with these options and inspect `plan_id`, pool
-   principal, `maximum_fee_satoshis` and `maximum_total_fee_satoshis`.
-2. Send the same options with `execute=true` and the returned `plan_id`.
-3. Inspect `getpaymasterpoolinfo.preparation`. `accepted=true` acknowledges a
-   durable command; `executed=true` only reports a transaction committed during
-   that particular call. Acceptance alone is not evidence of a finished pool.
+Review the response; submit the same options with `execute=true` and `plan_id`
+to approve. Counts and the per-step fee ceiling are examples, not universal
+requirements. Setup can create one DD carrier transaction and one DGB
+transaction; combined authorized fees depend on the missing asset classes.
+Core defaults and CLI proposed ceilings need not match. A ceiling is not an
+expected fee.
 
-The default fee ceiling is **0.2 DGB per setup transaction**. A new command
-creates at most one DD-carrier transaction and one DGB transaction, so its
-maximum total fee is the displayed ceiling times the number of missing asset
-classes. A retry cannot increase this ceiling, change targets, or replace a
-saved transaction. Changed inventory produces a new preview identity.
+`accepted=true` means durably accepted, not necessarily `executed=true`,
+broadcast or confirmed. A disabled provider can retain an accepted command
+with `PAYMASTER_PROVIDER_DISABLED`; acceptance does not enable or sign for it.
+The maintenance tick resumes approved work when feature/provider enablement,
+history/index readiness and signing prerequisites permit. It can continue
+with service stopped and autostart off; this does not start service or grant
+recurring maintenance approval. New signatures require wallet unlock.
 
-An explicit execute call may save the reviewed approval while the provider
-setting is disabled. It returns `accepted=true, executed=false` and reports
-`PAYMASTER_PROVIDER_DISABLED`; it does not enable the provider or sign a new
-transaction. This permits the Qt setup wizard to save funding approval before
-applying the operator's chosen enabled/runtime settings. Both the wizard and
-manual pool controls distinguish acceptance from execution and readiness.
+| State | Meaning |
+|---|---|
+| `pending_creation` | An approved step has no transaction; inspect funding/prerequisites. |
+| `pending_confirmation` | A retained transaction needs chain confirmation. |
+| `complete` | Finite command completed. |
+| `conflict` | Retained transaction/input conflict needs reconciliation, not blind replacement. |
+| `cancelled` | Unsigned remaining work was safely cancelled. |
 
-The existing 30-second wallet-maintenance tick continues the command when
-Paymaster and the wallet's provider setting are enabled and wallet/txindex are
-synchronized. It works with `running=false`, manual service mode, and
-`autostart=false`. It does not start the provider or enable recurring maintenance.
-New signatures require an unlocked wallet. Disabling the provider setting
-pauses setup; ordinary wallet rebroadcast of already signed transactions remains
-possible, as before.
+Exact signed bytes survive response loss, rejection and restart. A known signed
+step is not recreated merely because broadcast/confirmation failed. Children
+need confirmed parents. Funding status distinguishes confirmed/unconfirmed
+funds; a shortfall estimate can include the full approved fee ceiling. Regtest
+confirmation requires explicit mining.
 
-DGB setup coin selection requires confirmed inputs. DD setup also checks its
-planned parents for confirmation. Therefore, a carrier transaction's stempool
-change cannot immediately become the input of a DGB setup transaction whose
-normal fee precheck cannot see that change. Other suitable confirmed wallet
-coins may fund the DGB step. DD setup reuses the existing build-and-sign API,
-checks the exact signed fee before commit, and retains rejected transactions
-without invoking the ordinary DD send helper's automatic-abandon behavior.
-Ordinary wallet coin-selection and Dandelion rules are unchanged.
+## Recurring automatic refill
 
-## Waiting, failures, and cancellation
+`setpaymasterliquiditypolicy` and the operator workflow configure targets and
+separately approved automatic maintenance limits. `getpaymasterliquiditystatus`
+reports actual state. The daemon runs this headlessly; finite setup approval
+alone does not authorize indefinite paid refill.
 
-Each step reports its asset, operation ID, plan ID, state, last diagnostic,
-fee ceiling, actual saved fee, and transaction ID when present.
+When funds cannot fill all missing slots, create fewer **complete slots**.
+This applies to DGB and DD-carrier funding. If three slots are missing but only
+one plus fees is affordable, fill one; do not split money across three partial
+slots. Preserve the target, wait for confirmation and re-evaluate. Transaction
+and rolling maintenance fee limits still apply; no new spending authority is
+created by this fallback.
 
-- `pending_creation`: no transaction has been saved for that step. A missing
-  balance, locked wallet, or fee exceeding the approved ceiling pauses work.
-- `pending_confirmation`: a specific transaction is saved and tracked. Recovery
-  reuses those exact bytes, including after an immediate broadcast rejection.
-- `complete`: the transaction is confirmed and its pool outputs are reconciled.
-- `conflict`: a saved transaction is abandoned or conflicted. No automatic
-  replacement is authorized; the other uncompleted steps of that plan pause.
-- `cancelled`: an explicitly cancelled step had no saved transaction.
+Confirmed free capacity remains usable when further refill cannot reach its
+target. Payment readiness and maintenance funding/confirmation state are
+separate. Target count is not an all-or-nothing service gate.
 
-Conflict and abandonment observations are not terminal journal states: every
-later reconciliation checks the same saved transaction again. If it becomes
-valid/confirmed after a reorg, its existing outputs are restored without a new
-transaction. An output already spent by a successor is never made available
-again. A still-conflicted or abandoned signed transaction continues to block
-replacement setup; cancellation only removes genuinely unsigned work.
+## Cancellation and verification
 
-Uncreated DGB steps expose eligible confirmed funding, eligible funding including
-safe unconfirmed change, required pool principal, and
-`funding_shortfall_upper_bound_satoshis`. The shortfall includes the full fee
-ceiling, so it is a conservative estimate rather than an exact funding demand.
-Unconfirmed change is counted separately from immediately usable confirmed coins.
-Additional funding can resume the original command without creating more slots
-than approved.
+Pause future setup/maintenance explicitly. Cancellation must not release inputs
+protected by known signatures or ambiguous broadcast. Manual locks and restore
+guards remain authoritative. Use [capital release](paymaster-capital-release.md)
+for retirement.
 
-If an execute response is lost, repeat the preview with the unchanged options.
-An outstanding matching approval keeps its original plan ID and fee total; use
-that ID for the retry. This does not grant a new approval or create another set
-of slots. A changed request or provider policy cannot inherit the old approval.
-
-In Qt, **Operating capital** shows the active finite preparation steps and their
-last diagnostics. A pending setup is distinct from recurring refill; the operator
-overview uses the step diagnostic instead of treating
-`PAYMASTER_POOL_PREPARATION_PENDING` as an unknown service failure.
-`waiting_for_readiness` does not imply that autostart is enabled: it can also
-occur after an explicit provider start.
-
-For `PAYMASTER_POOL_FEE_LIMIT`, inspect the approved setup ceiling and the
-optional `diagnostic` text, which identifies the estimated/signed/saved fee and
-its approved limit. `PAYMASTER_POOL_FEE_INVALID` and
-`PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED` instead require diagnostic review;
-increasing the approved ceiling does not resolve those checks. Older binaries
-used the fee-limit code for all three conditions, so an old fee-limit record
-alone does not prove that a higher ceiling will help. The next execution check
-updates its diagnostic while preserving the approved limit. `pending_creation` with no transaction ID means that no transaction
-has been saved for that step. Changing the recurring refill budget does not
-change a previously approved finite setup.
-
-Qt offers **Cancel uncreated pool preparation…** only when the current pool
-snapshot describes a single wholly uncreated plan. The confirmation revokes that
-plan's unsigned steps through the existing RPC. Core reconciles first and retains
-any transaction saved concurrently. Afterwards, the manual preparation section
-allows reviewing **Maximum fee per setup transaction (DGB)** and a new preview.
-The field starts at 0.20 DGB; editing it neither changes old approvals nor moves
-funds, and invalidates any earlier preview. Execution requires explicit approval
-of the new preview. Unknown diagnostics and saved/conflicted transactions remain
-subject to diagnostic review; no timeout authorizes replacement.
-
-A provider-policy change pauses execution with `PAYMASTER_POOL_POLICY_CHANGED`.
-Unknown versions, unreadable records, ambiguous transaction matches and invalid
-fees fail closed. No signature or reservation is discarded on a timeout.
-
-To revoke unexecuted steps, pass the target options, the **original** `plan_id`,
-`execute=true`, and `cancel=true`. Recovery first checks for wallet-saved
-transactions; only genuinely unsigned steps become `cancelled`. Already saved
-transactions remain tracked and may still be broadcast. The response reports
-whether any unsigned step was cancelled. To change a fee ceiling or targets,
-cancel eligible steps, obtain a fresh preview and explicitly authorize it.
-
-Recurring automatic replenishment uses its existing separate consent and rolling
-budgets. DGB replenishment also selects confirmed funding, so the same stem-only
-parent cannot cause a signed child to fail the normal mempool fee precheck. It cannot construct replacement liquidity while finite setup is pending;
-existing payment submissions can still complete. Pool retirement is rejected
-while finite setup is pending; cancel eligible unsigned work before changing the
-pool in a contradictory direction.
-
-## Explicit recovery of a transaction created by the older implementation
-
-Do not run another plain setup for the reported legacy partial failure. The
-old transaction may still be valid even when it is absent from the mempool.
-Do not abandon it or modify the wallet database to force another attempt.
-
-After validating the updated build on isolated regtest, inspect the transaction
-and current pool with the same wallet and data directory used for setup. The
-operator must supply:
-
-- `recover_dgb_txid`: the existing **wallet** transaction ID;
-- `recover_dgb_outputs`: every intended DGB pool output as
-  `{"vout": <actual index>, "purpose": "admission" | "operational"}`;
-- the original desired pool totals and a sufficient finite fee ceiling.
-
-Do not guess indices from ordering. Decode the wallet transaction and identify
-its exact amounts and scripts. The remaining ordinary change is not a pool slot.
-First preview these options, then execute the identical options with the returned
-plan ID. The preview does not register or broadcast anything.
-
-Adoption requires owned inputs and outputs, no Paymaster input reservation or
-pool-input consumption, exact missing-slot values and counts, unspent mapped
-outputs, no abandonment/conflict, and an actual fee within the ceiling. It
-binds the transaction's witness hash and exact mapping to the preview. No
-replacement transaction is constructed. Registration is recovered before an
-attempt to broadcast the already saved transaction; outputs remain unavailable
-for provider service until confirmed.
-
-For the 2026-09-20 incident, the candidate is
-`b9c9b9ca0e18a8a8b9e59edb8e93b1cbaf3a99f4f532be31d3fea2ef064b7f30`.
-The already registered DD carriers must remain in the pool. Their confirmed
-change is sufficient according to the supplied diagnostic snapshot, but current
-transaction, spend, and registration state must be checked again by the operator.
-No command in development has been run against that existing testnet node.
-
-## Persistence and verification
-
-The wallet maintenance record advances from V3 to V4. V3 records remain readable
-without gaining setup authority. V4 adds two setup kinds plus authorization,
-request binding and diagnostic fields. Older binaries cannot interpret V4
-records; do not downgrade a wallet after this build writes such records. There is no second
-journal, transaction-byte copy, service thread or RPC endpoint.
-
-Run from the root of an already configured Linux checkout containing the
-selected revision, with wallet, SQLite and tests enabled. Check any helper
-script's pinned revision before using it; the original `354b711f92` snapshot
-predates the setup corrections. Do not run stale binaries against new tests.
-The [shared runbook](digidollar-paymaster-testing.md) supplies Windows and
-Linux/WSL commands for the full focused matrix.
-
-Build first (typically tens of minutes; the focused tests take minutes):
-
-```bash
-make -j2 -C src digibyted digibyte-cli test/test_digibyte
-```
-
-Focused tests are registered in the existing suites. Require exit code zero and
-no unexpected skips for each command:
-
-```bash
-./src/test/test_digibyte --run_test=paymaster_provider_tests,paymaster_wallet_identity_tests --log_level=test_suite --report_level=short
-python3 test/functional/test_runner.py wallet_paymaster_pool_setup.py wallet_paymaster_provider.py wallet_paymaster_rpc.py wallet_paymaster_lifecycle.py wallet_paymaster_failover.py wallet_paymaster_offer_selection.py -j1
-```
-
-Use freshly rebuilt binaries. The functional regression intentionally enables
-Dandelion and uses isolated regtest wallets and an inert stem-capable peer. It
-covers a single DGB funding input, deferred child creation, restart, identical
-retry, changed request rejection, missing funding, disabling/re-enabling setup,
-wallet locking, fee limits, unsigned cancellation, and explicit legacy adoption.
-Existing funded fixtures share a bounded confirmation helper so the ordinary
-provider, offer-selection, failover and legacy-bridge tests also allow a second
-setup transaction after confirmation of its parent. The optional bridge test
-requires its separately documented v9.26.5 binary.
-Unit coverage checks V3/V4 compatibility, authorization, wrong assets, amount
-bounds, write failure, transaction abort and unknown record versions.
-
-Full builds and these executable tests are operator verification steps. Static
-syntax checks alone do not establish that the runtime matrix passed.
-
-Local verification on 2026-09-20: targeted MSVC syntax checks passed for the
-changed C++ translation units and the wallet database codec; the Qt check used
-the installed compatible MSVC 14.43 toolset. Python AST checks passed for all
-seven affected scripts, the new test imports through `--help`, and
-`git diff --check` passed. No newly rebuilt executable tests had run at that
-initial check. The
-optional Python flake8 check was not run because that module is not installed
-in the current Windows Python environment.
-
-That paragraph records the initial syntax-only check. Later on September 20,
-the combined operator WSL run passed the selected Paymaster unit tests, 46 Qt
-cases and nine functional scenarios; see the
-[workflow review](digidollar-paymaster-edge-case-review.md#local-corrections-and-verification).
-This supersedes the initial absence of runtime evidence for that candidate,
-but does not verify the later client integration package or close release gates.
-
-
-## Guided Qt preparation and current progress
-
-The normal provider Operation page now loads the funding preview inside
-Restore reserves. One review authorizes only missing capital and the displayed
-maximum setup fees; existing and pending reserves are included. An optional
-start-when-ready does not change saved autostart. Manual Preview/Execute
-controls remain under advanced settings.
-
-Initial Qt setup uses the same Core calculation with a read-only
-proposed-policy preview before saving configuration. Its preview-only plan
-cannot execute. A later executable preview must stay within the reviewed
-capital, targets and fee bounds, otherwise Qt requires renewed approval.
-Core journals own all accepted continuation; closing the GUI does not revoke
-it. Pausing stops new signatures, while already saved transactions remain
-visible and can confirm. See the [operator guide](digidollar-paymaster-operator.md#guided-daily-tasks).
+Functional coverage: `wallet_paymaster_pool_setup.py`,
+`wallet_paymaster_partial_capacity.py`, `wallet_paymaster_operator.py`,
+`wallet_paymaster_readiness.py`. Wallet store/identity tests cover persisted
+commands, budgets and signing gates. See [testing](digidollar-paymaster-testing.md).
