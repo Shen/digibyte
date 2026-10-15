@@ -1220,6 +1220,9 @@ bool IsBoundedReserveReductionResult(const UniValue& result, const UniValue& opt
         !GetInt64Field(result, "maximum_total_fee_satoshis", total)) return false;
     const bool dgb = result.find_value("retired_dgb_satoshis").getInt<qint64>() > 0;
     const bool dd = result.find_value("retired_carrier_cents").getInt<qint64>() > 0;
+    if (options.find_value("dgb_only").isTrue() && (dd ||
+        result.find_value("retired_admission_carrier_slots").getInt<qint64>() != 0 ||
+        result.find_value("retired_operational_carrier_slots").getInt<qint64>() != 0)) return false;
     if (total != fee * (int(dgb) + int(dd))) return false;
     if (result.find_value("executed").isTrue()) {
         qint64 actual{0};
@@ -11625,6 +11628,9 @@ private:
             params = preparation ? poolOptions(false, {}, true) : rebalance ? poolOptions(false) : carrierWithdrawalOptions(task, false);
             if (rebalance) {
                 const auto& saved = reduction ? m_saved_liquidity_policy : context.find_value("provider").find_value("liquidity").find_value("policy");
+                qint64 revision{0};
+                if (!GetInt64Field(saved, "updated_at", revision) || revision <= 0)
+                    throw std::runtime_error("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
                 UniValue options{UniValue::VOBJ};
                 options.pushKV("admission_dgb_slots", saved.find_value("target_admission_dgb"));
                 options.pushKV("operational_dgb_slots", saved.find_value("target_operational_dgb"));
@@ -11634,8 +11640,10 @@ private:
                 if (!m_preparation_fee->satoshis(fee) || fee <= 0) throw std::runtime_error("PAYMASTER_RETIREMENT_FEE_LIMIT");
                 options.pushKV("maximum_fee_satoshis", fee);
                 options.pushKV("dgb_only", !reduction);
+                // Bind both release actions to saved targets. Empty or
+                // underfilled categories are retained, never refilled here.
+                options.pushKV("expected_liquidity_updated_at", saved.find_value("updated_at"));
                 if (reduction) {
-                    options.pushKV("expected_liquidity_updated_at", saved.find_value("updated_at"));
                     options.pushKV("recommend_fee", true);
                 }
                 options.pushKV("execute", false);
@@ -11675,7 +11683,9 @@ private:
                 options.pushKV("recommend_fee", false);
                 params.clear(); params.setArray(); params.push_back(options);
             }
-            const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : reduction ? IsBoundedReserveReductionResult(preview, params[0]) : rebalance ? IsCompletePoolRebalanceResult(preview) && poolNumber(preview, "retired_carrier_cents") == 0 && preview.find_value("maximum_network_fee_satoshis").isNum() && preview.find_value("maximum_network_fee_satoshis").write() == params[0].find_value("maximum_fee_satoshis").write() : IsCompleteCarrierWithdrawalResult(preview, task, false, {});
+            const bool valid = preparation ? IsCompletePoolPreparationResult(preview) : rebalance ?
+                IsBoundedReserveReductionResult(preview, params[0]) && (reduction || poolNumber(preview, "retired_carrier_cents") == 0) :
+                IsCompleteCarrierWithdrawalResult(preview, task, false, {});
             if (!valid || preview.find_value("executed").isTrue() || preview.find_value("accepted").isTrue()) {
                 failGuidedTask(tr("Core did not return a complete current preview. No task was approved.")); return;
             }
@@ -11691,7 +11701,7 @@ private:
                          PaymasterFormatDD(poolNumber(preview, "total_carrier_cents")),
                          dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
                          dgbAmount(poolNumber(preview, "maximum_fee_satoshis")))
-                : reduction ? tr("The smaller refill target is saved. Release the following excess reserves?\n\nReturn %1 DGB and %2 DD to ordinary wallet funds, before network fees.\nEstimated fees: %5 DGB for the DGB release and %6 DGB for the DD release.\nProposed maximum network fee: %3 DGB per transaction, %4 DGB total. These are one-time release fees; refill approval is unchanged. Only actual transaction fees are spent.\n\nOnly excess available, confirmed reserves are selected. The saved target remains prepared. Cancel keeps the smaller target and the existing reserves.")
+                : reduction ? tr("The smaller refill target is saved. Release the following excess reserves?\n\nReturn %1 DGB and %2 DD to ordinary wallet funds, before network fees.\nEstimated fees: %5 DGB for the DGB release and %6 DGB for the DD release.\nProposed maximum network fee: %3 DGB per transaction, %4 DGB total. These are one-time release fees; refill approval is unchanged. Only actual transaction fees are spent.\n\nOnly excess available, confirmed reserves are selected. Reserves at or below their saved target are retained; missing reserves are not created by this release. Cancel keeps the smaller target and the existing reserves.")
                     .arg(dgbAmount(poolNumber(preview, "retired_dgb_satoshis")), PaymasterFormatDD(poolNumber(preview, "retired_carrier_cents")),
                          dgbAmount(poolNumber(preview, "maximum_network_fee_satoshis")), dgbAmount(poolNumber(preview, "maximum_total_fee_satoshis")),
                          dgbAmount(poolNumber(preview, "estimated_dgb_fee_satoshis")), dgbAmount(poolNumber(preview, "estimated_dd_fee_satoshis")))
@@ -11829,7 +11839,11 @@ private:
         const UniValue reviewed = m_operation.reviewed;
         call(command, params, preparation || task == QLatin1String("all_excess") || task == QLatin1String("rebalancepaymasterpool") || task == QLatin1String("reduce_reserves"), nullptr,
             [this, preparation, task, reviewed, params](const UniValue& result) {
-                const bool valid = preparation ? IsCompletePoolPreparationResult(result) : task == QLatin1String("reduce_reserves") ? IsBoundedReserveReductionResult(result, params[0], reviewed) : task == QLatin1String("rebalancepaymasterpool") ? IsCompletePoolRebalanceResult(result) && poolNumber(result, "retired_carrier_cents") == 0 : IsCompleteCarrierWithdrawalResult(result, task, true, QString::fromStdString(reviewed.find_value("plan_id").get_str()));
+                const bool release = task == QLatin1String("reduce_reserves") || task == QLatin1String("rebalancepaymasterpool");
+                const bool valid = preparation ? IsCompletePoolPreparationResult(result) : release ?
+                    IsBoundedReserveReductionResult(result, params[0], reviewed) &&
+                        (task != QLatin1String("rebalancepaymasterpool") || poolNumber(result, "retired_carrier_cents") == 0) :
+                    IsCompleteCarrierWithdrawalResult(result, task, true, QString::fromStdString(reviewed.find_value("plan_id").get_str()));
                 if (!valid || result.find_value("plan_id").write() != reviewed.find_value("plan_id").write() ||
                     !(preparation ? result.find_value("accepted").isTrue() : result.find_value("executed").isTrue())) {
                     failGuidedTask(tr("The response did not confirm this exact task. Current saved work will be checked before another attempt.")); return;

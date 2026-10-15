@@ -11236,6 +11236,9 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks_data()
                                  "slot_unavailable_preview", "slot_unavailable_execute", "plan_changed", "target_zero"})
         QTest::newRow(decision) << QStringLiteral("release_slot") << QString::fromLatin1(decision);
     QTest::newRow("release-slot-wallet-selection") << QStringLiteral("release_slot") << QStringLiteral("wallet_selection");
+    for (const char* decision : {"no_excess", "negative_preview", "carrier_preview", "missing_revision",
+                                 "changed_receipt", "missing_txid", "excess_fee", "wrong_plan"})
+        QTest::newRow(decision) << QStringLiteral("rebalancepaymasterpool") << QString::fromLatin1(decision);
 }
 
 void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
@@ -11247,6 +11250,9 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
     auto provider = snapshot.find_value("provider");
     provider.pushKV("active_operations", UniValue{UniValue::VARR});
     auto liquidity = provider.find_value("liquidity");
+    auto policy = liquidity.find_value("policy");
+    policy.pushKV("updated_at", decision == "missing_revision" ? UniValue{} : UniValue{1});
+    liquidity.pushKV("policy", policy);
     const bool below_minimum = decision == QLatin1String("below_minimum") || decision == QLatin1String("zero_earnings") || decision == QLatin1String("one_cent_short");
     const qint64 earnings = decision == QLatin1String("below_minimum") ? 6 : decision == QLatin1String("zero_earnings") ? 0 : decision == QLatin1String("one_cent_short") ? 99 : 100;
     liquidity.pushKV("carrier_withdrawable_excess_cents", earnings);
@@ -11288,6 +11294,7 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
             const bool execute = options.find_value("execute").isTrue();
             execute ? ++executions : ++previews;
             if (!options.find_value("dgb_only").isTrue() ||
+                options.find_value("expected_liquidity_updated_at").getInt<int64_t>() != 1 ||
                 options.find_value("maximum_fee_satoshis").getInt<int64_t>() <= 0 ||
                 (execute && options.find_value("plan_id").get_str() != std::string(64, 'e')))
                 throw std::runtime_error("DGB release lost its exact scope or plan");
@@ -11295,12 +11302,19 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
             result.pushKV("executed", execute);
             result.pushKV("plan_id", std::string(64, 'e'));
             result.pushKV("maximum_network_fee_satoshis", options.find_value("maximum_fee_satoshis"));
-            result.pushKV("retired_admission_dgb_slots", 1);
+            result.pushKV("maximum_total_fee_satoshis", decision == "no_excess" ? UniValue{0} : options.find_value("maximum_fee_satoshis"));
+            result.pushKV("retired_admission_dgb_slots", decision == "no_excess" ? 0 : 1);
             result.pushKV("retired_operational_dgb_slots", 0);
-            result.pushKV("retired_admission_carrier_slots", 0);
+            result.pushKV("retired_admission_carrier_slots", decision == "carrier_preview" ? 1 : 0);
             result.pushKV("retired_operational_carrier_slots", 0);
-            result.pushKV("retired_dgb_satoshis", 10000000);
+            result.pushKV("retired_dgb_satoshis", decision == "no_excess" ? 0 : decision == "negative_preview" ? -1 :
+                execute && decision == "changed_receipt" ? 10000001 : 10000000);
             result.pushKV("retired_carrier_cents", 0);
+            if (execute) {
+                if (decision != "missing_txid") result.pushKV("dgb_txid", std::string(64, 'd'));
+                result.pushKV("network_fee_satoshis", decision == "excess_fee" ? options.find_value("maximum_fee_satoshis").getInt<int64_t>() + 1 : 1000);
+                if (decision == "wrong_plan") result.pushKV("plan_id", std::string(64, 'c'));
+            }
             if (execute && decision == "lost_reply") throw std::runtime_error("Connection lost after acceptance");
             return result;
         }
@@ -11366,6 +11380,18 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
         return;
     }
     QVERIFY(action->isEnabled());
+    if (mode == "rebalancepaymasterpool" && (decision == "no_excess" || decision == "negative_preview" ||
+        decision == "carrier_preview" || decision == "missing_revision")) {
+        action->click();
+        auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
+        QVERIFY(status);
+        if (decision == "no_excess") QVERIFY(status->text().contains("No excess DGB is available"));
+        else QVERIFY(!panel->findChild<QPushButton*>("paymasterTaskErrorToggle")->isHidden());
+        QCOMPARE(previews, decision == "missing_revision" ? 0 : 1);
+        QCOMPARE(executions, 0);
+        QCOMPARE(pauses, 0);
+        return;
+    }
     if (decision == QLatin1String("minimum_error") || decision == QLatin1String("unknown_error")) {
         action->click();
         auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
@@ -11411,6 +11437,15 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
     });
     response.start();
     action->click();
+    if (mode == "rebalancepaymasterpool" && (decision == "changed_receipt" || decision == "missing_txid" ||
+        decision == "excess_fee" || decision == "wrong_plan")) {
+        QTRY_COMPARE(approvals, 1);
+        QTRY_COMPARE(executions, 1);
+        response.stop();
+        QCOMPARE(previews, 1);
+        QVERIFY(panel->findChild<QLabel*>("paymasterTaskStatus")->text().contains("did not confirm this exact task"));
+        return;
+    }
     if (decision == "empty_pool" || decision == "invalid_pool" || decision == "pool_read_error" || blocked_preview || blocked_execute) {
         auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
         auto* details = panel->findChild<QLabel*>("paymasterTaskErrorDetails");
