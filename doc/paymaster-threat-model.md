@@ -1,1075 +1,128 @@
-# Paymaster threat model and financial-safety review
+# Paymaster threat model and security review index
 
-## Executive summary
+Scope: the implementation described in [PAYMASTER.md](../PAYMASTER.md).
+This is a source-grounded review index, not independent certification or a
+claim that all tests passed at HEAD. See [release evidence](digidollar-paymaster-release-gate.md).
 
-**Review date: 2026-10-10. Three findings reproduced across the initial review
-and the provider-backup follow-up:**
+## Assets, actors and trust boundaries
 
-- **TM-001 — medium:** provider budget pruning can delete the authorization
-  evidence needed to recover an already signed, unconfirmed transaction after
-  more than 24 hours. Recovery then fails closed, potentially leaving reserves
-  committed and preventing the provider's automatic rebroadcast.
-- **TM-002 — medium:** expired, never-signed provider requests retain full session
-  and attempt records without an automatic retention bound. Repeated valid
-  requests can grow persistent state and the work performed under the wallet lock.
-- **TM-003 — high before correction; explicit restore and wallet-only rollback protected:** restoring an older provider wallet renews
-  forgotten spending authority. A real SQLite/regtest restore allowed 0.3 DGB
-  in confirmed payment fees under a 0.2-DGB daily approval. A second variant
-  exposed and re-signed inputs of an earlier signed payment absent from both
-  mempools. No direct recipient diversion or DD theft was demonstrated.
+Protect client DD, provider DGB/DD, private keys, explicit fee authority,
+spending budgets, durable request identity and recovery evidence. Either remote
+party, directory peer or network relay can be malicious. Treat RPC clients,
+wallet backups and local storage as separate boundaries; authenticated local
+RPC is not a public payment API.
 
-The initial TM-001/TM-002 reproductions establish a recovery failure and a
-persistent resource-growth path. TM-003 subsequently demonstrated expenditure
-beyond an approved fee limit and conflicting provider signing after rollback.
-The reviewed signing paths bind amounts, destinations, fees, actual prevouts,
-input ownership and transaction signatures independently of transport and peer
-claims. The durable restore guard quarantines restored provider wallets before
-loading and survives file copying, renaming and restarting. It prevents renewed
-authority rather than inventing missing history. Manual replacement with an
-older unmarked image is additionally checked against a node-local checkpoint.
-Rollback of a matching wallet/checkpoint pair, including the whole directory,
-still requires a separately retained high-water mark.
-This is a scoped source review with selected tests, not proof of absence of such
-paths or release approval.
+The client trusts local validation, not provider claims of payment success.
+The provider validates exact transaction intent and its own exposure rather
+than trusting client PSBT metadata. Encrypted transport is not provider identity.
+The GUI cannot grant authority by displaying an offer or clearing a form.
 
-The [2026-10-11 integration boundary review](design/paymaster-integration-boundaries.md)
-separately checks original wallet recovery, test gates and scan coverage. It
-withdraws the temporary DD history shortcut and records remaining performance
-and full-build checks; it does not supersede this threat model's financial
-recovery requirements.
+## Required invariants and review locations
 
-Thirty-seven existing protection tests passed **1,130 assertions**. Two isolated
-diagnostic cases failed their intended security assertions (**342/344 assertions
-passed**), reproducing TM-001 and TM-002. Product code and the normal test suite
-were not changed during the initial audit. A subsequent authorized correction
-now addresses both findings in source; see the follow-up below. The original
-snapshot, diagnostic binaries and reproduction details remain historical evidence.
-
-### Follow-up corrections (2026-10-10)
-
-**TM-001:** the rolling provider ledger still ages expenditure normally. An exact
-retained commit and its authorization manifest independently preserve authority
-to retry that already signed transaction. Only when the ledger row is absent,
-its accounting high-water is more than 24 hours past commit, and the complete
-locally stored commit validates may the read-only historical SPENT check use
-that evidence. Current RESERVED checks are unchanged. Conflicting existing rows,
-missing/corrupt commits and modified finals fail closed. No reservation is
-recreated, limit raised, accounting date changed or fee charged again. Normal
-provider recovery and idempotent final commits use this path; alternative-provider
-final-commit retries also retain their exact local commit binding. This reuses
-existing records and needs no database-format migration or duplicate journal.
-
-**TM-002:** periodic/tip reconciliation now removes eligible FAILED provider
-sessions and QUOTE_EXPIRED attempts after both their terminal timestamp and
-complete retry/capacity expiry have passed the 24-hour replay-retention window.
-It validates every referenced record/index, rejects signatures, accepted
-authorizations, commits/results, recovery records and remaining budget/pool
-bindings, then erases full artifacts and indices atomically. Historical
-capability-bound requests are retained without blocking maintenance or consuming
-the cleanup quota.
-No permanent tombstone is created for these expired unsigned remote requests:
-the old signed envelopes are expired and cannot authorize a replay. Signed,
-ambiguous and confirmed-payment retention stays unchanged.
-
-Cleanup is limited to 64 eligible sessions per pass. New quote preflight and
-atomic admission stop at 8,192 retained provider sessions per wallet; existing
-requests can continue. The quota prevents unbounded accumulation even when
-maintenance is delayed. Existing backlogs drain over multiple passes. This is
-a count/retention bound, not a measured throughput or latency guarantee.
-
-Two new tests and an extended durable-commit test pass **3 cases / 8,539
-assertions**. The related selection, including those cases, passes **48 cases /
-10,012 assertions**. The quota test accounts for 8,197 assertions, mostly fixture
-inserts at the actual limit. Tests cover the 24-hour boundary, policy changes,
-restart, no additional spending/write on exact retry, corrupt/conflicting
-authority, unsigned pruning boundaries, signed/budget protection, transaction
-begin/commit failure rollback, index removal and expired replay rejection.
-Historical restricted retention is checked without re-enabling that mode.
-
-Seven selected translation units were compiled and linked into a new isolated
-test executable. Sources, binary/report hashes and exact filters are recorded
-under `build_msvc/paymaster-refresh-check/security-fixes/`. Normal product
-executables were not rebuilt or replaced. Fresh full product/functional,
-sanitizer/fuzz, physical SQLite storage-failure and independent review gates
-remain open. The real engine-level SQLite follow-up and the stale-provider
-explicit-restore gate are documented below. The threat table describes the initial attack
-assessment; TM-001 and TM-002 now have source corrections with this targeted
-verification, rather than unresolved implementations.
-
-## Scope and assumptions
-
-The operator confirmed a public provider accepting arbitrary counterparties,
-with local GUI/RPC administration and a trusted operating system on the honest
-side. Either the client or provider can be malicious. An on-path attacker may
-observe, relay, suppress, reorder or replace transport messages. Existing
-control of the honest party's OS/private keys is excluded; obtaining such
-control through a Paymaster defect remains in scope.
-
-Reviewed: `src/paymaster/`, Paymaster wallet/store/RPC code, relevant networking,
-transaction construction/signing, Qt confirmation, persistence and test paths.
-Original DigiDollar validation was inspected where a Paymaster claim depends on
-it. This is not a full consensus, cryptographic-library, compiler, dependency or
-operating-system audit. Restricted sponsorship is disabled in the current user
-interfaces; retained future-extension code is not evidence of a publicly usable
-voucher feature.
-
-Deployment details still affecting residual risk are the expected sustained
-request rate/storage budget, manual provider-file/directory rollback outside the explicit restore API, and whether confidentiality against an active transport relay is required. No positive assumptions about those guarantees were used.
-
-The audit includes the uncommitted worktree, including the previous client
-recovery fee-reservation correction. It is **not** a review of HEAD alone:
-
-| Item | Recorded value |
+| Invariant | Implementation / verification focus |
 |---|---|
-| Branch | `integration/paymaster-v9.26.7` |
-| HEAD | `d377b7683b22e9ba8618471bd5d8be812d0dab4d` |
-| Initial snapshot UTC | `2026-10-10T11:34:43.3734476Z` |
-| Worktree diff SHA256 | `bd18c19b48b81c912676d2bb67c1c04a07f5abd264df99f3294b26c1e90554c6` |
-| Probe executable SHA256 | `d0a17755d5fe68876d5f6c618d27e32333388ffa8d253766fdd96ec28a3ecf82` |
-| Existing-guard executable SHA256 | `972e8df9d6ef5b463c0c7eab1c6704b338ad12956fea826a860983cd29f1a10c` |
-
-Workspace-local evidence is in
-`build_msvc/paymaster-refresh-check/security-audit-20261010-133443/`:
-`source-before.diff`, `source-receipt.json` (117 relevant file hashes),
-`results.json`, the probe sources/response files, and test logs/reports.
-All 117 hashed source files remained unchanged during the audit. The six source
-hashes, binary and reports in the preceding `reorg-fee-fix/results.json` also
-still match. The diff hash predates this report and its documentation links.
-These local build artifacts are ignored by Git; preserve them with the review.
-
-Validation used a newly compiled diagnostic test translation unit linked with
-existing operator-built libraries and the latest isolated Paymaster store
-objects. Existing guards used the preceding isolated recovery-fee executable.
-This is **not a clean full rebuild** of every translation unit. Historical
-operator results and earlier functional runs have their own source/binary scope
-in the [test runbook](digidollar-paymaster-testing.md); they are not new passes
-of the complete current worktree.
-
-Guidance applied: repository and `src/` AGENTS instructions, `CLAUDE.md`,
-`CONTRIBUTING.md`, architecture/repository maps, developer notes, formatting and
-test guidance; the DigiDollar/oracle baseline; and the Paymaster implementation,
-hardening, integration, operator and testing documents. The review follows the
-`security-threat-model` skill. Heavy builds/campaigns remain operator tasks.
-
-## System model
-
-### Primary components
-
-The runtime is native C++: a daemon/wallet RPC service or Qt desktop application,
-with a CLI RPC client. Python drives functional tests. MSVC and autotools builds
-produce the daemon, GUI, CLI and test executables. CI runs separate sanitizer
-and fuzz builds; those checks do not grant runtime payment authority. Dependency
-and build-system compromise were not audited here.
-
-1. Discovery and direct transport advertise provider identity, policy and
-   capacity; dedicated BIP324 V2 channels route wallet-scoped messages.
-2. Protocol, transaction-builder and PSBT validators turn untrusted offers into
-   exact locally checked transactions and immutable authorization manifests.
-3. Wallet RPC/store code owns signing, concurrent reservations, durable commits,
-   finance records and restart/reorganization recovery.
-4. Provider maintenance prepares, recycles, withdraws and retires wallet-owned
-   capital under separately approved limits.
-5. GUI/CLI expose the same wallet authority. A successful RPC response, signed
-   peer reply or green GUI status is not independent proof of chain confirmation.
-
-### Data flows and trust boundaries
-
-- **Network → manager:** bounded messages, negotiated version/activation,
-  direction, wallet route and admission checks precede processing.
-- **Peer artifacts → signer:** signed intent/quote/capacity data still require
-  local prevout, amount, output, ownership and witness validation.
-- **Local approval → durable authority:** the exact selected transaction and
-  finite budgets must survive concurrent RPCs and crashes unchanged.
-- **Wallet database → recovery:** retained signed artifacts and accounting
-  evidence must remain consistent across time, restart and reorganization.
-- **Chain → wallet:** local exact transaction/witness and confirmation evidence
-  supersede peer status strings. A timeout does not invalidate a signature.
-- **Untrusted text → GUI/logs:** display must not execute input or misrepresent
-  financial authority; sensitive transaction artifacts need separate handling.
-
-### Diagram
-
-```mermaid
-flowchart LR
-    A[Untrusted peer or on-path attacker] --> B[Bounded direct transport]
-    B --> C[Protocol and chain checks]
-    U[Local operator approval] --> D[Wallet authorization and signing]
-    C --> D
-    D --> E[Atomic reservations and durable records]
-    E --> F[Broadcast and exact recovery]
-    F --> N[Network and chain]
-    N --> R[Confirmation and reorg reconciliation]
-    R --> E
-    E --> G[GUI and RPC status]
-    U --> M[Provider reserve maintenance]
-    M --> E
-```
-
-## Assets and security objectives
-
-| Asset | Required property |
-|---|---|
-| Client DD and DGB | Only approved recipients, amounts and fees; exact own change; no other wallet inputs signed. |
-| Provider capital and income | Only approved fee contribution and return scripts; no concurrent overbooking or unsafe reserve release. |
-| Private keys | No remote key exposure or code execution; only the selected input role is signed. |
-| Fee approvals | Absolute, percentage and rolling limits bind actual amounts; retries and policy changes cannot create new authority. |
-| Signed inputs | Remain protected while either original or recovery transaction can still win. |
-| Durable state | Crash-safe, idempotent reconstruction; adequate replay and reorg evidence retained. |
-| Availability and privacy | Bounded network and persistent work; clear distinction between availability, payment success and confidentiality. |
-
-## Attacker model
-
-### Capabilities
-
-The attacker can operate many peers/clients, own valid DD/DGB inputs, sign its
-own protocol artifacts, offer deceptive prices, request/cancel/abandon quotes,
-withhold signatures or final transactions, reconnect, replay messages and
-choose adverse timing. It can exploit chain delays and reorganizations within
-the node's actual chain rules. A local RPC principal may exercise its granted
-methods; method/wallet separation must remain enforced.
-
-### Non-capabilities
-
-The attacker cannot forge the honest wallet's valid Schnorr signatures, rewrite
-the honest node's chainstate at will, directly edit its database or use its
-admin cookie under these assumptions. A provider's identity signature proves
-control of that identity, not honesty. Public sponsorship deliberately permits
-eligible strangers to consume an approved finite subsidy budget.
-
-## Entry points and attack surfaces
-
-| Surface | Processing and relevant evidence |
-|---|---|
-| Discovery/capacity/direct messages | `net_processing.cpp:4260–4500`; `paymaster/wire.{h,cpp}`, `manager.cpp`, `validation.cpp`: version/size/direction, replay, chain-backed capacity, queues. |
-| Quote and user/provider PSBT | `paymaster/protocol.cpp`, `txbuilder.cpp`, `psbt.cpp`; `wallet/paymasterpsbt.cpp`: exact template, manifest, actual prevouts and selective signing. |
-| Send/accept/submit and recovery RPC | `wallet/rpc/paymaster_client.cpp`, `paymaster_processing.cpp`, `paymaster_send.cpp`; store transactions: approval before signature/exposure. |
-| Provider setup/refill/withdraw/release | `wallet/paymasterprovider.cpp`, `wallet/rpc/paymaster_provider.cpp`: finite maintenance authority, owned confirmed inputs and busy-state checks. |
-| Wallet records and restart | `wallet/paymasterstore*.cpp`, `walletdb.cpp`: typed records, atomic writes, exact durable recovery and protected bindings. |
-| GUI/CLI and authenticated RPC | `qt/paymasterconfirmation.h`, `paymastersendwidget.cpp`, `paymaster/cli.cpp`; RPC authorization test in `wallet_paymaster_rpc.py`. |
-| Parser/fuzz inputs | `paymaster_wire_envelopes`, `paymaster_stateful_security`, `paymaster_pool_lifecycle`, `paymaster_persistence_records`; current sanitizer campaigns not executed here. |
-
-Line references below describe the hashed worktree; symbols remain the primary
-navigation anchors when subsequent edits move lines.
-
-## Top abuse paths
-
-1. **Tamper with the transfer:** substitute recipient/change or fee while
-   relaying a genuine provider identity. Exact manifests, template equality,
-   actual prevout checks and full-input signatures reject the modified spend.
-2. **Replay authority across contexts:** move a valid quote/submit into another
-   session, provider, wallet route or network. Bound identifiers, genesis,
-   capacity nonce, immutable request and wallet-specific ownership checks
-   reject the substitution; transport encryption alone is insufficient.
-3. **Race approvals or manipulate pricing:** concurrent requests try to consume
-   the last budget/pool slot or exploit fee rounding. Integer limits and atomic
-   reservations defend the tested cases; explicitly approved expensive offers
-   remain possible within the limits.
-4. **Withhold a signed payment:** an attacker retains a usable signature while
-   the honest party times out or restarts. Same-input recovery and durable
-   reservations prevent timeout-based reuse. TM-001 can additionally break the
-   provider's own recovery once its evidence is pruned.
-5. **Accumulate unpaid abandoned quotes:** request a valid quote, never sign,
-   wait for expiry and repeat with fresh request IDs. TM-002 retains the full
-   historical records despite releasing current capacity.
-6. **Exploit restored history:** after an operator restores an old provider
-   backup, exploit forgotten spending/reservations. TM-003 reproduced both renewed expenditure and conflicting signing. Explicit GUI/RPC restore now persists a quarantine before wallet loading. An independent node-local checkpoint additionally blocks unmarked wallet-only rollback. Restoring a matching wallet/checkpoint pair still requires independently retained state.
-7. **Interrupt durable transitions:** terminate processes or provoke storage
-   failure between signature, commit and broadcast. Existing injected-failure
-   tests cover important transitions; real disk-full/power-loss behavior remains
-   unverified for this source/build.
-8. **Inject or exhaust resources:** malformed/oversized wire records, displayed
-   text, repeated valid subsidy requests or an active transport relay target
-   parsing, privacy and availability. Bounds and text escaping are defenses;
-   persistent retention, public subsidy consumption and sanitizer gaps remain
-   distinct concerns.
-
-## Threat model table
-
-Priority for an open question is its investigation priority, not a claim that
-an exploit has been confirmed.
-
-| ID / status | Threat source, prerequisites and action | Impact / assets | Existing controls and evidence | Gap, mitigation and detection | Likelihood / severity / priority |
-|---|---|---|---|---|---|
-| TM-001 **confirmed** | Delayed/withheld final outcome; provider signed commit survives >24 h; subsequent ledger pruning removes its SPENT row. | Failed recovery; committed DD/DGB may remain bound. No theft/extra fee shown. | Exact final validation and budget firewall reject missing authority; probe reproduces rejection. | Retain authorization provenance independently of rolling accounting. Detect missing-row errors for retained commits. | Medium / medium / **medium** |
-| TM-002 **confirmed** | Valid public client repeatedly creates unique quotes and lets unsigned requests expire. | Persistent database growth and increasing wallet-lock work; indirect recovery delays. | Short quote life, input control proofs, active/rate limits and capacity replay cleanup. | No automatic bound on full expired session/attempt history. Compact only provably unsigned terminal records; monitor counts, disk and reconciliation latency. | Medium / medium / **medium** |
-| TM-003 **restore/wallet-only rollback protected** | Operator restores stale provider backup; counterparties continue payment requests or retain an unpublished signed payment. | Before correction: confirmed 0.3-DGB fees under a 0.2-DGB allowance and conflicting provider signing. | Durable `pmrestoreguard` precedes wallet load; readiness, start, identity/transaction signing, quote admission and reserve actions fail closed. Exact known commits still replay. Both real SQLite/regtest variants pass, including unmarked renamed copies against the independent checkpoint. | No automatic history reconstruction or unconditional guard-clear API; current, quiescent backups have reviewed checkpoint-bound adoption. Whole-datadir/matching-pair rollback, multiple independent stores and physical storage-failure tests remain boundaries. | Conditional on restore / high pre-fix / matching-pair rollback residual |
-| TM-004 **channel binding implemented; wider testing open** | Active MITM terminates two BIP324 transports and relays authentic Paymaster artifacts. | Before channel binding, payment metadata could be observed; delays/drop remain possible. No modified spend demonstrated. | Mandatory provider signature over the locally observed BIP324 session ID, expected identity, genesis and fresh nonce; private queues are gated before Capacity/payment/recovery. Existing financial checks remain mandatory. | Real-cipher two-leg relay and focused network/payment checks are covered below. Full hostile TCP relay, fresh full binaries, independent review and traffic-analysis evaluation remain open. | Low selected confidentiality residual / low financial severity / continued verification |
-| TM-005 **defended in selected tests** | Malicious party changes outputs, model, fee, inputs or signature mode; races last budget/slot. | Attempted theft or fee-cap bypass. | Exact manifests, SIGHASH_DEFAULT/witness verification, role ownership, chain UTXOs, atomic budget/pool checks. | No bypass reproduced; preserve tests on every signing/recovery route and fresh builds. Monitor validation rejections without logging full artifacts. | Low residual / high if bypassed / **low** residual |
-| TM-006 **defended within retention horizon** | Lost reply, late final, cross-session replay, shallow reorg or old client fee rows after self-recovery. | Attempted double authorization/fee exposure or unsafe input reuse. | Durable exact commits; same-input conflicts; corrected client fee retention/repair; five related cases rerun. | No new bypass found. Reorgs beyond pruned 240-block history remain outside this reconstruction guarantee. Monitor unresolved liabilities. | Low residual / high if bypassed / **medium** continued verification |
-| TM-007 **open physical verification** | Process/storage failure at commit/broadcast boundary. | Lost authority, unavailable wallet or incorrect fee recovery if durability fails. | Atomic transactions, simulated begin/write/commit failures and lifecycle restarts; real SQLite page-cap `SQLITE_FULL` and connection-local commit-denial tests now verify unchanged records, close/reopen, restore quarantine and exact retry. | Physical ENOSPC, failed writes/fsync, torn writes and power loss remain untested. Use isolated filesystems/VMs, assert exact authority before publication and once-only accounting. | Unestablished physical durability / potentially high / **high** verification priority |
-| TM-008 **expected budget use** | Many eligible public-sponsored clients consume the approved subsidy. | Intentional bounded DGB expenditure and capacity exhaustion, rather than unauthorized theft. | Per-transfer/hour/day, recipient/netgroup and concurrent admission controls. | Sybil resistance is not guaranteed. Keep public budgets deliberately finite; monitor remaining allowance and request concentration. | High if targeted / bounded by approvals / **medium** operational |
-| TM-009 **no injection confirmed; test gap** | Arbitrary peer fields reach decoders, database, logs or display. | Parser crash/resource exhaustion; key compromise would be severe if memory corruption exists. | Wire/PSBT/count limits, typed DB records, structured RPC, plain/escaped UI text; selected malformed-input tests pass. | No executable/SQL injection path identified. Current sanitizer/fuzz and sustained-load runs remain open; TM-002 is a concrete cumulative-storage exception. | Unestablished residual / potentially high / **medium** verification |
-
-### TM-001: retained provider commit loses its budget authority
-
-**Reachable path.** `PruneProviderLedger` in
-[`src/paymaster/provider.cpp`](../src/paymaster/provider.cpp) (76–84) removes any
-non-RESERVED reservation older than `SAFETY_DAY_SECONDS`, including SPENT rows.
-`ReserveProviderBudget` calls it at about line 946 when admitting subsequent
-work. Other accounting/admission paths also invoke this helper. Its arguments
-contain no information about still-unconfirmed durable commits.
-
-`ValidateProviderBudgetState` in
-[`src/wallet/paymasterstore.cpp`](../src/wallet/paymasterstore.cpp) (428–452)
-requires the exact `commit_key` row. `RecoverDurablePaymasterCommit` in
-[`src/wallet/paymasterprovider.cpp`](../src/wallet/paymasterprovider.cpp)
-(873–900) requires that row to be SPENT before executing the retained final.
-`allow_historical_policy=true` does not permit a missing row. The signature can
-remain executable after expiry: `ValidateProviderCommitForExecution` in
-`paymaster/psbt.cpp` handles that case deliberately. Generic wallet rebroadcast
-excludes Paymaster durable commits (`wallet/wallet.cpp`, approximately
-2500–2520), so it does not remove this dependency.
-
-**Reproduction.** The diagnostic copy of
-`provider_final_commit_spends_budget_atomically` creates a genuine signed final
-using `PaymasterMempoolTestingSetup`; the ordinary initial recovery succeeds.
-At `commit.committed_at + 86401`, production `ReserveProviderBudget` admits a
-different operation and removes the first SPENT row. Persist that ledger and
-call `RecoverDurablePaymasterCommit` on the original retained commit:
-
-```text
-TM-001 recovery after ledger aging: error=PAYMASTER_BUDGET_RESERVATION_MISSING
-audit_pending_commit_budget_aging: 273 passed assertions, 1 failed assertion
-```
-
-The diagnostic does not delete the row by hand. It exercises the production
-pruning function and actual recovery validator. The first transaction remains
-unconfirmed in the test mempool; mempool eviction and a real multi-day outage
-were not simulated. The result proves rejection of valid retained authority,
-not inevitable loss of every old transfer or a full live-node outage.
-
-**Financial distinction.** No new spend is authorized by this failure. The
-provider refuses recovery while its durable signature and COMMITTED pool
-binding remain. Another holder may still broadcast that transaction. Manually
-releasing those inputs would be an unsafe workaround.
-
-**Proposed correction.** Separate rolling-window expenditure from immutable
-authorization evidence. Keep a bounded authorization record for each unresolved
-durable commit, even after its expenditure ages out of the daily window. Prune
-it only with safe commit/session finalization. When retention capacity is full,
-refuse new admission rather than delete live authority. A migration for an
-already missing row must derive evidence only from complete, locally verified
-durable records, preserve original accounting dates and avoid charging twice.
-Do not simply remove the recovery budget check or count all old costs forever.
-
-**Acceptance tests.** More than 24 h plus unrelated admission; restart and
-mempool eviction; delayed original broadcast; alternate-provider final;
-confirmed/pruned cleanup; ledger-cap backpressure; malformed/missing evidence;
-exactly-once finance; hour/day budgets still age normally.
-
-### TM-002: abandoned unsigned provider quotes retain full records
-
-**Reachable path.** `CommitProviderQuote` in
-[`src/wallet/paymasterstore_provider.cpp`](../src/wallet/paymasterstore_provider.cpp)
-persists a session and an attempt containing full request/quote/PSBT artifacts.
-`ExpireProviderQuotes` (starting near 1568; provider branch near 1760–1890)
-releases definitively unsigned pool/budget reservations and writes
-`QUOTE_EXPIRED` / `FAILED`. It does not compact their history.
-
-`ReconcileFinalSessionsAtTip` in
-[`src/wallet/paymasterstore_reconciliation.cpp`](../src/wallet/paymasterstore_reconciliation.cpp)
-calls expiration and scans the sessions again, but skips FAILED records near
-line 861. The production caller of `PruneFinalSession` near line 787 is reached
-through sufficiently confirmed final transactions. No automatic expiration or
-total retained-record quota was found for this unsigned terminal history.
-Runtime reconciliation runs periodically via `wallet/rpc/paymaster_integration.cpp`.
-These scans acquire the wallet lock.
-
-**Important existing defense.** `ExpireProviderCapacityReservations` does clean
-capacity response/nonce/session indices after `CAPACITY_REPLAY_RETENTION`.
-This finding concerns the separate full payment sessions/attempts; it does not
-claim that all capacity replay records live forever.
-
-**Reproduction.** The diagnostic copy of
-`provider_quote_commit_is_atomic_and_restart_durable` persists a valid quote,
-expires it at `now + 61` and runs `ReconcileFinalSessionsAtTip` at `now + 7 days`:
-
-```text
-TM-002 seven days later: sessions=1 full_attempt=true quote_bytes=750 psbt_bytes=355
-audit_expired_quote_retention: 69 passed assertions, 1 failed assertion
-```
-
-Seven days is a diagnostic observation point, not a documented cleanup deadline.
-The static call path establishes the missing automatic bound. The two byte
-counts are only selected artifacts in the small fixture, not total storage per
-attack request. No high-volume benchmark, disk exhaustion or live service
-denial was performed.
-
-**Attacker prerequisites and cost.** A reachable provider, valid client input
-control proof, eligible amount and available quote capacity are required.
-The client can reuse an unspent controlled DD input after unsigned expiry,
-using fresh requests. There is no successful payment/miner fee for the abandoned
-quotes. Active-slot and request-rate limits slow accumulation, but do not bound
-the lifetime number of retained full records.
-
-**Proposed correction.** Add Paymaster-specific terminal-record compaction after
-the applicable retry/replay window. First prove the absence of accepted user or
-provider signatures, authorization, durable commit and protected reservation.
-Atomically remove full artifacts and indices while retaining only the minimum
-bounded replay tombstone required by the protocol. Never use a timeout to prune
-signed or ambiguous work. Add a persisted-history quota/backpressure mechanism
-and operator metrics for retained records/reconciliation latency.
-
-**Acceptance tests.** Many unique valid unsigned expiries with bounded retained
-bytes/counts and released capital; restart during compaction; stale message
-replay; begin/write/commit failures; signed/ambiguous sessions remain intact;
-independent wallets remain isolated. Measure wallet-lock time under sustained
-admission before claiming a production capacity limit.
-
-### TM-003: stale provider restore forgets expenditure and signed inputs
-
-**Status: corrected for explicit GUI/RPC wallet restoration; targeted tests pass.**
-The fix conservatively blocks new authority. It does not reconstruct financial
-records missing from a backup or establish that an unpublished signature is gone.
-
-**Prerequisite and original reproduction.** An operator restores an old provider
-backup. Public counterparties cannot invoke this local RPC themselves. Two real
-payments each cost 0.1 DGB under an unchanged 0.2-DGB rolling-hour/day approval
-and two-payment count limit. A pre-payment SQLite backup previously autostarted
-ready, signed a third payment, and all three confirmed (0.3 DGB total). A second
-variant restores after the first confirmation but before the second signed final,
-with the final absent from both mempools. It previously exposed and re-signed an
-input of that withheld transaction. Competing spends cannot both settle; this
-variant proves conflicting authority, not an extra confirmed 0.3-DGB charge.
-
-**Implemented protection.** `RestoreWallet` in
-[`wallet.cpp`](../src/wallet/wallet.cpp) opens only the copied database and calls
-`MarkPaymasterProviderRestored` before `LoadWallet`, its callbacks, or autostart.
-The Paymaster helper and guard checks live in
-[`paymasteridentity.cpp`](../src/wallet/paymasteridentity.cpp), with codecs in
-[`paymasterdb.cpp`](../src/wallet/paymasterdb.cpp). The optional wallet record
-`pmrestoreguard` reuses the versioned provider-identity codec. Ordinary actions
-cannot remove it. Every explicit restore installs it again; only reviewed
-current-backup adoption can atomically remove it while advancing the checkpoint.
-Marker creation must commit successfully or restoration fails before loading.
-Missing identity means a client-only backup is unchanged; malformed identities
-are rejected. Malformed/unsupported markers fail closed and cannot be overwritten
-by the helper. The base wallet schema and Paymaster wire protocol are unchanged.
-
-The guard disables model availability/readiness, manual/automatic starts,
-identity-key access for announcements/capacity/quotes, store admission and both
-ordinary/alternative-provider pre-signature checks. The role-limited wallet
-signer checks it again for PROVIDER inputs. Manual reserve preparation,
-withdrawals, retirement and normal capital release, both automatic refill builders,
-and recurring preparation cannot create fresh spending authority. Changes to
-settings, approved limits, backup reminders, or the clock do not clear it.
-GUI diagnostics explain the missing-history risk without putting the internal
-error token in the main instruction text; RPC/CLI use
-`PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED`.
-
-Exact, already persisted fully signed commits can still be validated and
-replayed without new signatures. Lost templates cannot be reconstructed from
-untrusted replay data. This distinction is verified with actual retained and
-lost payments, not just mocked readiness flags.
-
-**Verification.** [`wallet_paymaster_backup.py`](../test/functional/wallet_paymaster_backup.py)
-uses only disposable descriptor SQLite wallets and two regtest nodes. Both
-variants pass with restored autostart/manual start blocked, exact retained
-commit replay unchanged, RPC and real CLI reserve actions rejected, no mempool
-change, and the guard surviving enable/disable, safety-policy saves, backup
-acknowledgement and automatic runtime selection. Client-only backup restoration
-preserves DD funds and its fee policy without a provider quarantine.
-
-Three additional wallet unit cases cover restart, append-only/idempotent marker
-creation, write/commit failure rollback, malformed/future layouts and the shared
-signing/refill boundaries. The focused security suite, existing PSBT suite and
-backup-metadata case pass. The GUI regression checks the readable instruction
-in light and dark themes. Source, object and binary hashes and per-run reports
-are tied to 22 passing unit cases / 9,348 assertions, both passing real backup
-variants and the targeted Qt check. Verification inputs and outputs
-are recorded in the workspace-local
-`build_msvc/paymaster-refresh-check/provider-backup-fix/run-receipt.json`.
-This is a selected-object MSVC build linked with existing Release dependencies;
-it is not a fresh full build or cross-platform/sanitizer approval. Normal product
-executables were not replaced. Pre-fix proof remains in
-`build_msvc/paymaster-refresh-check/provider-backup/run-receipt.json` and its
-visible/offline observations; those failing runs are historical evidence.
-
-**Residual scope and availability cost.** No unconditional guard-clear RPC is provided: an
-acknowledgement, a rescan, waiting 24 hours, or increasing limits cannot prove
-that an omitted signature is harmless. Continue service from the complete
-current original wallet, or use reviewed adoption only for a quiescent current
-backup matching independently retained state. Qualified recovery release can
-instead permanently retire the identity. Stale or uncertain images still need
-comprehensive history reconciliation/safe migration before new authority.
-Pool entries in an old image may look locally unspent, but they confer no
-provider authority while the guard is active. Ordinary wallet key ownership
-is unchanged; this is not an OS-wide prohibition on spending a restored wallet.
-
-Copying a wallet that already contains the guard preserves quarantine, even
-under a different wallet name and after a node restart. Unmarked wallet-only
-rollback is additionally protected by `wallet/paymastercheckpoint.cpp`.
-
-**Independent checkpoint (implemented).** Every Paymaster record mutation in
-an enrolled provider wallet advances a versioned `pmcheckpoint` in the SAME
-wallet DB transaction as the changed financial records. An implicit transaction
-wraps standalone codecs. The checkpoint binds the genesis hash, provider ID,
-monotonic generation, random token and unfinished-operation flag. The external
-file in `<network datadir>/paymaster-checkpoints/<binding hash>.checkpoint`
-contains only that record and a domain-separated checksum; no keys, PSBTs or
-payment contents. Its fixed-size parser rejects future versions, corruption,
-extra bytes, network/provider mismatch and missing established state.
-
-A tracked transaction holds both an in-process exclusion and an OS file lock.
-The external file is flushed and atomically replaced BEFORE the wallet commit;
-the wallet counter and financial records then commit together. A crash between
-these commits leaves the external file ahead and blocks further authority.
-Neither a failed commit nor a missing file causes the high-water mark to be
-recreated from an old wallet. Failed writes before external replacement abort
-without advancing it. The counter cannot overflow. Wallet renaming, settings
-changes and backup acknowledgement cannot reset it. Ordinary client-only wallet
-writes perform no checkpoint I/O. The generic wallet changes are limited to
-batch transaction/lifetime notifications and Paymaster codec declarations.
-
-Wallet-native reserve broadcasts use a durable pending fence before commit.
-The live operation keeps the wallet lock and a thread-local authorization while
-saving transaction/accounting records; it clears the fence only after those
-records are durable. Other threads, copied wallets and a restarted process do
-not inherit that temporary authorization. An unfinished fence therefore blocks
-new signatures and reserve spending. This conservative protection can require
-operator recovery after a failed broadcast even when funds were not lost; there
-is no blind fence-clear/reset RPC.
-
-Explicitly restored wallets remain quarantined by `pmrestoreguard` until a
-reviewed current-backup adoption succeeds; stale or uncertain images remain
-blocked. Their known exact signed recovery/accounting does not overwrite the
-original provider checkpoint. An unmarked mismatching copy cannot update Paymaster
-records; use explicit restore for quarantined recovery of its retained exact
-history. These checks protect Paymaster authority, not every ordinary wallet
-spend made by an operator with the keys.
-
-**Narrow capital exit.** A restored wallet can preview
-`releasepaymastercapital {"recovery":true}` only when its established checkpoint
-matches the independently retained external state. It must also pass all
-existing full-capital checks: stopped/disabled/autostart off, caught-up chain,
-no open provider work, reserved inputs/budgets, ambiguous pool or unconfirmed
-payment/maintenance transactions, and confirmed owned unspent outputs without
-manual locks. The plan binds the checkpoint checksum. Execution rechecks it
-under the OS/in-process lock, permanently retires the identity in checkpoint
-version 2, and atomically releases eligible reserves to the same wallet.
-External retirement precedes database commit, fencing old copies before funds
-become ordinarily spendable. Failed commit leaves a conservative mismatch,
-never a checkpoint rollback. The restore guard and history stay; this grants
-neither fresh provider signing nor override of an unknown obligation.
-Version 1 is readable and upgrades on a legitimate write; older checkpoint-aware
-binaries reject version 2. A matching-pair rollback is still undetectable locally.
-
-Backup reminder metadata is excluded from financial generation advancement:
-`BackupWallet` records its success after copying the image, and that reminder
-must not itself invalidate the current backup. Reminder/acknowledgement writes
-do not enable service, clear quarantine or grant spending authority. Financial
-transitions which update reminders retain their tracked transaction.
-
-**Remaining boundary.** The first enrollment of a legacy identity without
-EITHER marker is a trusted baseline at its first Paymaster write, not proof
-that its pre-enrollment history is complete. Start from a complete current
-wallet (or a fresh provider identity for first production use). Restoring the
-wallet AND its matching checkpoint together, including a whole data directory
-or an older independently retained checkpoint, can still conceal rollback.
-Preventing that requires a trustworthy high-water mark outside the restored
-storage or a separate service. Initial production deployment does not remove
-this requirement for future backups. Moving only an enrolled provider wallet
-to another node fails closed if its established checkpoint is missing; copying
-a stale matching pair is not safe migration. Physical failed fsync/torn-write,
-power-loss and cross-platform checks remain open. A checksum detects damage;
-it does not authenticate storage against an attacker already controlling the OS.
-Do not operate the same identity on multiple independent checkpoint stores:
-node-local locks cannot coordinate financial generations across different hosts.
-
-## Criticality calibration
-
-Direct unauthorized signature, recipient diversion, approval bypass or key
-extraction would be high/critical. TM-003 reproduces approval bypass following
-local backup restoration and has high correction priority. Medium here means an
-attacker-reachable or operationally reachable state/liveness defect with a
-concrete failed invariant. TM-002's eventual outage size/rate is not measured.
-
-| Consequence | Result of this review |
-|---|---|
-| DD/DGB theft or unauthorized principal diversion | No additional confirmed path; exact signing guards passed the selected tests. |
-| Exceeding approved service/network fees | TM-003 confirmed provider network-fee overspend following stale restore. Client service-fee bypass was not demonstrated. |
-| Bound or inaccessible capital | TM-003 conflicting signing after loss of a pending final; TM-001 initial recovery rejection. Adversarial withholding can also legitimately require same-input recovery/confirmation. |
-| Operating disruption | TM-002 confirmed retained-state growth; resulting disk/latency limits unmeasured. Public subsidy exhaustion is separately expected within approval. |
-
-### Attacks examined and stopped by existing controls
-
-- **Recipient/change/input substitution and weak signatures:** manifest equality,
-  independent actual-prevout checks, full-template comparisons, default sighash
-  and cryptographic witness verification in `psbt.cpp` plus ownership and
-  selective-role checks in `wallet/paymasterpsbt.cpp`. A wallet owning both roles
-  does not automatically sign the unrequested role.
-- **Stale or forged liquidity:** capacity proofs are checked against local chain
-  state, reference block, current UTXOs and input control. Provider pre-sign
-  firewalls reload pool/budget/capacity rather than trusting an earlier preview.
-- **Excess/rounded fees:** DD cents and DGB satoshis use checked arithmetic;
-  percentage caps use actual recipient amounts. The suspected omission of DGB
-  on DD inputs does not give a spend bypass: DD extraction requires the DD
-  output's native value to be zero in `digidollar/validation.cpp`.
-- **Parallel budget/pool consumption:** wallet locking and atomic store
-  transactions protect the last available budget or pool slot. Repeated exact
-  results do not imply another payment authorization.
-- **Timeout/backup/reorg misuse of client fee release:** the current repair
-  checks retained local authorization and signed artifacts, keeps unresolved
-  liabilities, preserves SPENT dates and current limits, and runs before new
-  approval. Invalid evidence fails closed. The 240-block retention horizon is
-  preserved; already-pruned history cannot be reconstructed by this helper.
-- **Recovery redirection:** alternative recovery binds the original inputs,
-  provider, fresh owned returns, fees, manifest and final witnesses. Provider
-  recovery also rechecks its own budget/pool authority. Same-input recovery
-  cannot revoke another valid transaction merely by elapsed time.
-- **Automatic repricing in GUI/CLI:** exact confirmation fields and authorization
-  commitment are rechecked in `qt/paymasterconfirmation.h` and send/recovery
-  paths. Structured CLI/RPC arguments do not invoke a shell. A changed preview
-  is not a new financial approval.
-- **Obvious injection:** searches and traced display/storage paths found no
-  Paymaster shell/SQL concatenation execution sink. Typed database APIs and
-  plain-text/escaped dynamic GUI fields are defenses. SQLite trace handling
-  avoids expanded bound values on writes. This is not proof of C++ memory safety
-  or a complete Qt widget audit.
-- **RPC/wallet confusion:** local authentication/whitelists, selected wallet
-  routing, per-wallet stores and ownership checks are relevant controls.
-  `wallet_paymaster_rpc.py` contains denied-method and mixed-batch permission
-  cases, but that functional script was not rerun for this audit.
-
-## Focus paths for security review
-
-| Path | Next review focus |
-|---|---|
-| `src/paymaster/provider.cpp` | TM-001 lifetime separation; quota/window arithmetic and concurrent reservations. |
-| `src/wallet/paymasterstore.cpp` | Provider budget binding and durable provenance validation. |
-| `src/wallet/paymasterstore_provider.cpp` | TM-002 unsigned expiry and atomic quote admission. |
-| `src/wallet/paymasterstore_reconciliation.cpp` | Safe pruning, client fee repair and deep-reorg limits. |
-| `src/wallet/paymasterstore_finalization.cpp` | Signature → commit → publication ordering; once-only finance. |
-| `src/wallet/paymasterstore_recovery.cpp` | Original/recovery competing authority and current fee limits. |
-| `src/wallet/paymasterprovider.cpp` | Durable recovery, restored provider accounting, maintenance and retirement. |
-| `src/paymaster/psbt.cpp` and `src/wallet/paymasterpsbt.cpp` | Exact template/witness/ownership on every signer path. |
-| `src/paymaster/recovery.cpp` | Alternate-provider output/input/fee bindings. |
-| `src/paymaster/wire.cpp` and `src/net_processing.cpp` | Parser and direction/version bounds; MITM/channel binding. |
-| `src/paymaster/manager.cpp` and `transport.h` | Admission/queue bounds, replay and wallet route isolation. |
-| `src/wallet/rpc/paymaster_client.cpp`, `paymaster_processing.cpp` | Concurrent approval/sign/retry and restored-state handling. |
-| `src/qt/paymasterconfirmation.h`, `paymastersendwidget.cpp` | Immutable user intent through delayed replies and wallet changes. |
-| `test/functional/wallet_paymaster_lifecycle.py`, `wallet_paymaster_reorg.py` | Extend real-database backup/failure/reorg coverage. |
-
-## Notes on use
-
-### Verification performed
-
-| Check | Result and scope |
-|---|---|
-| TM-001/TM-002 isolated diagnostics | 2 intended failures, 342 passed / 2 failed assertions; Boost exit 201. No normal product or tracked test source replacement. |
-| Protocol (4), PSBT (3), wire (5), transport (3), recovery (5) | 20 selected existing cases passed. |
-| Wallet PSBT (3), wallet security (5), provider limits (4), wallet store (5) | 17 selected existing cases passed. Total across both rows: **37 cases, 1,130 assertions**, exit 0. |
-| Prior recovery-fee evidence | Matching source/binary/report hashes; five repaired store cases included in today's selected run. Earlier 28-case result not counted as 28 new tests. |
-| Normal full product/Qt build, full functional matrix, sanitizer/fuzz, live MITM/load and real storage failures | **Not run in this audit.** |
-
-The exact 37-case selection is in local `guard-filter.txt` and `results.json`;
-there are 4,094 registered cases in that executable, of which 4,057 were skipped.
-Do not interpret its overall executable as a full-suite pass.
-
-The probe preparation script `prepare-probes.py` generates a copy of the existing
-wallet-security fixtures and inserts the two diagnostic blocks. Its local
-`audit.rsp` and `audit-link.rsp` record selected compilation/link inputs. They
-depend on the existing MSVC build artifacts. The generated copy and executable
-are reproducible local evidence, not newly passing regressions in the default
-suite. Promote the probes into ordinary passing regression tests with their
-eventual fixes.
-
-To rerun only the recorded binaries (seconds; synthetic test wallets/chain):
-
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-$audit = Join-Path $PWD 'build_msvc/paymaster-refresh-check/security-audit-20261010-133443'
-$receipt = Get-Content (Join-Path $audit 'results.json') -Raw | ConvertFrom-Json
-if ((Get-FileHash (Join-Path $audit 'audit-probes.exe')).Hash -ne $receipt.artifact_sha256.'audit-probes.exe') { throw 'Probe binary changed' }
-& (Join-Path $audit 'audit-probes.exe') '--run_test=paymaster_wallet_security_tests/audit_expired_quote_retention,audit_pending_commit_budget_aging' --log_level=message --report_level=detailed
-# Expected on the audited source: exit 201, exactly the two documented failures.
-if ($LASTEXITCODE -ne 201) { throw 'Diagnostic result changed; inspect the report' }
-$filter = (Get-Content (Join-Path $audit 'guard-filter.txt') -Raw).Trim()
-if ((Get-FileHash '.\build_msvc\paymaster-refresh-check\reorg-fee-fix\test-reorg-fee-fix.exe').Hash -ne '972e8df9d6ef5b463c0c7eab1c6704b338ad12956fea826a860983cd29f1a10c') { throw 'Protection-test binary changed' }
-& '.\build_msvc\paymaster-refresh-check\reorg-fee-fix\test-reorg-fee-fix.exe' "--run_test=$filter" --report_level=short
-if ($LASTEXITCODE -ne 0) { throw 'An existing protection test failed' }
-```
-
-### Open scenarios and completion criteria
-
-1. **Stale provider backup (TM-003): explicit restore and wallet-only rollback protected.** Both
-   `wallet_paymaster_backup.py` variants now require no renewed authority based
-   on forgotten liability. They cover automatic runtime selection, reserve
-   actions, restarts and copying guarded and unmarked stale wallets. The node-local
-   checkpoint is implemented and checked. A separately retained high-water mark
-   for whole-datadir rollback and comprehensive
-   missing-history reconciliation remain unimplemented; see the finding above.
-2. **Storage failures (TM-007).** The real SQLite engine-level follow-up passes
-   two cases / 123 assertions for page-limit `SQLITE_FULL` and denied marker
-   commit, including record
-   digests, close/reopen and exactly-once retry. These tests live solely in
-   `paymaster_wallet_security_tests.cpp`; the full focused security suite now
-   passes 18 cases / 9,094 assertions. For the remaining physical fault
-   injection, use an isolated disposable VM/filesystem. Interrupt before/after
-   wallet DB commit, final publication and wallet insertion;
-   include ENOSPC on writes/checkpoints and abrupt power loss. After restart,
-   prove exactly-once accounting and preserved signed-input protection. Ordinary
-   process kill and in-memory failure injection are not substitutes. Do not
-   perform disk-fill/power-loss experiments on the operator's real wallet volume.
-3. **Deep reorgs.** Explicitly document and test behavior after the 240-block
-   pruning horizon; this audit does not justify assuming finality or deleting
-   earlier evidence more aggressively.
-4. **MITM/privacy, parser memory safety and sustained load.** The channel-binding
-   implementation and real-cipher two-leg regression below reject transcript
-   relay before financial metadata. Extend this with an actual hostile TCP relay
-   across daemon connections and measure remaining timing/size information.
-   Run current sanitizer/fuzz builds and long-lived quote/admission load before
-   claiming memory safety or a bounded service footprint. V2 alone remains
-   insufficient; both endpoints must support the new channel authentication.
-5. **Independent review/current binaries.** Review both corrections before public
-   deployment, repeat tests with fresh normal binaries, and obtain independent
-   financial-signing/persistence review. An old committed CI run does not cover
-   the dirty source snapshot above.
-
-### Operator commands for outstanding builds and campaigns
-
-**Windows product/Core build:** use the existing local runbook script after
-closing Client and Paymaster normally. Requires installed MSVC 14.43, Qt 5.15.10
-and cached vcpkg dependencies; normally minutes. Success: build and every selected
-`paymaster_*` Core suite exit 0, with newly recorded source and binary hashes.
-
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-.\build_msvc\paymaster-refresh-check\reorg-fee-fix\build-and-check.ps1
-```
-
-**Functional follow-up:** after that build, use fresh executables explicitly
-(Python and the existing `test/config.ini` required; minutes, isolated regtest
-nodes). Success: all selected scripts pass, no unexpected daemon errors. These
-are existing scenarios; run the two backup variants separately as documented
-in the testing guide. They pass after the explicit restoration correction.
-Physical storage tests remain unimplemented.
-
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-$env:DIGIBYTED = (Resolve-Path '.\build_msvc\x64\Release\digibyted.exe').Path
-$env:DIGIBYTECLI = (Resolve-Path '.\build_msvc\x64\Release\digibyte-cli.exe').Path
-python -X utf8 test/functional/test_runner.py wallet_paymaster_rpc.py wallet_paymaster_lifecycle.py wallet_paymaster_reorg.py wallet_paymaster_failover.py wallet_paymaster_provider.py p2p_paymaster.py p2p_paymaster_connection_capacity.py -j1 --configfile=test/config.ini
-if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional follow-up failed' }
-```
-
-**Sanitizers/fuzz:** the authoritative existing command set is
-[`.github/workflows/paymaster-security.yml`](../.github/workflows/paymaster-security.yml).
-Run in separate Linux/WSL source copies containing the reviewed worktree changes,
-on the Linux filesystem, with its documented build dependencies already installed
-([Unix build guide](build-unix.md)). Do not run just a checkout of the older HEAD
-and attribute the result to this dirty snapshot. Build time is minutes to tens of
-minutes; the four bounded fuzz campaigns add at least 20 minutes. Longer campaigns
-remain useful. No packages or additional systems were installed for this audit.
-
-In the first copy's repository root:
-
-```bash
-set -euo pipefail
-./autogen.sh
-CC=clang CXX=clang++ ./configure --with-sanitizers=address,undefined \
-  --disable-bench --disable-fuzz --disable-fuzz-binary --with-gui=no \
-  --disable-man --disable-zmq --without-utils --without-daemon
-make -j2 -C src test/test_digibyte
-export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
-export LSAN_OPTIONS="suppressions=$PWD/test/sanitizer_suppressions/lsan"
-export UBSAN_OPTIONS="suppressions=$PWD/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1"
-./src/test/test_digibyte '--run_test=paymaster_*' --log_level=test_suite \
-  --report_level=short 2>&1 | tee paymaster-sanitizer.log
-```
-
-In a second source copy's repository root, with the same sanitizer environment:
-
-```bash
-set -euo pipefail
-./autogen.sh
-CC=clang CXX=clang++ ./configure --enable-fuzz \
-  --with-sanitizers=address,fuzzer,undefined --disable-bench --with-gui=no \
-  --disable-man --disable-zmq --without-utils --without-daemon
-make -j2 -C src test/fuzz/fuzz
-export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
-export LSAN_OPTIONS="suppressions=$PWD/test/sanitizer_suppressions/lsan"
-export UBSAN_OPTIONS="suppressions=$PWD/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1"
-for target in paymaster_wire_envelopes paymaster_stateful_security paymaster_pool_lifecycle paymaster_persistence_records; do
-  corpus="$PWD/paymaster-audit-corpus/$target"
-  mkdir -p "$corpus"
-  FUZZ="$target" ./src/test/fuzz/fuzz -max_total_time=300 -timeout=30 "$corpus"
-done
-```
-
-Success requires exit 0, no sanitizer diagnostics or new crash/leak/timeout/OOM
-reproducers. Record source diff, toolchain, binary hashes and logs. Even successful
-bounded campaigns do not close the separate backup, physical durability,
-independent review or long-running deployment gates.
-
-### Review quality check
-
-- [x] Network, wallet/RPC, signing/recovery, provider maintenance, persistence
-  and GUI/CLI entry points mapped to code and trust boundaries.
-- [x] Each identified trust boundary considered in an abuse path; controls
-  followed beyond the first parser or provider signature check.
-- [x] Runtime risks distinguished from build/test provenance and unexecuted CI.
-- [x] Confirmed public-provider/local-administration assumptions incorporated;
-  findings separated from hypotheses and intentionally allowed budget use.
-- [x] Reproduction limits, source/binary identity, unresolved tests and concrete
-  correction acceptance criteria recorded; no release or complete-safety claim.
-
-### Independent provider checkpoint verification (2026-10-10)
-
-The selected-object MSVC run passes 33 cases / 9,923 assertions: the 25-case
-Paymaster wallet security suite, five PSBT cases, the identity backup-metadata
-case and two original wallet database cases. Seven new checkpoint cases cover
-transaction atomicity/abandonment, renamed unmarked copies, concurrent copies,
-failed DB commits and restart, corrupt/missing markers, matching but semantically
-invalid pairs, overflow and incomplete native operations. Commit failure is
-also injected through the actual SQLite authorizer. Older corruption fixtures
-use explicit test-only raw injections to exercise their field-specific firewall;
-this is not a production checkpoint-reset mechanism.
-
-Both real SQLite/regtest backup variants pass, including unmarked file copy,
-restart, RPC/CLI refusal of fresh authority and client-only compatibility.
-The Qt readiness regression passes in both themes for the restore guard and
-three checkpoint protection messages. `git diff --check` and Python syntax
-parsing pass. Inputs, object/binary/report hashes and the working-copy diff are
-recorded in the workspace-local `provider-backup-fix/checkpoint-receipt.json`.
-
-### Restored-provider capital exit verification (2026-10-10)
-
-The selected Windows wallet filters pass 38 cases / 10,160 assertions. New
-checkpoint tests verify permanent retirement versus original copies, strict
-version 1 upgrade and backup reminders without authority advancement. Capital
-recovery covers pure preview, exact plan, stale/concurrently advanced copies,
-reserved inputs, unfinished native fences, write failure with safe retry and
-commit failure leaving a blocking external-ahead state. The pre-existing normal
-capital-release fixture now accounts for checkpoint advancement and never
-assumes a failed commit can be retried blindly.
-
-The new real SQLite/regtest exit test passes RPC/CLI preview/execution, restart,
-blocked original-copy authority and complete ordinary DD Send after release.
-Both stale-backup variants still pass and explicitly reject recovery release.
-The 32 GUI stop/retirement rows and the readiness function pass; the latter
-checks both themes. Source/object/binary/report hashes are retained in
-`provider-backup-fix/recovery-capital-receipt.json`. This is selected-object
-evidence, not a complete fresh application build. The prescribed full-build
-and full-Qt operator command is in `doc/digidollar-paymaster-testing.md`.
-All matching-pair, independent-host and physical-durability boundaries above
-remain; this capital exit is not automatic reconstruction of missing history.
-Normal product executables were not replaced. Full fresh builds/full Qt,
-Linux/macOS and physical ENOSPC/fsync/power-loss/device-cache checks remain
-operator work; see `digidollar-paymaster-testing.md`.
-
-## Matching-pair rollback and provider channel binding (2026-10-10)
-
-This follow-up starts from `b51c00797a5c0713e35fc067664b7485b59c4fd2` and includes
-its current worktree changes. Local source/object/binary/report hashes are saved
-in `build_msvc/paymaster-refresh-check/privacy-rollback/run-receipt.json`.
-Selected MSVC compiles use cached dependencies; full fresh builds are not claimed.
-
-**Matching wallet/checkpoint rollback: reproduced, still open.**
-`wallet_paymaster_checkpoint_rollback.py --descriptors` creates two actual
-confirmed 0.1-DGB payments under an explicit 0.2-DGB hourly/daily approval. It
-stops both disposable regtest nodes, replaces only the provider SQLite wallet
-and its matching checkpoint with pre-payment images, and keeps the current
-chain. The rolled-back provider accepts a third actual 0.1-DGB payment using
-remaining reserves. Independent transaction-value accounting proves 0.3 DGB
-paid while the restored ledger records only 0.1 DGB. This is a passing
-*diagnostic reproduction*, not evidence that this rollback is protected.
-The unit case `checkpoint_matching_pair_rollback_cannot_detect_newer_history`
-separately proves that a wallet-only rollback is fenced while a matching pair
-passes. No operator wallet, filesystem outside test roots or recovery override
-is used. Preventing this needs a high-water authority outside the jointly
-restorable storage; a checksum, a rescan or a second co-restored file cannot
-supply missing history.
-
-**The same identity on independent hosts: unsupported.** Local file locks fence
-copies sharing one checkpoint store. They do not coordinate different hosts'
-independent budget ledgers, retained signatures or pools. Safe current choices
-are independent wallets/identities per provider, or one signing wallet/node
-behind multiple transparent TCP/onion access points. The latter keeps one
-budget and persistence authority; access points must forward encrypted bytes.
-For failover, first stop/fence the old signing node and migrate the complete
-current state. A future replicated service needs durable globally ordered
-reservations/commits and fencing, including still-executable old signatures.
-A lease timeout alone cannot revoke an already signed payment. A network share
-or periodically copied checkpoint is not an implemented distributed guarantee.
-
-An external witness is a possible future matching-pair defence: bind provider
-and network, compare-and-swap the last committed generation/state, never permit
-re-enrollment/reset of an established identity, and participate before every
-new financial authority rather than only at backup time. Lost acknowledgements
-or unavailable witness state must block new authority. It must be retained
-outside the wallet/checkpoint rollback domain. This service and multi-host
-failover are design options here, not implemented or validated features.
-
-**MITM confidentiality: channel authentication implemented.** `ChannelChallenge`
-and `ChannelProof` in `paymaster/wire.{h,cpp}` sign a separate tagged hash over
-version, genesis, locally selected provider identity, local BIP324 session ID
-and random nonce. The provider validates the id against its own cipher before
-its wallet worker signs. The client checks against its own challenge and
-expected identity. No recipient, amount, payment UUID/session or user inputs
-are sent in this exchange. The existing cross-thread transport-ready flag is
-set only after the proof; both receive and send paths gate Capacity, quote,
-submit, result and alternative recovery on that flag. Every reconnect repeats
-authentication. Both direct peers must advertise `CAP_CHANNEL_AUTH`; there is
-no fallback to unauthenticated payment traffic. Financial V5/V6 serialization
-and signatures are unchanged.
-
-The eight-entry transient queue expires with the handshake deadline, accepts
-one challenge per peer and rejects signing results after disconnect. Keys stay
-in the wallet; locked, stopped or quarantined wallets do not sign. The worker
-handles one challenge per cycle under the existing provider work guard, even
-in manual mode, and acquires no extra work guard when the queue is empty.
-Authentication messages use the existing private-message direction, capture
-and logging filters. They authorize no payment, fee, expiry extension or input
-release. Independent PSBT and financial-manifest checks remain essential.
-
-`channel_authentication_rejects_two_leg_bip324_relay` establishes two genuine
-BIP324 cipher pairs, decrypts/re-encrypts the challenge and proof, and rejects
-both unchanged forwarding and rewriting to the relay's other session ID. It
-also rejects changed identity, genesis, nonce, version and signature. Queue
-regressions cover bounds, wrong provider, disconnect, duplicate response,
-once-only delivery, expiry and disable. Functional normal payments and the
-withheld-signature backup scenario exercise the handshake through actual daemon
-P2P connections. `p2p_paymaster.py` also rejects auth messages over V1. See the
-matching testing checkpoint for exact completed runs.
-
-BIP324 explicitly exposes the session ID as a foundation for separate
-application authentication ([BIP324 specification](https://github.com/bitcoin/bips/blob/master/bip-0324.mediawiki)).
-This implementation adds that binding only to Paymaster direct connections.
-It does not authenticate all ordinary P2P peers or hide IP addresses, traffic
-size/timing, public chain data, or information from the selected provider.
-Full hostile TCP relay, Tor testing, fresh full Qt/product binaries, independent
-cryptographic review and the earlier physical-durability/fuzz gaps remain open.
-
-### Authentication ordering and adversarial verification (2026-10-10)
-
-This follow-up starts from `2725df82691d6315831ec79778e4c8ae43e1a4ce` and includes
-the current worktree. The workspace-local `auth-adversarial/run-receipt.json`
-records source, object, binary, patch and report hashes, separating the
-pre-correction diagnostic from the final passing runs.
-
-**Ordering verified.** `RequestPaymasterConnection` requires the channel-proof
-flag before first exposing a ready channel. Payment Capacity/quote/submit and
-alternative-recovery RPC paths wait for readiness before queueing network work.
-`PeerManagerImpl::SendMessages` never dequeues financial payloads before proof;
-the provider sends `PMAUTHRESP` before releasing later responses. The receive
-dispatcher rejects all ten financial request/response types before decoding
-them if authentication is missing. Expected provider identity comes from the
-local operation's lease; expected session ID comes from the local BIP324
-transport. A reconnect gets a new session ID and nonce. Capability negotiation
-or a signature over the relay's other cipher session cannot satisfy this check.
-
-**Additional last-send barrier corrected.** The new
-`channel_sender_checks_authentication_for_internal_callers` deliberately calls
-`CConnman::PushMessage` outside the normal queued sender. Before correction,
-all ten financial message types escaped this helper before authentication;
-messages also escaped on canceled leases or disconnected nodes (13 failed
-assertions). This was a missing internal boundary, not a reproduced remote
-bypass of the existing gated PeerManager path. No financial loss or live
-payment disclosure was demonstrated. The existing Paymaster-only block in
-`src/net.cpp` now suppresses direct payloads unless the connection is connected,
-live and V2; financial messages also require authentication, and client
-messages require a non-canceled lease. Only authentication messages may precede
-proof. This 12-line addition is the sole shared product-code change; consensus,
-ordinary traffic and financial serialization remain unchanged.
-
-Seven new transport cases use genuine `V2Transport` pairs, encrypted packets,
-the real receive queue and message dispatcher. They test all financial message
-directions, early requests/responses, wrong provider keys/IDs, signed wrong
-genesis/session/nonce/version, damaged signatures, malformed frame sizes,
-canceled leases, disconnect, old-proof replay and provider response ordering.
-The existing cipher-level two-leg MITM regression remains in the selection.
-
-**Authentication does not replace transaction validation.** A new wallet case
-creates a local DD input and reconstructs a valid quote. Eight malicious quotes
-retain valid signatures from the selected provider and a consistent txid;
-preliminary identity/fee checks accept them, but actual client reconstruction
-rejects redirected recipient/change, changed DD metadata amounts, added outputs,
-replaced inputs, locktime/version changes and changed miner-fee outputs. A
-different provider's correctly signed quote is rejected against the original
-intent. Another matrix attempts ten PSBT mutations for each signing role;
-neither client nor provider creates a signature. Existing manifest, prevout,
-full-witness and provider execution-firewall cases also pass.
-
-Final selected checks pass **52 cases / 5,029 assertions**; real-daemon
-`wallet_paymaster_backup.py --descriptors --pending-offline` and `p2p_paymaster.py`
-also pass with the corrected sender. All wallets/datadirs are disposable. The
-normal application executable has not been replaced. See the
-[matching test runbook](digidollar-paymaster-testing.md#authentication-order-and-adversarial-regressions-2026-10-10).
-
-**Failure semantics.** Authentication failure cannot admit new financial messages
-or trigger signing through that network attempt. Local unsigned preparation is
-not payment authorization. Already accepted, independently validated requests
-and signatures are different: disconnect never invalidates a signature, deletes
-durable authorization or unlocks ambiguous inputs. Exact retry, reconciliation
-and recovery retain their existing firewalls. Explicit local offline/expert
-signing RPCs validate their own financial authority; channel authentication
-guards network disclosure, not every offline wallet operation.
-
-These are scoped transport/dispatcher, wallet and two regtest checks. An actual
-hostile two-leg TCP daemon proxy, Tor, full clean product/Qt build, sanitizer/fuzz,
-physical durability and independent cryptographic review remain open. Matching
-wallet/checkpoint rollback and independent multi-host identity limits from the
-preceding section are unchanged.
-
-
-### Reviewed current-backup adoption (2026-10-11)
-
-`AdoptPaymasterBackup` in `wallet/paymasterprovider.cpp` reuses the read-only
-full-capital recovery validation without releasing any output. Adoption requires
-persistent stop, matching independently retained enrolled checkpoint, no pending
-native fence or retired identity, no drain work, fee/input/capacity reservations
-or unresolved maintenance, and confirmed owned unspent pool entries without
-manual locks. Policy, safety policy, budget ledger and liquidity policy must be
-present and validated. A missing budget ledger is explicitly rejected instead
-of becoming a new spending allowance. The plan binds network/wallet/provider,
-exact reserves, maintenance/budgets, policies and checkpoint revision.
-
-`WalletBatch::AdoptPaymasterCheckpoint` rechecks under the checkpoint lock,
-advances generation and random token, and erases quarantine in the same wallet
-transaction. The independent checkpoint is flushed before wallet commit. A
-write failure preserves quarantine; a failed commit after checkpoint advance
-leaves a conservative mismatch and forbids blind retries. Copies sharing this
-checkpoint store cannot both continue. Backup reminders are renewed, but no
-reserves, spent budgets, policy or payment history are cleared and no transaction
-is signed or broadcast. Provider enablement and autostart remain off.
-
-The local `adoptpaymasterbackup` RPC requires an unchanged reviewed plan and an
-explicit `independent_checkpoint:true` affirmation. GUI Settings / Wallet & backup
-uses that same RPC with an initially unchecked confirmation and separate start.
-A successful adoption is not a permanent exemption: the next explicit restore
-installs quarantine again. Stale/missing/corrupt checkpoints, unsupported markers,
-legacy unenrolled state and retired identities have no override path.
-
-The affirmation is an operator assertion, not a technical proof that storage
-was independently preserved. Joint wallet/checkpoint rollback and identities
-operated across independent stores remain the documented limits. Power-loss/
-physical durability testing and independent review remain release-gate work.
-
-Selected verification passes 14 Core cases / 562 assertions, the real-daemon
-RPC/CLI adoption regtest including a new payment after separate activation, and
-the targeted Qt readiness/confirmation function. Unit injection covers failed
-checkpoint writes and failed database commit, stale original state, retired
-identity, reserved funds and missing budgets. Final source/binary/report receipts
-and the complete-build operator command are documented in the
-[test runbook](digidollar-paymaster-testing.md#reviewed-current-backup-adoption-2026-10-11).
-The subsequent normal-binary operator run in `backup-adoption/operator-20261011-131118-654Z`
-passes all 14 Core cases / 562 assertions, the three backup functional scenarios
-and 453 Qt entries with no failures/skips. A full clean cross-platform product
-build is not established by that incremental-build evidence.
-
-### Follow-up: legacy client-policy reader (2026-10-11)
-
-The generic current-version-only database codec rejected complete v1 client
-policies, despite their explicitly supported absolute-only approval. This
-blocked discovery, reconciliation and the setter's previous-policy check. The
-original reader fails the new isolated regression; a client-policy-specific
-reader accepts only fully decoded, valid v1/v2 policies. Other record readers
-retain their strict current-version check. This is a service-availability
-regression; no observed loss or unauthorized fee increase is claimed.
-
-Explicit upgrade preserves the spent/reserved ledger and monotonic accounting
-clock. Unknown, truncated and invalid records remain blocked. Core and genuine
-SQLite-wallet RPC/CLI regressions cover the change; GUI messages keep technical
-codes in diagnostics and explain the protected state. The separate near-tip
-provider display clarification changes no signing, sync or budget permission.
+| No extra client spend or recipient substitution | Exact manifests, commitments, `txbuilder`, `psbt`, wallet PSBT/finalization tests. |
+| No provider signature outside approved terms | Provider policy, admission, input ownership and exact final transaction validation. |
+| Fee and budget enforcement survives retry | Client/provider ledgers, retained commit authority, store/security tests. |
+| Capacity proof before sensitive intent | Protocol, channel authentication, transport/admission tests. |
+| Replays do not create another payment | Canonical request IDs, atomic store transitions, send/recovery tests. |
+| Timeout does not release signed exposure | Reservations, retained bytes, chain reconciliation, reorg/lifecycle tests. |
+| Work and storage are bounded | Wire size, inbox/queue limits, session cap, eligible unsigned pruning. |
+| Wallet lifecycle does not reset authority | Restore guard, independent checkpoint, backup/adoption/rollback tests. |
+| Setup/refill spends only approved funds/fees | Shared setup, finite commands, maintenance limits, whole-slot refill tests. |
+| Ordinary DigiByte checks remain intact | Integration boundaries and ordinary DGB/DD regression coverage. |
+
+These consolidate the earlier H1-H8 hardening work packages. Consensus/script
+checks, wallet history/index readiness and final transaction validation are
+mandatory. Performance or UI changes must not bypass them.
+
+## Signing, accounting and recovery details
+
+Capacity validation binds genesis, provider/session/request, nonce, reference
+block, expiry, resource-control proofs and creating transactions to live inputs.
+The later quote must match the persisted resource snapshot and funding roles.
+Channel authentication is an additional transport binding, not a replacement
+for financial capacity validation.
+
+Local manifests bind exact inputs/destinations, fees, policy, capacity and
+transaction template. Signing is role-scoped and requires `SIGHASH_DEFAULT`;
+unknown/substituted fields fail closed. Without an accepted exact commitment,
+high-level calls remain preparation-only regardless of the `prepare_only` flag.
+Provider final bytes, authority, accounting and pool state commit before broadcast.
+Clients validate txid/wtxid, all inputs/outputs/witnesses and actual-prevout
+script execution against the trusted PSBT, with applicable mempool preflight.
+Late negative results cannot overwrite a final commit or release its authority.
+
+Provider limits bound per-transaction, reserved and rolling spending/completions
+as well as request counts. Paid maintenance has separate explicit approval.
+Client outstanding fee reservations continue to count even after 24 hours;
+spent fees age out of the daily window. RPC options cannot raise wallet limits.
+These limits do not cap recipient spending or implement an agent-wide budget.
+Accounting uses durable atomic transitions and monotonic accounting time.
+
+Ordinary provider fallback ends before a user PSBT exists and preserves client
+inputs. `retry_same` creates no new quote, attempt or signature. Authorized
+`cancel_to_self` can use a distinct eligible user-paid provider, with inherited
+privacy requirements and exact original client inputs/fresh wallet-owned returns.
+It needs explicit acceptance of its own recovery commitment. Without suitable
+DGB or a reachable eligible provider, recovery can remain delayed.
+
+Conflicting signed capacity/quote claims produce durable evidence and local
+provider blocking. A staged first signed claim is evidence, not spending
+authority. Database/local-authority failure is distinct from an invalid remote
+artifact and must not acknowledge work as successfully consumed. Queue leases
+protect ownership across persistence operations. Ordinary coin selection still
+protects pool/session inputs when safety state cannot be read.
+
+## Recorded findings and disposition
+
+The identifiers below preserve traceability to the detailed pre-consolidation
+review at `e7c2c8c4bd:doc/paymaster-threat-model.md`. Corrections are source
+changes with selected regression evidence, not proof against every variant.
+
+| ID | Finding / result | Current handling and remaining limit |
+|---|---|---|
+| TM-001 | Rolling budget pruning invalidated evidence needed by retained signed commits. | Retained exact commit authority supports historical execution/retry without new approval or recreated budget. |
+| TM-002 | Expired unsigned provider history could grow without bound. | 8,192 retained-session admission cap; bounded eligible pruning (64/pass), protected signed/ambiguous history retained. |
+| TM-003 | Stale backup could forget signed liabilities and reset spending budgets; reproduced using SQLite/regtest. | Restore guard before load callbacks and independent checkpoint; reviewed adoption only. Rolling back wallet and matching checkpoint together remains outside protection. |
+| TM-004 | Two encrypted relay legs could forward authentic messages while exposing payment metadata. | Identity/session/genesis/nonce-bound channel proof before metadata. Real encrypted two-leg test exists; full hostile TCP relay and traffic-analysis coverage remain open. |
+| TM-005 | Mutation and budget-race scenarios. | Selected defensive tests; no general claim that all races are excluded. |
+| TM-006 | Lost replies, replay and reorganization. | Durable exact replay and local reconciliation; signed recovery exposure retained through 240 confirmations. Deeper/pruned history is not an unlimited guarantee. |
+| TM-007 | Storage/durability failures. | Simulated transaction failures and real SQLite page-cap/commit-denial reopen checks; physical ENOSPC, fsync, torn-write and power-loss coverage remain open. |
+| TM-008 | Public sponsorship budget drain. | Public callers may consume intentionally authorized budgets; caps/admission bound exposure, not Sybil abuse. |
+| TM-009 | Parser/injection robustness. | Selected mutation checks found no additional injection; fresh sanitizer, fuzz and load evidence still required. |
+
+A related recovery correction retains fee exposure after shallow cancel-to-self
+confirmation until reorg safety depth, repairs retained liabilities before new
+approvals and accounts once for an original payment that wins. Do not release
+budget solely because a competing recovery briefly confirmed.
+
+## Residual operational risks
+
+- The operating unlock is wallet-wide and lasts until locking/unload/shutdown;
+  it is not a Paymaster-only key permission. RPC access must remain protected.
+- Wallet encryption protects signing keys, not every payment-intent record or
+  log field. Backups/logs can expose metadata.
+- Independent checkpoints do not defeat rollback of the whole data directory
+  or coordinated wallet/checkpoint snapshots. Cloned provider stores must not
+  operate independently under one identity.
+- Announcements can outlive capacity. Transport failure or quote expiry does
+  not establish that no transaction was signed/broadcast.
+- Public sponsorship intentionally spends provider DGB. Fee limits and request
+  limits are economic controls, not identity or anti-Sybil guarantees.
+- Tor hides some routing information; it does not guarantee anonymity against
+  traffic analysis or a compromised endpoint.
+- Recovery transactions can race the original and need confirmations. A local
+  cancellation action cannot revoke an already valid remote signature.
+
+New restricted sponsorship is disabled. Legacy artifact readers/recovery support
+must not be confused with permission for fresh restricted signing.
+
+## Evidence discipline
+
+For each security change record commit, compiler/build configuration, exact test
+selection, result and remaining limits. A selected translation-unit build or
+isolated test executable is not a full product build. Assertions from seeded
+quota fixtures are not independent security cases. Preserve failure reproductions
+and compare them with the corrected behavior. Follow the
+[test runbook](digidollar-paymaster-testing.md) and outstanding release gates.

@@ -1,545 +1,89 @@
-# DigiDollar Paymaster V1 release gate
+# Paymaster release gate and evidence
 
-**Security review (2026-10-10):** The
-[current-worktree threat model](paymaster-threat-model.md) identified two
-medium-priority findings: aging out provider budget evidence needed
-by a retained durable commit (TM-001), and unbounded retention of full expired
-unsigned provider sessions/attempts (TM-002). Both have isolated diagnostic
-reproductions. Thirty-seven existing protection cases pass 1,130 assertions;
-the two diagnostic cases intentionally fail their respective invariant checks.
-No additional unauthorized spend was demonstrated. Subsequent Paymaster source
-corrections reuse retained exact commit authority for historical retries and
-atomically prune eligible unsigned provider history, with bounded cleanup and
-new-admission backpressure. The focused regression group passes 3 cases / 8,539
-assertions; the related selection passes 48 cases / 10,012 assertions, including
-those three. Most assertions in the quota test seed the 8,192-session boundary.
-This used selected MSVC compilation and an isolated executable. Fresh full-build
-verification remains open, alongside stale-provider-backup, physical storage-failure,
-sanitizer/fuzz and independent-review checks; see the
-[correction runbook](digidollar-paymaster-testing.md#provider-security-corrections-2026-10-10).
+Documentation baseline: source `e7c2c8c4bd`, 2026-10-15, on
+`integration/paymaster-v9.26.7`. There is **no complete current-revision release
+certification** in this record. Implemented behavior and selected regression
+results must not be confused with release acceptance.
 
-**Recovery fee-budget correction (2026-10-10):** An isolated regression
-demonstrated that a shallow cancel-to-self confirmation followed by reorganization
-could leave its original fee released and permit exposure above the daily cap.
-The Paymaster wallet correction retains fees through 240 confirmations, repairs
-retained older liabilities before new approvals, and records a winning original
-payment once. Five focused cases pass 384 assertions; the related selection
-passes 28 cases / 1,542 assertions, including those five. This used selected MSVC
-compilation and an isolated unit executable. A normal product build and full
-release matrix remain required; see the
-[recovery fee runbook](digidollar-paymaster-testing.md#recovery-fee-reorg-regression-2026-10-10).
+## Required candidate gates
 
-**Functional follow-up (2026-10-10):** The operator reported a successful build,
-443 Paymaster Qt results and 320 selected Core cases. Four initially failing
-functional scripts now pass in isolated reruns, together with the additional
-no-change lifecycle variant. Changes comprise corrected Paymaster test fixtures
-and a complete `getpaymasterreputation` result schema; financial rules and
-transport limits were not relaxed. See the
-[run details and binary scope](digidollar-paymaster-testing.md#functional-matrix-follow-up-2026-10-10).
-Normal binaries still require an operator build to include these latest changes.
-
-**Failure-test additions (2026-10-10):** Two new wallet-store cases and two
-extended cases cover simulated begin/write/commit failures, preserved fee
-approval/exposure, signed-input protection and lost-reply retries. They were
-added after compilation of the affected unit-test source in an ongoing operator
-build. That run does not contain these additions. A subsequent targeted MSVC
-compile and isolated link passed all four affected cases (655 assertions); see the
-[failure-test runbook](digidollar-paymaster-testing.md#additional-wallet-store-failure-tests-2026-10-10).
-These in-memory database tests do not close real SQLite/power-loss/disk-full,
-stale-provider-backup, sanitizer/fuzz or independent-review gates.
-
-The [subsequent Qt flow audit](design/paymaster-flow-audit.md) adds regression
-coverage for fallback, lost replies, discovery failures, modal wallet changes
-and delayed provider-startup status reads.
-Its targeted checks do not close the full-build or real-payment acceptance gates.
-
-**Qt navigation candidate (2026-09-28):** `feature/paymaster-ux-navigation`
-changes operator presentation on top of integrated RC2 `cac8e521e7`. Its
-[design and verification](design/paymaster-operator-ux.md) are separate from the
-older evidence below. A full current-revision build, full Qt regression and
-an interactive walkthrough remain operator gates; no release approval follows
-from the clickable preview. Targeted compilation/linking and twelve selected
-Qt cases passed. Two general dropdown-theme assertions also fail with the
-original RC2 styles; the linked verification records this open baseline issue.
-The subsequent client fixes cover live preparation, offer-check visibility and
-recipientless unsigned cancellation. Their targeted evidence is recorded in
-the same design document; it does not replace a full current-source build or
-the actual two-node regtest payment walkthrough.
-
-**Operator-workflow feature candidate (2026-09-27):**
-`feature/paymaster-operator-workflow`, based on `1a08828ca1`, adds
-[shared Qt/CLI setup and operation](digidollar-paymaster-operator.md). On September 28,
-the operator reported Windows build exit 0. Nine of twelve functional tests
-passed initially; after three test-fixture corrections, the focused operator,
-pool-setup and lifecycle rerun passed (55 s accumulated, 56 s runtime, exit 0).
-All twelve selected functional tests have therefore passed across these two
-runs. A subsequent Qt run reported 45 passes and two failures; corrections now
-pass both focused test functions (including both setup rows) with newly built
-Qt binaries, and the operator subsequently reported the full Paymaster Qt group
-passing, exit 0. The 297-case unit selection exposed an uninitialized chain tip
-in the new read-only fixture; after correction its isolated test passes all
-11 assertions. The operator then reported exit 0 for the complete selected
-unit rerun. Build, the selected unit group, Paymaster Qt and all twelve selected
-functional tests are therefore green across the recorded runs. Real-Tor and
-24-hour acceptance remain open. See the
-[validation details](digidollar-paymaster-operator.md#verification-and-acceptance).
-The dated RC2 results below cover the earlier code only.
-
-2026-09-27 status, source `1789c803be` on `integration/paymaster-v9.26.6rc2`:
-[Direct connection capacity](digidollar-paymaster-connection-capacity.md#current-verification-status)
-includes the default single-channel queue, dedicated provider listener,
-DoS admission limits, recovery fixes and explicit transport retry. The updated
-Windows build passed 284 selected unit tests (10,767 assertions) and all nine
-focused functional tests. Qt, reference compatibility, real Tor/load and the
-wider release matrix remain open. Wire, consensus and journal formats are unchanged.
-
-The v9.26.6rc2 integration, RPC migration and pending build/runtime gates are
-recorded in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md).
-The subsequent [client integration contract](digidollar-paymaster-integration.md)
-adds focused fee, payment-observation, RPC and Qt regressions. Its targeted local
-checks do not replace the clean build, functional reruns, independent review or
-real-Tor release gates below.
-
-**Current transport/retry status:** 2026-09-27, source commit `1789c803be` on
-`integration/paymaster-v9.26.6rc2`. See the [developer starting point](../PAYMASTER.md)
-and [implementation reference](digidollar-paymaster-implementation.md).
-
-This matrix maps the 28 acceptance criteria in
-[`DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md`](../DIGIDOLLAR_PAYMASTER_NETWORK_PROPOSAL_EN.md)
-and the post-proposal adversarial-counterparty hardening to their verification
-surfaces. It is an audit aid, not a substitute for a clean release build and
-test run.
-
-> **Current gate: RELEASE ACCEPTANCE OPEN.** The implementation is present in
-> the inspected branch. The recorded broad local matrix belongs to the
-> 2026-07-30 candidate; additional functional and official-v9.26.5 compatibility
-> results were recorded on 2026-08-08 and 2026-08-09. Later source changes mean
-> those results must not be presented as a fresh complete pass of `1789c803be`.
-> The September 27 selected unit and nine-test functional group passed; it
-> does not cover the entire acceptance matrix below.
-> A release revision, affected-surface reruns, real-Tor deployment testing and
-> independent review still need to be resolved. A documentation update does
-> not run or renew the executable test matrix.
-
-Status meanings:
-
-- **Covered**: implementation and a focused automated test exist; this does not
-  imply that the test passed on the current source tree.
-- **Candidate pass**: historical candidate evidence; the listed in-tree acceptance checks passed on the dated
-  working-tree candidate; this does not by itself satisfy an unlisted release
-  gate.
-- **Partial**: important coverage exists, but the listed test gap remains.
-- **External**: verification requires binaries or environments outside one
-  in-tree test process.
-
-The last column records the gate originally associated with each criterion.
-The local MSVC, functional, broad-regression, Qt, and same-revision WSL reruns
-covered by the 2026-07-30 matrix are satisfied for that working-tree candidate.
-Real-Tor deployment and independent-review requirements remain open. Official
-v9.26.5/current wallet-file, mixed-node relay, old-only bridge, and unchanged-
-datadir upgrade compatibility have dated passing evidence from 2026-08-08/09. The historical
-snapshot records only superseded pre-hardening states.
-
-| # | Coverage status | Coverage or historical evidence | Original/remaining release gate |
-|---:|---|---|---|
-| 1 | Covered | `wallet_paymaster_provider.py` completes a USER_PAID transfer from a client with no DGB. | Final functional rerun. |
-| 2 | Covered | Paymaster PSBT and wallet tests verify role-scoped signing and never transfer wallet secrets. | Final focused unit run. |
-| 3 | Covered | Provider/directory tests verify disjoint admission proofs; the provider functional test exercises separate admission and operational pools. | Final focused unit and functional run. |
-| 4 | Covered | Fee-boundary and transaction-builder tests cover carrier fees from 0.01 through 0.99 DD. | Final focused unit run. |
-| 5 | Covered | Client selection tests use exact rounded totals and deterministic local sorting; `wallet_paymaster_offer_selection.py` additionally exposes differently priced offers from two independent provider daemons, applies monotonic repricing, expires stale announcements, and accepts a fresh replacement. | Final focused unit run and the registered multi-provider functional run. |
-| 6 | Covered | PSBT tests prove the user and provider sign only their own inputs. | Final focused unit run. |
-| 7 | Covered | Template-binding tests reject mutations and require a newly verified attempt for provider-dependent fallback changes. | Final focused unit run. |
-| 8 | Covered | Persistent request IDs, monotonic attempt state, same-input recovery, and duplicate-payment guards are tested. `wallet_paymaster_failover.py` additionally proves the exact reserved DD input set survives a real provider change and produces one payment. | Crash-specific variants are tracked under 22 and 23. |
-| 9 | Covered | A three-node functional rerun on 2026-08-08 used the official v9.26.5 daemon: the old node accepted the Paymaster-created transaction in its mempool and validated it in the same block/tip as the upgraded nodes. The unchanged-datadir upgrade and old-only bridge scenarios also passed against that official daemon on 2026-08-09. | Satisfied by the official v9.26.5/current functional reruns. |
-| 10 | Covered | Paymaster transaction/protocol rules are wallet/P2P policy. The broader branch also changes DCA, ERR and volatility source to use portable 128-bit types; those changes require separate arithmetic-equivalence review. | Final diff review, cross-platform arithmetic checks and broad consensus regression run. |
-| 11 | Covered | Reputation tests cover local-only storage, neutral failures, cooldown, and security-first eligibility. | Final focused unit run. |
-| 12 | Covered | Headless selection, fee caps, durable sessions, and request-id idempotency are covered by client/store and provider functional tests. | Final focused and functional run. |
-| 13 | Covered | Legacy `senddigidollar` without options remains on the wallet-funded path and has regression coverage. | Final broad wallet regression run. |
-| 14 | Scoped | Public zero-service-fee sponsorship remains available. Restricted new service is disabled as of 2026-10-09; the provider test now checks rejection and preserves the public restart path. | Final broad functional rerun; see the testing runbook for targeted disabled-service checks. |
-| 15 | Covered | Capability tests bind restricted authorization to the payment, store only its hash, reject reuse, and keep it out of gossip. | Final focused and functional run. |
-| 16 | Covered | Builder tests require fresh internal DD/DGB change; the provider functional test scans production logs for payment artifacts and secrets. | Final functional rerun with `debug=net,rpc`. |
-| 17 | Covered | Readiness tests enforce onion-only high privacy, Tor isolation, one attempt, and no v1/clearnet fallback. | Perform a deployment smoke test with a real Tor proxy/onion service. |
-| 18 | Covered | `wallet_paymaster_offer_selection.py` proves automatic cheapest-provider selection and no mutation at the unselected provider. `wallet_paymaster_failover.py` adds two-client contention for one cheap operational slot and sequential completion through the standby provider. | Repeat both registered multi-provider functional tests on the release build. |
-| 19 | Covered | Store tests cover retention redaction, tombstones, idempotency, mempool observation, confirmation, and reorg handling. `wallet_paymaster_reorg.py` adds a real longer-chain rollback/reconfirmation of client state, provider finance, and successor liquidity. | Final focused unit and registered reorg functional run. |
-| 20 | Covered | Documentation states the pseudonymity boundary; the Qt privacy selector carries the same warning, and its assertion passed with Qt 5.15.10. | Final broad Qt regression run. |
-| 21 | Covered | Recovery tests cover recheck, exact retry, same-input fallback/self-return, durable locks, and confirmation-dependent cancellation finality. The functional failover test pins both safe pre-signature fallback and rejection after a user PSBT exists. | Crash-specific variants remain under 22 and 23. |
-| 22 | Covered | Every provider-commit write and the commit operation have deterministic rollback injection; a reopened post-commit snapshot contains the exact raw transaction, bindings, pool state, sponsorship state, and `PENDING_NETWORK` subphase used by retry/broadcast recovery. | Final focused and functional rerun. |
-| 23 | Covered | Every user-authorization write and the commit operation have deterministic rollback injection; a reopened successful snapshot contains the exact persisted user-signed PSBT hash, attempt, authorization, and `USER_SIGNATURE_SENT` subphase without another variant. | Final focused and functional rerun. |
-| 24 | Covered | Request parsing, analysis, builder, and boundary tests enforce one recipient and the 100–10,000,000-cent bounds on every DD output. The `paymaster_wire_envelopes` target completed 100,000 ASan/UBSan/libFuzzer runs after its timestamp-overflow finding was fixed and replayed successfully. | Final focused unit run. |
-| 25 | Covered | Readiness tests enforce unpruned, txindex-complete client/provider operation. The official-v9.26.5 leaf scenario proves old-node validation of the ordinary final transaction. On 2026-08-09 `p2p_paymaster_v9_26_5_bridge.py` additionally passed ordinary DGB/DD relay across an old-only bridge while Paymaster discovery failed closed until a direct current link existed. | Satisfied by the official v9.26.5 leaf and bridge runs. |
-| 26 | Covered | Signed monotonic `PMRESULT` and one commit key/raw transaction are tested; deterministic failure at each atomic provider-commit write and at commit proves complete rollback of the commit, sponsorship, pool, attempt, and session records. | Final focused unit run. |
-| 27 | Covered | Store/RPC tests distinguish mempool from confirmation and expose the shared state/finality fields; Qt renders those fields. | Final RPC and Qt regression run. |
-| 28 | Covered | Locked-wallet tests pause the same session without fallback, and provider policy requires a positive absolute DGB network-fee cap. | Final focused and functional run. |
-
-## Current integration evidence (2026-09-23)
-
-| Scope | Recorded evidence | Remaining limit |
-| --- | --- | --- |
-| September 20 setup/workflow corrections | The operator's combined WSL run passed Paymaster unit tests, all 46 then-selected Paymaster Qt cases and nine functional scenarios, exit codes 0/0/0; log `paymaster-retest-20260920-201621.log`. | This is the dated candidate described in the [workflow review](digidollar-paymaster-edge-case-review.md), not a pass of later client-integration changes. |
-| Client integration in `a4f17f6315` | Six targeted unit tests passed 144 assertions using rebuilt affected objects linked with existing unchanged libraries; 13 affected C++ translation units passed MSVC syntax checks, three Python files passed parsing, and the diff check passed. | Not a clean application build. Expanded functional/Qt runtime checks, complete release matrix, independent review and real Tor remain open. |
-| Documentation reconciliation | Active design, RPC/operator, build/test and navigation documents checked against `a4f17f6315`. | Documentation/static checks only; no executable test or new audit result. |
-
-The [client contract](digidollar-paymaster-integration.md#versioning-and-validation)
-records the targeted test breakdown. The shared
-[build and test runbook](digidollar-paymaster-testing.md) replaces duplicated
-current command recipes. Historical commands/results below remain attached to
-their original candidates; they must not be combined into a synthetic head pass.
-
-## Revision and evidence requirements
-
-Before a release decision, attach the exact source commit, build configuration,
-binary identification, command, exit code, date, and retained output for each
-required surface. A test file or workflow being present is coverage, not a
-successful run. The records below retain earlier reported counts without
-claiming a new independent reproduction.
-
-Later branch changes include current-only persistence handling, wallet metadata
-documentation, RPC/store decomposition, compatibility extensions, and Qt
-workflow hardening. Re-run the checks affected by those changes on the selected
-release revision. Independent review and real-Tor testing remain explicit
-external gates; documentation reconciliation does not close either one.
-
-## Adversarial-counterparty hardening gate
-
-These checks extend, rather than replace, the 28 proposal criteria. A release
-must demonstrate the invariant that once an honest side signs, every movement
-of its own DD or DGB exactly matches its locally persisted authorization
-manifest.
-
-| ID | Current status | Implementation/coverage surface | Required acceptance |
-|---|---|---|---|
-| H1 | Candidate pass | The recorded candidate baseline used Protocol V5 for mandatory `PMCAPREQ`/`PMCAPRESP`; current source uses V6 to additionally bind the maximum user-paid service fee into signed offers. Client validation covers provider identity, BIP86 control proofs, creating transactions, live Chainstate resources, reference block, nonce, request/session binding, and expiry before disclosing intent or capability. The V6 change still requires current-revision verification. | Malicious-provider tests for foreign/spent/double-promised resources, bad control proofs, stale references, quote/resource mismatch, reconnect, and explicit no-downgrade behavior. |
-| H2 | Candidate pass | `ClientAuthorizationManifest` and `ProviderAuthorizationManifest` are built from local authority and revalidated by the shared core immediately before client/provider signature, retry, recovery, and broadcast. Unknown PSBT fields, roles, outputs, and non-default sighashes fail closed. | Mutation matrix for inputs, outputs, amounts, recipients, fees, change ownership, PSBT fields, roles, sighashes, policy, capacity, and template commitments through RPC, Qt, and background paths. |
-| H3 | Candidate pass | Final processing reconstructs the trusted PSBT, checks raw/non-witness transaction, txid, wtxid, exact inputs/outputs/all witnesses, runs the script interpreter with actual prevouts, and performs a mempool preflight when needed. Final state is monotonic and result/attempt/session writes are atomic. The registered functional reorg rolls one real final transaction back and reconfirms the same txid without a duplicate finance event. | Invalid-witness, same-txid/different-witness, mempool-conflict, late-result, replay, reorg, restart, failure-injection, and immutable-final-state tests. |
-| H4 | Candidate pass | `ProviderSafetyPolicy` and `ProviderBudgetReservation` apply finite per-model transaction/reserved/hour/day fee and completion limits plus active-quote and request limits. Quote reserve, final spend, and safe release are atomic; ledger and accounting-time high-water survive restart. The functional contention case holds the only cheap slot for one client while a second safely moves to the standby provider. | Last-budget/last-slot races, concurrent quotes, clock rollback, crash at every write, restart, expiry, public-sponsorship drain, and balance-oracle tests proving no overspend. |
-| H5 | Candidate pass | `ClientSafetyPolicy` durably limits service fee per transfer and rolling day; the provider's signed offer caps its rounded percentage fee, and client authorization remains bounded by the wallet policy, RPC limit, and available daily budget. Current source adds the provider-side cap and V6 offer binding; affected tests must be rerun at the candidate revision. | Per-transfer/daily boundary, concurrent reservation, policy change, restart, exact retry, rejection without policy, and RPC/Qt parity tests. |
-| H6 | Candidate pass | Semantic replay keys are independent of peer ID; exact retries are idempotent and conflicting content is rejected. The first valid signed Capacity/quote claim is staged evidence-only before ACK/deep validation, with persisted-authority failures kept distinct from invalid remote artifacts. Generation-bound RAII leases protect inbox ownership across the database boundary. Critical replay state persists. Token buckets cover peer/netgroup/provider/session, work is fairly queued, cheap announcement/rate checks precede crypto, TTL math saturates, and signed equivocation evidence locally blocks the provider. | Cross-peer/reconnect/restart replay, DB-write failure and retry, lease overlap/ABA, exact request/session binding, queue fairness, netgroup/announcement flood, expiry race, sequential and simultaneous conflicting Capacity/quote, persistent block, and timestamp/amount boundary fuzz tests. |
-| H7 | Candidate pass | `resolvepaymastersession ... cancel_to_self` can use a distinct `USER_PAID` provider that passes Capacity V5. The recovery manifest permits only the original user inputs, fresh wallet-owned DD returns, a locally capped recovery fee, and recovery-provider DGB inputs. | End-to-end recovery without client DGB, same-provider rejection, privacy inheritance, malicious outputs/fees, ambiguous original broadcast race, restart, exact retry, and confirmation-dependent release tests. |
-| H8 | Candidate pass | Stateful fuzz targets cover Capacity → Intent → Quote → Submit → Result → Recovery; focused wallet/P2P tests cover manifests, budgets, replay, and finality. On 2026-07-30 the exact synchronized candidate was rebuilt with Clang ASan/UBSan/libFuzzer, all saved artifacts/corpora replayed successfully, and both fresh targets completed 100,000 runs. | Repeat this matrix after any affected source, build, or dependency change. |
-
-## Recorded candidate verification (2026-07-30 through 2026-08-09)
-
-These are previously recorded results for the candidates and dates named below.
-They do not certify the current branch head or a tagged release artifact:
-
-| Surface | Verified result |
+| Gate | Required evidence |
 |---|---|
-| MSVC Debug | `test_digibyte`, `digibyted`, and `digibyte-cli` built successfully. The 16 focused Paymaster suites plus `walletload_tests` passed 196/196, and the complete suite passed 3,605/3,605 with exit code 0. The MSVC Debug CRT still emits its known process-shutdown allocation dump after the successful result; this remains diagnostic follow-up rather than a hidden test failure. |
-| MSVC Release | `test_digibyte`, `digibyted`, `digibyte-cli`, `digibyte-qt`, and `test_digibyte-qt` built successfully. The focused Paymaster plus `walletload_tests` selection passed 196/196, and the complete core suite passed 3,605/3,605 with exit code 0. |
-| Functional Debug | `wallet_paymaster_provider.py` and `wallet_paymaster_readiness.py` completed successfully against the Debug candidate. Explicit safe port seeds avoided locally reserved Windows TCP ranges. |
-| Functional Release | `wallet_paymaster_provider.py` and `wallet_paymaster_readiness.py` completed successfully against the Release candidate. |
-| Multi-provider selection (2026-08-08) | On 2026-08-08 the registered `wallet_paymaster_offer_selection.py --descriptors` scenario passed all 17 framework unit tests and its 1/1 functional test in 27 seconds. Two independent current-version provider daemons advertised 50-bps and 200-bps USER_PAID offers to a DGB-less client; the client ordered both exact totals, selected only the cheaper provider, completed and confirmed one transfer, and left the expensive provider's pool, safety budget, and finance ledger unchanged. |
-| Extended multi-provider/reorg checks (2026-08-08) | On 2026-08-08 one registered local Windows `test_runner.py --jobs=1` invocation passed all 17 framework unit tests plus `wallet_paymaster_offer_selection.py --descriptors` in 21 seconds, `wallet_paymaster_failover.py --descriptors` in 47 seconds, and `wallet_paymaster_reorg.py --descriptors` in 9 seconds (77 seconds accumulated). The same registered group then passed under x86_64 WSL with all 17 framework tests and durations of 12, 24, and 3 seconds (39 seconds accumulated). The scenarios cover monotonic repricing and expiry/refresh; one-slot contention, same-input standby fallback, post-signature rejection, and exact single-provider accounting; plus finance/pool rollback and same-txid reconfirmation. |
-| Official v9.26.5/current compatibility | On 2026-08-08 an x86_64 WSL build ran both registered `wallet_v9_26_5_compatibility.py` variants and the three-node `wallet_paymaster_provider.py --descriptors` scenario against the official v9.26.5 Linux daemon. Each invocation passed all 17 framework unit tests. The legacy and descriptor wallet variants passed in 36 accumulated seconds; the provider scenario passed in 27 seconds after its restart path was corrected to reconnect the third node. |
-| New official-v9.26.5 scenarios | On 2026-08-09 `p2p_paymaster_v9_26_5_bridge.py --descriptors` passed against the official Linux daemon in 38 seconds after all 17 framework tests passed. It relayed and confirmed ordinary DGB and DD through the old-only bridge, proved through raw message capture that the old node received but did not relay `pmannounce`, failed Paymaster selection closed, and restored discovery over a direct current-current link. `wallet_v9_26_5_inplace_upgrade.py --descriptors` subsequently passed in 7 seconds after all 17 framework tests passed. It created encrypted v9.26.5 wallets, two active positions, and isolated pending DGB/DD transfers; loaded the exact datadir's blocks, Chainstate, txindex, and mempool with the current daemon while wallets were disabled; then loaded, reannounced, confirmed, spent, redeemed, and restarted the inherited wallet state. |
-| Native Qt | Qt 5.15.10 was rebuilt and installed with the bundled-zlib namespace backport. Inspection found the three affected `z_crc32_combine_*` symbols prefixed and no conflicting unprefixed definitions in `Qt5Core.lib`; the Release Qt targets linked and all eight registered suites completed with exit code 0. |
-| WSL2 sanitizers/fuzzing | The synchronized 2026-07-30 source candidate rebuilt successfully with Clang `-fsanitize=address,fuzzer,undefined`. One saved wire artifact plus the 710-file wire and 2,365-file stateful corpora replayed successfully. Fresh `paymaster_wire_envelopes` and `paymaster_stateful_security` campaigns each completed 100,000 executions with exit code 0. Wire added 289 units in 12 seconds at 373 MB peak RSS; stateful added 628 units in 2,004 seconds at 562 MB peak RSS. |
+| Product build | Clean app, daemon, CLI and test builds for supported platforms; exact revision/toolchain. |
+| Core invariants | Exact transaction/fee/signature, budgets, replay, recovery and persistence regression groups. |
+| Lifecycle | Encryption/unlock, startup/history readiness, shutdown/restart, backup/adoption/rollback and retirement. |
+| Liquidity | Finite versus recurring approvals, whole-slot refill for both assets, live capacity below target and fee caps. |
+| End-to-end clients | Exact authorization, cancellation, response loss, failover, reorg and confirmed-recipient-only success. |
+| GUI and CLI | Shared settings/approval semantics, async readiness, consistent balances/offers and headless maintenance. |
+| Compatibility | Ordinary DGB/DD paths, feature disabled, historical wallet/node interoperability. |
+| Adversarial operation | Sanitizers/fuzz/load, real Tor reachability and prolonged operation, hostile relay. |
+| Durability and review | Physical storage failure coverage and independent review of financial/lifecycle boundaries. |
 
-Any source, build, or dependency change that can affect a verification surface
-invalidates that surface's dated evidence and requires the affected checks to
-be repeated.
+Use the [runbook](digidollar-paymaster-testing.md) for commands and the
+[threat model](paymaster-threat-model.md) for residual risks. Record a pass only
+against the candidate and built executable. Remaining tests are not waived by
+successful manual regtest payments.
 
-## Required closing sequence
+## Earlier acceptance IDs: current interpretation
 
-Steps 1, 2, 4, 5, 6, and 8 have dated candidate evidence above. Step 3 has
-passing local and WSL evidence, but still requires the listed release-build
-rerun. Steps 7 and 9 remain open. Completed steps must be repeated after any
-affected source, build, or dependency change.
+The former V1 list is retained here as a review mapping, not a passed matrix.
+Items superseded by later implementation decisions are identified explicitly.
 
-1. **Dated candidate evidence — final review:** The final Paymaster security
-   diff was reviewed for consensus isolation, protocol V5/no-downgrade at the
-   recorded candidate revision,
-   manifest call-site completeness, atomic wallet writes, finite limits, and
-   absence of raw IP/payment material in persistent rate/accounting keys. No
-   obvious release-blocking counterparty theft path was found; this does not
-   replace the independent review in step 9.
-2. **Dated candidate evidence — MSVC:** Build `test_digibyte`, `digibyted`, and `digibyte-cli` with MSVC in Debug and
-   Release. Run the complete focused Paymaster unit/wallet suites in both
-   configurations, including malicious-counterparty, expiry, replay,
-   last-budget/slot, crash, restart, and final-witness regressions.
-3. **Dated local evidence — functional:** Run
-   `wallet_paymaster_provider.py`, `wallet_paymaster_offer_selection.py`,
-   `wallet_paymaster_failover.py`, `wallet_paymaster_reorg.py`, and
-   `wallet_paymaster_readiness.py` with
-   candidate binaries. The provider scenario must cover USER_PAID, public and
-   restricted SPONSORED, finite budgets, drain-only completion, distinct-provider
-   no-client-DGB recovery, restart, exact retry, capability replay, and balance
-   invariants. The selection scenario must expose two differently priced offers
-   from independent provider daemons, choose the lowest exact total without a
-   provider override, and leave the unselected provider untouched. On
-   2026-08-08 the newly registered descriptor selection scenario passed its
-   17 framework unit tests and 1/1 functional test in 27 seconds. The extended
-   selection, failover/contention, and reorg scripts subsequently passed one
-   registered local current-build `test_runner.py` run including all 17
-   framework unit tests; repeat it on the release build before closing this
-   step.
-4. **Dated candidate evidence — official
-   v9.26.5/current compatibility:** On
-   2026-08-08 both registered variants of
-   `wallet_v9_26_5_compatibility.py` passed against the official v9.26.5 Linux
-   daemon. The run covered raw legacy and descriptor wallet-directory loading
-   without an explicit upgrade, encryption and wallet state across restart,
-   post-load signing and spending, active DD records in the descriptor wallet,
-   and reopening in v9.26.5 after current-version use without Paymaster. Both
-   versions sent and received DGB directly, and the descriptor wallets sent and
-   received DD directly. The test also required cross-version address
-   validation, both-mempool relay with identical raw transaction bytes,
-   confirmation by the receiving version, and exact amount/direction history
-   after restart. The three-node `wallet_paymaster_provider.py --descriptors`
-   scenario also passed with the official v9.26.5 daemon: the Paymaster result
-   remained an ordinary `DD_TX_TRANSFER`, reached the old node's mempool with
-   identical raw bytes, was validated in the same block/tip, and no Paymaster
-   announcement was received or sent by the old node.
-   `p2p_paymaster_v9_26_5_bridge.py --descriptors` now covers the old-only P2P
-   bridge and passed against the official daemon on 2026-08-09.
-   `wallet_v9_26_5_inplace_upgrade.py --descriptors` adds the unchanged-datadir
-   pending-state/redeem path and also passed against the official daemon on
-   2026-08-09.
-5. **Dated candidate evidence — Qt 5.15.10:** Build and run the complete native Qt 5.15.10 suite, including client/provider
-   safety-policy RPC parity, authorization confirmation, warning persistence,
-   recovery, and authoritative finality rendering.
-6. **Dated candidate evidence — WSL2:** The exact synchronized candidate was
-   rebuilt in WSL2/Ubuntu with Clang/libFuzzer plus ASan/UBSan. Saved artifacts
-   and both corpora replayed successfully; fresh `paymaster_wire_envelopes` and
-   stateful Capacity → Recovery campaigns each completed 100,000 runs with
-   clean exit codes.
-7. **Open — real Tor deployment:** Exercise high-privacy mode against a real Tor proxy and onion service,
-   including stream isolation, `-logips=0`, capture rejection, one-attempt
-   enforcement, and no clearnet/v1 fallback.
-8. **Dated candidate evidence — broad local regressions:** The complete MSVC
-   Debug and Release core suites each passed 3,605/3,605, and the complete
-   native Qt suite passed all eight registered suites. Platform- or
-   configuration-specific release matrices beyond these local surfaces remain
-   separate release-review responsibilities.
-9. **Open — independent review:** Have the counterparty model, manifest and
-   budget invariants, and race/crash behavior assessed independently. Until
-   this is completed or explicitly dispositioned by release review, the
-   implementation must not be described as formally proven or independently
-   audited.
+| Earlier IDs | Current requirement / disposition |
+|---|---|
+| 1, 2, 6 | Confirmed DD payment without client DGB; no key transfer; each party signs only authorized owned inputs. |
+| 3 | Separate admission/operational resources. The old three-admission-slot readiness minimum is superseded: confirmed usable capacity remains serviceable below the refill target. |
+| 4, 5, 24 | Valid carrier outputs for small fees, bounded integer fee/exact-total arithmetic and one recipient with valid DD output bounds. |
+| 7, 8, 12, 21, 23 | Durable explicit authorization, same-input retry, fallback only before user PSBT, protected signed ambiguity and exact crash recovery. |
+| 9, 10, 13 | Existing validators/consensus remain authoritative; existing five-argument send retains wallet-funded DGB behavior. Review arithmetic portability separately. |
+| 11 | Local reputation cannot override identity, liquidity, privacy or authorization checks. |
+| 14, 15 | Public sponsorship is implemented; fresh restricted sponsorship is disabled. Legacy restricted bindings/consumption remain for accepted work and recovery, not new availability. |
+| 16, 17, 18, 20 | Fresh internal change, metadata-safe logging, selected-provider disclosure and high-privacy onion isolation/one attempt/no silent downgrade; no anonymity promise. |
+| 19 | Eligible detail pruning retains permanent request/conflict protection; missing evidence must not be reconstructed as new authority. |
+| 22, 26 | Exact final bytes and authority/accounting persist atomically before broadcast; signed-result authority is monotonic. |
+| 25 | Unpruned synchronized index/history and creating transactions; ordinary validation needs no Paymaster feature, discovery needs upgraded peers. |
+| 27 | Only validated locally confirmed recipient payment is success; terminal/mempool/recovery state alone is insufficient. |
+| 28 | Locking pauses the same session; active models require finite safety limits and positive absolute network-fee ceilings. |
 
-## Historical verification snapshot (2026-07-28; superseded)
+## Historical checkpoints
 
-The following results are retained for provenance only. They predate the
-adversarial-counterparty hardening and **do not satisfy the current gate**:
+These summarize previous records retained in Git. They are deliberately not
+summed into a current test total. Counts can overlap and some runs used isolated
+executables rather than normal product builds.
 
-- MSVC Debug and Release core builds passed; the test project used `/bigobj`
-  for existing large DigiDollar test translation units.
-- The then-current focused Paymaster unit set reported 75/75 passing in Debug
-  and Release.
-- The then-current provider/readiness functional tests and frozen/current
-  mixed-version runs reported passing.
-- The then-current native Qt 5.15.10 targeted and complete suites reported
-  passing exit codes.
-- `paymaster_wire_envelopes` first found a signed timestamp overflow. After the
-  corresponding saturating-time fix, its saved artifact and a fresh 100,000-run
-  ASan/UBSan campaign reported success.
-- Python syntax checks and `git diff --check` reported success.
-- A broad Release run that excluded separately tracked BIP324 vectors was not
-  clean: it reported network-dependent oracle, DigiDollar performance, RBF, and
-  Windows command-text failures. That historical disposition remains context,
-  not a waiver for the new common-revision rerun.
-
-## Additional security boundary checks (2026-09-19)
-
-The integration working tree adds tests and CI coverage without changing the
-production protocol, RPC permissions, wallet schema, or consensus. These results
-do not close the overall release gate or the previously recorded unrelated and
-unresolved integration failures.
-
-| Check | Local evidence | Limit |
+| Checkpoint | Recorded evidence | Limit |
 |---|---|---|
-| RPC access and wallet isolation | `wallet_paymaster_rpc.py --descriptors`: passed, 40 s. Missing/bad authentication returns HTTP 401; a read-only method whitelist rejects provider changes, signing and withdrawal with HTTP 403, including mixed batches. Request/session IDs cannot read or cancel records in another loaded wallet. | Existing node RPC authority is reused; RPC users are not per-wallet tenants. |
-| Real database recovery | `wallet_paymaster_lifecycle.py --descriptors`: passed, 35 s. Abruptly terminates the test provider child process after durable quote/client authorization, resumes one payment, and restores an older authorized-client SQLite backup after confirmation. | The older backup safely rejects the spent Capacity inputs; it does not automatically reconstruct the missing provider result. No power-loss/disk-full or stale-provider-ledger guarantee is inferred. |
-| Bounded V2 adversarial traffic | `p2p_paymaster.py`: passed, 14 s. Two real V2 daemons send 32 malformed announcements each across three connection rounds; invalid offers never enter the directory, ping and block relay remain functional. | Not a sustained CPU/RSS test or a test of expensive, well-formed invalid signatures. |
-| Extracted wallet load suite | `paymaster_wallet_load_tests`: 7 cases, 172 assertions passed in the existing Windows unit binary. | This binary predates the latest RPC result-schema fixes; no fresh full-build or sanitizer pass is claimed. |
-| Security CI | Selects every registered `paymaster_*` suite, including wallet load; adds the send-RPC/build/helper triggers and uploads the actual unit-test log. | Current-revision Linux ASan/UBSan/fuzz execution is still pending. Qt is excluded by the headless configuration. |
+| 2026-09-27, `1789c803be` | RC2 selected unit group: 284 cases / 10,767 assertions; nine functional tests. | Older branch/baseline; does not certify later setup, security or v9.26.7 work. |
+| 2026-10-06, `e5cfa2da3e` | Twelve translation units; 26 selected Core/Qt cases. | Incremental/isolated test executables; no normal app/daemon/CLI link or functional execution at that checkpoint. |
+| 2026-10-10 retention corrections | Focused 3 cases / 8,539 assertions; related selection 48 / 10,012 including the focused cases. | Isolated MSVC executable; quota fixture accounts for many assertions. |
+| 2026-10-10 recovery-fee correction | Focused 5 cases / 384 assertions; related 28 / 1,542 including them. | Selected tests, not full product release verification. |
+| 2026-10-15, `01aaf13df9` | Seven translation units and busy-wallet Qt regression. | Selected build/test; not complete GUI acceptance. |
+| 2026-10-15, `e7c2c8c4bd` | Two translation units, targeted Qt regression, German translations and two screenshot sizes. | Sync-presentation checks only; no Paymaster release certification. |
 
-The new functional scenarios ran with the local daemon built after the RPC schema
-fixes. No production source or public interface was changed for these checks.
+The detailed security record also contains real SQLite stale-backup and channel
+binding reproductions, simulated DB transaction failures and SQLite page-cap/
+commit-denial reopen tests. See TM-001 through TM-009 in the threat model.
+Do not describe those as physical power-loss/ENOSPC coverage.
 
-### Focused operator rerun
+## Open boundaries
 
-Prerequisites: freshly built daemon/CLI/unit binaries for the reviewed revision,
-Python, and the existing descriptor-wallet/SQLite support. Working directory is
-the repository root. Expect minutes for this focused selection, with exit code 0
-and all selected cases passing (no unexpected skips):
+A matching wallet/checkpoint rollback, independent cloned stores, public-service
+Sybil drain and traffic analysis remain explicit trust/operational limits.
+Current full builds/suites, broad Qt regression results, independent review,
+physical durability, real Tor and prolonged hostile-load acceptance need their
+own evidence. Old upstream release results do not certify this integration.
 
-```powershell
-Set-Location 'D:\Digibyte\digibyte-fork'
-$env:PYTHONUTF8 = '1'
-python -u test/functional/test_runner.py wallet_paymaster_rpc.py wallet_paymaster_lifecycle.py p2p_paymaster.py -j1
-if ($LASTEXITCODE -ne 0) { throw "Paymaster boundary tests failed: $LASTEXITCODE" }
-.\build_msvc\x64\Release\test_digibyte.exe '--run_test=paymaster_*' --report_level=short
-if ($LASTEXITCODE -ne 0) { throw "Paymaster unit tests failed: $LASTEXITCODE" }
+## Traceability
+
+Full earlier reports, test commands and work logs remain at the consolidation
+parent; for example:
+
+```sh
+git show e7c2c8c4bd:doc/digidollar-paymaster-release-gate.md
+git show e7c2c8c4bd:doc/digidollar-paymaster-testing.md
+git show e7c2c8c4bd:doc/paymaster-threat-model.md
 ```
 
-After the reviewed changes are committed and pushed, the operator can dispatch
-the existing GitHub workflow from this directory with an authenticated GitHub
-CLI. Verify that the selected run's head SHA is the intended revision. Expect
-tens of minutes or longer; require both jobs to pass and retain the test log:
-
-```powershell
-gh workflow run paymaster-security.yml --ref integration/paymaster-v9.26.6rc2
-gh run list --workflow paymaster-security.yml --branch integration/paymaster-v9.26.6rc2 --limit 5
-gh run watch --exit-status
-```
-
-The Qt and full-build commands remain in the [integration notes](digidollar-paymaster-v9.26.6rc2-integration.md#operator-build-and-runtime-gates).
-A successful headless workflow does not replace those Qt checks. The local
-Python runtime checks and `git diff --check` do not replace flake8 or actionlint;
-those tools were unavailable in the inspected environment.
-
-### Remaining deployment and artifact evidence
-
-- Repeat real Tor/onion testing with the reviewed binaries: stream isolation,
-  proxy failure and authentication failure must retain the existing no-clearnet/
-  no-V1 fallback and secret-redaction guarantees. Keep the independent review
-  and current-revision sanitizer/fuzz gates open until evidence is returned.
-- In an isolated fault-injection environment, cover interruption during database
-  writes, actual storage exhaustion and older provider backups. Verify live
-  outpoints before use and reconcile post-backup sponsorship and budget records;
-  ordinary wallet rescanning alone is not evidence of ledger restoration.
-- Extend the bounded network case with sustained, correctly encoded invalid
-  proofs while legitimate Paymaster payments and ordinary DGB sends run. Record
-  CPU/RSS, completion and reservation/budget counts. Unit queue/rate-limit tests
-  already cover deterministic limits; do not duplicate those algorithms in a
-  second production limiter.
-- Verify Windows wallet/backup/diagnostic access controls with disposable wallet
-  data and a separate unprivileged OS account. Encrypted private keys do not
-  imply encrypted Paymaster metadata. Test backup destinations and any actual
-  database sidecar files, not only the original wallet directory.
-- Tie the release inventory to the exact binaries and link inputs. The existing
-  SPDX workflow exports GitHub's repository dependency graph; it is not proof
-  of the dependencies embedded in a Windows executable. Include static Qt,
-  bundled Qt third-party code, vcpkg packages and externally supplied libraries.
-  Reconcile MSBuild link records with versions/source hashes and the executable
-  hashes, then review vendor advisories for those exact versions. A DLL listing
-  alone omits static dependencies. The local vcpkg status file did not enumerate
-  every manifest dependency, so no complete artifact inventory is claimed.
-
-From a Visual Studio developer PowerShell in the repository root, these read-only
-commands collect starting evidence after the final build (seconds, except hashing
-large artifacts). Keep compiler/link logs from that same build alongside it:
-
-```powershell
-$env:QTBASEDIR = 'D:\Qt51510\install'
-& "$env:QTBASEDIR\bin\qmake.exe" -query QT_VERSION
-Get-Content build_msvc/vcpkg.json
-Get-Content build_msvc/vcpkg_installed/vcpkg/status
-Get-FileHash .\build_msvc\x64\Release\digibyte-qt.exe, .\src\digibyted.exe, .\src\digibyte-cli.exe -Algorithm SHA256
-dumpbin /dependents .\build_msvc\x64\Release\digibyte-qt.exe
-```
-
-AI-assisted audit input (web pages, peer-provided strings, logs and code comments)
-is untrusted data, not permission to execute instructions or weaken checks. Use
-only disposable regtest secrets in shared diagnostics; do not submit production
-wallets, keys, capabilities or credentials to external audit services. This is a
-development workflow rule, not a reason to add an LLM filter to the wallet.
-
-### Automatic setup follow-up (2026-09-20)
-
-The testnet partial setup exposed a missing Dandelion scenario: a carrier parent
-was stem-only when the immediate DGB child's normal fee precheck ran. Finite
-setup now journals both output plans, waits for confirmed funding, and reuses
-saved transactions after restart or rejection. V4 journal validation and explicit
-legacy adoption add verification obligations. The registered
-`wallet_paymaster_pool_setup.py` regression and affected unit suites must pass
-on freshly rebuilt binaries before live recovery. Prior green results do not
-cover this change. The subsequent September 20 combined operator run recorded
-passing selected setup/workflow checks; see the current evidence table above.
-A release-head rerun is still required.
-
-### Workflow edge-case review (2026-09-20)
-
-The [working-tree edge-case review](digidollar-paymaster-edge-case-review.md)
-records five source-level findings and a cross-workflow regression matrix.
-It includes AUTO session-read failure, the setup wizard/RPC contract, recurring
-Dandelion funding, setup conflict recovery and retirement accounting. These
-findings now have local code corrections and targeted regression sources, as
-listed in the review's remediation section. Its September 20 combined WSL run
-passed the selected matrix. The wider G01-G14 scenarios and later integration
-changes still require their own evidence; that pass is not release approval.
-
-### Capacity patch DoS hardening (2026-09-26)
-
-The three initial availability findings now have
-[source fixes and targeted regressions](digidollar-paymaster-connection-capacity.md#implemented-dos-fixes-2026-09-26):
-bounded starts/group occupancy, replacement of old unadmitted handshakes,
-dedicated-listener-only promotion after routed work, isolated quotas, locally
-bound reply admission and rejection of unserved provider requests. Outbox
-reserves also protect local payment/recovery work.
-
-The implementation includes the three test-only commits pulled through
-`913daff217`. Fresh isolated transport/manager tests pass **22 cases / 3,328
-assertions**. Seven existing manager boundary cases also pass in an isolated
-harness (**731 assertions**); targeted C++ syntax/type and Python compilation
-checks pass. These supersede the earlier status of unimplemented mitigations. Fresh
-integrated unit, socket, wallet and sustained relay/Tor load evidence remains
-required for release approval. The initial reproductions remain in the review
-for traceability; passing local unit tests is not a complete DDoS guarantee.
-
-### Operator validation after the MSVC fix (2026-09-26)
-
-The operator built `7075ca046a` with the accompanying lrelease Exec correction
-in the capacity worktree: Windows Release build exit **0**, empty error log.
-MSBuild no longer parses translation source text such as `Error: %1` as a
-compiler diagnostic; lrelease nonzero exit codes still fail the task. A short
-isolated check verified both the Welsh catalog success and missing-input failure.
-
-The fresh integrated `paymaster_*,netbase_tests` run passed **283 cases / 10,755
-assertions**, exit **0**. The other 3,742 cases were excluded by the selection.
-`p2p_paymaster_connection_capacity.py --descriptors` passed in **22 seconds**,
-exit **0**, along with all **18** test-framework unit tests. The first socket
-run completed its checks but failed runner acceptance due to CP1252 logging of
-the Unicode temporary path; the successful rerun used `PYTHONUTF8=1` and
-`PYTHONIOENCODING=utf-8`, inherited by child Python processes.
-
-This updates the earlier integrated-build/unit/socket NOT_RUN status. Broader
-wallet/integration, interactive Qt, real Tor, sustained load and the remaining
-release matrix still require separate evidence. No full clean rebuild or
-complete-suite pass is claimed.
-
-### Functional-matrix follow-up (2026-09-27)
-
-The operator reported five of eight selected functional tests passing; provider
-recovery, failover and RPC failed. See the
-[capacity follow-up](digidollar-paymaster-connection-capacity.md#follow-up-from-the-functional-matrix-2026-09-27).
-Recovery transport release and asynchronous test-fixture corrections are under
-validation. The September 26 passing build/unit/socket results remain scoped to
-that earlier code; they do not establish a passing full Paymaster matrix.
-
-The recovery Capacity admission fix passes the integrated admission subset
-(11 cases / 871 assertions). Provider runs now complete recovery but exposed
-missing `senddigidollar` retry-option plumbing in later transfers. After that
-source fix and bounded fixture retries, the operator reports provider **PASS
-(87 s)** and RPC **PASS (44 s)**, runner exit **0**, combined **131 s**.
-The remaining seven focused functional tests also pass: P2P, connection
-capacity, failover, lifecycle, offer selection, readiness and reorg (204 s
-accumulated / 206 s wall time, exit 0). All nine selected functional tests are
-therefore green across these two operator runs. The latest integrated
-`paymaster_*,netbase_tests` selection also passes **284 cases / 10,767 assertions**;
-3,742 other cases were excluded by the filter. Both functional runner invocations
-passed all 18 framework unit tests. Qt, compatibility and Tor/load gates remain
-open; this completes the selected regression group, not the release matrix.
-
-### Client review-cancellation follow-up (2026-09-28)
-
-The [GUI flow audit](design/paymaster-flow-audit.md#follow-up-leaving-exact-offer-review-and-late-discovery-2026-09-28)
-records safe return to payment settings after explicit cancellation and automatic
-local-directory preview updates. The follow-up passes 53 selected Qt scenarios
-with newly compiled units and a linked GUI/test executable. A full build, the
-complete regression suites and a new operator-run two-node test remain open;
-this evidence does not establish immediate P2P discovery or release readiness.
-
-
-## Guided provider revision (2026-09-29)
-
-Three-area navigation, guided financial tasks, proposed-policy read-only preview
-and volatile start-when-ready are a new candidate. Earlier release-gate passes
-do not cover these changes. Targeted compilation, 63 Qt data cases and 11 shared
-setup unit cases pass locally. The operator reported passing pool, RPC,
-lifecycle and readiness regtests. After correcting wallet loading in its restart
-fixture, the operator regtest passed locally (11 seconds, exit code 0). These
-separate targeted runs do not replace full-build evidence or the complete release
-matrix. Use the commands
-and success criteria in [the current test runbook](digidollar-paymaster-testing.md#guided-provider-tasks-current-acceptance-2026-09-29).
+The former numbered design acceptance list is consolidated into the candidate
+gates above; it is not silently marked complete. Update this document with
+bounded revision-specific evidence rather than appending every local work log.
