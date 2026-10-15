@@ -112,3 +112,65 @@ helps detect stale wallet copies. See the [threat model](paymaster-threat-model.
 Store code is split into provider/client/finalization/recovery/reconciliation/
 reputation units; RPC code into provider/client/discovery/processing/runtime/
 integration/send units. Review callers and shared helpers together.
+
+## Lifecycle at the authorization boundaries
+
+This is a conceptual review diagram, not a list of serialized state names.
+Actual session/attempt/phase enums live in `src/paymaster/reservation.h`; RPC
+views and permitted actions are derived in `src/wallet/rpc/paymaster_client.cpp`.
+
+```mermaid
+flowchart TD
+    A[Persist order and request ID] --> B[Check readiness and prepare exact offer]
+    B --> C[Review exact commitment]
+    C --> D[Explicit acceptance]
+    D --> E[Sign own inputs and submit]
+    E --> F[Persist exact provider commit before broadcast]
+    F --> G[Observe local transaction and chain state]
+    G --> H[Validated recipient confirmation]
+    B --> I[Safe unsigned closure when Core permits]
+    C --> I
+    E --> J[Ambiguous or interrupted signed work]
+    F --> J
+    J --> K[Exact retry or separately authorized same-input recovery]
+    K --> G
+```
+
+These boundaries explain the conservative UI behavior: input reservation can
+precede payment approval, and signatures can exist despite a lost reply. A
+provider's cached announcement, admitted capacity, exact quote, signed commit
+and confirmed payment are separate artifacts. Timeout or UI cancellation must
+not collapse them into one success/failure flag. The detailed
+[client contract](digidollar-paymaster-integration.md) specifies API decisions.
+
+## Change ownership and verification
+
+| Task | Start with these sources | Check alongside the change |
+|---|---|---|
+| Fee arithmetic or exact gross amount | `src/paymaster/provider_policy.cpp`, `txbuilder.cpp`, `client.cpp` | Cent rounding, carrier output validity, client percentage/absolute/day limits, deducted-fee and sweep cases. |
+| High-level payment API or retries | `src/wallet/rpc/paymaster_send.cpp`, `paymaster_integration.cpp`, `paymaster_client.cpp` | Same-ID replay, commitment acceptance, lost replies, terminal/pruned records and confirmed-recipient status. |
+| Persistence or recovery | `src/wallet/paymasterstore*.cpp`, `paymasterdb.cpp`, `paymastercheckpoint.cpp` | Atomic failure/reopen, retained authority, reorg, restore and stale-copy cases. |
+| Provider settings or startup | `src/paymaster/setup.cpp`, `cli.cpp`, `src/wallet/rpc/paymaster_provider.cpp`, `paymaster_runtime.cpp` | Shared GUI/CLI policy, unlock, persistent pause, startup/history waits and read-back of saved state. |
+| Pool/refill | `src/wallet/paymasterprovider.cpp`, `paymasterstore_provider.cpp`, `src/wallet/rpc/paymaster_provider.cpp` | Both assets, complete slots, finite versus recurring approval, fees and usable capacity below target. |
+| Direct networking | `src/paymaster/manager.cpp`, `transport.h`, `wire.cpp`, `src/net.cpp` | Identity/session proof, early disclosure, quotas, ordinary P2P capacity and privacy-preserving retry. |
+| Client/provider UI | `src/qt/paymastersendwidget.cpp`, `paymasterwidget.cpp`, `paymasterwallet.cpp`, surrounding DD widgets | Unknown/loading states, wallet-bound asynchronous replies, cancellation, affordability and exact approval. |
+| Built-in help/config docs | `src/paymaster/help.h`, `src/init.cpp`, `src/digibyte-cli.cpp`, RPC registrations | Correct executable/context, real parameter names, no help-only command registered as a node argument. |
+
+Consult the [test coverage map](digidollar-paymaster-testing.md#coverage-map)
+for suites and the [integration boundaries](design/paymaster-integration-boundaries.md)
+for shared DigiByte code. Paths in a row are starting points, not permission to
+ignore their callers. Persisted/wire changes require reader/version/fixture
+review; changing only a GUI string must not create a new financial rule.
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Announcement / listing | Signed, expiring discovery information; not a reservation or guarantee. |
+| Capacity admission | Current protocol evidence/admission for a request before full intent disclosure. |
+| Quote / exact offer | Provider terms and resources bound to the transaction/authorization. |
+| Commitment | Exact authorization binding; neither a nominal fee ceiling nor a transport acknowledgment. |
+| Session / attempt | Durable client order versus a particular provider attempt within its permitted lifecycle. |
+| Pool slot / target | Protected resource allocation versus desired maintained capacity; not all pool capital is ordinary available balance. |
+| Final commit | Retained exact signed transaction and related durable authority/accounting. |
+| Confirmation / recovery | Local chain evidence of recipient payment versus a competing return-to-self outcome. |

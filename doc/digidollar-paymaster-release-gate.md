@@ -1,8 +1,9 @@
 # Paymaster release gate and evidence
 
-Documentation baseline: source `e7c2c8c4bd`, 2026-10-15, on
-`integration/paymaster-v9.26.7`. There is **no complete current-revision release
-certification** in this record. Implemented behavior and selected regression
+Financial review checkpoint: source `e7c2c8c4bd`, 2026-10-15, on
+`integration/paymaster-v9.26.7`. The [documentation index](../PAYMASTER.md) records
+its later documentation/source review baseline. There is **no complete
+current-revision release certification** in this record. Implemented behavior and selected regression
 results must not be confused with release acceptance.
 
 ## Required candidate gates

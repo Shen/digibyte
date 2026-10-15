@@ -58,6 +58,84 @@ inputs or fails with `PAYMASTER_SESSION_DETAILS_UNAVAILABLE`. Identity status
 reads remain possible. Sweeps forbid explicit selected inputs; inspect pruned
 sweeps through status rather than reconstructing a send.
 
+## Worked request and authorization sequence
+
+The preparation array above is the `params` value for `senddigidollar` at the
+selected wallet endpoint, not a shell command. Replace its address and generate
+a fresh UUID once for a genuinely new order. All subsequent calls for that
+order keep the same UUID and material arguments. The illustrated amount is
+500 cents = 5.00 DD; the 100-cent fee ceiling is a limit, not a price quote.
+
+When preparation returns an exact commitment, store the result and compare its
+recipient/provider/model/amount/fee/total with the intended order. Ask for
+explicit acceptance of those exact terms. Only after acceptance send the same
+parameters with `prepare_only` removed and the returned commitment inserted:
+
+```json
+["<same DD recipient>", 500, "", 0, null, "cents", {
+  "fee_mode": "paymaster",
+  "request_id": "550e8400-e29b-41d4-a716-446655440001",
+  "maximum_paymaster_fee_cents": 100,
+  "privacy": "standard",
+  "selection": "lowest_total_cost",
+  "maximum_provider_attempts": 1,
+  "authorization_commitment": "<exact accepted commitment returned by Core>"
+}]
+```
+
+Do not manufacture the placeholder commitment or recompute it from displayed
+rounded amounts. This call can sign and submit. If the application crashes or
+loses its response, read the same order first:
+
+```json
+{"method":"getdigidollarsendsession","params":[{"request_id":"550e8400-e29b-41d4-a716-446655440001"}]}
+```
+
+These method/params objects omit the transport envelope/authentication for
+clarity; use your RPC client's normal JSON-RPC version and request ID. Wallet
+selection and authentication belong to the transport, not the payment options.
+
+Persist the order before RPC, and persist accepted terms/commitment before the
+authorizing call. Keep request/session IDs, original material options, exact
+amounts, ordered reserved inputs and known transaction IDs. Read/modify this
+application record atomically so concurrent workers cannot create replacement
+orders for the same invoice. This application responsibility does not replace
+Core's own durable idempotency and authorization checks.
+
+## Response handling for applications
+
+The table describes the normalized send/session view, not every low-level RPC
+response. Do not deserialize a quote or a recovery envelope as a send result.
+`getdigidollarsendsession` returns the session object; `resolvepaymastersession`
+returns an action envelope containing `session` and current permitted actions.
+
+| Observation | Application behavior |
+|---|---|
+| Local readiness false / wallet locked | Show the actual prerequisite and retain order identity. Readiness failure is not payment failure or new-request permission. |
+| Preparation without an exact commitment | Continue the same supported preparation flow; do not show a signable approval based only on an announcement. |
+| `authorization_required=true` with exact terms | Request explicit acceptance; do not treat a previously accepted fee ceiling as acceptance of the commitment. |
+| `status=pending`, or a txid/mempool observation | Track the existing order and known transaction. This is not confirmed recipient payment. |
+| `status=success`, `payment_confirmed=true` | Verify the returned order/recipient/amount binding and local confirmation evidence. Apply any application-required additional confirmation policy separately. |
+| `confirmation_state=recovery_confirmed` | Funds recovered to the wallet, not payment to the recipient; do not mark an invoice paid. |
+| `final=true` with canceled/failed/conflicted status | Terminal order, not success. Inspect the financial result before deciding what the user should do next. |
+| Read failure, unsupported persisted version or unexpectedly missing known order | Treat outcome as unknown. Preserve IDs/evidence and investigate; do not release application obligations or send a new payment automatically. |
+
+Confirmation can change on reorg. Re-read the current view instead of treating
+a previously observed success string as irrevocable settlement. Missing optional
+fields are unavailable evidence, not zero-valued amounts or a free service fee.
+
+Core derives `allowed_actions`; a frontend may remove an action but cannot add
+financial authority. Use only actions documented for the method being called.
+In particular, a `resume` capability means resume the existing high-level send
+flow; it is not a `resolvepaymastersession` action string. That RPC accepts
+`refresh`, `retry_same`, `fallback`, `abandon_unsigned` and `cancel_to_self` under
+the current guards. State may change after inspection, so handle rejection of
+an action that was previously allowed.
+
+Recovery approval uses its own `recovery_authorization_commitment` and exact
+recovery terms. A payment commitment cannot authorize self-recovery, and a
+recovery confirmation cannot be substituted for recipient-payment evidence.
+
 ## Status and recovery
 
 | RPC | Contract |

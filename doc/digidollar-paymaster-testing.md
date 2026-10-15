@@ -28,22 +28,61 @@ actual dependency configuration. Normal build entry points are `./autogen.sh`,
 `./configure` with the required wallet/Qt options, then `make`. Do not reuse a
 sanitizer-only configuration that disables the daemon for functional tests.
 
-Windows: follow [MSVC instructions](../build_msvc/README.md). From the repository
-root in the configured MSVC environment, regenerate projects before a normal
-Release build:
+### Windows build from PowerShell
+
+Follow the [MSVC prerequisites](../build_msvc/README.md), including the static
+Qt build/patch and vcpkg dependencies. Run from the repository root. Stop
+processes using the executables that will be replaced. A normal build can take
+minutes to hours depending on how much is already built; use its exit code and
+final error summary, not the existence of an old executable, as the result.
+
+`msbuild` is often absent from an ordinary PowerShell PATH even when Visual
+Studio is installed. The following discovers the installed executable. First
+set these **installation-specific example paths** to your actual Qt prefix and
+vcpkg installed root (the directory containing `x64-windows-static/lib`). A
+nested local vcpkg layout may require a different root than this example.
 
 ```powershell
-python .uild_msvc\msvc-autogen.py
-if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
-msbuild .uild_msvc\digibyte.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m:1
-if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+$qtBase = 'C:/Qt_static'
+$vcpkgInstalledDir = 'C:/dev/digibyte/build_msvc/vcpkg_installed/'
 ```
 
-Supply installation-specific Qt/vcpkg properties as documented by the build
-setup. The recorded local environment used MSVC 14.43 and static Qt 5.15.10;
-this is evidence provenance, not a new universal prerequisite. Stop processes
-using output executables before replacing them. A full build can be lengthy;
-verify exit status and linked app/daemon/CLI/tests, not just compilation lines.
+Then run this block in the same PowerShell. It assumes dependencies already
+exist and disables automatic manifest installation for this build:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio Installer/vswhere is missing; follow the MSVC prerequisites.' }
+$msbuildPath = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+if (-not $msbuildPath) { throw 'MSBuild was not found in the installed Visual Studio products.' }
+if (-not (Test-Path -LiteralPath "$qtBase/lib/Qt5Core.lib")) { throw 'Set qtBase to the installed static Qt prefix.' }
+if (-not (Test-Path -LiteralPath "$vcpkgInstalledDir/x64-windows-static/lib")) { throw 'Set vcpkgInstalledDir to the parent of the installed triplet directory.' }
+if (-not (Test-Path -LiteralPath './build_msvc/msvc-autogen.py')) { throw 'Run this from the repository root.' }
+
+python ./build_msvc/msvc-autogen.py
+if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
+$buildArgs = @(
+    './build_msvc/digibyte.sln', '/t:Build',
+    '/p:Configuration=Release', '/p:Platform=x64',
+    "/p:QtBaseDir=$qtBase", "/p:VcpkgInstalledDir=$vcpkgInstalledDir",
+    '/p:VcpkgManifestInstall=false', '/m:1', '/verbosity:minimal'
+)
+& $msbuildPath @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
+```
+
+If dependencies are absent, complete the normal prerequisite installation first;
+do not treat this block as a toolchain installer. The recorded local checks used
+MSVC 14.43 and static Qt 5.15.10. That is provenance, not a claim that an arbitrary
+Visual Studio/Qt combination is compatible. Preserve the project's selected
+toolset and consult build guidance for changes.
+
+After success, expected Release outputs are under `build_msvc/x64/Release/`.
+Start the intended GUI/daemon from that directory with the original network and
+data-directory arguments; do not accidentally reopen an older shortcut target.
+Report source commit, first build error (if any), final summary and exit code.
+A newly built GUI feature cannot be judged from a process still running old code.
 
 ## Unit and Qt selection
 
@@ -56,7 +95,7 @@ In a configured Unix build:
 The prefix includes split wallet suites. Windows equivalent:
 
 ```powershell
-& .uild_msvcd\Release	est_digibyte.exe '--run_test=paymaster_*' --report_level=short
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_*' --report_level=short
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 ```
 
@@ -128,5 +167,7 @@ fsync/power-loss failure. See [threat model](paymaster-threat-model.md).
 ## Documentation-only checks
 
 Check relative links/anchors, referenced RPC/test/source names, current branch
-and version references, and `git diff --check`. Documentation maintenance does
+and version references, and `git diff --check`. Parse JSON/PowerShell examples,
+check configuration flags against registration, and reject hidden control
+characters in copied commands (valid Markdown alone is insufficient). Documentation maintenance does
 not require claiming a product-build rerun; report exactly which checks ran.
