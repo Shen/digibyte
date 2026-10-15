@@ -2065,6 +2065,10 @@ public:
         m_task_continue = new QPushButton(tr("Continue task…"), m_task_card);
         m_task_continue->setObjectName("paymasterContinueTask");
         task_layout->addWidget(m_task_continue, 0, Qt::AlignLeft);
+        m_cancel_maintenance = new QPushButton(tr("Cancel uncreated reserve work…"), m_task_card);
+        m_cancel_maintenance->setObjectName("paymasterCancelMaintenance");
+        task_layout->addWidget(m_cancel_maintenance, 0, Qt::AlignLeft);
+        connect(m_cancel_maintenance, &QPushButton::clicked, this, [this] { cancelMaintenance(); });
         m_task_error_details = new QLabel(m_task_card);
         m_task_error_details->setObjectName("paymasterTaskErrorDetails");
         m_task_error_details->setTextFormat(Qt::PlainText);
@@ -2101,6 +2105,8 @@ public:
                 showOperatorPage(m_liquidity_page);
                 if (m_liquidity_advanced_toggle) m_liquidity_advanced_toggle->setChecked(true);
                 m_preparation_fee->setFocus();
+            } else if (m_operation.error == QLatin1String("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED")) {
+                showOperatorPage(m_liquidity_page);
             } else if (m_operation.error.contains(QLatin1String("PROVIDER_DISABLED"))) {
                 const auto generation = m_wallet_generation;
                 setRpcBusyState(true);
@@ -11379,6 +11385,8 @@ private:
         m_withdraw_task->setEnabled(available && enough_earnings && m_operation.phase != Phase::Waiting);
         m_release_task->setEnabled(available && m_pool_operational_carriers > 0 && m_operation.phase != Phase::Waiting);
         m_task_card->setVisible(!m_privacy && m_operation.phase != Phase::Idle);
+        m_cancel_maintenance->setVisible(!m_privacy && !cancellableMaintenance().empty());
+        m_cancel_maintenance->setEnabled(available);
         const bool needs_reserves = m_operation.error == QLatin1String("PAYMASTER_POOL_PREPARATION_REQUIRED");
         m_task_continue->setVisible(m_operation.phase == Phase::Blocked && !canReviewPreparationFee() &&
             !(needs_reserves && m_operator_next_action == QLatin1String("review_liquidity")));
@@ -11390,6 +11398,7 @@ private:
             m_operation.error == QLatin1String("PAYMASTER_MAINTENANCE_FEE_EXCEEDED") ? tr("Review refill cost limit") :
             m_operation.error == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT") ? tr("Check current status") :
             m_operation.error.contains(QLatin1String("FEE_LIMIT")) ? tr("Review fee limit…") :
+            m_operation.error == QLatin1String("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED") ? tr("Review refill settings…") :
             m_operation.error.contains(QLatin1String("PROVIDER_DISABLED")) ? tr("Resume approved task…") :
             carrierReleaseNeedsReview() ? tr("Refresh reserves") : tr("Check current status"));
         QString message;
@@ -11431,6 +11440,8 @@ private:
                 ? tr("Next: choose ‘Review setup fee and continue’ above. Review a new fee ceiling and then approve the replacement plan. Nothing will be spent without your approval.")
                 : m_operation.error.contains(QLatin1String("FEE_LIMIT"))
                 ? tr("The approved fee limit is insufficient. Review it; no higher fee is authorized automatically.")
+                : m_operation.error == QLatin1String("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED")
+                    ? tr("Automatic refill is off. Cancel the uncreated reserve work, or review refill settings to resume it. No transaction is pending for the uncreated steps.")
                 : m_operation.error.contains(QLatin1String("PROVIDER_DISABLED"))
                     ? tr("This task is paused. Resume the approved task to allow the remaining steps within the saved limits.")
                 : m_operation.error.contains(QLatin1String("WAITING_FUNDS")) || m_operation.error.contains(QLatin1String("WAITING_DGB"))
@@ -11447,8 +11458,19 @@ private:
         const auto& work = m_operation.snapshot.find_value("provider").find_value("active_operations");
         const bool withdrawing = work.isArray() && !work.empty() && work[0].find_value("kind").isStr() &&
             work[0].find_value("kind").get_str() == "withdrawal";
-        const QString title = work.isArray() && work.size() > 1 ? tr("Reserve management") : m_operation.title.isEmpty()
-            ? (withdrawing ? tr("Withdraw earnings") : needs_reserves ? tr("Start provider") : tr("Maintaining reserves")) : m_operation.title;
+        QString saved_title = withdrawing ? tr("Withdraw earnings") : needs_reserves ? tr("Start provider") : tr("Maintaining reserves");
+        if (work.isArray() && work.size() == 1 && !withdrawing) {
+            const QString kind = activityText(work[0], "kind");
+            const QString asset = activityText(work[0], "asset");
+            if (kind == QLatin1String("preparation"))
+                saved_title = asset == QLatin1String("dgb") ? tr("Prepare DGB reserves") :
+                    asset == QLatin1String("dd_carrier") ? tr("Prepare DD reserves") : tr("Prepare reserves");
+            else if (kind == QLatin1String("maintenance"))
+                saved_title = asset == QLatin1String("dgb") ? tr("Refill DGB reserves") :
+                    asset == QLatin1String("dd_carrier") ? tr("Refill DD reserves") : tr("Refill reserves");
+        }
+        const QString title = !m_operation.busy() && work.isArray() && work.size() > 1 ? tr("Reserve management") :
+            m_operation.title.isEmpty() ? saved_title : m_operation.title;
         if (work.isArray() && work.size() > 1) {
             message += tr("\nCombined progress of %1 reserve operations; individual transactions are listed in Activity.").arg(work.size());
         }
@@ -12410,6 +12432,75 @@ private:
             if (IsHex256Field(step, "txid")) lines << tr("Transaction: %1").arg(activityText(step, "txid"));
         }
         return lines.join(QLatin1Char('\n'));
+    }
+
+    UniValue cancellableMaintenance() const
+    {
+        UniValue ids{UniValue::VARR};
+        if (m_operation.busy()) return ids;
+        const auto& work = m_operator_snapshot.find_value("provider").find_value("active_operations");
+        if (!work.isArray()) return ids;
+        for (const auto& item : work.getValues()) {
+            const QString kind = activityText(item, "kind");
+            if ((kind == QLatin1String("maintenance") || kind == QLatin1String("preparation")) &&
+                activityText(item, "state") == QLatin1String("pending_creation") &&
+                item.find_value("txid").isNull() && IsHex256Field(item, "operation_id"))
+                ids.push_back(item.find_value("operation_id"));
+        }
+        return ids;
+    }
+
+    void cancelMaintenance()
+    {
+        if (m_privacy || m_busy || !hasCompleteMutationSnapshots() || !hasRpcTransport()) return;
+        const UniValue ids = cancellableMaintenance();
+        if (ids.empty()) return;
+        const auto generation = m_wallet_generation;
+        UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
+        options.pushKV("operation_ids", ids);
+        params.push_back(options);
+        call("cancelpaymastermaintenance", params, false, nullptr,
+            [this, generation, ids, options](const UniValue& review) mutable {
+                qint64 budget{0};
+                if (!review.find_value("executed").isFalse() || !IsHex256Field(review, "plan_id") ||
+                    review.find_value("operation_ids").write() != ids.write() ||
+                    !GetInt64Field(review, "released_fee_budget_satoshis", budget) || !MoneyRange(budget)) {
+                    failGuidedTask(tr("The cancellation preview could not be verified. No cancellation was approved."));
+                    return;
+                }
+                setRpcBusyState(true);
+                const auto answer = askPlainTextQuestion(this, tr("Cancel uncreated reserve work"),
+                    tr("Cancel %n uncreated reserve-funding operation(s)?", nullptr, ids.size()) +
+                    tr("\nAutomatic refill will be turned off so these operations are not recreated. Provider enablement and autostart stay unchanged. Existing reserves, payments and signed transactions are retained.\n\nReleased fee allowance: %1 DGB. This is unused permission, not a payment or refund.").arg(dgbAmount(budget)));
+                if (generation != m_wallet_generation) return;
+                setRpcBusyState(false);
+                if (answer != QMessageBox::Yes || m_privacy || ids.write() != cancellableMaintenance().write()) return;
+                const auto plan = review.find_value("plan_id");
+                options.pushKV("execute", true);
+                options.pushKV("plan_id", plan);
+                UniValue execute{UniValue::VARR}; execute.push_back(options);
+                call("cancelpaymastermaintenance", execute, false, nullptr,
+                    [this, ids, plan, budget](const UniValue& result) {
+                        qint64 released{0};
+                        if (!result.find_value("executed").isTrue() || !result.find_value("automatic_refill_disabled").isTrue() ||
+                            result.find_value("plan_id").write() != plan.write() || result.find_value("operation_ids").write() != ids.write() ||
+                            !GetInt64Field(result, "released_fee_budget_satoshis", released) || released != budget) {
+                            failGuidedTask(tr("Cancellation was not confirmed. Refresh the current status before another action."));
+                            return;
+                        }
+                        m_operation.reset(m_wallet_generation);
+                        m_operation.title = tr("Uncreated reserve work cancelled; automatic refill is off");
+                        m_operation.phase = PaymasterOperationController::Phase::Complete;
+                        m_guided_task.clear();
+                        m_failed_guided_task.clear();
+                        ++m_guided_generation;
+                        // Wait for a fresh snapshot before offering the same IDs again.
+                        m_operator_snapshot = UniValue{};
+                        invalidatePoolPreviews();
+                        renderCurrentTask();
+                        refreshStatus();
+                    }, false, [this](const QString& error) { failGuidedTask(error); });
+            }, false, [this](const QString& error) { failGuidedTask(error); });
     }
 
     QString cancellablePreparationPlan() const
@@ -15343,6 +15434,7 @@ private:
     QLabel* m_withdrawal_hint{nullptr};
     QPushButton* m_release_task{nullptr};
     QPushButton* m_task_continue{nullptr};
+    QPushButton* m_cancel_maintenance{nullptr};
     QString m_guided_task;
     QString m_failed_guided_task;
     uint64_t m_guided_generation{0};

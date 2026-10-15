@@ -86,6 +86,7 @@ public:
         completed_confirmations = required_confirmations = 0;
         bool blocked{false};
         bool needs_creation{false};
+        bool needs_refill{false};
         if (operations.isArray()) for (const auto& item : operations.getValues()) {
             if (item.find_value("state").isStr() && item.find_value("state").get_str() == "pending_confirmation" &&
                 item.find_value("confirmations").isNum() && item.find_value("required_confirmations").isNum()) {
@@ -94,6 +95,8 @@ public:
                 completed_confirmations += std::clamp(item.find_value("confirmations").getInt<int>(), 0, std::max(0, required));
             }
             needs_creation |= item.find_value("state").isStr() && item.find_value("state").get_str() == "pending_creation";
+            needs_refill |= item.find_value("state").isStr() && item.find_value("state").get_str() == "pending_creation" &&
+                item.find_value("kind").isStr() && item.find_value("kind").get_str() == "maintenance";
             blocked |= item.find_value("state").isStr() && item.find_value("state").get_str() == "conflict";
             const auto& code = item.find_value("error");
             if (code.isStr() && !code.get_str().empty() &&
@@ -113,10 +116,16 @@ public:
         }
         if (!busy() && operations.isArray()) {
             if (!operations.empty() || provider.find_value("start_requested").isTrue()) {
-                if (phase == Phase::Complete) title.clear();
+                // The snapshot describes saved work, not necessarily the last
+                // GUI action (which may have failed or only been previewed).
+                // Its kind/asset supplies the title when rendering this state.
+                title.clear();
                 observed_work = true;
                 const bool needs_processing = needs_creation || provider.find_value("start_requested").isTrue();
-                if (needs_processing && provider.find_value("enabled").isFalse()) {
+                if (needs_refill && provider.find_value("liquidity").find_value("policy").find_value("automatic_replenishment").isFalse()) {
+                    blocked = true;
+                    error = QStringLiteral("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED");
+                } else if (needs_processing && provider.find_value("enabled").isFalse()) {
                     blocked = true;
                     error = QStringLiteral("PAYMASTER_PROVIDER_DISABLED");
                 } else if (needs_processing && provider.find_value("wallet_locked").isTrue()) {
@@ -128,9 +137,12 @@ public:
                 }
                 phase = blocked ? Phase::Blocked : Phase::Waiting;
                 if (!blocked) error.clear();
-            } else if ((phase == Phase::Waiting || (phase == Phase::Blocked && observed_work)) &&
-                       provider.find_value("pool_ready").isTrue()) {
-                phase = Phase::Complete;
+            } else if (phase == Phase::Waiting || (phase == Phase::Blocked && observed_work)) {
+                // Work can disappear through cancellation without ready pools.
+                // Do not leave an old blocked task or infer successful funding.
+                phase = provider.find_value("pool_ready").isTrue() ? Phase::Complete : Phase::Idle;
+                if (phase == Phase::Idle) title.clear();
+                observed_work = false;
                 error.clear();
             }
         }

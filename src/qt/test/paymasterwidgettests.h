@@ -45,6 +45,9 @@ private Q_SLOTS:
     void paymasterPoolPreparationDiagnostics();
     void paymasterPoolPreparationCancellation_data();
     void paymasterPoolPreparationCancellation();
+    void paymasterMaintenanceCancellation_data();
+    void paymasterMaintenanceCancellation();
+    void paymasterSavedTaskTitles();
     void paymasterConnectionLayout_data();
     void paymasterConnectionLayout();
     void paymasterOperatorDelayedStartup_data();
