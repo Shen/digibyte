@@ -2173,15 +2173,13 @@ public:
         auto* network_group = new QGroupBox(tr("Connection and reachability"), connection_column);
         network_group->setObjectName("paymasterConnectionNetwork");
         auto* network_layout = new QVBoxLayout(network_group);
-        auto* connection_help = new QLabel(tr("Local readiness means this node can accept connections. External reachability must be checked from another node; it does not prove a payment succeeded. Imported reports are past observations, not continuous monitoring."), network_group);
+        auto* connection_help = new QLabel(tr("Local readiness means this node can accept connections. To check reachability, run checkpaymasterendpoint with the announced IP or Tor address from another node. The RPC result describes that connection attempt; it does not verify provider identity, available reserves or payments."), network_group);
+        connection_help->setObjectName("paymasterConnectionHelp");
         connection_help->setWordWrap(true);
         network_layout->addWidget(connection_help);
         auto* configure_node = new QPushButton(tr("Refresh connection settings"), network_group);
         configure_node->setObjectName("paymasterReviewConnection");
-        auto* import_check = new QPushButton(tr("Import external check…"), network_group);
-        import_check->setObjectName("paymasterImportConnectionCheck");
         network_layout->addWidget(configure_node, 0, Qt::AlignLeft);
-        network_layout->addWidget(import_check, 0, Qt::AlignLeft);
         connection_layout->addWidget(network_group);
         auto* access_group = new QGroupBox(tr("Wallet access"), connection_column);
         access_group->setObjectName("paymasterConnectionWalletAccess");
@@ -2193,12 +2191,10 @@ public:
         unlock_operation->setObjectName("paymasterUnlockOperation");
         configure_node->setToolTip(tr("Review listener, endpoint and configuration changes before saving. Saved node changes require an explicit restart."));
         unlock_operation->setToolTip(tr("Choose continuous operation until manual lock or restart, or a timed wallet-wide unlock. No passphrase is saved."));
-        import_check->setToolTip(tr("Run checkpaymasterendpoint on your independent node, then import its report. No payment or identity verification is implied."));
         access_layout->addWidget(unlock_operation, 0, Qt::AlignLeft);
         connection_layout->addWidget(access_group);
         connect(configure_node, &QPushButton::clicked, this, [this] { configureOperatorNode(); });
         connect(unlock_operation, &QPushButton::clicked, this, [this] { unlockOperatorWallet(); });
-        connect(import_check, &QPushButton::clicked, this, [this] { importOperatorCheck(); });
         m_connection_page = connection_scroll;
 
         auto* management_scroll = new QScrollArea;
@@ -4837,7 +4833,6 @@ public:
         m_operator_snapshot = UniValue{};
         m_overview_finance_age.invalidate();
         m_overview_finance_observed = false;
-        m_operator_report = UniValue{};
         m_policy_readback_pending = false;
         m_pending_policy_hash.clear();
         m_last_checked->setText(tr("Status has not been checked yet."));
@@ -5103,7 +5098,6 @@ public:
         }
         if (privacy) {
             m_operator_snapshot = UniValue{};
-            m_operator_report = UniValue{};
         }
 
         if (privacy) {
@@ -10714,7 +10708,6 @@ private:
         const QString local = !listener.isBool() ? tr("Local listener: unknown") : listener.isTrue() ? tr("Local listener: ready") :
                                                                                                        tr("Local listener: unavailable");
         m_operator_connection->setText(local + tr(" · External reachability: no current measurement"));
-        if (!m_operator_report.isNull()) m_operator_connection->setText(local + tr(" · Imported external observation: %1 (historical)").arg(QDateTime::fromSecsSinceEpoch(m_operator_report.find_value("observed_at").getInt<int64_t>(), Qt::UTC).toString(Qt::ISODate)));
         QString wallet = locked ? tr("Wallet: locked") : tr("Wallet: unlocked");
         const auto& until = snapshot.find_value("unlocked_until");
         if (!locked && until.isNum() && until.getInt<int64_t>() == -1)
@@ -10923,7 +10916,6 @@ private:
                  try {
                      const auto& provider = snapshot.find_value("provider");
                      if (!snapshot.find_value("schema_version").isNum() || snapshot.find_value("schema_version").getInt<int>() != 1 || !snapshot.find_value("diagnostics").isArray() || !provider.find_value("service_state").isStr()) throw std::runtime_error("PAYMASTER_STATUS_INCOMPLETE");
-                     if (!m_operator_snapshot.isNull() && m_operator_snapshot.find_value("wallet_generation").write() != snapshot.find_value("wallet_generation").write()) m_operator_report = UniValue{};
                      if (!IsCompleteProviderInfoSnapshot(provider)) throw std::runtime_error("PAYMASTER_PROVIDER_STATUS_INCOMPLETE");
                      // Refresh freshness on every successful observation, but
                      // do not reload forms or rebuild presentation for identical
@@ -10989,10 +10981,6 @@ private:
                          const QString diagnostic = tr("%1: %2").arg(QString::fromStdString(item.find_value("code").get_str()), instruction);
                          if (&item == &diagnostics.getValues().front()) lines.prepend(tr("Next action: %1").arg(diagnostic));
                          else lines << diagnostic;
-                     }
-                     if (!m_operator_report.isNull()) {
-                         if (m_operator_report.find_value("endpoint").write() != provider.find_value("endpoint").write() || m_operator_report.find_value("network").write() != snapshot.find_value("network").write()) m_operator_report = UniValue{};
-                         else lines << tr("Imported operator report at %1: transport %2. This is a historical observation, not a current payment or identity guarantee.").arg(QString::fromStdString(m_operator_report.find_value("observed_at").write()), m_operator_report.find_value("transport_ready").isTrue() ? tr("reached") : tr("not reached"));
                      }
                      if (m_operator_restart_required) lines.prepend(tr("Node configuration was saved. Restart explicitly before expecting the new settings to become active."));
                      m_operator_summary->setText(lines.join(QLatin1Char('\n')));
@@ -11629,22 +11617,6 @@ private:
                 refreshOperatorStatus();
             });
         });
-    }
-
-    void importOperatorCheck()
-    {
-        if (m_privacy || m_busy || m_operator_snapshot.isNull()) return;
-        showPlainTextWarning(this, tr("External transport check"), tr("On your independent node run checkpaymasterendpoint with this provider's announced endpoint and save its JSON result. Import it here as an operator report. This check does not prove provider identity or payment operation."));
-        const QString name = QFileDialog::getOpenFileName(this, tr("Import operator check"), {}, tr("JSON files (*.json)"));
-        if (name.isEmpty()) return;
-        QFile file(name);
-        UniValue report;
-        if (!file.open(QIODevice::ReadOnly) || file.size() > 65536 || !report.read(file.readAll().toStdString()) || !report.isObject() || !report.find_value("observed_at").isNum() || !report.find_value("transport_ready").isBool() || !report.find_value("payment_verified").isFalse() || !report.find_value("identity_verified").isFalse() || report.find_value("network").write() != m_operator_snapshot.find_value("network").write() || report.find_value("endpoint").write() != m_operator_snapshot.find_value("provider").find_value("endpoint").write()) {
-            showPlainTextWarning(this, tr("Invalid operator report"), tr("The report must match this network and endpoint and contain only transport observations."));
-            return;
-        }
-        m_operator_report = report;
-        refreshOperatorStatus();
     }
 
     // Operating-capital actions retain the guarded start-and-refill path.
@@ -15857,7 +15829,6 @@ private:
     QPointer<QDialog> m_node_connection_dialog;
     QPointer<QDialog> m_refill_approval;
     UniValue m_operator_snapshot;
-    UniValue m_operator_report;
     bool m_operator_restart_required{false};
     QLabel* m_status;
     QLabel* m_identity;

@@ -9526,6 +9526,11 @@ void PaymasterWidgetTests::paymasterDeferredStartIntentIsWalletScoped()
 void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
 {
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QVERIFY(!panel->findChild<QPushButton*>("paymasterImportConnectionCheck"));
+    const auto* connection_help = panel->findChild<QLabel*>("paymasterConnectionHelp");
+    QVERIFY(connection_help);
+    QVERIFY(connection_help->text().contains("checkpaymasterendpoint"));
+    QVERIFY(connection_help->text().contains("Tor"));
     QTimer::singleShot(0, [] {
         if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
     });

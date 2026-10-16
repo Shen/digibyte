@@ -57,6 +57,17 @@ Announcements last up to 600 seconds; quote default/maximum is 60 seconds.
 An announcement may become unavailable before expiry. Expiry does not prove
 already signed spending authority harmless.
 
+## Endpoint diagnostics
+
+Endpoint diagnostics are separate from authenticated payment channels.
+`checkpaymasterendpoint` uses a locally selected `DirectPurpose::DIAGNOSTIC` key,
+which cannot alias a payment/recovery lease. It records V2 and capability
+negotiation and finishes with `TRANSPORT_READY`, never authenticated `READY`.
+The sender and receive handlers prohibit authentication/application messages on
+these connections. They share the existing connection quotas, deadlines and
+SOCKS5 privacy rules; they never reserve wallet capital. See the
+[RPC diagnostic instructions](digidollar-paymaster.md#start-and-verify-mainnet-operation).
+
 ## Durable state and recovery
 
 The client persists a canonical request ID/order. Identical concurrent retries

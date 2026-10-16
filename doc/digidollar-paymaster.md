@@ -173,11 +173,40 @@ in this explicit network probe:
 digibyte-cli -chain=main checkpaymasterendpoint 'PUBLIC_NUMERIC_IP:12025'
 ```
 
-`transport_ready=true` observes V2/Paymaster transport at that time. The probe
-does not authenticate the provider identity, reserve capacity or verify a
-payment. An actual payment still requires the normal exact-offer checks and
-authorization. A local listener status alone is not an external reachability
-test.
+`transport_ready=true` and `state="transport_ready"` mean that BIP324/V2 and
+Paymaster capability negotiation succeeded. The endpoint does not need a loaded
+wallet, provider identity, funds or a running provider for this listener check.
+It does not authenticate an identity, reserve payment capacity, verify a payment
+or prove that the provider accepts payments. Actual payments still require the
+authenticated channel and normal exact-offer checks and authorization.
+
+The `stages` object records positive observations independently; `unknown` means
+the stage was not confirmed, not that identity or payment verification failed.
+`message` explains the result. A failed or timed-out attempt is not proof of
+permanent unreachability. Each attempt lasts at most 30 seconds, uses the node's
+bounded outgoing Direct connection capacity and releases it on completion.
+Only one probe runs at once, with at most one start per 30 seconds.
+
+Tor v3 endpoints are also supported:
+
+```sh
+digibyte-cli -chain=main checkpaymasterendpoint 'YOUR_V3_ONION_ADDRESS.onion:12025'
+```
+
+On the **probing daemon**, configure `onion=127.0.0.1:9050` (or an appropriate
+`proxy`), `proxyrandomize=1` and `logips=0`, then restart if those settings changed.
+The SOCKS5 proxy must support username/password stream isolation. The provider's
+onion service must forward that virtual port to its dedicated Paymaster listener;
+the RPC does not create an onion service. The onion destination goes through the
+proxy without local DNS resolution or clearnet fallback. Missing proxy/isolation
+settings return `privacy_rejected` with an explanation before attempting a
+connection. A rejected SOCKS handshake or unreachable proxy/service returns
+`connect_failed`; the result does not distinguish all remote failure causes.
+
+Read the result directly in the CLI or RPC console. The GUI has no JSON-report
+import or persistent external reachability status. A local listener status alone
+is not an external reachability test. On Regtest, `127.0.0.1:port` tests only the
+same computer; public IP reachability should be checked from another machine.
 
 Use the [GUI/CLI operator workflow](digidollar-paymaster-operator.md) to review
 identity, finite limits, reserve funding, autostart and unlock behavior. Mainnet

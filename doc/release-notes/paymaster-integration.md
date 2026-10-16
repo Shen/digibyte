@@ -6,6 +6,14 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 
 ## Implemented behavior
 
+- `checkpaymasterendpoint` again checks listener reachability without a provider
+  identity. Its diagnostic connection stops after V2/capability negotiation and
+  cannot carry payments or authenticate a provider. Success returns
+  `state="transport_ready"`; stage observations and a result explanation are
+  included. Tor v3 endpoints use isolated SOCKS5 connections with explicit local
+  prerequisite errors and no clearnet fallback. The GUI JSON-report import is
+  removed; operators read the diagnostic result directly in CLI/RPC.
+
 - Collaborative single-recipient DD transfers with provider-funded DGB fees;
   user-paid DD service fees or public zero-DD-fee sponsorship.
 - Exact provider/recipient/fee authorization before client payment signing,

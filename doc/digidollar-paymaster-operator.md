@@ -53,6 +53,13 @@ offer changes use the reviewed save/restart path. Do not use tab changes as part
 of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
+**Settings > Node connection** describes the local listener and its configuration.
+For a separate reachability check, run `checkpaymasterendpoint` from another node
+and inspect its RPC result directly; JSON report import has been removed. Both
+numeric IP endpoints and Tor v3 onion endpoints are supported, subject to the
+[diagnostic prerequisites](digidollar-paymaster.md#start-and-verify-mainnet-operation).
+A reachable listener does not establish payment readiness or available reserves.
+
 **Settings > Start, pause & retire** is the first settings destination. It groups
 the operation controls and retirement review, with a checklist of each action's
 effects. These checkmarks describe the action, not its completion. **Reserves &

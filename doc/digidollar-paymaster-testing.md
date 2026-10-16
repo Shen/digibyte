@@ -134,6 +134,7 @@ replace the functional matrix, ordinary-wallet regressions or release gates.
 |---|---|
 | Amounts, exact fees, manifests and signatures | `src/test/paymaster_types_tests.cpp`, `paymaster_txbuilder_tests.cpp`, `paymaster_psbt_tests.cpp`; wallet PSBT/security tests. |
 | Wire/channel proof and bounded admission | Protocol, wire, transport, admission unit suites; `p2p_paymaster.py`, `p2p_paymaster_connection_capacity.py`. |
+| Nonfinancial endpoint diagnostics | `paymaster_transport_tests/diagnostic_*` and `payment_without_selected_identity_is_not_a_diagnostic`: isolated keys, negotiation without authentication, suppressed metadata and cleanup. `rpc_paymaster_endpoint.py`: wallet-free TCP listener, rate limit, invalid/closed endpoint, Tor prerequisites, SOCKS5 forwarding, credential isolation and no-auth rejection. Uses a local proxy fixture, not public Tor. `wallet_paymaster_operator.py` retains the operator probe regression. Qt `paymasterOperatorNavigationAndVisibleTasks` checks RPC guidance and absence of the removed report-import control. |
 | Selection, fee limits, model binding, failover | Directory/client/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
 | Explicit authorization and same-ID retry | Wallet store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`. |
 | Signed recovery and budget retention | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`. |
