@@ -1087,6 +1087,9 @@ the prerequisite review; pending starts are displayed separately and remain
 cancellable. Stop is disabled after a confirmed persistent stop; Retire remains
 available for release review. Retirement balances/backup review lives on that
 page; the stopped headline makes no claim that released reserves are still retained.
+Spending-limit forms explain invalid relationships before dispatch. Confirmed
+offer/limit saves invalidate the old Overview snapshot and request immediate
+combined readback; delayed or failed reads do not imply readiness.
 See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h

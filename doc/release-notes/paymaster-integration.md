@@ -63,6 +63,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   policy and link to the affected page. GUI/CLI setup review, CLI status and
   the operator RPC `configuration_conflicts` field expose the same comparison.
   Readiness and spending checks remain unchanged; limits are never auto-raised.
+- Spending-limit forms prevent known invalid saves with inline explanations
+  and retain edits after RPC rejection. Confirmed offer/limit saves immediately
+  refresh the combined provider status, replacing obsolete Overview warnings
+  with a loading state until readback succeeds. Failed reads remain unavailable.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls

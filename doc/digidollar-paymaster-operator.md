@@ -84,6 +84,19 @@ setup/status use the same comparison. A smaller budget for an inactive model
 does not block an offered model; a stored cap above the offer ceiling still
 needs correction under Core's policy validation.
 
+The spending-limit form explains invalid amounts and limit relationships
+before saving and disables Save until they are corrected. A per-payment cap
+above the saved offer ceiling cannot be saved; a smaller positive cap may be
+saved but retains the readiness warning. Core rechecks every save against the
+current policy. Rejected saves keep your edits and show an explanation in the
+form instead of a technical error dialog.
+
+After Core confirms an offer or spending-limit save, the GUI immediately reads
+the combined provider status again. The previous overview warning is replaced
+by a loading state during that read. A failed read shows status unavailable,
+not the old conflict or a readiness claim. An unsaved edit or unconfirmed save
+does not clear the saved-state warning.
+
 Review the intended ceiling and finite limits explicitly. Separately saved
 policies may pass through an intermediate mismatch while being changed; the
 warning makes that state visible. No warning changes readiness, raises a limit
