@@ -1104,6 +1104,14 @@ bool IsHex256Field(const UniValue& object, const char* name)
     return IsNonNullHex256(object.find_value(name));
 }
 
+bool IsExplicitlyStoppedProvider(const UniValue& provider)
+{
+    const auto& state = provider.find_value("service_state");
+    return IsHex256Field(provider, "provider_id") && provider.find_value("enabled").isFalse() &&
+        provider.find_value("running").isFalse() && provider.find_value("start_requested").isFalse() &&
+        state.isStr() && state.get_str() == "stopped";
+}
+
 bool IsExactProviderPolicyAcknowledgement(const UniValue& requested,
                                           const UniValue& persisted)
 {
@@ -10153,6 +10161,7 @@ private:
         if (!states.contains(state)) { resetOperatorPresentation(); return; }
         const bool running = provider.find_value("running").get_bool();
         const bool ready = provider.find_value("ready").get_bool();
+        const bool stopped = IsExplicitlyStoppedProvider(provider);
         const auto& unlock_deadline = snapshot.find_value("unlocked_until");
         const bool expired = unlock_deadline.isNum() && unlock_deadline.getInt<int64_t>() > 0 &&
                              unlock_deadline.getInt<int64_t>() <= QDateTime::currentSecsSinceEpoch();
@@ -10362,6 +10371,23 @@ private:
                 hint += tr(" Open-offer limit per recipient: %1.").arg(recipient_limit.getInt<int64_t>());
             }
         }
+        if (stopped && action != QLatin1String("inspect_error")) {
+            // Service state and readiness for a future restart are separate.
+            // Keep Core's diagnostic action/start guards; do not turn a stop
+            // into a request to unlock, approve refill or raise budgets.
+            headline = tr("Paymaster is stopped");
+            hint = tr("The provider is disabled and accepts no new requests. Saved offers, reserves and limits are retained. Review any missing requirements before starting again. Already signed transactions can still confirm.");
+            kind = QStringLiteral("neutral");
+            const auto& operations = provider.find_value("active_operations");
+            if (operations.isArray() && operations.empty() &&
+                DigiDollar::Paymaster::OperatorWorkPhase(provider) == "idle" &&
+                provider.find_value("liquidity").find_value("policy").find_value("automatic_replenishment").isFalse() &&
+                !m_overview_liquidity_snapshot.isNull()) {
+                setStatusLabel(m_overview_liquidity_status, savedPoolTargetsReady()
+                    ? tr("Refill off · reserves retained") : tr("Refill off · reserves below saved target"), QStringLiteral("neutral"));
+                m_overview_liquidity_action->setText(tr("Review liquidity"));
+            }
+        }
         if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
         m_operator_next_action = action;
         m_operator_next_area = area;
@@ -10441,8 +10467,10 @@ private:
             }
             m_overview_budget_details->setVisible(!budgets.isEmpty());
             setStatusLabel(m_overview_safety_status, budgets.isEmpty() ? tr("No spending authorization available") :
-                action == QLatin1String("review_budget") ? tr("Review spending limits") : tr("Limits active"),
-                action == QLatin1String("review_budget") || budgets.isEmpty() ? QStringLiteral("action") : QStringLiteral("ready"));
+                action == QLatin1String("review_budget") ? (stopped ? tr("Saved limits · review before restart") : tr("Review spending limits")) :
+                stopped ? tr("Saved limits") : tr("Limits active"),
+                action == QLatin1String("review_budget") || budgets.isEmpty() ? QStringLiteral("action") :
+                stopped ? QStringLiteral("neutral") : QStringLiteral("ready"));
         } catch (const std::exception&) {
             m_overview_budget_details->hide();
             setStatusLabel(m_overview_safety_status, tr("Budget status unavailable"), QStringLiteral("waiting"));
@@ -10457,6 +10485,7 @@ private:
         const auto& policy = provider.find_value("policy");
         const auto& safety = snapshot.find_value("safety");
         const auto& state = provider.find_value("service_state");
+        const bool stopped = IsExplicitlyStoppedProvider(provider);
         const bool accepting = provider.find_value("running").isTrue() && provider.find_value("enabled").isTrue() &&
             provider.find_value("ready").isTrue() && !locked && state.isStr() &&
             m_operator_next_action != QLatin1String("inspect_error") &&
@@ -10492,7 +10521,9 @@ private:
                     configured &= limits.find_value(field).getInt<int64_t>() > 0;
             }
             const auto& can_accept = usage.find_value("can_accept_minimum_quote");
-            if (!configured) {
+            if (stopped) {
+                setStatusLabel(status, tr("Configured · provider stopped"), QStringLiteral("neutral"));
+            } else if (!configured) {
                 setStatusLabel(status, tr("Enabled · spending approval needed"), QStringLiteral("action"));
             } else if (!can_accept.isBool()) {
                 setStatusLabel(status, tr("Enabled · budget status unavailable"), QStringLiteral("waiting"));

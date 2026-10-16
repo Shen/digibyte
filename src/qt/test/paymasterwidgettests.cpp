@@ -9515,6 +9515,112 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions_data()
     QTest::newRow("light") << QStringLiteral("light");
 }
 
+void PaymasterWidgetTests::paymasterStoppedOverview_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const char* scenario : {"empty_budget", "locked", "retained", "sponsored", "open_payment",
+                                 "unknown_error", "restore", "checkpoint", "start_requested", "enabled",
+                                 "inconsistent", "missing_stop_observation"})
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+}
+
+void PaymasterWidgetTests::paymasterStoppedOverview()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("enabled", scenario == "enabled");
+    provider.pushKV("running", scenario == "inconsistent");
+    provider.pushKV("ready", false);
+    provider.pushKV("start_requested", scenario == "missing_stop_observation" ? UniValue{} : UniValue{scenario == "start_requested"});
+    provider.pushKV("wallet_locked", scenario == "locked");
+    provider.pushKV("active_operations", UniValue{UniValue::VARR});
+    UniValue errors{UniValue::VARR};
+    errors.push_back("PAYMASTER_SAFETY_LIMIT_EXHAUSTED"); // First diagnostic must not replace the confirmed stop.
+    errors.push_back("PAYMASTER_PROVIDER_NOT_ENABLED");
+    errors.push_back("PAYMASTER_OPERATIONAL_SLOT_MISSING");
+    if (scenario == "locked") errors.push_back("PAYMASTER_WALLET_LOCKED");
+    if (scenario == "unknown_error") errors.push_back("PAYMASTER_UNKNOWN_FAILURE");
+    if (scenario == "restore") errors.push_back("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
+    if (scenario == "checkpoint") errors.push_back("PAYMASTER_PROVIDER_CHECKPOINT_MISSING");
+    provider.pushKV("readiness_errors", errors);
+    auto liquidity = PaymasterLiquidityStatus(scenario == "retained" ? "ready" : "waiting_for_maintenance_approval", true, false, scenario == "retained" ? 0 : 1);
+    auto policy = liquidity.find_value("policy");
+    policy.pushKV("automatic_replenishment", false);
+    liquidity.pushKV("policy", policy);
+    provider.pushKV("liquidity", liquidity);
+    auto pool = provider.find_value("pool");
+    UniValue activity{UniValue::VOBJ};
+    for (const char* key : {"active_payments", "capacity_requests", "reserved_outputs", "pending_confirmations"}) activity.pushKV(key, 0);
+    if (scenario == "open_payment") activity.pushKV("active_payments", 1);
+    pool.pushKV("activity", activity);
+    provider.pushKV("pool", pool);
+    if (scenario == "sponsored") {
+        auto offer = provider.find_value("policy");
+        UniValue models{UniValue::VARR}; models.push_back("sponsored");
+        offer.pushKV("funding_models", models);
+        provider.pushKV("policy", offer);
+    }
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+    int mutations{0};
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        ++mutations;
+        throw std::runtime_error("Status rendering must not mutate the provider");
+        return UniValue{};
+    });
+    panel->refreshStatus();
+    auto* headline = panel->findChild<QLabel*>("paymasterOperatorHeadline");
+    auto* header = panel->findChild<QLabel*>("paymasterProviderStatus");
+    auto* hint = panel->findChild<QLabel*>("paymasterOperatorHint");
+    auto* capital = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
+    auto* start = panel->findChild<QPushButton*>("paymasterOperatorStart");
+    QVERIFY(headline && header && hint && capital && start);
+    const bool stop_observed = scenario != "start_requested" && scenario != "enabled" &&
+        scenario != "inconsistent" && scenario != "missing_stop_observation";
+    const bool protected_state = scenario == "unknown_error" || scenario == "restore" || scenario == "checkpoint";
+    QCOMPARE(headline->text() == "Paymaster is stopped", stop_observed && !protected_state);
+    QVERIFY(!start->isEnabled()); // No readiness/approval bypass from the presentation change.
+    if (protected_state) {
+        QCOMPARE(headline->text(), scenario == "restore" ? QStringLiteral("Restored provider wallet is protected") :
+            scenario == "checkpoint" ? QStringLiteral("Provider wallet safety check needs review") : QStringLiteral("Status needs review"));
+    }
+    if (stop_observed && !protected_state) {
+        QCOMPARE(header->text(), headline->text());
+        QVERIFY(hint->text().contains("no new requests"));
+        QVERIFY(hint->text().contains("signed transactions can still confirm"));
+        QCOMPARE(panel->findChild<QGroupBox*>("paymasterOperatorCard")->property("statusKind").toString(), QStringLiteral("neutral"));
+        if (scenario != "open_payment") {
+            QVERIFY(capital->text().contains(scenario == "retained" ? "reserves retained" : "reserves below saved target"));
+            QCOMPARE(capital->property("statusKind").toString(), QStringLiteral("neutral"));
+        } else {
+            QVERIFY(!capital->text().contains("Refill off"));
+            QVERIFY(panel->findChild<QLabel*>("paymasterLive_activity")->text().contains("work in progress"));
+        }
+        const auto model = scenario == "sponsored" ? "sponsored" : "user_paid";
+        auto* offer_status = panel->findChild<QLabel*>(QStringLiteral("paymasterLive_") + model);
+        QVERIFY(offer_status->text().contains("Configured · provider stopped"));
+        QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("neutral"));
+    }
+    if (scenario == "empty_budget") {
+        // A fresh running observation must remove the stopped presentation.
+        provider.pushKV("enabled", true);
+        provider.pushKV("running", true);
+        provider.pushKV("ready", true);
+        provider.pushKV("service_state", "active");
+        provider.pushKV("readiness_errors", UniValue{UniValue::VARR});
+        snapshot.pushKV("provider", provider);
+        snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+        panel->refreshStatus();
+        QCOMPARE(headline->text(), QStringLiteral("Provider is running"));
+        QVERIFY(panel->findChild<QLabel*>("paymasterLive_user_paid")->text().contains("accepting requests"));
+    }
+    QCOMPARE(mutations, 0);
+}
+
 void PaymasterWidgetTests::paymasterLiveOverview_data()
 {
     paymasterFinanceOperatorPresentation_data();
