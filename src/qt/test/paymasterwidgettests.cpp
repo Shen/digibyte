@@ -70,6 +70,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFocusEvent>
+#include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
 #include <QPlainTextEdit>
@@ -9586,7 +9587,8 @@ void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
     QCOMPARE(settings->widget(1), lifecycle); // First Settings destination, after its home page.
     auto* settings_home = panel->findChild<QWidget*>("paymasterSettingsHome");
     const auto menu = settings_home->findChildren<QPushButton*>();
-    QCOMPARE(menu.size(), 8);
+    QCOMPARE(menu.size(), 7);
+    QVERIFY(!panel->findChild<QPushButton*>("paymasterDiagnosticsPageLink"));
     QCOMPARE(menu.front()->accessibleName(), QStringLiteral("Start, pause & retire"));
     QCOMPARE(tabs->indexOf(funds), -1);
     QVERIFY(funds->isAncestorOf(panel->findChild<QCheckBox*>("paymasterSettingsRefill")));
@@ -9612,6 +9614,14 @@ void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
     QCOMPARE(settings->currentWidget(), lifecycle);
     panel->findChild<QPushButton*>("paymasterLifecycleOverviewLink")->click();
     QCOMPARE(tabs->currentIndex(), 0);
+    auto* connection_page = panel->findChild<QWidget*>("paymasterConnectionPage");
+    auto* diagnostic_link = panel->findChild<QPushButton*>("paymasterConnectionDiagnosticsLink");
+    QVERIFY(connection_page && diagnostic_link && connection_page->isAncestorOf(diagnostic_link));
+    SelectPaymasterPage(tabs, connection_page);
+    diagnostic_link->click();
+    QCOMPARE(settings->currentWidget()->objectName(), QStringLiteral("paymasterDiagnosticsPage"));
+    panel->findChild<QPushButton*>("paymasterDiagnosticsBack")->click();
+    QCOMPARE(settings->currentWidget(), connection_page);
 }
 
 namespace {
@@ -12696,7 +12706,7 @@ void PaymasterWidgetTests::paymasterGuidedTaskLayout()
 void PaymasterWidgetTests::paymasterNodeConnectionEditor_data()
 {
     QTest::addColumn<QString>("scenario");
-    for (const char* value : {"unchanged", "override", "all_locked_dark", "all_locked_light", "save", "edit_after_preview", "core_conflict", "wallet_change", "privacy", "close_pending"})
+    for (const char* value : {"unchanged", "override", "all_locked_dark", "all_locked_light", "all_locked_onion_dark", "mixed_sources", "pending_restart", "incomplete", "save", "edit_after_preview", "core_conflict", "wallet_change", "privacy", "close_pending"})
         QTest::newRow(value) << QString::fromLatin1(value);
 }
 
@@ -12704,6 +12714,7 @@ void PaymasterWidgetTests::paymasterNodeConnectionEditor()
 {
     QFETCH(QString, scenario);
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    panel->setObjectName("paymasterWidget");
     if (scenario.startsWith("all_locked_")) {
         QFile css(QStringLiteral(":/css/") + scenario.section('_', -1));
         QVERIFY(css.open(QIODevice::ReadOnly));
@@ -12714,6 +12725,7 @@ void PaymasterWidgetTests::paymasterNodeConnectionEditor()
     QVERIFY(settings.read(R"({"paymasterbind":["127.0.0.1:18450"],"paymasterendpoint":"127.0.0.1:18450",
         "digidollar":1,"paymaster":1,"txindex":1,"v2transport":1,"prune":0,"maxconnections":125,
         "paymastermaxoutbound":1,"paymastermaxinbound":16})"));
+    if (scenario.contains("onion")) settings.pushKV("paymasterendpoint", "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:12025");
     snapshot.pushKV("node_settings", settings);
     if (scenario == "override" || scenario.startsWith("all_locked_")) {
         UniValue overrides{UniValue::VOBJ}; overrides.pushKV("paymasterbind", "command_line");
@@ -12733,6 +12745,34 @@ void PaymasterWidgetTests::paymasterNodeConnectionEditor()
         field.pushKV("reason", locked ? "command_line" : "");
         field.pushKV("restart_required", false);
         fields.pushKV(key, field);
+    }
+    if (scenario == "mixed_sources") {
+        for (const auto& item : {std::make_pair("digidollar", "command_line"), std::make_pair("paymaster", "settings_json"), std::make_pair("txindex", "forced")}) {
+            auto field = fields.find_value(item.first);
+            field.pushKV("editable", false);
+            field.pushKV("source", item.second);
+            field.pushKV("reason", item.second);
+            fields.pushKV(item.first, field);
+        }
+        auto field = fields.find_value("v2transport");
+        field.pushKV("editable", false);
+        field.pushKV("source", "loaded_configuration");
+        field.pushKV("reason", "included file: included.conf");
+        fields.pushKV("v2transport", field);
+    } else if (scenario == "pending_restart") {
+        auto field = fields.find_value("paymasterendpoint");
+        field.pushKV("configured_value", "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:12025");
+        field.pushKV("restart_required", true);
+        field.pushKV("source", "loaded_configuration");
+        fields.pushKV("paymasterendpoint", field);
+        field = fields.find_value("digidollar");
+        field.pushKV("value", 0);
+        field.pushKV("restart_required", true);
+        fields.pushKV("digidollar", field);
+    } else if (scenario == "incomplete") {
+        auto field = fields.find_value("paymaster");
+        field.pushKV("source", UniValue{});
+        fields.pushKV("paymaster", field);
     }
     node.pushKV("network", "regtest"); node.pushKV("target", "node.conf"); node.pushKV("fields", fields);
     int previews{0}, writes{0};
@@ -12774,6 +12814,40 @@ void PaymasterWidgetTests::paymasterNodeConnectionEditor()
         auto* save = dialog->findChild<QPushButton*>("paymasterNodeSave");
         auto* status = dialog->findChild<QLabel*>("paymasterNodeConfigStatus");
         QVERIFY(preview && save && status);
+        for (const auto& group : {std::make_pair("paymasterNodeAddresses", "paymasterNode_paymasterendpoint"),
+                                  std::make_pair("paymasterNodeFeatures", "paymasterNode_digidollar"),
+                                  std::make_pair("paymasterNodeCapacity", "paymasterNode_maxconnections")}) {
+            auto* section = dialog->findChild<QGroupBox*>(group.first);
+            QVERIFY(section && section->isAncestorOf(dialog->findChild<QWidget*>(group.second)));
+        }
+        for (const auto* label : dialog->findChildren<QLabel*>()) {
+            QVERIFY(!label->text().contains("command_line"));
+            QVERIFY(!label->text().contains("loaded_configuration"));
+        }
+        if (scenario == "mixed_sources") {
+            QVERIFY(dialog->findChild<QLabel*>("paymasterNodeSource_digidollar")->text().contains("Start command / BAT"));
+            QVERIFY(dialog->findChild<QLabel*>("paymasterNodeSource_paymaster")->text().contains("settings.json"));
+            QVERIFY(dialog->findChild<QLabel*>("paymasterNodeSource_txindex")->text().contains("Runtime override"));
+            QVERIFY(dialog->findChild<QLabel*>("paymasterNodeSource_v2transport")->text().contains("Configuration file"));
+            QVERIFY(total && total->isEnabled());
+            QCOMPARE(previews, 0);
+            return;
+        }
+        if (scenario == "pending_restart") {
+            auto* pending = dialog->findChild<QLabel*>("paymasterNodePending_paymasterendpoint");
+            QVERIFY(pending && pending->text().contains("Running now: 127.0.0.1:18450"));
+            QVERIFY(pending->text().contains("restart required"));
+            QVERIFY(dialog->findChild<QLineEdit*>("paymasterNode_paymasterendpoint")->text().contains(".onion:12025"));
+            QVERIFY(dialog->findChild<QLabel*>("paymasterNodePending_digidollar")->text().contains("Running now: No"));
+            QCOMPARE(previews, 0);
+            return;
+        }
+        if (scenario == "incomplete") {
+            QVERIFY(!preview->isEnabled());
+            QVERIFY(!save->isEnabled());
+            QVERIFY(status->text().contains("incomplete"));
+            return;
+        }
         if (scenario.startsWith("all_locked_")) {
             QVERIFY(!bind && !total);
             QVERIFY(preview->isHidden() && save->isHidden());
@@ -12782,7 +12856,32 @@ void PaymasterWidgetTests::paymasterNodeConnectionEditor()
             auto* scroll = panel->findChild<QScrollArea*>("paymasterConnectionPage");
             QVERIFY(scroll && scroll->isAncestorOf(dialog));
             const QString screenshot = qEnvironmentVariable("DIGIBYTE_PAYMASTER_NODE_SCREENSHOT");
-            if (!screenshot.isEmpty()) QVERIFY(dialog->grab().save(screenshot + "-" + scenario + ".png"));
+            panel->resize(1180, 900);
+            panel->show();
+            QCoreApplication::processEvents();
+            for (const auto& size : {QSize(1180, 900), QSize(650, 780)}) {
+                panel->resize(size);
+                QCoreApplication::processEvents();
+                QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+                for (auto* label : dialog->findChildren<QLabel*>()) {
+                    if (label->isVisible() && label->wordWrap())
+                        QTRY_VERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(label->text()));
+                }
+                for (auto* section : dialog->findChildren<QGroupBox*>()) {
+                    auto* rows = qobject_cast<QFormLayout*>(section->layout());
+                    QVERIFY(rows);
+                    for (int row = 0; row < rows->rowCount(); ++row) {
+                        auto* label = rows->itemAt(row, QFormLayout::LabelRole)->widget();
+                        auto* field = rows->itemAt(row, QFormLayout::FieldRole)->widget();
+                        QVERIFY(!label->geometry().intersects(field->geometry()));
+                    }
+                }
+                if (!screenshot.isEmpty()) {
+                    QVERIFY(dialog->grab().save(screenshot + "-" + scenario + "-" + QString::number(size.width()) + ".png"));
+                    scroll->verticalScrollBar()->setValue(0);
+                    QVERIFY(panel->grab().save(screenshot + "-page-" + scenario + "-" + QString::number(size.width()) + ".png"));
+                }
+            }
             QCOMPARE(previews, 0);
             return;
         }

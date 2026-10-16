@@ -6429,6 +6429,7 @@ QWidget#paymasterWidget QScrollArea#paymasterFinancesPage,
 QWidget#paymasterWidget QScrollArea#paymasterActivityPage,
 QWidget#paymasterWidget QWidget#paymasterOverviewContents,
 QWidget#paymasterWidget QWidget#paymasterConnectionContents,
+QWidget#paymasterWidget QWidget#paymasterNodeConfigEditor,
 QWidget#paymasterWidget QWidget#paymasterDiagnosticsContents,
 QWidget#paymasterWidget QWidget#paymasterManagementContents,
 QWidget#paymasterWidget QWidget#paymasterLifecycleContents,
@@ -7517,4 +7518,27 @@ DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::sub-line:
 DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::add-page:vertical,
 DigiDollarSendWidget QScrollArea#paymasterOfferCardsScroll QScrollBar::sub-page:vertical {
     background-color: #edf8f1;
+}
+
+/* Grouped node settings: distinguish the value from its source. */
+QWidget#paymasterWidget QWidget#paymasterNodeConfigEditor QLabel[paymasterRole="nodeSettingName"] {
+    color: #123f2b;
+    font-size: 10pt;
+    font-weight: 600;
+}
+
+QWidget#paymasterWidget QWidget#paymasterNodeConfigEditor QLabel[paymasterRole="nodeSettingValue"] {
+    color: #123f2b;
+    font-size: 11pt;
+    font-weight: 700;
+}
+
+QWidget#paymasterWidget QWidget#paymasterNodeConfigEditor QLabel[paymasterRole="nodeSettingSource"] {
+    color: #426650;
+    background-color: #edf8f1;
+    border: 1px solid #b8d9c7;
+    border-radius: 4px;
+    padding: 3px 7px;
+    font-size: 8pt;
+    font-weight: 400;
 }

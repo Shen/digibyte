@@ -2171,7 +2171,7 @@ public:
         auto* connection_column = CreatePaymasterPageColumn(connection, connection_layout);
         AddPaymasterPageHeading(connection_layout, connection_column, tr("Node connection"),
                                 tr("Connection settings apply to every wallet on this node. Review reachability and changes that need a restart."), QStringLiteral("paymasterConnection"));
-        auto* network_group = new QGroupBox(tr("Connection and reachability"), connection_column);
+        auto* network_group = new QGroupBox(tr("Connection checks"), connection_column);
         network_group->setObjectName("paymasterConnectionNetwork");
         auto* network_layout = new QVBoxLayout(network_group);
         auto* connection_help = new QLabel(tr("Local readiness means this node can accept connections. To check reachability, run checkpaymasterendpoint with the announced IP or Tor address from another node. The RPC result describes that connection attempt; it does not verify provider identity, available reserves or payments."), network_group);
@@ -4356,7 +4356,7 @@ public:
         diagnostics_contents->setObjectName("paymasterDiagnosticsContents");
         QVBoxLayout* diagnostics_layout{nullptr};
         auto* diagnostics_column = CreatePaymasterPageColumn(diagnostics_contents, diagnostics_layout);
-        AddPaymasterPageHeading(diagnostics_layout, diagnostics_column, tr("Advanced diagnostics"),
+        AddPaymasterPageHeading(diagnostics_layout, diagnostics_column, tr("Connection test"),
             tr("Copy a connection-test command and run it on a second node on the same network, with Paymaster and V2 transport enabled and outgoing Paymaster capacity. Opening this page does not start a connection test."),
             QStringLiteral("paymasterDiagnostics"));
         auto* endpoint_group = new QGroupBox(tr("Connection test from another node"), diagnostics_column);
@@ -4470,8 +4470,17 @@ public:
             tr("Edit node settings and review their sources and reachability."));
         add_settings_page(technical_settings, management_scroll, management_layout, tr("Wallet & backup"),
             tr("Manage wallet access and protect the provider with a full-wallet backup."));
-        add_settings_page(technical_settings, diagnostics_scroll, diagnostics_layout, tr("Advanced diagnostics"),
-            tr("Copy the connection-test command for another node, using this node's announced IP or Tor address."));
+        // This detail view belongs to Node connection, not the Settings menu.
+        auto* diagnostics_back = new QPushButton(tr("Back to node connection"), diagnostics_column);
+        diagnostics_back->setObjectName("paymasterDiagnosticsBack");
+        diagnostics_layout->insertWidget(0, diagnostics_back, 0, Qt::AlignLeft);
+        connect(diagnostics_back, &QPushButton::clicked, this, [this] { showOperatorPage(m_connection_page); });
+        m_settings_tabs->addWidget(diagnostics_scroll);
+        auto* connection_test = new QPushButton(tr("Test connection from another node…"), network_group);
+        connection_test->setObjectName("paymasterConnectionDiagnosticsLink");
+        connection_test->setProperty("paymasterRole", QStringLiteral("primaryAction"));
+        network_layout->insertWidget(1, connection_test, 0, Qt::AlignLeft);
+        connect(connection_test, &QPushButton::clicked, this, [this] { showOperatorPage(m_diagnostics_page); });
 
         const auto related_settings = [this](QVBoxLayout* layout, const QString& title,
                                              const char* name, QWidget* destination) {
@@ -4484,7 +4493,6 @@ public:
         related_settings(safety_layout, tr("Configure reserve capital and refill costs"), "paymasterBudgetsReservesLink", m_liquidity_page);
         related_settings(liquidity_layout, tr("Review customer-payment budgets"), "paymasterReservesBudgetsLink", m_safety_page);
         related_settings(automation_layout, tr("Configure automatic reserve refill"), "paymasterStartupReservesLink", m_liquidity_page);
-        related_settings(connection_layout, tr("Connection-test commands — open Advanced diagnostics"), "paymasterConnectionDiagnosticsLink", m_diagnostics_page);
 
         auto* refill_controls = new QGroupBox(tr("Automatic refill — saved settings"), liquidity_column);
         refill_controls->setObjectName("paymasterSavedRefillControls");
@@ -11186,14 +11194,55 @@ private:
         const auto generation = m_wallet_generation;
         auto* panel = new QWidget(parent);
         panel->setObjectName("paymasterNodeConfigEditor");
+        panel->setAttribute(Qt::WA_StyledBackground, true);
         const QPointer<QWidget> guard{panel};
         auto* layout = new QVBoxLayout(panel);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(16);
         auto* help = new QLabel(tr("Review all current connection settings here. Only changed values are previewed. Saving requires a reviewed plan and an explicit node restart; this window does not configure your firewall or Tor service."), panel);
+        help->setProperty("paymasterRole", QStringLiteral("summaryText"));
         help->setWordWrap(true);
         layout->addWidget(help);
         auto* contents = new QWidget(panel);
         auto* form = new QVBoxLayout(contents);
+        form->setContentsMargins(0, 0, 0, 0);
+        form->setSpacing(16);
         layout->addWidget(contents);
+        const auto section = [contents, form](const QString& title, const char* name) {
+            auto* group = new QGroupBox(title, contents);
+            group->setObjectName(QString::fromLatin1(name));
+            group->setProperty("paymasterRole", QStringLiteral("card"));
+            auto* rows = new QFormLayout(group);
+            rows->setContentsMargins(18, 22, 18, 16);
+            rows->setHorizontalSpacing(28);
+            rows->setVerticalSpacing(16);
+            rows->setLabelAlignment(Qt::AlignLeft | Qt::AlignTop);
+            rows->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            rows->setRowWrapPolicy(QFormLayout::WrapLongRows);
+            form->addWidget(group);
+            return rows;
+        };
+        auto* addresses = section(tr("Addresses"), "paymasterNodeAddresses");
+        auto* features = section(tr("Required node features"), "paymasterNodeFeatures");
+        auto* capacity = section(tr("Connection capacity"), "paymasterNodeCapacity");
+        const auto display_value = [this](const std::string& key, const UniValue& value) {
+            if (key == "paymasterbind" && value.isArray()) {
+                QStringList values;
+                for (const auto& bind : value.getValues()) {
+                    if (!bind.isStr()) return tr("Unavailable");
+                    values << QString::fromStdString(bind.get_str());
+                }
+                return values.empty() ? tr("Not configured") : values.join('\n');
+            }
+            if (key == "paymasterendpoint" && value.isStr())
+                return value.get_str().empty() ? tr("Not configured") : QString::fromStdString(value.get_str());
+            if (value.isNum()) {
+                if (key == "maxconnections" || key == "paymastermaxoutbound" || key == "paymastermaxinbound")
+                    return QString::fromStdString(value.write());
+                return (key == "prune" ? value.getInt<int64_t>() == 0 : value.getInt<int64_t>() == 1) ? tr("Yes") : tr("No");
+            }
+            return tr("Unavailable");
+        };
         struct Field { std::string key; QWidget* input; UniValue original; QString caption; };
         std::vector<Field> fields;
         const auto& metadata = current.find_value("fields");
@@ -11245,61 +11294,85 @@ private:
                 input = check;
             }
             input->setObjectName(QStringLiteral("paymasterNode_") + QString::fromStdString(key));
-            QString label = caption;
             const auto& source = info.find_value("source");
+            const auto& reason = info.find_value("reason");
+            const QString source_name = !source.isStr() ? tr("Unknown source") :
+                source.get_str() == "command_line" ? tr("Start command / BAT") :
+                source.get_str() == "settings_json" ? tr("settings.json") :
+                source.get_str() == "forced" ? tr("Runtime override") :
+                source.get_str() == "loaded_configuration" ? tr("Configuration file") :
+                source.get_str() == "default" ? tr("Node default") : tr("Unknown source");
             if (!editable) {
                 locked = true;
-                QString displayed;
-                if (auto* edit = qobject_cast<QPlainTextEdit*>(input)) displayed = edit->toPlainText();
-                else if (auto* edit = qobject_cast<QLineEdit*>(input)) displayed = edit->text();
-                else if (auto* spin = qobject_cast<QSpinBox*>(input)) displayed = QString::number(spin->value());
-                else if (auto* check = qobject_cast<QCheckBox*>(input)) displayed = check->isChecked() ? tr("Yes") : tr("No");
-                if (displayed.isEmpty()) displayed = tr("Not configured");
                 const QString tooltip = input->toolTip();
                 delete input;
-                auto* fixed = new QLabel(displayed, contents);
+                auto* fixed = new QLabel(display_value(key, value), contents);
+                fixed->setProperty("paymasterRole", QStringLiteral("nodeSettingValue"));
                 fixed->setTextFormat(Qt::PlainText);
                 fixed->setWordWrap(true);
                 fixed->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
                 fixed->setToolTip(tooltip);
-                QFont font = fixed->font(); font.setBold(true); fixed->setFont(font);
                 input = fixed;
                 input->setObjectName(QStringLiteral("paymasterNode_") + QString::fromStdString(key));
-                label += QStringLiteral(" (-%1)").arg(QString::fromStdString(key));
-                label += source.isStr() && source.get_str() == "command_line" ? tr(" — start command / BAT") :
-                    source.isStr() && source.get_str() == "settings_json" ? tr(" — settings.json") :
-                    source.isStr() && source.get_str() == "forced" ? tr(" — runtime override") : tr(" — configuration conflict");
-                const auto& reason = info.find_value("reason");
-                if (reason.isStr() && !reason.get_str().empty()) label += QStringLiteral("\n") + QString::fromStdString(reason.get_str());
             }
-            auto* name = new QLabel(label, contents);
+            auto* description = new QWidget(contents);
+            description->setMinimumWidth(245);
+            description->setMaximumWidth(285);
+            auto* description_layout = new QVBoxLayout(description);
+            description_layout->setContentsMargins(0, 0, 0, 0);
+            description_layout->setSpacing(4);
+            auto* name = new QLabel(caption, description);
+            name->setProperty("paymasterRole", QStringLiteral("nodeSettingName"));
             name->setTextFormat(Qt::PlainText);
             name->setWordWrap(true);
-            name->setToolTip(QStringLiteral("-") + QString::fromStdString(key));
             name->setBuddy(input);
-            form->addWidget(name);
-            form->addWidget(input);
+            description_layout->addWidget(name);
+            auto* option = new QLabel(QStringLiteral("-") + QString::fromStdString(key), description);
+            option->setProperty("paymasterRole", QStringLiteral("mutedText"));
+            option->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+            description_layout->addWidget(option);
+            auto* value_column = new QWidget(contents);
+            value_column->setMinimumWidth(220);
+            auto* value_layout = new QVBoxLayout(value_column);
+            value_layout->setContentsMargins(0, 0, 0, 0);
+            value_layout->setSpacing(5);
+            input->setAccessibleName(caption);
+            value_layout->addWidget(input);
+            auto* provenance = new QLabel(editable ? tr("Source: %1").arg(source_name) : tr("%1 · Read-only").arg(source_name), value_column);
+            provenance->setObjectName(QStringLiteral("paymasterNodeSource_") + QString::fromStdString(key));
+            provenance->setProperty("paymasterRole", QStringLiteral("nodeSettingSource"));
+            provenance->setTextFormat(Qt::PlainText);
+            provenance->setWordWrap(true);
+            provenance->setMaximumWidth(300);
+            value_layout->addWidget(provenance);
+            if (!editable && reason.isStr() && !reason.get_str().empty() &&
+                (!source.isStr() || reason.get_str() != source.get_str())) {
+                auto* conflict = new QLabel(tr("Review configuration source: %1").arg(QString::fromStdString(reason.get_str())), value_column);
+                conflict->setProperty("paymasterRole", QStringLiteral("mutedText"));
+                conflict->setWordWrap(true);
+                conflict->setTextFormat(Qt::PlainText);
+                value_layout->addWidget(conflict);
+            }
+            auto* rows = key == "paymasterbind" || key == "paymasterendpoint" ? addresses :
+                key == "maxconnections" || key == "paymastermaxoutbound" || key == "paymastermaxinbound" ? capacity : features;
+            rows->addRow(description, value_column);
             if (editable) {
                 fields.push_back({key, input, value, caption});
-                const QString source_text = source.isStr() && source.get_str() == "loaded_configuration"
-                    ? tr("configuration loaded at startup") : tr("node default");
-                auto* provenance = new QLabel(tr("Current value: %1 · Source: %2")
-                    .arg(QString::fromStdString(info.find_value("value").write()), source_text), contents);
-                provenance->setTextFormat(Qt::PlainText);
-                provenance->setWordWrap(true);
-                form->addWidget(provenance);
                 if (info.find_value("restart_required").isTrue()) {
-                    auto* pending = new QLabel(tr("Saved in the configuration file; restart the node to use the displayed edit value."), contents);
+                    auto* pending = new QLabel(tr("Running now: %1\nSaved change — restart required.").arg(display_value(key, info.find_value("value"))), value_column);
+                    pending->setProperty("paymasterRole", QStringLiteral("summaryText"));
+                    pending->setTextFormat(Qt::PlainText);
                     pending->setWordWrap(true);
                     pending->setObjectName(QStringLiteral("paymasterNodePending_") + QString::fromStdString(key));
-                    form->addWidget(pending);
+                    value_layout->addWidget(pending);
                 }
             }
         }
         auto* source_help = new QLabel(locked
-            ? tr("Marked settings are controlled outside the node configuration file. For start-command values, edit the corresponding -option in your BAT/shortcut and restart. Alternatively, move those values into this node's configuration file and remove the overriding start arguments before using this editor. They cannot be overwritten here.")
+            ? tr("Read-only values must be changed at their source, for example in the BAT/shortcut or settings.json, followed by a node restart. To manage them here, remove the overriding setting first.")
             : tr("Start arguments and included configuration files can override this file. Core checks conflicts before saving. Tor requires a separately configured service; public reachability must be checked from another node."), panel);
         source_help->setWordWrap(true);
+        source_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
         source_help->setObjectName("paymasterNodeSourceHelp");
         layout->addWidget(source_help);
         auto* status = new QLabel(panel);
@@ -11321,8 +11394,8 @@ private:
         discard->setVisible(editable);
         preview_button->setEnabled(complete && editable);
         if (!editable) {
-            help->setText(tr("These settings are supplied externally and cannot be changed in this window. Their current values and sources are shown below."));
-            status->setText(tr("To change these values, edit their displayed source and restart the node."));
+            help->setText(tr("These settings are managed outside this window. Current values are shown below; the source badge identifies where to change each setting."));
+            if (complete) status->hide();
         }
         save->setEnabled(false);
         layout->addWidget(buttons);
