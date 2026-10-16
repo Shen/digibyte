@@ -54,8 +54,19 @@ of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
 **Settings > Node connection** describes the local listener and its configuration.
-For a separate reachability check, run `checkpaymasterendpoint` from another node
-and inspect its RPC result directly; JSON report import has been removed. Both
+**Settings > Advanced diagnostics** provides copyable RPC-console and CLI
+commands for a second node, using the current announced `-paymasterendpoint`
+and network. It reads the running node's configuration, not unsaved edits or
+the local bind address. It does not discover a public IP behind NAT, create a
+Tor service or run the probe automatically. Configure the public IP/onion address
+and port in Node connection and restart if the announced endpoint is missing.
+The CLI example needs the second node's `-datadir` or `-rpcport` if nonstandard;
+use the executable's full path when it is not on PATH (`.\digibyte-cli.exe` in
+PowerShell when in its directory). Regtest loopback tests require both nodes on
+the same computer and do not establish Internet reachability.
+
+Run `checkpaymasterendpoint` from that second node and inspect its RPC result
+directly; JSON report import has been removed. Both
 numeric IP endpoints and Tor v3 onion endpoints are supported, subject to the
 [diagnostic prerequisites](digidollar-paymaster.md#start-and-verify-mainnet-operation).
 A reachable listener does not establish payment readiness or available reserves.
@@ -133,6 +144,8 @@ configuration. **Start, pause & retire** remains first. **Startup & processing**
 contains autostart and the automatic/manual request-processing mode; automatic
 reserve refill belongs to **Reserves & refill**. **Node connection** and
 **Wallet & backup** retain connection, unlock and recovery tools.
+**Advanced diagnostics** contains the commands and prerequisites for an
+independent connection check; it does not alter the provider's readiness.
 
 Review the three service settings in this order:
 

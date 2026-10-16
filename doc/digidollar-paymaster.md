@@ -173,6 +173,11 @@ in this explicit network probe:
 digibyte-cli -chain=main checkpaymasterendpoint 'PUBLIC_NUMERIC_IP:12025'
 ```
 
+The provider GUI's **Settings > Advanced diagnostics** supplies a copyable
+command with its current announced address and network. It uses the running
+`-paymasterendpoint`; it does not discover an external IP/Tor address or probe
+automatically. Use the second node's data directory/RPC port when nonstandard.
+
 `transport_ready=true` and `state="transport_ready"` mean that BIP324/V2 and
 Paymaster capability negotiation succeeded. The endpoint does not need a loaded
 wallet, provider identity, funds or a running provider for this listener check.
