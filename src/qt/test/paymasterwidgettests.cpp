@@ -6410,6 +6410,13 @@ void PaymasterWidgetTests::paymasterPoolPreparationStoredFeeDiagnostics()
         QCOMPARE(step.find_value("diagnostic").isStr(), fee_detail);
         QCOMPARE(step.find_value("state").get_str(), std::string{"pending_creation"});
         QCOMPARE(step.find_value("maximum_fee_satoshis").getInt<int64_t>(), int64_t{20000000});
+        QCOMPARE(step.find_value("required_output_cents").getInt<int64_t>(), int64_t{100});
+        QCOMPARE(step.find_value("required_output_satoshis").getInt<int64_t>(), int64_t{0});
+        QVERIFY(step.find_value("confirmed_available_satoshis").isNum());
+        if (wallet->GetDDWallet()) {
+            QCOMPARE(step.find_value("confirmed_available_cents").getInt<int64_t>(), int64_t{0});
+            QCOMPARE(step.find_value("capital_shortfall_cents").getInt<int64_t>(), int64_t{100});
+        }
         QVERIFY(step.find_value("txid").isNull());
         if (fee_detail) {
             auto pool = PaymasterLiquidityPoolStatus();
@@ -6434,7 +6441,12 @@ void PaymasterWidgetTests::paymasterPoolPreparationDiagnostics_data()
     QTest::newRow("fee_limit") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_FEE_LIMIT") << QStringLiteral("review_liquidity") << QStringLiteral("0.20000000 DGB");
     QTest::newRow("invalid_fee") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_FEE_INVALID") << QStringLiteral("inspect_error") << QStringLiteral("Raising the approved setup limit does not resolve");
     QTest::newRow("estimate_exceeded") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED") << QStringLiteral("inspect_error") << QStringLiteral("Raising the approved setup limit does not resolve");
-    QTest::newRow("funding") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: insufficient DD") << QStringLiteral("review_liquidity") << QStringLiteral("Waiting for usable wallet funds");
+    QTest::newRow("funding") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: insufficient DD") << QStringLiteral("review_liquidity") << QStringLiteral("Current funding amounts are unavailable");
+    QTest::newRow("funding_dd") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: old error") << QStringLiteral("review_liquidity") << QStringLiteral("missing capital: 3.00 DD");
+    QTest::newRow("funding_both") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: old error") << QStringLiteral("review_liquidity") << QStringLiteral("missing capital: 1.43060000 DGB");
+    QTest::newRow("funding_pending") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: old error") << QStringLiteral("review_liquidity") << QStringLiteral("mine a block to confirm incoming");
+    QTest::newRow("funding_received") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: old error") << QStringLiteral("review_liquidity") << QStringLiteral("Reserve capital is covered");
+    QTest::newRow("funding_invalid") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_FUNDS: old error") << QStringLiteral("review_liquidity") << QStringLiteral("Current funding amounts are unavailable");
     QTest::newRow("parent_confirmation") << QStringLiteral("pending_creation") << QStringLiteral("PAYMASTER_POOL_WAITING_CONFIRMATION") << QStringLiteral("wait") << QStringLiteral("funding inputs to confirm");
     QTest::newRow("saved_transaction") << QStringLiteral("pending_confirmation") << QStringLiteral("PAYMASTER_POOL_WAITING_CONFIRMATION") << QStringLiteral("wait") << QStringLiteral("saved transaction is waiting");
     QTest::newRow("queued") << QStringLiteral("pending_creation") << QStringLiteral("") << QStringLiteral("wait") << QStringLiteral("30 seconds");
@@ -6454,17 +6466,49 @@ void PaymasterWidgetTests::paymasterPoolPreparationDiagnostics()
     QFETCH(QString, expected_text);
     UniValue step{UniValue::VOBJ};
     step.pushKV("plan_id", std::string(64, 'a'));
+    step.pushKV("operation_id", std::string(64, 'b'));
+    step.pushKV("kind", "preparation");
     step.pushKV("state", state.toStdString());
     step.pushKV("error", error.toStdString());
     step.pushKV("asset", "dd_carrier");
     step.pushKV("maximum_fee_satoshis", 20000000);
+    const QString test_case = QString::fromLatin1(QTest::currentDataTag());
+    if (test_case.startsWith(QLatin1String("funding_"))) {
+        step.pushKV("required_output_cents", 900);
+        step.pushKV("confirmed_available_cents", test_case == QLatin1String("funding_received") ? 900 : 600);
+        step.pushKV("capital_shortfall_cents", test_case == QLatin1String("funding_received") ? 0 :
+            test_case == QLatin1String("funding_invalid") ? -1 : 300);
+        step.pushKV("pending_cents", test_case == QLatin1String("funding_pending") ? 300 : 0);
+        step.pushKV("confirmed_available_satoshis", 186940000);
+    }
     if (state == QLatin1String("pending_confirmation")) step.pushKV("txid", std::string(64, 'b'));
     UniValue steps{UniValue::VARR};
     steps.push_back(step);
+    if (test_case == QLatin1String("funding_both")) {
+        UniValue dgb{UniValue::VOBJ};
+        dgb.pushKV("plan_id", std::string(64, 'a'));
+        dgb.pushKV("operation_id", std::string(64, 'c'));
+        dgb.pushKV("kind", "preparation");
+        dgb.pushKV("asset", "dgb");
+        dgb.pushKV("state", "pending_creation");
+        dgb.pushKV("error", "PAYMASTER_POOL_WAITING_DGB: Insufficient funds");
+        dgb.pushKV("maximum_fee_satoshis", 50000000);
+        dgb.pushKV("required_output_satoshis", 330000000);
+        dgb.pushKV("confirmed_available_satoshis", 186940000);
+        dgb.pushKV("available_including_unconfirmed_satoshis", 186940000);
+        dgb.pushKV("capital_shortfall_satoshis", 143060000);
+        steps.push_back(dgb);
+    }
     UniValue snapshot;
     QVERIFY(snapshot.read(R"({"schema_version":1,"unlocked_until":0,"provider":{"running":true,"ready":false,"enabled":true,"autostart":false,"wallet_locked":false,"service_state":"waiting_for_readiness","last_service_error":"PAYMASTER_POOL_PREPARATION_PENDING","readiness_errors":["PAYMASTER_OPERATIONAL_SLOT_MISSING"],"transport":{"listener_ready":true},"backup_status":{"required":true}}})"));
     UniValue provider = snapshot.find_value("provider");
     provider.pushKV("preparation", steps);
+    if (test_case.startsWith(QLatin1String("funding_"))) {
+        provider.pushKV("running", false);
+        provider.pushKV("start_requested", true);
+        provider.pushKV("active_operations", steps);
+    }
+    snapshot.pushKV("network", "regtest");
     snapshot.pushKV("provider", provider);
     const UniValue diagnostics = DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100);
     QCOMPARE(QString::fromStdString(diagnostics[0].find_value("action").get_str()), expected_action);
@@ -6472,10 +6516,15 @@ void PaymasterWidgetTests::paymasterPoolPreparationDiagnostics()
 
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
     int mutations{0};
-    panel->setRpcExecutorForTesting([&](const std::string&, const UniValue&) { ++mutations; return UniValue{UniValue::VOBJ}; });
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        if (method.rfind("get", 0) == 0) throw std::runtime_error("No follow-up snapshot in this fixture");
+        ++mutations;
+        return UniValue{UniValue::VOBJ};
+    });
     panel->setMutationSnapshotsAvailableForTesting(true, true, true);
     auto pool = PaymasterLiquidityPoolStatus();
     pool.pushKV("preparation", steps);
+    panel->setOperatorStatusForTesting(snapshot);
     panel->setLiquidityPoolForTesting(pool);
     panel->setOperatorStatusForTesting(snapshot);
     auto* details = panel->findChild<QLabel*>("paymasterPoolPreparationStatus");
@@ -6490,11 +6539,51 @@ void PaymasterWidgetTests::paymasterPoolPreparationDiagnostics()
             QVERIFY(hint->text().contains("new plan"));
         } else {
             QVERIFY(headline->text().contains(QStringLiteral("Pool preparation")));
-            QVERIFY(hint->text() == details->text().section(QLatin1Char('\n'), 0, 0));
+            QVERIFY2(hint->text().contains(expected_text), qPrintable(hint->text()));
+            QVERIFY(!hint->text().contains(QStringLiteral("Last attempt diagnostic:")));
         }
     }
     QCOMPARE(!cancel->isHidden(), state == QLatin1String("pending_creation"));
     QCOMPARE(mutations, 0);
+    if (test_case == QLatin1String("funding_both")) {
+        QVERIFY(hint->text().contains(QStringLiteral("missing capital: 3.00 DD")));
+        QVERIFY(hint->text().contains(QStringLiteral("not an estimate")));
+        QVERIFY(hint->text().contains(QStringLiteral("Automatic refill does not need to be enabled")));
+        QVERIFY(!hint->text().contains(QStringLiteral("mine a block")));
+        QVERIFY(headline->text().contains(QStringLiteral("Start requested")));
+        const auto* task = panel->findChild<QLabel*>("paymasterTaskStatus");
+        QVERIFY(task->text().contains(QStringLiteral("missing capital: 3.00 DD")));
+        QVERIFY(task->text().contains(QStringLiteral("missing capital: 1.43060000 DGB")));
+        auto* next = panel->findChild<QPushButton*>("paymasterContinueTask");
+        QVERIFY(next && !next->isHidden());
+        QVERIFY(next->text().contains(QStringLiteral("funding and next steps")));
+        const QString screenshot = qEnvironmentVariable("DIGIBYTE_PAYMASTER_FUNDING_SCREENSHOT");
+        panel->setObjectName("paymasterWidget");
+        for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+            QFile css(QStringLiteral(":/css/") + theme);
+            QVERIFY(css.open(QIODevice::ReadOnly));
+            panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+            panel->findChild<QWidget*>("paymasterSetupChoice")->hide();
+            panel->findChild<QWidget*>("paymasterConfiguredOverview")->show();
+            panel->findChild<QGroupBox*>("paymasterOperatorCard")->show();
+            for (const int width : {1400, 900}) {
+                panel->resize(width, 1100);
+                panel->show();
+                QVERIFY(QTest::qWaitForWindowExposed(panel.get()));
+                panel->findChild<QTimer*>("paymasterSetupStatusTimer")->stop();
+                QCoreApplication::processEvents();
+                QVERIFY(task->height() >= task->heightForWidth(task->width()));
+                QVERIFY(hint->height() >= hint->heightForWidth(hint->width()));
+                auto* page = panel->findChild<QScrollArea*>("paymasterOverviewPage");
+                QCOMPARE(page->horizontalScrollBar()->maximum(), 0);
+                if (!screenshot.isEmpty()) QVERIFY(panel->grab().save(screenshot + "-" + theme + "-" + QString::number(width) + ".png"));
+            }
+        }
+        next->click();
+        QCOMPARE(panel->findChild<QStackedWidget*>("paymasterSettingsPages")->currentWidget(),
+            panel->findChild<QWidget*>("paymasterLiquidityPage"));
+        QCOMPARE(mutations, 0);
+    }
     panel->setPrivacy(true);
     QVERIFY(details->text().isEmpty());
     QVERIFY(cancel->isHidden());

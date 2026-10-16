@@ -1906,6 +1906,42 @@ void AddPreparationDiagnostic(UniValue& item, const ProviderMaintenanceRecord& r
     }
 }
 
+// Current funding observations, not a fee quote or a new spending approval.
+// Share these between pool and operator RPCs; a saved execution error can be
+// older than an incoming payment. No transaction or change key is created here.
+void AddPreparationFunding(UniValue& item, CWallet& wallet, const ProviderMaintenanceRecord& record)
+{
+    if (!record.IsPreparation() || !record.transaction_id.IsNull() ||
+        record.state == ProviderMaintenanceState::CONFIRMED ||
+        record.state == ProviderMaintenanceState::RELEASED ||
+        record.state == ProviderMaintenanceState::FAILED) return;
+    LOCK(wallet.cs_wallet);
+    CAmount required_dgb{0}, required_dd{0};
+    for (const auto& output : record.outputs) {
+        required_dgb += record.kind == ProviderMaintenanceKind::PREPARE_DGB ? output.dgb_value.value : 0;
+        required_dd += record.kind == ProviderMaintenanceKind::PREPARE_CARRIER ? output.carrier_value.value : 0;
+    }
+    CCoinControl control;
+    control.m_min_depth = 1;
+    const CAmount confirmed = AvailableCoins(wallet, &control).GetTotalAmount();
+    control.m_min_depth = 0;
+    const CAmount available = AvailableCoins(wallet, &control).GetTotalAmount();
+    item.pushKV("required_output_satoshis", required_dgb);
+    item.pushKV("confirmed_available_satoshis", confirmed);
+    item.pushKV("available_including_unconfirmed_satoshis", available);
+    item.pushKV("capital_shortfall_satoshis", std::max<CAmount>(0, required_dgb - confirmed));
+    item.pushKV("funding_shortfall_upper_bound_satoshis", std::max<CAmount>(0, required_dgb + record.maximum_fee.value - available));
+    if (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER) {
+        item.pushKV("required_output_cents", required_dd);
+        if (const auto* dd_wallet = wallet.GetDDWallet()) {
+            const auto balance = dd_wallet->GetDDBalanceSummary();
+            item.pushKV("confirmed_available_cents", balance.spendable);
+            item.pushKV("pending_cents", balance.pending);
+            item.pushKV("capital_shortfall_cents", std::max<CAmount>(0, required_dd - balance.spendable));
+        }
+    }
+}
+
 std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record, PaymasterCheckpointOperation& checkpoint)
 {
     LOCK(wallet.cs_wallet);
@@ -2054,7 +2090,12 @@ RPCResult paymaster_rpc::internal::PoolPreparationResult()
             {RPCResult::Type::NUM, "required_output_satoshis", true, "Uncreated DGB pool principal"},
             {RPCResult::Type::NUM, "confirmed_available_satoshis", true, "Eligible confirmed DGB funding"},
             {RPCResult::Type::NUM, "available_including_unconfirmed_satoshis", true, "Eligible funding including safe unconfirmed change"},
+            {RPCResult::Type::NUM, "capital_shortfall_satoshis", true, "Missing confirmed DGB reserve capital; network fees are additional"},
             {RPCResult::Type::NUM, "funding_shortfall_upper_bound_satoshis", true, "Shortfall including the full fee ceiling, after unconfirmed change is counted; actual fee may be lower"},
+            {RPCResult::Type::NUM, "required_output_cents", true, "DD capital for the approved uncreated step"},
+            {RPCResult::Type::NUM, "confirmed_available_cents", true, "Currently spendable confirmed DD outside protected reserves"},
+            {RPCResult::Type::NUM, "pending_cents", true, "Unconfirmed wallet DD; eligibility is rechecked after confirmation"},
+            {RPCResult::Type::NUM, "capital_shortfall_cents", true, "Missing confirmed DD capital for this step"},
         }},
     }};
 }
@@ -2073,20 +2114,7 @@ UniValue paymaster_rpc::internal::PoolPreparationToJSON(CWallet& wallet)
         item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
         item.pushKV("actual_fee_satoshis", record.actual_fee.value);
         if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
-        if (record.kind == ProviderMaintenanceKind::PREPARE_DGB && record.transaction_id.IsNull()) {
-            LOCK(wallet.cs_wallet);
-            CAmount required{0};
-            for (const auto& output : record.outputs) required += output.dgb_value.value;
-            CCoinControl control;
-            control.m_min_depth = 1;
-            const CAmount confirmed = AvailableCoins(wallet, &control).GetTotalAmount();
-            control.m_min_depth = 0;
-            const CAmount available = AvailableCoins(wallet, &control).GetTotalAmount();
-            item.pushKV("required_output_satoshis", required);
-            item.pushKV("confirmed_available_satoshis", confirmed);
-            item.pushKV("available_including_unconfirmed_satoshis", available);
-            item.pushKV("funding_shortfall_upper_bound_satoshis", std::max<CAmount>(0, required + record.maximum_fee.value - available));
-        }
+        AddPreparationFunding(item, wallet, record);
         result.push_back(std::move(item));
     }
     return result;
@@ -4017,6 +4045,7 @@ RPCHelpMan getpaymasteroperatorinfo()
                 item.pushKV("state", record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.transaction_id.IsNull() ? "pending_creation" :
                                                                                                                                       "pending_confirmation");
                 AddPreparationDiagnostic(item, record);
+                AddPreparationFunding(item, *wallet, record);
                 if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
                 if (record.IsPreparation()) preparation.push_back(item);
                 active_operations.push_back(std::move(item));

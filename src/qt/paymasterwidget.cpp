@@ -2092,7 +2092,11 @@ public:
             tr("Show technical details"), tr("Hide technical details"), QStringLiteral("paymasterTaskErrorToggle"));
         m_task_error_toggle->hide();
         connect(m_task_continue, &QPushButton::clicked, this, [this] {
-            if (canReviewReserveReduction()) {
+            if (m_operation.error.contains(QLatin1String("WAITING_FUNDS")) ||
+                m_operation.error.contains(QLatin1String("WAITING_DGB"))) {
+                showOperatorPage(m_liquidity_page);
+                refreshStatus();
+            } else if (canReviewReserveReduction()) {
                 beginGuidedTask("reduce_reserves");
             } else if (m_operation.error == QLatin1String("PAYMASTER_POOL_PREPARATION_REQUIRED") ||
                 m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
@@ -10680,16 +10684,16 @@ private:
             hint = tr("A problem or an unknown status prevents a reliable readiness assessment. Open the diagnostic details before acting.");
             button = tr("View diagnostics");
         }
-        const QString preparation_details = formatPoolPreparation(provider.find_value("preparation"));
+        const QString preparation_details = formatPoolPreparation(provider.find_value("preparation"), PreparationDetail::Operator);
         if (!preparation_details.isEmpty()) {
             if (area == QLatin1String("liquidity") && action == QLatin1String("wait")) {
                 headline = tr("Pool preparation is pending");
-                hint = preparation_details.section(QLatin1Char('\n'), 0, 0);
+                hint = preparation_details;
                 button = tr("View pool preparation");
             } else if (area == QLatin1String("liquidity") && action == QLatin1String("review_liquidity")) {
                 headline = tr("Pool preparation needs attention");
-                hint = preparation_details.section(QLatin1Char('\n'), 0, 0);
-                button = tr("Review pool preparation");
+                hint = preparation_details;
+                button = tr("View reserve funding and next steps");
                 if (canReviewPreparationFee()) {
                     headline = tr("Setup fee approval needs updating");
                     hint = tr("The missing reserve has not been created. Review the setup fee below; the wallet will safely close the uncreated step and show a new plan for your approval. Recurring maintenance limits are unchanged.");
@@ -10778,7 +10782,9 @@ private:
                 m_overview_liquidity_action->setText(tr("Review liquidity"));
             }
         } else if (start_pending && action != QLatin1String("inspect_error")) {
-            headline = tr("Start requested · waiting for prerequisites");
+            headline = area == QLatin1String("liquidity") && !preparation_details.isEmpty()
+                ? tr("Start requested · %1").arg(headline)
+                : tr("Start requested · waiting for prerequisites");
             hint.prepend(tr("A start is requested for this wallet session. Core starts only when all checks pass. Pause or Stop cancels the request. "));
         }
         if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
@@ -11875,7 +11881,9 @@ private:
         m_task_continue->setVisible(m_operation.phase == Phase::Blocked && !canReviewPreparationFee() &&
             !(needs_reserves && m_operator_next_action == QLatin1String("review_liquidity")));
         m_task_continue->setEnabled(!m_busy && !m_privacy);
-        m_task_continue->setText(canReviewReserveReduction() ? tr("Recalculate fees and review release…") :
+        m_task_continue->setText(m_operation.error.contains(QLatin1String("WAITING_FUNDS")) ||
+            m_operation.error.contains(QLatin1String("WAITING_DGB")) ? tr("View reserve funding and next steps") :
+            canReviewReserveReduction() ? tr("Recalculate fees and review release…") :
             (needs_reserves || m_operation.error == QLatin1String("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL") ||
             m_operation.error == QLatin1String("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE")) ? tr("Restore required reserves…") :
             m_operation.error.contains(QLatin1String("WALLET_LOCKED")) ? tr("Unlock wallet…") :
@@ -11940,6 +11948,13 @@ private:
         case Phase::Idle: break;
         }
         const auto& work = m_operation.snapshot.find_value("provider").find_value("active_operations");
+        if ((m_operation.phase == Phase::Blocked || m_operation.phase == Phase::Waiting) &&
+            (m_operation.error.contains(QLatin1String("WAITING_FUNDS")) ||
+             m_operation.error.contains(QLatin1String("WAITING_DGB")))) {
+            const QString preparation = formatPoolPreparation(
+                m_operation.snapshot.find_value("provider").find_value("preparation"), PreparationDetail::Summary);
+            if (!preparation.isEmpty()) message = preparation;
+        }
         const bool withdrawing = work.isArray() && !work.empty() && work[0].find_value("kind").isStr() &&
             work[0].find_value("kind").get_str() == "withdrawal";
         QString saved_title = withdrawing ? tr("Withdraw earnings") : needs_reserves ? tr("Start provider") : tr("Maintaining reserves");
@@ -12913,11 +12928,71 @@ private:
         }
     }
 
-    QString formatPoolPreparation(const UniValue& records) const
+    enum class PreparationDetail { Technical, Operator, Summary };
+
+    QString preparationFundingExplanation(const UniValue& step, bool summary) const
+    {
+        const bool dd = activityText(step, "asset") == QLatin1String("dd_carrier");
+        qint64 required{0}, available{0}, missing{0};
+        if (!GetInt64Field(step, dd ? "required_output_cents" : "required_output_satoshis", required) ||
+            !GetInt64Field(step, dd ? "confirmed_available_cents" : "confirmed_available_satoshis", available) ||
+            !GetInt64Field(step, dd ? "capital_shortfall_cents" : "capital_shortfall_satoshis", missing) ||
+            required < 0 || available < 0 || missing != std::max<qint64>(0, required - available) ||
+            (!dd && (!MoneyRange(required) || !MoneyRange(available)))) {
+            return dd
+                ? tr("The last preparation attempt lacked DD reserve capital or DGB for its network fee. Current funding amounts are unavailable. Check this wallet's available DD and DGB balances and the technical details; no reserve transaction has been created.")
+                : tr("The last preparation attempt lacked DGB for reserve capital or its network fee. Current funding amounts are unavailable. Check this wallet's available DGB balance and the technical details; no reserve transaction has been created.");
+        }
+        QString text = dd
+            ? tr("Required capital: %1 DD; confirmed available: %2 DD; missing capital: %3 DD.")
+                  .arg(PaymasterFormatDD(required), PaymasterFormatDD(available), PaymasterFormatDD(missing))
+            : tr("Required capital: %1 DGB; confirmed available: %2 DGB; missing capital: %3 DGB.")
+                  .arg(dgbAmount(required), dgbAmount(available), dgbAmount(missing));
+        qint64 pending{0};
+        if (dd) {
+            if (!GetInt64Field(step, "pending_cents", pending) || pending < 0) pending = 0;
+        } else {
+            qint64 total{0};
+            if (GetInt64Field(step, "available_including_unconfirmed_satoshis", total) &&
+                MoneyRange(total) && total >= available) pending = total - available;
+        }
+        if (summary) {
+            if (pending > 0)
+                text += tr("Awaiting confirmation: %1 %2.").prepend(QLatin1Char(' ')).arg(dd ? PaymasterFormatDD(pending) : dgbAmount(pending), dd ? QStringLiteral("DD") : QStringLiteral("DGB"));
+            return text;
+        }
+        if (missing > 0) {
+            if (pending >= missing) {
+                text += tr(" Incoming funds may cover the missing capital after confirmation. Wait for confirmations; Core rechecks input eligibility before continuing.");
+            } else {
+                text += dd ? tr(" Receive the missing DD in this wallet, or cancel the uncreated preparation and review a smaller reserve target.")
+                           : tr(" Receive the missing DGB plus network fees in this wallet, or cancel the uncreated preparation and review a smaller reserve target.");
+            }
+        } else {
+            text += tr(" Reserve capital is covered. Core still checks network-fee funding and usable inputs on its next automatic attempt.");
+        }
+        if (pending > 0) {
+            text += dd ? tr(" Wallet DD awaiting confirmation: %1 DD.").arg(PaymasterFormatDD(pending))
+                       : tr(" Eligible DGB awaiting confirmation: %1 DGB.").arg(dgbAmount(pending));
+            if (m_operator_snapshot.find_value("network").isStr() &&
+                m_operator_snapshot.find_value("network").get_str() == "regtest")
+                text += tr(" On Regtest, mine a block to confirm incoming transactions.");
+        }
+        if (dd) {
+            qint64 dgb{0};
+            if (GetInt64Field(step, "confirmed_available_satoshis", dgb) && MoneyRange(dgb))
+                text += tr(" Confirmed DGB available for network fees: %1 DGB.").arg(dgbAmount(dgb));
+            text += tr(" This DD preparation also needs a DGB network fee.");
+        }
+        return text;
+    }
+
+    QString formatPoolPreparation(const UniValue& records, PreparationDetail detail = PreparationDetail::Technical) const
     {
         if (m_privacy || records.isNull()) return {};
         if (!records.isArray()) return tr("Pool preparation status is unavailable. Refresh before acting.");
         QStringList lines;
+        bool waiting_funding{false};
         for (const auto& step : records.getValues()) {
             const QString state = activityText(step, "state");
             if (state == QLatin1String("complete") || state == QLatin1String("cancelled")) continue;
@@ -12933,29 +13008,37 @@ private:
                 explanation = tr("Paused at the fee check. The transaction fee must be valid and within the approved setup limit. Changing recurring refill limits does not change this approval. To review a different limit, cancel the uncreated step, then preview a new plan.");
             else if (code == QLatin1String("PAYMASTER_POOL_FEE_INVALID") || code == QLatin1String("PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED"))
                 explanation = tr("The fee calculation needs review. Raising the approved setup limit does not resolve this check; no replacement is authorized automatically.");
-            else if (code == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS") || code == QLatin1String("PAYMASTER_POOL_WAITING_DGB"))
-                explanation = tr("Waiting for usable wallet funds. The DigiDollar reserve and its DGB network fee require confirmed funds outside the protected pool.");
-            else if (code == QLatin1String("PAYMASTER_POOL_POLICY_CHANGED"))
+            else if (code == QLatin1String("PAYMASTER_POOL_WAITING_FUNDS") || code == QLatin1String("PAYMASTER_POOL_WAITING_DGB")) {
+                explanation = preparationFundingExplanation(step, detail == PreparationDetail::Summary);
+                waiting_funding = true;
+            } else if (code == QLatin1String("PAYMASTER_POOL_POLICY_CHANGED"))
                 explanation = tr("The provider policy changed after approval. Cancel uncreated steps and review a new plan for the current policy.");
             else if (code == QLatin1String("PAYMASTER_WALLET_LOCKED"))
                 explanation = tr("Waiting for wallet unlock before creating the approved transaction.");
             else if (code == QLatin1String("PAYMASTER_PROVIDER_DISABLED"))
                 explanation = tr("The provider configuration is disabled. Approved preparation can continue when it is enabled; autostart is not required.");
             else if (code == QLatin1String("PAYMASTER_POOL_WAITING_CONFIRMATION") || (error.isEmpty() && state == QLatin1String("pending_confirmation")))
-                explanation = state == QLatin1String("pending_creation") ? tr("Waiting for funding inputs to confirm before creating the transaction.") : tr("The saved transaction is waiting for confirmation. In Regtest, a new block must be mined. No new approval is needed.");
+                explanation = state == QLatin1String("pending_creation") ? tr("Waiting for funding inputs to confirm before creating the transaction. On Regtest, mine a block to confirm incoming transactions.") : tr("The saved transaction is waiting for confirmation. In Regtest, a new block must be mined. No new approval is needed.");
             else if (error.isEmpty() && state == QLatin1String("pending_creation"))
                 explanation = tr("Approved and waiting for the next automatic check. Core checks approximately every 30 seconds while the provider configuration is enabled and the wallet and index are synchronized.");
             else
                 explanation = tr("Preparation needs diagnostic review before continuing.");
             lines << tr("%1: %2").arg(name, explanation);
+            if (detail == PreparationDetail::Summary) continue;
             if (state == QLatin1String("pending_creation")) lines << tr("No transaction has been saved for this step.");
             qint64 fee{0};
             if (GetInt64Field(step, "maximum_fee_satoshis", fee) && MoneyRange(fee))
-                lines << tr("Approved setup fee limit: %1 DGB.").arg(dgbAmount(fee));
-            if (!error.isEmpty()) lines << tr("Diagnostic: %1").arg(error);
+                lines << tr("Approved setup fee limit: %1 DGB. This is a ceiling, not an estimate of the required network fee.").arg(dgbAmount(fee));
+            if (detail == PreparationDetail::Technical && !error.isEmpty()) lines << tr("Last attempt diagnostic: %1").arg(error);
             const QString fee_diagnostic = activityText(step, "diagnostic");
-            if (!fee_diagnostic.isEmpty()) lines << fee_diagnostic;
-            if (IsHex256Field(step, "txid")) lines << tr("Transaction: %1").arg(activityText(step, "txid"));
+            if (detail == PreparationDetail::Technical && !fee_diagnostic.isEmpty()) lines << fee_diagnostic;
+            if (detail == PreparationDetail::Technical && IsHex256Field(step, "txid")) lines << tr("Transaction: %1").arg(activityText(step, "txid"));
+        }
+        if (waiting_funding && detail == PreparationDetail::Summary) {
+            lines << tr("Network fees are additional. Review funding below to receive missing funds, wait for incoming confirmations, or cancel uncreated work and choose smaller targets.");
+        } else if (waiting_funding) {
+            lines << tr("Available funds exclude protected reserves and are shared by the pending steps.");
+            lines << tr("Preparation continues automatically within the saved approval when the provider configuration is enabled and the wallet is unlocked and synchronized. Automatic refill does not need to be enabled.");
         }
         return lines.join(QLatin1Char('\n'));
     }

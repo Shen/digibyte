@@ -31,6 +31,8 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
 
     def add_options(self, parser):
         self.add_wallet_options(parser, legacy=False)
+        parser.add_argument("--funding-diagnostics-only", action="store_true",
+                            help="Run only the read-only preparation funding regression")
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -78,6 +80,23 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
     def setup_steps(self, wallet):
         return wallet.getpaymasterpoolinfo()["preparation"]
 
+    def funding_steps(self, wallet):
+        """Both status RPCs observe current funds without executing saved work."""
+        before = wallet.getwalletinfo()["txcount"]
+        pool = self.setup_steps(wallet)
+        operator = wallet.getpaymasteroperatorinfo()["provider"]["preparation"]
+        assert_equal(len(pool), len(operator))
+        fields = ("required_output_satoshis", "confirmed_available_satoshis",
+                  "available_including_unconfirmed_satoshis", "capital_shortfall_satoshis",
+                  "required_output_cents", "confirmed_available_cents", "pending_cents",
+                  "capital_shortfall_cents")
+        for step in pool:
+            observed = next(item for item in operator if item["operation_id"] == step["operation_id"])
+            for field in fields:
+                assert_equal(step.get(field), observed.get(field))
+        assert_equal(wallet.getwalletinfo()["txcount"], before)
+        return {step["asset"]: step for step in pool}
+
     def wait_for(self, wallet, condition):
         def check():
             self.tick()
@@ -115,6 +134,37 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         limited = node.get_wallet_rpc("limited")
         miner = node.get_wallet_rpc("miner")
 
+        self.log.info("Uncreated DD and DGB steps report current capital gaps even before another attempt")
+        shortage = self.configure("funding-diagnostics")
+        shortage.setpaymasterenabled(False)
+        shortage_targets = self.targets()
+        shortage_preview = shortage.preparepaymasterpool(shortage_targets)
+        shortage_request = dict(shortage_targets, execute=True, plan_id=shortage_preview["plan_id"])
+        shortage.preparepaymasterpool(shortage_request)
+        gaps = self.funding_steps(shortage)
+        assert_equal(gaps["dd_carrier"]["required_output_cents"], shortage_preview["total_carrier_cents"])
+        assert_equal(gaps["dd_carrier"]["confirmed_available_cents"], 0)
+        assert_equal(gaps["dd_carrier"]["capital_shortfall_cents"], shortage_preview["total_carrier_cents"])
+        assert_equal(gaps["dgb"]["capital_shortfall_satoshis"], shortage_preview["total_output_satoshis"])
+        assert all("txid" not in step for step in gaps.values())
+        dd_funding = miner.senddigidollar(shortage.getdigidollaraddress(), 100)
+        # Dandelion deliberately keeps these transactions outside the public
+        # mempool; confirm the retained transactions explicitly.
+        self.confirm(miner, dd_funding["txid"])
+        dgb_funding = miner.sendtoaddress(shortage.getnewaddress(), Decimal("0.1"))
+        self.confirm(miner, dgb_funding)
+        updated = self.funding_steps(shortage)
+        assert_equal(updated["dd_carrier"]["confirmed_available_cents"], 100)
+        assert_equal(updated["dd_carrier"]["capital_shortfall_cents"], shortage_preview["total_carrier_cents"] - 100)
+        assert_equal(updated["dgb"]["confirmed_available_satoshis"], 10_000_000)
+        assert_equal(updated["dgb"]["capital_shortfall_satoshis"], shortage_preview["total_output_satoshis"] - 10_000_000)
+        assert_equal(updated["dd_carrier"]["error"], "PAYMASTER_PROVIDER_DISABLED")
+        assert all("txid" not in step for step in updated.values())
+        shortage.preparepaymasterpool(dict(shortage_request, cancel=True))
+        assert all("capital_shortfall_satoshis" not in step for step in self.setup_steps(shortage))
+        if self.options.funding_diagnostics_only:
+            return
+
         self.log.info("One confirmed DGB input: carrier succeeds, DGB setup waits without signing a child")
         targets = self.targets()
         default_preview = provider.preparepaymasterpool(targets)
@@ -131,6 +181,7 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         execute = dict(targets, execute=True, plan_id=preview["plan_id"])
         prepared = provider.preparepaymasterpool(execute)
         assert_equal(prepared["accepted"], True)
+        assert "required_output_cents" not in self.funding_steps(provider)["dd_carrier"]
         operator = provider.getpaymasteroperatorinfo()
         assert operator["provider"]["active_operations"]
         for operation in operator["provider"]["active_operations"]:
