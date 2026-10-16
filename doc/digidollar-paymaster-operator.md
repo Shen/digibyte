@@ -52,6 +52,27 @@ offer changes use the reviewed save/restart path. Do not use tab changes as part
 of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
+**Settings > Start, pause & retire** is the first settings destination. It groups
+the operation controls and retirement review, with a checklist of each action's
+effects. These checkmarks describe the action, not its completion. **Funds &
+reserves** links directly to this page; Overview retains its quick Start/Pause
+controls. Both entry points use the same confirmations and readiness checks.
+
+| Action | Effect after confirmation |
+|---|---|
+| Start / resume | Enable the saved configuration and request operation subject to readiness and wallet checks. Existing budgets and automation preferences remain; autostart is unchanged. |
+| Pause | Persistently disable service and autostart, including new reserve-setup signatures. Retain reserves, unfinished work and refill preferences; refill execution is blocked while paused. |
+| Stop | Apply the **same persistent pause**. Optionally review full reserve release in a separate confirmation. Without release approval, its effect is the same as Pause. |
+| Retire | Stop, check unfinished work, separately review full reserve release and eligible uncreated funding cancellation, then review wallet balances and a full-wallet backup. A confirmed release turns off automatic refill and revokes its fee approval. |
+
+Approved full release through Stop also turns off refill and revokes its fee
+approval. No action transfers funds or closes the wallet. Signed work remains
+protected and can still confirm. Cancelling or failing a later retirement step
+does not undo a confirmed stop; the remaining review stays incomplete. Ordinary
+retirement retains the identity for a deliberate future setup. Restored-wallet
+recovery can instead permanently retire it after a separate explicit review;
+see [capital release](paymaster-capital-release.md).
+
 ### CLI sequence
 
 The following assumes `digibyte-cli` is on PATH and the intended Mainnet node
@@ -145,6 +166,11 @@ work remains, the reserve card shows the retained or below-target reserves
 without asking for immediate refill approval. Unknown errors and wallet
 restore/checkpoint protection still take precedence; open payments remain in
 Activity. These display distinctions do not change start or signing checks.
+The same stopped status applies after ordinary retirement, including an empty
+pool or a declined release. It does not assert that reserves were retained or
+released; the release receipt and retirement review report that separately.
+Once a fresh snapshot confirms running again, old successful stop/release
+messages disappear. Unclear or failed release results remain available for review.
 
 `startpaymaster` with `wait_for_readiness=true` can retain a one-shot start
 request during the current wallet load when accepted. It is not persistent

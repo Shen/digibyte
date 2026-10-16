@@ -7,6 +7,12 @@ sign a transaction, delete identity/history or delete the wallet.
 
 ## Whole-provider retirement
 
+In the GUI, use **Settings > Start, pause & retire**, the first Settings item.
+**Funds & reserves** provides an internal link. Pause and Stop use the same
+persistent pause; Stop additionally offers an optional full-release review.
+Retire always leads to that review and then to remaining balances and backup.
+The checklists describe these effects, not completed operations.
+
 1. Stop the provider, disable provider enablement and autostart.
 2. Resolve outstanding financial, maintenance and signed/ambiguous work. Ensure
    chain/wallet readiness; unconfirmed signed authority cannot be ignored.
@@ -28,6 +34,10 @@ one-shot start intent. This prevents automatic execution but retains saved refil
 preferences for explicit resumption. Completing retirement additionally disables
 automatic refill and revokes its fee approval. A bare RPC `stoppaymaster` without
 persistent options still allows saved autostart to resume later.
+Approved full release through Stop disables refill and its approval as well.
+After ordinary retirement the service remains stopped; the GUI does not treat
+missing restart reserves or budgets as evidence of an active provider. Release
+results and incomplete balance/backup review remain separate from service state.
 
 Starting without enough funds can leave a planned reserve-funding task with no
 transaction. Normal GUI **Retire Paymaster** includes these tasks in its release

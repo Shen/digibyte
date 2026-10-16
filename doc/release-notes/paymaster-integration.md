@@ -44,6 +44,13 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Retirement after an unfunded start waits briefly for competing provider work
   and can explicitly cancel uncreated reserve-funding tasks in the reviewed
   release. Signed/ambiguous work and restored-wallet guards remain enforced.
+- Settings starts with **Start, pause & retire**, with per-action checklists and
+  the retirement balance/backup review. Funds & reserves links there. Pause and
+  Stop share a persistent stop; Stop optionally reviews full reserve release,
+  while Retire guides the release and final review. Overview and Settings use
+  the same Start/Pause guards; the stopped hint no longer implies that released
+  reserves were retained. A confirmed restart clears old successful stop/release
+  messages while preserving failed or uncertain results.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls
