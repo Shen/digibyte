@@ -58,6 +58,23 @@ effects. These checkmarks describe the action, not its completion. **Funds &
 reserves** links directly to this page; Overview retains its quick Start/Pause
 controls. Both entry points use the same confirmations and readiness checks.
 
+A confirmed stopped provider with saved settings can request **Resume** while
+known budget, liquidity or node prerequisites remain unmet. Overview keeps the
+prerequisite review beside Resume. This records a one-shot start request for the
+current wallet session; it does not mean the provider is serving payments or
+approve refill, increase limits or enable autostart. The waiting state is shown
+explicitly. Pause or Stop cancels the request. Locked wallets and unknown,
+restore/checkpoint errors still require review before the GUI offers Resume.
+When already persistently stopped, Stop is disabled; **Retire** remains the
+entry point for reserve release and the final balance/backup review.
+
+For a spending-limit warning, compare the offer's network-fee ceiling with its
+payment safety limits as well as the rolling budget usage. For example, an offer
+ceiling of 0.50 DGB cannot fit a per-payment limit of 0.20 DGB, even when today's
+budget is unused. Review the intended offer ceiling and limits; neither changes
+automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
+one-satoshi quote, not the saved offer ceiling or payment readiness.
+
 | Action | Effect after confirmation |
 |---|---|
 | Start / resume | Enable the saved configuration and request operation subject to readiness and wallet checks. Existing budgets and automation preferences remain; autostart is unchanged. |

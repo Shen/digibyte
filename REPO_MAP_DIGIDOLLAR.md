@@ -1082,8 +1082,11 @@ errors and restore/checkpoint protection retain diagnostic precedence.
 The first Settings subpage (`paymasterLifecyclePage`) groups Start/Pause,
 Stop and Retire with effect checklists; Funds & reserves links to it.
 Overview and Settings Start/Pause controls reuse the same confirmations and
-gates. Retirement balances/backup review lives on that page; the stopped
-headline makes no claim that released reserves are still retained.
+gates. Explicit stopped providers can request a one-shot readiness wait beside
+the prerequisite review; pending starts are displayed separately and remain
+cancellable. Stop is disabled after a confirmed persistent stop; Retire remains
+available for release review. Retirement balances/backup review lives on that
+page; the stopped headline makes no claim that released reserves are still retained.
 See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h

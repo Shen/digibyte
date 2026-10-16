@@ -51,6 +51,12 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   the same Start/Pause guards; the stopped hint no longer implies that released
   reserves were retained. A confirmed restart clears old successful stop/release
   messages while preserving failed or uncertain results.
+- A stopped provider can request Resume with saved settings while known
+  budget/liquidity/node prerequisites remain unmet. The prerequisite review
+  stays visible beside Resume; a pending start is identified and cancellable.
+  No readiness checks, spending limits or refill approvals are bypassed.
+  Stop is disabled after a confirmed persistent stop; Retire remains available
+  for release and backup review.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls
