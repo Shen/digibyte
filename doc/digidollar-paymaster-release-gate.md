@@ -60,6 +60,7 @@ executables rather than normal product builds.
 | 2026-10-10 recovery-fee correction | Focused 5 cases / 384 assertions; related 28 / 1,542 including them. | Selected tests, not full product release verification. |
 | 2026-10-15, `01aaf13df9` | Seven translation units and busy-wallet Qt regression. | Selected build/test; not complete GUI acceptance. |
 | 2026-10-15, `e7c2c8c4bd` | Two translation units, targeted Qt regression, German translations and two screenshot sizes. | Sync-presentation checks only; no Paymaster release certification. |
+| 2026-10-16, `685a6b4f2c` | Three changed translation units compiled with MSVC 14.43/Qt 5.15.10; 41 selected Qt cases and `wallet_paymaster_pool_setup.py --funding-diagnostics-only` passed. Funding display checked in two themes at 900/1400 px. | Isolated incremental Qt/daemon links. Full pool-setup test remains failing at `check_full_capital_release` with `PAYMASTER_CAPITAL_OPEN_MAINTENANCE`, reproduced with the unchanged test and previous daemon. Full product builds/suites were not run. |
 
 The detailed security record also contains real SQLite stale-backup and channel
 binding reproductions, simulated DB transaction failures and SQLite page-cap/

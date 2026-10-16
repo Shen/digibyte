@@ -1618,6 +1618,10 @@ Wallet maintenance resumes finite approved commands separately from recurring
 refill permission. Whole-slot funding and confirmed-capacity readiness are
 covered by pool-setup, partial-capacity and readiness tests. See
 [pool setup](doc/digidollar-paymaster-pool-setup.md).
+`wallet/rpc/paymaster_provider.cpp` shares current, read-only DD/DGB preparation
+funding observations between pool and operator status. Qt uses those structured
+amounts for capital shortfalls and confirmation/fee guidance, separately from
+the last saved execution error and the approved fee ceiling.
 
 ### Shared Paymaster operator workflow
 

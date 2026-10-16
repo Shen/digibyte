@@ -54,6 +54,20 @@ funds; a shortfall estimate can include the full approved fee ceiling.
 On Mainnet, retained transactions need confirmation in network-mined blocks.
 Confirmation delays do not authorize recreating a signed funding step.
 
+Both `getpaymasterpoolinfo.preparation` and
+`getpaymasteroperatorinfo.provider.preparation` report current funding for
+uncreated, nonterminal steps. DGB fields are `required_output_satoshis`,
+`confirmed_available_satoshis` and `capital_shortfall_satoshis`; DD steps add
+`required_output_cents`, `confirmed_available_cents`, `capital_shortfall_cents`
+and `pending_cents`. These observations exclude protected reserves from
+available funds and do not create transactions or replace the saved error from
+the last attempt. DGB availability is shared across steps. Capital shortfalls
+exclude network fees; `maximum_fee_satoshis` is an authorization ceiling, and
+`funding_shortfall_upper_bound_satoshis` includes that ceiling and counts safe
+unconfirmed DGB change. Neither is an actual fee quote. Pending DD must be
+rechecked for eligibility after confirmation. Signed/terminal steps do not
+report a new funding requirement.
+
 ## Recurring automatic refill
 
 `setpaymasterliquiditypolicy` and the operator workflow configure targets and

@@ -38,6 +38,11 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Finite pool funding and separately approved recurring refill. Limited funds
   create fewer complete slots for DGB/DD; usable confirmed slots remain available
   while the remaining target waits for funds or confirmation.
+- Uncreated pool preparation reports required, available and missing DD/DGB
+  capital consistently through pool/operator RPCs and the GUI. Both outstanding
+  steps remain visible, with funding/confirmation guidance and a link to reserve
+  settings. Fee ceilings are distinguished from actual fees; status reads do not
+  execute preparation or alter its approval.
 - Separate available/reserved/total balances, reasoned non-selectable offer
   cards, recommendation and announcement-expiry countdown. An offer can become
   unavailable before its displayed expiry.

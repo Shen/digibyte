@@ -344,6 +344,18 @@ counters overlap stages and must not be summed into a payment count.
 | Network statistics unavailable | Unknown snapshot, not zero supply or proof of lost funds; check synchronization/index diagnostics. |
 | Restore guard | Use supported reviewed adoption/recovery; do not clear records to bypass it. |
 
+For an approved preparation waiting for funds, Overview and the management task
+show each DD/DGB step's required capital, currently confirmed available funds
+and capital shortfall. Fund the selected wallet in the missing asset, plus DGB
+for network fees. An approved fee ceiling is not an estimate of the actual fee.
+The same available DGB can be shown for both steps; it is shared, not two balances.
+Protected reserves are excluded. Incoming funds still require confirmation and
+eligible inputs. If no transaction exists, waiting for blocks alone does not
+resolve a capital shortfall. Alternatively, cancel uncreated preparation and
+review a smaller target. **View reserve funding and next steps** opens the
+reserve settings. An already approved finite plan continues automatically when
+its prerequisites are met, even with automatic refill and autostart off.
+
 Use operator/provider, liquidity, safety and finance status plus client session
 inspection and node logs. Correlate time/wallet/request without publishing
 secrets or unnecessary payment metadata. Temporary debug categories should be
