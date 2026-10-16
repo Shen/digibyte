@@ -5262,6 +5262,11 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     int operating_unlocks{0}, reviewed_starts{0};
     bool operating_default_seen{false};
     bool missing_funding = deferred_funding;
+    UniValue setup_preparation;
+    QVERIFY(setup_preparation.read(R"({"asset":"dd_carrier","kind":"preparation","state":"pending_creation",
+        "error":"PAYMASTER_POOL_WAITING_FUNDS","required_output_cents":600,"confirmed_available_cents":100,
+        "capital_shortfall_cents":500,"pending_cents":500,"confirmed_available_satoshis":5000000,
+        "maximum_fee_satoshis":20000000})"));
     int pool_approvals{0};
     bool funding_approved_while_disabled{false};
     TestChain100Setup test;
@@ -5372,8 +5377,10 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                     liquidity.pushKV("policy", malformed_liquidity_snapshot ? UniValue{UniValue::VOBJ} :
                         liquidity_policy.isObject() ? liquidity_policy : suggested_liquidity_policy());
                     result.pushKV("liquidity", liquidity);
-                    result.pushKV("preparation", UniValue{UniValue::VARR});
-                    result.pushKV("active_operations", UniValue{UniValue::VARR});
+                    UniValue preparation{UniValue::VARR};
+                    if (missing_funding && pool_approvals > 0) preparation.push_back(setup_preparation);
+                    result.pushKV("preparation", preparation);
+                    result.pushKV("active_operations", preparation);
                     aggregate.pushKV("unlocked_until", 0);
                     aggregate.pushKV("encrypted", encrypted_start);
                     aggregate.pushKV("observed_at", QDateTime::currentSecsSinceEpoch());
@@ -5717,12 +5724,18 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     bool retry_completed{false};
     bool funding_confirmation_seen{false};
     QString completion_text;
+    bool funding_details_current{false}, funding_refresh_read_only{false}, funding_refresh_failure_cleared{false};
+    bool funding_ready_updated{false}, autostart_editable{false};
     QTimer::singleShot(0, [&] {
         auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
         if (!wizard || wizard->objectName() != QLatin1String("PaymasterSetupWizard")) {
             return;
         }
         wizard_opened = true;
+        auto* selected_autostart = wizard->findChild<QCheckBox*>("paymasterSetupAutostart");
+        QVERIFY(selected_autostart);
+        autostart_editable = selected_autostart->isEnabled();
+        selected_autostart->setChecked(true);
 
         QCheckBox* wallet_confirmation = wizard->findChild<QCheckBox*>(
             QStringLiteral("paymasterSetupWalletConfirmation"));
@@ -5944,6 +5957,50 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         QCoreApplication::processEvents();
         completion_text = result->text();
         retry_completed = progress_page->isComplete() && !retry->isVisible();
+        auto* funding = wizard->findChild<QLabel*>("paymasterSetupFundingStatus");
+        auto* refresh = wizard->findChild<QPushButton*>("paymasterSetupRefreshStatus");
+        QVERIFY(funding);
+        QVERIFY(refresh);
+        if (deferred_funding) {
+            funding_details_current = funding->text().contains("Required capital: 6.00 DD") &&
+                funding->text().contains("missing capital: 5.00 DD") &&
+                funding->text().contains("Incoming funds may cover") &&
+                funding->text().contains("0.05000000 DGB");
+            const int prior_mutations = mutation_rpc_calls;
+            setup_preparation.pushKV("confirmed_available_cents", 600);
+            setup_preparation.pushKV("capital_shortfall_cents", 0);
+            auto* status_timer = wizard->findChild<QTimer*>("paymasterSetupStatusTimer");
+            QVERIFY(status_timer && status_timer->isActive());
+            QCOMPARE(status_timer->interval(), 5000);
+            QVERIFY(QMetaObject::invokeMethod(status_timer, "timeout", Qt::DirectConnection));
+            funding_details_current &= funding->text().contains("missing capital: 0.00 DD") &&
+                funding->text().contains("Reserve capital is covered");
+            setup_preparation.pushKV("confirmed_available_cents", "unknown");
+            refresh->click();
+            funding_details_current &= funding->text().contains("funding amounts are unavailable") &&
+                !funding->text().contains("missing capital: 0.00 DD");
+            setup_preparation.pushKV("confirmed_available_cents", 600);
+            setup_preparation.pushKV("state", "pending_confirmation");
+            setup_preparation.pushKV("error", "PAYMASTER_POOL_WAITING_CONFIRMATION");
+            setup_preparation.pushKV("confirmations", 0);
+            setup_preparation.pushKV("required_confirmations", 1);
+            refresh->click();
+            funding_details_current &= funding->text().contains("saved transaction is waiting") &&
+                !funding->text().contains("Required capital:");
+            fail_safety_snapshot = true;
+            refresh->click();
+            funding_refresh_failure_cleared = funding->text().contains("could not be refreshed") &&
+                !funding->text().contains("capital is covered");
+            fail_safety_snapshot = false;
+            missing_funding = false;
+            rpc_ready = true;
+            refresh->click();
+            funding_ready_updated = !funding->text().contains("missing capital") &&
+                (funding->text().contains("Reserves are ready") || funding->text().contains("locally ready"));
+            funding_refresh_read_only = mutation_rpc_calls == prior_mutations;
+            missing_funding = true;
+            rpc_ready = false;
+        }
         wizard->reject();
     });
     QTimer operating_answer;
@@ -5981,7 +6038,14 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QVERIFY(!funding_confirmation_seen);
     QVERIFY(completion_text.contains(QStringLiteral("Configuration saved")));
     QVERIFY(completion_text.contains(QStringLiteral("saved autostart")));
-    QCOMPARE(completion_text.contains(QStringLiteral("Waiting for approved pool preparation or blockchain confirmations")), deferred_funding);
+    QVERIFY(autostart_editable);
+    QVERIFY(rpc_autostart);
+    if (deferred_funding) {
+        QVERIFY(funding_details_current);
+        QVERIFY(funding_refresh_read_only);
+        QVERIFY(funding_refresh_failure_cleared);
+        QVERIFY(funding_ready_updated);
+    }
     QCOMPARE(operating_policy_attempts, 1);
     QCOMPARE(safety_attempts, 2);
     QCOMPARE(enabled_requests, QList<bool>{true});
@@ -6324,6 +6388,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         wallet_confirmation->setChecked(true);
         restore_liquidity->click();
         restored_autostart_matches = autostart->isChecked() == rpc_autostart;
+        autostart->setChecked(false);
         enabled->setChecked(false);
         for (int i = 0; i < 10 && wizard->currentPage()->objectName() != QLatin1String("paymasterSetupReviewPage"); ++i) wizard->next();
         if (last_preview_policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>() == 3000000000) {
@@ -6337,6 +6402,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     guided_setup->click();
     QVERIFY(restored_autostart_matches);
     QVERIFY(retained_large_policy);
+    QVERIFY(!rpc_autostart);
 
     UniValue disabled_with_autostart{UniValue::VOBJ};
     disabled_with_autostart.pushKV("wallet_eligible", true);

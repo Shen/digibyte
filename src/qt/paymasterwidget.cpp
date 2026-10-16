@@ -14672,9 +14672,7 @@ private:
         auto* autostart = new QCheckBox(
             tr("Start this provider automatically after loading its wallet"), pool_page);
         autostart->setObjectName("paymasterSetupAutostart");
-        autostart->setChecked(m_autostart_enabled);
-        autostart->setEnabled(false);
-        autostart->setToolTip(tr("The saved autostart choice is retained. You can change it beside Start on Overview."));
+        autostart->setToolTip(tr("Start when this wallet is ready, including after restarts. An encrypted wallet still needs manual unlock after restart. This choice is saved only after the final review; it is separate from a one-time start."));
         // An identity can be created before any ProviderSettings record exists.
         // Treat that identity-only state as a fresh setup so the usable default
         // remains enabled; preserve an explicit disabled state only for an
@@ -14683,6 +14681,7 @@ private:
             m_provider_settings_present || m_policy_loaded ||
             m_provider_safety_configured ||
             m_liquidity_policy_configured;
+        autostart->setChecked(have_existing_provider_configuration ? m_autostart_enabled : true);
         auto* provider_enabled = new QCheckBox(
             tr("Enable this wallet's provider configuration"), pool_page);
         provider_enabled->setObjectName("paymasterSetupProviderEnabled");
@@ -14748,7 +14747,7 @@ private:
         connect(restore_liquidity_defaults, &QPushButton::clicked, pool_page,
                 [reserve_editor,
                  automatic_replenishment, paid_maintenance_approved,
-                 operation_mode, autostart, provider_enabled, this] {
+                 operation_mode, autostart, provider_enabled, have_existing_provider_configuration, this] {
                     reserve_editor->applyPreset(1);
                     automatic_replenishment->setChecked(true);
                     paid_maintenance_approved->setChecked(true);
@@ -14756,7 +14755,7 @@ private:
                         operation_mode->setCurrentIndex(
                             operation_mode->findData(QStringLiteral("automatic")));
                     }
-                    autostart->setChecked(m_autostart_enabled);
+                    autostart->setChecked(have_existing_provider_configuration ? m_autostart_enabled : true);
                     provider_enabled->setChecked(true);
                 });
         auto* liquidity_help = new QFrame(pool_page);
@@ -14855,7 +14854,7 @@ private:
         review->setTextInteractionFlags(Qt::TextSelectableByKeyboard |
                                         Qt::TextSelectableByMouse);
         auto* next_actions = new QLabel(tr(
-                                            "When you apply this plan, the assistant first places an existing enabled provider safely offline, then creates or reuses the identity, saves the selected operating, safety and automatic-liquidity policies, and asks Core to recheck and create only missing pool outputs. Runtime and the requested enabled state are saved last. The saved autostart choice is retained. You can include a one-time start in this review."),
+                                            "When you apply this plan, the assistant first places an existing enabled provider safely offline, then creates or reuses the identity, saves the selected operating, safety and automatic-liquidity policies, and asks Core to recheck and create only missing pool outputs. Processing mode, the selected autostart choice and the requested enabled state are saved last. You can also include a one-time start in this review."),
                                         review_page);
         next_actions->setObjectName("paymasterSetupNextActions");
         next_actions->setWordWrap(true);
@@ -14963,7 +14962,7 @@ private:
             if (method == "setpaymastersafetypolicy") return tr("Save finite safety limits");
             if (method == "setpaymasterliquiditypolicy") return tr("Save liquidity targets and refill approval");
             if (method == "preparepaymasterpool") return tr("Review and approve exact pool funding");
-            if (method == "setpaymasterruntimesettings") return tr("Save processing mode and retain autostart choice");
+            if (method == "setpaymasterruntimesettings") return tr("Save processing mode and selected autostart choice");
             if (method == "setpaymasterenabled") return tr("Save provider enablement");
             return tr("Unknown setup step");
         };
@@ -15039,6 +15038,15 @@ private:
                 [this] { acknowledgeExternalBackup(); });
         progress_layout->addSpacing(10);
         progress_layout->addWidget(progress_result);
+        auto* setup_funding = new QLabel(progress_page);
+        setup_funding->setObjectName("paymasterSetupFundingStatus");
+        setup_funding->setWordWrap(true);
+        setup_funding->setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
+        auto* setup_refresh = new QPushButton(tr("Check funding and readiness"), progress_page);
+        setup_refresh->setObjectName("paymasterSetupRefreshStatus");
+        setup_refresh->hide();
+        progress_layout->addWidget(setup_funding);
+        progress_layout->addWidget(setup_refresh, 0, Qt::AlignLeft);
         progress_layout->addWidget(setup_backup);
         progress_layout->addWidget(setup_retry, 0, Qt::AlignLeft);
         progress_layout->addStretch();
@@ -15105,6 +15113,7 @@ private:
             choices.policy = proposed_policy();
             choices.operation_mode = operation_mode->currentData().toString().toStdString();
             choices.enabled = provider_enabled->isChecked();
+            choices.autostart = autostart->isChecked();
             choices.pool = wizard_pool_options(false)[0];
             const auto guided = current_safety_limits();
             const auto cap = choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>();
@@ -15269,7 +15278,7 @@ private:
                              dgbAmount(maintenance_per_hour),
                              dgbAmount(maintenance_per_day));
                     maintenance_confirmation->setText(
-                        paid_maintenance_approved->isChecked() ? tr("I approve automatic paid liquidity maintenance for wallet \"%1\" up to %2 DGB per transaction, %3 DGB per rolling hour and %4 DGB per rolling day. This approval alone does not start the provider. The saved autostart choice is retained.")
+                        paid_maintenance_approved->isChecked() ? tr("I approve automatic paid liquidity maintenance for wallet \"%1\" up to %2 DGB per transaction, %3 DGB per rolling hour and %4 DGB per rolling day. This approval alone does not start the provider. Autostart is a separate choice shown in this review.")
                                                                      .arg(setup_wallet_name,
                                                                           dgbAmount(maintenance_per_transaction),
                                                                           dgbAmount(maintenance_per_hour),
@@ -15351,8 +15360,10 @@ private:
                 "Core will continue automatically. Any larger funding requirement needs a new review.")
                 .arg(setup_wallet_name, wizard_pool_preview_text(*reviewed_pool));
             confirmation += start_after_setup->isChecked()
-                ? tr("\n\nStart the provider when ready. Keep the saved autostart choice unchanged.")
-                : tr("\n\nNo one-time start is requested. The saved autostart choice remains in force.");
+                ? tr("\n\nStart the provider when ready.")
+                : tr("\n\nNo one-time start is requested.");
+            confirmation += tr("\nSave autostart: %1. When enabled, it can start this provider independently of the one-time start choice, once all prerequisites are met.")
+                                .arg(autostart->isChecked() ? tr("on") : tr("off"));
             // The injected RPC transport exists only in widget tests, where
             // native modal message boxes are not reliable on headless Qt
             // platforms. Production always requires the explicit approval.
@@ -15414,6 +15425,62 @@ private:
 
         auto shared_steps = std::make_shared<std::vector<DigiDollar::Paymaster::SetupStep>>();
         auto shared_context = std::make_shared<UniValue>();
+        const QPointer<QLabel> funding_label{setup_funding};
+        const QPointer<QPushButton> funding_refresh{setup_refresh};
+        const auto render_setup_status = [this, funding_label, shared_context](const UniValue& current) {
+            if (!funding_label || m_privacy) return;
+            DigiDollar::Paymaster::CheckSetupContext(*shared_context, current);
+            const auto progress = DigiDollar::Paymaster::InspectSetupProgress(current, false);
+            const auto& provider = current.find_value("provider");
+            QString text;
+            if (!provider.find_value("enabled").isTrue()) {
+                text = tr("Provider configuration is disabled. Approved preparation is paused until you explicitly enable it.");
+            } else if (progress.needs_unlock) {
+                text = tr("Waiting for wallet unlock. Close this assistant and unlock the provider wallet on Overview; the approved task remains saved.");
+            } else if (progress.complete) {
+                if (provider.find_value("running").isTrue()) text = tr("Provider is running and locally ready.");
+                else if (provider.find_value("start_requested").isTrue() || provider.find_value("autostart").isTrue())
+                    text = tr("Reserves are ready. Waiting for Core to confirm the requested or automatic start.");
+                else text = tr("Reserves are ready. The provider is stopped; use Start / resume on Overview when you want to operate it.");
+            } else {
+                text = tr("Configuration is saved; preparation or another prerequisite is still pending.");
+            }
+            const auto& preparation = provider.find_value("preparation");
+            text += QStringLiteral("\n\n") + (preparation.isArray()
+                ? formatPoolPreparation(preparation, PreparationDetail::Operator)
+                : tr("Current reserve-funding amounts are unavailable. Check again; missing information does not mean no funding is needed."));
+            const auto& errors = provider.find_value("readiness_errors");
+            if (errors.isArray()) {
+                for (const auto& error : errors.getValues()) {
+                    if (error.isStr()) text += QStringLiteral("\n") + readinessExplanation(QString::fromStdString(error.get_str()));
+                }
+            }
+            text += tr("\n\nStatus is checked every 5 seconds while this assistant is open. Closing it does not cancel approved preparation or a requested start. To change the target or cancel uncreated work, use Settings → Reserves & refill.");
+            funding_label->setText(text.trimmed());
+        };
+        const auto refresh_setup_status = [this, funding_label, funding_refresh, render_setup_status,
+                                           setup_completed, setup_model, setup_wallet_id] {
+            if (!funding_label || !funding_refresh || !*setup_completed || m_privacy || m_busy || m_rpc_active ||
+                !setup_model || m_model != setup_model || m_model->getWalletName() != setup_wallet_id) return;
+            funding_refresh->setEnabled(false);
+            const auto failed = [this, funding_label, funding_refresh](const QString&) {
+                if (!funding_label || !funding_refresh || m_privacy) return;
+                funding_label->setText(tr("Current funding and readiness could not be refreshed. Check again; the previously displayed status is no longer current. Approved settings remain saved."));
+                funding_refresh->setEnabled(true);
+            };
+            call("getpaymasteroperatorinfo", {}, false, nullptr,
+                [funding_label, funding_refresh, render_setup_status, failed](const UniValue& current) {
+                    if (!funding_label || !funding_refresh) return;
+                    try { render_setup_status(current); }
+                    catch (const std::exception&) { failed({}); return; }
+                    funding_refresh->setEnabled(true);
+                }, false, failed, true);
+        };
+        auto* setup_status_timer = new QTimer(&wizard);
+        setup_status_timer->setObjectName("paymasterSetupStatusTimer");
+        setup_status_timer->setInterval(5000);
+        connect(setup_status_timer, &QTimer::timeout, progress_page, refresh_setup_status);
+        connect(setup_refresh, &QPushButton::clicked, progress_page, refresh_setup_status);
         auto advance_setup = std::make_shared<std::function<void()>>();
         std::weak_ptr<std::function<void()>> weak_advance_setup{advance_setup};
         *advance_setup = [this, &wizard, progress_page, progress_result, setup_retry,
@@ -15423,7 +15490,8 @@ private:
                           weak_advance_setup, shared_steps, shared_context,
                           setup_model, setup_wallet_id, display, policy_params,
                           safety_params, liquidity_policy_params, liquidity_preview_params,
-                          operation_mode, provider_enabled, reviewed_pool, setup_start_requested] {
+                          operation_mode, provider_enabled, autostart, reviewed_pool, setup_start_requested,
+                          render_setup_status, setup_status_timer, setup_refresh] {
             using namespace DigiDollar::Paymaster;
             if (!setup_model || m_model != setup_model || m_model->getWalletName() != setup_wallet_id) {
                 fail_setup(tr("The selected wallet changed or was unloaded. Reopen setup in the intended wallet."));
@@ -15432,7 +15500,7 @@ private:
             *setup_running = true;
             setup_retry->setVisible(false);
             set_wizard_running(true);
-            call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled, reviewed_pool, setup_start_requested](const UniValue& current) {
+            call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled, autostart, reviewed_pool, setup_start_requested, render_setup_status, setup_status_timer, setup_refresh](const UniValue& current) {
                     try {
                         if (shared_context->isNull()) {
                             SetupChoices choices;
@@ -15443,6 +15511,7 @@ private:
                             choices.pool = (*liquidity_preview_params)[0];
                             choices.operation_mode = operation_mode->currentData().toString().toStdString();
                             choices.enabled = provider_enabled->isChecked();
+                            choices.autostart = autostart->isChecked();
                             *shared_steps = BuildSetupPlan(current, choices);
                             *setup_needs_quiesce = current.find_value("provider").find_value("enabled").isTrue();
                         } else {
@@ -15468,7 +15537,7 @@ private:
                         const auto& id = current.find_value("provider").find_value("provider_id");
                         if (id.isStr()) { *setup_provider_id = QString::fromStdString(id.get_str()); setup_backup_id->setText(*setup_provider_id); }
                         setup_backup->setVisible(true);
-                        QString completion_text = tr("Configuration saved. Core continues the approved task automatically. Current progress remains visible in the task card; no setup steps need to be repeated.");
+                        QString completion_text = tr("Configuration saved. Funding and readiness are shown below. No completed setup steps need to be repeated.");
                         completion_text += tr("\nThe saved autostart choice is %1.").arg(m_autostart_enabled ? tr("on") : tr("off"));
                         m_operation.title = tr("Set up provider");
                         m_operation.generation = m_wallet_generation;
@@ -15478,9 +15547,10 @@ private:
                             if (current.find_value("encrypted").isTrue()) unlockOperatorWallet([this] { requestReviewedStart(); });
                             else requestReviewedStart();
                         }
-                        if (m_setup_waiting_for_confirmations) {
-                            completion_text += QStringLiteral("\n\n") + tr("Waiting for approved pool preparation or blockchain confirmations. Check funding and unlock status on Overview.");
-                        }
+                        try { render_setup_status(current); }
+                        catch (const std::exception&) { completion_text += tr("\nCurrent funding and readiness are unavailable. Check again before acting."); }
+                        setup_refresh->show();
+                        setup_status_timer->start();
                         progress_result->setText(completion_text);
                         setup_retry->setVisible(false);
                         progress_page->setComplete(true);
