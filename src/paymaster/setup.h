@@ -43,6 +43,9 @@ std::string OperatorSummary(const UniValue& snapshot);
 std::string OperatorAmount(int64_t satoshis);
 int64_t OperatorRemaining(int64_t limit, int64_t spent, int64_t reserved);
 UniValue OperatorBudgets(const UniValue& snapshot);
+/** Known cross-policy fee conflicts only; not policy validation or readiness. */
+UniValue OperatorFeeLimitConflicts(const UniValue& policy, const UniValue& safety);
+std::string DescribeOperatorFeeLimitConflicts(const UniValue& conflicts);
 
 struct SetupChoices {
     std::string display_name;

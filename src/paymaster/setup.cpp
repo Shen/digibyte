@@ -134,7 +134,7 @@ const std::vector<SetupField>& SetupFields()
         {"max_amount_cents", "Largest accepted payment", "Payments above this DD amount are declined. Must be at least the smallest payment.", "DD", 2, 100, MAX_DD_OUTPUT_CENTS},
         {"quote_ttl", "Offer lifetime", "Time for a customer to review and accept an offer. 60 seconds gives the maximum supported review time.", "seconds", 0, 1, 60},
         {"maximum_network_fee_dgb_satoshis", "Advertised network-fee ceiling", "Upper DGB fee advertised for one customer payment. This is a ceiling, not a fixed charge. Actual spending must also fit the limits below.", "DGB", 8, 1, MAX_MONEY},
-        {"maximum_network_fee_per_transaction_satoshis", "Maximum fee per payment", "Cap on DGB spent for one customer payment. Must not exceed the advertised ceiling. Zero disables this payment model.", "DGB", 8, 0, MAX_MONEY},
+        {"maximum_network_fee_per_transaction_satoshis", "Maximum fee per payment", "For an offered model, match the advertised network-fee ceiling: a smaller limit prevents service at that ceiling; a larger limit is invalid. Zero disables an unused model.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_reserved_network_fee_satoshis", "Maximum reserved payment budget", "Budget held for accepted offers at the same time; it is not a confirmed expense. Must cover at least one payment fee ceiling.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_network_fee_per_hour_satoshis", "Payment fees per rolling hour", "Total DGB fee allowance in any rolling 60 minutes. At the limit, new payments wait or are declined; the limit never increases itself.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_network_fee_per_day_satoshis", "Payment fees per rolling day", "Total DGB fee allowance in any rolling 24 hours, not a midnight reset. Must be at least the hourly limit.", "DGB", 8, 0, MAX_MONEY},
@@ -552,13 +552,64 @@ UniValue OperatorBudgets(const UniValue& snapshot)
     add("refill", liquidity, liquidity.find_value("policy"), true);
     return rows;
 }
+UniValue OperatorFeeLimitConflicts(const UniValue& policy, const UniValue& safety)
+{
+    UniValue conflicts{UniValue::VARR};
+    const auto& models = policy.find_value("funding_models");
+    const auto& ceiling = policy.find_value("maximum_network_fee_dgb_satoshis");
+    if (!models.isArray() || !ceiling.isNum() || !safety.isObject()) return conflicts;
+    int64_t offer_fee{0};
+    if (!ParseInt64(ceiling.getValStr(), &offer_fee) || offer_fee <= 0 || !MoneyRange(offer_fee)) return conflicts;
+    const auto offers = [&](const char* name) {
+        return std::any_of(models.getValues().begin(), models.getValues().end(),
+                           [name](const UniValue& model) { return model.isStr() && model.get_str() == name; });
+    };
+    const auto& scope = policy.find_value("sponsorship_scope");
+    for (const auto* model : {"user_paid", "public_sponsored", "restricted_sponsored"}) {
+        const auto& limit = safety.find_value(model).find_value("maximum_network_fee_per_transaction_satoshis");
+        if (!limit.isNum()) continue;
+        int64_t payment_fee{0};
+        if (!ParseInt64(limit.getValStr(), &payment_fee) || !MoneyRange(payment_fee)) continue;
+        const bool offered = std::string{model} == "user_paid" ? offers("user_paid") :
+            offers("sponsored") && scope.isStr() && scope.get_str() == (std::string{model} == "public_sponsored" ? "public" : "restricted");
+        // Inactive smaller budgets do not restrict the current offer. Larger
+        // stored limits still violate Core's policy validation during edits.
+        if (payment_fee == offer_fee || (!offered && payment_fee < offer_fee)) continue;
+        UniValue conflict{UniValue::VOBJ};
+        conflict.pushKV("code", "PAYMASTER_OFFER_FEE_LIMIT_MISMATCH");
+        conflict.pushKV("model", model);
+        conflict.pushKV("offered", offered);
+        conflict.pushKV("offer_fee_ceiling_satoshis", offer_fee);
+        conflict.pushKV("payment_fee_limit_satoshis", payment_fee);
+        conflicts.push_back(conflict);
+    }
+    return conflicts;
+}
+
+std::string DescribeOperatorFeeLimitConflicts(const UniValue& conflicts)
+{
+    std::string result;
+    for (const auto& conflict : conflicts.getValues()) {
+        const auto offer = conflict.find_value("offer_fee_ceiling_satoshis").getInt<int64_t>();
+        const auto limit = conflict.find_value("payment_fee_limit_satoshis").getInt<int64_t>();
+        result += "Configuration conflict (" + conflict.find_value("model").get_str() + "): offer network-fee ceiling " +
+            OperatorAmount(offer) + " DGB; per-payment safety limit " + OperatorAmount(limit) + " DGB. ";
+        result += limit < offer ? "This payment model cannot serve at the saved offer ceiling. " :
+                                 "Core requires the per-payment limit not to exceed the offer ceiling, including stored inactive limits. ";
+        result += "Review offer and spending limits; waiting for a rolling budget does not resolve this mismatch. No limits were changed.\n";
+    }
+    return result;
+}
+
 std::string OperatorSummary(const UniValue& snapshot)
 {
     if (!snapshot.find_value("schema_version").isNum() || snapshot.find_value("schema_version").getInt<int>() != 1) throw std::runtime_error("PAYMASTER_STATUS_VERSION_UNKNOWN");
     const auto& provider = snapshot.find_value("provider");
     std::string result = "Network: " + snapshot.find_value("network").get_str() + "\nWallet: " + snapshot.find_value("wallet").write();
     const auto& diagnostics = snapshot.find_value("diagnostics");
-    const auto explain = [](const UniValue& diagnostic) -> std::string {
+    const auto conflicts = OperatorFeeLimitConflicts(provider.find_value("policy"), snapshot.find_value("safety").find_value("policy"));
+    if (!conflicts.empty()) result += "\n" + DescribeOperatorFeeLimitConflicts(conflicts);
+    const auto explain = [&conflicts](const UniValue& diagnostic) -> std::string {
         const auto action = diagnostic.find_value("action").get_str();
         if (action == "configure_node") return "Run -paymastersetup and review node configuration and routing";
         if (action == "setup") return "Continue -paymastersetup in this wallet";
@@ -570,7 +621,8 @@ std::string OperatorSummary(const UniValue& snapshot)
         if (action == "unlock" || action == "review_unlock") return "Review wallet-wide unlock with -paymastersetup (unlock)";
         if (action == "start" || action == "enable") return "Review the saved policy, then use -paymastersetup (resume)";
         if (action == "review_liquidity") return "Review confirmed funds and pool preparation in -paymastersetup";
-        if (action == "review_budget") return "Wait for rolling budget capacity or explicitly review finite limits";
+        if (action == "review_budget") return conflicts.empty() ? "Wait for rolling budget capacity or explicitly review finite limits" :
+            "Correct the offer/payment fee-limit configuration conflict; waiting for rolling capacity is insufficient";
         if (action == "backup_wallet") return "Create a full-wallet backup with -paymastersetup (backup)";
         if (action == "check_external") return "Run checkpaymasterendpoint from your own independent node";
         if (action == "none") return "Operation is locally ready";

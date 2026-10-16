@@ -618,6 +618,7 @@ public:
         std::cout << "Wallet: " << wallet << " | Network: " << snapshot.find_value("network").get_str() << '\n';
         OperatorShowOffer(choices.policy);
         OperatorShowSafety(choices.policy, choices.safety);
+        std::cout << DescribeOperatorFeeLimitConflicts(OperatorFeeLimitConflicts(choices.policy, choices.safety));
         OperatorFields(choices.safety, false);
         int64_t daily_ceiling{0};
         for (const auto& model : OperatorBudgetModels(choices.policy)) daily_ceiling += choices.safety.find_value(model.first).find_value("maximum_network_fee_per_day_satoshis").getInt<int64_t>();

@@ -39,6 +39,43 @@ SetupChoices Choices()
 }
 } // namespace
 BOOST_AUTO_TEST_SUITE(paymaster_setup_tests)
+BOOST_AUTO_TEST_CASE(offer_fee_conflicts_are_model_specific_and_read_only)
+{
+    auto policy = SetupDefaultPolicy();
+    auto safety = SetupDefaultSafety(20000000, true, false, false);
+    BOOST_CHECK(OperatorFeeLimitConflicts(policy, safety).empty());
+    policy.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+    const auto before = safety.write();
+    auto conflicts = OperatorFeeLimitConflicts(policy, safety);
+    BOOST_REQUIRE_EQUAL(conflicts.size(), 1U);
+    BOOST_CHECK_EQUAL(conflicts[0].find_value("model").get_str(), "user_paid");
+    BOOST_CHECK_EQUAL(conflicts[0].find_value("offer_fee_ceiling_satoshis").getInt<int64_t>(), 50000000);
+    BOOST_CHECK_EQUAL(conflicts[0].find_value("payment_fee_limit_satoshis").getInt<int64_t>(), 20000000);
+    const auto message = DescribeOperatorFeeLimitConflicts(conflicts);
+    BOOST_CHECK(message.find("0.50000000 DGB") != std::string::npos);
+    BOOST_CHECK(message.find("0.20000000 DGB") != std::string::npos);
+    BOOST_CHECK(message.find("waiting for a rolling budget does not resolve") != std::string::npos);
+    BOOST_CHECK_EQUAL(safety.write(), before);
+
+    UniValue models{UniValue::VARR}; models.push_back("user_paid"); models.push_back("sponsored");
+    policy.pushKV("funding_models", models);
+    auto sponsored = SetupDefaultSafety(50000000, false, true, false).find_value("public_sponsored");
+    safety.pushKV("public_sponsored", sponsored);
+    BOOST_CHECK_EQUAL(OperatorFeeLimitConflicts(policy, safety).size(), 1U); // Only user paid is blocked.
+    models = UniValue{UniValue::VARR}; models.push_back("sponsored");
+    policy.pushKV("funding_models", models);
+    BOOST_CHECK(OperatorFeeLimitConflicts(policy, safety).empty()); // Inactive smaller budget is harmless.
+    policy.pushKV("maximum_network_fee_dgb_satoshis", 10000000);
+    conflicts = OperatorFeeLimitConflicts(policy, safety);
+    BOOST_REQUIRE_EQUAL(conflicts.size(), 2U); // Core also checks inactive stored caps above the ceiling.
+    BOOST_CHECK(conflicts[0].find_value("offered").isFalse());
+    auto invalid = policy;
+    invalid.pushKV("maximum_network_fee_dgb_satoshis", UniValue{UniValue::VNUM, "9223372036854775808"});
+    BOOST_CHECK(OperatorFeeLimitConflicts(invalid, safety).empty()); // Invalid data is not a known numeric conflict.
+    BOOST_CHECK(OperatorFeeLimitConflicts(UniValue{}, safety).empty());
+    BOOST_CHECK(OperatorFeeLimitConflicts(policy, UniValue{}).empty());
+}
+
 BOOST_AUTO_TEST_CASE(cli_status_uses_the_selected_wallet_without_mutations)
 {
     ArgsManager args;
@@ -61,6 +98,16 @@ BOOST_AUTO_TEST_CASE(cli_status_uses_the_selected_wallet_without_mutations)
     provider.pushKV("liquidity", liquidity);
     snapshot.pushKV("provider", provider);
     snapshot.pushKV("diagnostics", UniValue{UniValue::VARR});
+    auto policy = SetupDefaultPolicy();
+    policy.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+    provider.pushKV("policy", policy);
+    snapshot.pushKV("provider", provider);
+    UniValue safety{UniValue::VOBJ};
+    safety.pushKV("policy", SetupDefaultSafety(20000000, true, false, false));
+    UniValue usage{UniValue::VOBJ};
+    for (const auto* key : {"reserved_network_fee_satoshis", "spent_network_fee_last_hour_satoshis", "spent_network_fee_last_day_satoshis"}) usage.pushKV(key, 0);
+    for (const auto* model : {"user_paid", "public_sponsored", "restricted_sponsored"}) safety.pushKV(model, usage);
+    snapshot.pushKV("safety", safety);
     const CliRpc rpc = [&](const std::string& method, const UniValue& params, const std::optional<std::string>& wallet) {
         ++calls;
         BOOST_CHECK_EQUAL(method, "getpaymasteroperatorinfo");
@@ -72,6 +119,8 @@ BOOST_AUTO_TEST_CASE(cli_status_uses_the_selected_wallet_without_mutations)
     BOOST_CHECK_EQUAL(RunCli(false, args, "127.0.0.1", rpc), 0);
     BOOST_CHECK_EQUAL(calls, 1);
     BOOST_CHECK_EQUAL(output.str(), "RPC node: 127.0.0.1 (configured RPC port)\n" + OperatorSummary(snapshot));
+    BOOST_CHECK(output.str().find("Configuration conflict (user_paid)") != std::string::npos);
+    BOOST_CHECK(output.str().find("0.50000000 DGB; per-payment safety limit 0.20000000 DGB") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(cli_rejects_ambiguous_input_and_does_not_retry_failed_status)

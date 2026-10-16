@@ -3886,6 +3886,13 @@ RPCHelpMan getpaymasteroperatorinfo()
                                                                      {RPCResult::Type::OBJ, "node_settings", "Effective startup values, including ordinary_outbound_target; OS-limited capacity is reported separately in provider.transport", {{RPCResult::Type::ELISION, "", "Allowed Paymaster node options"}}},
                                                                      {RPCResult::Type::OBJ, "node_setting_overrides", "Options controlled outside the editable config: command_line, forced, or settings_json; advisory, configuration RPCs recheck conflicts", {{RPCResult::Type::ELISION, "", "Setting name and controlling source"}}},
                                                                      {RPCResult::Type::OBJ, "safety", "Finite policies and budget accounting", {{RPCResult::Type::ELISION, "", "Same field meanings as getpaymastersafetystatus; no expiry mutation"}}},
+                                                                     {RPCResult::Type::ARR, "configuration_conflicts", "Known offer/payment fee-limit mismatches; not a readiness verdict", {{RPCResult::Type::OBJ, "", "Conflict", {
+                                                                         {RPCResult::Type::STR, "code", "PAYMASTER_OFFER_FEE_LIMIT_MISMATCH"},
+                                                                         {RPCResult::Type::STR, "model", "Affected funding model"},
+                                                                         {RPCResult::Type::BOOL, "offered", "Model is offered by the saved policy"},
+                                                                         {RPCResult::Type::NUM, "offer_fee_ceiling_satoshis", "Advertised network-fee ceiling"},
+                                                                         {RPCResult::Type::NUM, "payment_fee_limit_satoshis", "Per-payment safety limit"},
+                                                                     }}}},
                                                                      {RPCResult::Type::ARR, "diagnostics", "Ordered causes and action identifiers", {{RPCResult::Type::OBJ, "", "Diagnostic", {
                                                                                                                                                                                                   {RPCResult::Type::STR, "code", "Stable code"},
                                                                                                                                                                                                   {RPCResult::Type::STR, "state", "ready, waiting, action_required, error or unknown"},
@@ -4071,6 +4078,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             result.pushKV("diagnostics", OperatorDiagnostics(provider, wallet->nRelockTime, now));
             result.pushKV("provider", provider);
             result.pushKV("safety", safety);
+            result.pushKV("configuration_conflicts", OperatorFeeLimitConflicts(provider.find_value("policy"), safety.find_value("policy")));
             return result;
         },
     };
