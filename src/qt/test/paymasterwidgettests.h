@@ -35,7 +35,8 @@ private Q_SLOTS:
     void paymasterOperationControllerRecoversWithoutDuplicateApproval();
     void paymasterOperationFundingReviewIsBounded();
     void paymasterDeferredStartIntentIsWalletScoped();
-    void paymasterFiveDestinationsAndVisibleTasks();
+    void paymasterOperatorNavigationAndVisibleTasks();
+    void paymasterReserveSettingsRefresh();
     void paymasterOperatorOverviewGuidesAndFailsClosed();
     void paymasterPreparationFeeRecovery();
     void paymasterStartIntentNeedsReserveApproval();

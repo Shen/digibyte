@@ -103,6 +103,22 @@
 #include <QtTest/QtTestWidgets>
 #include <QtWidgets/qtestsupport_widgets.h>
 
+namespace {
+void SelectPaymasterPage(QStackedWidget* pages, QWidget* page)
+{
+    auto* parent = qobject_cast<QStackedWidget*>(page->parentWidget());
+    QVERIFY(parent);
+    if (parent != pages) pages->setCurrentWidget(parent);
+    parent->setCurrentWidget(page);
+}
+
+QWidget* CurrentPaymasterPage(QStackedWidget* pages)
+{
+    auto* settings = qobject_cast<QStackedWidget*>(pages->currentWidget());
+    return settings ? settings->currentWidget() : pages->currentWidget();
+}
+} // namespace
+
 using wallet::AddWallet;
 using wallet::CreateMockableWalletDatabase;
 using wallet::RemoveWallet;
@@ -534,9 +550,8 @@ void PaymasterWidgetTests::paymasterLiquidityPolicyDefaultsAndApprovalGuard()
     QVERIFY(liquidity_page != nullptr);
     tab.findChild<QStackedWidget*>("paymasterSettingsPages")->setEnabled(true);
 
-    const int liquidity_index = paymaster_tabs->indexOf(liquidity_page);
-    QVERIFY(liquidity_index >= 0);
-    paymaster_tabs->widget(liquidity_index)->setEnabled(true);
+    QVERIFY(tab.findChild<QStackedWidget*>("paymasterSettingsPages")->indexOf(liquidity_page) >= 0);
+    liquidity_page->setEnabled(true);
     QVERIFY(liquidity_page->isEnabled());
 
     QCheckBox* automatic = tab.findChild<QCheckBox*>(
@@ -593,10 +608,10 @@ void PaymasterWidgetTests::paymasterLiquidityPolicyDefaultsAndApprovalGuard()
     QVERIFY(settings && automation);
     paymaster_tabs->setCurrentWidget(settings);
     settings->setCurrentWidget(automation);
-    paymaster_tabs->setCurrentWidget(liquidity_page);
+    SelectPaymasterPage(paymaster_tabs, liquidity_page);
     QVERIFY(primary_save->isVisibleTo(liquidity_page));
     QCOMPARE(primary_save->text(), QStringLiteral("Save liquidity settings"));
-    paymaster_tabs->setCurrentIndex(liquidity_index);
+    SelectPaymasterPage(paymaster_tabs, liquidity_page);
     advanced->setChecked(true);
     QVERIFY(save->isHidden()); // Only the combined targets/costs form remains visible.
     QVERIFY(target_save_status->text().contains(
@@ -778,7 +793,7 @@ void PaymasterWidgetTests::paymasterLiquidityMaintenanceStatesAreReadable()
     QVERIFY(operator_tabs && capital_page);
     tab.findChild<QStackedWidget*>("paymasterSettingsPages")->setEnabled(true);
 
-    operator_tabs->widget(operator_tabs->indexOf(capital_page))->setEnabled(true);
+    capital_page->setEnabled(true);
 
     QLabel* state = tab.findChild<QLabel*>(
         QStringLiteral("paymasterLiquidityMaintenanceState"));
@@ -851,7 +866,7 @@ void PaymasterWidgetTests::paymasterLiquidityMaintenanceStatesAreReadable()
     auto* settings = tab.findChild<QStackedWidget*>("paymasterSettingsPages");
     auto* automation = tab.findChild<QWidget*>("paymasterAutomationPage");
     QVERIFY(settings && automation);
-    QCOMPARE(operator_tabs->currentWidget(), capital_page);
+    QCOMPARE(CurrentPaymasterPage(operator_tabs), capital_page);
     QVERIFY(tab.findChild<QLabel*>("paymasterLiquidityPolicyStatus")->text().contains(
         QStringLiteral("DigiDollar 3 / 1")));
     QCOMPARE(admission_carriers->value(), 3);
@@ -1211,7 +1226,7 @@ void PaymasterWidgetTests::paymasterExternalReadinessIsSeparatedFromConfiguratio
         };
         verify_start_action(liquidity_action);
         operation_action->click();
-        QCOMPARE(operator_tabs->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+        QCOMPARE(CurrentPaymasterPage(operator_tabs)->objectName(), QStringLiteral("paymasterLiquidityPage"));
         operator_tabs->setCurrentIndex(0);
     }
 
@@ -1485,9 +1500,8 @@ void PaymasterWidgetTests::paymasterCarrierWithdrawalActionsFailClosed()
     QVERIFY(liquidity_page != nullptr);
     tab.findChild<QStackedWidget*>("paymasterSettingsPages")->setEnabled(true);
 
-    const int liquidity_index = paymaster_tabs->indexOf(liquidity_page);
-    QVERIFY(liquidity_index >= 0);
-    paymaster_tabs->widget(liquidity_index)->setEnabled(true);
+    QVERIFY(tab.findChild<QStackedWidget*>("paymasterSettingsPages")->indexOf(liquidity_page) >= 0);
+    liquidity_page->setEnabled(true);
     QVERIFY(liquidity_page->isEnabled());
 
     QLabel* value = tab.findChild<QLabel*>(
@@ -6684,8 +6698,8 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     auto* pause = panel->findChild<QPushButton*>(QStringLiteral("paymasterOperatorPause"));
     auto* card = panel->findChild<QGroupBox*>(QStringLiteral("paymasterOperatorCard"));
     QVERIFY(tabs && settings && headline && hint && connection && action && pause && card);
-    QCOMPARE(tabs->count(), 5);
-    QCOMPARE(settings->count(), 7);
+    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(settings->count(), 8);
     auto* details = panel->findChild<QWidget*>(QStringLiteral("paymasterTechnicalDetails"));
     QVERIFY(details);
     QVERIFY(details->isHidden());
@@ -6816,7 +6830,7 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
         QCOMPARE(capital_action->text(), QStringLiteral("View progress"));
         action->click();
         if (reserved) QVERIFY(tabs->currentWidget() != static_cast<QWidget*>(settings));
-        else QCOMPARE(tabs->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+        else QCOMPARE(CurrentPaymasterPage(tabs)->objectName(), QStringLiteral("paymasterLiquidityPage"));
 
         // Unknown diagnostics take priority even with an expected service wait.
         errors.push_back("PAYMASTER_INVALID_MAINTENANCE_LEDGER");
@@ -9241,7 +9255,7 @@ void PaymasterWidgetTests::paymasterConnectionLayout_data()
     QTest::addColumn<QSize>("window_size");
     QTest::addColumn<QString>("page_name");
     for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
-        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome", "paymasterLifecyclePage"}) {
+        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome", "paymasterLifecyclePage", "paymasterLiquidityPage", "paymasterSafetyPolicyPage", "paymasterConfigurationPage"}) {
             const auto name = QString::fromLatin1(page);
             const auto prefix = theme + "_" + name;
             QTest::newRow(qPrintable(prefix + "_narrow")) << theme << QSize(900, 620) << name;
@@ -9267,7 +9281,7 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     auto* runtime = panel->findChild<QPushButton*>("paymasterRuntimeSettingsToggle");
     auto* backup = panel->findChild<QGroupBox*>("paymasterOverviewBackupNotice");
     QVERIFY(tabs && settings && scroll && prerequisites && runtime && backup);
-    QCOMPARE(settings->count(), 7);
+    QCOMPARE(settings->count(), 8);
     auto* operation = panel->findChild<QWidget*>("paymasterOverviewPage");
     auto* administration = panel->findChild<QWidget*>("paymasterManagementPage");
     auto* connection = panel->findChild<QWidget*>("paymasterConnectionPage");
@@ -9314,7 +9328,11 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
         for (int i = 0; i < column_layout->count(); ++i) {
             auto* widget = column_layout->itemAt(i)->widget();
             if (!widget || widget->isHidden()) continue;
-            QVERIFY2(widget->height() >= widget->minimumSizeHint().height(), qPrintable(widget->objectName()));
+            // Responsive reserve cards post a new layout request after their
+            // column count changes. Check the settled geometry, not that event.
+            QTRY_VERIFY2(widget->height() >= widget->minimumSizeHint().height(),
+                         qPrintable(QStringLiteral("%1: height %2, minimum %3")
+                             .arg(widget->objectName()).arg(widget->height()).arg(widget->minimumSizeHint().height())));
             if (previous) QVERIFY2(widget->y() > previous->geometry().bottom(), qPrintable(widget->objectName()));
             if (auto* label = qobject_cast<QLabel*>(widget); label && label->wordWrap()) {
                 QVERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(label->objectName()));
@@ -9505,7 +9523,7 @@ void PaymasterWidgetTests::paymasterDeferredStartIntentIsWalletScoped()
     QVERIFY(!manager.HasRequestedProviderStart("wallet", provider));
 }
 
-void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
+void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
 {
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
     QTimer::singleShot(0, [] {
@@ -9517,8 +9535,8 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     auto* navigation = panel->findChild<QListWidget*>("paymasterNavigation");
     auto* selector = panel->findChild<QComboBox*>("paymasterNavigationSelect");
     QVERIFY(tabs && settings && navigation && selector);
-    QCOMPARE(navigation->count(), 5);
-    QCOMPARE(selector->count(), 5);
+    QCOMPARE(navigation->count(), 4);
+    QCOMPARE(selector->count(), 4);
     panel->resize(760, 650);
     panel->show();
     QCoreApplication::processEvents();
@@ -9528,10 +9546,10 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     QCoreApplication::processEvents();
     QVERIFY(navigation->isVisible());
     QVERIFY(selector->isHidden());
-    QCOMPARE(tabs->count(), 5);
-    QCOMPARE(settings->count(), 7);
+    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(settings->count(), 8);
     QCOMPARE(tabs->widget(0)->property("paymasterPageTitle").toString(), QStringLiteral("Overview"));
-    QCOMPARE(tabs->widget(1)->property("paymasterPageTitle").toString(), QStringLiteral("Funds & reserves"));
+    QCOMPARE(tabs->widget(1)->property("paymasterPageTitle").toString(), QStringLiteral("Activity"));
     QVERIFY(panel->findChild<QPushButton*>("paymasterRestoreTask"));
     QVERIFY(panel->findChild<QPushButton*>("paymasterWithdrawTask"));
     QVERIFY(panel->findChild<QPushButton*>("paymasterReleaseTask"));
@@ -9551,9 +9569,18 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     QCOMPARE(settings->widget(1), lifecycle); // First Settings destination, after its home page.
     auto* settings_home = panel->findChild<QWidget*>("paymasterSettingsHome");
     const auto menu = settings_home->findChildren<QPushButton*>();
-    QVERIFY(!menu.empty());
-    QCOMPARE(menu.front()->text(), QStringLiteral("Start, pause & retire"));
+    QCOMPARE(menu.size(), 7);
+    QCOMPARE(menu.front()->accessibleName(), QStringLiteral("Start, pause & retire"));
+    QCOMPARE(tabs->indexOf(funds), -1);
+    QVERIFY(funds->isAncestorOf(panel->findChild<QCheckBox*>("paymasterSettingsRefill")));
+    QVERIFY(panel->findChild<QWidget*>("paymasterAutomationPage")->isAncestorOf(
+        panel->findChild<QCheckBox*>("paymasterSettingsAutostart")));
     tabs->setCurrentWidget(settings);
+    for (int index = 0; index < menu.size(); ++index) {
+        settings->setCurrentIndex(0);
+        menu[index]->click();
+        QCOMPARE(settings->currentWidget(), settings->widget(index + 1));
+    }
     settings->setCurrentIndex(0);
     menu.front()->click();
     QCOMPARE(settings->currentWidget(), lifecycle);
@@ -9562,7 +9589,7 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     QVERIFY(back && back->text() == "Back to settings");
     back->click();
     QCOMPARE(settings->currentWidget(), settings_home);
-    tabs->setCurrentWidget(funds);
+    SelectPaymasterPage(tabs, funds);
     link->click();
     QCOMPARE(tabs->currentWidget(), settings);
     QCOMPARE(settings->currentWidget(), lifecycle);
@@ -9613,6 +9640,65 @@ UniValue GuidedOperatorSnapshot()
     snapshot.pushKV("wallet_generation", "loaded-provider");
     return snapshot;
 }
+}
+
+void PaymasterWidgetTests::paymasterReserveSettingsRefresh()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("running", true);
+    provider.pushKV("service_state", "active");
+    snapshot.pushKV("provider", provider);
+    QStringList commands;
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        commands << QString::fromStdString(method);
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        throw std::runtime_error("Unexpected navigation RPC");
+    });
+    panel->refreshStatus();
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+    auto* reserves = panel->findChild<QWidget*>("paymasterLiquidityPage");
+    auto* timer = panel->findChild<QTimer*>("paymasterSetupStatusTimer");
+    auto* fee = panel->findChild<QLineEdit*>("paymasterMaintenanceFeePerTransaction");
+    auto* state = panel->findChild<QLabel*>("paymasterReserveState");
+    QVERIFY(pages && settings && reserves && timer && fee && state);
+    panel->resize(1050, 750);
+    panel->show();
+    SelectPaymasterPage(pages, reserves);
+    QVERIFY(timer->isActive());
+    QCOMPARE(timer->interval(), 2000);
+    fee->setText("0.33000000");
+    auto pool = provider.find_value("pool");
+    pool.pushKV("complete_operational_slots", 2);
+    provider.pushKV("pool", pool);
+    snapshot.pushKV("provider", provider);
+    commands.clear();
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    QVERIFY(commands.contains("getpaymasteroperatorinfo"));
+    QCOMPARE(fee->text(), QStringLiteral("0.33000000"));
+    QVERIFY(state->text().contains("Available payment reserves: 2"));
+    QCOMPARE(CurrentPaymasterPage(pages), reserves);
+
+    panel->findChild<QPushButton*>("paymasterReservesBudgetsLink")->click();
+    QCOMPARE(settings->currentWidget()->objectName(), QStringLiteral("paymasterSafetyPolicyPage"));
+    QVERIFY(!timer->isActive());
+    panel->findChild<QPushButton*>("paymasterBudgetsReservesLink")->click();
+    QCOMPARE(CurrentPaymasterPage(pages), reserves);
+    QVERIFY(timer->isActive());
+    QCOMPARE(fee->text(), QStringLiteral("0.33000000"));
+    settings->setCurrentIndex(0);
+    QVERIFY(!timer->isActive());
+    panel->findChild<QPushButton*>("paymasterLiquidityPageLink")->click();
+    QCOMPARE(CurrentPaymasterPage(pages), reserves);
+    QVERIFY(timer->isActive());
+    for (const auto& method : commands) QVERIFY(method.startsWith("get"));
+    panel->setPrivacy(true);
+    QCOMPARE(pages->currentIndex(), 0);
+    QVERIFY(!settings->isEnabled());
+    QVERIFY(!timer->isActive());
 }
 
 void PaymasterWidgetTests::paymasterConfigurationConflicts_data()
@@ -10592,7 +10678,7 @@ void PaymasterWidgetTests::paymasterOperatorWorkTransitions()
         for (const auto& command : commands) QVERIFY(command.startsWith(QStringLiteral("get")));
         auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
         QVERIFY(pages);
-        QCOMPARE(pages->currentWidget()->objectName(), QStringLiteral("paymasterLiquidityPage"));
+        QCOMPARE(CurrentPaymasterPage(pages)->objectName(), QStringLiteral("paymasterLiquidityPage"));
         // Core may serve independent confirmed slots while the refill target
         // remains incomplete. Keep the refill warning, not a provider outage.
         provider.pushKV("service_state", "active");
@@ -10864,8 +10950,10 @@ void PaymasterWidgetTests::paymasterOverviewAutostart()
     auto* control = panel->findChild<QCheckBox*>("paymasterProviderAutostart");
     auto* copy = panel->findChild<QCheckBox*>("paymasterSettingsAutostart");
     auto* status = panel->findChild<QLabel*>("paymasterAutostartStatus");
+    auto* settings_status = panel->findChild<QLabel*>("paymasterSettingsAutostartStatus");
     auto* processing = panel->findChild<QComboBox*>("paymasterOperationMode");
-    QVERIFY(control && copy && status && processing);
+    QVERIFY(control && copy && status && settings_status && processing);
+    QCOMPARE(settings_status->text(), status->text());
     if (scenario == "privacy") {
         panel->setPrivacy(true);
         QVERIFY(!control->isEnabled() && !copy->isEnabled());
@@ -10899,6 +10987,7 @@ void PaymasterWidgetTests::paymasterOverviewAutostart()
     QTRY_VERIFY(reads > 0);
     QTRY_COMPARE(control->isChecked(), stored);
     QCOMPARE(copy->isChecked(), stored);
+    QCOMPARE(settings_status->text(), status->text());
     QCOMPARE(writes, 1);
     if (scenario == "processing_draft") QCOMPARE(processing->currentData().toString(), QStringLiteral("manual"));
     if (scenario == "lost_unsaved" || scenario == "malformed") QVERIFY(status->text().contains("not saved"));
@@ -11521,7 +11610,7 @@ void PaymasterWidgetTests::paymasterHomeStartIsSeparateFromSettings()
                     QVERIFY(css.open(QIODevice::ReadOnly));
                     panel->setStyleSheet(QString::fromUtf8(css.readAll()));
                     for (const auto* page : {"paymasterOverviewPage", "paymasterLiquidityPage"}) {
-                        pages->setCurrentWidget(panel->findChild<QWidget*>(page));
+                        SelectPaymasterPage(pages, panel->findChild<QWidget*>(page));
                         panel->show();
                         QVERIFY(QTest::qWaitForWindowExposed(panel.get()));
                         QCoreApplication::processEvents();
@@ -12153,7 +12242,7 @@ void PaymasterWidgetTests::paymasterFundsOperatorPresentation()
     auto* page = panel->findChild<QScrollArea*>("paymasterLiquidityPage");
     auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
     QVERIFY(page && pages);
-    pages->setCurrentWidget(page);
+    SelectPaymasterPage(pages, page);
     panel->refreshStatus();
     QCOMPARE(commands, QStringList({"getpaymasteroperatorinfo", "getpaymasterfinancestatus"}));
     panel->resize(width, 940);
@@ -12446,7 +12535,7 @@ void PaymasterWidgetTests::paymasterGuidedTaskLayout()
     auto* tabs = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
     QVERIFY(tabs && settings->isEnabled());
     tabs->setCurrentWidget(settings);
-    tabs->setCurrentWidget(panel->findChild<QWidget*>("paymasterLiquidityPage"));
+    SelectPaymasterPage(tabs, panel->findChild<QWidget*>("paymasterLiquidityPage"));
     QVERIFY(tabs->currentWidget()->isVisible());
     panel->setPrivacy(true);
     QVERIFY(budget_details->isHidden());
@@ -13198,7 +13287,7 @@ void PaymasterWidgetTests::paymasterReserveReduction()
     auto* release = panel->findChild<QPushButton*>("paymasterReviewExcessReserves");
     QVERIFY(preset && save && state && overview_target && overview_available && release);
     auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
-    pages->setCurrentWidget(panel->findChild<QWidget*>("paymasterLiquidityPage"));
+    SelectPaymasterPage(pages, panel->findChild<QWidget*>("paymasterLiquidityPage"));
     panel->resize(1000, 800);
     panel->show();
     preset->setCurrentIndex(preset->findData(1));
@@ -13332,7 +13421,7 @@ void PaymasterWidgetTests::paymasterReservePresets()
     auto* discard = panel->findChild<QPushButton*>("paymasterDiscardLiquidity");
     auto* save = panel->findChild<QPushButton*>("paymasterSaveLiquidityPolicyPrimary");
     QVERIFY(pages && capital && preset && manual && summary && suggestion && admission && operational && carriers && fee && hour && day && approved && discard && save);
-    pages->setCurrentWidget(capital);
+    SelectPaymasterPage(pages, capital);
     panel->resize(560, 640);
     panel->show();
     QCOMPARE(preset->currentData().toInt(), 0);
