@@ -1971,6 +1971,14 @@ DigiDollar::Paymaster::DirectResult CConnman::RequestPaymasterConnection(
     auto result = m_direct_queue.Request(key, endpoint.ToStringAddrPort(), high_privacy, DirectNow());
     if (result.lease && !result.lease->canceled) {
         ForNode(result.lease->peer_id, [&](CNode* peer) {
+            if (peer->m_paymaster_lease == result.lease && key.purpose == DirectPurpose::DIAGNOSTIC) {
+                if (peer->m_transport->GetInfo().transport_type == TransportProtocolType::V2) {
+                    result.lease->diagnostic_v2 = true;
+                }
+                // Diagnostic readiness is recorded by the message handler;
+                // it must never become authenticated payment readiness.
+                return true;
+            }
             if (peer->m_paymaster_lease == result.lease && peer->m_paymaster_negotiated &&
                 peer->m_transport->GetInfo().transport_type == TransportProtocolType::V2) {
                 result.lease->state = DirectState::READY;
@@ -4009,6 +4017,8 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
         return;
     }
     if (pnode->IsPaymasterDirectConn() && paymaster_direct_message) {
+        if (pnode->m_paymaster_lease &&
+            pnode->m_paymaster_lease->key.purpose == DigiDollar::Paymaster::DirectPurpose::DIAGNOSTIC) return;
         const bool channel_authentication{
             msg.m_type == NetMsgType::PMAUTHREQ || msg.m_type == NetMsgType::PMAUTHRESP};
         // Apply the same privacy boundary to every internal caller, not only

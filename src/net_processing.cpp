@@ -4379,6 +4379,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::PMAUTHREQ || msg_type == NetMsgType::PMAUTHRESP) {
         const auto transport = pfrom.m_transport->GetInfo();
         if (!pfrom.IsPaymasterDirectConn() || !pfrom.fSuccessfullyConnected ||
+            (pfrom.m_paymaster_lease && pfrom.m_paymaster_lease->key.purpose == DigiDollar::Paymaster::DirectPurpose::DIAGNOSTIC) ||
             !peer->m_paymaster_negotiated || pfrom.m_paymaster_negotiated ||
             transport.transport_type != TransportProtocolType::V2 || !transport.session_id ||
             !m_opts.paymaster || !m_opts.paymaster->Enabled() ||
@@ -7464,6 +7465,19 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         }
         if (!peer->m_paymaster_negotiated) {
             MaybeSendPing(*pto, *peer, GetTime<std::chrono::microseconds>());
+            return true;
+        }
+        if (pto->m_paymaster_lease &&
+            pto->m_paymaster_lease->key.purpose == DigiDollar::Paymaster::DirectPurpose::DIAGNOSTIC) {
+            // This locally requested probe ends at capability negotiation.
+            // Keep m_paymaster_negotiated false: no authentication challenge,
+            // capacity request, payment or recovery metadata may be sent.
+            const auto& lease = pto->m_paymaster_lease;
+            if (!lease->canceled) {
+                lease->diagnostic_v2 = true;
+                lease->diagnostic_negotiated = true;
+                lease->state = DigiDollar::Paymaster::DirectState::TRANSPORT_READY;
+            }
             return true;
         }
         if (!pto->m_paymaster_negotiated) {

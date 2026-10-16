@@ -140,7 +140,7 @@ struct DirectBudget {
     }
 };
 
-enum class DirectState { DISABLED, QUEUED, CONNECTING, HANDSHAKING, READY, FULL, EXPIRED, FAILED, CANCELED, NETWORK_INACTIVE, PRIVACY_REJECTED, CONNECT_FAILED };
+enum class DirectState { DISABLED, QUEUED, CONNECTING, HANDSHAKING, READY, FULL, EXPIRED, FAILED, CANCELED, NETWORK_INACTIVE, PRIVACY_REJECTED, CONNECT_FAILED, TRANSPORT_READY };
 
 inline const char* DirectStateName(DirectState state)
 {
@@ -157,9 +157,12 @@ inline const char* DirectStateName(DirectState state)
     case DirectState::NETWORK_INACTIVE: return "network_inactive";
     case DirectState::PRIVACY_REJECTED: return "privacy_rejected";
     case DirectState::CONNECT_FAILED: return "connect_failed";
+    case DirectState::TRANSPORT_READY: return "transport_ready";
     }
     return "failed";
 }
+
+enum class DirectPurpose : uint8_t { PAYMENT, DIAGNOSTIC };
 
 /** owner is a random wallet-load identifier, never a wallet name. operation
  * binds a request/provider/phase (or recovery); endpoints alone are not keys. */
@@ -169,13 +172,15 @@ struct DirectKey {
     bool recovery{false};
     /** Locally selected identity, never supplied by the transport peer. */
     uint256 provider_id{};
+    /** Local-only purpose. A diagnostic never authenticates or carries payment messages. */
+    DirectPurpose purpose{DirectPurpose::PAYMENT};
     friend bool operator<(const DirectKey& a, const DirectKey& b)
     {
-        return std::tie(a.owner, a.operation, a.recovery, a.provider_id) < std::tie(b.owner, b.operation, b.recovery, b.provider_id);
+        return std::tie(a.owner, a.operation, a.recovery, a.provider_id, a.purpose) < std::tie(b.owner, b.operation, b.recovery, b.provider_id, b.purpose);
     }
     friend bool operator==(const DirectKey& a, const DirectKey& b)
     {
-        return a.owner == b.owner && a.operation == b.operation && a.recovery == b.recovery && a.provider_id == b.provider_id;
+        return a.owner == b.owner && a.operation == b.operation && a.recovery == b.recovery && a.provider_id == b.provider_id && a.purpose == b.purpose;
     }
 };
 
@@ -278,6 +283,9 @@ struct DirectLease {
     std::atomic<int64_t> peer_id{-1};
     std::atomic<int64_t> progress{0};
     std::atomic_bool canceled{false};
+    // Positive observations survive a disconnect while the RPC holds the lease.
+    std::atomic_bool diagnostic_v2{false};
+    std::atomic_bool diagnostic_negotiated{false};
 };
 
 struct DirectResult {

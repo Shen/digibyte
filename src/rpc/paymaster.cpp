@@ -8,6 +8,7 @@
 #include <common/settings.h>
 #include <fstream>
 #include <hash.h>
+#include <logging.h>
 #include <map>
 #include <mutex>
 #include <net.h>
@@ -499,46 +500,91 @@ RPCHelpMan applypaymasternodeconfig()
 }
 RPCHelpMan checkpaymasterendpoint()
 {
-    return RPCHelpMan{"checkpaymasterendpoint", "Explicit bounded v2/Paymaster transport check from this node. No payment, capacity reservation, identity authentication or guarantee of availability. At most one probe per node and one start per 30 seconds.\n", {{"endpoint", RPCArg::Type::STR, RPCArg::Optional::NO, "Numeric public IP:port or onion:port; loopback only on regtest"}}, RPCResult{RPCResult::Type::OBJ, "", "Transport observation", {{RPCResult::Type::STR, "network", "Probe network"}, {RPCResult::Type::STR, "endpoint", "Probed endpoint"}, {RPCResult::Type::NUM_TIME, "observed_at", "Probe time"}, {RPCResult::Type::BOOL, "transport_ready", "v2 and Paymaster negotiated"}, {RPCResult::Type::STR, "state", "Terminal transport state"}, {RPCResult::Type::OBJ, "stages", "Only positively observed stages are marked passed", {{RPCResult::Type::STR, "v2_transport", "passed or unknown"}, {RPCResult::Type::STR, "paymaster_negotiation", "passed or unknown"}}}, {RPCResult::Type::BOOL, "payment_verified", "Always false"}, {RPCResult::Type::BOOL, "identity_verified", "Always false"}}}, RPCExamples{HelpExampleCli("checkpaymasterendpoint", "\"PUBLIC_IP:12033\"")}, [](const RPCHelpMan&, const JSONRPCRequest& request) {
-                          using namespace DigiDollar::Paymaster;
-                          auto& node = EnsureAnyNodeContext(request.context);
-                          if (!node.connman) throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "P2P unavailable");
-                          const auto endpoint = LookupNumeric(request.params[0].get_str(), 0);
-                          if (!ProbeAddress(endpoint)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_DIAGNOSTIC_ENDPOINT_INVALID");
-                          std::unique_lock<std::mutex> lock(g_probe_mutex, std::try_to_lock);
-                          if (!lock.owns_lock()) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_BUSY");
-                          const auto start = DirectNow();
-                          if (g_last_probe && start - g_last_probe < 30000) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_RATE_LIMIT");
-                          if (node.connman->GetPaymasterBudget().outbound <= node.connman->GetPaymasterUsage().outgoing || node.connman->GetPaymasterQueueSize()) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_CAPACITY_BUSY");
-                          g_last_probe = start;
-                          const DirectKey key{GetRandHash().GetHex(), "operator-diagnostic", false};
-                          struct Release {
-                              CConnman& connman;
-                              DirectKey key;
-                              ~Release() { connman.ReleasePaymasterConnection(key); }
-                          } release{*node.connman, key};
-                          DirectState state{DirectState::EXPIRED};
-                          while (!ShutdownRequested() && DirectNow() - start < DIRECT_HANDSHAKE_MS) {
-                              auto result = node.connman->RequestPaymasterConnection(key, endpoint, endpoint.IsTor());
-                              state = result.state;
-                              if (state != DirectState::QUEUED && state != DirectState::CONNECTING && state != DirectState::HANDSHAKING) break;
-                              std::this_thread::sleep_for(std::chrono::milliseconds{50});
-                          }
-                          if (state == DirectState::QUEUED || state == DirectState::CONNECTING || state == DirectState::HANDSHAKING) state = DirectState::EXPIRED;
-                          UniValue result{UniValue::VOBJ};
-                          result.pushKV("network", ChainTypeToString(Params().GetChainType()));
-                          result.pushKV("endpoint", endpoint.ToStringAddrPort());
-                          result.pushKV("observed_at", GetTime());
-                          result.pushKV("transport_ready", state == DirectState::READY);
-                          result.pushKV("state", DirectStateName(state));
-                          UniValue stages{UniValue::VOBJ};
-                          stages.pushKV("v2_transport", state == DirectState::READY ? "passed" : "unknown");
-                          stages.pushKV("paymaster_negotiation", state == DirectState::READY ? "passed" : "unknown");
-                          result.pushKV("stages", stages);
-                          result.pushKV("payment_verified", false);
-                          result.pushKV("identity_verified", false);
-                          return result;
-                      }};
+    return RPCHelpMan{"checkpaymasterendpoint",
+        "Check BIP324/V2 and Paymaster capability negotiation from this node (at most 30 seconds).\n"
+        "No wallet, provider identity, funds or running provider is needed at the endpoint. This checks the node's listener, not payment readiness.\n"
+        "No payment, capacity reservation, identity authentication or guarantee of future availability.\n"
+        "Tor v3 endpoints use the configured onion SOCKS5 proxy (-onion or -proxy), require -proxyrandomize=1 and -logips=0, and never fall back to clearnet.\n"
+        "At most one probe per node and one start per 30 seconds. Run on another machine to check external reachability.\n",
+        {{"endpoint", RPCArg::Type::STR, RPCArg::Optional::NO, "Numeric public IP:port or Tor v3 onion:port; loopback only on regtest. DNS names are not resolved."}},
+        RPCResult{RPCResult::Type::OBJ, "", "Transport observation", {
+            {RPCResult::Type::STR, "network", "Probe chain"},
+            {RPCResult::Type::STR, "endpoint", "Probed endpoint"},
+            {RPCResult::Type::NUM_TIME, "observed_at", "Probe completion time"},
+            {RPCResult::Type::BOOL, "transport_ready", "V2 and Paymaster capabilities were negotiated"},
+            {RPCResult::Type::STR, "state", "Terminal diagnostic state; transport_ready on success (not authenticated direct_ready)"},
+            {RPCResult::Type::STR, "message", "Explanation of the result or the local prerequisite that prevented the check"},
+            {RPCResult::Type::OBJ, "stages", "Only positively observed stages are marked passed", {
+                {RPCResult::Type::STR, "v2_transport", "passed or unknown"},
+                {RPCResult::Type::STR, "paymaster_negotiation", "passed or unknown"}}},
+            {RPCResult::Type::BOOL, "payment_verified", "Always false"},
+            {RPCResult::Type::BOOL, "identity_verified", "Always false"}}},
+        RPCExamples{HelpExampleCli("checkpaymasterendpoint", "\"PUBLIC_IP:12025\"")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
+            using namespace DigiDollar::Paymaster;
+            auto& node = EnsureAnyNodeContext(request.context);
+            if (!node.connman) throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "P2P unavailable");
+            const auto endpoint = LookupNumeric(request.params[0].get_str(), 0);
+            if (!ProbeAddress(endpoint)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_DIAGNOSTIC_ENDPOINT_INVALID");
+            std::unique_lock<std::mutex> lock(g_probe_mutex, std::try_to_lock);
+            if (!lock.owns_lock()) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_BUSY");
+            const auto start = DirectNow();
+            if (g_last_probe && start - g_last_probe < 30000) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_RATE_LIMIT");
+            if ((node.connman->GetPaymasterBudget().outbound > 0 && node.connman->GetPaymasterBudget().outbound <= node.connman->GetPaymasterUsage().outgoing) || node.connman->GetPaymasterQueueSize()) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_CAPACITY_BUSY");
+            const DirectKey key{GetRandHash().GetHex(), "operator-diagnostic", false, {}, DirectPurpose::DIAGNOSTIC};
+            struct Release {
+                CConnman& connman;
+                DirectKey key;
+                ~Release() { connman.ReleasePaymasterConnection(key); }
+            } release{*node.connman, key};
+            DirectState state{DirectState::EXPIRED};
+            std::string message;
+            if (endpoint.IsTor()) {
+                Proxy proxy;
+                if (!GetProxy(NET_ONION, proxy)) message = "Tor check requires an onion SOCKS5 proxy configured with -onion or -proxy. No connection was attempted.";
+                else if (!proxy.randomize_credentials) message = "Tor check requires -proxyrandomize=1 for SOCKS5 stream isolation. No connection was attempted.";
+                else if (fLogIPs) message = "Tor check requires -logips=0. No connection was attempted.";
+                if (!message.empty()) state = DirectState::PRIVACY_REJECTED;
+            }
+            std::shared_ptr<DirectLease> observation;
+            if (message.empty()) g_last_probe = start;
+            while (message.empty() && !ShutdownRequested() && DirectNow() - start < DIRECT_HANDSHAKE_MS) {
+                auto result = node.connman->RequestPaymasterConnection(key, endpoint, endpoint.IsTor());
+                if (result.lease) observation = result.lease;
+                state = result.state;
+                if (state != DirectState::QUEUED && state != DirectState::CONNECTING && state != DirectState::HANDSHAKING) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+            if (state == DirectState::QUEUED || state == DirectState::CONNECTING || state == DirectState::HANDSHAKING) state = DirectState::EXPIRED;
+            const bool v2 = observation && observation->diagnostic_v2;
+            const bool negotiated = observation && observation->diagnostic_negotiated;
+            if (negotiated) state = DirectState::TRANSPORT_READY;
+            if (message.empty()) {
+                switch (state) {
+                case DirectState::TRANSPORT_READY: message = "Endpoint reached: BIP324/V2 and Paymaster capabilities negotiated. Provider identity, payment readiness and reserves were not checked."; break;
+                case DirectState::DISABLED: message = "No outgoing Paymaster connection slots are enabled on this node."; break;
+                case DirectState::NETWORK_INACTIVE: message = "Networking is disabled on this node. No connection was attempted."; break;
+                case DirectState::PRIVACY_REJECTED: message = "Local transport requirements prevent the check. Enable V2 transport; mainnet message capture must be disabled."; break;
+                case DirectState::CONNECT_FAILED: message = "Connection could not be established. Check the endpoint, listener, firewall and, for Tor, the SOCKS5 proxy and onion service."; break;
+                case DirectState::EXPIRED: message = "Check timed out before Paymaster negotiation completed. This does not establish whether the endpoint is permanently unreachable."; break;
+                default: message = "Connection ended before Paymaster negotiation completed. Check the listener and compatible Paymaster/V2 support on both nodes."; break;
+                }
+            }
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("network", ChainTypeToString(Params().GetChainType()));
+            result.pushKV("endpoint", endpoint.ToStringAddrPort());
+            result.pushKV("observed_at", GetTime());
+            result.pushKV("transport_ready", negotiated);
+            result.pushKV("state", DirectStateName(state));
+            result.pushKV("message", message);
+            UniValue stages{UniValue::VOBJ};
+            stages.pushKV("v2_transport", v2 ? "passed" : "unknown");
+            stages.pushKV("paymaster_negotiation", negotiated ? "passed" : "unknown");
+            result.pushKV("stages", stages);
+            result.pushKV("payment_verified", false);
+            result.pushKV("identity_verified", false);
+            return result;
+        }};
 }
 } // namespace
 void RegisterPaymasterRPCCommands(CRPCTable& table)

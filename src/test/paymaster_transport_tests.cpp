@@ -549,6 +549,78 @@ BOOST_FIXTURE_TEST_CASE(channel_auth_queue_bounds_disconnect_and_expiry, BasicTe
     BOOST_CHECK(!manager.HasChannelChallenges(challenge.provider_id, 31'002));
 }
 
+BOOST_FIXTURE_TEST_CASE(diagnostic_negotiation_never_authorizes_payments, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    V2Transport remote{100, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto node = MakePeer(100, false, remote, {});
+    node->m_paymaster_lease->key.purpose = DirectPurpose::DIAGNOSTIC;
+    BOOST_REQUIRE(manager.QueueOutboundDirectMessage(node->GetId(), GetRandHash(), 100,
+        PaymasterCapacityRequest{}, GetTime()));
+    m_node.peerman->SendMessages(node.get());
+    BOOST_CHECK(!node->fDisconnect);
+    BOOST_CHECK(!node->m_paymaster_negotiated);
+    BOOST_CHECK(node->m_paymaster_lease->state == DirectState::TRANSPORT_READY);
+    BOOST_CHECK(node->m_paymaster_lease->diagnostic_v2);
+    BOOST_CHECK(node->m_paymaster_lease->diagnostic_negotiated);
+    // No identity challenge or application message, even if accidentally queued.
+    for (const auto& message : Drain(*node, remote)) {
+        BOOST_CHECK(message.m_type != NetMsgType::PMAUTHREQ);
+        BOOST_CHECK(!NetMsgType::IsPaymasterDirectMessage(message.m_type));
+    }
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    m_node.connman->PushMessage(node.get(), maker.Make(NetMsgType::PMCAPREQ, uint8_t{0xff}));
+    m_node.connman->PushMessage(node.get(), maker.Make(NetMsgType::PMAUTHREQ, ChannelChallenge{}));
+    BOOST_CHECK(Drain(*node, remote).empty());
+    // An unsolicited provider response cannot upgrade a diagnostic connection.
+    Receive(*node, remote, maker.Make(NetMsgType::PMCAPRESP, uint8_t{0xff}));
+    BOOST_CHECK(node->fDisconnect);
+    BOOST_CHECK(!node->m_paymaster_negotiated);
+    m_node.peerman->FinalizeNode(*node);
+}
+
+BOOST_FIXTURE_TEST_CASE(payment_without_selected_identity_is_not_a_diagnostic, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    V2Transport remote{99, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto node = MakePeer(99, false, remote, {});
+    m_node.peerman->SendMessages(node.get());
+    BOOST_CHECK(node->fDisconnect);
+    BOOST_CHECK(!node->m_paymaster_negotiated);
+    BOOST_CHECK(!node->m_paymaster_lease->diagnostic_negotiated);
+    m_node.peerman->FinalizeNode(*node);
+}
+
+BOOST_AUTO_TEST_CASE(diagnostic_queue_keys_are_separate_from_payments)
+{
+    DirectQueue queue;
+    DirectPermits permits;
+    permits.Configure({2, 0, 0, 0});
+    const DirectKey payment{"owner", "operation"};
+    auto diagnostic = payment;
+    diagnostic.purpose = DirectPurpose::DIAGNOSTIC;
+    BOOST_CHECK(!(payment == diagnostic));
+    BOOST_CHECK(payment < diagnostic || diagnostic < payment);
+    BOOST_CHECK(queue.Request(diagnostic, "127.0.0.1:1234", false, 0).Pending());
+    auto probe = queue.Claim(permits, 0);
+    BOOST_REQUIRE(probe);
+    probe->state = DirectState::TRANSPORT_READY;
+    BOOST_CHECK(queue.Request(payment, "127.0.0.1:1234", false, 1).state == DirectState::QUEUED);
+    auto transfer = queue.Claim(permits, 1);
+    BOOST_REQUIRE(transfer);
+    BOOST_CHECK(transfer != probe);
+    BOOST_CHECK(transfer->state == DirectState::CONNECTING);
+    queue.Release(diagnostic);
+    BOOST_CHECK(probe->canceled);
+    BOOST_CHECK(!transfer->canceled);
+    probe.reset();
+    BOOST_CHECK_EQUAL(permits.GetUsage().outgoing, 1);
+    queue.Release(payment);
+    transfer.reset();
+    BOOST_CHECK_EQUAL(permits.GetUsage().outgoing, 0);
+}
+
 BOOST_FIXTURE_TEST_CASE(channel_handler_withholds_all_requests_until_authenticated, PaymasterChannelSetup)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);

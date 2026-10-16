@@ -40,6 +40,7 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         policy = {
             "funding_models": ["sponsored"], "sponsorship_scope": "public",
             "fee_rate_bps": 0, "min_amount_cents": 100, "max_amount_cents": 10000,
+            "maximum_user_paid_service_fee_cents": 0,
             "quote_ttl": 60, "maximum_network_fee_dgb_satoshis": 20000000,
         }
         provider.setpaymasterpolicy(policy)
@@ -108,6 +109,7 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         policy = {
             "funding_models": ["sponsored"], "sponsorship_scope": "public",
             "fee_rate_bps": 0, "min_amount_cents": 100, "max_amount_cents": 100000,
+            "maximum_user_paid_service_fee_cents": 0,
             "quote_ttl": 60, "maximum_network_fee_dgb_satoshis": 20000000,
         }
         self.log.info("A proposed-policy setup preview writes no identity, settings, pool or transaction")
@@ -195,6 +197,8 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         transactions = wallet.getwalletinfo()["txcount"]
         checked = node.checkpaymasterendpoint(f"127.0.0.1:{paymaster_port(1)}")
         assert_equal(checked["transport_ready"], True)
+        assert_equal(checked["state"], "transport_ready")
+        assert_equal(checked["stages"], {"v2_transport": "passed", "paymaster_negotiation": "passed"})
         assert_equal(checked["payment_verified"], False)
         assert_equal(checked["identity_verified"], False)
         assert_equal(wallet.getwalletinfo()["txcount"], transactions)
