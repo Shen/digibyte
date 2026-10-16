@@ -621,7 +621,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
 | `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and bounded IP/Tor endpoint diagnostics. Diagnostic leases stop at V2/capability negotiation and cannot authorize payment traffic; `rpc_paymaster_endpoint.py` covers TCP and SOCKS5 routes. |
 
 Ordinary DD consensus/history checks remain authoritative. See
@@ -1068,6 +1068,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 Provider setup, settings, status, funds, activity and finance UI backed by
 Core/shared setup. Service readiness is separate from maintenance progress.
+The setup wizard reviews editable autostart and refreshes funding/readiness on
+its result page every five seconds using guarded asynchronous operator reads.
+It reuses `formatPoolPreparation`; failed reads replace stale funding text.
 Saved task titles follow operation kind/asset; completed or cancelled work
 cannot retain an unrelated action title or a blocked card with no active work.
 The shared task card previews cancellation of uncreated setup/refill work;

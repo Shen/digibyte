@@ -117,7 +117,7 @@ helps detect stale wallet copies. See the [threat model](paymaster-threat-model.
 | `src/wallet/paymasterstore*`, `paymasterdb.cpp`, `paymastercheckpoint.*` | Atomic state, accounting, reconciliation, rollback protection. |
 | `src/wallet/rpc/paymaster*.cpp` | Wallet RPC orchestration and grouped implementations. |
 | `src/rpc/paymaster.cpp`, `src/rpc/digidollar.cpp` | Node configuration, diagnostics, directory/send entry points. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and interactive CLI. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions/presets and interactive CLI; `DescribeSetupFunding` formats current preparation observations without inferring readiness from balances. GUI setup reuses the operator preparation formatter and refreshes its result through wallet-bound asynchronous reads. Both assistants review an explicit autostart choice. |
 | `src/qt/paymasterwidget.*`, `paymastersendwidget.*`, `paymasterwallet.*`, `paymasteramount.*` | Provider/send UI, wallet adapter and amounts. |
 
 Store code is split into provider/client/finalization/recovery/reconciliation/

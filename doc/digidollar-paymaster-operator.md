@@ -46,6 +46,33 @@ Do not move collateral or another session's reserved funds to make it pass.
    that setup was accepted. Back up the resulting wallet. An open offer or an
    announcement is not a successfully completed customer payment.
 
+Both assistants offer **Small (1)**, **Standard (3)** and **Large (6)** payment
+reserve targets, with individual counts available for advanced use. Existing
+usable reserves count toward the target; choosing a smaller target does not
+release excess reserves. Presets propose refill-fee ceilings but do not grant
+approval until the final review. Reserve capital, customer-payment budgets,
+recurring refill fees and the finite initial setup fee remain separate.
+
+Autostart is editable in both assistants. Existing settings are imported;
+a new provider proposes autostart on. Review the choice before applying:
+autostart can start service in the current session and after a wallet reload,
+subject to readiness and unlock. It is independent of the optional one-time
+start request. Disabling the one-time request does not disable autostart.
+
+The GUI result page refreshes funding/readiness every five seconds and offers
+**Check funding and readiness**. CLI monitoring checks every two seconds.
+For reserve steps awaiting funding, both show required capital, confirmed usable
+funds, missing capital, pending incoming funds and the approved setup-fee
+ceiling. Available funds exclude protected reserves and are shared across
+pending steps, so do not add the available amounts together. Fee ceilings are
+not fee estimates. Receive missing funds in the selected wallet, wait for
+confirmations, or cancel uncreated work and review a smaller target under
+**Settings > Reserves & refill** (CLI: the reviewed setup/pool RPC workflow).
+Missing observations are shown as unavailable, never as zero. A failed GUI
+refresh clears the earlier status. Closing either monitor leaves approved
+Core work active; **Configuration saved** does not certify completed funding
+or a running provider.
+
 The main navigation separates **Overview**, **Activity**, **Income & costs**
 and **Settings**. Reserve management is under **Settings > Reserves & refill**;
 Overview and finance actions link directly to it. Node configuration requires restart; running-provider
@@ -222,6 +249,10 @@ review/apply and funding completion. Existing-provider entry defaults to status
 with explicit pause/resume, unlock, backup and settings actions. An explicitly
 selected unloaded wallet is loaded first. Enter declines the final mutation/
 funding review; type the requested confirmation to approve it.
+In the capacity menu, Enter keeps the current targets and refill limits;
+select a preset explicitly to replace that proposal. The funding monitor and
+`-paymasterstatus` show preparation-specific amounts from the operator RPC,
+not general wallet ownership balances as though they were all usable capital.
 
 Setup requires a terminal and rejects noninteractive setup before mutation.
 Do not automate it by piping answers/passwords. Automation uses the documented

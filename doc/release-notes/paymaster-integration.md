@@ -35,6 +35,12 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   and explicit unsigned cancellation without releasing ambiguous signed work.
 - Shared GUI/interactive CLI setup, status and reviewed policy changes. Automatic
   maintenance runs headlessly without an open frontend.
+- Both setup assistants review autostart explicitly and offer capacity presets.
+  CLI funding/status describes usable capital and missing amounts per preparation
+  step instead of general wallet balances. The GUI result page updates funding
+  and readiness automatically, with manual refresh and stale-status clearing on
+  failed reads. Saved configuration remains distinct from confirmed reserves and
+  running service; fee ceilings do not become fee estimates or new approvals.
 - Finite pool funding and separately approved recurring refill. Limited funds
   create fewer complete slots for DGB/DD; usable confirmed slots remain available
   while the remaining target waits for funds or confirmation.
