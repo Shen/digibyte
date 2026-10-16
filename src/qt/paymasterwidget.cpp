@@ -83,6 +83,7 @@
 #include <consensus/params.h>
 #include <digidollar/digidollar.h>
 #include <interfaces/node.h>
+#include <netbase.h>
 #include <node/context.h>
 #include <paymaster/directory.h>
 #include <paymaster/types.h>
@@ -4349,6 +4350,73 @@ public:
         ConfigureScrollArea(automation_scroll, automation_contents);
         m_automation_page = automation_scroll;
 
+        auto* diagnostics_scroll = new QScrollArea(m_settings_tabs);
+        diagnostics_scroll->setObjectName("paymasterDiagnosticsPage");
+        auto* diagnostics_contents = new QWidget(diagnostics_scroll);
+        diagnostics_contents->setObjectName("paymasterDiagnosticsContents");
+        QVBoxLayout* diagnostics_layout{nullptr};
+        auto* diagnostics_column = CreatePaymasterPageColumn(diagnostics_contents, diagnostics_layout);
+        AddPaymasterPageHeading(diagnostics_layout, diagnostics_column, tr("Advanced diagnostics"),
+            tr("Copy a connection-test command and run it on a second node on the same network, with Paymaster and V2 transport enabled and outgoing Paymaster capacity. Opening this page does not start a connection test."),
+            QStringLiteral("paymasterDiagnostics"));
+        auto* endpoint_group = new QGroupBox(tr("Connection test from another node"), diagnostics_column);
+        auto* endpoint_layout = new QVBoxLayout(endpoint_group);
+        auto* endpoint_help = new QLabel(tr("The command uses this node's current announced Paymaster address (-paymasterendpoint), including its port. It is not a measurement of reachability. A public address behind NAT or a Tor service address cannot be inferred from the local listener. Saved connection changes require a node restart."), endpoint_group);
+        endpoint_help->setWordWrap(true);
+        endpoint_layout->addWidget(endpoint_help);
+        m_diagnostic_endpoint = new QLabel(endpoint_group);
+        m_diagnostic_endpoint->setObjectName("paymasterDiagnosticEndpoint");
+        m_diagnostic_endpoint->setWordWrap(true);
+        m_diagnostic_endpoint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        endpoint_layout->addWidget(m_diagnostic_endpoint);
+        m_diagnostic_hint = new QLabel(endpoint_group);
+        m_diagnostic_hint->setObjectName("paymasterDiagnosticHint");
+        m_diagnostic_hint->setWordWrap(true);
+        endpoint_layout->addWidget(m_diagnostic_hint);
+        const auto command_field = [this, endpoint_group, endpoint_layout](const QString& title, const char* name,
+            QPlainTextEdit*& command, QPushButton*& copy) {
+            auto* label = new QLabel(title, endpoint_group);
+            endpoint_layout->addWidget(label);
+            command = new QPlainTextEdit(endpoint_group);
+            command->setObjectName(QString::fromLatin1(name));
+            command->setReadOnly(true);
+            command->setAccessibleName(title);
+            command->setWordWrapMode(QTextOption::WrapAnywhere);
+            command->setFixedHeight(command->fontMetrics().height() * 3 + 20);
+            endpoint_layout->addWidget(command);
+            copy = new QPushButton(tr("Copy command"), endpoint_group);
+            copy->setObjectName(QString::fromLatin1(name) + QStringLiteral("Copy"));
+            copy->setAccessibleName(tr("Copy command: %1").arg(title));
+            endpoint_layout->addWidget(copy, 0, Qt::AlignLeft);
+            connect(copy, &QPushButton::clicked, this, [this, command] {
+                if (!m_privacy && !command->toPlainText().isEmpty()) GUIUtil::setClipboard(command->toPlainText());
+            });
+        };
+        command_field(tr("RPC console on the second node"), "paymasterDiagnosticRpc", m_diagnostic_rpc, m_diagnostic_rpc_copy);
+        command_field(tr("Command line on the second node"), "paymasterDiagnosticCli", m_diagnostic_cli, m_diagnostic_cli_copy);
+        auto* cli_help = new QLabel(tr("The command-line example selects the network. If the second node uses a separate data directory or RPC port, add that node's -datadir or -rpcport option before the command. Run digibyte-cli from its installation directory or use its full path; in PowerShell, use .\\digibyte-cli.exe for an executable in the current directory."), endpoint_group);
+        cli_help->setWordWrap(true);
+        endpoint_layout->addWidget(cli_help);
+        auto* diagnostic_result_help = new QLabel(tr("Read the result on the second node: transport_ready=true means the encrypted connection and Paymaster negotiation succeeded. It does not verify provider identity, available reserves or payments. The check may take up to 30 seconds; only one check may start per 30 seconds. There is no result import."), endpoint_group);
+        diagnostic_result_help->setWordWrap(true);
+        endpoint_layout->addWidget(diagnostic_result_help);
+        auto* diagnostic_refresh = new QPushButton(tr("Refresh announced address"), endpoint_group);
+        diagnostic_refresh->setObjectName("paymasterDiagnosticRefresh");
+        endpoint_layout->addWidget(diagnostic_refresh, 0, Qt::AlignLeft);
+        connect(diagnostic_refresh, &QPushButton::clicked, this, [this] { refreshOperatorStatus(); });
+        auto* diagnostic_connection = new QPushButton(tr("Open node connection settings"), endpoint_group);
+        diagnostic_connection->setObjectName("paymasterDiagnosticConnectionLink");
+        endpoint_layout->addWidget(diagnostic_connection, 0, Qt::AlignLeft);
+        connect(diagnostic_connection, &QPushButton::clicked, this, [this] { showOperatorPage(m_connection_page); });
+        diagnostics_layout->addWidget(endpoint_group);
+        diagnostics_layout->addStretch();
+        diagnostics_scroll->setWidgetResizable(true);
+        diagnostics_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        diagnostics_scroll->setWidget(diagnostics_contents);
+        ConfigureScrollArea(diagnostics_scroll, diagnostics_contents);
+        m_diagnostics_page = diagnostics_scroll;
+        renderEndpointDiagnostic(UniValue{});
+
         const auto settings_group = [settings_layout, settings_column](const QString& title) {
             auto* group = new QGroupBox(QString(title).replace(QLatin1Char('&'), QStringLiteral("&&")), settings_column);
             group->setProperty("paymasterRole", QStringLiteral("card"));
@@ -4378,6 +4446,8 @@ public:
             updateAutomaticRefreshTimer();
             if (m_settings_tabs->currentWidget() == m_connection_page && !m_inline_node_editor && !m_busy)
                 configureOperatorNode();
+            if (m_settings_tabs->currentWidget() == m_diagnostics_page && !m_privacy && !m_busy)
+                refreshOperatorStatus();
         });
         auto* operation_settings = settings_group(tr("Operation"));
         add_settings_page(operation_settings, lifecycle_scroll, lifecycle_page_layout, tr("Start, pause & retire"),
@@ -4400,6 +4470,8 @@ public:
             tr("Edit node settings and review their sources and reachability."));
         add_settings_page(technical_settings, management_scroll, management_layout, tr("Wallet & backup"),
             tr("Manage wallet access and protect the provider with a full-wallet backup."));
+        add_settings_page(technical_settings, diagnostics_scroll, diagnostics_layout, tr("Advanced diagnostics"),
+            tr("Copy the connection-test command for another node, using this node's announced IP or Tor address."));
 
         const auto related_settings = [this](QVBoxLayout* layout, const QString& title,
                                              const char* name, QWidget* destination) {
@@ -4412,6 +4484,7 @@ public:
         related_settings(safety_layout, tr("Configure reserve capital and refill costs"), "paymasterBudgetsReservesLink", m_liquidity_page);
         related_settings(liquidity_layout, tr("Review customer-payment budgets"), "paymasterReservesBudgetsLink", m_safety_page);
         related_settings(automation_layout, tr("Configure automatic reserve refill"), "paymasterStartupReservesLink", m_liquidity_page);
+        related_settings(connection_layout, tr("Connection-test commands — open Advanced diagnostics"), "paymasterConnectionDiagnosticsLink", m_diagnostics_page);
 
         auto* refill_controls = new QGroupBox(tr("Automatic refill — saved settings"), liquidity_column);
         refill_controls->setObjectName("paymasterSavedRefillControls");
@@ -5718,7 +5791,7 @@ private:
     {
         const QList<QWidget*> pages{
             m_configuration_page, m_safety_page, m_liquidity_page,
-            m_finance_page, m_activity_page, m_connection_page, m_management_page, m_automation_page, m_lifecycle_page};
+            m_finance_page, m_activity_page, m_connection_page, m_management_page, m_automation_page, m_lifecycle_page, m_diagnostics_page};
         for (QWidget* page : pages) {
             if (!page) continue;
             QList<QWidget*> controls{page};
@@ -10361,8 +10434,54 @@ private:
         updateLifecycleControls();
     }
 
+    void renderEndpointDiagnostic(const UniValue& snapshot)
+    {
+        m_diagnostic_rpc->clear();
+        m_diagnostic_cli->clear();
+        m_diagnostic_rpc_copy->setEnabled(false);
+        m_diagnostic_cli_copy->setEnabled(false);
+        m_diagnostic_hint->clear();
+        m_diagnostic_endpoint->setText(m_privacy ? tr("Hidden by privacy mode") : tr("Current announced address unavailable. Refresh status to read it."));
+        if (m_privacy || snapshot.isNull()) return;
+        const auto& network_value = snapshot.find_value("network");
+        const auto& endpoint_value = snapshot.find_value("provider").find_value("endpoint");
+        if (!network_value.isStr()) return;
+        const auto network = QString::fromStdString(network_value.get_str());
+        if (network != QLatin1String("main") && network != QLatin1String("test") &&
+            network != QLatin1String("regtest") && network != QLatin1String("signet")) return;
+        if (!endpoint_value.isStr() || endpoint_value.get_str().empty()) {
+            m_diagnostic_endpoint->setText(tr("No announced Paymaster address is configured. Open node connection settings and configure -paymasterendpoint with the address and port reachable from the second node, then restart this node."));
+            return;
+        }
+        // Parse without DNS and only format the normalized IP/Tor endpoint. Never
+        // interpolate arbitrary RPC strings into a copyable shell command.
+        const auto endpoint = LookupNumeric(endpoint_value.get_str(), 0);
+        const bool loopback = network == QLatin1String("regtest") && endpoint.IsLocal();
+        if (!endpoint.IsValid() || !endpoint.GetPort() ||
+            !(endpoint.IsIPv4() || endpoint.IsIPv6() || endpoint.IsTor()) ||
+            !(endpoint.IsRoutable() || loopback)) {
+            m_diagnostic_endpoint->setText(tr("The announced address is not supported by checkpaymasterendpoint. Use a public numeric IP or Tor v3 address with a port; loopback is allowed only on regtest. Review node connection settings."));
+            return;
+        }
+        const auto address = QString::fromStdString(endpoint.ToStringAddrPort());
+        m_diagnostic_endpoint->setText(tr("Announced endpoint: %1\nNetwork: %2").arg(address, network));
+        if (endpoint.IsTor()) {
+            m_diagnostic_hint->setText(tr("Tor: the second node needs a working Tor SOCKS5 proxy configured with -onion or -proxy, with -proxyrandomize=1 and -logips=0. The proxy must accept randomized credentials. This test uses Tor without a direct-connection fallback."));
+        } else if (loopback) {
+            m_diagnostic_hint->setText(tr("Loopback address: run the test on a second node on this same computer. This does not test reachability from the Internet or another computer."));
+        } else {
+            m_diagnostic_hint->setText(tr("For an external reachability check, run the command on a node outside the provider's network. The announced address and port must route to the Paymaster listener through any firewall or NAT."));
+        }
+        const auto rpc = QStringLiteral("checkpaymasterendpoint \"%1\"").arg(address);
+        m_diagnostic_rpc->setPlainText(rpc);
+        m_diagnostic_cli->setPlainText(QStringLiteral("digibyte-cli -chain=%1 %2").arg(network, rpc));
+        m_diagnostic_rpc_copy->setEnabled(true);
+        m_diagnostic_cli_copy->setEnabled(true);
+    }
+
     void resetOperatorPresentation()
     {
+        renderEndpointDiagnostic(UniValue{});
         for (auto* warning : {m_operator_config_warning, m_policy_config_warning, m_safety_config_warning}) {
             if (!warning) continue;
             warning->clear();
@@ -10415,6 +10534,7 @@ private:
                                  QStringLiteral("waiting_for_maintenance_approval"), QStringLiteral("replenishing_liquidity"),
                                  QStringLiteral("waiting_for_liquidity_confirmation"), QStringLiteral("drain_only"), QStringLiteral("error")};
         if (!states.contains(state)) { resetOperatorPresentation(); return; }
+        renderEndpointDiagnostic(snapshot);
         const bool running = provider.find_value("running").get_bool();
         const bool ready = provider.find_value("ready").get_bool();
         const bool stopped = IsExplicitlyStoppedProvider(provider);
@@ -15784,6 +15904,13 @@ private:
     QString m_guided_review_text;
     bool m_guided_start_after{false};
     QWidget* m_connection_page{nullptr};
+    QWidget* m_diagnostics_page{nullptr};
+    QLabel* m_diagnostic_endpoint{nullptr};
+    QLabel* m_diagnostic_hint{nullptr};
+    QPlainTextEdit* m_diagnostic_rpc{nullptr};
+    QPlainTextEdit* m_diagnostic_cli{nullptr};
+    QPushButton* m_diagnostic_rpc_copy{nullptr};
+    QPushButton* m_diagnostic_cli_copy{nullptr};
     QWidget* m_management_page{nullptr};
     QWidget* m_node_editor_host{nullptr};
     QVBoxLayout* m_node_editor_layout{nullptr};

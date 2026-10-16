@@ -65,6 +65,7 @@
 #include <QAccessible>
 #include <QColor>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDialogButtonBox>
 #include <QCoreApplication>
 #include <QFile>
@@ -6699,7 +6700,7 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     auto* card = panel->findChild<QGroupBox*>(QStringLiteral("paymasterOperatorCard"));
     QVERIFY(tabs && settings && headline && hint && connection && action && pause && card);
     QCOMPARE(tabs->count(), 4);
-    QCOMPARE(settings->count(), 8);
+    QCOMPARE(settings->count(), 9);
     auto* details = panel->findChild<QWidget*>(QStringLiteral("paymasterTechnicalDetails"));
     QVERIFY(details);
     QVERIFY(details->isHidden());
@@ -9249,13 +9250,17 @@ void PaymasterWidgetTests::paymasterOperatorDelayedStartup()
     }
 }
 
+namespace {
+UniValue GuidedOperatorSnapshot();
+}
+
 void PaymasterWidgetTests::paymasterConnectionLayout_data()
 {
     QTest::addColumn<QString>("theme");
     QTest::addColumn<QSize>("window_size");
     QTest::addColumn<QString>("page_name");
     for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
-        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome", "paymasterLifecyclePage", "paymasterLiquidityPage", "paymasterSafetyPolicyPage", "paymasterConfigurationPage"}) {
+        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome", "paymasterLifecyclePage", "paymasterLiquidityPage", "paymasterSafetyPolicyPage", "paymasterConfigurationPage", "paymasterDiagnosticsPage"}) {
             const auto name = QString::fromLatin1(page);
             const auto prefix = theme + "_" + name;
             QTest::newRow(qPrintable(prefix + "_narrow")) << theme << QSize(900, 620) << name;
@@ -9274,6 +9279,13 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     QFile css(":/css/" + theme);
     QVERIFY(css.open(QIODevice::ReadOnly));
     panel->setStyleSheet(QString::fromUtf8(css.readAll()));
+    if (page_name == QLatin1String("paymasterDiagnosticsPage")) {
+        auto snapshot = GuidedOperatorSnapshot();
+        auto provider = snapshot.find_value("provider");
+        provider.pushKV("endpoint", "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:12025");
+        snapshot.pushKV("provider", provider);
+        panel->setOperatorStatusForTesting(snapshot);
+    }
     auto* tabs = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
     auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
     auto* scroll = panel->findChild<QScrollArea*>(page_name);
@@ -9281,7 +9293,7 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     auto* runtime = panel->findChild<QPushButton*>("paymasterRuntimeSettingsToggle");
     auto* backup = panel->findChild<QGroupBox*>("paymasterOverviewBackupNotice");
     QVERIFY(tabs && settings && scroll && prerequisites && runtime && backup);
-    QCOMPARE(settings->count(), 8);
+    QCOMPARE(settings->count(), 9);
     auto* operation = panel->findChild<QWidget*>("paymasterOverviewPage");
     auto* administration = panel->findChild<QWidget*>("paymasterManagementPage");
     auto* connection = panel->findChild<QWidget*>("paymasterConnectionPage");
@@ -9552,7 +9564,7 @@ void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
     QVERIFY(navigation->isVisible());
     QVERIFY(selector->isHidden());
     QCOMPARE(tabs->count(), 4);
-    QCOMPARE(settings->count(), 8);
+    QCOMPARE(settings->count(), 9);
     QCOMPARE(tabs->widget(0)->property("paymasterPageTitle").toString(), QStringLiteral("Overview"));
     QCOMPARE(tabs->widget(1)->property("paymasterPageTitle").toString(), QStringLiteral("Activity"));
     QVERIFY(panel->findChild<QPushButton*>("paymasterRestoreTask"));
@@ -9574,7 +9586,7 @@ void PaymasterWidgetTests::paymasterOperatorNavigationAndVisibleTasks()
     QCOMPARE(settings->widget(1), lifecycle); // First Settings destination, after its home page.
     auto* settings_home = panel->findChild<QWidget*>("paymasterSettingsHome");
     const auto menu = settings_home->findChildren<QPushButton*>();
-    QCOMPARE(menu.size(), 7);
+    QCOMPARE(menu.size(), 8);
     QCOMPARE(menu.front()->accessibleName(), QStringLiteral("Start, pause & retire"));
     QCOMPARE(tabs->indexOf(funds), -1);
     QVERIFY(funds->isAncestorOf(panel->findChild<QCheckBox*>("paymasterSettingsRefill")));
@@ -9645,6 +9657,137 @@ UniValue GuidedOperatorSnapshot()
     snapshot.pushKV("wallet_generation", "loaded-provider");
     return snapshot;
 }
+}
+
+void PaymasterWidgetTests::paymasterDiagnosticCommands_data()
+{
+    QTest::addColumn<QString>("network");
+    QTest::addColumn<QString>("endpoint");
+    QTest::addColumn<QString>("normalized");
+    QTest::addColumn<QString>("hint");
+    QTest::newRow("ipv4-main") << QStringLiteral("main") << QStringLiteral("8.8.8.8:12025") << QStringLiteral("8.8.8.8:12025") << QStringLiteral("outside");
+    QTest::newRow("ipv6-test") << QStringLiteral("test") << QStringLiteral("[2606:4700:4700::1111]:12025") << QStringLiteral("[2606:4700:4700::1111]:12025") << QStringLiteral("outside");
+    QTest::newRow("loopback-regtest") << QStringLiteral("regtest") << QStringLiteral("127.0.0.1:18450") << QStringLiteral("127.0.0.1:18450") << QStringLiteral("same computer");
+    QTest::newRow("ipv6-loopback-regtest") << QStringLiteral("regtest") << QStringLiteral("[::1]:18450") << QStringLiteral("[::1]:18450") << QStringLiteral("same computer");
+    const QString onion = QStringLiteral("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:12025");
+    QTest::newRow("tor-main") << QStringLiteral("main") << onion << onion << QStringLiteral("-onion or -proxy");
+    QTest::newRow("missing") << QStringLiteral("main") << QStringLiteral("") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("missing-port") << QStringLiteral("main") << QStringLiteral("8.8.8.8") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("zero-port") << QStringLiteral("main") << QStringLiteral("8.8.8.8:0") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("dns-name") << QStringLiteral("main") << QStringLiteral("example.org:12025") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("bad-onion") << QStringLiteral("main") << QStringLiteral("invalid.onion:12025") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("local-main") << QStringLiteral("main") << QStringLiteral("127.0.0.1:18450") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("private-ip") << QStringLiteral("regtest") << QStringLiteral("192.168.1.1:18450") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("command-injection") << QStringLiteral("main") << QStringLiteral("8.8.8.8:12025\"; echo injected") << QStringLiteral("") << QStringLiteral("");
+    QTest::newRow("network-injection") << QStringLiteral("main; echo injected") << QStringLiteral("8.8.8.8:12025") << QStringLiteral("") << QStringLiteral("");
+}
+
+void PaymasterWidgetTests::paymasterDiagnosticCommands()
+{
+    QFETCH(QString, network);
+    QFETCH(QString, endpoint);
+    QFETCH(QString, normalized);
+    QFETCH(QString, hint);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("endpoint", endpoint.toStdString());
+    snapshot.pushKV("provider", provider);
+    snapshot.pushKV("network", network.toStdString());
+    panel->setOperatorStatusForTesting(snapshot);
+    auto* rpc = panel->findChild<QPlainTextEdit*>("paymasterDiagnosticRpc");
+    auto* cli = panel->findChild<QPlainTextEdit*>("paymasterDiagnosticCli");
+    auto* rpc_copy = panel->findChild<QPushButton*>("paymasterDiagnosticRpcCopy");
+    auto* cli_copy = panel->findChild<QPushButton*>("paymasterDiagnosticCliCopy");
+    auto* help = panel->findChild<QLabel*>("paymasterDiagnosticHint");
+    QVERIFY(rpc && cli && rpc_copy && cli_copy && help);
+    QVERIFY(rpc->isReadOnly() && cli->isReadOnly());
+    if (normalized.isEmpty()) {
+        QVERIFY(rpc->toPlainText().isEmpty() && cli->toPlainText().isEmpty());
+        QVERIFY(!rpc_copy->isEnabled() && !cli_copy->isEnabled());
+        return;
+    }
+    const auto command = QStringLiteral("checkpaymasterendpoint \"%1\"").arg(normalized);
+    QCOMPARE(rpc->toPlainText(), command);
+    QCOMPARE(cli->toPlainText(), QStringLiteral("digibyte-cli -chain=%1 %2").arg(network, command));
+    QVERIFY(help->text().contains(hint));
+    // Copy the exact command, with no label, newline, markup or execution.
+    auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+    settings->setEnabled(true);
+    QVERIFY(rpc_copy->isEnabled() && cli_copy->isEnabled());
+    rpc_copy->click();
+    QCOMPARE(QApplication::clipboard()->text(), command);
+    cli_copy->click();
+    QCOMPARE(QApplication::clipboard()->text(), cli->toPlainText());
+    QApplication::clipboard()->clear();
+}
+
+void PaymasterWidgetTests::paymasterDiagnosticRefreshAndPrivacy()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    provider.pushKV("endpoint", "127.0.0.1:18450");
+    snapshot.pushKV("provider", provider);
+    QStringList calls;
+    bool fail{false};
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        calls << QString::fromStdString(method);
+        if (method == "getpaymasteroperatorinfo") {
+            if (fail) throw std::runtime_error("Diagnostic snapshot unavailable");
+            return snapshot;
+        }
+        if (method == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        throw std::runtime_error("Unexpected diagnostic command");
+    });
+    panel->refreshStatus();
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+    auto* page = panel->findChild<QWidget*>("paymasterDiagnosticsPage");
+    auto* rpc = panel->findChild<QPlainTextEdit*>("paymasterDiagnosticRpc");
+    auto* cli = panel->findChild<QPlainTextEdit*>("paymasterDiagnosticCli");
+    auto* copy = panel->findChild<QPushButton*>("paymasterDiagnosticRpcCopy");
+    auto* refresh = panel->findChild<QPushButton*>("paymasterDiagnosticRefresh");
+    auto* address = panel->findChild<QLabel*>("paymasterDiagnosticEndpoint");
+    QVERIFY(pages && settings && page && rpc && cli && copy && refresh && address);
+    SelectPaymasterPage(pages, page);
+    QVERIFY(rpc->toPlainText().contains("127.0.0.1:18450"));
+    provider.pushKV("endpoint", "[::1]:18460");
+    snapshot.pushKV("provider", provider);
+    refresh->click();
+    QVERIFY(rpc->toPlainText().contains("[::1]:18460"));
+    QCOMPARE(settings->currentWidget(), page);
+    fail = true;
+    refresh->click();
+    QVERIFY(rpc->toPlainText().isEmpty() && cli->toPlainText().isEmpty());
+    QVERIFY(!copy->isEnabled());
+    QVERIFY(!address->text().contains("18460"));
+    fail = false;
+    refresh->click();
+    QVERIFY(!rpc->toPlainText().isEmpty());
+    panel->setPrivacy(true);
+    QVERIFY(rpc->toPlainText().isEmpty() && cli->toPlainText().isEmpty());
+    QVERIFY(!copy->isEnabled());
+    QVERIFY(!address->text().contains("18460"));
+    panel->setPrivacy(false);
+    panel->refreshStatus();
+    QVERIFY(!rpc->toPlainText().isEmpty());
+    // A missing announcement must not fall back to the local bind address.
+    provider.pushKV("endpoint", "");
+    snapshot.pushKV("provider", provider);
+    UniValue node_settings{UniValue::VOBJ};
+    node_settings.pushKV("paymasterbind", "127.0.0.1:18460");
+    snapshot.pushKV("node_settings", node_settings);
+    panel->setOperatorStatusForTesting(snapshot);
+    QVERIFY(rpc->toPlainText().isEmpty());
+    QVERIFY(address->text().contains("No announced"));
+    provider.pushKV("endpoint", "127.0.0.1:18450");
+    snapshot.pushKV("provider", provider);
+    panel->setOperatorStatusForTesting(snapshot);
+    QVERIFY(!rpc->toPlainText().isEmpty());
+    panel->setWalletModel(nullptr);
+    QVERIFY(rpc->toPlainText().isEmpty() && cli->toPlainText().isEmpty());
+    for (const auto& method : calls) QVERIFY(method.startsWith("get"));
 }
 
 void PaymasterWidgetTests::paymasterReserveSettingsRefresh()

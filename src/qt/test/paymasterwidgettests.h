@@ -57,6 +57,9 @@ private Q_SLOTS:
     void paymasterSavedTaskTitles();
     void paymasterConnectionLayout_data();
     void paymasterConnectionLayout();
+    void paymasterDiagnosticCommands_data();
+    void paymasterDiagnosticCommands();
+    void paymasterDiagnosticRefreshAndPrivacy();
     void paymasterOperatorDelayedStartup_data();
     void paymasterOperatorDelayedStartup();
     void paymasterLiquidityPolicyDefaultsAndApprovalGuard();
