@@ -37,6 +37,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Stop and retirement take priority over new automatic/provider work while
   allowing the current work owner to finish. Priority is scoped to the request;
   timeout or failed persistence cannot silently confirm a stop or leave a block.
+- The overview identifies a confirmed provider stop independently of missing
+  reserves or restart budgets. Saved offer models are labelled as stopped;
+  disabled refill is not presented as an immediate approval task. Unknown errors
+  and restore/checkpoint diagnostics remain prominent.
 - Retirement after an unfunded start waits briefly for competing provider work
   and can explicitly cancel uncreated reserve-funding tasks in the reviewed
   release. Signed/ambiguous work and restored-wallet guards remain enforced.

@@ -137,6 +137,15 @@ then stops service. It does not revoke existing signatures or release protected
 funds. A bare `stoppaymaster` can be undone later by saved autostart. Complete
 node shutdown is a separate operation; stopping a provider does not stop the node.
 
+The GUI shows **Paymaster is stopped** when a current snapshot confirms a
+disabled, non-running provider without a pending start request. Saved offers
+are marked as configured but stopped. Missing reserves or spending requirements
+for a later restart do not replace that service status. If refill is off and no
+work remains, the reserve card shows the retained or below-target reserves
+without asking for immediate refill approval. Unknown errors and wallet
+restore/checkpoint protection still take precedence; open payments remain in
+Activity. These display distinctions do not change start or signing checks.
+
 `startpaymaster` with `wait_for_readiness=true` can retain a one-shot start
 request during the current wallet load when accepted. It is not persistent
 autostart, a wallet unlock or permission to exceed saved limits. Inspect the

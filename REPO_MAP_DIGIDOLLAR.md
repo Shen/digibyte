@@ -1076,6 +1076,9 @@ Individual DGB and combined reserve releases bind the saved target revision,
 validate exact amounts/fees and handle underfilled categories without creating
 reserves. Manual submission confirmation rechecks wallet generation, privacy
 and current runtime snapshots before dispatch.
+Confirmed disabled/stopped service is displayed separately from restart
+readiness; saved offers/refill targets do not imply active operation. Unknown
+errors and restore/checkpoint protection retain diagnostic precedence.
 See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h
