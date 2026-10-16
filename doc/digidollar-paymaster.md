@@ -223,6 +223,16 @@ methods are not an alternative way to bypass their authorization boundaries.
 
 ## RPC groups
 
+`getpaymasteroperatorinfo.configuration_conflicts` reports known cross-policy
+fee mismatches as an array. Each entry contains `code`
+(`PAYMASTER_OFFER_FEE_LIMIT_MISMATCH`), `model`, `offered`,
+`offer_fee_ceiling_satoshis` and `payment_fee_limit_satoshis`. Amounts are
+integer DGB satoshis. For example, an offered model with a 50,000,000-satoshi
+offer ceiling and a 20,000,000-satoshi per-payment limit cannot satisfy the
+readiness check at that ceiling. An empty array does not certify validity or
+readiness; retain the ordinary diagnostics and readiness checks. The field is
+informational and does not change the write contracts of policy-setting RPCs.
+
 | Purpose | Methods |
 |---|---|
 | Node configuration | `getpaymasternodeconfig`, `preparepaymasternodeconfig`, `applypaymasternodeconfig`, `checkpaymasterendpoint` |

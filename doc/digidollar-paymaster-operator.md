@@ -75,6 +75,21 @@ budget is unused. Review the intended offer ceiling and limits; neither changes
 automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
 one-satoshi quote, not the saved offer ceiling or payment readiness.
 
+GUI Overview, **Offer and identity**, and **Spending limits** show these
+configuration conflicts with the affected model and both DGB amounts. The
+settings pages link to each other without changing values. Each form compares
+its edits with the other policy's **saved** values; an unsaved correction does
+not clear the saved-state warning on Overview. The GUI setup review and CLI
+setup/status use the same comparison. A smaller budget for an inactive model
+does not block an offered model; a stored cap above the offer ceiling still
+needs correction under Core's policy validation.
+
+Review the intended ceiling and finite limits explicitly. Separately saved
+policies may pass through an intermediate mismatch while being changed; the
+warning makes that state visible. No warning changes readiness, raises a limit
+or grants spending authority. Configuration mismatches do not expire like
+rolling budget usage.
+
 | Action | Effect after confirmation |
 |---|---|
 | Start / resume | Enable the saved configuration and request operation subject to readiness and wallet checks. Existing budgets and automation preferences remain; autostart is unchanged. |

@@ -57,6 +57,12 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   No readiness checks, spending limits or refill approvals are bypassed.
   Stop is disabled after a confirmed persistent stop; Retire remains available
   for release and backup review.
+- Configuration warnings identify mismatched offer network-fee ceilings and
+  per-payment safety limits by model and exact DGB amounts. Overview shows
+  saved values; both settings forms compare edits against the other saved
+  policy and link to the affected page. GUI/CLI setup review, CLI status and
+  the operator RPC `configuration_conflicts` field expose the same comparison.
+  Readiness and spending checks remain unchanged; limits are never auto-raised.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls

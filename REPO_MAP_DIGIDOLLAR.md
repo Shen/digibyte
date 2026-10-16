@@ -621,7 +621,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
 | `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and endpoint diagnostics. |
 
 Ordinary DD consensus/history checks remain authoritative. See
