@@ -8,7 +8,7 @@ sign a transaction, delete identity/history or delete the wallet.
 ## Whole-provider retirement
 
 In the GUI, use **Settings > Start, pause & retire**, the first Settings item.
-**Funds & reserves** provides an internal link. Pause and Stop use the same
+**Settings > Reserves & refill** provides an internal link. Pause and Stop use the same
 persistent pause; Stop additionally offers an optional full-release review.
 Retire always leads to that review and then to remaining balances and backup.
 The checklists describe these effects, not completed operations.

@@ -1080,7 +1080,14 @@ Confirmed disabled/stopped service is displayed separately from restart
 readiness; saved offers/refill targets do not imply active operation. Unknown
 errors and restore/checkpoint protection retain diagnostic precedence.
 The first Settings subpage (`paymasterLifecyclePage`) groups Start/Pause,
-Stop and Retire with effect checklists; Funds & reserves links to it.
+Stop and Retire with effect checklists; Settings > Reserves & refill links to it.
+Main navigation separates Overview, Activity, Income & costs and Settings.
+Settings groups lifecycle/startup, offer/payment budgets/reserve refill, and
+node/wallet tools. Reserve configuration retains background status refresh and
+dirty-form protection inside the settings stack; other settings forms do not
+start periodic reads. Cross-links use `showOperatorPage` for nested navigation.
+Customer-payment budgets, refill fees and reserve capital are explained
+separately; navigation never changes Core policy or grants spending authority.
 Overview and Settings Start/Pause controls reuse the same confirmations and
 gates. Explicit stopped providers can request a one-shot readiness wait beside
 the prerequisite review; pending starts are displayed separately and remain

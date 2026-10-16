@@ -45,7 +45,7 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   and can explicitly cancel uncreated reserve-funding tasks in the reviewed
   release. Signed/ambiguous work and restored-wallet guards remain enforced.
 - Settings starts with **Start, pause & retire**, with per-action checklists and
-  the retirement balance/backup review. Funds & reserves links there. Pause and
+  the retirement balance/backup review. Reserves & refill links there. Pause and
   Stop share a persistent stop; Stop optionally reviews full reserve release,
   while Retire guides the release and final review. Overview and Settings use
   the same Start/Pause guards; the stopped hint no longer implies that released
@@ -67,6 +67,14 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   and retain edits after RPC rejection. Confirmed offer/limit saves immediately
   refresh the combined provider status, replacing obsolete Overview warnings
   with a loading state until readback succeeds. Failed reads remain unavailable.
+- Operator navigation separates Overview, Activity, Income & costs and Settings.
+  Settings groups operation, service/cost configuration and node/wallet tools.
+  Reserves & refill now contains capital targets, current reserves and automatic
+  refill, with continued status refresh that preserves drafts. Offer & pricing
+  and Customer-payment budgets link to related configuration and distinguish DD
+  income, DGB payment fees, wallet-owned capital and separate refill fees. Each
+  payment model and refill retains its independent budget; no shared wallet cap
+  or new spending authorization is introduced.
 
 The built-in node/GUI help groups Paymaster startup flags, node/wallet RPCs and
 terminal-only CLI assistant examples separately. RPC names and assistant calls

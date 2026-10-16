@@ -46,16 +46,17 @@ Do not move collateral or another session's reserved funds to make it pass.
    that setup was accepted. Back up the resulting wallet. An open offer or an
    announcement is not a successfully completed customer payment.
 
-Existing settings are available through Overview, Funds & reserves, Activity,
-Income & costs and Settings. Node configuration requires restart; running-provider
+The main navigation separates **Overview**, **Activity**, **Income & costs**
+and **Settings**. Reserve management is under **Settings > Reserves & refill**;
+Overview and finance actions link directly to it. Node configuration requires restart; running-provider
 offer changes use the reviewed save/restart path. Do not use tab changes as part
 of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
 **Settings > Start, pause & retire** is the first settings destination. It groups
 the operation controls and retirement review, with a checklist of each action's
-effects. These checkmarks describe the action, not its completion. **Funds &
-reserves** links directly to this page; Overview retains its quick Start/Pause
+effects. These checkmarks describe the action, not its completion. **Reserves &
+refill** links directly to this page; Overview retains its quick Start/Pause
 controls. Both entry points use the same confirmations and readiness checks.
 
 A confirmed stopped provider with saved settings can request **Resume** while
@@ -75,7 +76,7 @@ budget is unused. Review the intended offer ceiling and limits; neither changes
 automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
 one-satoshi quote, not the saved offer ceiling or payment readiness.
 
-GUI Overview, **Offer and identity**, and **Spending limits** show these
+GUI Overview, **Offer & pricing**, and **Customer-payment budgets** show these
 configuration conflicts with the affected model and both DGB amounts. The
 settings pages link to each other without changing values. Each form compares
 its edits with the other policy's **saved** values; an unsaved correction does
@@ -117,6 +118,45 @@ does not undo a confirmed stop; the remaining review stays incomplete. Ordinary
 retirement retains the identity for a deliberate future setup. Restored-wallet
 recovery can instead permanently retire it after a separate explicit review;
 see [capital release](paymaster-capital-release.md).
+
+### Finding and understanding configuration
+
+Settings groups operation controls separately from service costs and technical
+configuration. **Start, pause & retire** remains first. **Startup & processing**
+contains autostart and the automatic/manual request-processing mode; automatic
+reserve refill belongs to **Reserves & refill**. **Node connection** and
+**Wallet & backup** retain connection, unlock and recovery tools.
+
+Review the three service settings in this order:
+
+| Page | Operator decision | How it relates to the other settings |
+|---|---|---|
+| **1. Offer & pricing** | Payment models, amount range, DD service fee and DGB network-fee ceiling. | A user-paid customer pays the service fee in DD; the provider still pays the network fee in DGB. For readiness, match each active model's per-payment budget to the offer ceiling. |
+| **2. Customer-payment budgets** | Maximum customer-payment DGB fees per transfer, rolling hour and day, separately for each model. | These do not fund reserves or authorize refill fees. Reservation, transaction-count and request-rate protections remain under the additional/advanced controls. |
+| **3. Reserves & refill** | Complete payment-slot target, reserve capital, automatic refill and its separate transaction/hour/day fee limits. | DGB and DD capital remains wallet-owned and protected from ordinary spending. Only the actual network fees are costs. Existing usable reserves count toward the target; a refill may create fewer complete slots when funds are limited. |
+
+The pages link to related settings without saving edits. The reserve page keeps
+current capacity and management progress refreshed, while preserving unsaved
+target and fee edits. Advanced manual preparation, release and individual
+reserve adjustments remain available on that page.
+
+**There is no shared daily wallet cap across these budgets.** Each payment
+model and reserve maintenance has its own allowance. For example, a 10 DGB
+user-paid daily limit plus a 15 DGB refill daily limit permits up to 25 DGB
+across those two categories, subject to their other checks. An enabled sponsored
+model can have an additional budget. This example excludes separately approved
+manual operations and ordinary wallet spending. Limits are ceilings, not
+spending targets; unused allowances are not spent, and DD income does not
+replenish a DGB fee budget.
+
+Reserve configuration distinguishes **saved automation** from **form edits**.
+The automatic-refill switch uses the saved targets and fee approval immediately;
+missing fee approval requires a separate review. Editing targets or refill
+limits requires Save. The form's approval checkbox authorizes refill fees;
+the saved automation switch determines whether recurring refill is enabled.
+Starting a stopped provider remains a separate action. Autostart also saves
+through its own switch; it neither unlocks an encrypted wallet nor approves
+additional spending.
 
 ### CLI sequence
 
