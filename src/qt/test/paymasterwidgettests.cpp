@@ -7538,11 +7538,16 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding_data()
     QTest::addColumn<bool>("pause");
     QTest::addColumn<bool>("settings");
     QTest::addColumn<QString>("decision");
+    QTest::addColumn<QString>("prerequisite");
     for (bool pause : {false, true}) {
         for (bool settings : {false, true}) {
             for (const char* decision : {"approve", "cancel", "wallet", "privacy"}) {
                 const QString name = QString(pause ? "pause_" : "start_") + (settings ? "settings_" : "overview_") + decision;
-                QTest::newRow(qPrintable(name)) << pause << settings << QString::fromLatin1(decision);
+                QTest::newRow(qPrintable(name)) << pause << settings << QString::fromLatin1(decision) << QStringLiteral("ready");
+                if (!pause) {
+                    for (const char* prerequisite : {"budget", "reserves", "sync", "connection"})
+                        QTest::newRow(qPrintable(name + "_" + prerequisite)) << pause << settings << QString::fromLatin1(decision) << QString::fromLatin1(prerequisite);
+                }
             }
         }
     }
@@ -7553,6 +7558,7 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
     QFETCH(bool, pause);
     QFETCH(bool, settings);
     QFETCH(QString, decision);
+    QFETCH(QString, prerequisite);
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
     QTimer::singleShot(0, [] {
         if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
@@ -7560,6 +7566,7 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
     panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
     QStringList mutations;
     std::vector<UniValue> stop_params;
+    bool waiting_notice{false};
     panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
         if (command == "stoppaymaster") {
             mutations << "stop";
@@ -7576,6 +7583,23 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
         UniValue result{UniValue::VOBJ};
         result.pushKV("enabled", true);
         result.pushKV("running", false);
+        if (command == "startpaymaster" && prerequisite != "ready") {
+            result.pushKV("ready", false);
+            result.pushKV("start_requested", true);
+            result.pushKV("operation_mode", "automatic");
+            result.pushKV("service_state", "waiting_for_readiness");
+            QTimer::singleShot(0, panel.get(), [&] {
+                auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                const auto icon = dialog->icon();
+                const auto text = dialog->text();
+                waiting_notice = true;
+                dialog->accept();
+                QCOMPARE(icon, QMessageBox::Information);
+                QVERIFY(text.contains("accepted the start request"));
+                QVERIFY(text.contains("Pause or Stop cancels"));
+            });
+        }
         return result;
     });
     UniValue snapshot;
@@ -7593,10 +7617,30 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
         provider.pushKV("service_state", "active");
         snapshot.pushKV("provider", provider);
     }
+    if (prerequisite != "ready") {
+        auto provider = snapshot.find_value("provider");
+        provider.pushKV("provider_id", std::string(64, 'a'));
+        provider.pushKV("enabled", false);
+        provider.pushKV("start_requested", false);
+        provider.pushKV("autostart", false);
+        provider.pushKV("ready", false);
+        provider.pushKV("settings_present", true);
+        UniValue policy{UniValue::VOBJ};
+        policy.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+        provider.pushKV("policy", policy);
+        UniValue errors{UniValue::VARR};
+        errors.push_back(prerequisite == "budget" ? "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" :
+            prerequisite == "reserves" ? "PAYMASTER_OPERATIONAL_SLOT_MISSING" :
+            prerequisite == "sync" ? "PAYMASTER_PROVIDER_SYNCING" : "PAYMASTER_REQUIRES_TXINDEX");
+        errors.push_back("PAYMASTER_PROVIDER_NOT_ENABLED");
+        provider.pushKV("readiness_errors", errors);
+        snapshot.pushKV("provider", provider);
+        snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
+    }
     panel->setOperatorStatusForTesting(snapshot);
     auto* action = panel->findChild<QPushButton*>(settings
         ? (pause ? "paymasterLifecyclePause" : "paymasterLifecycleStart")
-        : (pause ? "paymasterOperatorPause" : "paymasterOperatorNextAction"));
+        : (pause ? "paymasterOperatorPause" : prerequisite == "ready" ? "paymasterOperatorNextAction" : "paymasterOperatorStart"));
     QVERIFY(action && action->isEnabled());
     bool reviewed{false};
     QTimer::singleShot(0, panel.get(), [&] {
@@ -7619,6 +7663,7 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
         QVERIFY(stop_params.front()[0].find_value("pause_setup").isTrue());
     } else
         QCOMPARE(mutations, QStringList({"enable", "start"}));
+    QCOMPARE(waiting_notice, !pause && decision == "approve" && prerequisite != "ready");
 }
 
 void PaymasterWidgetTests::paymasterClientMutationDialogWalletBinding_data()
@@ -9582,7 +9627,7 @@ void PaymasterWidgetTests::paymasterStoppedOverview_data()
     QTest::addColumn<QString>("scenario");
     for (const char* scenario : {"empty_budget", "locked", "retained", "sponsored", "open_payment",
                                  "unknown_error", "restore", "checkpoint", "start_requested", "enabled",
-                                 "inconsistent", "missing_stop_observation"})
+                                 "inconsistent", "missing_stop_observation", "missing_settings", "missing_policy", "waiting_start", "autostart"})
         QTest::newRow(scenario) << QString::fromLatin1(scenario);
 }
 
@@ -9592,11 +9637,15 @@ void PaymasterWidgetTests::paymasterStoppedOverview()
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
     auto snapshot = GuidedOperatorSnapshot();
     auto provider = snapshot.find_value("provider");
-    provider.pushKV("enabled", scenario == "enabled");
+    provider.pushKV("enabled", scenario == "enabled" || scenario == "waiting_start");
     provider.pushKV("running", scenario == "inconsistent");
     provider.pushKV("ready", false);
-    provider.pushKV("start_requested", scenario == "missing_stop_observation" ? UniValue{} : UniValue{scenario == "start_requested"});
+    provider.pushKV("start_requested", scenario == "missing_stop_observation" ? UniValue{} : UniValue{scenario == "start_requested" || scenario == "waiting_start"});
+    if (scenario == "waiting_start") provider.pushKV("service_state", "waiting_for_readiness");
     provider.pushKV("wallet_locked", scenario == "locked");
+    provider.pushKV("autostart", scenario == "autostart");
+    if (scenario == "missing_settings") provider.pushKV("settings_present", false);
+    if (scenario == "missing_policy") provider.pushKV("policy", UniValue{});
     provider.pushKV("active_operations", UniValue{UniValue::VARR});
     UniValue errors{UniValue::VARR};
     errors.push_back("PAYMASTER_SAFETY_LIMIT_EXHAUSTED"); // First diagnostic must not replace the confirmed stop.
@@ -9642,10 +9691,31 @@ void PaymasterWidgetTests::paymasterStoppedOverview()
     auto* start = panel->findChild<QPushButton*>("paymasterOperatorStart");
     QVERIFY(headline && header && hint && capital && start);
     const bool stop_observed = scenario != "start_requested" && scenario != "enabled" &&
-        scenario != "inconsistent" && scenario != "missing_stop_observation";
+        scenario != "inconsistent" && scenario != "missing_stop_observation" && scenario != "waiting_start";
     const bool protected_state = scenario == "unknown_error" || scenario == "restore" || scenario == "checkpoint";
     QCOMPARE(headline->text() == "Paymaster is stopped", stop_observed && !protected_state);
-    QVERIFY(!start->isEnabled()); // No readiness/approval bypass from the presentation change.
+    const bool can_request_start = stop_observed && !protected_state && scenario != "locked" &&
+        scenario != "missing_settings" && scenario != "missing_policy";
+    QCOMPARE(start->isEnabled(), can_request_start);
+    QVERIFY(!provider.find_value("ready").isTrue()); // A start request is not payment readiness.
+    auto* next = panel->findChild<QPushButton*>("paymasterOperatorNextAction");
+    QVERIFY(next && !next->isHidden()); // Keep the prerequisite action alongside Start.
+    if (can_request_start) {
+        QVERIFY(!start->isHidden());
+        QCOMPARE(next->text(), QStringLiteral("Review spending limits"));
+        QCOMPARE(next->property("paymasterRole").toString(), QStringLiteral("secondaryAction"));
+    }
+    if (scenario == "waiting_start") {
+        QVERIFY(headline->text().contains("Start requested"));
+        QVERIFY(hint->text().contains("Pause or Stop cancels the request"));
+        QVERIFY(!panel->findChild<QPushButton*>("paymasterOperatorPause")->isHidden());
+        QVERIFY(panel->findChild<QPushButton*>("paymasterOperatorStop")->isEnabled());
+        QVERIFY(start->toolTip().contains("already requested"));
+    }
+    if (stop_observed && !protected_state) {
+        QCOMPARE(panel->findChild<QPushButton*>("paymasterOperatorStop")->isEnabled(), scenario == "autostart");
+        QVERIFY(panel->findChild<QPushButton*>("paymasterOperatorRetire")->isEnabled());
+    }
     if (protected_state) {
         QCOMPARE(headline->text(), scenario == "restore" ? QStringLiteral("Restored provider wallet is protected") :
             scenario == "checkpoint" ? QStringLiteral("Provider wallet safety check needs review") : QStringLiteral("Status needs review"));
@@ -9664,8 +9734,9 @@ void PaymasterWidgetTests::paymasterStoppedOverview()
         }
         const auto model = scenario == "sponsored" ? "sponsored" : "user_paid";
         auto* offer_status = panel->findChild<QLabel*>(QStringLiteral("paymasterLive_") + model);
-        QVERIFY(offer_status->text().contains("Configured · provider stopped"));
-        QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("neutral"));
+        QCOMPARE(offer_status->text().contains("Configured · provider stopped"), scenario != "missing_policy");
+        if (scenario != "missing_policy")
+            QCOMPARE(offer_status->property("statusKind").toString(), QStringLiteral("neutral"));
     }
     if (scenario == "empty_budget") {
         // A fresh running observation must remove the stopped presentation.
@@ -11096,7 +11167,8 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
         QCOMPARE(panel->findChild<QLabel*>("paymasterLifecycleStatus")->text(), headline->text());
         QVERIFY(!panel->findChild<QLabel*>("paymasterOperatorHint")->text().contains("reserves and limits are retained"));
         QVERIFY(panel->findChild<QLabel*>("paymasterLive_user_paid")->text().contains("provider stopped"));
-        QVERIFY(!panel->findChild<QPushButton*>("paymasterLifecycleStart")->isEnabled());
+        QVERIFY(panel->findChild<QPushButton*>("paymasterLifecycleStart")->isEnabled());
+        QVERIFY(!panel->findChild<QPushButton*>("paymasterOperatorStop")->isEnabled());
         if (executions == 1) {
             auto* capital = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
             QVERIFY(capital->text().contains("Refill off"));

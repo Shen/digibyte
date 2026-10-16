@@ -2045,8 +2045,8 @@ public:
         m_operator_pause->setObjectName("paymasterOperatorPause");
         m_operator_pause->setToolTip(tr("Pause persistently, including autostart and new pool signatures. Already signed transactions can still confirm."));
         m_operator_pause->hide();
-        operator_actions->addWidget(m_operator_action);
         operator_actions->addWidget(m_operator_start);
+        operator_actions->addWidget(m_operator_action);
         operator_actions->addWidget(m_operator_pause);
         operator_actions->addStretch();
         operator_layout->addLayout(operator_actions);
@@ -5782,6 +5782,12 @@ private:
             QString::fromStdString(result_service_state.get_str());
 
         if (!running) {
+            if (result.find_value("start_requested").isTrue() &&
+                (service_state == QLatin1String("waiting_for_readiness") || service_state == QLatin1String("waiting_for_unlock"))) {
+                QMessageBox::information(this, tr("Paymaster start requested"),
+                    tr("Core accepted the start request for this wallet session and is waiting for the prerequisites. Review the missing requirements on Overview. Refill approval, budgets and autostart remain unchanged. Pause or Stop cancels the request."));
+                return;
+            }
             QMessageBox::warning(
                 this, tr("Paymaster provider not started"),
                 !m_liquidity_targets_satisfy_provider_policy
@@ -10238,6 +10244,9 @@ private:
         const bool running = provider.find_value("running").get_bool();
         const bool ready = provider.find_value("ready").get_bool();
         const bool stopped = IsExplicitlyStoppedProvider(provider);
+        const bool start_pending = !running && provider.find_value("enabled").isTrue() &&
+            provider.find_value("start_requested").isTrue() &&
+            (state == QLatin1String("waiting_for_readiness") || state == QLatin1String("waiting_for_unlock"));
         const auto& unlock_deadline = snapshot.find_value("unlocked_until");
         const bool expired = unlock_deadline.isNum() && unlock_deadline.getInt<int64_t>() > 0 &&
                              unlock_deadline.getInt<int64_t>() <= QDateTime::currentSecsSinceEpoch();
@@ -10348,7 +10357,7 @@ private:
             }
         } else if (action == QLatin1String("review_budget")) {
             headline = tr("Spending limits need attention");
-            hint = tr("Check the affected limit. Rolling budgets recover over time; limits are never raised automatically.");
+            hint = tr("Compare the offer's network-fee ceiling with the per-payment limits and remaining rolling budgets. Rolling budgets recover over time; limits are never raised automatically.");
             button = tr("Review spending limits");
         } else if (action == QLatin1String("configure_node")) {
             headline = tr("Connection needs attention");
@@ -10449,10 +10458,13 @@ private:
         }
         if (stopped && action != QLatin1String("inspect_error")) {
             // Service state and readiness for a future restart are separate.
-            // Keep Core's diagnostic action/start guards; do not turn a stop
-            // into a request to unlock, approve refill or raise budgets.
+            // Keep the prerequisite action separate from an explicit one-shot
+            // start request. Core still decides when service may actually run.
+            const QString prerequisite_hint = hint;
             headline = tr("Paymaster is stopped");
-            hint = tr("The provider is disabled and accepts no new requests. Saved configuration and limits are retained. Review any missing requirements before starting again. Already signed transactions can still confirm.");
+            hint = tr("The provider is disabled and accepts no new requests. Start/resume requests operation with saved settings; Core waits until all prerequisites are met. It does not approve refill costs or change limits. Already signed transactions can still confirm.");
+            if (action != QLatin1String("start") && action != QLatin1String("enable"))
+                hint += QLatin1Char('\n') + prerequisite_hint;
             kind = QStringLiteral("neutral");
             const auto& operations = provider.find_value("active_operations");
             if (operations.isArray() && operations.empty() &&
@@ -10463,6 +10475,9 @@ private:
                     ? tr("Refill off · reserves retained") : tr("Refill off · reserves below saved target"), QStringLiteral("neutral"));
                 m_overview_liquidity_action->setText(tr("Review liquidity"));
             }
+        } else if (start_pending && action != QLatin1String("inspect_error")) {
+            headline = tr("Start requested · waiting for prerequisites");
+            hint.prepend(tr("A start is requested for this wallet session. Core starts only when all checks pass. Pause or Stop cancels the request. "));
         }
         if (m_operator_restart_required) hint.prepend(tr("Node settings were saved. Restart the node explicitly to apply them. "));
         m_operator_next_action = action;
@@ -10473,21 +10488,34 @@ private:
         m_operator_action->setText(button);
         m_operator_action->setToolTip(hint);
         m_operator_action->setEnabled(!m_privacy && hasRpcTransport() && !m_busy);
-        m_operator_start_allowed = !running && !locked && IsHex256Field(provider, "provider_id") &&
+        const bool stopped_start_request = stopped && provider.find_value("settings_present").isTrue() &&
+            provider.find_value("policy").isObject() && !provider.find_value("policy").empty() &&
+            (action == QLatin1String("review_budget") || action == QLatin1String("review_liquidity") ||
+             action == QLatin1String("wait") || action == QLatin1String("configure_node"));
+        m_operator_start_allowed = !running && !locked && !provider.find_value("start_requested").isTrue() && IsHex256Field(provider, "provider_id") &&
             (action == QLatin1String("start") || action == QLatin1String("enable") ||
-             (action == QLatin1String("backup_wallet") && ready));
+             (action == QLatin1String("backup_wallet") && ready) || stopped_start_request);
         m_operator_start->setEnabled(m_operator_start_allowed && hasRpcTransport() && !m_busy);
-        m_operator_start->setText(action == QLatin1String("enable") ? tr("Resume Paymaster…") : tr("Start Paymaster…"));
+        m_operator_start->setText(stopped || action == QLatin1String("enable") ? tr("Resume Paymaster…") : tr("Start Paymaster…"));
         m_operator_start->setToolTip(m_operator_start_allowed
-            ? tr("Start with the saved settings and existing budgets. A backup reminder does not itself block a ready provider.")
-            : tr("Already running or prerequisites are missing. Review the current status before starting."));
-        m_operator_action->setVisible(!m_operator_start_allowed);
+            ? tr("Request a start with saved settings. Core waits for readiness; refill approval, budgets and autostart remain unchanged.")
+            : start_pending ? tr("A start is already requested. Review the missing prerequisites, or cancel the request with Pause or Stop.")
+                            : tr("Already running or prerequisites are missing. Review the current status before starting."));
+        m_operator_action->setVisible(!m_operator_start_allowed || stopped_start_request);
+        const QString action_role = m_operator_start_allowed ? QStringLiteral("secondaryAction") : QStringLiteral("primaryAction");
+        if (m_operator_action->property("paymasterRole").toString() != action_role) {
+            m_operator_action->setProperty("paymasterRole", action_role);
+            m_operator_action->style()->unpolish(m_operator_action);
+            m_operator_action->style()->polish(m_operator_action);
+        }
         m_operator_start->setVisible(m_operator_start_allowed);
         m_operator_start->setProperty("paymasterRole", QStringLiteral("primaryAction"));
-        m_operator_pause->setVisible(running || provider.find_value("enabled").isTrue() || provider.find_value("autostart").isTrue());
+        m_operator_pause->setVisible(running || provider.find_value("enabled").isTrue() || provider.find_value("autostart").isTrue() || provider.find_value("start_requested").isTrue());
         m_operator_pause->setEnabled(hasRpcTransport() && !m_busy);
         const bool can_stop = IsHex256Field(provider, "provider_id") && hasRpcTransport() && !m_busy;
-        m_operator_stop->setEnabled(can_stop);
+        m_operator_stop->setEnabled(can_stop && (!stopped || provider.find_value("autostart").isTrue()));
+        m_operator_stop->setToolTip(stopped && !provider.find_value("autostart").isTrue()
+            ? tr("Already stopped. Use Retire Paymaster to review reserve release and backup.") : QString{});
         m_operator_retire->setEnabled(can_stop);
         if (running || provider.find_value("enabled").isTrue() || provider.find_value("autostart").isTrue()) {
             m_retirement_summary->hide();
@@ -11403,7 +11431,7 @@ private:
         if (m_busy || !hasRpcTransport() || m_autostart_dirty || m_autostart_pending_read) return;
         const uint64_t wallet_generation = m_wallet_generation;
         setRpcBusyState(true);
-        const auto answer = askPlainTextQuestion(this, m_operator_next_action == QLatin1String("enable") ? tr("Resume provider") : tr("Start provider"), tr("Enable the saved provider configuration and request a start within its existing budgets? Unlock and missing readiness prerequisites remain separate; budgets are not reset."));
+        const auto answer = askPlainTextQuestion(this, IsExplicitlyStoppedProvider(m_operator_snapshot.find_value("provider")) || m_operator_next_action == QLatin1String("enable") ? tr("Resume provider") : tr("Start provider"), tr("Enable the saved provider configuration and request a start within its existing budgets? Unlock and missing readiness prerequisites remain separate; budgets are not reset."));
         if (m_wallet_generation != wallet_generation) return;
         setRpcBusyState(false);
         if (answer != QMessageBox::Yes || m_privacy || !hasRpcTransport()) return;
@@ -11440,7 +11468,7 @@ private:
     }
 
     // Operating-capital actions retain the guarded start-and-refill path.
-    // The overview is the only place with general start/pause controls.
+    // Overview and lifecycle settings share the general start/pause controls.
     void updateEarningsWithdrawalHint()
     {
         const QString withdrawal_hint = m_privacy || !hasCompleteMutationSnapshots() ? QString{} : tr(
