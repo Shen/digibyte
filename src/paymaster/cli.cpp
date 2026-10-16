@@ -5,6 +5,7 @@
 #include <paymaster/types.h>
 
 #include <common/args.h>
+#include <consensus/amount.h>
 #include <compat/stdin.h>
 #include <support/cleanse.h>
 #include <tinyformat.h>
@@ -266,7 +267,7 @@ class OperatorCli
     {
         std::cout << "Checking incoming funds, approved reserve preparation and readiness every 2 seconds.\n"
                   << "Ctrl+C closes this monitor; accepted funding and a requested start remain active in Core.\n";
-        std::string last_message, last_balances;
+        std::string last_message, last_funding;
         const auto started = std::chrono::steady_clock::now();
         auto last_report = started;
         for (;;) {
@@ -276,6 +277,12 @@ class OperatorCli
             if (progress.message != last_message) {
                 std::cout << "\n" << progress.message << '\n' << std::flush;
                 last_message = progress.message;
+            }
+            const auto funding = DescribeSetupFunding(current.find_value("provider").find_value("preparation"),
+                current.find_value("network").get_str() == "regtest");
+            if (funding != last_funding) {
+                std::cout << funding << '\n' << std::flush;
+                last_funding = funding;
             }
             if (progress.blocked) return false;
             if (progress.complete) return true;
@@ -287,25 +294,6 @@ class OperatorCli
             if (progress.needs_unlock) {
                 OperatorOperatingUnlock(wallet, current);
                 continue;
-            }
-            const auto balances = OperatorCall("getbalances", UniValue{UniValue::VARR}, wallet).find_value("mine");
-            // minconf=0 retains the separate confirmed bucket and also includes
-            // incoming unconfirmed DD, so funding becomes visible before mining.
-            const auto dd = OperatorCall("getdigidollarbalance", OperatorParams({UniValue{""}, UniValue{0}}), wallet);
-            const auto dd_amount = [](int64_t cents) {
-                if (cents < 0) throw std::runtime_error("Invalid DD funding balance");
-                return strprintf("%d.%02d", cents / 100, cents % 100);
-            };
-            CheckSetupContext(context, OperatorCall("getpaymasteroperatorinfo", UniValue{UniValue::VARR}, wallet));
-            std::ostringstream balance_text;
-            balance_text << "DGB available/trusted: " << balances.find_value("trusted").write()
-                         << " | incoming unconfirmed: " << balances.find_value("untrusted_pending").write()
-                         << " | immature mining rewards: " << balances.find_value("immature").write() << '\n'
-                         << "DD confirmed: " << dd_amount(dd.find_value("confirmed").getInt<int64_t>())
-                         << " | incoming unconfirmed: " << dd_amount(dd.find_value("unconfirmed").getInt<int64_t>()) << '\n';
-            if (last_balances != balance_text.str()) {
-                last_balances = balance_text.str();
-                std::cout << last_balances << "Core checks usable inputs; displayed balances alone do not complete setup.\n";
             }
             const auto now = std::chrono::steady_clock::now();
             if (now - last_report >= std::chrono::seconds{10}) {
@@ -324,6 +312,8 @@ class OperatorCli
                   << " | Wallet: " << (provider.find_value("wallet_locked").isTrue() ? "locked" : "unlocked")
                   << " | Autostart: " << (provider.find_value("autostart").isTrue() ? "on" : "off") << '\n';
         if (!provider.find_value("ready").isTrue()) std::cout << InspectSetupProgress(snapshot, false).message << '\n';
+        const auto funding = DescribeSetupFunding(provider.find_value("preparation"), snapshot.find_value("network").get_str() == "regtest");
+        if (!funding.empty()) std::cout << funding << '\n';
         std::cout << "Use -paymasterstatus with this wallet for detailed diagnostics.\n";
     }
 public:
@@ -570,6 +560,7 @@ public:
             choices.liquidity.pushKV("target_admission_carriers", 0);
             choices.liquidity.pushKV("target_operational_carriers", 0);
         }
+        choices.liquidity = SetupSelectLiquidity(std::cin, std::cout, choices.liquidity, paid);
         OperatorFields(choices.liquidity, false);
         if (OperatorCustomize("Reserve counts and refill fee ceilings")) OperatorFields(choices.liquidity, true);
         for (;;) {
@@ -580,6 +571,16 @@ public:
             std::cout << "Customer-paid service needs at least 3 DD capacity-check reserves and 1 DD payment reserve. Sponsored-only pool preparation requires zero for both DD counts. Review the targets.\n";
             OperatorFields(choices.liquidity, true);
         }
+        const auto admission_capital = choices.liquidity.find_value("target_admission_dgb").getInt<int64_t>() * 10000000;
+        const auto operational_count = choices.liquidity.find_value("target_operational_dgb").getInt<int64_t>();
+        const auto operational_value = std::max<int64_t>(10000000, choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>());
+        if (operational_count > (MAX_MONEY - admission_capital) / operational_value) throw std::runtime_error("Reserve capital exceeds the DGB money range; review the capacity and offer ceiling");
+        const auto dgb_capital = admission_capital + operational_count * operational_value;
+        const auto dd_capital = (choices.liquidity.find_value("target_admission_carriers").getInt<int64_t>() +
+            choices.liquidity.find_value("target_operational_carriers").getInt<int64_t>()) * 100;
+        std::cout << "Minimum target capital: " << SetupFormatNumber(dgb_capital, 8) << " DGB + "
+                  << SetupFormatNumber(dd_capital, 2) << " DD, before network fees. Existing usable reserves count toward this target.\n"
+                  << "The funding preview determines the missing capital. Customer-payment budgets, recurring refill fees and the finite setup fee approval are separate.\n";
         choices.liquidity.pushKV("automatic_replenishment", OperatorSetting("Maintain reserves automatically? (recommended for 24/7)",
             choices.liquidity.find_value("automatic_replenishment").get_bool(),
             "Reuse confirmed change and maintain the selected targets. Paid replacements additionally require the allowance below.",

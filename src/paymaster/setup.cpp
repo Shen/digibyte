@@ -82,6 +82,21 @@ UniValue SetupDefaultLiquidity(bool user_paid)
 {
     return SetupLiquidityPreset(user_paid, 1);
 }
+UniValue SetupSelectLiquidity(std::istream& input, std::ostream& output, const UniValue& current, bool user_paid)
+{
+    const auto selection = SetupSelect(input, output, "Payment reserve target", {
+        {"keep", "Keep current targets and refill fee limits", "Retain saved or proposed values; individual settings can be reviewed next."},
+        {"small", "Small - reserves for 1 payment", "Propose one complete payment reserve and finite refill fee limits."},
+        {"standard", "Standard - reserves for 3 payments", "Propose three complete payment reserves and finite refill fee limits."},
+        {"large", "Large - reserves for 6 payments", "Propose six complete payment reserves and finite refill fee limits."}}, "keep");
+    if (selection == "keep") return current;
+    auto result = SetupLiquidityPreset(user_paid, selection == "small" ? 1 : selection == "standard" ? 3 : 6);
+    // Selecting capacity is neither a new automation choice nor a fee approval.
+    for (const auto* key : {"automatic_replenishment", "paid_maintenance_approved"}) result.pushKV(key, current.find_value(key));
+    output << "This changes the proposal only. Existing usable reserves count toward the target. "
+              "Lowering it does not release excess reserves. Individual slots are always funded in full.\n";
+    return result;
+}
 SetupChoices SetupCliDefaults(const UniValue& snapshot)
 {
     CheckSetupContext(snapshot, snapshot);
@@ -454,6 +469,77 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         result.push_back(item);
     return result;
 }
+std::string DescribeSetupFunding(const UniValue& preparation, bool regtest)
+{
+    if (!preparation.isArray()) return "Current reserve-funding amounts are unavailable. Refresh operator status; missing data does not mean zero funding is needed.";
+    const auto amount = [](const UniValue& step, const char* key, bool dgb) -> std::optional<int64_t> {
+        const auto& value = step.find_value(key);
+        int64_t number{0};
+        if (!value.isNum() || !ParseInt64(value.getValStr(), &number) || number < 0 || (dgb && !MoneyRange(number))) return std::nullopt;
+        return number;
+    };
+    std::string result;
+    bool uncreated{false};
+    for (const auto& step : preparation.getValues()) {
+        const auto& state = step.find_value("state");
+        if (!state.isStr() || state.get_str() == "complete" || state.get_str() == "cancelled") continue;
+        const auto& asset = step.find_value("asset");
+        const bool dd = asset.isStr() && asset.get_str() == "dd_carrier";
+        const bool dgb = asset.isStr() && asset.get_str() == "dgb";
+        if (!result.empty()) result += "\n";
+        result += dd ? "DigiDollar reserve: " : dgb ? "DGB reserve: " : "Reserve preparation: ";
+        if (state.get_str() == "pending_confirmation") {
+            const auto have = amount(step, "confirmations", false);
+            const auto need = amount(step, "required_confirmations", false);
+            result += "Saved transaction awaiting confirmation";
+            if (have && need && *need > 0) result += " (" + std::to_string(*have) + "/" + std::to_string(*need) + ")";
+            result += ". No new funding approval is needed.";
+            if (regtest) result += " On Regtest, mine a block to confirm it.";
+            continue;
+        }
+        if (state.get_str() != "pending_creation" || !step.find_value("txid").isNull()) {
+            result += "Review the saved transaction/task in operator status before authorizing a replacement.";
+            continue;
+        }
+        uncreated = true;
+        const auto required = amount(step, dd ? "required_output_cents" : "required_output_satoshis", !dd);
+        const auto available = amount(step, dd ? "confirmed_available_cents" : "confirmed_available_satoshis", !dd);
+        const auto missing = amount(step, dd ? "capital_shortfall_cents" : "capital_shortfall_satoshis", !dd);
+        if ((!dd && !dgb) || !required || !available || !missing || *missing != std::max<int64_t>(0, *required - *available)) {
+            result += "Current funding amounts are unavailable. Refresh operator status and check usable DD/DGB funds; no transaction has been created.";
+            continue;
+        }
+        const auto format = [dd](int64_t value) { return SetupFormatNumber(value, dd ? 2 : 8) + (dd ? " DD" : " DGB"); };
+        result += "Required capital: " + format(*required) + "; confirmed available: " + format(*available) + "; missing capital: " + format(*missing) + ".";
+        auto pending = dd ? amount(step, "pending_cents", false) : std::nullopt;
+        if (dgb) {
+            const auto total = amount(step, "available_including_unconfirmed_satoshis", true);
+            if (total && *total >= *available) pending = *total - *available;
+        }
+        if (pending && *pending > 0) {
+            result += " Awaiting confirmation: " + format(*pending) + ".";
+            if (regtest) result += " On Regtest, mine a block to confirm incoming transactions.";
+        }
+        if (*missing > 0) {
+            result += pending && *pending >= *missing
+                ? " Incoming funds may cover the capital after confirmation; Core rechecks eligibility."
+                : " Receive the missing capital in this wallet, or cancel uncreated preparation and review a smaller target.";
+        } else {
+            result += " Capital is covered; Core still checks fee funding and usable inputs on its next attempt.";
+        }
+        if (dd) {
+            const auto fees = amount(step, "confirmed_available_satoshis", true);
+            if (fees) result += " Confirmed DGB available for network fees: " + SetupFormatNumber(*fees, 8) + " DGB.";
+        }
+        result += " Network fees require additional DGB.";
+        const auto ceiling = amount(step, "maximum_fee_satoshis", true);
+        if (ceiling) result += " Approved setup fee ceiling: " + SetupFormatNumber(*ceiling, 8) + " DGB (not an estimate).";
+        result += " No transaction has been created for this step.";
+    }
+    if (uncreated) result += "\nAvailable funds exclude protected reserves and are shared across pending steps; do not add the available amounts together. "
+                            "Finite approved preparation continues when the provider configuration is enabled and the wallet is unlocked and synchronized. Recurring auto-refill is not required.";
+    return result;
+}
 SetupProgress InspectSetupProgress(const UniValue& snapshot, bool require_running)
 {
     SetupProgress result;
@@ -647,7 +733,8 @@ std::string OperatorSummary(const UniValue& snapshot)
             result += "; " + std::string{field} + "=" + OperatorAmount(budget.find_value(field).getInt<int64_t>());
     }
     result += "\nOpen work: " + provider.find_value("service_queue").write();
-    if (provider.find_value("preparation").isArray()) result += "\nApproved setup steps: " + provider.find_value("preparation").write();
+    result += "\n" + DescribeSetupFunding(provider.find_value("preparation"), snapshot.find_value("network").isStr() && snapshot.find_value("network").get_str() == "regtest");
+    if (provider.find_value("preparation").isArray()) result += "\nApproved setup steps (technical): " + provider.find_value("preparation").write();
     result += "\nWallet locked: " + provider.find_value("wallet_locked").write();
     result += snapshot.find_value("unlocked_until").isNum() && snapshot.find_value("unlocked_until").getInt<int64_t>() == -1
         ? "\nOperating unlock: until manual lock, wallet unload or node restart (wallet-wide)."

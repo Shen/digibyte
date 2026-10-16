@@ -23,6 +23,8 @@ UniValue SetupDefaultSafety(int64_t advertised_fee, bool user_paid, bool sponsor
  * Admission uses three independent proofs; payment reserves scale with capacity. */
 UniValue SetupLiquidityPreset(bool user_paid, int capacity);
 UniValue SetupDefaultLiquidity(bool user_paid);
+/** Review capacity presets without changing saved settings or approval flags. */
+UniValue SetupSelectLiquidity(std::istream& input, std::ostream& output, const UniValue& current, bool user_paid);
 UniValue SetupNodePrerequisites(const UniValue& snapshot);
 int64_t SetupFundingFee(const UniValue& snapshot);
 /** All JSON amounts are integer satoshis / DD cents. Core validates policy. */
@@ -39,6 +41,8 @@ struct SetupProgress {
 };
 /** Read-only setup completion; balances never substitute for Core readiness. */
 SetupProgress InspectSetupProgress(const UniValue& snapshot, bool require_running);
+/** Current per-step funding observations, not wallet ownership balances or fee quotes. */
+std::string DescribeSetupFunding(const UniValue& preparation, bool regtest);
 std::string OperatorSummary(const UniValue& snapshot);
 std::string OperatorAmount(int64_t satoshis);
 int64_t OperatorRemaining(int64_t limit, int64_t spent, int64_t reserved);
@@ -53,7 +57,7 @@ struct SetupChoices {
     UniValue pool{UniValue::VOBJ};
     std::string operation_mode{"automatic"};
     bool enabled{true};
-    // Empty preserves saved autostart (the GUI contract). CLI reviews a choice.
+    // Empty preserves saved autostart. Both assistants review an explicit choice.
     std::optional<bool> autostart;
 };
 /** Validate complete proposed settings with the Core policy validators, without writes. */

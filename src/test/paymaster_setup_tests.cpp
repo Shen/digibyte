@@ -779,6 +779,80 @@ BOOST_AUTO_TEST_CASE(operator_sync_wait_and_activity_validation)
     }
 }
 
+BOOST_AUTO_TEST_CASE(capacity_selection_retains_approvals_and_requires_no_mutation)
+{
+    auto current = SetupLiquidityPreset(true, 2);
+    current.pushKV("maximum_maintenance_fee_per_transaction_satoshis", 12345678);
+    current.pushKV("automatic_replenishment", true);
+    for (const bool paid : {false, true}) {
+        for (const bool approved : {false, true}) {
+            current.pushKV("paid_maintenance_approved", approved);
+            const auto before = current.write();
+            std::ostringstream output;
+            std::istringstream keep{"\n"};
+            BOOST_CHECK_EQUAL(SetupSelectLiquidity(keep, output, current, paid).write(), before);
+            for (const auto& preset : {std::pair{"small", 1}, {"standard", 3}, {"large", 6}}) {
+                std::istringstream input{std::string{preset.first} + "\n"};
+                const auto selected = SetupSelectLiquidity(input, output, current, paid);
+                BOOST_CHECK_EQUAL(selected.find_value("target_operational_dgb").getInt<int>(), preset.second);
+                BOOST_CHECK_EQUAL(selected.find_value("target_operational_carriers").getInt<int>(), paid ? preset.second : 0);
+                BOOST_CHECK_EQUAL(selected.find_value("target_admission_dgb").getInt<int>(), 3);
+                BOOST_CHECK_EQUAL(selected.find_value("target_admission_carriers").getInt<int>(), paid ? 3 : 0);
+                BOOST_CHECK(selected.find_value("automatic_replenishment").isTrue());
+                BOOST_CHECK_EQUAL(selected.find_value("paid_maintenance_approved").get_bool(), approved);
+                BOOST_CHECK_EQUAL(current.write(), before);
+            }
+            BOOST_CHECK(output.str().find("does not release") != std::string::npos);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(funding_diagnostics_distinguish_capital_fees_and_confirmation)
+{
+    UniValue dd, dgb;
+    BOOST_REQUIRE(dd.read(R"({"asset":"dd_carrier","state":"pending_creation","error":"PAYMASTER_POOL_WAITING_FUNDS",
+        "required_output_cents":600,"confirmed_available_cents":100,"capital_shortfall_cents":500,"pending_cents":500,
+        "confirmed_available_satoshis":5000000,"maximum_fee_satoshis":75000000})"));
+    BOOST_REQUIRE(dgb.read(R"({"asset":"dgb","state":"pending_creation","error":"PAYMASTER_POOL_WAITING_DGB",
+        "required_output_satoshis":180000000,"confirmed_available_satoshis":5000000,"capital_shortfall_satoshis":175000000,
+        "available_including_unconfirmed_satoshis":6000000,"maximum_fee_satoshis":75000000})"));
+    UniValue records{UniValue::VARR}; records.push_back(dd); records.push_back(dgb);
+    const auto before = records.write();
+    const auto text = DescribeSetupFunding(records, true);
+    for (const auto* expected : {"Required capital: 6.00 DD", "confirmed available: 1.00 DD", "missing capital: 5.00 DD",
+             "Awaiting confirmation: 5.00 DD", "Incoming funds may cover", "0.05000000 DGB", "missing capital: 1.75000000 DGB",
+             "Receive the missing capital", "0.75000000 DGB (not an estimate)", "exclude protected reserves", "shared across pending steps", "On Regtest"}) {
+        BOOST_CHECK_MESSAGE(text.find(expected) != std::string::npos, expected);
+    }
+    BOOST_CHECK_EQUAL(records.write(), before);
+    BOOST_CHECK(DescribeSetupFunding(records, false).find("On Regtest") == std::string::npos);
+    // Funding arriving since the last recorded attempt removes the capital gap,
+    // but does not establish input eligibility, fee sufficiency or readiness.
+    dd.pushKV("confirmed_available_cents", 600);
+    dd.pushKV("capital_shortfall_cents", 0);
+    records = UniValue{UniValue::VARR}; records.push_back(dd);
+    BOOST_CHECK(DescribeSetupFunding(records, false).find("Capital is covered; Core still checks") != std::string::npos);
+    for (const auto* state : {"complete", "cancelled", "pending_confirmation", "conflict"}) {
+        dd.pushKV("state", state);
+        dd.pushKV("confirmations", 0);
+        dd.pushKV("required_confirmations", 1);
+        records = UniValue{UniValue::VARR}; records.push_back(dd);
+        const auto status = DescribeSetupFunding(records, false);
+        BOOST_CHECK(status.find("Required capital") == std::string::npos);
+        if (std::string{state} == "pending_confirmation") BOOST_CHECK(status.find("(0/1)") != std::string::npos);
+    }
+    dd.pushKV("state", "pending_creation");
+    for (const auto* invalid : {"null", "-1", "2.5", "\"600\"", "9223372036854775808"}) {
+        UniValue value; BOOST_REQUIRE(value.read(invalid));
+        dd.pushKV("confirmed_available_cents", value);
+        records = UniValue{UniValue::VARR}; records.push_back(dd);
+        const auto unknown = DescribeSetupFunding(records, false);
+        BOOST_CHECK(unknown.find("amounts are unavailable") != std::string::npos);
+        BOOST_CHECK(unknown.find("Capital is covered") == std::string::npos);
+    }
+    BOOST_CHECK(DescribeSetupFunding(UniValue{}, false).find("does not mean zero") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(setup_waits_for_funding_confirmations_and_actual_start)
 {
     auto snapshot = Snapshot();
