@@ -8485,7 +8485,9 @@ private:
             safety.pushKV("public_sponsored", fundingSafetyToJSON(sponsored));
             safety.pushKV("restricted_sponsored", fundingSafetyToJSON(restricted));
         }
-        display(m_safety_config_warning, tr("Spending-limit form compared with saved offer"), configurationConflictText(saved_offer, safety));
+        const QString input_error = providerSafetyInputError();
+        display(m_safety_config_warning, tr("Spending-limit form compared with saved offer"),
+            input_error.isEmpty() ? configurationConflictText(saved_offer, safety) : input_error);
     }
 
     void updatePolicyDisplay()
@@ -9190,8 +9192,55 @@ private:
             control->setEnabled(controls_enabled);
         }
         if (m_save_provider_safety) {
-            m_save_provider_safety->setEnabled(enabled && !m_busy);
+            m_save_provider_safety->setEnabled(enabled && !m_busy && providerSafetyInputError().isEmpty());
         }
+    }
+
+    QString providerSafetyInputError() const
+    {
+        if (!m_save_provider_safety || !m_restricted_sponsored_safety.completed_per_day) return {};
+        const auto& offer = m_operator_snapshot.find_value("provider").find_value("policy");
+        const auto& models = offer.find_value("funding_models");
+        const auto offers = [&models](const char* name) {
+            return models.isArray() && std::any_of(models.getValues().begin(), models.getValues().end(),
+                [name](const UniValue& model) { return model.isStr() && model.get_str() == name; });
+        };
+        qint64 ceiling{0};
+        const bool has_ceiling = GetInt64Field(offer, "maximum_network_fee_dgb_satoshis", ceiling) && ceiling > 0;
+        const bool restricted = offer.find_value("sponsorship_scope").isStr() && offer.find_value("sponsorship_scope").get_str() == "restricted";
+        const std::array<QString, 3> names{tr("User paid"), tr("Public sponsored"), tr("Restricted sponsored")};
+        const std::array<bool, 3> required{offers("user_paid"), offers("sponsored") && !restricted, offers("sponsored") && restricted};
+        const std::array<const FundingSafetyControls*, 3> controls{&m_user_paid_safety, &m_public_sponsored_safety, &m_restricted_sponsored_safety};
+        // Form feedback only. The RPC revalidates these relationships against
+        // the current saved offer and remains authoritative for every write.
+        for (size_t i = 0; i < controls.size(); ++i) {
+            FundingSafetyValues values;
+            QString reason;
+            if (!readFundingSafety(*controls[i], values))
+                reason = tr("Enter valid DGB amounts with at most eight decimal places.");
+            else if (values.allZero() && !required[i]) continue;
+            else if (values.hasZero())
+                reason = tr("An offered model needs six positive limits. Use all zero values only for a model that is not offered.");
+            else if (has_ceiling && values.per_transaction > ceiling)
+                reason = tr("Maximum per transfer (%1 DGB) must not exceed the saved offer ceiling (%2 DGB). Lower this limit or save a higher offer ceiling first.")
+                    .arg(PaymasterFormatDGB(values.per_transaction), PaymasterFormatDGB(ceiling));
+            else if (values.reserved < values.per_transaction)
+                reason = tr("Maximum reserved at once (%1 DGB) must cover at least one transfer (%2 DGB).")
+                    .arg(PaymasterFormatDGB(values.reserved), PaymasterFormatDGB(values.per_transaction));
+            else if (values.per_hour < values.per_transaction)
+                reason = tr("The hourly limit (%1 DGB) must cover at least one transfer (%2 DGB).")
+                    .arg(PaymasterFormatDGB(values.per_hour), PaymasterFormatDGB(values.per_transaction));
+            else if (values.per_day < values.per_hour)
+                reason = tr("The daily limit (%1 DGB) must be at least the hourly limit (%2 DGB).")
+                    .arg(PaymasterFormatDGB(values.per_day), PaymasterFormatDGB(values.per_hour));
+            else if (values.completed_per_day < values.completed_per_hour)
+                reason = tr("The daily transfer count must be at least the hourly transfer count.");
+            if (!reason.isEmpty()) return tr("Cannot save %1 limits: %2").arg(names[i], reason);
+        }
+        if (m_max_active_quotes_per_netgroup->value() > m_max_active_quotes_total->value() ||
+            m_max_active_quotes_per_recipient->value() > m_max_active_quotes_total->value())
+            return tr("Cannot save: per-network-group and per-recipient offer limits must not exceed the total active-offer limit.");
+        return {};
     }
 
     static void loadFundingSafety(const UniValue& value,
@@ -9859,6 +9908,10 @@ private:
     void updateProviderButtons()
     {
         updateConfigurationWarnings();
+        if (m_save_provider_safety) {
+            const QString error = m_privacy ? QString{} : providerSafetyInputError();
+            m_save_provider_safety->setEnabled(!m_privacy && !m_busy && m_provider_safety_snapshot_representable && error.isEmpty());
+        }
         const bool complete_snapshots = hasCompleteMutationSnapshots();
         updatePoolPreparationStatus();
         const bool manual_mode = m_operation_mode == QLatin1String("manual");
@@ -12119,6 +12172,12 @@ private:
 
     void saveProviderSafetyPolicy()
     {
+        if (m_busy || m_privacy) return;
+        const QString input_error = providerSafetyInputError();
+        if (!input_error.isEmpty()) {
+            updateProviderButtons();
+            return;
+        }
         if (!m_provider_safety_snapshot_representable) {
             m_provider_safety_status->setText(tr(
                 "Provider safety settings were not changed: the persisted Core policy cannot be represented exactly by this interface."));
@@ -12157,14 +12216,34 @@ private:
                      return;
                  }
                  m_provider_safety_dirty = false;
+                 m_provider_safety_status->setText(tr("Spending limits saved."));
                  if (!m_policy_limits_review->isHidden()) {
                      showPolicySaveStatus(tr("Spending limits saved. Review your offer edits and save the policy to activate them."));
                      setStatusLabel(m_policy_limits_hint,
                          tr("Spending limits saved. Return to offer settings and save the policy to activate your offer changes."),
                          QStringLiteral("ready"));
                  }
-                 refreshProviderSafetyStatus();
+                 invalidateSavedConfigurationDisplay();
+                 refreshStatus();
+             }, false, [this](const QString& error) {
+                 const bool rejected = error.contains(QStringLiteral("PAYMASTER_INVALID_SAFETY")) ||
+                     error.contains(QStringLiteral("PAYMASTER_SAFETY_LIMITS_REQUIRED"));
+                 m_provider_safety_status->setText(rejected
+                     ? tr("Limits were not saved: they do not fit the current offer or the other budgets. Your edits have been kept. Review the current offer and highlighted limits before saving again.")
+                     : tr("Saving the limits could not be confirmed. Your edits have been kept. Check the current saved status before trying again."));
+                 refreshStatus();
              });
+    }
+
+    void invalidateSavedConfigurationDisplay()
+    {
+        // A successful write makes the previous combined snapshot obsolete.
+        // Do not keep displaying its conflict/readiness during readback, and
+        // do not synthesize readiness from the write acknowledgement alone.
+        m_operator_snapshot = UniValue{};
+        m_status_age.invalidate();
+        m_provider_info_snapshot_available = false;
+        resetOperatorPresentation();
     }
 
     void saveClientSafetyPolicy()
@@ -13315,6 +13394,7 @@ private:
                      m_policy_readback_pending = true;
                      m_policy_dirty = false;
                      showPolicySaveStatus(tr("Policy saved."));
+                     invalidateSavedConfigurationDisplay();
                      updatePolicyDisplay();
                      updateAutomaticRefreshTimer();
                      if (restart) {

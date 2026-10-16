@@ -18,6 +18,10 @@ public:
 private Q_SLOTS:
     void paymasterConfigurationConflicts_data();
     void paymasterConfigurationConflicts();
+    void paymasterSafetyInputValidation_data();
+    void paymasterSafetyInputValidation();
+    void paymasterConfigurationSaveRefresh_data();
+    void paymasterConfigurationSaveRefresh();
     void paymasterWaitsForFullHistory_data();
     void paymasterWaitsForFullHistory();
     void paymasterPreparationClockStartsWithFirstReply();

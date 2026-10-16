@@ -9631,7 +9631,6 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
     });
     panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
     int writes{0};
-    panel->setRpcExecutorForTesting([&](const std::string&, const UniValue&) { ++writes; return UniValue{}; });
     auto snapshot = GuidedOperatorSnapshot();
     auto provider = snapshot.find_value("provider");
     auto offer = provider.find_value("policy");
@@ -9652,11 +9651,17 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
     auto paid_limits = limits.find_value("user_paid");
     paid_limits.pushKV("maximum_network_fee_per_transaction_satoshis", paid_limit);
     limits.pushKV("user_paid", paid_limits);
-    auto sponsored_limits = paid_limits;
+    auto sponsored_limits = sponsored_limit > 0 ? paid_limits : limits.find_value("public_sponsored");
     sponsored_limits.pushKV("maximum_network_fee_per_transaction_satoshis", sponsored_limit);
     limits.pushKV("public_sponsored", sponsored_limits);
     safety.pushKV("policy", limits);
     snapshot.pushKV("safety", safety);
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method.rfind("get", 0) != 0) ++writes;
+        return UniValue{UniValue::VOBJ};
+    });
+    panel->refreshStatus();
 
     auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyMaximumNetworkFee");
     auto* paid_amount = panel->findChild<QLineEdit*>("paymasterSafetyUserPaidMaxNetworkFeePerTransaction");
@@ -9675,7 +9680,7 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
         QCOMPARE(!label->parentWidget()->isHidden(), conflict);
         if (conflict) {
             QVERIFY(label->text().contains(scenario == "sponsored" ? "Public sponsored" : "User paid"));
-            QVERIFY(label->text().contains("DGB"));
+            if (scenario != "zero") QVERIFY(label->text().contains("DGB"));
             if (scenario == "mixed") QVERIFY(!label->text().contains("Public sponsored"));
         }
     }
@@ -9707,6 +9712,165 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
         QVERIFY(!label->text().contains("0.50000000"));
     }
     QCOMPARE(writes, 0);
+}
+
+void PaymasterWidgetTests::paymasterSafetyInputValidation_data()
+{
+    QTest::addColumn<QString>("control");
+    QTest::addColumn<QString>("value");
+    QTest::addColumn<QString>("message");
+    QTest::newRow("above_offer") << QStringLiteral("MaxNetworkFeePerTransaction") << QStringLiteral("0.6") << QStringLiteral("saved offer ceiling (0.50000000 DGB)");
+    QTest::newRow("reserved") << QStringLiteral("MaxReservedNetworkFee") << QStringLiteral("0.1") << QStringLiteral("must cover at least one transfer");
+    QTest::newRow("hour") << QStringLiteral("MaxNetworkFeePerHour") << QStringLiteral("0.1") << QStringLiteral("hourly limit");
+    QTest::newRow("day") << QStringLiteral("MaxNetworkFeePerDay") << QStringLiteral("0.1") << QStringLiteral("daily limit");
+    QTest::newRow("zero") << QStringLiteral("MaxNetworkFeePerTransaction") << QStringLiteral("0") << QStringLiteral("six positive limits");
+    QTest::newRow("precision") << QStringLiteral("MaxNetworkFeePerTransaction") << QStringLiteral("0.123456789") << QStringLiteral("eight decimal places");
+}
+
+void PaymasterWidgetTests::paymasterSafetyInputValidation()
+{
+    QFETCH(QString, control);
+    QFETCH(QString, value);
+    QFETCH(QString, message);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto offer = provider.find_value("policy");
+    offer.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+    provider.pushKV("policy", offer);
+    snapshot.pushKV("provider", provider);
+    int writes{0};
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        if (method == "getpaymasteroperatorinfo") return snapshot;
+        if (method.rfind("set", 0) == 0) ++writes;
+        return UniValue{UniValue::VOBJ};
+    });
+    panel->refreshStatus();
+    auto* amount = panel->findChild<QLineEdit*>("paymasterSafetyUserPaid" + control);
+    auto* save = panel->findChild<QPushButton*>("savePaymasterProviderSafetyPolicy");
+    auto* error = panel->findChild<QLabel*>("paymasterSafetyConfigWarning");
+    QVERIFY(amount && save && error);
+    QVERIFY(save->isEnabled()); // A smaller valid cap remains saveable with a readiness warning.
+    const QString original = amount->text();
+    amount->setText(value);
+    QVERIFY(!save->isEnabled());
+    QVERIFY(!error->parentWidget()->isHidden());
+    QVERIFY2(error->text().contains(message), qPrintable(error->text()));
+    QVERIFY(!error->text().contains("PAYMASTER_"));
+    save->click();
+    QCOMPARE(writes, 0);
+    amount->setText(original);
+    QVERIFY(save->isEnabled());
+    QVERIFY(!error->text().contains("Cannot save"));
+    amount->setText(value);
+    panel->setPrivacy(true);
+    QVERIFY(error->parentWidget()->isHidden());
+    QVERIFY(error->text().isEmpty());
+}
+
+void PaymasterWidgetTests::paymasterConfigurationSaveRefresh_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const char* scenario : {"safety", "offer", "read_error", "incomplete", "bad_ack", "rpc_error", "wallet_switch", "privacy"})
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+}
+
+void PaymasterWidgetTests::paymasterConfigurationSaveRefresh()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto offer = provider.find_value("policy");
+    offer.pushKV("maximum_user_paid_service_fee_cents", 0);
+    offer.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+    provider.pushKV("policy", offer);
+    snapshot.pushKV("provider", provider);
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) {
+        return method == "getpaymasteroperatorinfo" ? snapshot : UniValue{UniValue::VOBJ};
+    });
+    panel->refreshStatus();
+    auto* warning = panel->findChild<QLabel*>("paymasterOperatorConfigWarning");
+    auto* headline = panel->findChild<QLabel*>("paymasterOperatorHeadline");
+    auto* safety_status = panel->findChild<QLabel*>("paymasterProviderSafetyStatus");
+    auto* amount = panel->findChild<QLineEdit*>("paymasterSafetyUserPaidMaxNetworkFeePerTransaction");
+    auto* save = panel->findChild<QPushButton*>(scenario == "offer" ? "savePaymasterPolicy" : "savePaymasterProviderSafetyPolicy");
+    QVERIFY(warning && headline && safety_status && amount && save);
+    QVERIFY(!warning->parentWidget()->isHidden());
+    if (scenario == "offer") panel->findChild<QSpinBox*>("paymasterPolicyMaximumNetworkFee")->setValue(20000000);
+    else amount->setText(QStringLiteral("0.50000000"));
+    QVERIFY(!warning->parentWidget()->isHidden()); // A draft is not a successful save.
+
+    DigiDollarPaymasterWidget::RpcCallback pending;
+    int writes{0}, reads{0}, dialogs{0};
+    QTimer close_unexpected_dialog;
+    connect(&close_unexpected_dialog, &QTimer::timeout, panel.get(), [&] {
+        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) { ++dialogs; box->accept(); }
+    });
+    close_unexpected_dialog.start(1);
+    panel->setAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback done) {
+        if (method == "setpaymastersafetypolicy" || method == "setpaymasterpolicy") {
+            ++writes;
+            if (scenario == "rpc_error") { done(UniValue{}, QStringLiteral("PAYMASTER_INVALID_SAFETY_LIMITS")); return; }
+            if (scenario == "bad_ack") { done(UniValue{UniValue::VOBJ}, {}); return; }
+            auto persisted = params[0];
+            if (scenario == "offer") {
+                persisted.pushKV("policy_hash", std::string(64, 'b'));
+                provider.pushKV("policy", persisted);
+                snapshot.pushKV("provider", provider);
+            } else {
+                persisted.pushKV("updated_at", 2);
+                auto safety = snapshot.find_value("safety");
+                safety.pushKV("policy", persisted);
+                snapshot.pushKV("safety", safety);
+            }
+            done(persisted, {});
+        } else if (method == "getpaymasteroperatorinfo") {
+            ++reads;
+            pending = std::move(done);
+        } else done(UniValue{UniValue::VOBJ}, {});
+    });
+    QVERIFY(save->isEnabled());
+    save->click();
+    QCOMPARE(writes, 1);
+    QCOMPARE(dialogs, 0);
+    if (scenario == "bad_ack") {
+        QCOMPARE(reads, 0);
+        QVERIFY(safety_status->text().contains("did not confirm"));
+        QVERIFY(!warning->parentWidget()->isHidden());
+        return;
+    }
+    QCOMPARE(reads, 1); // Read immediately, not after the periodic timer.
+    QVERIFY(pending);
+    QVERIFY(!save->isEnabled());
+    if (scenario == "rpc_error") {
+        QVERIFY(safety_status->text().contains("Limits were not saved"));
+        QVERIFY(!safety_status->text().contains("PAYMASTER_"));
+        pending(snapshot, {});
+        QCOMPARE(amount->text(), QStringLiteral("0.50000000")); // Keep the rejected edit.
+        QVERIFY(!warning->parentWidget()->isHidden());
+        return;
+    }
+    QVERIFY(warning->parentWidget()->isHidden()); // Old conflict is no longer presented as current.
+    QVERIFY(!headline->text().contains("ready", Qt::CaseInsensitive));
+    if (scenario == "wallet_switch") panel->setWalletModel(nullptr);
+    if (scenario == "privacy") panel->setPrivacy(true);
+    if (scenario == "read_error") pending(UniValue{}, QStringLiteral("injected read failure"));
+    else if (scenario == "incomplete") pending(UniValue{UniValue::VOBJ}, {});
+    else pending(snapshot, {});
+    QCOMPARE(writes, 1);
+    QCOMPARE(dialogs, 0);
+    QVERIFY(warning->parentWidget()->isHidden());
+    if (scenario == "read_error" || scenario == "incomplete") {
+        QVERIFY(headline->text().contains("unavailable", Qt::CaseInsensitive));
+        QVERIFY(safety_status->text().contains("Spending limits saved"));
+        QVERIFY(!safety_status->text().contains("Reading", Qt::CaseInsensitive));
+        QVERIFY(!panel->findChild<QPushButton*>("paymasterOperatorStart")->isEnabled());
+    } else if (scenario == "safety" || scenario == "offer") {
+        QVERIFY(panel->findChild<QLabel*>("paymasterSafetyConfigWarning")->parentWidget()->isHidden());
+        QVERIFY(panel->findChild<QLabel*>("paymasterPolicyConfigWarning")->parentWidget()->isHidden());
+        QVERIFY(save->isEnabled());
+    }
 }
 
 void PaymasterWidgetTests::paymasterOperatorWorkTransitions_data()
