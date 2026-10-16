@@ -2209,21 +2209,77 @@ public:
         auto* management_column = CreatePaymasterPageColumn(management, management_layout);
         AddPaymasterPageHeading(management_layout, management_column, tr("Wallet & backup"),
                                 tr("Manage operating access and protect this provider identity, configuration and financial records."), QStringLiteral("paymasterManagement"));
-        auto* lifecycle = new QGroupBox(tr("Stop or retire this provider"), management_column);
+        auto* lifecycle_scroll = new QScrollArea;
+        m_lifecycle_page = lifecycle_scroll;
+        lifecycle_scroll->setObjectName("paymasterLifecyclePage");
+        lifecycle_scroll->setWidgetResizable(true);
+        auto* lifecycle_contents = new QWidget(lifecycle_scroll);
+        lifecycle_contents->setObjectName("paymasterLifecycleContents");
+        QVBoxLayout* lifecycle_page_layout{nullptr};
+        auto* lifecycle_column = CreatePaymasterPageColumn(lifecycle_contents, lifecycle_page_layout);
+        AddPaymasterPageHeading(lifecycle_page_layout, lifecycle_column, tr("Start, pause & retire"),
+            tr("Choose how to operate this provider. The checklists describe each action after confirmation; they are not completion indicators."),
+            QStringLiteral("paymasterLifecycle"));
+        m_lifecycle_status = new QLabel(lifecycle_column);
+        m_lifecycle_status->setObjectName("paymasterLifecycleStatus");
+        m_lifecycle_status->setTextFormat(Qt::PlainText);
+        m_lifecycle_status->setWordWrap(true);
+        lifecycle_page_layout->addWidget(m_lifecycle_status);
+        auto* status_link = new QPushButton(tr("View status and prerequisites on Overview"), lifecycle_column);
+        status_link->setObjectName("paymasterLifecycleOverviewLink");
+        connect(status_link, &QPushButton::clicked, this, [this] { m_tabs->setCurrentIndex(0); });
+        lifecycle_page_layout->addWidget(status_link, 0, Qt::AlignLeft);
+        const auto action_card = [lifecycle_page_layout, lifecycle_column](const QString& title, const QStringList& effects, const char* name) {
+            auto* card = new QGroupBox(title, lifecycle_column);
+            card->setObjectName(name);
+            auto* layout = new QVBoxLayout(card);
+            for (const auto& effect : effects) {
+                auto* label = new QLabel(QStringLiteral("✓ ") + effect, card);
+                label->setTextFormat(Qt::PlainText);
+                label->setWordWrap(true);
+                layout->addWidget(label);
+            }
+            lifecycle_page_layout->addWidget(card);
+            return layout;
+        };
+        auto* start_layout = action_card(tr("Start / resume"), {
+            tr("Request operation with saved settings, subject to readiness and wallet checks."),
+            tr("Keep budgets and automation preferences; autostart stays unchanged.")}, "paymasterLifecycleStartCard");
+        m_lifecycle_start = new QPushButton(tr("Start Paymaster…"), lifecycle_column);
+        m_lifecycle_start->setObjectName("paymasterLifecycleStart");
+        start_layout->addWidget(m_lifecycle_start, 0, Qt::AlignLeft);
+        connect(m_lifecycle_start, &QPushButton::clicked, m_operator_start, &QPushButton::click);
+        auto* pause_layout = action_card(tr("Pause — keep reserves"), {
+            tr("Stop service, disable autostart and pause new reserve-setup signatures."),
+            tr("Keep reserves and unfinished work protected."),
+            tr("Keep refill settings; refill execution waits for an explicit restart.")}, "paymasterLifecyclePauseCard");
+        m_lifecycle_pause = new QPushButton(tr("Pause provider…"), lifecycle_column);
+        m_lifecycle_pause->setObjectName("paymasterLifecyclePause");
+        pause_layout->addWidget(m_lifecycle_pause, 0, Qt::AlignLeft);
+        connect(m_lifecycle_pause, &QPushButton::clicked, m_operator_pause, &QPushButton::click);
+        auto* stop_layout = action_card(tr("Stop — optional reserve release"), {
+            tr("Apply the same persistent pause as Pause; there is no separate Stop state."),
+            tr("Optionally review full reserve release in a second confirmation."),
+            tr("After approved release, turn off automatic refill and its fee approval.")}, "paymasterLifecycleStopCard");
+        m_operator_stop = new QPushButton(tr("Stop Paymaster…"), lifecycle_column);
+        m_operator_stop->setObjectName("paymasterOperatorStop");
+        stop_layout->addWidget(m_operator_stop, 0, Qt::AlignLeft);
+        auto* retire_layout = action_card(tr("Retire — release reserves and review backup"), {
+            tr("Stop persistently and check unfinished work."),
+            tr("Separately review exact reserve release and cancellation of funding tasks with no transaction."),
+            tr("After approved release, turn off automatic refill and its fee approval."),
+            tr("Show remaining wallet funds and offer a full-wallet backup before archiving.")}, "paymasterLifecycleRetireCard");
+        m_operator_retire = new QPushButton(tr("Retire Paymaster…"), lifecycle_column);
+        m_operator_retire->setObjectName("paymasterOperatorRetire");
+        retire_layout->addWidget(m_operator_retire, 0, Qt::AlignLeft);
+        auto* lifecycle = new QGroupBox(tr("What remains protected"), lifecycle_column);
         lifecycle->setObjectName("paymasterLifecycleSettings");
         auto* lifecycle_layout = new QVBoxLayout(lifecycle);
-        auto* stop_help = new QLabel(tr("Stop disables this provider and its autostart, including new setup signatures. You can keep reserves or separately review their full release. The node and other wallets keep running; already signed transactions can still confirm."), lifecycle);
+        auto* stop_help = new QLabel(tr("The node and other wallets keep running. Already signed transactions can still confirm. Release makes reserves available in this wallet; it does not send funds, close the wallet or delete identity and recovery records. Declining release keeps the reserves protected. After a confirmed stop, an incomplete retirement leaves the provider stopped."), lifecycle);
         stop_help->setWordWrap(true);
         lifecycle_layout->addWidget(stop_help);
-        m_operator_stop = new QPushButton(tr("Stop Paymaster…"), lifecycle);
-        m_operator_stop->setObjectName("paymasterOperatorStop");
-        lifecycle_layout->addWidget(m_operator_stop, 0, Qt::AlignLeft);
-        auto* retire_help = new QLabel(tr("Retire guides you through stopping, checking unfinished work, releasing all pool reserves, reviewing remaining funds and making a full-wallet backup. Release makes funds usable in this wallet; it does not send them elsewhere. Identity, payment history and recovery records are kept."), lifecycle);
-        retire_help->setWordWrap(true);
-        lifecycle_layout->addWidget(retire_help);
-        m_operator_retire = new QPushButton(tr("Retire Paymaster…"), lifecycle);
-        m_operator_retire->setObjectName("paymasterOperatorRetire");
-        lifecycle_layout->addWidget(m_operator_retire, 0, Qt::AlignLeft);
+        m_lifecycle_start->setEnabled(false);
+        m_lifecycle_pause->setEnabled(false);
         m_operator_stop->setEnabled(false);
         m_operator_retire->setEnabled(false);
         connect(m_operator_stop, &QPushButton::clicked, this, [this] { stopOperator(); });
@@ -2235,9 +2291,9 @@ public:
         m_operator_stop_status->setTextFormat(Qt::PlainText);
         m_operator_stop_status->hide();
         lifecycle_layout->addWidget(m_operator_stop_status);
-        management_layout->addWidget(lifecycle);
+        lifecycle_page_layout->addWidget(lifecycle);
 
-        m_retirement_summary = new QGroupBox(tr("Finish retirement — funds and backup"), management_column);
+        m_retirement_summary = new QGroupBox(tr("Finish retirement — funds and backup"), lifecycle_column);
         m_retirement_summary->setObjectName("paymasterRetirementSummary");
         auto* retirement_summary_layout = new QVBoxLayout(m_retirement_summary);
         m_retirement_balances = new QLabel(m_retirement_summary);
@@ -2260,8 +2316,11 @@ public:
         close_help->setObjectName("paymasterRetirementCloseHelp");
         close_help->setWordWrap(true);
         retirement_summary_layout->addWidget(close_help);
-        management_layout->addWidget(m_retirement_summary);
+        lifecycle_page_layout->addWidget(m_retirement_summary);
         m_retirement_summary->hide();
+        lifecycle_page_layout->addStretch();
+        lifecycle_scroll->setWidget(lifecycle_contents);
+        ConfigureScrollArea(lifecycle_scroll, lifecycle_contents);
 
         m_operator_summary = new QLabel(tr("Reading current provider status…"), overview);
         m_operator_summary->setObjectName("paymasterOperatorSummary");
@@ -4297,6 +4356,8 @@ public:
             if (m_settings_tabs->currentWidget() == m_connection_page && !m_inline_node_editor && !m_busy)
                 configureOperatorNode();
         });
+        add_settings_page(lifecycle_scroll, lifecycle_page_layout, tr("Start, pause & retire"),
+            tr("Compare operation controls, keep or release reserves, and review retirement."));
         add_settings_page(configuration_scroll, configuration_layout, tr("Offer"),
             tr("Choose who can use your service, its price and payment range."));
         add_settings_page(safety_scroll, safety_layout, tr("Spending limits"),
@@ -4307,9 +4368,10 @@ public:
             tr("Edit node settings and review their sources and reachability."));
         add_settings_page(management_scroll, management_layout, tr("Wallet & backup"),
             tr("Manage wallet access and protect the provider with a full-wallet backup."));
-        lifecycle->setTitle(tr("Stop operation and release all capital"));
-        liquidity_layout->addWidget(lifecycle);
-        liquidity_layout->addWidget(m_retirement_summary);
+        auto* lifecycle_link = new QPushButton(tr("Start, pause, stop or retire Paymaster — open Settings"), liquidity_column);
+        lifecycle_link->setObjectName("paymasterLiquidityLifecycleLink");
+        liquidity_layout->addWidget(lifecycle_link, 0, Qt::AlignLeft);
+        connect(lifecycle_link, &QPushButton::clicked, this, [this] { showOperatorPage(m_lifecycle_page); });
         settings_layout->addStretch();
         management_layout->addStretch();
         management_scroll->setWidget(management);
@@ -5604,7 +5666,7 @@ private:
     {
         const QList<QWidget*> pages{
             m_configuration_page, m_safety_page, m_liquidity_page,
-            m_finance_page, m_activity_page, m_connection_page, m_management_page, m_automation_page};
+            m_finance_page, m_activity_page, m_connection_page, m_management_page, m_automation_page, m_lifecycle_page};
         for (QWidget* page : pages) {
             if (!page) continue;
             QList<QWidget*> controls{page};
@@ -8461,7 +8523,7 @@ private:
         if (error == QLatin1String("PAYMASTER_PROVIDER_CHECKPOINT_WRITE"))
             return tr("The independent provider safety checkpoint could not be saved. New payments and reserve spending are blocked. Check storage availability and diagnostics before continuing.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED"))
-            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Settings → Wallet & backup, review adoption only if this wallet matches the independently retained current checkpoint and has no unfinished work. Adoption keeps reserves and spent budgets, and leaves the provider stopped. Funds & reserves also offers separate capital recovery and permanent retirement.");
+            return tr("This provider wallet was restored from a backup. New payments and reserve spending are blocked because signed transactions and spent fee budgets may be missing. A rescan or a higher fee limit cannot resolve this. Recorded exact transactions remain recoverable. In Settings → Wallet & backup, review adoption only if this wallet matches the independently retained current checkpoint and has no unfinished work. Adoption keeps reserves and spent budgets, and leaves the provider stopped. Settings → Start, pause & retire also offers separate capital recovery and permanent retirement.");
         if (error == QLatin1String("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"))
             return tr("The saved sponsorship setting is unsupported. Review a supported offer in Settings. Existing payment records remain available in Activity.");
         if (error == QLatin1String("PAYMASTER_PROVIDER_SYNCING"))
@@ -9484,6 +9546,7 @@ private:
                 (m_operator_next_action == QLatin1String("review_liquidity") && !m_core_running))
                 m_operator_action->setEnabled(false);
         }
+        updateLifecycleControls();
     }
 
     void saveAutostart()
@@ -10069,6 +10132,16 @@ private:
         if (!m_operator_progress_timer->isActive()) m_operator_progress_timer->start();
     }
 
+    void updateLifecycleControls()
+    {
+        // Settings and Overview share the same reviewed actions and gates.
+        m_lifecycle_start->setText(m_operator_start->text());
+        m_lifecycle_start->setEnabled(!m_privacy && !m_busy && m_operator_start->isEnabled());
+        m_lifecycle_start->setToolTip(m_privacy ? QString{} : m_operator_start->toolTip());
+        m_lifecycle_pause->setEnabled(!m_privacy && !m_busy && !m_operator_pause->isHidden() && m_operator_pause->isEnabled());
+        m_lifecycle_status->setText(m_privacy ? tr("Hidden by privacy mode") : m_operator_headline->text());
+    }
+
     void showOperatorBusyState()
     {
         updateOperatorProgress();
@@ -10086,6 +10159,7 @@ private:
                     setStatusLabel(status, tr("Waiting for the history check; readiness not rechecked"), QStringLiteral("waiting"));
             }
             setStatusKind(m_operator_card, QStringLiteral("waiting"));
+            updateLifecycleControls();
             return;
         }
         // Polling keeps a recent, validated status in place; initial reads and
@@ -10110,6 +10184,7 @@ private:
         m_operator_stop->setEnabled(false);
         m_operator_retire->setEnabled(false);
         setStatusKind(m_operator_card, QStringLiteral("waiting"));
+        updateLifecycleControls();
     }
 
     void resetOperatorPresentation()
@@ -10142,6 +10217,7 @@ private:
         m_operator_retire->setEnabled(false);
         setStatusKind(m_operator_card, QStringLiteral("waiting"));
         showOperatorBusyState();
+        updateLifecycleControls();
     }
 
     void renderOperatorPresentation(const UniValue& snapshot)
@@ -10376,7 +10452,7 @@ private:
             // Keep Core's diagnostic action/start guards; do not turn a stop
             // into a request to unlock, approve refill or raise budgets.
             headline = tr("Paymaster is stopped");
-            hint = tr("The provider is disabled and accepts no new requests. Saved offers, reserves and limits are retained. Review any missing requirements before starting again. Already signed transactions can still confirm.");
+            hint = tr("The provider is disabled and accepts no new requests. Saved configuration and limits are retained. Review any missing requirements before starting again. Already signed transactions can still confirm.");
             kind = QStringLiteral("neutral");
             const auto& operations = provider.find_value("active_operations");
             if (operations.isArray() && operations.empty() &&
@@ -10420,7 +10496,8 @@ private:
         // A completed stop/retirement message describes the previous run.
         // Clear it only after a current snapshot confirms running again and
         // the RPC chain has finished. Preserve failed/incomplete stop errors.
-        if (running && !m_busy && m_operator_stop_status->property("statusKind").toString() == QLatin1String("neutral")) {
+        const auto stop_result_kind = m_operator_stop_status->property("statusKind").toString();
+        if (running && !m_busy && (stop_result_kind == QLatin1String("neutral") || stop_result_kind == QLatin1String("ready"))) {
             m_operator_stop_status->clear();
             m_operator_stop_status->hide();
         }
@@ -15433,6 +15510,7 @@ private:
     QListWidget* m_navigation{nullptr};
     QComboBox* m_navigation_select{nullptr};
     QWidget* m_automation_page{nullptr};
+    QWidget* m_lifecycle_page{nullptr};
     QGroupBox* m_setup_choice{nullptr};
     QWidget* m_setup_content{nullptr};
     QWidget* m_configuration_page{nullptr};
@@ -15519,6 +15597,9 @@ private:
     QLabel* m_operator_wallet{nullptr};
     QPushButton* m_operator_action{nullptr};
     QPushButton* m_operator_start{nullptr};
+    QPushButton* m_lifecycle_start{nullptr};
+    QPushButton* m_lifecycle_pause{nullptr};
+    QLabel* m_lifecycle_status{nullptr};
     bool m_operator_start_allowed{false};
     QPushButton* m_operator_pause{nullptr};
     QPushButton* m_operator_stop{nullptr};

@@ -6685,7 +6685,7 @@ void PaymasterWidgetTests::paymasterOperatorOverviewGuidesAndFailsClosed()
     auto* card = panel->findChild<QGroupBox*>(QStringLiteral("paymasterOperatorCard"));
     QVERIFY(tabs && settings && headline && hint && connection && action && pause && card);
     QCOMPARE(tabs->count(), 5);
-    QCOMPARE(settings->count(), 6);
+    QCOMPARE(settings->count(), 7);
     auto* details = panel->findChild<QWidget*>(QStringLiteral("paymasterTechnicalDetails"));
     QVERIFY(details);
     QVERIFY(details->isHidden());
@@ -7536,18 +7536,28 @@ void PaymasterWidgetTests::paymasterManualSubmitConfirmation()
 void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding_data()
 {
     QTest::addColumn<bool>("pause");
-    QTest::addColumn<bool>("switch_wallet");
-    QTest::newRow("start") << false << false;
-    QTest::newRow("pause") << true << false;
-    QTest::newRow("start-wallet-switch") << false << true;
-    QTest::newRow("pause-wallet-switch") << true << true;
+    QTest::addColumn<bool>("settings");
+    QTest::addColumn<QString>("decision");
+    for (bool pause : {false, true}) {
+        for (bool settings : {false, true}) {
+            for (const char* decision : {"approve", "cancel", "wallet", "privacy"}) {
+                const QString name = QString(pause ? "pause_" : "start_") + (settings ? "settings_" : "overview_") + decision;
+                QTest::newRow(qPrintable(name)) << pause << settings << QString::fromLatin1(decision);
+            }
+        }
+    }
 }
 
 void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
 {
     QFETCH(bool, pause);
-    QFETCH(bool, switch_wallet);
+    QFETCH(bool, settings);
+    QFETCH(QString, decision);
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QTimer::singleShot(0, [] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
+    });
+    panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
     QStringList mutations;
     std::vector<UniValue> stop_params;
     panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
@@ -7555,8 +7565,14 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
             mutations << "stop";
             stop_params.push_back(params);
         }
-        if (command == "setpaymasterenabled") mutations << "enable";
-        if (command == "startpaymaster") mutations << "start";
+        if (command == "setpaymasterenabled") {
+            if (!params[0].isTrue()) throw std::runtime_error("Start must enable saved settings");
+            mutations << "enable";
+        }
+        if (command == "startpaymaster") {
+            if (!params[0].find_value("wait_for_readiness").isTrue()) throw std::runtime_error("Start must retain readiness checks");
+            mutations << "start";
+        }
         UniValue result{UniValue::VOBJ};
         result.pushKV("enabled", true);
         result.pushKV("running", false);
@@ -7564,6 +7580,11 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
     });
     UniValue snapshot;
     QVERIFY(snapshot.read(R"({"schema_version":1,"unlocked_until":0,"provider":{"running":false,"ready":true,"wallet_locked":false,"service_state":"stopped","transport":{"listener_ready":true},"backup_status":{"required":false}},"diagnostics":[{"code":"PAYMASTER_LOCAL_READY","state":"ready","action":"start","area":"service"}]})"));
+    if (settings) {
+        auto provider = snapshot.find_value("provider");
+        provider.pushKV("provider_id", std::string(64, 'a'));
+        snapshot.pushKV("provider", provider);
+    }
     if (pause) {
         auto provider = snapshot.find_value("provider");
         provider.pushKV("running", true);
@@ -7573,8 +7594,10 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
         snapshot.pushKV("provider", provider);
     }
     panel->setOperatorStatusForTesting(snapshot);
-    auto* action = panel->findChild<QPushButton*>(pause ? "paymasterOperatorPause" : "paymasterOperatorNextAction");
-    QVERIFY(action);
+    auto* action = panel->findChild<QPushButton*>(settings
+        ? (pause ? "paymasterLifecyclePause" : "paymasterLifecycleStart")
+        : (pause ? "paymasterOperatorPause" : "paymasterOperatorNextAction"));
+    QVERIFY(action && action->isEnabled());
     bool reviewed{false};
     QTimer::singleShot(0, panel.get(), [&] {
         auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
@@ -7582,12 +7605,13 @@ void PaymasterWidgetTests::paymasterOperatorConfirmationWalletBinding()
         reviewed = true;
         // Reentrant clicks must not create a second operation/dialog.
         QVERIFY(!action->isEnabled());
-        if (switch_wallet) panel->setWalletModel(nullptr);
-        dialog->done(QMessageBox::Yes);
+        if (decision == "wallet") panel->setWalletModel(nullptr);
+        if (decision == "privacy") panel->setPrivacy(true);
+        dialog->done(decision == "cancel" ? QMessageBox::Cancel : QMessageBox::Yes);
     });
     action->click();
     QVERIFY(reviewed);
-    if (switch_wallet)
+    if (decision != "approve")
         QVERIFY(mutations.isEmpty());
     else if (pause) {
         QCOMPARE(mutations, QStringList{"stop"});
@@ -9172,7 +9196,7 @@ void PaymasterWidgetTests::paymasterConnectionLayout_data()
     QTest::addColumn<QSize>("window_size");
     QTest::addColumn<QString>("page_name");
     for (const auto& theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
-        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome"}) {
+        for (const auto* page : {"paymasterConnectionPage", "paymasterManagementPage", "paymasterAutomationPage", "paymasterSettingsHome", "paymasterLifecyclePage"}) {
             const auto name = QString::fromLatin1(page);
             const auto prefix = theme + "_" + name;
             QTest::newRow(qPrintable(prefix + "_narrow")) << theme << QSize(900, 620) << name;
@@ -9198,14 +9222,17 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
     auto* runtime = panel->findChild<QPushButton*>("paymasterRuntimeSettingsToggle");
     auto* backup = panel->findChild<QGroupBox*>("paymasterOverviewBackupNotice");
     QVERIFY(tabs && settings && scroll && prerequisites && runtime && backup);
-    QCOMPARE(settings->count(), 6);
+    QCOMPARE(settings->count(), 7);
     auto* operation = panel->findChild<QWidget*>("paymasterOverviewPage");
     auto* administration = panel->findChild<QWidget*>("paymasterManagementPage");
     auto* connection = panel->findChild<QWidget*>("paymasterConnectionPage");
     QVERIFY(operation && administration && connection);
-    for (const auto* name : {"paymasterOperatorStop", "paymasterOperatorRetire"}) {
+    auto* lifecycle = panel->findChild<QWidget*>("paymasterLifecyclePage");
+    QVERIFY(lifecycle);
+    for (const auto* name : {"paymasterOperatorStop", "paymasterOperatorRetire", "paymasterLifecycleStart", "paymasterLifecyclePause", "paymasterRetirementSummary"}) {
         auto* control = panel->findChild<QWidget*>(name);
-        QVERIFY(control && panel->findChild<QWidget*>("paymasterLiquidityPage")->isAncestorOf(control));
+        QVERIFY(control && lifecycle->isAncestorOf(control));
+        QVERIFY(!panel->findChild<QWidget*>("paymasterLiquidityPage")->isAncestorOf(control));
         QVERIFY(!operation->isAncestorOf(control));
         QVERIFY(!connection->isAncestorOf(control));
     }
@@ -9248,6 +9275,12 @@ void PaymasterWidgetTests::paymasterConnectionLayout()
                 QVERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(label->objectName()));
             }
             previous = widget;
+        }
+        if (page_name == "paymasterLifecyclePage") {
+            for (auto* label : column->findChildren<QLabel*>()) {
+                if (label->isVisible() && label->wordWrap())
+                    QVERIFY2(label->height() >= label->heightForWidth(label->width()), qPrintable(label->text()));
+            }
         }
         // The last action must be reachable by scrolling, including after
         // changing the window size or expanding a formerly hidden section.
@@ -9430,6 +9463,10 @@ void PaymasterWidgetTests::paymasterDeferredStartIntentIsWalletScoped()
 void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
 {
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QTimer::singleShot(0, [] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
+    });
+    panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
     auto* tabs = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
     auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
     auto* navigation = panel->findChild<QListWidget*>("paymasterNavigation");
@@ -9447,7 +9484,7 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     QVERIFY(navigation->isVisible());
     QVERIFY(selector->isHidden());
     QCOMPARE(tabs->count(), 5);
-    QCOMPARE(settings->count(), 6);
+    QCOMPARE(settings->count(), 7);
     QCOMPARE(tabs->widget(0)->property("paymasterPageTitle").toString(), QStringLiteral("Overview"));
     QCOMPARE(tabs->widget(1)->property("paymasterPageTitle").toString(), QStringLiteral("Funds & reserves"));
     QVERIFY(panel->findChild<QPushButton*>("paymasterRestoreTask"));
@@ -9461,6 +9498,31 @@ void PaymasterWidgetTests::paymasterFiveDestinationsAndVisibleTasks()
     QVERIFY(technical);
     QVERIFY(!technical->findChild<QPushButton*>("paymasterOperatorNextAction"));
     QVERIFY(!technical->findChild<QPushButton*>("paymasterOperatorPause"));
+
+    auto* lifecycle = panel->findChild<QWidget*>("paymasterLifecyclePage");
+    auto* link = panel->findChild<QPushButton*>("paymasterLiquidityLifecycleLink");
+    auto* funds = panel->findChild<QWidget*>("paymasterLiquidityPage");
+    QVERIFY(lifecycle && link && funds && funds->isAncestorOf(link));
+    QCOMPARE(settings->widget(1), lifecycle); // First Settings destination, after its home page.
+    auto* settings_home = panel->findChild<QWidget*>("paymasterSettingsHome");
+    const auto menu = settings_home->findChildren<QPushButton*>();
+    QVERIFY(!menu.empty());
+    QCOMPARE(menu.front()->text(), QStringLiteral("Start, pause & retire"));
+    tabs->setCurrentWidget(settings);
+    settings->setCurrentIndex(0);
+    menu.front()->click();
+    QCOMPARE(settings->currentWidget(), lifecycle);
+    auto* column = lifecycle->findChild<QWidget*>("paymasterPageColumn");
+    auto* back = qobject_cast<QPushButton*>(column->layout()->itemAt(0)->widget());
+    QVERIFY(back && back->text() == "Back to settings");
+    back->click();
+    QCOMPARE(settings->currentWidget(), settings_home);
+    tabs->setCurrentWidget(funds);
+    link->click();
+    QCOMPARE(tabs->currentWidget(), settings);
+    QCOMPARE(settings->currentWidget(), lifecycle);
+    panel->findChild<QPushButton*>("paymasterLifecycleOverviewLink")->click();
+    QCOMPARE(tabs->currentIndex(), 0);
 }
 
 namespace {
@@ -10845,7 +10907,16 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
             provider.pushKV("enabled", false);
             provider.pushKV("running", false);
             provider.pushKV("autostart", false);
+            provider.pushKV("start_requested", false);
+            provider.pushKV("service_state", "stopped");
+            provider.pushKV("ready", false);
+            provider.pushKV("active_operations", UniValue{UniValue::VARR});
+            UniValue errors{UniValue::VARR};
+            errors.push_back("PAYMASTER_SAFETY_LIMIT_EXHAUSTED");
+            errors.push_back("PAYMASTER_PROVIDER_NOT_ENABLED");
+            provider.pushKV("readiness_errors", errors);
             snapshot.pushKV("provider", provider);
+            snapshot.pushKV("diagnostics", DigiDollar::Paymaster::OperatorDiagnostics(provider, 0, 100));
             UniValue result{UniValue::VOBJ}; result.pushKV("running", decision == "bad_stop"); return result;
         }
         if (method == "releasepaymastercapital") {
@@ -10863,7 +10934,17 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
             if (decision == QLatin1String("blocked")) throw std::runtime_error("PAYMASTER_CAPITAL_RESERVED");
             if (execute && params[0].find_value("plan_id").get_str() != std::string(64, 'c'))
                 throw std::runtime_error("Unreviewed release plan");
-            if (execute) writes << QStringLiteral("release");
+            if (execute) {
+                writes << QStringLiteral("release");
+                auto provider = snapshot.find_value("provider");
+                auto liquidity = PaymasterLiquidityStatus("waiting_for_maintenance_approval", true, false, 1);
+                auto policy = liquidity.find_value("policy");
+                policy.pushKV("automatic_replenishment", false);
+                policy.pushKV("paid_maintenance_approved", false);
+                liquidity.pushKV("policy", policy);
+                provider.pushKV("liquidity", liquidity);
+                snapshot.pushKV("provider", provider);
+            }
             UniValue result{UniValue::VOBJ};
             result.pushKV("executed", execute);
             result.pushKV("plan_id", std::string(64, execute && decision == QLatin1String("bad_receipt") ? 'd' : 'c'));
@@ -10991,8 +11072,8 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
         QVERIFY(panel->findChild<QLabel*>("paymasterRetirementBackupStatus")->text().contains("still recommended"));
         QCOMPARE(writes, QStringList({"stop", "release"}));
     }
-    if (retire && decision == "release") {
-        QVERIFY(status->text().contains("Provider stopped and pool capital released"));
+    if (decision == "release") {
+        QVERIFY(status->text().contains(retire ? "Provider stopped and pool capital released" : "all reviewed pool capital"));
         auto resumed = GuidedOperatorSnapshot();
         auto running = resumed.find_value("provider");
         running.pushKV("running", true);
@@ -11009,24 +11090,46 @@ void PaymasterWidgetTests::paymasterStopAndRelease()
         QVERIFY(status->text().isEmpty());
     }
 
+    if (retire && QStringList{"empty_pool", "balance_error", "cancel_release", "blocked", "uncreated_release", "uncreated_cancel"}.contains(decision)) {
+        auto* headline = panel->findChild<QLabel*>("paymasterOperatorHeadline");
+        QCOMPARE(headline->text(), QStringLiteral("Paymaster is stopped"));
+        QCOMPARE(panel->findChild<QLabel*>("paymasterLifecycleStatus")->text(), headline->text());
+        QVERIFY(!panel->findChild<QLabel*>("paymasterOperatorHint")->text().contains("reserves and limits are retained"));
+        QVERIFY(panel->findChild<QLabel*>("paymasterLive_user_paid")->text().contains("provider stopped"));
+        QVERIFY(!panel->findChild<QPushButton*>("paymasterLifecycleStart")->isEnabled());
+        if (executions == 1) {
+            auto* capital = panel->findChild<QLabel*>("paymasterOverviewLiquidityStatus");
+            QVERIFY(capital->text().contains("Refill off"));
+            QCOMPARE(capital->property("statusKind").toString(), QStringLiteral("neutral"));
+        }
+    }
+
 }
 
 void PaymasterWidgetTests::paymasterHomeStartIsSeparateFromSettings()
 {
     std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QTimer::singleShot(0, [] {
+        if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) dialog->button(QMessageBox::Yes)->click();
+    });
+    panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
     int calls{0};
     panel->setRpcExecutorForTesting([&](const std::string&, const UniValue&) {
         ++calls;
         return UniValue{UniValue::VOBJ};
     });
     auto* start = panel->findChild<QPushButton*>("paymasterOperatorStart");
+    auto* settings_start = panel->findChild<QPushButton*>("paymasterLifecycleStart");
     auto* next = panel->findChild<QPushButton*>("paymasterOperatorNextAction");
     auto* overview = panel->findChild<QWidget*>("paymasterOverviewPage");
     QVERIFY(start && next && overview && overview->isAncestorOf(start));
+    QVERIFY(settings_start);
     QVERIFY(!start->isEnabled());
+    QVERIFY(!settings_start->isEnabled());
     auto snapshot = GuidedOperatorSnapshot();
     panel->setOperatorStatusForTesting(snapshot);
     QVERIFY(start->isEnabled());
+    QVERIFY(settings_start->isEnabled());
     QVERIFY(next->isHidden()); // No duplicate Start button.
     UniValue diagnostics;
     QVERIFY(diagnostics.read(R"([{"code":"PAYMASTER_BACKUP_REQUIRED","state":"action_required","action":"backup_wallet","area":"wallet"}])"));
@@ -11042,6 +11145,7 @@ void PaymasterWidgetTests::paymasterHomeStartIsSeparateFromSettings()
     });
     answer.start(10);
     start->click();
+    settings_start->click();
     answer.stop();
     QCOMPARE(calls, 0);
     for (const char* scenario : {"locked", "not_ready", "no_identity", "running", "unknown"}) {
@@ -11099,12 +11203,16 @@ void PaymasterWidgetTests::paymasterHomeStartIsSeparateFromSettings()
             }
         }
         QVERIFY2(!start->isEnabled(), scenario);
+        QVERIFY2(!settings_start->isEnabled(), scenario);
         start->click();
+        settings_start->click();
         QCOMPARE(calls, 0);
     }
     panel->setOperatorStatusForTesting(snapshot);
     panel->setPrivacy(true);
     QVERIFY(!start->isEnabled());
+    QVERIFY(!settings_start->isEnabled());
+    QVERIFY(!panel->findChild<QPushButton*>("paymasterLifecyclePause")->isEnabled());
     QCOMPARE(calls, 0);
 }
 
