@@ -173,7 +173,7 @@ in this explicit network probe:
 digibyte-cli -chain=main checkpaymasterendpoint 'PUBLIC_NUMERIC_IP:12025'
 ```
 
-The provider GUI's **Settings > Advanced diagnostics** supplies a copyable
+The provider GUI's **Settings > Node connection > Connection test** supplies a copyable
 command with its current announced address and network. It uses the running
 `-paymasterendpoint`; it does not discover an external IP/Tor address or probe
 automatically. Use the second node's data directory/RPC port when nonstandard.

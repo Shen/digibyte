@@ -1086,12 +1086,17 @@ Settings groups lifecycle/startup, offer/payment budgets/reserve refill, and
 node/wallet tools. Reserve configuration retains background status refresh and
 dirty-form protection inside the settings stack; other settings forms do not
 start periodic reads. Cross-links use `showOperatorPage` for nested navigation.
-`paymasterDiagnosticsPage` under Settings derives copyable console/CLI
+`paymasterDiagnosticsPage`, reached from Node connection with a matching back
+link instead of a separate Settings entry, derives copyable console/CLI
 `checkpaymasterendpoint` commands from the operator snapshot's announced endpoint
 and network, with numeric IP/Tor validation and no DNS lookup or probe. Missing
 or invalid endpoints, failed reads, wallet changes and privacy clear the command;
 the local bind address is never used as a substitute. It links to Node connection
 and explains Tor proxy requirements and same-computer regtest loopback checks.
+The node editor groups addresses, required features and connection capacity in
+responsive forms with readable source badges. External overrides stay read-only;
+pending restart values distinguish saved configuration from the running value.
+Preview/save authorization and generation guards are unchanged.
 Customer-payment budgets, refill fees and reserve capital are explained
 separately; navigation never changes Core policy or grants spending authority.
 Overview and Settings Start/Pause controls reuse the same confirmations and

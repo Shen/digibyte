@@ -13,12 +13,17 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   included. Tor v3 endpoints use isolated SOCKS5 connections with explicit local
   prerequisite errors and no clearnet fallback. The GUI JSON-report import is
   removed; operators read the diagnostic result directly in CLI/RPC.
-- **Settings > Advanced diagnostics** provides copyable connection-test commands
+- **Settings > Node connection > Connection test** provides copyable connection-test commands
   for a second node using the running announced IP/Tor endpoint and network.
   It explains Tor proxy requirements and local-only regtest checks, links to
   connection settings, and clears commands for missing/invalid addresses, failed
   reads, wallet changes or privacy. It does not discover external addresses or
   run a probe automatically.
+- Node connection groups addresses, required features and connection capacity
+  into responsive forms with prominent values and readable source badges.
+  Pending restart notices distinguish running values from saved changes.
+  The connection test is a nested view instead of a separate Settings entry;
+  reviewed writes and externally controlled read-only settings are preserved.
 
 - Collaborative single-recipient DD transfers with provider-funded DGB fees;
   user-paid DD service fees or public zero-DD-fee sponsorship.

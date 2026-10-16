@@ -54,7 +54,13 @@ of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
 **Settings > Node connection** describes the local listener and its configuration.
-**Settings > Advanced diagnostics** provides copyable RPC-console and CLI
+Addresses, required node features and connection capacity appear in separate
+groups. Each setting shows its value and readable configuration source;
+externally controlled values remain read-only. Pending restart notices show
+the running value separately from the saved edit value. The connection-test
+button opens the command view, with a back link to these settings.
+
+**Settings > Node connection > Connection test** provides copyable RPC-console and CLI
 commands for a second node, using the current announced `-paymasterendpoint`
 and network. It reads the running node's configuration, not unsaved edits or
 the local bind address. It does not discover a public IP behind NAT, create a
@@ -144,8 +150,8 @@ configuration. **Start, pause & retire** remains first. **Startup & processing**
 contains autostart and the automatic/manual request-processing mode; automatic
 reserve refill belongs to **Reserves & refill**. **Node connection** and
 **Wallet & backup** retain connection, unlock and recovery tools.
-**Advanced diagnostics** contains the commands and prerequisites for an
-independent connection check; it does not alter the provider's readiness.
+**Node connection > Connection test** contains the commands and prerequisites
+for an independent check; it does not alter the provider's readiness.
 
 Review the three service settings in this order:
 
