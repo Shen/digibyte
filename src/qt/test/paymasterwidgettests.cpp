@@ -9615,6 +9615,100 @@ UniValue GuidedOperatorSnapshot()
 }
 }
 
+void PaymasterWidgetTests::paymasterConfigurationConflicts_data()
+{
+    QTest::addColumn<QString>("scenario");
+    for (const auto* scenario : {"user_paid", "sponsored", "mixed", "inactive", "matching", "zero", "above"})
+        QTest::newRow(scenario) << QString::fromLatin1(scenario);
+}
+
+void PaymasterWidgetTests::paymasterConfigurationConflicts()
+{
+    QFETCH(QString, scenario);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QTimer::singleShot(0, [] {
+        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click();
+    });
+    panel->findChild<QPushButton*>("paymasterChooseExpertSetup")->click();
+    int writes{0};
+    panel->setRpcExecutorForTesting([&](const std::string&, const UniValue&) { ++writes; return UniValue{}; });
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto offer = provider.find_value("policy");
+    const bool paid = scenario != "sponsored" && scenario != "inactive";
+    const bool sponsored = scenario == "sponsored" || scenario == "mixed" || scenario == "inactive";
+    const int ceiling = scenario == "above" ? 10000000 : 50000000;
+    const int paid_limit = scenario == "zero" ? 0 : scenario == "matching" ? ceiling : 20000000;
+    const int sponsored_limit = scenario == "sponsored" ? 20000000 : sponsored ? ceiling : 0;
+    UniValue models{UniValue::VARR};
+    if (paid) models.push_back("user_paid");
+    if (sponsored) models.push_back("sponsored");
+    offer.pushKV("funding_models", models);
+    offer.pushKV("maximum_network_fee_dgb_satoshis", ceiling);
+    provider.pushKV("policy", offer);
+    snapshot.pushKV("provider", provider);
+    auto safety = snapshot.find_value("safety");
+    auto limits = safety.find_value("policy");
+    auto paid_limits = limits.find_value("user_paid");
+    paid_limits.pushKV("maximum_network_fee_per_transaction_satoshis", paid_limit);
+    limits.pushKV("user_paid", paid_limits);
+    auto sponsored_limits = paid_limits;
+    sponsored_limits.pushKV("maximum_network_fee_per_transaction_satoshis", sponsored_limit);
+    limits.pushKV("public_sponsored", sponsored_limits);
+    safety.pushKV("policy", limits);
+    snapshot.pushKV("safety", safety);
+
+    auto* fee = panel->findChild<QSpinBox*>("paymasterPolicyMaximumNetworkFee");
+    auto* paid_amount = panel->findChild<QLineEdit*>("paymasterSafetyUserPaidMaxNetworkFeePerTransaction");
+    auto* sponsored_amount = panel->findChild<QLineEdit*>("paymasterSafetyPublicSponsoredMaxNetworkFeePerTransaction");
+    QVERIFY(fee && paid_amount && sponsored_amount);
+    panel->findChild<QCheckBox*>("paymasterPolicyUserPaid")->setChecked(paid);
+    panel->findChild<QCheckBox*>("paymasterPolicySponsored")->setChecked(sponsored);
+    fee->setValue(ceiling);
+    paid_amount->setText(QString::fromStdString(DigiDollar::Paymaster::OperatorAmount(paid_limit)));
+    sponsored_amount->setText(QString::fromStdString(DigiDollar::Paymaster::OperatorAmount(sponsored_limit)));
+    panel->setOperatorStatusForTesting(snapshot);
+    const bool conflict = scenario != "matching" && scenario != "inactive";
+    for (const char* name : {"paymasterOperatorConfigWarning", "paymasterPolicyConfigWarning", "paymasterSafetyConfigWarning"}) {
+        auto* label = panel->findChild<QLabel*>(name);
+        QVERIFY(label);
+        QCOMPARE(!label->parentWidget()->isHidden(), conflict);
+        if (conflict) {
+            QVERIFY(label->text().contains(scenario == "sponsored" ? "Public sponsored" : "User paid"));
+            QVERIFY(label->text().contains("DGB"));
+            if (scenario == "mixed") QVERIFY(!label->text().contains("Public sponsored"));
+        }
+    }
+    if (scenario == "user_paid") {
+        auto* overview_warning = panel->findChild<QLabel*>("paymasterOperatorConfigWarning");
+        QVERIFY(overview_warning->text().contains("0.50000000"));
+        QVERIFY(overview_warning->text().contains("0.20000000"));
+        auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
+        panel->findChild<QPushButton*>("paymasterOperatorConfigWarningLink")->click();
+        QCOMPARE(settings->currentWidget(), panel->findChild<QWidget*>("paymasterSafetyPolicyPage"));
+        panel->findChild<QPushButton*>("paymasterSafetyConfigWarningLink")->click();
+        QCOMPARE(settings->currentWidget(), panel->findChild<QWidget*>("paymasterConfigurationPage"));
+        fee->setValue(paid_limit);
+        QVERIFY(panel->findChild<QLabel*>("paymasterPolicyConfigWarning")->parentWidget()->isHidden());
+        QVERIFY(!overview_warning->parentWidget()->isHidden()); // Unsaved edits never clear the saved conflict.
+        paid_amount->setText(QStringLiteral("0.50000000"));
+        QVERIFY(panel->findChild<QLabel*>("paymasterSafetyConfigWarning")->parentWidget()->isHidden());
+        QVERIFY(!overview_warning->parentWidget()->isHidden());
+        offer.pushKV("maximum_network_fee_dgb_satoshis", paid_limit);
+        provider.pushKV("policy", offer);
+        snapshot.pushKV("provider", provider);
+        panel->setOperatorStatusForTesting(snapshot);
+        QVERIFY(overview_warning->parentWidget()->isHidden());
+    }
+    panel->setPrivacy(true);
+    for (const char* name : {"paymasterOperatorConfigWarning", "paymasterPolicyConfigWarning", "paymasterSafetyConfigWarning"}) {
+        auto* label = panel->findChild<QLabel*>(name);
+        QVERIFY(label->parentWidget()->isHidden());
+        QVERIFY(!label->text().contains("0.50000000"));
+    }
+    QCOMPARE(writes, 0);
+}
+
 void PaymasterWidgetTests::paymasterOperatorWorkTransitions_data()
 {
     QTest::addColumn<QString>("theme");

@@ -2006,6 +2006,8 @@ public:
             label->setTextFormat(Qt::PlainText);
             operator_layout->addWidget(label);
         }
+        operator_layout->addWidget(configurationWarningPanel(m_operator_config_warning, "paymasterOperatorConfigWarning",
+            tr("Review spending limits"), [this] { showOperatorPage(m_safety_page); }));
         m_operator_loading = new QWidget(m_operator_card);
         m_operator_loading->setObjectName("paymasterOperatorLoading");
         auto* loading_layout = new QVBoxLayout(m_operator_loading);
@@ -3003,6 +3005,8 @@ public:
         m_policy_summary->setProperty("paymasterRole", QStringLiteral("summaryText"));
         m_policy_summary->setWordWrap(true);
         policy_form->addRow(tr("Policy summary:"), m_policy_summary);
+        policy_form->addRow(configurationWarningPanel(m_policy_config_warning, "paymasterPolicyConfigWarning",
+            tr("Open spending limits"), [this] { showOperatorPage(m_safety_page); }));
         m_policy_save_status = new QLabel(policy_group);
         m_policy_save_status->setObjectName("paymasterPolicySaveStatus");
         m_policy_save_status->setProperty("paymasterRole", QStringLiteral("statusText"));
@@ -3070,6 +3074,8 @@ public:
         safety_instructions->setObjectName("paymasterSafetyPolicyInstructions");
         safety_instructions->setWordWrap(true);
         safety_layout->addWidget(safety_instructions);
+        safety_layout->addWidget(configurationWarningPanel(m_safety_config_warning, "paymasterSafetyConfigWarning",
+            tr("Open offer settings"), [this] { showOperatorPage(m_configuration_page); }));
 
         m_policy_limits_review = new QWidget(safety_column);
         auto* limits_review_layout = new QVBoxLayout(m_policy_limits_review);
@@ -8414,8 +8420,77 @@ private:
         updateAutomaticRefreshTimer();
     }
 
+    QWidget* configurationWarningPanel(QLabel*& label, const char* name, const QString& button_text, std::function<void()> navigate)
+    {
+        auto* panel = new QWidget(this);
+        auto* layout = new QVBoxLayout(panel);
+        layout->setContentsMargins(0, 0, 0, 0);
+        label = new QLabel(panel);
+        label->setObjectName(name);
+        label->setWordWrap(true);
+        label->setTextFormat(Qt::PlainText);
+        label->setProperty("paymasterRole", QStringLiteral("statusText"));
+        layout->addWidget(label);
+        auto* link = new QPushButton(button_text, panel);
+        link->setObjectName(QString::fromLatin1(name) + QStringLiteral("Link"));
+        layout->addWidget(link, 0, Qt::AlignLeft);
+        connect(link, &QPushButton::clicked, this, [this, navigate] { if (!m_busy && !m_privacy) navigate(); });
+        panel->hide();
+        return panel;
+    }
+
+    QString configurationConflictText(const UniValue& offer, const UniValue& safety) const
+    {
+        QStringList lines;
+        const auto conflicts = DigiDollar::Paymaster::OperatorFeeLimitConflicts(offer, safety);
+        for (const auto& conflict : conflicts.getValues()) {
+            const auto model = conflict.find_value("model").get_str();
+            const QString name = model == "user_paid" ? tr("User paid") : model == "public_sponsored" ? tr("Public sponsored") : tr("Restricted sponsored");
+            const auto ceiling = conflict.find_value("offer_fee_ceiling_satoshis").getInt<int64_t>();
+            const auto limit = conflict.find_value("payment_fee_limit_satoshis").getInt<int64_t>();
+            lines << tr("%1: offer network-fee ceiling %2 DGB; per-payment safety limit %3 DGB.")
+                .arg(name, PaymasterFormatDGB(ceiling), PaymasterFormatDGB(limit));
+            lines << (limit < ceiling
+                ? tr("This payment model cannot serve with this offer ceiling. Review the offer ceiling and spending limits; waiting for the rolling budget does not resolve this configuration conflict.")
+                : tr("The per-payment limit exceeds the offer ceiling. Core requires it to be at most the offer ceiling, including limits saved for inactive models. Review both settings."));
+        }
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    void updateConfigurationWarnings()
+    {
+        if (!m_operator_config_warning || !m_policy_config_warning || !m_safety_config_warning ||
+            !m_restricted_sponsored_safety.completed_per_day) return;
+        const auto display = [this](QLabel* label, const QString& heading, const QString& detail) {
+            label->parentWidget()->setVisible(!m_privacy && !detail.isEmpty());
+            setStatusLabel(label, m_privacy || detail.isEmpty() ? QString{} : heading + QLatin1Char('\n') + detail, QStringLiteral("action"));
+        };
+        const auto& saved_offer = m_operator_snapshot.find_value("provider").find_value("policy");
+        const auto& saved_safety = m_operator_snapshot.find_value("safety").find_value("policy");
+        display(m_operator_config_warning, tr("Saved configuration conflict"), configurationConflictText(saved_offer, saved_safety));
+        UniValue offer{UniValue::VOBJ}, models{UniValue::VARR};
+        if (m_user_paid->isChecked()) models.push_back("user_paid");
+        if (m_sponsored->isChecked()) models.push_back("sponsored");
+        offer.pushKV("funding_models", models);
+        offer.pushKV("sponsorship_scope", m_scope->currentData().toString().toStdString());
+        offer.pushKV("maximum_network_fee_dgb_satoshis", m_network_fee->value());
+        display(m_policy_config_warning, tr("Offer form compared with saved spending limits"),
+            configurationConflictText(m_policy_snapshot_representable ? offer : saved_offer, saved_safety));
+        FundingSafetyValues paid, sponsored, restricted;
+        UniValue safety = saved_safety;
+        if (m_provider_safety_snapshot_representable && readFundingSafety(m_user_paid_safety, paid) &&
+            readFundingSafety(m_public_sponsored_safety, sponsored) && readFundingSafety(m_restricted_sponsored_safety, restricted)) {
+            safety = UniValue{UniValue::VOBJ};
+            safety.pushKV("user_paid", fundingSafetyToJSON(paid));
+            safety.pushKV("public_sponsored", fundingSafetyToJSON(sponsored));
+            safety.pushKV("restricted_sponsored", fundingSafetyToJSON(restricted));
+        }
+        display(m_safety_config_warning, tr("Spending-limit form compared with saved offer"), configurationConflictText(saved_offer, safety));
+    }
+
     void updatePolicyDisplay()
     {
+        updateConfigurationWarnings();
         const bool user_paid = m_user_paid->isChecked();
         m_user_paid_pricing->setVisible(user_paid);
         m_save_policy->setText(m_core_running ? tr("Save and restart provider…") : tr("Save policy"));
@@ -9783,6 +9858,7 @@ private:
 
     void updateProviderButtons()
     {
+        updateConfigurationWarnings();
         const bool complete_snapshots = hasCompleteMutationSnapshots();
         updatePoolPreparationStatus();
         const bool manual_mode = m_operation_mode == QLatin1String("manual");
@@ -10195,6 +10271,11 @@ private:
 
     void resetOperatorPresentation()
     {
+        for (auto* warning : {m_operator_config_warning, m_policy_config_warning, m_safety_config_warning}) {
+            if (!warning) continue;
+            warning->clear();
+            warning->parentWidget()->hide();
+        }
         for (auto* label : m_live_status) setStatusLabel(label, tr("Status unavailable"), QStringLiteral("waiting"));
         for (auto* label : m_live_details) label->clear();
         m_overview_budget_details->hide();
@@ -10228,6 +10309,7 @@ private:
 
     void renderOperatorPresentation(const UniValue& snapshot)
     {
+        updateConfigurationWarnings();
         if (m_privacy) { resetOperatorPresentation(); return; }
         const auto& provider = snapshot.find_value("provider");
         const auto& diagnostics = snapshot.find_value("diagnostics");
@@ -14824,6 +14906,8 @@ private:
                     }
                     try {
                         const auto choices = wizard_choices();
+                        const auto conflicts = configurationConflictText(choices.policy, choices.safety);
+                        if (!conflicts.isEmpty()) review_text.prepend(tr("Configuration conflict:\n%1\n\n").arg(conflicts));
                         review_text += tr("\nSaved inactive budgets remain disabled; their per-transfer ceiling is reduced if needed to fit the reviewed offer.");
                         for (const auto& item : {std::pair{"user_paid", tr("User paid")}, {"public_sponsored", tr("Public sponsored")}, {"restricted_sponsored", tr("Inactive legacy sponsorship")}}) {
                             const auto& limits = choices.safety.find_value(item.first);
@@ -15806,6 +15890,9 @@ private:
     QSpinBox* m_max_active_quotes_per_recipient;
     QSpinBox* m_max_quote_requests_per_netgroup;
     QLabel* m_provider_safety_status;
+    QLabel* m_operator_config_warning{nullptr};
+    QLabel* m_policy_config_warning{nullptr};
+    QLabel* m_safety_config_warning{nullptr};
     QLabel* m_provider_safety_usage;
     QSpinBox* m_client_fee_per_transaction;
     QSpinBox* m_client_fee_per_day;
