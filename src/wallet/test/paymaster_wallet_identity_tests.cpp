@@ -3125,6 +3125,75 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     BOOST_CHECK_EQUAL(operational.missing, 1U);
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_reconciliation_preserves_accounting_time)
+{
+    using namespace paymaster_rpc::internal;
+    ScopedPaymasterMockTime clock{2000};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "maintenance time test");
+    BOOST_REQUIRE(destination);
+    ProviderMaintenanceRecord record;
+    record.operation_id = uint256S("b1");
+    record.plan_id = uint256S("b2");
+    record.maximum_fee = DGBSatoshis{2000};
+    // A saved policy revision can advance accounting time beyond GetTime(),
+    // even without clock rollback. A lost journal reply still needs recovery.
+    record.created_at = record.updated_at = 2001;
+    ProviderMaintenanceOutput output;
+    output.purpose = PoolPurpose::ADMISSION;
+    output.script_pub_key = GetScriptForDestination(*destination);
+    output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    record.outputs = {output};
+    ProviderMaintenanceLedger ledger;
+    ledger.accounting_time_high_water = 2002;
+    ledger.records = {record};
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    CMutableTransaction transaction;
+    transaction.vin.emplace_back(COutPoint{uint256S("b3"), 0});
+    transaction.vout.emplace_back(output.dgb_value.value, output.script_pub_key);
+    const auto tx = MakeTransactionRef(transaction);
+    auto* wtx = m_wallet.AddToWallet(tx, TxStateInactive{});
+    BOOST_REQUIRE(wtx);
+    size_t recovered{0};
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_CHECK_EQUAL(recovered, 1U);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::BROADCAST);
+    BOOST_CHECK_EQUAL(ledger.records.front().updated_at, 2002);
+
+    SetMockTime(1999);
+    wtx->m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::CONFIRMED);
+    BOOST_CHECK_EQUAL(ledger.records.front().updated_at, 2002);
+
+    // A later observation advances the budget's high-water mark.
+    wtx->m_state = TxStateInactive{};
+    SetMockTime(2010);
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, 2010);
+    BOOST_CHECK_EQUAL(ledger.records.front().updated_at, 2010);
+    // Older records may have a timestamp above the ledger high-water mark.
+    ledger.accounting_time_high_water = 2002;
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    SetMockTime(1998);
+    wtx->m_state = TxStateConflicted{uint256S("b4"), 1};
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::FAILED);
+    BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, 2010);
+    BOOST_CHECK_EQUAL(ledger.records.front().updated_at, 2010);
+    BOOST_CHECK(ledger.records.front().transaction_id == tx->GetHash());
+    BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, record.maximum_fee.value);
+    BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(obsolete_refill_release_recovers_transactions_first)
 {
     ScopedPaymasterMockTime clock{2000};

@@ -99,6 +99,13 @@ approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
 See [pool setup](digidollar-paymaster-pool-setup.md).
 
+Maintenance reconciliation keeps record timestamps and the ledger accounting
+high-water mark monotonic. Saved policy revisions can advance accounting time
+beyond the wall clock, as can a later clock correction. Recovering a transaction,
+observing confirmation or a conflict must preserve that time floor; otherwise
+completed reserve work can fail validation and incorrectly block capital release.
+Wall-clock expiry checks remain separate from accounting timestamps.
+
 Canonical wallet history/index checks remain prerequisites. Automatic work
 belongs to the daemon; Qt/CLI control the same persisted state. Restoration
 sets a durable guard before load callbacks, and an independent checkpoint

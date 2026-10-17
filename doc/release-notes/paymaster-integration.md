@@ -44,6 +44,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Finite pool funding and separately approved recurring refill. Limited funds
   create fewer complete slots for DGB/DD; usable confirmed slots remain available
   while the remaining target waits for funds or confirmation.
+- Maintenance reconciliation preserves monotonic accounting time after rapid
+  policy changes or clock rollback. Confirmed reserve work can complete its
+  journal transition and cease blocking capital release; genuinely unfinished
+  or signed work remains protected.
 - Uncreated pool preparation reports required, available and missing DD/DGB
   capital consistently through pool/operator RPCs and the GUI. Both outstanding
   steps remain visible, with funding/confirmation guidance and a link to reserve

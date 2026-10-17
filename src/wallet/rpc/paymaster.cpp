@@ -1526,6 +1526,15 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     bool ledger_changed{false};
     bool pool_changed{false};
     const int64_t now = GetTime();
+    const auto update_record_time = [&](ProviderMaintenanceRecord& record) {
+        // Policy revisions and a clock rollback can put durable accounting
+        // ahead of wall time. Reconciliation must not invalidate an existing
+        // record or move confirmed spend into an earlier budget window.
+        ledger.accounting_time_high_water = std::max({
+            now, ledger.accounting_time_high_water, record.updated_at});
+        record.updated_at = ledger.accounting_time_high_water;
+        ledger_changed = true;
+    };
     ProviderCarrierWithdrawalPlan withdrawal_plan;
     const DatabaseReadStatus withdrawal_status{
         batch.ReadPaymasterCarrierWithdrawalPlanWithStatus(withdrawal_plan)};
@@ -1665,8 +1674,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             // crash window; this can only reduce later maintenance capacity.
             if (!record.IsPreparation()) record.actual_fee = record.maximum_fee;
             record.state = ProviderMaintenanceState::BROADCAST;
-            record.updated_at = now;
-            ledger_changed = true;
+            update_record_time(record);
             ++recovered;
         }
 
@@ -1674,8 +1682,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             transaction->second.isConflicted()) {
             if (record.state != ProviderMaintenanceState::FAILED) {
                 record.state = ProviderMaintenanceState::FAILED;
-                record.updated_at = now;
-                ledger_changed = true;
+                update_record_time(record);
             }
             for (ProviderPoolEntry& entry : pool) {
                 if (entry.outpoint.hash != txid ||
@@ -1789,8 +1796,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             : ProviderMaintenanceState::BROADCAST;
         if (record.state != expected_state) {
             record.state = expected_state;
-            record.updated_at = now;
-            ledger_changed = true;
+            update_record_time(record);
         }
         for (const ProviderMaintenanceOutput& output : record.outputs) {
             const auto output_index = FindMaintenanceOutputIndex(

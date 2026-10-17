@@ -265,6 +265,15 @@ class PaymasterPoolSetupTest(DigiByteTestFramework):
         self.confirm(provider, refill_dgb)
         self.tick()
         assert_equal(provider.getwalletinfo()["txcount"], before_refill + 1)
+        # Repeated policy saves can put the ledger time ahead of the frozen
+        # clock. Confirmed refills must still reconcile and cease blocking
+        # retirement; pool readiness alone does not prove journal completion.
+        self.wait_until(lambda: provider.getpaymasterliquiditystatus()[
+            "maintenance_fee_broadcast_satoshis"] == 0)
+        reconciled = provider.getpaymasterliquiditystatus()
+        assert_equal(reconciled["maintenance_fee_reserved_satoshis"], 0)
+        assert reconciled["maintenance_fee_spent_last_day_satoshis"] > 0
+        assert "PAYMASTER_INVALID_MAINTENANCE_RECORD" not in reconciled["readiness_errors"]
         provider.stoppaymaster()
         provider.setpaymasterruntimesettings({"operation_mode": "manual", "autostart": False})
 
