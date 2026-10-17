@@ -181,6 +181,14 @@ an old bridge. A direct current-current link should restore discovery.
 
 ## Security and acceptance checks
 
+Functional manual-provider fixtures may wait for the exact pre-execution
+`PAYMASTER_PROVIDER_BUSY` / `PAYMASTER_PROVIDER_SERVICE_BUSY` guards. The quote
+harness permits at most two explicit same-request transport retries after the
+real-time localhost start budget refills; financial/protocol errors propagate.
+Offer selection checks zero fee reservation before client acceptance and the
+exact reserved fee afterwards. A second unsigned provider choice needs its own
+durable request, no inherited authorization, and enough remaining DD funds.
+
 `checkpoint_readers_do_not_block_atomic_replacement` runs a read-only stale
 snapshot concurrently with repeated live checkpoint updates, using separate mock
 row maps to avoid a fixture data race. Every replacement must succeed and the

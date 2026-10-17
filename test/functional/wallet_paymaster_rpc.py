@@ -27,6 +27,7 @@ from test_framework.paymaster import (
     paymaster_node_args,
     provider_safety_policy,
     value_snapshot,
+    wait_for_paymaster_idle,
 )
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
@@ -721,7 +722,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
                 recipient, 200, "", 0, None, "cents", second_options)
             if second_pending["reserved_user_inputs"]:
                 return True
-            response = provider.processpaymasterrequests()
+            response = wait_for_paymaster_idle(self, provider.processpaymasterrequests)
             if response["processed"]:
                 assert_equal(response["message_type"], "capacity")
                 assert_equal(response["queued"], True)

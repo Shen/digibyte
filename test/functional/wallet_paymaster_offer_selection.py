@@ -16,6 +16,7 @@ from test_framework.paymaster import (
     paymaster_node_args,
     paymaster_port,
     provider_safety_policy,
+    wait_for_paymaster_idle,
 )
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
@@ -352,14 +353,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         assert_equal(initial["status"], "pending")
         assert_equal(
             client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"],
-            5)
-        assert_equal(client.getpaymasteroffers(1_000, {
-            "maximum_paymaster_fee_cents": 100,
-        }), [])
-        client.setpaymasterclientsafetypolicy({
-            "maximum_service_fee_per_transaction_cents": 100,
-            "maximum_service_fee_per_day_cents": 10_000,
-        })
+            0)
 
         capacity_seen = False
         provider_quote = {}
@@ -367,10 +361,10 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         def process_quote():
             nonlocal capacity_seen, provider_quote
             send()
-            not_selected = expensive.processpaymasterrequests()
+            not_selected = wait_for_paymaster_idle(self, expensive.processpaymasterrequests)
             assert_equal(not_selected["processed"], False)
             assert_equal(not_selected["queued"], False)
-            response = cheap.processpaymasterrequests()
+            response = wait_for_paymaster_idle(self, cheap.processpaymasterrequests)
             if not response["processed"]:
                 return False
             assert_equal(response["queued"], True)
@@ -402,7 +396,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             authorization = send()
             if authorization.get("authorization_required", False):
                 return True
-            replay = cheap.processpaymasterrequests()
+            replay = wait_for_paymaster_idle(self, cheap.processpaymasterrequests)
             if replay["processed"]:
                 assert_equal(replay["queued"], True)
                 assert_equal(
@@ -415,17 +409,28 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         assert_equal(authorization["payment_cents"], 1_000)
         assert_equal(authorization["service_fee_cents"], 5)
         assert_equal(authorization["user_total_cents"], 1_005)
+        assert_equal(client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"], 0)
         options["authorization_commitment"] = authorization[
             "authorization_commitment"]
 
         authorized = send()
         assert_equal(authorized["authorization_accepted"], True)
         assert_equal(authorized["session_state"], "PENDING_PROVIDER")
+        # The exact fee is reserved only after explicit client acceptance,
+        # not merely by listing/selecting an announcement or receiving a quote.
+        assert_equal(client.getpaymasterclientsafetystatus()["reserved_service_fee_cents"], 5)
+        assert_equal(client.getpaymasteroffers(1_000, {
+            "maximum_paymaster_fee_cents": 100,
+        }), [])
+        client.setpaymasterclientsafetypolicy({
+            "maximum_service_fee_per_transaction_cents": 100,
+            "maximum_service_fee_per_day_cents": 10_000,
+        })
         if "psbt" not in authorized:
             authorized = send()
         assert "psbt" in authorized
 
-        expensive_submit = expensive.processpaymastersubmits()
+        expensive_submit = wait_for_paymaster_idle(self, expensive.processpaymastersubmits)
         assert_equal(expensive_submit["processed"], False)
         assert_equal(expensive_submit["queued"], False)
 
@@ -433,7 +438,7 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
 
         def submit_ready():
             nonlocal provider_commit
-            provider_commit = cheap.processpaymastersubmits()
+            provider_commit = wait_for_paymaster_idle(self, cheap.processpaymastersubmits)
             if provider_commit["processed"]:
                 return True
             send()
@@ -515,10 +520,10 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             [event["event_id"]
              for event in expensive_finance_before["events"]])
 
-        late_request = expensive.processpaymasterrequests()
+        late_request = wait_for_paymaster_idle(self, expensive.processpaymasterrequests)
         assert_equal(late_request["processed"], False)
         assert_equal(late_request["queued"], False)
-        late_submit = expensive.processpaymastersubmits()
+        late_submit = wait_for_paymaster_idle(self, expensive.processpaymastersubmits)
         assert_equal(late_submit["processed"], False)
         assert_equal(late_submit["queued"], False)
 
@@ -538,42 +543,45 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
         assert_equal(self.reserved_operational_entries(expensive), [])
 
         self.log.info("Explicitly choose the more expensive provider without signing")
-        current_offers = client.getpaymasteroffers(1_000)
+        # The first transfer left 495 cents. Keep this independent selection
+        # within the remaining balance so funding errors cannot mask it.
+        chosen_amount = 200
+        current_offers = client.getpaymasteroffers(chosen_amount)
         chosen_offer = next(offer for offer in current_offers
                             if offer["provider_id"] == expensive_identity["provider_id"])
         assert_equal(chosen_offer["recommendation_deprioritized"], False)
         chosen_options = dict(options,
                               request_id="550e8400-e29b-41d4-a716-446655442002",
                               preferred_provider_id=chosen_offer["provider_id"],
-                              preferred_offer_id=chosen_offer["offer_id"],
-                              prepare_only=True)
+                              preferred_offer_id=chosen_offer["offer_id"])
+        # This new request must not inherit the first payment's approval.
+        chosen_options.pop("authorization_commitment", None)
         unavailable_options = dict(chosen_options, preferred_offer_id="00" * 31 + "01")
         assert_raises_rpc_error(-4, "PAYMASTER_SELECTED_OFFER_UNAVAILABLE",
-                                client.senddigidollar, recipient_address, 1_000,
+                                client.senddigidollar, recipient_address, chosen_amount,
                                 "", 0, None, "cents", unavailable_options)
 
-        def prepare_chosen():
-            prepared = client.senddigidollar(recipient_address, 1_000, "", 0,
+        # Start an unsigned durable order. prepare_only is a read-only preview
+        # and cannot establish the provider binding tested below.
+        def send_chosen():
+            prepared = client.senddigidollar(recipient_address, chosen_amount, "", 0,
                                              None, "cents", chosen_options)
             assert_equal(prepared["provider_id"], expensive_identity["provider_id"])
             return prepared
 
-        prepare_chosen()
+        send_chosen()
         cheap_offer = next(offer for offer in current_offers
                            if offer["provider_id"] == cheap_identity["provider_id"])
         changed_options = dict(chosen_options,
                                preferred_provider_id=cheap_offer["provider_id"],
                                preferred_offer_id=cheap_offer["offer_id"])
-        assert_raises_rpc_error(-4, "PAYMASTER_REQUEST_ID_CONFLICT",
-                                client.senddigidollar, recipient_address, 1_000,
-                                "", 0, None, "cents", changed_options)
         chosen_quote = {}
 
         def process_chosen_quote():
             nonlocal chosen_quote
-            prepare_chosen()
-            assert_equal(cheap.processpaymasterrequests()["processed"], False)
-            response = expensive.processpaymasterrequests()
+            send_chosen()
+            assert_equal(wait_for_paymaster_idle(self, cheap.processpaymasterrequests)["processed"], False)
+            response = wait_for_paymaster_idle(self, expensive.processpaymasterrequests)
             if not response["processed"] or response["message_type"] != "quote":
                 return False
             assert_equal(response["request_id"], chosen_options["request_id"])
@@ -581,10 +589,15 @@ class PaymasterOfferSelectionTest(DigiByteTestFramework):
             return True
 
         self.wait_until(process_chosen_quote)
-        self.wait_until(lambda: prepare_chosen()["attempt_state"] == "QUOTED")
+        self.wait_until(lambda: send_chosen().get("authorization_required", False))
+        # Wait for the actual quote/intent binding before testing that an
+        # existing unsigned order cannot be redirected to another provider.
+        assert_raises_rpc_error(-4, "PAYMASTER_REQUEST_ID_CONFLICT",
+                                client.senddigidollar, recipient_address, chosen_amount,
+                                "", 0, None, "cents", changed_options)
         client.resolvepaymastersession({"request_id": chosen_options["request_id"]},
                                       "abandon_unsigned")
-        expensive.cancelpaymasterquote(chosen_quote["attempt_id"])
+        wait_for_paymaster_idle(self, lambda: expensive.cancelpaymasterquote(chosen_quote["attempt_id"]))
         assert_equal(expensive.getpaymasterfinancestatus()["successful_transfers"], 0)
 
         self.log.info("Expire stale announcements and accept a fresh replacement")

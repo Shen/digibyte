@@ -12,7 +12,27 @@ lifecycle, and end-to-end tests without hiding protocol progress from them.
 from dataclasses import dataclass
 import time
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import MAX_NODES, assert_equal, p2p_port
+
+
+def wait_for_paymaster_idle(test, call):
+    """Retry only a work-guard rejection that occurred before execution."""
+    result = None
+
+    def execute():
+        nonlocal result
+        try:
+            result = call()
+            return True
+        except JSONRPCException as error:
+            if (error.error.get("code") == -4 and error.error.get("message") in
+                    ("PAYMASTER_PROVIDER_BUSY", "PAYMASTER_PROVIDER_SERVICE_BUSY")):
+                return False
+            raise
+
+    test.wait_until(execute)
+    return result
 
 
 def paymaster_port(node_index):
@@ -279,9 +299,26 @@ class PaymasterFunctionalHarness:
             "maximum_provider_attempts": 1,
         }
 
+        transport_retries = 0
+
         def send():
-            return self.client.senddigidollar(
-                recipient, amount_cents, "", 0, None, "cents", options)
+            nonlocal transport_retries
+            call_options = dict(options)
+            while True:
+                try:
+                    return self.client.senddigidollar(
+                        recipient, amount_cents, "", 0, None, "cents", call_options)
+                except JSONRPCException as error:
+                    if (error.error.get("code") not in (-34, -4) or
+                            error.error.get("message") != "PAYMASTER_DIRECT_CONNECTION_FAILED" or
+                            transport_retries >= 2):
+                        raise
+                    transport_retries += 1
+                    self.test.log.info("Retry the same Direct request after source-budget refill")
+                    # The localhost start budget uses real monotonic time;
+                    # mocktime cannot refill it. Preserve the exact request.
+                    time.sleep(5.1)
+                    call_options["retry_transport"] = True
 
         initial = send()
         assert_equal(initial["request_id"], request_id)
@@ -290,7 +327,7 @@ class PaymasterFunctionalHarness:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             send()
-            response = self.provider.processpaymasterrequests()
+            response = wait_for_paymaster_idle(self.test, self.provider.processpaymasterrequests)
             if response.get("processed", False):
                 if response.get("message_type") == "capacity":
                     capacity_seen = True

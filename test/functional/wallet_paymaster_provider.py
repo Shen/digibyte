@@ -21,7 +21,7 @@ from test_framework.address import base58_to_byte
 from test_framework.authproxy import JSONRPCException
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import ser_string, ser_uint256
-from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, paymaster_port, provider_safety_policy
+from test_framework.paymaster import confirm_pool_preparation, paymaster_node_args, paymaster_port, provider_safety_policy, wait_for_paymaster_idle
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import (
     assert_equal,
@@ -142,7 +142,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         for field in ("maximum_active_quotes_total", "maximum_active_quotes_per_netgroup",
                       "maximum_active_quotes_per_recipient"):
             safety[field] = 1
-        saved_safety = provider.setpaymastersafetypolicy(safety)
+        saved_safety = wait_for_paymaster_idle(self, lambda: provider.setpaymastersafetypolicy(safety))
         saved_liquidity = provider.getpaymasterinfo()["liquidity"]["policy"]
         balance_before = client.getdigidollarbalance()["total"]
         mempool_before = set(self.nodes[0].getrawmempool())
