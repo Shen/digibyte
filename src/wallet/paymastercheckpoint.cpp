@@ -81,6 +81,10 @@ uint256 Checksum(const PaymasterCheckpoint& record)
 // extensible parser. Future layouts, extra bytes and corruption fail closed.
 DatabaseReadStatus ReadFile(const fs::path& path, PaymasterCheckpoint& record)
 {
+    // CRT read handles on Windows can prevent replacement of the same file.
+    // Keep their entire lifetime inside the writer's checkpoint mutex. This
+    // takes no database locks: callers read the wallet row before entering.
+    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
     std::error_code ec;
     const auto status = fs::symlink_status(path, ec);
     if (status.type() == fs::file_type::not_found) return DatabaseReadStatus::NOT_FOUND;

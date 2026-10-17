@@ -181,6 +181,12 @@ an old bridge. A direct current-current link should restore discovery.
 
 ## Security and acceptance checks
 
+`checkpoint_readers_do_not_block_atomic_replacement` runs a read-only stale
+snapshot concurrently with repeated live checkpoint updates, using separate mock
+row maps to avoid a fixture data race. Every replacement must succeed and the
+stale snapshot must remain rejected. This is concurrency regression coverage;
+the old implementation may also pass a run that misses the Windows handle race.
+
 Database-failure fixtures must distinguish wallet transaction rollback from
 the independent provider checkpoint. A rejected row write leaves both unchanged;
 a rejected DB commit can leave the external checkpoint ahead, requiring review

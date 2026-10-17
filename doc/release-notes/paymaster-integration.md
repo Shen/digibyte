@@ -48,6 +48,9 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
   policy changes or clock rollback. Confirmed reserve work can complete its
   journal transition and cease blocking capital release; genuinely unfinished
   or signed work remains protected.
+- Checkpoint file readers are serialized with atomic replacement. Windows CRT
+  read handles can otherwise deny replacement and fail an unrelated wallet
+  commit; checkpoint validation and stale-copy rejection remain enforced.
 - Uncreated pool preparation reports required, available and missing DD/DGB
   capital consistently through pool/operator RPCs and the GUI. Both outstanding
   steps remain visible, with funding/confirmation guidance and a link to reserve

@@ -32,6 +32,8 @@
 #include <wallet/walletdb.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <future>
 
@@ -1895,6 +1897,52 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
     BOOST_CHECK(db.m_records == released);
     // An external-ahead commit failure never permits a blind fresh retry.
     BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
+}
+
+BOOST_AUTO_TEST_CASE(checkpoint_readers_do_not_block_atomic_replacement)
+{
+    SyncWithValidationInterfaceQueue();
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Checkpoint reader", 100, identity, error));
+    // Use a separate immutable database image for the reader. Concurrent
+    // access to one MockableDatabase's row map would itself be a data race.
+    auto snapshot = DuplicateMockDatabase(m_wallet.GetDatabase());
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> reads{0};
+    std::array<std::promise<bool>, 4> started;
+    std::array<std::future<void>, 4> readers;
+    bool initially_current{true};
+    for (size_t index = 0; index < readers.size(); ++index) {
+        auto initial = started[index].get_future();
+        readers[index] = std::async(std::launch::async, [&, index] {
+            std::string read_error;
+            started[index].set_value(CheckPaymasterCheckpoint(*snapshot, read_error));
+            do {
+                CheckPaymasterCheckpoint(*snapshot, read_error);
+                ++reads;
+            } while (!stop);
+        });
+        initially_current &= initial.get();
+    }
+    bool written{true};
+    for (int index = 0; index < 256 && written; ++index) {
+        written = WalletBatch{m_wallet.GetDatabase()}.WritePaymasterIdentity(identity, /*overwrite=*/true);
+    }
+    stop = true;
+    for (auto& reader : readers) reader.get();
+    BOOST_CHECK(initially_current);
+    BOOST_CHECK(reads > 0);
+    BOOST_CHECK(written);
+    BOOST_CHECK_MESSAGE(CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error), error);
+    // Reading an old image cannot advance or roll back the live checkpoint.
+    if (written) {
+        BOOST_CHECK(!CheckPaymasterCheckpoint(*snapshot, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+    }
 }
 
 BOOST_AUTO_TEST_CASE(capital_recovery_release_is_atomic_and_retires_identity)

@@ -111,6 +111,12 @@ belongs to the daemon; Qt/CLI control the same persisted state. Restoration
 sets a durable guard before load callbacks, and an independent checkpoint
 helps detect stale wallet copies. See the [threat model](paymaster-threat-model.md).
 
+Checkpoint file reads hold the same recursive mutex as atomic file replacement
+for the complete read-handle lifetime. On Windows, a CRT reader otherwise can
+deny replacement and make an unrelated wallet transaction fail its commit.
+Wallet-row reads finish before this file-only lock is acquired; database and
+checkpoint rollback protections still apply independently.
+
 ## Source ownership
 
 | Paths | Responsibility |
