@@ -1239,6 +1239,19 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 assert_equal(direct_dgb_successors[0]["state"],
                              "pending_successor")
             else:
+                # A pending payment successor blocks the next refill batch.
+                # Verify that wait, confirm the payment, then expect exactly
+                # one DGB replacement (without creating another DD carrier).
+                liquidity = cli.getpaymasterliquiditystatus()
+                assert_equal(liquidity["operational_carriers"]["pending"], 1)
+                assert_equal(liquidity["operational_carriers"]["missing"], 0)
+                assert_equal(liquidity["operational_dgb"]["missing"], 1)
+                assert_equal(liquidity["maintenance_state"], "waiting_for_liquidity_confirmation")
+                node.mockscheduler(3)
+                assert_equal(set(node.getrawmempool()) - mempool_before, {final_txid})
+                self.generatetoaddress(node, 1, wallet.getnewaddress())
+                self.sync_blocks()
+
                 def one_maintenance_transaction_created():
                     nonlocal maintenance_txids
                     maintenance_txids = (
@@ -1261,7 +1274,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             liquidity = cli.getpaymasterliquiditystatus()
             assert_equal(liquidity["operational_carriers"][
                 "counted_toward_target"], 1)
-            assert_equal(liquidity["operational_carriers"]["pending"], 1)
+            assert_equal(liquidity["operational_carriers"]["pending"], int(bool(direct_dgb_successors)))
+            assert_equal(liquidity["operational_carriers"]["ready"], int(not direct_dgb_successors))
             assert_equal(liquidity["operational_carriers"]["missing"], 0)
             assert_equal(liquidity["operational_dgb"][
                 "counted_toward_target"], 1)
@@ -1273,7 +1287,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             # Let several scheduler ticks observe the pending outputs. They
             # count against the target and therefore must not trigger a
             # duplicate maintenance transaction.
-            expected_new_txids = {final_txid} | maintenance_txids
+            expected_new_txids = {final_txid} if direct_dgb_successors else maintenance_txids
             check_after = time.monotonic() + 2
             self.wait_until(lambda: time.monotonic() >= check_after)
             assert_equal(
@@ -1317,7 +1331,17 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             tightened_provider = provider_safety_policy(
                 policy["funding_models"], policy["sponsorship_scope"])
             tightened_provider["maximum_active_quotes_total"] = 63
-            cli.setpaymastersafetypolicy(tightened_provider)
+
+            def save_when_worker_idle():
+                try:
+                    cli.setpaymastersafetypolicy(tightened_provider)
+                    return True
+                except JSONRPCException as error:
+                    if error.error.get("code") == -4 and error.error.get("message") == "PAYMASTER_PROVIDER_BUSY":
+                        return False
+                    raise
+
+            self.wait_until(save_when_worker_idle)
             client.setpaymasterclientsafetypolicy({
                 "maximum_service_fee_per_transaction_cents": 0,
                 "maximum_service_fee_per_day_cents": 0,
@@ -2268,7 +2292,10 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "spent_network_fee_last_day_satoshis"], 10000000)
         assert_equal(recovery_provider_safety["completed_last_day"], 1)
         recovery_client_safety = client.getpaymasterclientsafetystatus()
-        assert_equal(recovery_client_safety["active_reservations"], 0)
+        # One confirmation completes the cancellation view, but the original
+        # signed authorization remains protected through the 240-block reorg
+        # safety depth. This original sponsored quote reserved a zero DD fee.
+        assert_equal(recovery_client_safety["active_reservations"], 1)
         assert_equal(recovery_client_safety["reserved_service_fee_cents"], 0)
         assert_equal(recovery_client_safety[
             "spent_service_fee_last_day_cents"], 7)
@@ -2276,6 +2303,20 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             "available_service_fee_today_cents"], 9993)
         assert_equal(wallet.stoppaymaster()["running"], False)
         assert_equal(shadow.stoppaymaster()["running"], False)
+
+        self.log.info("Keep original recovery exposure until the reorg safety depth")
+        self.generatetoaddress(node, 238, wallet.getnewaddress())
+        self.sync_blocks()
+        assert_equal(client.getdigidollarsendsession(recovery_lookup)[
+            "payment_view"]["recovery"]["confirmations"], 239)
+        assert_equal(client.getpaymasterclientsafetystatus()["active_reservations"], 1)
+        self.generatetoaddress(node, 1, wallet.getnewaddress())
+        self.sync_blocks()
+        self.wait_until(lambda: client.getpaymasterclientsafetystatus()["active_reservations"] == 0)
+        settled_recovery_safety = client.getpaymasterclientsafetystatus()
+        assert_equal(settled_recovery_safety["reserved_service_fee_cents"], 0)
+        assert_equal(settled_recovery_safety["spent_service_fee_last_day_cents"], 7)
+        assert_equal(settled_recovery_safety["available_service_fee_today_cents"], 9993)
 
         self.log.info("Restricted new service is disabled without altering the saved public offer")
         saved_public_policy = wallet.getpaymasterinfo()["policy"]

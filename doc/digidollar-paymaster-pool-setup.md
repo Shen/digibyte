@@ -82,6 +82,13 @@ slots. Preserve the target, wait for confirmation and re-evaluate. Transaction
 and rolling maintenance fee limits still apply; no new spending authority is
 created by this fallback.
 
+Recurring refill proceeds in confirmed stages. When both assets are missing,
+Core funds DD carriers first and waits for confirmation before the DGB batch.
+An unconfirmed reserve successor from a customer payment also holds up the next
+refill batch. Pending slots count toward their asset's target, but are not yet
+usable. On Mainnet, wait for network confirmations; restarting does not replace
+the saved transaction or bypass this wait.
+
 Confirmed free capacity remains usable when further refill cannot reach its
 target. Payment readiness and maintenance funding/confirmation state are
 separate. Target count is not an all-or-nothing service gate.

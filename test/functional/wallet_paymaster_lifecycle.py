@@ -363,13 +363,17 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         provider.setpaymasterliquiditypolicy(expanded)
         assert_equal(provider.startpaymaster()["running"], True)
 
+        # Recurring maintenance fills carriers first, then waits for their
+        # confirmation before funding DGB. Pending slots count toward their
+        # own target; they do not imply that all asset targets are filled.
         self.wait_until(lambda: all(
             provider.getpaymasterliquiditystatus()[key]["missing"] == 0
-            for key in ("admission_dgb", "operational_dgb",
-                        "admission_carriers", "operational_carriers")))
+            for key in ("admission_carriers", "operational_carriers")))
         first_mempool = set(self.nodes[0].getrawmempool())
-        assert len(first_mempool) > 0
+        assert_equal(len(first_mempool), 1)
         first_status = provider.getpaymasterliquiditystatus()
+        assert_equal(first_status["maintenance_state"], "waiting_for_liquidity_confirmation")
+        assert first_status["admission_dgb"]["missing"] + first_status["operational_dgb"]["missing"] > 0
         pending_before = sum(first_status[key]["pending"] for key in (
             "admission_dgb", "operational_dgb", "admission_carriers",
             "operational_carriers"))
@@ -391,12 +395,31 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         # operation rather than create another transaction for the same gap.
         self.wait_until(lambda: provider.getpaymasterliquiditystatus()[
             "maintenance_fee_reserved_satoshis"] > 0)
+        self.nodes[0].mockscheduler(3)
+        assert_equal(provider.getpaymasterliquiditystatus()["maintenance_state"],
+                     "waiting_for_liquidity_confirmation")
         assert_equal(set(self.nodes[0].getrawmempool()), first_mempool)
 
         self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
         self.sync_blocks()
         self.wait_until(lambda: all(
             provider.getpaymasterliquiditystatus()[key]["missing"] == 0
+            for key in ("admission_dgb", "operational_dgb",
+                        "admission_carriers", "operational_carriers")))
+        second_mempool = set(self.nodes[0].getrawmempool())
+        assert_equal(len(second_mempool), 1)
+        assert not first_mempool & second_mempool
+        dgb_pending = provider.getpaymasterliquiditystatus()
+        for key in ("admission_dgb", "operational_dgb"):
+            assert_equal(dgb_pending[key]["ready"] + dgb_pending[key]["pending"],
+                         dgb_pending[key]["target"])
+        assert dgb_pending["operational_dgb"]["pending"] > 0
+        self.nodes[0].mockscheduler(3)
+        assert_equal(set(self.nodes[0].getrawmempool()), second_mempool)
+        self.generatetoaddress(self.nodes[0], 1, provider.getnewaddress())
+        self.sync_blocks()
+        self.wait_until(lambda: all(
+            provider.getpaymasterliquiditystatus()[key]["ready"] == expanded["target_" + key]
             for key in ("admission_dgb", "operational_dgb",
                         "admission_carriers", "operational_carriers")))
         final_status = provider.getpaymasterliquiditystatus()
@@ -437,9 +460,12 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         assert_equal(self.nodes[0].getrawmempool(), [])
 
         provider.walletpassphrase("paymaster lifecycle passphrase", 3600)
+        # Existing confirmed capacity can serve payments while the additional
+        # target slots wait for confirmation. Service and refill are distinct.
         self.wait_until(lambda: (
             provider.getpaymasterinfo()["running"] and
-            provider.getpaymasterinfo()["service_state"] == "waiting_for_liquidity_confirmation"))
+            provider.getpaymasterinfo()["service_state"] == "active" and
+            provider.getpaymasterliquiditystatus()["maintenance_state"] == "waiting_for_liquidity_confirmation"))
         self.wait_until(lambda: len(self.nodes[0].getrawmempool()) == 1)
         maintenance_txid = self.nodes[0].getrawmempool()[0]
         unlocked_status = provider.getpaymasterliquiditystatus()
