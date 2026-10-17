@@ -78,7 +78,8 @@ def confirm_pool_preparation(test, node, wallet, options, prepared):
         test.generatetoaddress(node, 1, wallet.getnewaddress())
         # The execute retry synchronizes and reconciles the journal after mining.
         # Inspect that response, not a stale snapshot taken before reconciliation.
-        prepared = wallet.preparepaymasterpool(options)
+        prepared = wait_for_paymaster_idle(
+            test, lambda: wallet.preparepaymasterpool(options))
         assert_equal(prepared["accepted"], True)
         steps = [step for step in prepared["preparation"]
                  if step["plan_id"] == options["plan_id"]]

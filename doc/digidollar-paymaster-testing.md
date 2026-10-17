@@ -205,6 +205,12 @@ Functional manual-provider fixtures may wait for the exact pre-execution
 `PAYMASTER_PROVIDER_BUSY` / `PAYMASTER_PROVIDER_SERVICE_BUSY` guards. The quote
 harness permits at most two explicit same-request transport retries after the
 real-time localhost start budget refills; financial/protocol errors propagate.
+In the provider lifecycle fixture, guarded configuration, pool and start/stop
+calls use `provider_rpc`, including calls expected to fail. Put the idle helper
+inside `assert_raises_rpc_error`: otherwise an early busy response is converted
+to an assertion failure before it can be retried. The running-policy regression
+injects one busy response before checking the live RPC's `PROVIDER_RUNNING`
+rejection. Shared pool-confirmation retries use the same idle guard.
 Offer selection checks zero fee reservation before client acceptance and the
 exact reserved fee afterwards. A second unsigned provider choice needs its own
 durable request, no inherited authorization, and enough remaining DD funds.
