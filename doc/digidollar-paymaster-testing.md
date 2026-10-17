@@ -164,6 +164,26 @@ is intentional. Do not run every test under an arbitrary wallet flag. The
 failover scenario uses four daemons/two providers; reorg scenarios must verify
 actual transaction confirmation and reversal, not only mocked status.
 
+### RPC startup failures
+
+If a variant fails in `wait_for_rpc_connection` before its scenarios run, inspect
+that variant's `nodeN/regtest/debug.log` and `nodeN/stderr` first. The default
+framework RPC client uses IPv4 loopback. A node can finish startup with only its
+IPv6 RPC listener if binding `127.0.0.1` failed; `Done loading` alone therefore
+does not prove the test client can connect. Increasing the timeout cannot fix a
+failed bind. On Windows, inspect the port printed in the failed bind message:
+
+```powershell
+Get-NetTCPConnection -LocalPort 20072 -ErrorAction SilentlyContinue
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+These are read-only diagnostics; do not terminate unrelated nodes or change OS
+port reservations. For a standalone retry, keep the reported `--randomseed`
+and choose an unused `--portseed` with a fresh `--tmpdir`. `--portseed` selects
+test ports independently of the scenario's random seed. A later successful run
+does not establish what held or blocked the port during the failed run.
+
 ## Historical compatibility
 
 Follow [test/README.md](../test/README.md) to obtain the official v9.26.5 daemon.

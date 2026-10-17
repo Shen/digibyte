@@ -101,6 +101,30 @@ whitespace checks passed. Flake8 was unavailable. The complete 19-variant matrix
 and normal product builds were not repeated; these focused passes are not a
 new complete-matrix or release certification.
 
+## Remaining provider variants, 2026-10-17
+
+The next operator-run matrix passed 17 of 19 variants. The full provider test
+reached a remaining unguarded manual quote replay and failed with
+`PAYMASTER_PROVIDER_SERVICE_BUSY`. Source `69efb3665f` applies the existing
+exact pre-execution busy helper consistently to manual request, replay, submit
+and alternative-recovery processing in this fixture. Other RPC failures and
+all financial/provider-isolation assertions remain effective.
+
+The drain-only variant failed before its scenarios: node 0's IPv4 RPC bind on
+`127.0.0.1:20072` failed while its IPv6 listener succeeded. The node finished
+startup, but the framework uses IPv4. The retained log does not establish why
+that port was unavailable. A repeat with the same seed and port seed succeeded
+without a startup-code change; no OS reservations or other processes were changed.
+
+Verification used the operator's normal Release daemon/CLI already built in the
+workspace. The full provider scenario passed with seed `7101818818119886812`
+and port seed 7; drain-only passed with seed `8618233438433012274` and port seed
+6. The drain-only repeat ran before this additional fixture change; the full
+scenario ran afterwards. Python syntax and scoped Git whitespace checks passed.
+No new C++ build or unit run was needed for this Python-only change. The full
+19-variant matrix was not repeated; the intermittent IPv4 bind failure was not
+reproduced and is not claimed as fixed.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
