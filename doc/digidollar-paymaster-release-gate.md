@@ -150,6 +150,30 @@ changing OS permissions, reservations or other processes. The earlier bind
 denial is not reproduced or claimed as fixed. No new C++ build/unit run or
 complete functional matrix was performed for this test-only correction.
 
+## Operator matrix completion, 2026-10-17
+
+After the configuration-guard corrections at checkout `31d36a6b7a`, the operator
+reported all 19 current-current Paymaster functional variants passing on Windows:
+
+```powershell
+python ./test/functional/test_runner.py --jobs=1 --extended '--filter=^(wallet|rpc|p2p)_paymaster' --exclude=p2p_paymaster_v9_26_5_bridge.py
+```
+
+The supplied summary records 704 seconds accumulated and 709 seconds wall time,
+with no failed variants. This completes the previously failing 19-variant
+selection, including full provider and drain-only, checkpoint rollback, RPC,
+offer selection, lifecycle, pool setup, backup/adoption/exit, failover and reorg.
+The preceding standalone provider selection also passed both variants in the
+operator's environment (101 and 22 seconds).
+
+This is operator-supplied functional evidence; exact executable hashes, complete
+logs and random seeds were not included with the successful matrix summary.
+It does not certify the full Qt suite, ordinary-wallet regressions, historical
+node interoperability, real Tor operation or a clean cross-platform product
+build. The intermittent Windows bind failures were absent in this run; their
+underlying cause remains unestablished. The next separate GUI gate is the full
+`PaymasterWidgetTests` suite from the runbook.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
