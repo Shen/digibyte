@@ -956,10 +956,12 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                     # Poll the other simultaneously running provider first.
                     # Once the addressed message is present, its provider-ID
                     # filter must leave it untouched for the selected wallet.
-                    not_selected = unselected_provider_wallet.processpaymasterrequests()
+                    not_selected = wait_for_paymaster_idle(
+                        self, unselected_provider_wallet.processpaymasterrequests)
                     assert_equal(not_selected["processed"], False)
                     assert_equal(not_selected["queued"], False)
-                response = provider_wallet.processpaymasterrequests()
+                response = wait_for_paymaster_idle(
+                    self, provider_wallet.processpaymasterrequests)
                 if not response["processed"]:
                     return False
                 assert_equal(response["queued"], True)
@@ -1053,7 +1055,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 # Keep the manual provider service moving so an exact retry can
                 # receive the already durable signed quote on its new peer.
                 if not automatic_provider:
-                    replay = provider_wallet.processpaymasterrequests()
+                    replay = wait_for_paymaster_idle(
+                        self, provider_wallet.processpaymasterrequests)
                     if replay["processed"]:
                         assert_equal(replay["queued"], True)
                         assert_equal(replay["request_id"], request_id)
@@ -1081,15 +1084,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
 
             def process_submit():
                 nonlocal provider_commit
-                try:
-                    provider_commit = provider_wallet.processpaymastersubmits()
-                except JSONRPCException as error:
-                    # The service guard can be held briefly by announcement or
-                    # maintenance reconciliation even in manual processing mode.
-                    # A busy rejection acquired no work; poll within wait_until.
-                    if error.error["code"] == -4 and error.error["message"] == "PAYMASTER_PROVIDER_SERVICE_BUSY":
-                        return False
-                    raise
+                provider_commit = wait_for_paymaster_idle(
+                    self, provider_wallet.processpaymastersubmits)
                 if not provider_commit["processed"]:
                     return False
                 if provider_commit["request_id"] != request_id:
@@ -2105,7 +2101,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             # client retries the same idempotent Capacity request on the
             # replacement connection as well.
             resolve_recovery(prepare_recovery_options)
-            capacity_reply = shadow.processpaymasterrequests()
+            capacity_reply = wait_for_paymaster_idle(
+                self, shadow.processpaymasterrequests)
             return capacity_reply.get("processed", False)
 
         self.wait_until(process_recovery_capacity)
@@ -2130,7 +2127,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         def process_recovery_request():
             nonlocal recovery_quote
             resolve_recovery(prepare_recovery_options)
-            recovery_quote = shadow.processpaymasterrequests()
+            recovery_quote = wait_for_paymaster_idle(
+                self, shadow.processpaymasterrequests)
             if not recovery_quote.get("processed", False):
                 return False
             assert_equal(recovery_quote["queued"], True)
@@ -2233,7 +2231,8 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         def process_recovery_submit():
             nonlocal recovery_commit
             resolve_recovery(authorize_options)
-            recovery_commit = shadow.processpaymastersubmits()
+            recovery_commit = wait_for_paymaster_idle(
+                self, shadow.processpaymastersubmits)
             return (recovery_commit.get("processed", False) and
                     recovery_commit.get("message_type") == "recovery_submit")
 
