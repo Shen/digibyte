@@ -56,6 +56,23 @@ CLI, not a new complete product build or full test suite. Python syntax and
 Git whitespace checks passed; Flake8 was unavailable in the local environment.
 Cross-platform, full-suite and release-acceptance gates remain separate.
 
+## Checkpoint fixture follow-up, 2026-10-17
+
+Source `e4195962a0` corrects four locally reproduced failures reported from a
+broader Windows unit run: current/V5 capacity reservation lifecycle, append-only
+client authorization and atomic provider-quote commit. Synthetic clone mutations
+had advanced the source provider checkpoint; a client-only fixture enrolled the
+remote provider identity locally; provider tests expected immediate retry after
+a DB commit failure despite the independent checkpoint requiring review.
+
+The four corrected cases and three explicit commit-failure quarantine cases
+passed (7 cases / 992 assertions). Successful paths, row-write rollback and
+post-commit-failure protection are separate scenarios. Production code and
+checkpoint enforcement were not changed. Two test translation units compiled
+and linked in isolation with MSVC 14.43 using existing dependencies; Git
+whitespace checks passed. The complete Paymaster unit group and functional
+matrix remain operator-run checks and were not rerun for this test-only change.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
