@@ -2341,7 +2341,8 @@ BOOST_AUTO_TEST_CASE(provider_safety_policy_time_never_regresses_below_accountin
 }
 
 namespace {
-void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_t version)
+void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_t version,
+                                           bool fail_commit = false)
 {
     auto& m_wallet = fixture.m_wallet;
     auto& m_node = fixture.m_node;
@@ -2541,8 +2542,10 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
         BOOST_REQUIRE(orphan_batch.ReadPaymasterProviderBudgetLedger(
             orphan_ledger));
         orphan_ledger.capacity_admissions.clear();
-        BOOST_REQUIRE(orphan_batch.WritePaymasterProviderBudgetLedger(
-            orphan_ledger));
+        // Inject an incomplete snapshot, not a legitimate mutation by a
+        // second provider copy that would advance the original checkpoint.
+        BOOST_REQUIRE(orphan_database->MakeBatch()->Write(
+            DBKeys::PAYMASTER_PROVIDER_BUDGET, orphan_ledger));
 
         CWallet orphan_wallet{m_node.chain.get(),
                               "orphan-capacity-drain-restart",
@@ -2556,6 +2559,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
                               error);
         BOOST_CHECK(!has_drain_work);
     }
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error), error);
 
     CDataStream admission_stream{SER_NETWORK, ::PROTOCOL_VERSION};
     admission_stream << admission_ledger;
@@ -2624,7 +2628,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
                               error);
         BOOST_CHECK(!has_drain_work);
     }
-    for (size_t failing_write = 0; failing_write < 2; ++failing_write) {
+    for (size_t failing_write = 0; failing_write < 4; ++failing_write) {
         database.FailWriteAt(failing_write);
         BOOST_CHECK(!store.ExpireProviderCapacityReservations(
             173, expired_reservations, error));
@@ -2633,13 +2637,25 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
         database.ClearFailureInjection();
         BOOST_CHECK(database.m_records == before_expiry);
     }
-    database.FailCommit();
-    BOOST_CHECK(!store.ExpireProviderCapacityReservations(
-        173, expired_reservations, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    BOOST_CHECK_EQUAL(expired_reservations, 0U);
-    database.ClearFailureInjection();
-    BOOST_CHECK(database.m_records == before_expiry);
+    if (fail_commit) {
+        database.FailCommit();
+        BOOST_CHECK(!store.ExpireProviderCapacityReservations(
+            173, expired_reservations, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+        BOOST_CHECK_EQUAL(expired_reservations, 0U);
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before_expiry);
+        // The independent checkpoint is advanced before DB commit. A failed
+        // commit must keep the old reservation and require recovery review.
+        BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+        BOOST_CHECK(!store.ExpireProviderCapacityReservations(
+            173, expired_reservations, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
+        BOOST_CHECK_EQUAL(expired_reservations, 0U);
+        BOOST_CHECK(database.m_records == before_expiry);
+        return;
+    }
 
     BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(
                               173, expired_reservations, error),
@@ -2806,6 +2822,16 @@ BOOST_AUTO_TEST_CASE(capacity_proof_is_signed_from_exact_available_operational_s
 BOOST_AUTO_TEST_CASE(v5_capacity_proof_survives_reload_replay_and_atomic_release)
 {
     CheckCapacityProofReservationLifecycle(*this, LEGACY_DIRECT_PROTOCOL_VERSION);
+}
+
+BOOST_AUTO_TEST_CASE(capacity_expiry_failed_commit_preserves_checkpoint_guard)
+{
+    CheckCapacityProofReservationLifecycle(*this, DigiDollar::Paymaster::PROTOCOL_VERSION, true);
+}
+
+BOOST_AUTO_TEST_CASE(v5_capacity_expiry_failed_commit_preserves_checkpoint_guard)
+{
+    CheckCapacityProofReservationLifecycle(*this, LEGACY_DIRECT_PROTOCOL_VERSION, true);
 }
 
 BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_records)

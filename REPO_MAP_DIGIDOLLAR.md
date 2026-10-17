@@ -1419,6 +1419,13 @@ present in the tree but not compiled into the current unit-test binary.
 
 ### Wallet Tests (`src/wallet/test/`)
 
+Checkpoint-aware failure coverage in the identity/store suites keeps synthetic
+copied records separate from legitimate provider writes. Capacity expiry is
+tested for current and V5 proofs with complete DB rollback plus retained
+checkpoint protection after a rejected commit. Provider-quote commit failures
+likewise require review; client-only authorization fixtures do not enroll a
+remote provider identity locally.
+
 | File | Coverage Area |
 |------|--------------|
 | `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records; prioritized bounded provider stop, timeout/write-failure cleanup, stopped automation and atomic, reviewed cancellation of uncreated reserve funding during retirement |

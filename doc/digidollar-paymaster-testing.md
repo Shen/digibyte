@@ -181,6 +181,16 @@ an old bridge. A direct current-current link should restore discovery.
 
 ## Security and acceptance checks
 
+Database-failure fixtures must distinguish wallet transaction rollback from
+the independent provider checkpoint. A rejected row write leaves both unchanged;
+a rejected DB commit can leave the external checkpoint ahead, requiring review
+instead of an immediate retry. Capacity-expiry and provider-quote tests cover
+successful completion and commit-failure quarantine in separate fixtures.
+Inject malformed copied records through the mock database, without performing a
+legitimate provider mutation that advances the original identity's checkpoint.
+Client-only fixtures retain the remote provider key in their artifacts, rather
+than enrolling that identity as the client's local provider.
+
 [Paymaster Security CI](../.github/workflows/paymaster-security.yml) is the
 executable reference for sanitizer, fuzz and functional selections. Run its
 current configuration rather than copying stale package lists. Inspect code

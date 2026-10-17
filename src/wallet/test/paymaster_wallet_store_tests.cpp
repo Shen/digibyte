@@ -24,6 +24,7 @@
 #include <streams.h>
 #include <util/time.h>
 #include <validationinterface.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -1842,10 +1843,8 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     provider_identity.identity_script = GetScriptForDestination(identity_builder.GetOutput());
     provider_identity.display_name = "Provider";
     provider_identity.created_at = 100;
-    {
-        LOCK(m_wallet.cs_wallet);
-        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterIdentity(provider_identity));
-    }
+    // This key belongs to the remote provider. A client wallet must not enroll
+    // that identity as its own provider or share its rollback checkpoint.
     candidate.provider_id = provider_identity.provider_id;
     candidate.provider_identity_key = provider_identity.identity_key;
     candidate.client_nonce = uint256S("13");
@@ -2685,8 +2684,10 @@ BOOST_AUTO_TEST_CASE(expired_provider_quotes_release_pool_and_budget_atomically)
     BOOST_CHECK(database.m_records == before_unreadable_authorization);
 }
 
-BOOST_AUTO_TEST_CASE(provider_quote_preflight_is_read_only_and_commit_is_atomic)
+static void CheckProviderQuoteCommit(WalletTestingSetup& fixture, bool fail_commit)
 {
+    auto& m_wallet = fixture.m_wallet;
+    auto& m_node = fixture.m_node;
     constexpr int64_t now{1000};
     constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440201";
     PaymasterStore store{m_wallet};
@@ -2951,13 +2952,23 @@ BOOST_AUTO_TEST_CASE(provider_quote_preflight_is_read_only_and_commit_is_atomic)
         BOOST_CHECK(database.m_records == before_commit);
         check_uncommitted();
     }
-    database.FailCommit();
-    BOOST_CHECK(!store.CommitProviderQuote(
-        attempt, request.intent.genesis_hash, now, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    database.ClearFailureInjection();
-    BOOST_CHECK(database.m_records == before_commit);
-    check_uncommitted();
+    if (fail_commit) {
+        database.FailCommit();
+        BOOST_CHECK(!store.CommitProviderQuote(
+            attempt, request.intent.genesis_hash, now, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before_commit);
+        check_uncommitted();
+        BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+        BOOST_CHECK(!store.CommitProviderQuote(
+            attempt, request.intent.genesis_hash, now, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+        BOOST_CHECK(database.m_records == before_commit);
+        check_uncommitted();
+        return;
+    }
 
     BOOST_REQUIRE_MESSAGE(
         store.CommitProviderQuote(
@@ -3017,6 +3028,16 @@ BOOST_AUTO_TEST_CASE(provider_quote_preflight_is_read_only_and_commit_is_atomic)
         netgroup_bucket, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_ADMISSION_CONFLICT");
     BOOST_CHECK(restarted_mock.m_records == before_conflict);
+}
+
+BOOST_AUTO_TEST_CASE(provider_quote_preflight_is_read_only_and_commit_is_atomic)
+{
+    CheckProviderQuoteCommit(*this, false);
+}
+
+BOOST_AUTO_TEST_CASE(provider_quote_failed_commit_requires_checkpoint_review)
+{
+    CheckProviderQuoteCommit(*this, true);
 }
 
 BOOST_AUTO_TEST_CASE(unavailable_submit_rejection_and_pool_release_are_atomic)
