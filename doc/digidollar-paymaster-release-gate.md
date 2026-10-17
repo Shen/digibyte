@@ -125,6 +125,31 @@ No new C++ build or unit run was needed for this Python-only change. The full
 19-variant matrix was not repeated; the intermittent IPv4 bind failure was not
 reproduced and is not claimed as fixed.
 
+## Provider configuration assertions, 2026-10-17
+
+A further operator run failed before a full provider scenario because Windows
+denied its P2P bind on `127.0.0.1:15012` with WSAEACCES (10013). Drain-only
+reached a policy-change rejection test, but a transient `PROVIDER_BUSY` response
+arrived before the expected `PROVIDER_RUNNING` response. Previous busy fixes
+covered processing calls, not every configuration/assertion path.
+
+Source `bfc3ee5b6a` consistently waits for pre-execution exclusion on guarded
+configuration, pool and start/stop calls. Expected-error assertions enclose the
+idle helper, so permanent errors remain mandatory rather than accepting busy
+as a substitute. A deterministic fixture injection rejects the first policy
+call as busy, then checks the real running-provider rejection. Shared finite
+pool-confirmation retries also wait for the guard. Production RPC behavior,
+spending limits and transport limits are unchanged.
+
+Verification against the normal Release daemon/CLI: full provider passed with
+seed `2954881066833722793`, port seed 1; drain-only passed with seed
+`6701264833899060309`, port seed 0. Both final runs included the injected busy
+regression. Python syntax and scoped Git whitespace checks passed; Flake8 was
+unavailable. The original P2P port was usable in the repeated full test without
+changing OS permissions, reservations or other processes. The earlier bind
+denial is not reproduced or claimed as fixed. No new C++ build/unit run or
+complete functional matrix was performed for this test-only correction.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
