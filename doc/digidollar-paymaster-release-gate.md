@@ -25,6 +25,37 @@ Use the [runbook](digidollar-paymaster-testing.md) for commands and the
 against the candidate and built executable. Remaining tests are not waived by
 successful manual regtest payments.
 
+## Focused regression follow-up, 2026-10-17
+
+Source changes: `c7750a18a1` (maintenance accounting time) and `0ab4289107`
+(functional expectations and coverage). The three failures reported from another
+node were reproduced locally before correction:
+
+- Full pool setup/capital release: maintenance reconciliation used wall time
+  below a saved record's creation time after policy revisions. Preserve the
+  record/ledger accounting floor so confirmed work no longer remains open.
+  The strict guard for genuinely unfinished or signed work stays in place.
+- Lifecycle target expansion and provider replacement: tests waited for later
+  batches without confirming pending reserve outputs. They now verify the
+  separate confirmation stages, restart idempotency and absence of duplicates.
+  Further stale expectations were corrected for active service below its refill
+  target and recovery exposure retained until 240 confirmations. A policy-change
+  test retries only the transient `PAYMASTER_PROVIDER_BUSY` response.
+
+Verification: two changed translation units compiled with MSVC 14.43; the new
+wallet regression failed against the previous implementation and passed after
+the fix. Ten selected wallet cases passed (455 assertions). Full descriptor
+runs of `wallet_paymaster_pool_setup.py`, `wallet_paymaster_lifecycle.py` and
+`wallet_paymaster_provider.py` passed with the reported seeds
+`6185203042326809576`, `5495766456681726476` and `8132640900451697906`, respectively.
+The previously open pool-setup failure in the historical rows below is resolved
+by this correction.
+
+These were isolated unit/daemon links with existing dependencies and the local
+CLI, not a new complete product build or full test suite. Python syntax and
+Git whitespace checks passed; Flake8 was unavailable in the local environment.
+Cross-platform, full-suite and release-acceptance gates remain separate.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
