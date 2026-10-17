@@ -73,6 +73,34 @@ and linked in isolation with MSVC 14.43 using existing dependencies; Git
 whitespace checks passed. The complete Paymaster unit group and functional
 matrix remain operator-run checks and were not rerun for this test-only change.
 
+## Windows functional matrix follow-up, 2026-10-17
+
+The operator's extended current-current matrix passed 15 of 19 variants. Four
+reported failures were investigated against their saved logs and random seeds.
+Source `e17c96415d` serializes checkpoint file reads with replacement: Windows
+CRT readers can deny `MoveFileExW` replacement while their handles remain open.
+A direct Windows API probe reproduced error 5 with an open reader and succeeded
+after closing it. The new concurrent unit stress test can also pass on the old
+implementation depending on scheduling; it is not a deterministic red/green
+reproduction. Checkpoint enforcement and stale-copy rejection remain enabled.
+
+Source `fe6536afc3` corrects functional fixtures: retry only exact pre-execution
+busy guards, bound explicit same-request transport retries, reserve client fees
+only after authorization, and establish a funded unsigned order and quote before
+testing immutable provider selection. Financial/protocol failures still fail
+the tests; production transport and spending limits were not increased.
+
+Verification: three related wallet cases passed (270 assertions). All four
+previously failing functional variants passed individually with their reported
+seeds: checkpoint rollback (`5648792314745756954`), RPC
+(`7865158726139777058`), provider `--drain-recovery-only`
+(`5055654902687554025`) and offer selection (`3385301776452823645`). Two changed
+C++ translation units compiled with MSVC 14.43; unit/daemon executables were
+linked in isolation with existing dependencies and CLI. Python syntax and Git
+whitespace checks passed. Flake8 was unavailable. The complete 19-variant matrix
+and normal product builds were not repeated; these focused passes are not a
+new complete-matrix or release certification.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
