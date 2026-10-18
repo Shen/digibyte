@@ -213,6 +213,33 @@ regression selection covers the remaining ordinary wallet, address-book,
 DigiDollar, transaction and app/options/URI/RPC Qt suites without repeating the
 Paymaster suite.
 
+## Remaining Qt suites: overview teardown, 2026-10-18
+
+The operator's remaining-Qt run passed `AppTests`, `OptionTests`, `URITests`,
+`RPCNestedTests`, `WalletTests` and `AddressBookTests`, then crashed in the first
+`DigiDollarWidgetTests` scenario. Windows reported access violation `0xc0000005`
+with `getdigidollarstats`' chainstate flush reaching the validation-signal
+scheduler from an overview RPC worker. The later suites did not complete;
+this run is not an all-Qt pass.
+
+The overview smoke fixture started real asynchronous balance/history/oracle/
+health reads, then immediately destroyed its models and `TestChain100Setup`.
+An invalidated callback guard does not stop a Core RPC already running against
+that temporary node. Source `628321a743` moves the smoke check into the existing
+friend test method and waits for its in-flight updates to complete before
+teardown, keeping the validation scheduler alive through those reads. No
+production RPC or widget behavior is changed.
+
+The standalone old smoke test passed locally, so a deterministic crash
+reproduction is not claimed. The corrected smoke test, reservation-balance
+overview and privacy-mask overview each passed separately (three feature checks;
+each Qt summary includes init/cleanup). Verification compiled one test
+translation unit with MSVC 14.43 and linked an isolated executable with the
+current normal-build dependencies and previously corrected Paymaster test
+object. Scoped whitespace checks passed. The complete remaining-Qt selection
+must still be rerun by the operator; other asynchronous fixture lifetimes are
+not certified by these focused results.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
