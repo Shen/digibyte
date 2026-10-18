@@ -17,6 +17,7 @@
 // redemption needs the collateral lock to expire, which is hundreds of blocks.
 
 #include <qt/test/ddtransactionrecordtests.h>
+#include <qt/test/digidollartestutil.h>
 #include <qt/test/util.h>
 
 #include <consensus/digidollar.h>
@@ -83,6 +84,7 @@ struct MiniGui {
         AddWallet(context, wallet);
         walletModel = std::make_unique<WalletModel>(
             interfaces::MakeWallet(context, wallet), *clientModel, platformStyle.get());
+        DigiDollarTest::SyncDGBBalance(*walletModel);
         RemoveWallet(context, wallet, std::nullopt);
     }
 };

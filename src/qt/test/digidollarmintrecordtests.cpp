@@ -13,9 +13,11 @@
 // function the Mint button calls.
 
 #include <qt/test/digidollarmintrecordtests.h>
+#include <qt/test/digidollartestutil.h>
 
 #include <consensus/merkle.h>
 #include <interfaces/chain.h>
+#include <rpc/server.h>
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <oracle/bundle_manager.h>
@@ -108,6 +110,7 @@ struct DigiDollarMiniGUI {
         AddWallet(context, wallet);
         walletModel = std::make_unique<WalletModel>(
             interfaces::MakeWallet(context, wallet), *clientModel, platformStyle.get());
+        DigiDollarTest::SyncDGBBalance(*walletModel);
         RemoveWallet(context, wallet, std::nullopt);
     }
 };
@@ -126,6 +129,9 @@ std::shared_ptr<wallet::CWallet> PrepareMintableWallet(interfaces::Node& node, T
         test.coinbaseKey);
     wallet->SetBroadcastTransactions(true);
     wallet->EnsureDDWallet();
+    // Standalone suite runs do not execute AppTests' node startup. The test
+    // chain and quote are ready, including the post-Thaw-Day eligibility RPCs.
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     return wallet;
 }
 

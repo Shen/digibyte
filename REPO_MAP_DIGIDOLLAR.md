@@ -1453,6 +1453,8 @@ The original Qt suite retains DD behavior and boundary integration tests;
 `digidollartestutil.cpp/h` provides the single shared descriptor-wallet fixture.
 Its exported `DigiDollarTest::SyncUpWallet` also retains the official legacy
 watch-only address regression's rescan setup after the helpers were separated.
+`DigiDollarTest::SyncDGBBalance` explicitly waits for the asynchronous model cache
+before direct mint/send tests; it does not change the default MiniGUI setup.
 `src/wallet/test/paymaster_wallet_load_tests.cpp` owns the seven Paymaster
 maintenance/load regression cases formerly embedded in `walletload_tests.cpp`.
 

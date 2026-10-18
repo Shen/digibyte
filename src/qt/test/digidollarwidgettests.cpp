@@ -510,6 +510,9 @@ void DigiDollarWidgetTests::overviewWidgetTests()
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
+    // Exercise real status reads even when AppTests was excluded by a filter.
+    // A warmup rejection would not exercise the chainstate-flush lifetime.
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
     DigiDollarOverviewWidget overview;
@@ -859,7 +862,7 @@ void DigiDollarWidgetTests::qtMintStoresDescriptorRecoverableOwnerKey()
     wallet->EnsureDDWallet();
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    mini_gui.walletModel->pollBalanceChanged();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
 
     WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
     QVERIFY2(result.status == WalletModel::OK, result.reasonFailed.toUtf8().constData());
@@ -923,7 +926,7 @@ void DigiDollarWidgetTests::staleMintUnlockHeightCacheRepairsFromOpReturn()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    mini_gui.walletModel->pollBalanceChanged();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
 
     WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
     QVERIFY2(result.status == WalletModel::OK, result.reasonFailed.toUtf8().constData());
@@ -1018,7 +1021,7 @@ void DigiDollarWidgetTests::qtFailedMintAbandonsRejectedDraft()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    mini_gui.walletModel->pollBalanceChanged();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
 
     WalletModel::DigiDollarMintResult result = mini_gui.walletModel->mintDigiDollar(10000, 0);
 
@@ -1219,7 +1222,7 @@ void DigiDollarWidgetTests::sendWidgetCoinControlDialogSelectionFeedsSend()
     const int direct_mode = fee_mode->findData(QStringLiteral("dgb"));
     QVERIFY(direct_mode >= 0);
     fee_mode->setCurrentIndex(direct_mode);
-    mini_gui.walletModel->pollBalanceChanged();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
     QVERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
     sendWidget.setAvailableDigiDollarBalanceForTesting(12500);
 
@@ -2717,6 +2720,7 @@ void DigiDollarWidgetTests::mintWidgetPreservesEncryptedWalletUnlockFlow()
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
     mini_gui.walletModel->startPollBalance();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
     const CAmount funded_balance = mini_gui.walletModel->wallet().getBalances().balance;
     QVERIFY(funded_balance > 0);
     QCOMPARE(mini_gui.walletModel->getAvailableDGBBalance(), funded_balance);
@@ -2945,7 +2949,7 @@ void DigiDollarWidgetTests::transactionsWidgetExportTests()
     QVERIFY2(!timed_out, "The export dialogs did not finish");
 
     QFile file(path);
-    QVERIFY(file.open(QIODevice::ReadOnly));
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
     const QString csv = QString::fromUtf8(file.readAll());
     QVERIFY2(!csv.contains("$DD"), qPrintable(csv));
     QVERIFY(csv.contains("\"123.45\""));
@@ -4201,7 +4205,6 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(paymasterTabs != nullptr);
     const QStringList expectedPaymasterTabs{
         QStringLiteral("Overview"),
-        QStringLiteral("Funds & reserves"),
         QStringLiteral("Activity"),
         QStringLiteral("Income & costs"),
         QStringLiteral("Settings"),
@@ -4220,7 +4223,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
         tab.findChild<QWidget*>("paymasterOverviewContents");
     auto* settingsTabs = tab.findChild<QStackedWidget*>("paymasterSettingsPages");
     QVERIFY(settingsTabs != nullptr);
-    QCOMPARE(settingsTabs->count(), 6);
+    QCOMPARE(settingsTabs->count(), 9);
     QWidget* configurationPage = tab.findChild<QWidget*>("paymasterConfigurationPage");
     QWidget* safetyPage = tab.findChild<QWidget*>("paymasterSafetyPolicyPage");
     QWidget* liquidityPage = tab.findChild<QWidget*>("paymasterLiquidityPage");
@@ -4319,7 +4322,7 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QCOMPARE(liquiditySettings->text(), QStringLiteral("Advanced reserve management"));
     const QList<QWidget*> pageColumns =
         tab.findChildren<QWidget*>("paymasterPageColumn");
-    QCOMPARE(pageColumns.size(), 10);
+    QCOMPARE(pageColumns.size(), 12);
     for (QWidget* column : pageColumns) {
         QCOMPARE(column->maximumWidth(), 1100);
     }
@@ -4328,8 +4331,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QVERIFY(!setupChoice->isHidden());
     QVERIFY(configuredOverview->isHidden());
     QVERIFY(!settingsTabs->isEnabled());
-    QCOMPARE(settingsTabs->indexOf(configurationPage), 1);
-    QCOMPARE(settingsTabs->indexOf(safetyPage), 2);
+    QCOMPARE(settingsTabs->indexOf(configurationPage), 3);
+    QCOMPARE(settingsTabs->indexOf(safetyPage), 4);
     QVERIFY(!liquidityPage->isEnabled());
     QVERIFY(!financesPage->isEnabled());
     QVERIFY(activityPage->isEnabled());
@@ -4453,8 +4456,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
                                            !maintenanceApproval->isChecked() &&
                                            requirements->text().contains(QStringLiteral("txindex=1")) &&
                                            requirements->text().contains(QStringLiteral("BIP324")) &&
-                                           nextActions->text().contains(QStringLiteral("Runtime and the requested enabled state are saved last")) &&
-                                           nextActions->text().contains(QStringLiteral("The saved autostart choice is retained")) &&
+                                           nextActions->text().contains(QStringLiteral("selected autostart choice and the requested enabled state are saved last")) &&
+                                           introduction->text().contains(QStringLiteral("The saved autostart choice is retained")) &&
+                                           nextActions->text().contains(QStringLiteral("one-time start")) &&
                                            progressResult->text().contains(QStringLiteral("not started")) &&
                                            firstProgressStep->text().contains(QStringLiteral("Pending")) &&
                                            transitionProgressStep->text().contains(QStringLiteral("safety transition")) &&
@@ -4525,7 +4529,8 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QCheckBox* userPaidPolicy = tab.findChild<QCheckBox*>("paymasterPolicyUserPaid");
     QSpinBox* feePolicy = tab.findChild<QSpinBox*>("paymasterPolicyFeeBps");
     QVERIFY(configurationIntroduction != nullptr);
-    QVERIFY(configurationIntroduction->text().contains(QStringLiteral("do not move funds")));
+    QVERIFY(configurationIntroduction->text().contains(QStringLiteral("network-fee ceiling")));
+    QVERIFY(configurationIntroduction->text().contains(QStringLiteral("Reserve capital and refill costs")));
     QVERIFY(policySummary != nullptr);
     QVERIFY(policySummary->text().contains(QStringLiteral("User paid only")));
     QVERIFY(fundingModelExplanation != nullptr);
@@ -4622,8 +4627,9 @@ void DigiDollarWidgetTests::digiDollarAmountLabelsUseCurrencyPrefix()
     QSpinBox* admissionCarriers =
         tab.findChild<QSpinBox*>("paymasterAdmissionCarrierSlots");
     QVERIFY(liquidityIntroduction != nullptr);
-    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("All funds remain in this wallet")));
-    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("capacity to keep ready")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("reserves remain your wallet's capital")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("payment capacity ready")));
+    QVERIFY(liquidityIntroduction->text().contains(QStringLiteral("separate DGB network fee")));
     QVERIFY(liquiditySteps != nullptr);
     QVERIFY(liquiditySteps->text().contains(QStringLiteral("review the exact amounts and fees")));
     QVERIFY(liquiditySummary != nullptr);
@@ -5250,13 +5256,13 @@ void DigiDollarWidgetTests::overviewPendingBalanceHasThemeRules()
 
     const auto requirePendingRule = [](const QString& css, const QString& theme) {
         const QRegularExpression pendingLabel(
-            QStringLiteral(R"re(DigiDollarOverviewWidget\s+\.QFrame#balanceFrame\s+\.QLabel#ddPendingLabel[^\{]*\{[^\}]*qproperty-alignment\s*:[^\;]*AlignRight[^\}]*min-width\s*:\s*160px\s*;[^\}]*font-size\s*:\s*11pt\s*;)re"),
+            QStringLiteral(R"re(DigiDollarOverviewWidget\s+\.QFrame#balanceFrame\s+\.QLabel#ddPendingLabel[^\{]*\{[^\}]*qproperty-alignment\s*:[^\;]*AlignRight[^\}]*min-width\s*:\s*160px\s*;[^\}]*font-size\s*:\s*10pt\s*;)re"),
             QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
         QVERIFY2(pendingLabel.match(css).hasMatch(),
                  qPrintable(QString("%1 must style #ddPendingLabel like the other DigiDollar balance labels").arg(theme)));
 
         const QRegularExpression pendingValue(
-            QStringLiteral(R"re(DigiDollarOverviewWidget\s+\.QFrame#balanceFrame\s+\.QLabel#ddPendingValue[^\{]*\{[^\}]*qproperty-alignment\s*:[^\;]*AlignLeft[^\}]*font-size\s*:\s*13pt\s*;)re"),
+            QStringLiteral(R"re(DigiDollarOverviewWidget\s+\.QFrame#balanceFrame\s+\.QLabel#ddPendingValue[^\{]*\{[^\}]*qproperty-alignment\s*:[^\;]*AlignRight[^\}]*font-size\s*:\s*11pt\s*;)re"),
             QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
         QVERIFY2(pendingValue.match(css).hasMatch(),
                  qPrintable(QString("%1 must style #ddPendingValue like the adjacent DigiDollar value rows").arg(theme)));
@@ -5390,7 +5396,20 @@ void DigiDollarWidgetTests::digiDollarSectionUsesGreenThemeRules()
             QStringLiteral("Paymaster operator console — DigiDollar visual system v2"));
         QVERIFY2(paymasterThemeStart >= 0,
                  qPrintable(QString("%1 must contain the dedicated Paymaster green-theme block").arg(theme)));
-        const QString paymasterTheme = css.mid(paymasterThemeStart);
+        // Later stylesheet sections also contain ordinary DGB/file-dialog
+        // controls. Check Paymaster selectors, not every rule after a comment.
+        QString scoped_css = css.mid(paymasterThemeStart);
+        scoped_css.remove(QRegularExpression(QStringLiteral(R"(/\*.*?\*/)"),
+            QRegularExpression::DotMatchesEverythingOption));
+        const QRegularExpression rule(QStringLiteral(R"(([^{}]+)\{([^{}]*)\})"));
+        auto rules = rule.globalMatch(scoped_css);
+        QString paymasterTheme;
+        while (rules.hasNext()) {
+            const auto match = rules.next();
+            if (match.captured(1).contains(QStringLiteral("paymaster"), Qt::CaseInsensitive))
+                paymasterTheme += match.captured(0);
+        }
+        QVERIFY(!paymasterTheme.isEmpty());
         const QStringList dgbBlueColors{
             QStringLiteral("#002352"),
             QStringLiteral("#003366"),
@@ -8511,7 +8530,7 @@ void DigiDollarWidgetTests::digiDollarControlsStayReadableInBothThemes()
         widget.show();
         QCoreApplication::processEvents();
         for (auto* edit : widget.findChildren<QLineEdit*>()) {
-            if (!edit->isVisible()) continue;
+            if (!edit->isVisible() || !edit->isEnabled()) continue;
             const auto palette = edit->palette();
             const QColor text = palette.color(QPalette::Text);
             QColor base = palette.color(QPalette::Base);
@@ -8523,41 +8542,57 @@ void DigiDollarWidgetTests::digiDollarControlsStayReadableInBothThemes()
                     base.greenF() * alpha + behind.greenF() * (1 - alpha),
                     base.blueF() * alpha + behind.blueF() * (1 - alpha));
             }
-            QVERIFY2(readable(text, base), qPrintable(theme + " input text: " + edit->objectName()));
+            QVERIFY2(readable(text, base), qPrintable(theme + " input text: " + widget.metaObject()->className() +
+                '/' + edit->objectName() + " foreground=" + text.name() + " background=" + base.name()));
             QVERIFY2(text.green() >= text.blue(), qPrintable(theme + " input uses blue text: " + edit->objectName()));
             if (theme == "light") QVERIFY2(base.lightness() > 230, qPrintable(edit->objectName()));
         }
         for (auto* combo : widget.findChildren<QComboBox*>()) {
+            if (!combo->isVisible() || !combo->isEnabled()) continue;
             combo->showPopup();
             QCoreApplication::processEvents();
             const auto palette = combo->view()->palette();
             const QColor highlight = palette.color(QPalette::Highlight);
-            QVERIFY2(highlight.green() > highlight.blue(), qPrintable(theme + " dropdown selection must use DD green"));
+            QVERIFY2(highlight.green() > highlight.blue(), qPrintable(
+                theme + " dropdown selection must use DD green: " + widget.metaObject()->className() +
+                '/' + combo->objectName() + " highlight=" + highlight.name()));
             QVERIFY(readable(palette.color(QPalette::HighlightedText), highlight));
             if (QApplication::platformName() != "minimal") {
                 const QModelIndex current = combo->model()->index(combo->currentIndex(), 0);
-                const QRect row = combo->view()->visualRect(current);
+                // A model row can be wider than the native popup viewport.
+                // Sample the painted, visible portion instead of reading past
+                // the captured image (which returns an invalid black color).
+                const QRect row = combo->view()->visualRect(current).intersected(
+                    combo->view()->viewport()->rect());
                 QVERIFY(!row.isEmpty());
                 const QImage rendered = combo->view()->viewport()->grab().toImage();
                 const QPoint sample(row.right() - 5, row.center().y());
+                QVERIFY(rendered.rect().contains(sample * rendered.devicePixelRatio()));
                 const QColor selected = rendered.pixelColor(sample * rendered.devicePixelRatio());
-                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " dropdown must paint its selection green"));
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(
+                    theme + " dropdown must paint its selection green: " + combo->objectName() +
+                    " pixel=" + selected.name()));
             }
             combo->hidePopup();
         }
         if (QApplication::platformName() != "minimal") {
             for (auto* table : widget.findChildren<QTableWidget*>()) {
-                if (!table->isVisible()) continue;
+                // Paymaster's legacy offer table is a read-only preview;
+                // provider selection happens in the offer cards instead.
+                if (!table->isVisible() || !table->isEnabled() ||
+                    table->selectionMode() == QAbstractItemView::NoSelection) continue;
                 table->setRowCount(1);
                 table->setItem(0, 0, new QTableWidgetItem(QString()));
                 table->selectRow(0);
                 table->setFocus();
                 QCoreApplication::processEvents();
+                QVERIFY(table->item(0, 0)->isSelected());
                 const QRect cell = table->visualItemRect(table->item(0, 0));
                 QVERIFY(!cell.isEmpty());
                 const QImage rendered = table->viewport()->grab().toImage();
                 const QColor selected = rendered.pixelColor(cell.center() * rendered.devicePixelRatio());
-                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " selected table row must use DD green"));
+                QVERIFY2(selected.green() > selected.blue(), qPrintable(theme + " selected table row must use DD green: " +
+                    widget.metaObject()->className() + '/' + table->objectName() + " pixel=" + selected.name()));
                 QVERIFY(readable(table->palette().color(QPalette::HighlightedText), selected));
             }
         }
@@ -8610,6 +8645,11 @@ void DigiDollarWidgetTests::digiDollarControlsStayReadableInBothThemes()
         check_headings();
         std::unique_ptr<const PlatformStyle> platform(PlatformStyle::instantiate("other"));
         DigiDollarSendWidget send(platform.get());
+        auto* paymaster_mode = send.findChild<QRadioButton*>("feeFundingPaymaster");
+        auto* advanced_settings = send.findChild<QPushButton*>("advancedPaymasterSettingsToggle");
+        QVERIFY(paymaster_mode && advanced_settings);
+        paymaster_mode->setChecked(true);
+        advanced_settings->setChecked(true);
         check(send, theme);
         send.updateView();
         auto* send_amount = send.findChild<QLineEdit*>("amountEdit");

@@ -111,6 +111,14 @@ and relevant `DigiDollarWidgetTests` cases from the current fixture. Clear filte
 before claiming a complete Qt run. A targeted result including init/cleanup
 is not that many independent feature cases.
 
+Direct mint/send fixtures must await the model's asynchronous DGB balance cache
+with `DigiDollarTest::SyncDGBBalance`; one `pollBalanceChanged()` call is not a
+completed read. Standalone post-Thaw-Day mint fixtures also finish RPC warmup
+after preparing their test chain/quote, rather than relying on `AppTests` having
+run first. Native dropdown render checks sample the visible row/viewport
+intersection and verify image bounds; read-only offer previews are not selectable
+rows. These fixture rules do not change production balances or safety checks.
+
 For an operator-run full Paymaster GUI suite on the configured Windows build:
 
 ```powershell

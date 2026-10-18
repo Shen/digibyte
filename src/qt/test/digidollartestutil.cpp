@@ -23,6 +23,20 @@ using wallet::WalletContext;
 using wallet::WalletRescanReserver;
 
 namespace DigiDollarTest {
+void SyncDGBBalance(WalletModel& model)
+{
+    const auto expected = model.wallet().getBalances();
+    // Production starts balance polling when the wallet view is opened. These
+    // small fixtures drive the model directly and must await that first read.
+    QTRY_VERIFY([&] {
+        const auto& cached = model.getCachedBalance();
+        if (!expected.balanceChanged(cached) && !(expected.spendable != cached.spendable) &&
+            !(expected.watch_only != cached.watch_only)) return true;
+        model.pollBalanceChanged();
+        return false;
+    }());
+}
+
 void SyncUpWallet(const std::shared_ptr<wallet::CWallet>& wallet, interfaces::Node& node)
 {
     WalletRescanReserver reserver(*wallet);
