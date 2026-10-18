@@ -202,6 +202,17 @@ checks passed. No production GUI code changed. The complete Qt suite was not
 rerun; the full-suite GUI gate remains open. Style-property and Windows geometry
 warnings in the supplied output have not been classified as resolved.
 
+The subsequent operator repeat of the full `PaymasterWidgetTests` selection
+using `gui-followup-20261018/qt.exe` reported `All tests passed`; the captured
+PowerShell exit-code guard did not throw. This completes that Paymaster GUI
+selection on the isolated Windows executable after the test corrections. The
+successful follow-up did not include per-case totals, duration or warning
+details, so those are not inferred from the earlier failed run. It is not a
+complete all-Qt, cross-platform or normal-product-build certification. The next
+regression selection covers the remaining ordinary wallet, address-book,
+DigiDollar, transaction and app/options/URI/RPC Qt suites without repeating the
+Paymaster suite.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
