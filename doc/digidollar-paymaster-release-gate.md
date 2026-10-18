@@ -274,9 +274,15 @@ include init/cleanup and must not be added as independent feature cases.
 Four test translation units and the generated Qt resource were compiled with
 MSVC 14.43/Qt 5.15.10 and linked in isolation with existing normal-build
 dependencies. Source/executable fingerprints and logs are retained locally;
-scoped whitespace checks passed. No complete product build or new full Qt run
-was performed. The large `DigiDollarWidgetTests` suite still needs an operator
-repeat; the already green Wave 19/table selections were not rerun locally.
+scoped whitespace checks passed. The operator subsequently reported
+`All tests passed.` for the complete `DigiDollarWidgetTests` selection using
+`build_msvc/paymaster-refresh-check/dd-gui-regressions-20261018/qt.exe` on
+Windows with Fusion style. The supplied exit-code guard did not throw. The
+report does not include a Qt row count; none is inferred from the earlier
+failed run. This completes the pending large-widget repeat for these fixes.
+The already green Wave 19/table selections were not rerun locally. No complete
+normal product rebuild or single combined full Qt run is established by these
+separate component results.
 
 ## Earlier acceptance IDs: current interpretation
 
