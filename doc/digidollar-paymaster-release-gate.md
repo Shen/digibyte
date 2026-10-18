@@ -240,6 +240,44 @@ object. Scoped whitespace checks passed. The complete remaining-Qt selection
 must still be rerun by the operator; other asynchronous fixture lifetimes are
 not certified by these focused results.
 
+## DigiDollar Qt regression follow-up, 2026-10-18
+
+The operator's next five-suite selection completed without the earlier crash:
+`DigiDollarWidgetTests` reported 120 passed / 11 failed; Wave 19, 16 / 0;
+mint records, 2 / 7; transaction records, 7 / 5; transaction table, 10 / 0.
+These are Qt result rows, including fixture and data rows, not independent
+security scenarios. The 23 failures were investigated as shared causes.
+
+Source `c231521234` explicitly awaits the asynchronous DGB cache before direct
+mint/send actions, finishes RPC warmup for standalone active-Thaw-Day mint
+fixtures, reads CSV in text mode for Windows newlines, and updates menu, setup
+and balance-format expectations to the current UI. The cache helper is opt-in;
+default shared MiniGUI initialization is unchanged. The overview teardown check
+also completes RPC warmup so a filtered run exercises real status reads instead
+of only a warmup rejection. Theme assertions scope Paymaster rules rather than
+unrelated later file-dialog CSS. Native render checks exercise visible enabled
+controls, expand advanced Paymaster settings, sample the clipped popup viewport
+with an image-bounds assertion, and require selectable table items to actually
+be selected; read-only offer previews are not selection controls.
+
+Source `82c0b31493` fixes a real presentation issue: advanced privacy/selection
+dropdowns and numeric editors inherited blue or low-contrast styles. Both DD
+send themes now style native combo items, item views and numeric editors in
+the DD palette. Core monetary rules, wallet balances and RPC behavior are
+unchanged; palette and rendered-selection contrast checks remain in place.
+
+Local verification passed eleven focused DigiDollar widget functions, the full
+mint-record component selection (9 Qt passed rows) and full transaction-record
+component selection (12 passed rows). The related Paymaster offer-theme and
+automatic-offer-refresh functions also passed. Counts for individual functions
+include init/cleanup and must not be added as independent feature cases.
+Four test translation units and the generated Qt resource were compiled with
+MSVC 14.43/Qt 5.15.10 and linked in isolation with existing normal-build
+dependencies. Source/executable fingerprints and logs are retained locally;
+scoped whitespace checks passed. No complete product build or new full Qt run
+was performed. The large `DigiDollarWidgetTests` suite still needs an operator
+repeat; the already green Wave 19/table selections were not rerun locally.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
