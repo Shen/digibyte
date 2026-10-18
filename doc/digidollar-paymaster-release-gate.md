@@ -174,6 +174,34 @@ build. The intermittent Windows bind failures were absent in this run; their
 underlying cause remains unestablished. The next separate GUI gate is the full
 `PaymasterWidgetTests` suite from the runbook.
 
+## Operator Qt follow-up, 2026-10-18
+
+The supplied full `PaymasterWidgetTests` output reports 686 passed, 3 failed,
+0 skipped and 0 blacklisted in 1,245,421 ms, using static Qt 5.15.10/MSVC 2022
+on Windows 11. Other Qt suites were excluded by the suite filter. The failures
+were `paymasterSafetyControlsDefaultFailClosed`,
+`paymasterInjectedRpcCoversConfigurationWorkflows` and
+`paymasterClientOfferAutomaticRefresh`.
+
+Source `6cea92c461` updates the test fixtures only. The safety notice now explains
+customer-payment budgets separately from reserve capital/refill fees. The
+configuration workflow explicitly supplies a fresh mutation snapshot after an
+intentionally incomplete identity refresh and expects the complete operator
+refresh after saving safety limits. The countdown test requires the offer radio
+button to be the form's remembered focus and checks its preservation, rather
+than depending on Windows retaining global application activation. Card
+identity, geometry, selection, expiry and read-count assertions remain intact.
+
+The first two failures were reproduced against the existing Release executable;
+the global-focus failure did not recur in a standalone baseline run. All three
+corrected functions passed separately after compiling one test translation unit
+with MSVC 14.43 and linking an isolated Qt executable against the current normal
+build's objects/libraries. Each reports 3 passed including init/cleanup, so this
+is three feature checks, not nine independent scenarios. Scoped whitespace
+checks passed. No production GUI code changed. The complete Qt suite was not
+rerun; the full-suite GUI gate remains open. Style-property and Windows geometry
+warnings in the supplied output have not been classified as resolved.
+
 ## Earlier acceptance IDs: current interpretation
 
 The former V1 list is retained here as a review mapping, not a passed matrix.
