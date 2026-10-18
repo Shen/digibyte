@@ -250,24 +250,6 @@ std::map<uint256, int64_t> MintDescriptorNextIndexes(const wallet::CWallet& wall
     return indexes;
 }
 
-void TestOverviewWidget(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wallet)
-{
-    std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
-    DigiDollarMiniGUI mini_gui(node);
-    mini_gui.initModelForWallet(node, wallet);
-
-    DigiDollarOverviewWidget overviewWidget;
-    overviewWidget.setWalletModel(mini_gui.walletModel.get());
-    overviewWidget.setClientModel(mini_gui.clientModel.get());
-
-    QVERIFY(&overviewWidget != nullptr);
-
-    overviewWidget.updateView();
-    overviewWidget.updateBalance();
-    overviewWidget.updateOraclePrice();
-    overviewWidget.updateSystemHealth();
-}
-
 void TestMintWidget(interfaces::Node& node, const std::shared_ptr<wallet::CWallet>& wallet)
 {
     DigiDollarMiniGUI mini_gui(node);
@@ -528,7 +510,23 @@ void DigiDollarWidgetTests::overviewWidgetTests()
     m_node.setContext(&test.m_node);
 
     const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
-    TestOverviewWidget(m_node, wallet);
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    DigiDollarOverviewWidget overview;
+    overview.setWalletModel(mini_gui.walletModel.get());
+    overview.setClientModel(mini_gui.clientModel.get());
+    overview.updateView();
+    overview.updateBalance();
+    overview.updateOraclePrice();
+    overview.updateSystemHealth();
+
+    // These reads run on workers that use this fixture's NodeContext. Keep
+    // the widget/models and validation scheduler alive until their callbacks
+    // arrive; discarding a guarded callback does not cancel an in-flight RPC.
+    QTRY_VERIFY(!overview.m_balanceRefreshInFlight &&
+                !overview.m_recentRefreshInFlight &&
+                !overview.m_oracleRefreshInFlight &&
+                !overview.m_healthRefreshInFlight);
 }
 
 void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBreakdown()
