@@ -59,6 +59,10 @@ or a security certification. See the [release gate](../digidollar-paymaster-rele
 - Separate available/reserved/total balances, reasoned non-selectable offer
   cards, recommendation and announcement-expiry countdown. An offer can become
   unavailable before its displayed expiry.
+- Paymaster privacy/selection dropdowns and numeric editors on the DigiDollar
+  send page use the DD green palette in both themes, including native popup
+  rows and readable selected text. Ordinary DGB wallet controls retain their
+  existing theme.
 - Wallet-wide operating unlock until locking/unload/shutdown, with fresh unlock
   required after restart; no saved passphrase for automatic restart.
 - Guarded backup restoration, independent rollback checkpoint, reviewed adoption
