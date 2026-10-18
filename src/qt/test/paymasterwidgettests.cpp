@@ -1627,7 +1627,8 @@ void PaymasterWidgetTests::paymasterSafetyControlsDefaultFailClosed()
     QVERIFY(quote_total != nullptr);
     QVERIFY(client_transfer != nullptr);
     QVERIFY(client_day != nullptr);
-    QVERIFY(warning->text().contains(QStringLiteral("spending brake")));
+    QVERIFY(warning->text().contains(QStringLiteral("customer payments only")));
+    QVERIFY(warning->text().contains(QStringLiteral("Reserve capital and refill fees are separate")));
     QVERIFY(provider_status->text().contains(QStringLiteral("not configured")));
     QVERIFY(client_status->text().contains(QStringLiteral("not configured")));
     QCOMPARE(public_hour->text(), QStringLiteral("0.00000000"));
@@ -1834,6 +1835,9 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
         provider_fee_cap->findChild<QLineEdit*>();
     QVERIFY(provider_fee_cap_editor != nullptr);
     provider_fee_cap_editor->setText(QStringLiteral("1.00 DD"));
+    // The identity refresh intentionally returned no usable operator snapshot.
+    // Supply a current snapshot before testing the subsequent policy mutation.
+    tab.setPaymasterMutationSnapshotsAvailableForTesting(true, true, true);
     save_policy->setEnabled(true);
     save_policy->click();
     QCOMPARE(commands.value(0), QStringLiteral("setpaymasterpolicy"));
@@ -1850,7 +1854,8 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversConfigurationWorkflows()
     save_safety->click();
     QCOMPARE(commands.value(0), QStringLiteral("setpaymastersafetypolicy"));
     QVERIFY(parameters.at(0)[0].find_value("user_paid").isObject());
-    QCOMPARE(commands.value(1), QStringLiteral("getpaymastersafetystatus"));
+    // Saving refreshes the complete operator snapshot, including safety data.
+    QCOMPARE(commands.value(1), QStringLiteral("getpaymasteroperatorinfo"));
 
     commands.clear();
     parameters.clear();
@@ -9071,7 +9076,10 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         QCoreApplication::processEvents();
         const QRect geometry = cards->geometry();
         choice->setFocus();
-        QWidget* focus_before = QApplication::focusWidget();
+        // Check the form's remembered focus, which must survive refreshes even
+        // if Windows activates another application while the test is running.
+        QTRY_COMPARE(form.focusWidget(), static_cast<QWidget*>(choice));
+        QWidget* focus_before = form.focusWidget();
         const int seconds_before = remaining(countdown);
         const int reads_before = reads;
         const int deadline_interval = expiry->interval();
@@ -9082,7 +9090,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         QCOMPARE(expiry->interval(), deadline_interval); // Never renew the expiry.
         QCOMPARE(form.findChild<QWidget*>("paymasterOfferCard0"), original_card.data());
         QCOMPARE(cards->geometry(), geometry);
-        QCOMPARE(QApplication::focusWidget(), focus_before);
+        QCOMPARE(form.focusWidget(), focus_before);
         QVERIFY(choice->isChecked());
         QVERIFY(tick());
         QVERIFY(pending);
@@ -9099,7 +9107,7 @@ void PaymasterWidgetTests::paymasterClientOfferAutomaticRefresh()
         QCOMPARE(form.findChild<QWidget*>("paymasterExcludedOfferCard0"), original_excluded.data());
         QCOMPARE(cards->geometry(), geometry);
         QVERIFY(choice->isChecked());
-        QCOMPARE(QApplication::focusWidget(), focus_before);
+        QCOMPARE(form.focusWidget(), focus_before);
     }
     auto* refresh_offers = form.findChild<QPushButton*>("refreshPaymasterOffers");
     QVERIFY(refresh_offers && refresh_offers->isEnabled());
