@@ -1532,6 +1532,16 @@ BOOST_AUTO_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombston
     const uint256 txid = uint256S("03");
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::CONFIRMED,
                                           PendingPhase::NONE, txid, 104, error));
+    CheckPaymasterWriteFailures(m_wallet, 1,
+        [&](std::string& failure) { return store.PruneFinalSession(request_id, failure); },
+        [&] {
+            PaymentSession preserved;
+            BOOST_REQUIRE(store.GetSessionByRequestId(request_id, preserved));
+            BOOST_CHECK(preserved.state == SessionState::CONFIRMED);
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
+            LOCK(m_wallet.cs_wallet);
+            BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        });
     BOOST_REQUIRE(store.PruneFinalSession(request_id, error));
     BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, input));
     {
@@ -6972,12 +6982,134 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cancel_failures_and_lost_reply_preserve_inp
     BOOST_CHECK(!reopened_store.AbandonUnsignedClientSession(request_id, 106, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FAILED_SESSION_STILL_RESERVED");
     BOOST_CHECK(database.m_records == with_new_owner);
+    BOOST_CHECK(!reopened_store.PruneFinalSession(request_id, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_RESERVATION_SESSION_CONFLICT");
+    BOOST_CHECK(database.m_records == with_new_owner);
     for (const auto& input : inputs) {
         InputReservation reservation;
         LOCK(reopened.cs_wallet);
         BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterReservation(input, reservation));
         BOOST_CHECK_EQUAL(reservation.request_id, next_request);
         BOOST_CHECK(reopened.IsLockedCoin(input));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unsigned_client_cleanup_preserves_later_manual_locks)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440093";
+    const COutPoint transient_input{uint256S("f211"), 0};
+    const COutPoint persistent_input{uint256S("f212"), 1};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f213"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+        {{transient_input, ReservationRole::USER_DD}, {persistent_input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error), error);
+    BOOST_REQUIRE_MESSAGE(store.AbandonUnsignedClientSession(request_id, 102, error), error);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(!m_wallet.IsLockedCoin(transient_input));
+        BOOST_REQUIRE(!m_wallet.IsLockedCoin(persistent_input));
+        BOOST_REQUIRE(m_wallet.LockCoin(transient_input));
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockCoin(persistent_input, &batch));
+    }
+    const auto check_manual_locks = [&] {
+        BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, transient_input));
+        BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, persistent_input));
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(m_wallet.IsLockedCoin(transient_input));
+        BOOST_CHECK(m_wallet.IsLockedCoin(persistent_input));
+    };
+    const auto check_reloaded_locks = [&] {
+        wallet::CWallet restarted{m_node.chain.get(), "manual-lock-cleanup-restart",
+                                 DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+        // Only the explicitly persistent manual lock survives a real load.
+        LOCK(restarted.cs_wallet);
+        BOOST_CHECK(!restarted.IsLockedCoin(transient_input));
+        BOOST_CHECK(restarted.IsLockedCoin(persistent_input));
+    };
+
+    auto& database = GetMockableDatabase(m_wallet);
+    const MockableData before_retry{database.m_records};
+    database.FailWriteAt(0);
+    const bool repeated = store.AbandonUnsignedClientSession(request_id, 103, error);
+    const size_t repeated_writes = database.m_write_count;
+    database.ClearFailureInjection();
+    BOOST_REQUIRE_MESSAGE(repeated, error);
+    BOOST_CHECK_EQUAL(repeated_writes, 0U);
+    BOOST_CHECK(database.m_records == before_retry);
+    check_manual_locks();
+    check_reloaded_locks();
+
+    // Pruning may remove historical records, but no longer owns these locks.
+    CheckPaymasterWriteFailures(m_wallet, 1,
+        [&](std::string& failure) { return store.PruneFinalSession(request_id, failure); },
+        check_manual_locks);
+    BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(request_id, error), error);
+    check_manual_locks();
+    check_reloaded_locks();
+    BOOST_CHECK(store.CreateOrJoinSession(request_id, uint256S("f213"),
+        FeeMode::PAYMASTER, 104, session, error) == CreatePaymasterSessionResult::FINAL_TOMBSTONE);
+}
+
+BOOST_AUTO_TEST_CASE(unsigned_client_cleanup_rejects_unreadable_reservations)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440094";
+    const COutPoint input{uint256S("f221"), 0};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f222"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+        {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error), error);
+    InputReservation reservation;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterReservation(input, reservation));
+    }
+    BOOST_REQUIRE_MESSAGE(store.AbandonUnsignedClientSession(request_id, 102, error), error);
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+    }
+
+    DataStream key_stream;
+    key_stream << std::make_pair(DBKeys::PAYMASTER_RESERVATION, input);
+    const SerializeData key{key_stream.begin(), key_stream.end()};
+    auto& database = GetMockableDatabase(m_wallet);
+    for (const bool unknown_version : {false, true}) {
+        BOOST_TEST_CONTEXT("unknown reservation version " << unknown_version) {
+            CDataStream value{SER_DISK, CLIENT_VERSION};
+            if (unknown_version) {
+                InputReservation future{reservation};
+                future.version = InputReservation::CURRENT_VERSION + 1;
+                value << future;
+            } else {
+                // A present, truncated current record produces READ_ERROR.
+                value << InputReservation::CURRENT_VERSION;
+            }
+            database.m_records[key] = SerializeData{value.begin(), value.end()};
+            const MockableData before{database.m_records};
+            const char* expected_error = unknown_version
+                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=InputReservation found=2 expected=1"
+                : "PAYMASTER_INVALID_PERSISTED_RESERVATION";
+            BOOST_CHECK(!store.AbandonUnsignedClientSession(request_id, 103, error));
+            BOOST_CHECK_EQUAL(error, expected_error);
+            BOOST_CHECK(database.m_records == before);
+            BOOST_CHECK(!store.PruneFinalSession(request_id, error));
+            BOOST_CHECK_EQUAL(error, expected_error);
+            BOOST_CHECK(database.m_records == before);
+            LOCK(m_wallet.cs_wallet);
+            BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        }
     }
 }
 

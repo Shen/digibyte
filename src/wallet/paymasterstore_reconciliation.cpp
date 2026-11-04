@@ -1226,13 +1226,10 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
     // valid replay. Keeping a permanent tombstone for each public request
     // would only move the unbounded storage growth to another record type.
     if (!prune_unsigned && !batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    if (!session.provider_side) {
-        for (const auto& outpoint : session.user_inputs) {
-            if ((reservations_to_erase.count(outpoint) != 0 &&
-                 !batch.ErasePaymasterReservation(outpoint)) ||
-                !batch.EraseLockedUTXO(outpoint)) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-            }
+    for (const COutPoint& outpoint : reservations_to_erase) {
+        if (!batch.ErasePaymasterReservation(outpoint) ||
+            !batch.EraseLockedUTXO(outpoint)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
     for (const PrunableAttempt& records : attempts) {
@@ -1289,10 +1286,8 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         return false;
     }
     pruned = true;
-    if (!session.provider_side) {
-        for (const auto& outpoint : session.user_inputs)
-            m_wallet.UnlockCoin(outpoint);
-    }
+    for (const COutPoint& outpoint : reservations_to_erase)
+        m_wallet.UnlockCoin(outpoint);
     return true;
 }
 

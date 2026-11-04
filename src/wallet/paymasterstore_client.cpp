@@ -1705,14 +1705,21 @@ bool PaymasterStore::AbandonUnsignedClientSession(const std::string& request_id,
     if (session.state == SessionState::FAILED) {
         for (const COutPoint& outpoint : session.user_inputs) {
             InputReservation reservation;
-            if (batch.ReadPaymasterReservation(outpoint, reservation)) {
+            const DatabaseReadStatus status =
+                batch.ReadPaymasterReservationWithStatus(outpoint, reservation);
+            if (status == DatabaseReadStatus::FOUND) {
                 error = "PAYMASTER_FAILED_SESSION_STILL_RESERVED";
                 return false;
             }
+            if (status != DatabaseReadStatus::NOT_FOUND) {
+                error = PersistedReadError(
+                    status, "InputReservation", reservation,
+                    "PAYMASTER_RESERVATION_NOT_FOUND",
+                    "PAYMASTER_INVALID_PERSISTED_RESERVATION");
+                return false;
+            }
         }
-        for (const COutPoint& outpoint : session.user_inputs) {
-            m_wallet.UnlockCoin(outpoint);
-        }
+        // Historical input bindings do not own a later manual coin lock.
         return true;
     }
     if ((session.state != SessionState::CREATED &&
