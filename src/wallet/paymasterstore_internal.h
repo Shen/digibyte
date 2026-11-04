@@ -67,7 +67,8 @@ bool PrepareProviderTransferFinanceEvent(WalletBatch& batch,
                                          const ProviderAttempt& attempt,
                                          const ProviderCommitRecord& commit,
                                          const uint256& expected_genesis,
-                                         ProviderFinanceLedger& ledger,
+                                         ProviderFinanceMetadata& ledger,
+                                         ProviderFinanceEvent& event,
                                          bool& changed,
                                          std::string& error);
 bool HasAuthorizationRisk(SessionState state);

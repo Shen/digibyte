@@ -178,6 +178,7 @@ DIGIBYTE_CORE_H = \
   paymaster/recovery.h \
   paymaster/provider.h \
   paymaster/finance.h \
+  paymaster/error.h \
   paymaster/protocol.h \
   paymaster/reputation.h \
   paymaster/sponsorship.h \
@@ -398,6 +399,18 @@ DIGIBYTE_CORE_H = \
   wallet/walletdb.h \
   wallet/paymasterpsbt.h \
   wallet/paymastercheckpoint.h \
+  wallet/paymasterfinance.h \
+  wallet/paymasterfinancecache.h \
+  wallet/paymasterapplication.h \
+  wallet/paymasterclientview.h \
+  wallet/paymasterrecoveryservice.h \
+  wallet/paymasterproviderops.h \
+  wallet/paymasterconfiguration.h \
+  wallet/paymasterintegration.h \
+  wallet/paymasterpool.h \
+  wallet/paymasterclient.h \
+  wallet/paymasterservice.h \
+  wallet/paymasterapplication_internal.h \
   wallet/paymasteridentity.h \
   wallet/paymasterprovider.h \
   wallet/paymasterstore.h \
@@ -573,7 +586,6 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/rpc/paymaster.cpp \
   wallet/rpc/paymaster_client.cpp \
   wallet/rpc/paymaster_discovery.cpp \
-  wallet/rpc/paymaster_integration.cpp \
   wallet/rpc/paymaster_send.cpp \
   wallet/rpc/paymaster_processing.cpp \
   wallet/rpc/paymaster_provider.cpp \
@@ -584,6 +596,18 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/wallet.cpp \
   wallet/walletdb.cpp \
   wallet/paymastercheckpoint.cpp \
+  wallet/paymasterfinance.cpp \
+  wallet/paymasterapplication.cpp \
+  wallet/paymastertransactions.cpp \
+  wallet/paymasterprocessing.cpp \
+  wallet/paymasterclientview.cpp \
+  wallet/paymasterrecoveryservice.cpp \
+  wallet/paymasterproviderops.cpp \
+  wallet/paymasterconfiguration.cpp \
+  wallet/paymasterintegration.cpp \
+  wallet/paymasterpool.cpp \
+  wallet/paymasterclient.cpp \
+  wallet/paymasterservice.cpp \
   wallet/paymasterdb.cpp \
   wallet/paymasterpsbt.cpp \
   wallet/paymasteridentity.cpp \

@@ -1446,7 +1446,7 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
             {"period": "year", "include_events": False},
         )
         assert_raises_rpc_error(
-            -8, "PAYMASTER_INVALID_FINANCE_CURSOR",
+            -8, "PAYMASTER_FINANCE_CURSOR_INVALID",
             wallet.getpaymasterfinancestatus,
             {"period": "all", "include_events": True,
              "cursor": "00" * 32},

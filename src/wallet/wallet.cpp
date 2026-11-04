@@ -78,6 +78,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymastersessionindex.h>
+#include <wallet/paymasterfinancecache.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -113,6 +114,7 @@ CWallet::CWallet(interfaces::Chain* chain, const std::string& name, std::unique_
 CWallet::~CWallet()
 {
     ForgetPaymasterSessionIndex(GetDatabase());
+    ForgetPaymasterFinanceCache(GetDatabase());
     // Should not have slots connected at this point.
     assert(NotifyUnload.empty());
 }

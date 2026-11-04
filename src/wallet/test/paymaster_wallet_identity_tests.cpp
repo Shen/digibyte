@@ -1090,6 +1090,63 @@ BOOST_AUTO_TEST_CASE(finance_v2_large_history_uses_bounded_range_reads)
     BOOST_CHECK_EQUAL(report.events.front().created_at, 100082);
 }
 
+BOOST_AUTO_TEST_CASE(finance_report_continuations_invalidate_on_wallet_changes_and_errors)
+{
+    class RangeBatch final : public MockableBatch {
+        bool& m_block_ranges;
+    public:
+        RangeBatch(MockableData& rows, bool& pass, bool& block) : MockableBatch(rows, pass), m_block_ranges{block} {}
+        std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override {
+            return m_block_ranges ? nullptr : MockableBatch::GetNewPrefixCursor(prefix);
+        }
+        std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override {
+            return m_block_ranges ? nullptr : MockableBatch::GetNewRangeCursor(begin, end);
+        }
+    };
+    class RangeDatabase final : public MockableDatabase {
+    public:
+        bool block_ranges{false};
+        void IncrementUpdateCounter() override { ++nUpdateCounter; }
+        std::unique_ptr<DatabaseBatch> MakeBatch(bool = true) override {
+            return std::make_unique<RangeBatch>(m_records, m_pass, block_ranges);
+        }
+    };
+    auto database = std::make_unique<RangeDatabase>();
+    auto& rows = *database;
+    CWallet wallet{m_node.chain.get(), "finance-report-cache", std::move(database)};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    std::string error;
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(*m_node.chain->getHeight(), m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+        ProviderIdentityRecord identity;
+        BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Finance report", 1000, identity, error));
+    }
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderFinanceReport(wallet, false, error), error);
+    rows.block_ranges = true;
+    BOOST_CHECK(ReconcileProviderFinanceReport(wallet, true, error)); // Header-only continuation.
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{rows}.WriteName("cache-fixture", "changed"));
+    }
+    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // A wallet write invalidates it.
+    BOOST_CHECK(!error.empty());
+    rows.block_ranges = false;
+    BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, true, error)); // Failed rebuild was not cached.
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(1, uint256S("1234"));
+    }
+    rows.block_ranges = true;
+    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // Reorg/tip also invalidates it.
+    rows.block_ranges = false;
+    BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, false, error));
+    rows.block_ranges = true;
+    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, false, error)); // First pages always reconcile.
+}
+
 BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
 {
     {
@@ -3739,19 +3796,14 @@ BOOST_AUTO_TEST_CASE(automatic_submit_defers_before_wallet_or_index_wait)
     {
         LOCK(m_wallet.cs_wallet);
         // Model a new block arriving after the outer submit handler checked
-        // readiness. The nested handler must defer before parsing or signing.
+        // readiness. The native finalization service must defer before validating or signing.
         m_wallet.SetLastBlockProcessed(0, uint256::ONE);
     }
-    JSONRPCRequest request;
-    request.context = &context;
-    request.strMethod = paymaster_rpc::internal::INTERNAL_PAYMASTER_SERVICE_METHOD;
-    request.params = UniValue{UniValue::VARR};
-    request.params.push_back("invalid-psbt-must-not-be-processed");
     const auto before = GetMockableDatabase(m_wallet).m_records;
-    BOOST_CHECK_EXCEPTION(submitpaymasterdigidollar().HandleRequest(request), UniValue,
-        [](const UniValue& error) {
-            return error.find_value("code").getInt<int>() == -4 &&
-                   error.find_value("message").get_str() == "PAYMASTER_PROVIDER_SYNCING";
+    BOOST_CHECK_EXCEPTION(
+        paymaster_app::SubmitPaymasterTransaction(m_wallet, PartiallySignedTransaction{}, paymaster_app::ExecutionMode::AUTOMATIC),
+        ApplicationError, [](const ApplicationError& error) {
+            return error.kind == ErrorKind::WALLET && error.code == "PAYMASTER_PROVIDER_SYNCING";
         });
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
 }

@@ -6,6 +6,7 @@
 
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <paymaster/finance.h>
 
 #include <chainparams.h>
 #include <digidollar/digidollar.h>
@@ -345,11 +346,12 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         batch.ReadPaymasterPolicy(provider_policy)
             ? std::optional<ProviderPolicy>{provider_policy}
             : std::nullopt;
-    ProviderFinanceLedger finance_ledger;
+    ProviderFinanceMetadata finance_ledger;
+    ProviderFinanceEvent finance_event;
     bool finance_changed{false};
     if (!PrepareProviderTransferFinanceEvent(
             batch, identity, attempt, commit, expected_genesis,
-            finance_ledger, finance_changed, error)) {
+            finance_ledger, finance_event, finance_changed, error)) {
         return false;
     }
 
@@ -410,7 +412,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
             (pool_changed &&
              !batch.WritePaymasterProviderPool(pool_entries)) ||
             (finance_changed &&
-             !batch.WritePaymasterFinanceLedger(finance_ledger))) {
+             !batch.WritePaymasterFinanceEvents(finance_ledger, {finance_event}, error))) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
         if (!batch.TxnCommit()) {
@@ -523,7 +525,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     if (finance_changed &&
-        !batch.WritePaymasterFinanceLedger(finance_ledger)) {
+        !batch.WritePaymasterFinanceEvents(finance_ledger, {finance_event}, error)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     attempt.state = AttemptState::FINAL_COMMITTED;
