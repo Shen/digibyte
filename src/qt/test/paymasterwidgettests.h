@@ -178,6 +178,12 @@ private Q_SLOTS:
     void paymasterAsyncShutdownDrainsWorkers();
     void paymasterAsyncPreservesStructuredErrors();
     void paymasterSendFailureDecisions();
+    void paymasterSendControllerSnapshotBinding();
+    void paymasterSendControllerClosureFreshness();
+    void paymasterSendControllerClockAndEffects();
+    void paymasterSendControllerCancellationAndWalletChange();
+    void paymasterSendControllerAuthorizationAndLostReply();
+    void paymasterSendControllerRecoveryReview();
     void paymasterClientDatabaseReadErrorIsActionable();
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();

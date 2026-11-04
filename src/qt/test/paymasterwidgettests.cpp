@@ -15148,7 +15148,7 @@ void PaymasterWidgetTests::paymasterWaitsForFullHistory()
     panel->setWalletModel(gui.walletModel.get());
     const bool provider_wait = panel->findChild<QLabel*>("paymasterOperatorHeadline")->text().contains("history check");
     const bool no_early_calls = sends == 0 && offer_reads == before && provider_reads == 0;
-    const bool no_request = client->m_paymasterRequestId.isEmpty() && !client->m_paymasterActiveSendStarted.isValid();
+    const bool no_request = client->m_send.m_state.requestId.isEmpty() && !client->m_send.m_state.activeSendStarted.isValid();
     const bool explanation = client->m_historyStatus->text().contains("No Paymaster payment has been started");
     mode->setCurrentIndex(mode->findData(QStringLiteral("dgb")));
     const bool native_unaffected = !client->historyBlocksPreparation();
@@ -15177,7 +15177,7 @@ void PaymasterWidgetTests::paymasterWaitsForFullHistory()
     QVERIFY(client->m_historyStatus->isHidden());
     QCOMPARE(history_replies, unload_scan_model ? 0 : 2);
     QVERIFY(history_ok);
-    QVERIFY(client->m_paymasterRequestId.isEmpty());
+    QVERIFY(client->m_send.m_state.requestId.isEmpty());
 }
 
 void PaymasterWidgetTests::paymasterClientPreparationCancellation_data()
@@ -15287,19 +15287,19 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation()
     if (outcome == "own_dgb" || outcome == "approved") {
         // The control cannot turn an ordinary spend or prior approval into an
         // unsigned cancellation, even if invoked programmatically.
-        if (outcome == "approved") client->m_paymasterAuthorizationCommitment = QString(64, 'c');
+        if (outcome == "approved") client->m_send.m_state.authorizationCommitment = QString(64, 'c');
         else {
             UniValue params{UniValue::VARR};
-            for (size_t i = 0; i < 6; ++i) params.push_back(client->m_paymasterActiveSendParams[i]);
-            auto options = client->m_paymasterActiveSendParams[6];
+            for (size_t i = 0; i < 6; ++i) params.push_back(client->m_send.m_state.activeSendParams[i]);
+            auto options = client->m_send.m_state.activeSendParams[6];
             options.pushKV("fee_mode", "dgb");
             params.push_back(options);
-            client->m_paymasterActiveSendParams = params;
+            client->m_send.m_state.activeSendParams = params;
         }
         client->updatePaymasterFocusMode();
         QVERIFY(cancel->isHidden());
         client->requestPaymasterPreparationCancellation();
-        QVERIFY(!client->m_paymasterPreparationCancelRequested);
+        QVERIFY(!client->m_send.m_state.preparationCancelRequested);
         QVERIFY(actions.isEmpty());
         form.setWalletModel(nullptr);
         pending_send(prepared(), {});
@@ -15323,11 +15323,11 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation()
     cancel->click();
     cancel->click(); // Repeated clicks must not enqueue another mutation.
     QVERIFY(!client->m_paymasterPollTimer->isActive());
-    QVERIFY(client->m_paymasterActiveSendParams.isNull());
+    QVERIFY(client->m_send.m_state.activeSendParams.isNull());
     QVERIFY(address->isReadOnly());
     if (!between_polls) {
         QVERIFY(actions.isEmpty()); // In particular, no premature NOT_FOUND read.
-        QVERIFY(client->m_paymasterPreparationCancelRequested);
+        QVERIFY(client->m_send.m_state.preparationCancelRequested);
         QVERIFY(!cancel->isEnabled());
         QVERIFY(form.findChild<QLabel*>("paymasterSessionNextStep")->text().contains("Cancellation requested"));
         if (outcome == "wallet_switch") {
@@ -15358,20 +15358,20 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation()
     QVERIFY(!client->isBusy());
     if (outcome == "wallet_switch") {
         QVERIFY(actions.isEmpty());
-        QVERIFY(client->m_paymasterRequestId.isEmpty());
-        QVERIFY(!client->m_paymasterPreparationCancelRequested);
+        QVERIFY(client->m_send.m_state.requestId.isEmpty());
+        QVERIFY(!client->m_send.m_state.preparationCancelRequested);
         return;
     }
     const bool protected_outcome = outcome == "signed_elsewhere" || outcome == "status_error" || outcome == "untrusted_absence_text" ||
         outcome == "malformed_status" || outcome == "known_session_missing" || outcome == "refused" || outcome == "privacy";
     if (protected_outcome) {
-        QCOMPARE(client->m_paymasterRequestId, request_id);
+        QCOMPARE(client->m_send.m_state.requestId, request_id);
         QVERIFY(address->isReadOnly());
-        QVERIFY(client->m_paymasterActiveSendParams.isNull());
+        QVERIFY(client->m_send.m_state.activeSendParams.isNull());
         QVERIFY(!client->m_paymasterPollTimer->isActive());
         QCOMPARE(actions.count("abandon_unsigned"), outcome == "refused" ? 1 : 0);
     } else {
-        QVERIFY(client->m_paymasterRequestId.isEmpty());
+        QVERIFY(client->m_send.m_state.requestId.isEmpty());
         QVERIFY(!address->isReadOnly());
         QCOMPARE(address->text(), recipient);
         QCOMPARE(amount->text(), QStringLiteral("3.25"));
@@ -15409,16 +15409,16 @@ void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()
         else if (command == "senddigidollar") pending = std::move(callback);
     });
     form.setWalletModel(gui.walletModel.get());
-    client->m_paymasterRequestId = QStringLiteral("00000000-0000-4000-8000-000000000001");
+    client->m_send.m_state.requestId = QStringLiteral("00000000-0000-4000-8000-000000000001");
     client->executePaymasterTransfer(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"), 325, false);
     QVERIFY(pending);
-    QVERIFY(!client->m_paymasterActiveSendStarted.isValid());
+    QVERIFY(!client->m_send.m_state.activeSendStarted.isValid());
     QVERIFY(!client->activePaymasterSendExpired());
     auto result = PaymasterAuthorizationResult(false, "", "CREATED", "none");
-    result.pushKV("request_id", client->m_paymasterRequestId.toStdString());
+    result.pushKV("request_id", client->m_send.m_state.requestId.toStdString());
     pending(result, {});
     QVERIFY2(warning.isEmpty(), qPrintable(warning));
-    QVERIFY(client->m_paymasterActiveSendStarted.isValid());
+    QVERIFY(client->m_send.m_state.activeSendStarted.isValid());
     QVERIFY(!client->activePaymasterSendExpired());
     client->m_paymasterPollTimer->stop();
 
@@ -15426,12 +15426,12 @@ void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()
     gui.walletModel->getDigiDollarTransactionHistoryAsync(0, 0, [&](UniValue, QString error) {
         callback_received = error.isEmpty();
     });
-    QVERIFY(client->m_paymasterHistoryPausedAt >= 0);
-    const QString request = client->m_paymasterRequestId;
+    QVERIFY(client->m_send.m_state.historyPausedAt >= 0);
+    const QString request = client->m_send.m_state.requestId;
     client->pollPaymasterSession();
-    QCOMPARE(client->m_paymasterRequestId, request);
+    QCOMPARE(client->m_send.m_state.requestId, request);
     QTRY_VERIFY_WITH_TIMEOUT(callback_received, 5000);
-    QCOMPARE(client->m_paymasterHistoryPausedAt, qint64{-1});
+    QCOMPARE(client->m_send.m_state.historyPausedAt, qint64{-1});
     QVERIFY(!client->activePaymasterSendExpired());
     client->m_paymasterPollTimer->stop();
 }
@@ -15476,7 +15476,7 @@ void PaymasterWidgetTests::paymasterHistoryFailureCanBeRetried()
     client->send(recipient, 325);
     QCOMPARE(sends, 0);
     QCOMPARE(offer_reads, 0);
-    QVERIFY(client->m_paymasterRequestId.isEmpty());
+    QVERIFY(client->m_send.m_state.requestId.isEmpty());
     wallet->EnsureDDWallet();
     client->refreshPaymasterOffers();
     QTRY_VERIFY_WITH_TIMEOUT(client->isReady() && client->hasCurrentPaymasterOffer(), 5000);
@@ -15484,7 +15484,7 @@ void PaymasterWidgetTests::paymasterHistoryFailureCanBeRetried()
     QVERIFY(offer_reads > 0);
     QVERIFY(client->m_historyStatus->isHidden());
     QCOMPARE(sends, 0);
-    QVERIFY(client->m_paymasterRequestId.isEmpty());
+    QVERIFY(client->m_send.m_state.requestId.isEmpty());
 }
 
 void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
@@ -15516,12 +15516,12 @@ void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
     QVERIFY(client->updatePaymasterSessionView(snapshot));
     QVERIFY(client->m_paymasterPrimaryButton->text().contains("Prepare return"));
     // A live recovery wait expires without granting a fresh signature or retry.
-    client->m_paymasterRecoveryActive = true;
-    client->m_paymasterActiveRecoveryParams = UniValue{UniValue::VARR};
-    client->m_paymasterActiveRecoveryStarted.invalidate();
+    client->m_send.m_state.recoveryActive = true;
+    client->m_send.m_state.activeRecoveryParams = UniValue{UniValue::VARR};
+    client->m_send.m_state.activeRecoveryStarted.invalidate();
     client->pollPaymasterSession();
     QVERIFY(client->m_paymasterPollTimer->isActive());
-    QVERIFY(!client->m_paymasterRecoveryActive);
+    QVERIFY(!client->m_send.m_state.recoveryActive);
     QVERIFY(actions.isEmpty());
     client->pollPaymasterSession();
     QCOMPARE(actions, QStringList{"refresh"});
@@ -15530,14 +15530,14 @@ void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
     QCOMPARE(actions, QStringList({"refresh", "refresh"}));
     QVERIFY(client->m_paymasterPollTimer->isActive());
     QVERIFY(client->m_paymasterNotice->text().contains("temporarily unavailable"));
-    QCOMPARE(client->m_paymasterArtifact, QStringLiteral("user_psbt"));
-    QVERIFY(!client->m_paymasterRequestId.isEmpty());
+    QCOMPARE(client->m_send.m_state.artifact, QStringLiteral("user_psbt"));
+    QVERIFY(!client->m_send.m_state.requestId.isEmpty());
     unavailable = false;
     snapshot = PaymasterSessionView("FAILED", "user_psbt", "USER_SIGNED");
     client->pollPaymasterSession();
     QVERIFY(client->m_paymasterPollTimer->isActive());
     QCOMPARE(actions.back(), QStringLiteral("refresh"));
-    QCOMPARE(client->m_paymasterArtifact, QStringLiteral("user_psbt"));
+    QCOMPARE(client->m_send.m_state.artifact, QStringLiteral("user_psbt"));
 }
 
 void PaymasterWidgetTests::paymasterAsyncLimitsAndCoalescing()
@@ -15636,6 +15636,286 @@ void PaymasterWidgetTests::paymasterAsyncPreservesStructuredErrors()
     QCOMPARE(PaymasterQt::StableCode(observed.error), QStringLiteral("PAYMASTER_COMMIT_UNKNOWN"));
     QCOMPARE(PaymasterQt::Disposition(observed.error), QStringLiteral("reconcile"));
     QCOMPARE(observed.error.message, QStringLiteral("An operator-facing message"));
+}
+
+void PaymasterWidgetTests::paymasterSendControllerSnapshotBinding()
+{
+    PaymasterQt::SendController controller;
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.authoritative = true;
+    snapshot.request_id = QStringLiteral("first");
+    snapshot.session_id = QString(64, '1');
+    snapshot.state = QStringLiteral("AUTHORIZED");
+    snapshot.artifact = QStringLiteral("user_psbt");
+    snapshot.recipient = QStringLiteral("recipient");
+    snapshot.requested_amount_cents = 123;
+    snapshot.allowed_actions_known = true;
+    snapshot.allowed_actions = QStringList{QStringLiteral("refresh"), QStringLiteral("retry_same")};
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(controller.allows(QStringLiteral("retry_same")));
+    // A restored snapshot can advertise a user action, never a live timer job.
+    QCOMPARE(controller.advance({true, false}), PaymasterQt::SendController::Effect::OBSERVE);
+    QString error;
+    auto different = snapshot;
+    different.request_id = QStringLiteral("other");
+    different.requested_amount_cents = 999;
+    QVERIFY(!controller.applySnapshot(different, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(controller.m_state.amountCents, CAmount{123});
+    QCOMPARE(controller.m_state.requestId, snapshot.request_id);
+    different = snapshot;
+    different.recipient = QStringLiteral("different recipient");
+    QVERIFY(!controller.applySnapshot(different));
+    snapshot.allowed_actions.clear();
+    snapshot.allowed_actions_known = false;
+    snapshot.artifact.clear();
+    snapshot.requested_amount_cents = -1;
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(!controller.allows(QStringLiteral("retry_same")));
+    QVERIFY(controller.m_state.artifact.isEmpty());
+    QCOMPARE(controller.m_state.amountCents, CAmount{0});
+}
+
+void PaymasterWidgetTests::paymasterSendControllerClosureFreshness()
+{
+    using Controller = PaymasterQt::SendController;
+    Controller controller;
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.request_id = QStringLiteral("completed-request");
+    snapshot.session_id = QString(64, '1');
+    snapshot.state = QStringLiteral("CONFIRMED");
+    snapshot.transaction_id = QString(64, '2');
+    snapshot.confirmation_state = QStringLiteral("payment_confirmed");
+    QVERIFY(controller.applySnapshot(snapshot));
+    UniValue paid{UniValue::VOBJ};
+    paid.pushKV("status", "success");
+    paid.pushKV("payment_confirmed", true);
+    paid.pushKV("payment_cents", 100);
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
+    controller.markNoticeShown();
+    // A repeated valid observation still proves closure without another UI notice.
+    QVERIFY(controller.applySnapshot(snapshot));
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::ALREADY_SHOWN);
+    snapshot.state = QStringLiteral("PENDING_PROVIDER");
+    snapshot.confirmation_state = QStringLiteral("unconfirmed");
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(!controller.clearAfterClosure());
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::NONE);
+    QVERIFY(!controller.clearAfterClosure());
+    snapshot.state = QStringLiteral("CONFIRMED");
+    snapshot.confirmation_state = QStringLiteral("payment_confirmed");
+    QVERIFY(controller.applySnapshot(snapshot));
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
+    UniValue malformed = paid;
+    malformed.pushKV("payment_confirmed", false);
+    QCOMPARE(controller.completion(malformed).kind, Controller::CompletionKind::PAYMENT_UNVERIFIED);
+    QVERIFY(!controller.clearAfterClosure());
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
+    QVERIFY(controller.clearAfterClosure());
+
+    PaymasterQt::RpcError absent;
+    absent.failed = true;
+    absent.data = UniValue{UniValue::VOBJ};
+    absent.data.pushKV("paymaster_code", "PAYMASTER_SESSION_NOT_FOUND");
+    absent.data.pushKV("session_absent", true);
+    QVERIFY(controller.beginTransfer(QStringLiteral("unpersisted-request"), QStringLiteral("standard")));
+    QVERIFY(controller.observeAbsence(absent));
+    snapshot.request_id = QStringLiteral("unpersisted-request");
+    snapshot.state = QStringLiteral("INPUTS_RESERVED");
+    snapshot.confirmation_state.clear();
+    snapshot.transaction_id.clear();
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(!controller.clearAfterClosure());
+    QVERIFY(!controller.observeAbsence(absent));
+
+    // Absence observed before a later mutation cannot justify forgetting its
+    // request after a lost response, even without another persisted snapshot.
+    for (bool continuation : {false, true}) {
+        Controller fresh;
+        QVERIFY(fresh.beginTransfer(QStringLiteral("late-request"), QStringLiteral("standard")));
+        QVERIFY(fresh.observeAbsence(absent));
+        if (continuation) fresh.beginContinuation();
+        else fresh.startPreparation(UniValue{UniValue::VARR});
+        QVERIFY(!fresh.clearAfterClosure());
+    }
+}
+
+void PaymasterWidgetTests::paymasterSendControllerClockAndEffects()
+{
+    using Controller = PaymasterQt::SendController;
+    qint64 now{1000};
+    Controller controller{[&] { return now; }};
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.request_id = QStringLiteral("live-request");
+    snapshot.session_id = QString(64, '2');
+    snapshot.state = QStringLiteral("INPUTS_RESERVED");
+    snapshot.artifact = QStringLiteral("none");
+    QVERIFY(controller.applySnapshot(snapshot));
+    UniValue params{UniValue::VARR};
+    for (int i = 0; i < 6; ++i) params.push_back(i);
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("request_id", "live-request");
+    options.pushKV("prepare_only", true);
+    params.push_back(options);
+    const auto token = controller.startPreparation(params);
+    now += 300000; // A queued wallet access does not consume transport time.
+    QVERIFY(!controller.activeSendExpired());
+    QVERIFY(controller.receivePreparation(token, true));
+    QVERIFY(!controller.receivePreparation(token, true));
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::CONTINUE);
+    now += 110000;
+    controller.historyWaiting(true);
+    QCOMPARE(controller.advance({true, true}), Controller::Effect::WAIT_HISTORY);
+    now += 300000;
+    QVERIFY(!controller.activeSendExpired());
+    controller.historyWaiting(false);
+    now += 10000;
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::CLOSE_UNSIGNED);
+    controller.stop();
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    QCOMPARE(controller.nextPoll(true), 1500);
+    QCOMPARE(controller.nextPoll(false), 3000);
+    for (int i = 0; i < 8; ++i) QVERIFY(controller.nextPoll(false) <= 15000);
+    QCOMPARE(controller.nextPoll(false), 15000);
+    snapshot.unsigned_closed = true;
+    QVERIFY(controller.applySnapshot(snapshot));
+    QCOMPARE(controller.nextPoll(false), 0);
+}
+
+void PaymasterWidgetTests::paymasterSendControllerCancellationAndWalletChange()
+{
+    using Controller = PaymasterQt::SendController;
+    Controller controller;
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.request_id = QStringLiteral("cancel-request");
+    snapshot.session_id = QString(64, '3');
+    snapshot.state = QStringLiteral("AWAITING_USER_SIGNATURE");
+    snapshot.artifact = QStringLiteral("none");
+    QVERIFY(controller.applySnapshot(snapshot));
+    UniValue params{UniValue::VARR};
+    for (int i = 0; i < 6; ++i) params.push_back(i);
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("request_id", "cancel-request");
+    options.pushKV("prepare_only", true);
+    options.pushKV("fee_mode", "paymaster");
+    params.push_back(options);
+    const auto token = controller.startPreparation(params);
+    QVERIFY(controller.requestCancellation());
+    // A delayed exact-offer reply cannot reverse the user's cancellation.
+    QVERIFY(!controller.acceptReview(QString(64, 'a'), token.wallet));
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    controller.walletChanged();
+    QVERIFY(!controller.accepts(token));
+    QVERIFY(!controller.acceptReview(QString(64, 'a'), token.wallet));
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::NONE);
+    QCOMPARE(controller.nextPoll(true), 0);
+    QVERIFY(controller.m_state.authorizationCommitment.isEmpty());
+}
+
+void PaymasterWidgetTests::paymasterSendControllerAuthorizationAndLostReply()
+{
+    using Controller = PaymasterQt::SendController;
+    Controller controller;
+    QVERIFY(controller.beginTransfer(QStringLiteral("00000000-0000-4000-8000-000000000001"), QStringLiteral("high")));
+    controller.bindInput(QStringLiteral("recipient"), 100);
+    PaymasterConfirmationSelection selection;
+    selection.provider_id = QString(64, '1');
+    selection.offer_id = QString(64, '2');
+    selection.policy_hash = QString(64, '3');
+    selection.authorization_commitment = QString(64, '4');
+    selection.funding_model = QStringLiteral("user_paid");
+    selection.recipient = QStringLiteral("recipient");
+    selection.payment_cents = 100;
+    selection.service_fee_cents = 1;
+    selection.user_total_cents = 101;
+    selection.expires_at = 2000;
+    UniValue reply{UniValue::VOBJ};
+    reply.pushKV("authorization_commitment", selection.authorization_commitment.toStdString());
+    reply.pushKV("authorization_required", true);
+    QCOMPARE(controller.preparedReply(reply).effect, Controller::PreparedEffect::REVIEW);
+    QVERIFY(controller.view().authorizationCommitment.isEmpty());
+    const auto wallet = controller.replyToken().wallet;
+    QVERIFY(!controller.confirmSelection(selection, wallet + 1, 1000));
+    QVERIFY(!controller.confirmSelection(selection, wallet, 2000));
+    QVERIFY(controller.confirmSelection(selection, wallet, 1000));
+    QVERIFY(controller.acceptReview(selection.authorization_commitment, wallet));
+    QVERIFY(!controller.requestCancellation());
+    // A prepared reply with a different commitment invalidates the earlier
+    // decision. The caller must present the exact offer again.
+    reply.pushKV("authorization_commitment", std::string(64, '5'));
+    QCOMPARE(controller.preparedReply(reply).effect, Controller::PreparedEffect::CHANGED_COMMITMENT);
+    QVERIFY(controller.view().authorizationCommitment.isEmpty());
+    QVERIFY(controller.confirmSelection(selection, wallet, 1000));
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.request_id = controller.view().requestId;
+    snapshot.session_id = QString(64, '6');
+    snapshot.state = QStringLiteral("AUTHORIZED");
+    snapshot.artifact = QStringLiteral("user_psbt");
+    snapshot.recipient = selection.recipient;
+    snapshot.allowed_actions_known = true;
+    snapshot.allowed_actions = QStringList{QStringLiteral("refresh"), QStringLiteral("retry_same"), QStringLiteral("cancel_to_self")};
+    QVERIFY(controller.applySnapshot(snapshot));
+    PaymasterQt::RpcError error{true, -4, QStringLiteral("reply lost"), UniValue{UniValue::VOBJ}};
+    error.data.pushKV("disposition", "reconcile");
+    const auto decision = controller.failedReply(error);
+    QVERIFY(!decision.discard_uncreated_request);
+    QVERIFY(!decision.allow_unsigned_cancel);
+    QVERIFY(!controller.requestCancellation());
+    QVERIFY(!controller.clearAfterClosure());
+    QVERIFY(!controller.beginTransfer(QStringLiteral("00000000-0000-4000-8000-000000000002"), QStringLiteral("high")));
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    QCOMPARE(controller.view().requestId, snapshot.request_id);
+    QVERIFY(controller.beginRetry());
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::RETRY);
+}
+
+void PaymasterWidgetTests::paymasterSendControllerRecoveryReview()
+{
+    using Controller = PaymasterQt::SendController;
+    Controller controller;
+    PaymasterQt::PaymasterSessionSnapshot snapshot;
+    snapshot.request_id = QStringLiteral("recovery-request");
+    snapshot.session_id = QString(64, '6');
+    snapshot.state = QStringLiteral("AUTHORIZED");
+    snapshot.artifact = QStringLiteral("user_psbt");
+    snapshot.privacy_profile = QStringLiteral("high");
+    snapshot.allowed_actions_known = true;
+    snapshot.allowed_actions = QStringList{QStringLiteral("refresh"), QStringLiteral("cancel_to_self")};
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(controller.beginRecovery(10));
+    PaymasterRecoveryConfirmationSelection selection;
+    selection.recovery_provider_id = QString(64, '1');
+    selection.offer_id = QString(64, '2');
+    selection.policy_hash = QString(64, '3');
+    selection.original_commit_key = QString(64, '4');
+    selection.original_template_commitment = QString(64, '5');
+    selection.authorization_commitment = QString(64, '6');
+    selection.privacy_profile = QStringLiteral("high");
+    selection.wallet_returns = QStringList{QStringLiteral("wallet return")};
+    selection.maximum_service_fee_cents = 10;
+    selection.service_fee_cents = 1;
+    selection.network_fee_satoshis = 100;
+    selection.expires_at = 2000;
+    UniValue recovery{UniValue::VOBJ};
+    recovery.pushKV("expired", false);
+    recovery.pushKV("phase", "request_ready");
+    UniValue reply{UniValue::VOBJ};
+    reply.pushKV("recovery", recovery);
+    QCOMPARE(controller.recoveryReply(reply, selection, 1000).effect, Controller::RecoveryEffect::REVIEW);
+    QVERIFY(controller.view().recoveryAuthorizationCommitment.isEmpty());
+    const auto wallet = controller.replyToken().wallet;
+    auto downgraded = selection;
+    downgraded.privacy_profile = QStringLiteral("standard");
+    QVERIFY(!controller.confirmRecovery(downgraded, wallet, 1000));
+    QVERIFY(controller.confirmRecovery(selection, wallet, 1000));
+    QCOMPARE(controller.recoveryReply(reply, selection, 1000).effect, Controller::RecoveryEffect::REJECTED);
+    recovery.pushKV("authorization_accepted", true);
+    recovery.pushKV("phase", "user_signed");
+    reply.pushKV("recovery", recovery);
+    QCOMPARE(controller.recoveryReply(reply, selection, 1000).effect, Controller::RecoveryEffect::POLL);
+    recovery.pushKV("expired", true);
+    reply.pushKV("recovery", recovery);
+    QCOMPARE(controller.recoveryReply(reply, selection, 2000).effect, Controller::RecoveryEffect::EXPIRED);
 }
 
 void PaymasterWidgetTests::paymasterSendFailureDecisions()

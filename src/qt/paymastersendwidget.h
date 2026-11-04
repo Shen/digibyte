@@ -6,7 +6,7 @@
 #define DIGIBYTE_QT_PAYMASTERSENDWIDGET_H
 
 #include <qt/digidollarstatus.h>
-#include <qt/paymasterconfirmation.h>
+#include <qt/paymastersendcontroller.h>
 #include <qt/walletmodel.h>
 
 #include <univalue.h>
@@ -51,7 +51,7 @@ public:
     void amountChanged(bool setting_sweep);
     void beginSweep();
     void setPrivacy(bool privacy);
-    bool isBusy() const { return m_paymasterBusy; }
+    bool isBusy() const { return m_send.view().busy; }
     bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured && m_sessionDiscoveryReady && !historyBlocksPreparation(); }
     bool historyBlocksPreparation() const;
     bool sessionDiscoveryReady() const { return m_sessionDiscoveryReady; }
@@ -201,6 +201,7 @@ private:
     QString feeMode() const;
     void connectSignals();
     void setPaymasterBusy(bool busy);
+    PaymasterQt::SendController m_send;
     DigiDollarSendWidget& m_form;
     WalletModel* m_walletModel{nullptr};
     QMetaObject::Connection m_historyConnection;
@@ -286,46 +287,12 @@ private:
     QFrame* m_paymasterTechnicalDetails{nullptr};
 
     double m_paymasterInitialAvailableBalance{0.0};
-    UniValue m_paymasterActiveRecoveryParams;
-    QElapsedTimer m_paymasterActiveRecoveryStarted;
-    UniValue m_paymasterSendTemplate;
-    UniValue m_paymasterRestoredOptions{UniValue::VOBJ};
-    QString m_paymasterRequestId;
-    QString m_paymasterSessionId;
-    QString m_paymasterSessionState;
-    QString m_paymasterAttemptState;
-    QString m_paymasterArtifact;
-    QString m_paymasterPendingPhase;
-    QString m_paymasterBroadcastState;
-    QString m_paymasterConfirmationState;
-    QString m_paymasterTransactionId;
-    QString m_paymasterRecoveryTransactionId;
-    QString m_paymasterResultStatus;
-    qint64 m_paymasterResultSequence{-1};
-    qint64 m_paymasterRecoveryExpiresAt{-1};
-    qint64 m_paymasterSessionCreatedAt{0};
-    QStringList m_paymasterAllowedActions;
-    QString m_paymasterAddress;
-    QString m_paymasterAuthorizationCommitment;
-    QString m_paymasterSessionPrivacy;
-    QString m_paymasterRecoveryAuthorizationCommitment;
-    double m_paymasterAmount{0.0};
-    CAmount m_paymasterAmountCents{0};
     qint64 m_paymasterPreviewRecipientCents{-1};
     qint64 m_paymasterPreviewServiceFeeCents{-1};
     qint64 m_paymasterPreviewTotalCents{-1};
     uint64_t m_paymasterOfferPreviewGeneration{0};
-    uint64_t m_paymasterWalletGeneration{0};
-    uint64_t m_paymasterSendGeneration{0};
     uint64_t m_clientSafetyRefreshGeneration{0};
     bool m_sendAllSpendableDD{false};
-    qint64 m_paymasterRecoveryMaximumServiceFeeCents{0};
-    bool m_paymasterBusy{false};
-    bool m_paymasterPreparationCancelRequested{false};
-    bool m_paymasterSessionPersisted{false};
-    bool m_paymasterUnsignedClosed{false};
-    bool m_paymasterOfferReadyForReview{false};
-    bool m_paymasterRecoveryActive{false};
     enum class PaymasterPrimaryAction {
         REFRESH,
         RESUME,
@@ -346,22 +313,11 @@ private:
     qint64 m_clientSafetyAvailableTodayCents{0};
     QString m_clientSafetyError;
     QTimer* m_paymasterPollTimer;
-    int m_paymasterPollIntervalMs{1500};
     static constexpr int MAX_PAYMASTER_POLL_INTERVAL_MS{15000};
-    bool m_paymasterAllowedActionsKnown{false};
-    bool m_paymasterTerminalNoticeShown{false};
     PaymasterRpcExecutorForTesting m_paymasterRpcExecutorForTesting;
     PaymasterAsyncRpcExecutorForTesting m_paymasterAsyncRpcExecutorForTesting;
-    PaymasterConfirmationGuard m_paymasterConfirmationGuard;
-    PaymasterRecoveryConfirmationGuard m_paymasterRecoveryConfirmationGuard;
     // Only the request explicitly started in this wallet view may advance on
     // the timer. Restored sessions have no continuation or signing authority.
-    UniValue m_paymasterActiveSendParams;
-    QElapsedTimer m_paymasterActiveSendStarted;
-    qint64 m_paymasterHistoryPausedAt{-1};
-    qint64 m_paymasterHistoryPausedMs{0};
-    QString m_paymasterActiveRetryRequest;
-    QElapsedTimer m_paymasterActiveRetryStarted;
     static constexpr int MAX_PAYMASTER_ACTIVE_SEND_MS{120000};
     QFrame* m_offerCheckFrame{nullptr};
     QLabel* m_offerStateIcon{nullptr};
