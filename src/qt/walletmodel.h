@@ -12,6 +12,7 @@
 #include <key.h>
 
 #include <qt/walletmodeltransaction.h>
+#include <qt/paymasterasync.h>
 
 #include <interfaces/wallet.h>
 #include <support/allocators/secure.h>
@@ -267,7 +268,11 @@ public:
      * bridge so network waits and wallet synchronization never block Qt.
      */
     using RpcCallback = std::function<void(UniValue result, QString error)>;
+    using RpcError = PaymasterQt::RpcError;
+    using DetailedRpcCallback = std::function<void(UniValue result, RpcError error)>;
     void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
+    void executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback);
+    PaymasterQt::WorkQueue& asyncWorkQueue();
 
     /**
      * Build the DigiDollar transaction-history view away from Qt's event

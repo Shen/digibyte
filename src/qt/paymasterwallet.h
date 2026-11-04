@@ -14,6 +14,8 @@ std::shared_ptr<WalletModel::UnlockContext> RequestUnlock(WalletModel& model);
  * wallet lease. is_current runs on Qt before the dialog and before dispatch. */
 void ExecuteSigningRpcAsync(WalletModel& model, std::string command, UniValue params,
                             std::function<bool()> is_current, WalletModel::RpcCallback callback);
+void ExecuteSigningRpcAsyncDetailed(WalletModel& model, std::string command, UniValue params,
+                                    std::function<bool()> is_current, WalletModel::DetailedRpcCallback callback);
 } // namespace PaymasterQt
 
 #endif // DIGIBYTE_QT_PAYMASTERWALLET_H

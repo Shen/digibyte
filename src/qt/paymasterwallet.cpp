@@ -5,7 +5,6 @@
 #include <interfaces/node.h>
 
 #include <QPointer>
-#include <QThread>
 #include <QUrl>
 
 #include <exception>
@@ -22,62 +21,61 @@ std::shared_ptr<WalletModel::UnlockContext> PaymasterQt::RequestUnlock(WalletMod
 void PaymasterQt::ExecuteSigningRpcAsync(WalletModel& model, std::string command, UniValue params,
                                        std::function<bool()> is_current, WalletModel::RpcCallback callback)
 {
+    ExecuteSigningRpcAsyncDetailed(model, std::move(command), std::move(params), std::move(is_current),
+        [callback = std::move(callback)](UniValue result, WalletModel::RpcError error) mutable {
+            if (callback) callback(std::move(result), error.failed ? std::move(error.message) : QString{});
+        });
+}
+
+void PaymasterQt::ExecuteSigningRpcAsyncDetailed(WalletModel& model, std::string command, UniValue params,
+                                                std::function<bool()> is_current, WalletModel::DetailedRpcCallback callback)
+{
     const auto wallet = model.walletShared();
     const QByteArray encoded_name = QUrl::toPercentEncoding(model.getWalletName());
     const std::string uri = "/wallet/" + std::string(encoded_name.constData(), encoded_name.length());
     interfaces::Node* const node = &model.node();
     QPointer<WalletModel> guard{&model};
-    // Merely asking IsLocked can wait behind Paymaster maintenance. Do not
-    // take that lock on Qt before launching an otherwise asynchronous RPC.
-    QThread* preflight = QThread::create([guard, wallet, node, uri, command = std::move(command),
-                                         params = std::move(params), is_current = std::move(is_current),
-                                         callback = std::move(callback)]() mutable {
-        const bool was_locked = wallet->isLocked();
-        if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, wallet, node, uri, was_locked, command = std::move(command),
-                                          params = std::move(params), is_current = std::move(is_current),
-                                          callback = std::move(callback)]() mutable {
-            if (!guard || !is_current()) return;
-            if (was_locked) Q_EMIT guard->requireUnlock();
-            // The normal modal unlock dialog may switch/close the wallet.
-            // Even then, release temporary authority using the retained wallet.
-            const bool current = guard && is_current();
-            QThread* signing = QThread::create([guard, wallet, node, uri, was_locked, current,
-                                               command = std::move(command), params = std::move(params),
-                                               callback = std::move(callback)]() mutable {
-                UniValue result;
-                QString error;
-                {
-                    const bool valid = !wallet->isLocked();
-                    WalletModel::UnlockContext unlock(wallet, valid, was_locked);
-                    if (current) {
-                        if (!valid) {
-                            error = QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED");
-                        } else {
-                            try {
-                                result = node->executeRpc(command, params, uri);
-                            } catch (const UniValue& rpc_error) {
-                                const auto& message = rpc_error.find_value("message");
-                                error = QString::fromStdString(message.isStr() ? message.get_str() : rpc_error.write());
-                            } catch (const std::exception& exception) {
-                                error = QString::fromUtf8(exception.what());
-                            } catch (...) {
-                                error = QStringLiteral("Unknown RPC error");
-                            }
-                        }
+    QPointer<WorkQueue> queue{&model.asyncWorkQueue()};
+    // Hold one mutation slot across preflight, the unlock dialog and signing.
+    // Merely checking IsLocked can wait, so it too stays off the Qt thread.
+    queue->submit(WorkQueue::Kind::MUTATION, {},
+        [queue, guard, wallet, node, uri, command = std::move(command), params = std::move(params), is_current]
+        (WorkQueue::Completion complete) mutable {
+            queue->run([wallet] { return RpcReply{UniValue{wallet->isLocked()}, {}}; },
+                [queue, guard, wallet, node, uri, command = std::move(command), params = std::move(params),
+                 is_current, complete = std::move(complete)](RpcReply preflight) mutable {
+                    if (preflight.error.failed) { complete(std::move(preflight)); return; }
+                    if (!guard || !is_current()) {
+                        complete({{}, {true, 0, QStringLiteral("PAYMASTER_OPERATION_CANCELED"), {}}});
+                        return;
                     }
-                    // Relock on this worker, before any UI result/error dialog.
-                }
-                if (!current || !guard) return;
-                QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback),
-                                                  result = std::move(result), error = std::move(error)]() mutable {
-                    if (guard && callback) callback(std::move(result), std::move(error));
-                }, Qt::QueuedConnection);
-            });
-            QObject::connect(signing, &QThread::finished, signing, &QObject::deleteLater);
-            signing->start();
-        }, Qt::QueuedConnection);
-    });
-    QObject::connect(preflight, &QThread::finished, preflight, &QObject::deleteLater);
-    preflight->start();
+                    const bool was_locked = preflight.value.get_bool();
+                    if (was_locked) Q_EMIT guard->requireUnlock();
+                    // A modal dialog can unload the model. No node access may
+                    // begin afterwards; the retained wallet still owns relocking.
+                    if (!queue || queue->stopping()) {
+                        if (was_locked) wallet->lock();
+                        return;
+                    }
+                    const bool current = guard && is_current();
+                    queue->run([wallet, node, uri, was_locked, current,
+                                command = std::move(command), params = std::move(params)]() mutable {
+                        const bool valid = !wallet->isLocked();
+                        WalletModel::UnlockContext unlock(wallet, valid, was_locked);
+                        if (!current || !valid) {
+                            RpcReply reply;
+                            reply.error.failed = true;
+                            reply.error.message = QStringLiteral("PAYMASTER_WALLET_UNLOCK_CANCELLED");
+                            reply.error.data = UniValue{UniValue::VOBJ};
+                            reply.error.data.pushKV("paymaster_code", "PAYMASTER_WALLET_UNLOCK_CANCELLED");
+                            reply.error.data.pushKV("disposition", "user_decision");
+                            return reply;
+                        }
+                        return RpcReply{node->executeRpc(command, params, uri), {}};
+                    }, std::move(complete));
+                });
+        },
+        [guard, is_current, callback = std::move(callback)](RpcReply reply) mutable {
+            if (guard && is_current() && callback) callback(std::move(reply.value), std::move(reply.error));
+        });
 }

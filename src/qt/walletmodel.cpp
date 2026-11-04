@@ -164,6 +164,9 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
 
 WalletModel::~WalletModel()
 {
+    for (QObject* child : children()) {
+        if (auto* queue = dynamic_cast<PaymasterQt::WorkQueue*>(child)) queue->stop();
+    }
     {
         std::lock_guard<std::mutex> lock(g_dd_history_mutex);
         g_dd_history_models.erase(std::remove(g_dd_history_models.begin(), g_dd_history_models.end(), this), g_dd_history_models.end());
@@ -241,7 +244,7 @@ void WalletModel::pollBalanceChanged()
             if (update_confirmations && guard->transactionTableModel) guard->transactionTableModel->updateConfirmations();
         }, Qt::QueuedConnection);
     });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    asyncWorkQueue().track(thread);
     thread->start();
 }
 
@@ -1413,7 +1416,7 @@ void WalletModel::getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback)
             },
             Qt::QueuedConnection);
     });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    asyncWorkQueue().track(thread);
     thread->start();
 }
 
@@ -1449,7 +1452,7 @@ void WalletModel::getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback
                 if (guard && callback) callback(balances, collateral, std::move(mint_error), std::move(error));
             }, Qt::QueuedConnection);
     });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    asyncWorkQueue().track(thread);
     thread->start();
 }
 
@@ -1590,41 +1593,43 @@ UniValue WalletModel::executeRpc(const std::string& command, const UniValue& par
     return m_node.executeRpc(command, params, uri);
 }
 
+PaymasterQt::WorkQueue& WalletModel::asyncWorkQueue()
+{
+    for (QObject* child : children()) {
+        if (auto* queue = dynamic_cast<PaymasterQt::WorkQueue*>(child)) return *queue;
+    }
+    return *new PaymasterQt::WorkQueue(this);
+}
+
 void WalletModel::executeRpcAsync(std::string command, UniValue params, RpcCallback callback)
+{
+    executeRpcAsyncDetailed(std::move(command), std::move(params),
+        [callback = std::move(callback)](UniValue result, RpcError error) mutable {
+            if (callback) callback(std::move(result), error.failed ? std::move(error.message) : QString{});
+        });
+}
+
+void WalletModel::executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback)
 {
     const QByteArray encoded_name = QUrl::toPercentEncoding(getWalletName());
     const std::string uri = "/wallet/" + std::string(encoded_name.constData(), encoded_name.length());
     interfaces::Node* const node = &m_node;
-    QPointer<WalletModel> guard{this};
-
-    QThread* thread = QThread::create(
-        [guard, node, command = std::move(command), params = std::move(params),
-         uri, callback = std::move(callback)]() mutable {
-            UniValue result;
-            QString error;
-            try {
-                result = node->executeRpc(command, params, uri);
-            } catch (const UniValue& rpc_error) {
-                const UniValue& message = rpc_error.find_value("message");
-                error = message.isStr() ? QString::fromStdString(message.get_str())
-                                        : QString::fromStdString(rpc_error.write());
-            } catch (const std::exception& exception) {
-                error = QString::fromUtf8(exception.what());
-            } catch (...) {
-                error = QStringLiteral("Unknown RPC error");
-            }
-
-            if (!guard) return;
-            QMetaObject::invokeMethod(
-                guard,
-                [guard, callback = std::move(callback), result = std::move(result),
-                 error = std::move(error)]() mutable {
-                    if (guard && callback) callback(std::move(result), std::move(error));
-                },
-                Qt::QueuedConnection);
+    auto& queue = asyncWorkQueue();
+    const bool read = command.starts_with("get") || command.starts_with("list");
+    const std::string key = read ? command + "\n" + params.write() : std::string{};
+    queue.submit(read ? PaymasterQt::WorkQueue::Kind::READ : PaymasterQt::WorkQueue::Kind::MUTATION, key,
+        [&queue, node, wallet = m_wallet, command = std::move(command), params = std::move(params), uri]
+        (PaymasterQt::WorkQueue::Completion complete) mutable {
+            queue.run([node, wallet, command = std::move(command), params = std::move(params), uri]() mutable {
+                // Retain the wallet lease for the entire operation. WorkQueue
+                // joins the worker before WalletModel releases its node access.
+                (void)wallet;
+                return PaymasterQt::RpcReply{node->executeRpc(command, params, uri), {}};
+            }, std::move(complete));
+        },
+        [callback = std::move(callback)](PaymasterQt::RpcReply reply) mutable {
+            if (callback) callback(std::move(reply.value), std::move(reply.error));
         });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
 }
 
 bool WalletModel::digiDollarHistoryRefreshInProgress() const
@@ -1732,7 +1737,7 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
                 },
                 Qt::QueuedConnection);
         });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    asyncWorkQueue().track(thread);
     thread->start();
     NotifyDigiDollarHistoryReaders(node);
 }
@@ -1760,7 +1765,7 @@ void WalletModel::getDigiDollarReceiveRequestsAsync(ReceiveRequestsCallback call
             },
             Qt::QueuedConnection);
     });
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    asyncWorkQueue().track(thread);
     thread->start();
 }
 

@@ -25,6 +25,7 @@
 #include <qt/paymasterconfirmation.h>
 #include <qt/paymasteramount.h>
 #include <qt/paymastersendwidget.h>
+#include <qt/paymastersendcontroller.h>
 #include <qt/paymasterwidget.h>
 #include <qt/paymasteroperation.h>
 #include <paymaster/manager.h>
@@ -49,6 +50,7 @@
 #include <univalue.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -15500,4 +15502,122 @@ void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
     QVERIFY(client->m_paymasterPollTimer->isActive());
     QCOMPARE(actions.back(), QStringLiteral("refresh"));
     QCOMPARE(client->m_paymasterArtifact, QStringLiteral("user_psbt"));
+}
+
+void PaymasterWidgetTests::paymasterAsyncLimitsAndCoalescing()
+{
+    using namespace PaymasterQt;
+    WorkQueue queue;
+    std::vector<WorkQueue::Completion> reads, writes;
+    int callbacks{0};
+    const auto read = [&](const char* key) {
+        queue.submit(WorkQueue::Kind::READ, key,
+            [&](WorkQueue::Completion complete) { reads.push_back(std::move(complete)); },
+            [&](RpcReply) { ++callbacks; });
+    };
+    const auto mutate = [&] {
+        queue.submit(WorkQueue::Kind::MUTATION, {},
+            [&](WorkQueue::Completion complete) { writes.push_back(std::move(complete)); },
+            [&](RpcReply) { ++callbacks; });
+    };
+    read("status");
+    read("status");
+    read("finance");
+    read("pool");
+    mutate();
+    mutate();
+    read("status"); // Cannot join the snapshot preceding queued mutations.
+    QCOMPARE(reads.size(), size_t{2});
+    QCOMPARE(writes.size(), size_t{1});
+    auto done = reads[0];
+    done({});
+    QCOMPARE(callbacks, 2);
+    QCOMPARE(reads.size(), size_t{3});
+    done({}); // A duplicate completion never releases another operation's slot.
+    QCOMPARE(callbacks, 2);
+    done = reads[1]; done({});
+    QCOMPARE(reads.size(), size_t{4});
+    done = writes[0]; done({});
+    QCOMPARE(writes.size(), size_t{2});
+    done = reads[2]; done({});
+    done = reads[3]; done({});
+    done = writes[1]; done({});
+    QCOMPARE(callbacks, 7);
+}
+
+void PaymasterWidgetTests::paymasterAsyncShutdownDrainsWorkers()
+{
+    using namespace PaymasterQt;
+    WorkQueue queue;
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    std::atomic<bool> finished{false};
+    bool callback{false}, queued_started{false};
+    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion complete) {
+        queue.run([&] {
+            entered.set_value();
+            released.wait();
+            finished = true;
+            return RpcReply{};
+        }, std::move(complete));
+    }, [&](RpcReply) { callback = true; });
+    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion) {
+        queued_started = true;
+    }, {});
+    entered.get_future().wait();
+    std::thread unblock([&] { release.set_value(); });
+    queue.stop();
+    unblock.join();
+    QVERIFY(finished.load());
+    QCoreApplication::processEvents();
+    QVERIFY(!callback);
+    QVERIFY(!queued_started);
+}
+
+void PaymasterWidgetTests::paymasterAsyncPreservesStructuredErrors()
+{
+    using namespace PaymasterQt;
+    WorkQueue queue;
+    bool finished{false};
+    RpcReply observed;
+    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion complete) {
+        queue.run([]() -> RpcReply {
+            UniValue error = JSONRPCError(-4, "An operator-facing message");
+            UniValue data{UniValue::VOBJ};
+            data.pushKV("paymaster_code", "PAYMASTER_COMMIT_UNKNOWN");
+            data.pushKV("disposition", "reconcile");
+            error.pushKV("data", data);
+            throw error;
+        }, std::move(complete));
+    }, [&](RpcReply reply) { observed = std::move(reply); finished = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(finished, 5000);
+    QVERIFY(observed.error.failed);
+    QCOMPARE(observed.error.code, -4);
+    QCOMPARE(observed.error.stableCode(), QStringLiteral("PAYMASTER_COMMIT_UNKNOWN"));
+    QCOMPARE(observed.error.disposition(), QStringLiteral("reconcile"));
+    QCOMPARE(observed.error.message, QStringLiteral("An operator-facing message"));
+}
+
+void PaymasterWidgetTests::paymasterSendFailureDecisions()
+{
+    using namespace PaymasterQt;
+    RpcError error{true, -4, QStringLiteral("PAYMASTER_SELECTED_OFFER_UNAVAILABLE"), {}};
+    auto decision = SendController::failure(error, false, true);
+    QVERIFY(decision.invalidate_review);
+    QVERIFY(!decision.discard_uncreated_request);
+    QVERIFY(!decision.allow_unsigned_cancel);
+    error.data = UniValue{UniValue::VOBJ};
+    error.data.pushKV("disposition", "retry_before_execution");
+    QVERIFY(!SendController::failure(error, false, true).discard_uncreated_request);
+    error.data.pushKV("session_absent", true);
+    QVERIFY(SendController::failure(error, false, true).discard_uncreated_request);
+    QVERIFY(!SendController::failure(error, true, true).discard_uncreated_request);
+    error.message = QStringLiteral("A translated or arbitrary diagnostic");
+    QVERIFY(SendController::failure(error, false, true).discard_uncreated_request);
+    error.data.pushKV("disposition", "user_decision");
+    QVERIFY(SendController::failure(error, true, true).allow_unsigned_cancel);
+    QVERIFY(!SendController::failure(error, true, false).allow_unsigned_cancel);
+    error.data.pushKV("disposition", "unknown_future_value");
+    QVERIFY(!SendController::failure(error, false, true).discard_uncreated_request);
+    QVERIFY(!SendController::failure(error, false, true).allow_unsigned_cancel);
 }
