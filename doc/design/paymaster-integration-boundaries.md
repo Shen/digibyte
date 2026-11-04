@@ -115,8 +115,8 @@ the purpose, existing API reused, ordinary callers affected and regression
 checks. The record is review evidence, not proof that the tests passed. Record
 actual results only in the [release evidence](../digidollar-paymaster-release-gate.md);
 the test guide owns commands and coverage. Compare both against
-the task baseline `5ddc3e268e` and the official baseline documented in the
-v9.26.7 integration note; do not attribute all historical fork changes to this
+the task and official baselines in the change record and the ancestry documented
+in the v9.26.7 integration note; do not attribute all historical fork changes to this
 optimization. There is no arbitrary line-count budget.
 
 Keep behavior-preserving extraction separate from behavioral changes when
