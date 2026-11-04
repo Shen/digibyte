@@ -375,6 +375,9 @@ artifact. Older binaries cannot read the v2 finance header.
 value bound to provider, network, period/cutoff, revision and last position.
 Pass the returned value unchanged. If data changes between pages, the RPC
 returns `PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED`; refresh from the first page.
+While committed changes are being reconciled, queries return
+`PAYMASTER_FINANCE_RECONCILING`. The GUI shows this pending state and repeats only
+the finance read; no funding or payment action is retried.
 The GUI also checks revision consistency and abandons an inconsistent CSV
 export before writing a file. Do not concatenate pages from different revisions.
 

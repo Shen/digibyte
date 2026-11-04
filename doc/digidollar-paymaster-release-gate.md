@@ -6,33 +6,29 @@ implemented behavior alone does not establish release acceptance.
 
 ## Optimization candidate (2026-11-04)
 
-The optimization series is based on `5ddc3e268e`; the official comparison base and
-required Core-change reasons are in the [change record](design/paymaster-change-record.json).
-Checks used MSVC 14.43 Release and static Qt 5.15.10, with isolated executables
-`build_msvc/paymaster-optimization-check/tests.exe` and `qt-tests.exe` linked against
-existing objects. These results do not establish a clean build or release approval.
+The review-fix series starts at `33c680cba1`; comparison bases and required
+Core-change reasons are in the [change record](design/paymaster-change-record.json).
+Local checks use MSVC 14.43 Release flags, static Qt 5.15.10 and isolated links
+against existing dependencies, not a clean product build.
+Local artifacts are under `build_msvc/paymaster-optimization-check/`; exact
+selections, output paths and executable hashes are in `verified-checks.json` there.
 
-| Executed checks | Result |
+| Source / executable | Executed selection and result |
 |---|---|
-| Wallet identity suite, before final object relink | 49 cases / 2,668 assertions passed. |
-| Final client/comparator, session-index scale/commit, finance-cache and saved-target rebalance selection | 15 cases / 39,777 assertions passed. |
-| Quote commit/restart, concurrent budget, SQLite failure and stale-final security checks | 4 cases / 277 assertions passed. |
-| Qt reserve reduction and maintenance cancellation (`windows` plugin) | 40/40 and 10/10 passed; totals include init/cleanup. |
-| Other targeted Qt checks (`minimal` plugin) | Offers/cancellation, finance/backup, wallet/privacy binding, controllers, queue/shutdown and unlock lifetime passed. |
-| Architecture fixtures and local dependency/cycle scan | 4 fixtures and the scan passed. |
+| `6ad3fa7242`, `tests-6ad3fa7242.exe` | 21 cases / 8,673 assertions passed: native service/RPC contracts, finance migration/pagination/incremental work, actual finance RPC backlog, commit failure/restore, background wallet/scheduler isolation, session views, cancellation and stale submits. |
+| Same native executable, `db_tests/*` | Seven ordinary database cases / 935 assertions passed, including prefix and bounded range cursors on the available backends. |
+| `24172ca820`, `tests.exe`, `paymaster_wallet_finance_tests/*` | Six cases / 8,353 assertions passed again after placing timing inside the wallet lock. These overlap the native selection above. |
+| `4c8c60d00c`, `qt-tests.exe`, Windows/Fusion | 32 functions passed: 13 provider and 19 sender/controller/queue functions, including finance read retries, exact confirmations, lost replies, cancellation, recovery and shutdown. The prior executable was replaced by the following relink; its hash and results remain recorded. |
+| `75d9351e46`, relinked `qt-tests.exe`, Windows/Fusion | Eleven functions passed: two sender fixtures strengthened to require fresh offers and validated completion, plus nine ordinary wallet/DD queue, balance, validation and view-lifetime regressions. Together the Qt selections cover 43 distinct functions. |
+| `75d9351e46`, local architecture checks | Five positive/negative boundary fixtures passed; committed dependency, path, Core-record and cycle checks passed against policy base `d298087a9a`. This is local evidence, not server approval of the separately committed controls. |
 
-Finance migration/reorg/backend checks and 100,000-event bounded reads also passed;
-the session-index checks cover 100, 1,000 and 8,192 sessions. Detailed local output
-remains with the check executables. These are operation-count checks, not production
-throughput measurements. No new consensus, PoW, activation or general script
-validation change was introduced.
-
-The provider exception escape is corrected by a per-wallet background boundary.
-Fresh service, pool, integration and identity-test objects passed three targeted
-cases / 70 assertions covering corrupt/unknown records, scheduler and wallet
-isolation, duplicate-log suppression and retained equivocation evidence. This
-isolated MSVC link still reuses other existing objects. Full-history finance
-reconciliation remains a scaling concern until its incremental replacement passes.
+The native selection covers 100, 1,000 and 8,192 sessions plus 100,000 finance
+events. Unchanged warm finance reads scanned no history; one transaction at the
+three session sizes used one bounded index query. These are operation-count
+checks with local timing, not production throughput measurements. After a failed
+commit the ahead checkpoint remains binding: tests require explicit restore
+quarantine before observation-only reconciliation, without restoring signing
+permission. No consensus, PoW, activation or signed-format change is introduced.
 
 Open: the complete build, functional, Qt, ordinary DGB/DD, sanitizer and platform
 gates below. Server-side required statuses and bypass protection are not configured
@@ -69,6 +65,7 @@ are not reconstructed from the test counts.
 
 | Source / date | Retained evidence | Scope or limitation |
 |---|---|---|
+| `33c680cba1`, 2026-11-04 | Prior optimization: targeted identity, selection/index, finance and security checks plus selected Qt workflows passed; four boundary fixtures passed. | Earlier source and isolated links; detailed evidence remains in that revision of this file. |
 | `1789c803be`, 2026-09-27 | 284 selected unit cases / 10,767 assertions; nine functional tests. | Older RC2 branch. |
 | `e5cfa2da3e`, 2026-10-06 | Twelve translation units; 26 selected Core/Qt cases. | No normal product link or functional run. |
 | Retention and recovery corrections, 2026-10-10 | Related selections: 48 cases / 10,012 assertions and 28 / 1,542. | Overlapping focused tests; many assertions come from quota fixtures. |

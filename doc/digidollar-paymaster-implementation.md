@@ -141,22 +141,33 @@ existing wallet database. Wallet keys, balances and signed artifacts are not
 migrated by this change. Migration, accounting and page-consistency requirements
 are defined in the [operator guide](digidollar-paymaster-operator.md#finance-storage-and-page-consistency).
 
-Pagination uses bounded ordered database cursors. First pages reconcile history; subsequent
-pages reuse success only while wallet update counter, processed tip and finance
-revision match, for at most 60 seconds. Errors are not cached.
+Pagination uses bounded ordered database cursors. A full reconstruction runs on
+first use after load, restore or invalidation. Thereafter wallet transaction
+notifications and committed Paymaster source changes enqueue affected IDs; each
+pass handles at most 256 jobs, including bounded transaction-index pages. Failed
+commits retain pending work. Reports return `PAYMASTER_FINANCE_RECONCILING` while
+work remains; a reader retries the query and never treats stale totals as current.
+Cursor filters and revisions still require a navigation restart after changes.
 
 ## Execution and presentation
 
-RPC and background callers invoke the same native services with typed inputs.
+RPC and background callers invoke the same native services with typed inputs and
+results (`wallet/paymasterresults.h`). JSON encoding belongs to
+`wallet/rpc/paymaster_results.cpp`; session snapshots are captured before encoding.
 Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 
-One wallet work queue admits two concurrent reads and one mutation. Identical
-reads coalesce only within the same mutation generation. Signing preflight, unlock,
+The generic `qt/walletasync.*` queue admits two concurrent pure reads. A mutation
+waits for earlier reads and blocks subsequent work until completion. Callers
+declare effects explicitly; unclassified work is a non-coalescible mutation.
+Opted-in identical reads coalesce only within the same mutation generation.
+Signing preflight, unlock,
 execution and relock share one mutation slot. Cancelling the UI cannot cancel an
 already-started wallet operation or authorize its repetition. Wallet generations
 invalidate late replies; shutdown joins started workers before destroying their
-dependencies. Provider views share helpers instead of duplicating financial rules.
+dependencies. Provider components own their panel state and workflows; the send
+controller owns session transitions and emits effects for the widget to execute.
+Both reuse shared formatting and backend financial rules.
 
 Pool-preparation request bindings now hash typed recovery mappings with the local
 `Pool Request v2` tag, independent of JSON formatting. This is a local preview/replay

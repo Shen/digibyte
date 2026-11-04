@@ -679,6 +679,9 @@ Ordinary DD consensus/history checks remain authoritative. See
 
 Wallet RPC adapters cover provider, client, discovery, processing, runtime
 and send operations. Lifecycle implementation lives in `wallet/paymasterintegration.cpp`.
+`wallet/paymasterresults.h` defines native operation results;
+`wallet/rpc/paymaster_results.cpp` encodes their RPC representation. The shared
+Qt worker queue is `qt/walletasync.*`; `qt/paymasterasync.*` interprets domain errors.
 Exact method groups and
 side-effect boundaries are in the [RPC reference](doc/digidollar-paymaster.md)
 and [client contract](doc/digidollar-paymaster-integration.md).

@@ -81,9 +81,9 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 
 If dependencies are absent, complete the normal prerequisite installation first;
 do not treat this block as a toolchain installer. Preserve the project's selected
-toolset. `/t:Rebuild` is required because the database range-cursor change alters
-the `DatabaseBatch` interface: all binaries and test libraries must use the same
-headers. Prior isolated-check provenance is in the release evidence.
+toolset. `/t:Rebuild` is required because database interfaces and Qt wallet/send
+object layouts changed: all binaries, allocators and test libraries must use the
+same headers. Prior isolated-check provenance is in the release evidence.
 
 After success, expected Release outputs are under `build_msvc/x64/Release/`.
 Start the intended GUI/daemon from that directory with the original network and
@@ -133,7 +133,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
 ```
 
 Use the `windows` plugin for Windows modal-dialog tests; the local Qt 5.15.10
-`minimal` plugin does not support the reserve-review dialog. Run from the
+`minimal` plugin lacks the native Windows interface used by some `QMessageBox`
+dialogs. Pure controller/queue tests do not construct those dialogs. Run from the
 repository root after a successful current-revision build with tests enabled. Allow several minutes or longer; some fixtures build chains.
 Success requires exit code zero and no failed tests. This suite still does not
 replace the functional matrix, ordinary-wallet regressions or release gates.
@@ -153,6 +154,17 @@ Local scans do not establish trusted-base change approval; see the
 [boundary contract](design/paymaster-integration-boundaries.md#enforcement-and-trusted-policy-bootstrap)
 for committed candidates. Required Core-change reasons stay in the
 [change record](design/paymaster-change-record.json).
+
+For review, compare new work against the task base and the complete fork against
+the official base. Keep the normal diff; `-w` additionally exposes changes without
+historical whitespace noise:
+
+```powershell
+$paymasterBases = Get-Content doc/design/paymaster-change-record.json -Raw | ConvertFrom-Json
+git diff $paymasterBases.task_baseline HEAD
+git diff -w $paymasterBases.task_baseline HEAD
+git diff -w $paymasterBases.official_baseline HEAD
+```
 
 ## Coverage map
 
@@ -176,9 +188,10 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Excess reserve release | Identity `rebalance_saved_targets_*`; Qt `paymasterGuidedCapitalTasks`, `paymasterReserveReduction`: missing/underfilled assets, saved revisions, DGB-only scope and exact receipts. |
 | Stop and retirement | Wire `manager_provider_stop_*`; identity `provider_stop_waits_for_work_without_bypassing_exclusion`, `capital_release_cancels_only_reviewed_uncreated_funding`; Qt `paymasterStoppedOverview`, `paymasterStopAndRelease`, `paymasterRetirementLateResults`: priority, atomic release and uncertain replies. |
 | Configuration and signing review | Setup suite; Qt `paymasterConfigurationConflicts`, `paymasterSafetyInputValidation`, `paymasterConfigurationSaveRefresh`, `paymasterManualSubmitConfirmation`, `paymasterOperatorConfirmationWalletBinding`: saved versus draft policy, current wallet/privacy/readiness and exact approval. |
-| GUI state, finance and navigation | Paymaster Qt suite covers unavailable/loading states, affordability, cancellation, two reads/one mutation, coalescing, wallet switch/shutdown, unlock lifetime, untrusted error text, finance pages/export, responsive themes and preserved drafts. Mocked RPC fixtures do not replace backend tests. |
+| GUI state, finance and navigation | Paymaster Qt suite covers unavailable/loading states, affordability, cancellation, two reads with mutation barriers, explicit coalescing, wallet switch/shutdown, unlock lifetime, untrusted error text, finance pages/export, responsive themes and preserved drafts. Controller cases inject time and replies; ordinary `WalletTests/async*` cover generic scheduling/start failure/worker shutdown. Mocked RPC fixtures do not replace backend tests. |
 | Session index | Wallet store tests at 100/1,000/8,192 sessions: one reconstruction, point reads, commit/abort, reopen and invalidation. |
-| Finance v2 | Wallet identity/DB tests: 100,000 events, bounded/filter-bound pages, stale revisions, UTC periods, idempotence/reorg totals, atomic migration, corrupt/unknown versions and cache invalidation. |
+| Finance v2 | Wallet identity/DB and `paymaster_wallet_finance_tests`: 100,000 events; 100/1,000/8,192 sessions; bounded/filter-bound pages, 256-job limit, unchanged-query scan counts, stale revisions, UTC periods, replay/reorg/abandon/delete, commit failure, atomic migration and restore. `bench` logs measure actual reconciliation lock duration. |
+| Native service/RPC contract | `paymaster_application_tests` retains amount units, optional false/zero values, artifacts and structured errors. Identity `background_*` and load `periodic_paymaster_maintenance_persists_prebaseline_capacity_equivocation` cover malformed records, wallet/scheduler isolation and retained evidence. |
 | Checkpoint concurrency | Wallet identity/security tests: independent identities, shared clone locks, read/replace, rollback/restore and checkpoint-ahead failures. |
 | Architecture controls | Boundary fixtures reject forbidden paths/dependencies, missing Core records, new cycles and candidate attempts to weaken trusted checks. |
 | Ordinary behavior and migration | DGB/DD wallet/DB/Qt tests with Paymaster disabled, both DB backends, sanitizers/platform builds and historical compatibility below. |
