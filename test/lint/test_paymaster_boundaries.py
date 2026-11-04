@@ -26,6 +26,8 @@ class BoundaryTests(unittest.TestCase):
                              ('src/paymaster/x.h', '../rpc/server.h'),
                              ('src/wallet/paymasterservice.cpp', 'wallet/rpc/paymaster.h'),
                              ('src/wallet/paymasterservice.cpp', 'qt/walletmodel.h'),
+                             ('src/qt/walletasync.cpp', 'qt/paymasterasync.h'),
+                             ('src/qt/walletasync.h', 'paymaster/error.h'),
                              ('src/qt/paymasterpage.cpp', 'wallet/wallet.h')]:
             with self.subTest(path=path, header=header):
                 self.assertTrue(BOUNDARIES.dependency_errors(path, f'#include "{header}"\n', POLICY))
@@ -101,6 +103,27 @@ class BoundaryTests(unittest.TestCase):
             self.assertTrue(any('forbidden dependency' in error for error in errors))
             self.assertTrue(any('owner review' in error for error in errors))
             self.assertTrue(any('new cyclic dependency' in error for error in errors))
+
+    def test_shared_dependencies_are_scanned(self):
+        with tempfile.TemporaryDirectory(prefix='paymaster-shared-') as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', directory, *args], stderr=subprocess.PIPE).decode().strip()
+            git('init')
+            git('config', 'user.name', 'Boundary fixture')
+            git('config', 'user.email', 'boundary@example.invalid')
+            for name in [BOUNDARIES.POLICY, BOUNDARIES.CYCLES]:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text((HERE.parents[1] / name).read_text(encoding='utf-8'), encoding='utf-8')
+            git('add', '.')
+            git('commit', '-m', 'trusted policy')
+            source = root / 'src/qt/walletasync.cpp'
+            source.parent.mkdir(parents=True)
+            source.write_text('#include <qt/paymasterasync.h>\n', encoding='utf-8')
+            self.assertTrue(any('forbidden dependency' in error for error in BOUNDARIES.check(root)))
+            source.write_text('#include <interfaces/wallet.h>\n', encoding='utf-8')
+            self.assertFalse(BOUNDARIES.check(root))
 
 
 if __name__ == '__main__':

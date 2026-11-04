@@ -89,6 +89,12 @@ handlers from a worker. Reuse wallet signing, database transactions, connection
 budgets and asynchronous infrastructure. Do not copy these systems into a
 Paymaster-specific replacement to reduce the apparent shared-Core diff.
 
+The shared Qt worker bridge belongs to `qt/walletasync.*`; it must not depend
+on Paymaster, wallet implementations or RPC handlers. Paymaster adapters own
+error interpretation and explicit task policies. Shared wallet tests cover this
+bridge alongside ordinary DGB/DD behavior. Approved integration paths include
+these bridge files and `qt/test/wallettests.*`; they are not Paymaster-owned code.
+
 Each financial rule has one canonical implementation. Calling that implementation
 again at a different trust boundary is deliberate validation, not redundant
 business logic. Caches, transaction-to-session indexes and finance daily totals

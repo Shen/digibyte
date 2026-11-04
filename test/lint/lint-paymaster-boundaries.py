@@ -187,7 +187,9 @@ def check(root, base=None, head=None):
     else:
         paths = git(root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard').decode().split('\0')
     for path in sorted(set(paths)):
-        if path.endswith(('.cpp', '.h')) and matches(path, policy['owned']):
+        guarded = matches(path, policy['owned']) or any(
+            matches(path, rule['sources']) for rule in policy['dependencies'])
+        if path.endswith(('.cpp', '.h')) and guarded:
             if not head and not (root / path).exists():
                 continue
             errors += dependency_errors(path, read_blob(root, head, path), policy)

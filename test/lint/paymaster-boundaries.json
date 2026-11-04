@@ -33,6 +33,10 @@
     "src/interfaces/wallet.h",
     "src/qt/walletmodel.cpp",
     "src/qt/walletmodel.h",
+    "src/qt/walletasync.cpp",
+    "src/qt/walletasync.h",
+    "src/qt/test/wallettests.cpp",
+    "src/qt/test/wallettests.h",
     "src/qt/digibyte.cpp",
     "src/qt/test/test_main.cpp",
     "src/rpc/client.cpp",
@@ -70,6 +74,10 @@
     "contrib/devtools/circular-dependencies.py"
   ],
   "dependencies": [
+    {
+      "sources": ["src/qt/walletasync.cpp", "src/qt/walletasync.h"],
+      "deny": ["qt/paymaster*", "paymaster/*", "wallet/*", "rpc/*"]
+    },
     {
       "sources": [
         "src/paymaster/*"
