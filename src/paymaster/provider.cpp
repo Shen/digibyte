@@ -36,7 +36,6 @@ static constexpr int64_t QUOTE_REQUEST_WINDOW_SECONDS{60};
 static constexpr size_t MAX_BUDGET_LEDGER_ENTRIES{8192};
 static constexpr size_t MAX_QUOTE_REQUEST_EVENTS{8192};
 static constexpr size_t MAX_CAPACITY_ADMISSION_EVENTS{8192};
-static constexpr size_t MAX_PROVIDER_FINANCE_EVENTS{1000000};
 
 bool AddAmount(int64_t& total, int64_t value)
 {
@@ -1334,18 +1333,24 @@ bool ValidateProviderFinanceLedger(const ProviderFinanceLedger& ledger,
     for (size_t index = 0; index < ledger.daily_totals.size(); ++index) {
         const ProviderFinanceDailyTotals& stored = ledger.daily_totals[index];
         const ProviderFinanceDailyTotals& expected = rebuilt.daily_totals[index];
-        if (stored.version != ProviderFinanceDailyTotals::CURRENT_VERSION ||
-            stored.day_start != expected.day_start ||
-            stored.dd_income.value != expected.dd_income.value ||
-            stored.dgb_cost.value != expected.dgb_cost.value ||
-            stored.successful_transfers != expected.successful_transfers ||
-            stored.user_paid_transfers != expected.user_paid_transfers ||
-            stored.public_sponsored_transfers != expected.public_sponsored_transfers ||
-            stored.restricted_sponsored_transfers != expected.restricted_sponsored_transfers ||
-            stored.maintenance_transactions != expected.maintenance_transactions) {
+        if (!(stored == expected)) {
             error = "PAYMASTER_INVALID_FINANCE_TOTALS";
             return false;
         }
+    }
+    return true;
+}
+
+bool CheckProviderFinanceEventBinding(const ProviderFinanceEvent& existing,
+                                     const ProviderFinanceEvent& incoming, std::string& error)
+{
+    if (existing.event_id != incoming.event_id || existing.genesis_hash != incoming.genesis_hash ||
+        existing.provider_id != incoming.provider_id || existing.kind != incoming.kind ||
+        existing.funding_model != incoming.funding_model || existing.sponsorship_scope != incoming.sponsorship_scope ||
+        existing.transaction_id != incoming.transaction_id || !(existing.dd_income == incoming.dd_income) ||
+        !(existing.dgb_cost == incoming.dgb_cost) || existing.created_at != incoming.created_at) {
+        error = "PAYMASTER_FINANCE_EVENT_CONFLICT";
+        return false;
     }
     return true;
 }
@@ -1372,20 +1377,7 @@ bool UpsertProviderFinanceEvent(ProviderFinanceLedger& ledger,
         }
         ledger.events.push_back(event);
     } else {
-        const bool same_economic_event =
-            existing->genesis_hash == event.genesis_hash &&
-            existing->provider_id == event.provider_id &&
-            existing->kind == event.kind &&
-            existing->funding_model == event.funding_model &&
-            existing->sponsorship_scope == event.sponsorship_scope &&
-            existing->transaction_id == event.transaction_id &&
-            existing->dd_income == event.dd_income &&
-            existing->dgb_cost == event.dgb_cost &&
-            existing->created_at == event.created_at;
-        if (!same_economic_event) {
-            error = "PAYMASTER_FINANCE_EVENT_CONFLICT";
-            return false;
-        }
+        if (!CheckProviderFinanceEventBinding(*existing, event, error)) return false;
         // A delayed replay can legitimately carry an older pending or
         // confirmed snapshot. Treat it as an idempotent no-op instead of
         // letting it roll back the more recent chain-derived state.

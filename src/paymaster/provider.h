@@ -20,6 +20,8 @@
 #include <vector>
 
 namespace DigiDollar::Paymaster {
+inline constexpr size_t MAX_PROVIDER_FINANCE_EVENTS{1000000};
+
 
 struct ProviderAttempt;
 struct ProviderAuthorizationManifest;
@@ -398,6 +400,17 @@ struct ProviderFinanceDailyTotals {
     uint32_t public_sponsored_transfers{0};
     uint32_t restricted_sponsored_transfers{0};
     uint32_t maintenance_transactions{0};
+
+    bool operator==(const ProviderFinanceDailyTotals& other) const
+    {
+        return version == other.version && day_start == other.day_start &&
+            dd_income == other.dd_income && dgb_cost == other.dgb_cost &&
+            successful_transfers == other.successful_transfers &&
+            user_paid_transfers == other.user_paid_transfers &&
+            public_sponsored_transfers == other.public_sponsored_transfers &&
+            restricted_sponsored_transfers == other.restricted_sponsored_transfers &&
+            maintenance_transactions == other.maintenance_transactions;
+    }
 
     SERIALIZE_METHODS(ProviderFinanceDailyTotals, obj)
     {
@@ -873,6 +886,9 @@ bool ValidateProviderBackupStatus(const ProviderBackupStatus& status,
                                   std::string& error);
 bool RebuildProviderFinanceDailyTotals(ProviderFinanceLedger& ledger,
                                        std::string& error);
+/** Immutable economic identity must match even when a chain observation changes. */
+bool CheckProviderFinanceEventBinding(const ProviderFinanceEvent& existing,
+                                     const ProviderFinanceEvent& incoming, std::string& error);
 bool UpsertProviderFinanceEvent(ProviderFinanceLedger& ledger,
                                 const ProviderFinanceEvent& event,
                                 std::string& error);

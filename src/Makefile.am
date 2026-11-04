@@ -177,6 +177,7 @@ DIGIBYTE_CORE_H = \
   paymaster/psbt.h \
   paymaster/recovery.h \
   paymaster/provider.h \
+  paymaster/finance.h \
   paymaster/protocol.h \
   paymaster/reputation.h \
   paymaster/sponsorship.h \
@@ -818,6 +819,7 @@ libdigibyte_common_a_SOURCES = \
   paymaster/psbt.cpp \
   paymaster/recovery.cpp \
   paymaster/provider.cpp \
+  paymaster/finance.cpp \
   paymaster/provider_policy.cpp \
   paymaster/protocol.cpp \
   paymaster/reputation.cpp \
