@@ -543,6 +543,10 @@ public:
                                         std::string& error);
     bool GetProviderResult(const uint256& commit_key,
                            DigiDollar::Paymaster::PaymasterResult& result) const;
+    /** Preserve unreadable/unsupported state; result is usable only on FOUND. */
+    DatabaseReadStatus GetProviderResultWithStatus(
+        const uint256& commit_key,
+        DigiDollar::Paymaster::PaymasterResult& result) const;
 
     bool CommitSelfRecovery(
         const std::string& request_id,
@@ -571,6 +575,11 @@ public:
         int64_t now,
         std::string& error);
     bool GetAlternativeRecovery(
+        const std::string& request_id,
+        DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery) const;
+    /** Only a missing request index means NOT_FOUND; a missing indexed record
+     * is READ_ERROR. Recovery is usable only on FOUND. */
+    DatabaseReadStatus GetAlternativeRecoveryWithStatus(
         const std::string& request_id,
         DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery) const;
     bool GetAlternativeRecoveryById(

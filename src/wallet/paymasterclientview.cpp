@@ -233,8 +233,14 @@ bool LoadClientSessionView(PaymasterStore& store,
 
     if (view.attempt && !view.attempt->commit_key.IsNull()) {
         PaymasterResult provider_result;
-        if (store.GetProviderResult(view.attempt->commit_key,
-                                    provider_result)) {
+        const DatabaseReadStatus status = store.GetProviderResultWithStatus(
+            view.attempt->commit_key, provider_result);
+        if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+            error = status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RESULT_DATABASE_READ";
+            return false;
+        }
+        if (status == DatabaseReadStatus::FOUND) {
             if (!ValidatePaymasterResult(
                     provider_result, Params().GenesisBlock().GetHash(),
                     view.attempt->provider_id,
@@ -257,7 +263,14 @@ bool LoadClientSessionView(PaymasterStore& store,
     if (has_live_reservations) view.authorization_may_exist = true;
 
     AlternativeRecoveryRecord recovery;
-    if (store.GetAlternativeRecovery(session.request_id, recovery)) {
+    const DatabaseReadStatus recovery_status =
+        store.GetAlternativeRecoveryWithStatus(session.request_id, recovery);
+    if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+        error = recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+            ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    if (recovery_status == DatabaseReadStatus::FOUND) {
         if (recovery.session_id != session.session_id) {
             error = "PAYMASTER_RECOVERY_SESSION_CONFLICT";
             return false;

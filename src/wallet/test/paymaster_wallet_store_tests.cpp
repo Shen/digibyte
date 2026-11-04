@@ -15,6 +15,7 @@
 #include <wallet/rpc/paymaster_send.h>
 #include <key.h>
 #include <key_io.h>
+#include <paymaster/error.h>
 #include <paymaster/protocol.h>
 #include <paymaster/psbt.h>
 #include <paymaster/wire.h>
@@ -23,8 +24,10 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <util/time.h>
+#include <validation.h>
 #include <validationinterface.h>
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymasterclientview.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -602,6 +605,133 @@ void CheckPaymasterWriteFailures(wallet::CWallet& wallet, size_t writes,
             check_preserved();
         }
     }
+}
+
+// Reuse the signed client-payment fixture, including durable input protection.
+void SeedClientViewPayment(WalletTestingSetup& fixture, PaymentSession& session,
+                           ValidClientResultArtifacts& artifacts)
+{
+    auto& wallet = fixture.m_wallet;
+    {
+        LOCK2(cs_main, wallet.cs_wallet);
+        const CBlockIndex* tip = fixture.m_node.chainman->ActiveChain().Tip();
+        BOOST_REQUIRE(tip);
+        wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    }
+    SeedResultlessClientPayment(wallet, "550e8400-e29b-41d4-a716-4466554400d1", session, artifacts);
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
+        artifacts.user_input, session.request_id, session.session_id,
+        ReservationRole::USER_DD, true, 101}));
+    BOOST_REQUIRE(batch.WriteLockedUTXO(artifacts.user_input));
+    wallet.LockCoin(artifacts.user_input);
+}
+
+AlternativeRecoveryRecord MakeClientViewRecovery(const PaymentSession& session,
+                                                  const ValidClientResultArtifacts& artifacts)
+{
+    CKey identity;
+    identity.MakeNewKey(true);
+    AlternativeRecoveryRecord recovery;
+    recovery.request_id = session.request_id;
+    recovery.session_id = session.session_id;
+    recovery.original_provider_id = artifacts.attempt.provider_id;
+    recovery.recovery_provider_identity_key = XOnlyPubKey{identity.GetPubKey()};
+    recovery.recovery_provider_id = GetPaymasterId(recovery.recovery_provider_identity_key);
+    recovery.offer_id = uint256S("d2");
+    recovery.policy_hash = uint256S("d3");
+    recovery.original_commit_key = artifacts.attempt.commit_key;
+    recovery.original_template_commitment = artifacts.attempt.template_commitment;
+    recovery.client_nonce = uint256S("d4");
+    recovery.recovery_id = GetAlternativeRecoveryId(recovery.request_id, recovery.session_id,
+        recovery.recovery_provider_id, recovery.client_nonce);
+    recovery.created_at = recovery.updated_at = 102;
+    return recovery;
+}
+
+PaymasterResult MakeClientViewResult(const ValidClientResultArtifacts& artifacts)
+{
+    PaymasterResult result;
+    result.genesis_hash = artifacts.genesis_hash;
+    result.provider_id = artifacts.attempt.provider_id;
+    result.commit_key = artifacts.attempt.commit_key;
+    result.result_sequence = 1;
+    result.status = PaymasterResultStatus::USER_PSBT_ACCEPTED;
+    result.updated_at = 102;
+    result.identity_signature.resize(64);
+    BOOST_REQUIRE(artifacts.provider_identity_key.SignSchnorr(
+        GetPaymasterResultSignatureHash(result), result.identity_signature, nullptr, uint256{}));
+    return result;
+}
+
+void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSession& session,
+                                   const char* expected_error)
+{
+    auto& wallet = fixture.m_wallet;
+    PaymasterStore store{wallet};
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const size_t transactions_before = WITH_LOCK(wallet.cs_wallet, return wallet.mapWallet.size());
+    std::vector<COutPoint> locks_before;
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.ListLockedCoins(locks_before);
+    }
+    paymaster_app::ClientSessionView view;
+    std::string error;
+    BOOST_CHECK(!paymaster_app::LoadClientSessionView(store, session, GetTime(), view, error));
+    BOOST_CHECK_EQUAL(error, expected_error);
+    BOOST_CHECK(view.allowed_actions.empty());
+    BOOST_CHECK_EXCEPTION(paymaster_app::CaptureClientSession(store, session, "refresh"), ApplicationError,
+        [&](const ApplicationError& failure) {
+            return failure.kind == ErrorKind::WALLET && failure.code == expected_error &&
+                failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+        });
+
+    WalletContext context;
+    context.chain = fixture.m_node.chain.get();
+    context.args = fixture.m_node.args;
+    context.wallets.emplace_back(&wallet, [](wallet::CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    const auto expected_rpc_error = [&](const UniValue& failure) {
+        const auto& data = failure.find_value("data");
+        return failure.find_value("code").isNum() &&
+            failure.find_value("code").getInt<int>() == RPC_WALLET_ERROR &&
+            failure.find_value("message").isStr() &&
+            failure.find_value("message").get_str() == expected_error &&
+            data.find_value("paymaster_code").isStr() &&
+            data.find_value("paymaster_code").get_str() == expected_error &&
+            data.find_value("disposition").isStr() &&
+            data.find_value("disposition").get_str() == "reconcile" &&
+            !data.find_value("session_absent").isTrue();
+    };
+    // Test the public RPC adapters: neither a partial list nor a capability
+    // error may hide the underlying unreadable durable artifact.
+    request.strMethod = "listdigidollarsendsessions";
+    request.params = UniValue{UniValue::VARR};
+    BOOST_CHECK_EXCEPTION(listdigidollarsendsessions().HandleRequest(request), UniValue, expected_rpc_error);
+    UniValue lookup{UniValue::VOBJ};
+    lookup.pushKV("request_id", session.request_id);
+    for (const char* action : {"refresh", "retry_same", "fallback", "abandon_unsigned", "cancel_to_self"}) {
+        BOOST_TEST_CONTEXT("resolve action " << action) {
+            request.strMethod = "resolvepaymastersession";
+            request.params = UniValue{UniValue::VARR};
+            request.params.push_back(lookup);
+            request.params.push_back(action);
+            BOOST_CHECK_EXCEPTION(resolvepaymastersession().HandleRequest(request), UniValue, expected_rpc_error);
+        }
+    }
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+    BOOST_CHECK_EQUAL(WITH_LOCK(wallet.cs_wallet, return wallet.mapWallet.size()), transactions_before);
+    std::vector<COutPoint> locks_after;
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.ListLockedCoins(locks_after);
+    }
+    BOOST_CHECK(locks_after == locks_before);
+    BOOST_REQUIRE(!session.user_inputs.empty());
+    BOOST_CHECK(IsPaymasterInputReserved(wallet, session.user_inputs.front()));
 }
 
 } // namespace
@@ -7109,6 +7239,254 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cleanup_rejects_unreadable_reservations)
             BOOST_CHECK(database.m_records == before);
             LOCK(m_wallet.cs_wallet);
             BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(client_view_recovery_read_failures_block_rpc_actions)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    std::string error;
+    // A valid first list entry must not turn a later failure into partial success.
+    PaymentSession first;
+    BOOST_REQUIRE(store.CreateOrJoinSession("550e8400-e29b-41d4-a716-4466554400d0",
+        uint256S("d0"), FeeMode::PAYMASTER, 100, first, error) == CreatePaymasterSessionResult::CREATED);
+    paymaster_app::ClientSessionView view;
+    BOOST_REQUIRE_MESSAGE(paymaster_app::LoadClientSessionView(store, session, 110, view, error), error);
+    BOOST_CHECK(!view.recovery);
+    BOOST_CHECK_EQUAL(view.artifact, "user_psbt");
+    BOOST_CHECK(std::find(view.allowed_actions.begin(), view.allowed_actions.end(), "retry_same") != view.allowed_actions.end());
+    const AlternativeRecoveryRecord recovery = MakeClientViewRecovery(session, artifacts);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto absent_rows = database.m_records;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(recovery));
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecoveryRequest(session.request_id, recovery.recovery_id));
+    }
+    BOOST_REQUIRE_MESSAGE(paymaster_app::LoadClientSessionView(store, session, 110, view, error), error);
+    BOOST_REQUIRE(view.recovery);
+    BOOST_CHECK_EQUAL(view.artifact, "alternative_recovery");
+    BOOST_CHECK(std::find(view.allowed_actions.begin(), view.allowed_actions.end(), "retry_same") == view.allowed_actions.end());
+
+    for (int scenario = 0; scenario < 7; ++scenario) {
+        BOOST_TEST_CONTEXT("recovery read scenario " << scenario) {
+            database.m_records = absent_rows;
+            const char* expected_error = "PAYMASTER_RECOVERY_DATABASE_READ";
+            {
+                LOCK(m_wallet.cs_wallet);
+                auto batch = m_wallet.GetDatabase().MakeBatch();
+                const auto index = std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST, session.request_id);
+                BOOST_REQUIRE(batch->Write(index, recovery.recovery_id));
+                if (scenario == 0) {
+                    BOOST_REQUIRE(batch->Write(index, uint8_t{0})); // Truncated index.
+                } else if (scenario == 1) {
+                    // Existing index with no target must not mean no recovery.
+                } else if (scenario == 2 || scenario == 3) {
+                    const uint16_t version = AlternativeRecoveryRecord::CURRENT_VERSION + (scenario == 3);
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), version));
+                    if (scenario == 3) expected_error = "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION";
+                } else {
+                    auto invalid = recovery;
+                    if (scenario == 4) invalid.provider_side = true;
+                    if (scenario == 5) invalid.request_id = first.request_id;
+                    if (scenario == 6) {
+                        invalid.session_id = first.session_id;
+                        expected_error = "PAYMASTER_RECOVERY_SESSION_CONFLICT";
+                    }
+                    invalid.recovery_id = GetAlternativeRecoveryId(invalid.request_id, invalid.session_id,
+                        invalid.recovery_provider_id, invalid.client_nonce);
+                    BOOST_REQUIRE(batch->Write(index, invalid.recovery_id));
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, invalid.recovery_id), invalid));
+                }
+            }
+            CheckUnreadableClientArtifact(*this, session, expected_error);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(client_view_result_read_failures_and_bindings_block_rpc_actions)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    paymaster_app::ClientSessionView view;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(paymaster_app::LoadClientSessionView(store, session, 110, view, error), error);
+    BOOST_CHECK(!view.provider_result);
+    const PaymasterResult result = MakeClientViewResult(artifacts);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto absent_rows = database.m_records;
+    const auto key = std::make_pair(DBKeys::PAYMASTER_RESULT, artifacts.attempt.commit_key);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterResult(result));
+    }
+    BOOST_REQUIRE_MESSAGE(paymaster_app::LoadClientSessionView(store, session, 110, view, error), error);
+    BOOST_REQUIRE(view.provider_result);
+    BOOST_CHECK(view.provider_result->status == PaymasterResultStatus::USER_PSBT_ACCEPTED);
+
+    for (int scenario = 0; scenario < 8; ++scenario) {
+        BOOST_TEST_CONTEXT("result read scenario " << scenario) {
+            database.m_records = absent_rows;
+            const char* expected_error = "PAYMASTER_RESULT_DATABASE_READ";
+            {
+                LOCK(m_wallet.cs_wallet);
+                auto batch = m_wallet.GetDatabase().MakeBatch();
+                if (scenario <= 1) {
+                    const uint16_t version = PaymasterResult::CURRENT_VERSION + scenario;
+                    BOOST_REQUIRE(batch->Write(key, version));
+                    if (scenario == 1) expected_error = "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION";
+                } else {
+                    auto invalid = result;
+                    if (scenario == 2) invalid.commit_key = uint256S("d5");
+                    if (scenario == 3) invalid.identity_signature.resize(63);
+                    if (scenario == 4) invalid.txid = artifacts.attempt.unsigned_txid;
+                    if (scenario == 5 || scenario == 6) {
+                        if (scenario == 5) invalid.genesis_hash = uint256S("d6");
+                        if (scenario == 6) invalid.provider_id = uint256S("d7");
+                        expected_error = "PAYMASTER_RESULT_BINDING_MISMATCH";
+                    }
+                    if (scenario == 7) {
+                        invalid.identity_signature.assign(64, 0);
+                        expected_error = "PAYMASTER_INVALID_RESULT_SIGNATURE";
+                    }
+                    BOOST_REQUIRE(batch->Write(key, invalid));
+                    if (scenario >= 5) {
+                        // Storage shape validation must not replace the view's
+                        // expected-network/provider/signature validation.
+                        PaymasterResult decoded;
+                        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterResultWithStatus(
+                            artifacts.attempt.commit_key, decoded) == DatabaseReadStatus::FOUND);
+                    }
+                }
+            }
+            CheckUnreadableClientArtifact(*this, session, expected_error);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(client_recovery_status_getter_preserves_absence_and_bool_compatibility)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto absent_rows = database.m_records;
+    const AlternativeRecoveryRecord recovery = MakeClientViewRecovery(session, artifacts);
+    const auto index = std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST, session.request_id);
+    const auto check_status = [&](DatabaseReadStatus expected) {
+        const auto before = database.m_records;
+        AlternativeRecoveryRecord decoded;
+        BOOST_CHECK(store.GetAlternativeRecoveryWithStatus(session.request_id, decoded) == expected);
+        BOOST_CHECK_EQUAL(store.GetAlternativeRecovery(session.request_id, decoded), expected == DatabaseReadStatus::FOUND);
+        if (expected == DatabaseReadStatus::FOUND) BOOST_CHECK(decoded.recovery_id == recovery.recovery_id);
+        BOOST_CHECK(database.m_records == before);
+    };
+    check_status(DatabaseReadStatus::NOT_FOUND);
+    database.m_pass = false;
+    check_status(DatabaseReadStatus::READ_ERROR);
+    database.m_pass = true;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(recovery));
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecoveryRequest(session.request_id, recovery.recovery_id));
+    }
+    check_status(DatabaseReadStatus::FOUND);
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        BOOST_TEST_CONTEXT("recovery getter scenario " << scenario) {
+            database.m_records = absent_rows;
+            {
+                LOCK(m_wallet.cs_wallet);
+                auto batch = m_wallet.GetDatabase().MakeBatch();
+                BOOST_REQUIRE(batch->Write(index, recovery.recovery_id));
+                if (scenario == 0) {
+                    BOOST_REQUIRE(batch->Write(index, uint8_t{0}));
+                } else if (scenario == 1) {
+                    // A dangling index is a read error, not absence.
+                } else if (scenario == 2 || scenario == 3) {
+                    const uint16_t version = AlternativeRecoveryRecord::CURRENT_VERSION + (scenario == 3);
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), version));
+                } else {
+                    auto invalid = recovery;
+                    if (scenario == 4) invalid.provider_side = true;
+                    if (scenario == 5) invalid.request_id = "550e8400-e29b-41d4-a716-4466554400d8";
+                    invalid.recovery_id = GetAlternativeRecoveryId(invalid.request_id, invalid.session_id,
+                        invalid.recovery_provider_id, invalid.client_nonce);
+                    BOOST_REQUIRE(batch->Write(index, invalid.recovery_id));
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, invalid.recovery_id), invalid));
+                }
+            }
+            check_status(scenario == 3 ? DatabaseReadStatus::UNSUPPORTED_VERSION : DatabaseReadStatus::READ_ERROR);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(client_result_status_getter_preserves_absence_and_bool_compatibility)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const PaymasterResult result = MakeClientViewResult(artifacts);
+    const auto key = std::make_pair(DBKeys::PAYMASTER_RESULT, artifacts.attempt.commit_key);
+    const auto check_status = [&](DatabaseReadStatus expected) {
+        const auto before = database.m_records;
+        PaymasterResult decoded;
+        BOOST_CHECK(store.GetProviderResultWithStatus(artifacts.attempt.commit_key, decoded) == expected);
+        BOOST_CHECK_EQUAL(store.GetProviderResult(artifacts.attempt.commit_key, decoded), expected == DatabaseReadStatus::FOUND);
+        if (expected == DatabaseReadStatus::FOUND) BOOST_CHECK(decoded.commit_key == artifacts.attempt.commit_key);
+        BOOST_CHECK(database.m_records == before);
+    };
+    check_status(DatabaseReadStatus::NOT_FOUND);
+    database.m_pass = false;
+    check_status(DatabaseReadStatus::READ_ERROR);
+    database.m_pass = true;
+    for (const auto status : {PaymasterResultStatus::NO_FINAL_COMMIT, PaymasterResultStatus::USER_PSBT_ACCEPTED,
+                             PaymasterResultStatus::FINAL_COMMITTED, PaymasterResultStatus::BROADCAST_ATTEMPTED,
+                             PaymasterResultStatus::SLOT_UNAVAILABLE, PaymasterResultStatus::REJECTED}) {
+        auto valid = result;
+        valid.status = status;
+        if (status == PaymasterResultStatus::FINAL_COMMITTED || status == PaymasterResultStatus::BROADCAST_ATTEMPTED) {
+            valid.final_transaction = artifacts.final_transaction;
+            valid.txid = CTransaction{artifacts.final_transaction}.GetHash();
+            valid.raw_transaction_hash = CTransaction{artifacts.final_transaction}.GetWitnessHash();
+        }
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterResult(valid));
+        }
+        check_status(DatabaseReadStatus::FOUND);
+    }
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        BOOST_TEST_CONTEXT("result getter scenario " << scenario) {
+            {
+                LOCK(m_wallet.cs_wallet);
+                auto batch = m_wallet.GetDatabase().MakeBatch();
+                if (scenario <= 1) {
+                    const uint16_t version = PaymasterResult::CURRENT_VERSION + scenario;
+                    BOOST_REQUIRE(batch->Write(key, version));
+                } else {
+                    auto invalid = result;
+                    if (scenario == 2) invalid.commit_key = uint256S("d5");
+                    if (scenario == 3) invalid.identity_signature.resize(63);
+                    if (scenario == 4) invalid.txid = artifacts.attempt.unsigned_txid;
+                    BOOST_REQUIRE(batch->Write(key, invalid));
+                }
+            }
+            check_status(scenario == 1 ? DatabaseReadStatus::UNSUPPORTED_VERSION : DatabaseReadStatus::READ_ERROR);
         }
     }
 }

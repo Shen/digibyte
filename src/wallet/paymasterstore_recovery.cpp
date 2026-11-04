@@ -747,12 +747,29 @@ bool PaymasterStore::GetAlternativeRecovery(
     const std::string& request_id,
     AlternativeRecoveryRecord& recovery) const
 {
+    return GetAlternativeRecoveryWithStatus(request_id, recovery) ==
+           DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetAlternativeRecoveryWithStatus(
+    const std::string& request_id,
+    AlternativeRecoveryRecord& recovery) const
+{
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     uint256 recovery_id;
-    return batch.ReadPaymasterAlternativeRecoveryRequest(request_id, recovery_id) &&
-           batch.ReadPaymasterAlternativeRecovery(recovery_id, recovery) &&
-           !recovery.provider_side && recovery.request_id == request_id;
+    const DatabaseReadStatus index_status =
+        batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(request_id, recovery_id);
+    if (index_status != DatabaseReadStatus::FOUND) return index_status;
+    const DatabaseReadStatus status =
+        batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery);
+    // An existing index must resolve to its durable record, not authorize
+    // the original payment path by treating broken recovery state as absent.
+    if (status == DatabaseReadStatus::NOT_FOUND) return DatabaseReadStatus::READ_ERROR;
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return !recovery.provider_side && recovery.request_id == request_id
+               ? DatabaseReadStatus::FOUND
+               : DatabaseReadStatus::READ_ERROR;
 }
 
 bool PaymasterStore::GetAlternativeRecoveryById(

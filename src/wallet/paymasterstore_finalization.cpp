@@ -1576,8 +1576,14 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
 bool PaymasterStore::GetProviderResult(const uint256& commit_key,
                                        PaymasterResult& result) const
 {
+    return GetProviderResultWithStatus(commit_key, result) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetProviderResultWithStatus(
+    const uint256& commit_key, PaymasterResult& result) const
+{
     LOCK(m_wallet.cs_wallet);
-    return WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterResult(commit_key, result);
+    return WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterResultWithStatus(commit_key, result);
 }
 
 } // namespace wallet

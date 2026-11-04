@@ -343,7 +343,7 @@ RPCHelpMan listdigidollarsendsessions()
                 ClientSessionView view;
                 if (!LoadClientSessionView(
                         store, session, GetTime(), view, error)) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                    throw ApplicationError(ErrorKind::WALLET, error);
                 }
                 if (active_only && !IsActiveClientSession(session, view)) {
                     continue;
