@@ -1945,6 +1945,56 @@ BOOST_AUTO_TEST_CASE(checkpoint_readers_do_not_block_atomic_replacement)
     }
 }
 
+BOOST_AUTO_TEST_CASE(checkpoint_independent_identities_progress_while_another_write_is_paused)
+{
+    SyncWithValidationInterfaceQueue();
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    CWallet other{m_node.chain.get(), "independent-checkpoint", CreateMockableWalletDatabase()};
+    LOCK(other.cs_wallet);
+    other.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    other.SetupDescriptorScriptPubKeyMans();
+    ProviderIdentityRecord first_identity, second_identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "first", 100, first_identity, error));
+    BOOST_REQUIRE(CreatePaymasterIdentity(other, "second", 100, second_identity, error));
+    auto& database = GetMockableDatabase(m_wallet);
+    DataStream checkpoint_key;
+    checkpoint_key << std::string{"pmcheckpoint"};
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto release_future = release.get_future();
+    bool paused{false};
+    database.m_on_write = [&](Span<const std::byte> key) {
+        if (!paused && key.size() == checkpoint_key.size() &&
+            std::equal(key.begin(), key.end(), checkpoint_key.begin())) {
+            paused = true;
+            entered.set_value();
+            release_future.wait();
+        }
+    };
+    auto first = std::async(std::launch::async, [&] {
+        return WalletBatch{database}.WritePaymasterIdentity(first_identity, /*overwrite=*/true);
+    });
+    const bool reached = entered_future.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    auto second = std::async(std::launch::async, [&] {
+        return WalletBatch{other.GetDatabase()}.WritePaymasterIdentity(second_identity, /*overwrite=*/true);
+    });
+    const bool independent = second.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    // Release before assertions/future destruction, including failure paths.
+    release.set_value();
+    const bool first_ok = first.get();
+    const bool second_ok = second.get();
+    database.m_on_write = {};
+    BOOST_CHECK(reached);
+    BOOST_CHECK(independent);
+    BOOST_CHECK(first_ok);
+    BOOST_CHECK(second_ok);
+    BOOST_CHECK(CheckPaymasterCheckpoint(database, error));
+    BOOST_CHECK(CheckPaymasterCheckpoint(other.GetDatabase(), error));
+}
+
 BOOST_AUTO_TEST_CASE(capital_recovery_release_is_atomic_and_retires_identity)
 {
     ScopedPaymasterMockTime clock{2000};

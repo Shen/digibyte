@@ -35,16 +35,63 @@ const std::string CHECKPOINT_KEY{"pmcheckpoint"};
 constexpr uint64_t CHECKPOINT_MAGIC{0x3150435042474444};
 constexpr size_t CHECKPOINT_FILE_SIZE{149};
 
+struct CheckpointFileState {
+    std::recursive_mutex mutex;
+    bool transaction_active{false};
+};
+
 struct TransactionState {
+    std::recursive_mutex mutex;
+    std::shared_ptr<CheckpointFileState> file_state;
+    bool owns_file{false};
     std::unique_ptr<fsbridge::FileLock> file_lock;
     fs::path path;
     PaymasterCheckpoint next;
     bool dirty{false};
     bool failed{false};
+
+    ~TransactionState()
+    {
+        if (!owns_file) return;
+        std::lock_guard<std::recursive_mutex> lock{file_state->mutex};
+        // POSIX locks are process-owned. Close this descriptor before allowing
+        // another transaction to open/close a descriptor for the same file.
+        file_lock.reset();
+        file_state->transaction_active = false;
+    }
 };
-std::recursive_mutex checkpoint_mutex;
-std::map<const WalletBatch*, TransactionState> transactions;
+// Registry lock is never held during file/database I/O or while acquiring a
+// transaction/file lock. Order: wallet -> transaction -> checkpoint file.
+std::mutex registry_mutex;
+std::map<const WalletBatch*, std::shared_ptr<TransactionState>> transactions;
+std::map<fs::path, std::weak_ptr<CheckpointFileState>> checkpoint_files;
 thread_local std::set<WalletDatabase*> pending_operations;
+
+std::shared_ptr<TransactionState> FindTransaction(const WalletBatch* owner)
+{
+    std::lock_guard<std::mutex> lock{registry_mutex};
+    const auto found = transactions.find(owner);
+    return found == transactions.end() ? nullptr : found->second;
+}
+
+std::shared_ptr<CheckpointFileState> FileState(const fs::path& path)
+{
+    // Every caller uses PaymasterCheckpointPath: one cached network data
+    // directory and a genesis/provider-derived filename. Normalize that path
+    // without probing a not-yet-created file (including Windows long paths).
+    const auto key = path.lexically_normal();
+    std::lock_guard<std::mutex> lock{registry_mutex};
+    auto& weak = checkpoint_files[key];
+    if (auto shared = weak.lock()) return shared;
+    // Reclaim expired identities without retaining wallet/provider lifetimes.
+    for (auto it = checkpoint_files.begin(); it != checkpoint_files.end();) {
+        if (it->first != key && it->second.expired()) it = checkpoint_files.erase(it);
+        else ++it;
+    }
+    auto shared = std::make_shared<CheckpointFileState>();
+    weak = shared;
+    return shared;
+}
 
 bool Valid(const PaymasterCheckpoint& record, const uint256& provider)
 {
@@ -82,9 +129,11 @@ uint256 Checksum(const PaymasterCheckpoint& record)
 DatabaseReadStatus ReadFile(const fs::path& path, PaymasterCheckpoint& record)
 {
     // CRT read handles on Windows can prevent replacement of the same file.
-    // Keep their entire lifetime inside the writer's checkpoint mutex. This
+    // Keep their entire lifetime inside this file's checkpoint mutex. This
     // takes no database locks: callers read the wallet row before entering.
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
+    const auto file_state = FileState(path);
+    if (!file_state) return DatabaseReadStatus::READ_ERROR;
+    std::lock_guard<std::recursive_mutex> lock{file_state->mutex};
     std::error_code ec;
     const auto status = fs::symlink_status(path, ec);
     if (status.type() == fs::file_type::not_found) return DatabaseReadStatus::NOT_FOUND;
@@ -263,24 +312,24 @@ bool CheckPaymasterCapitalRecoveryCheckpoint(WalletDatabase& database,
 
 void PaymasterCheckpointBegin(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    transactions.try_emplace(owner);
+    auto state = std::make_shared<TransactionState>();
+    std::lock_guard<std::mutex> lock{registry_mutex};
+    transactions.try_emplace(owner, std::move(state));
 }
 
 bool PaymasterCheckpointInTransaction(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    return transactions.count(owner) != 0;
+    return static_cast<bool>(FindTransaction(owner));
 }
 
 namespace {
 bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatabase& database,
                      bool retirement, const uint256& expected_revision, bool adoption = false)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(owner);
-    if (found == transactions.end()) return false;
-    auto& state = found->second;
+    const auto transaction = FindTransaction(owner);
+    if (!transaction) return false;
+    std::lock_guard<std::recursive_mutex> lock{transaction->mutex};
+    auto& state = *transaction;
     if (state.failed) return false;
     if (state.dirty) return true;
     // Quarantined wallets cannot advance the original provider's high-water
@@ -296,12 +345,12 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
     }
     state.path = PaymasterCheckpointPath(Params().GenesisBlock().GetHash(), identity.provider_id);
     try {
-        // POSIX fcntl locks belong to the process, not to individual threads.
-        // Refuse a second in-process transaction before opening its lock file
-        // (closing that second descriptor would also release the first lock).
-        for (const auto& other : transactions) {
-            if (other.first != owner && other.second.dirty && other.second.path == state.path) throw std::runtime_error("checkpoint busy");
-        }
+        state.file_state = FileState(state.path);
+        if (!state.file_state) throw std::runtime_error("invalid checkpoint path");
+        std::lock_guard<std::recursive_mutex> file_guard{state.file_state->mutex};
+        if (state.file_state->transaction_active) throw std::runtime_error("checkpoint busy");
+        state.file_state->transaction_active = true;
+        state.owns_file = true;
         fs::create_directories(state.path.parent_path());
         if (!SyncDirectory(state.path.parent_path().parent_path())) throw std::runtime_error("directory sync failed");
         const auto lock_path = fs::path{state.path.parent_path()} / fs::PathFromString(identity.provider_id.GetHex() + ".lock");
@@ -350,22 +399,24 @@ bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, Wa
 
 bool WalletBatch::RetirePaymasterCheckpoint(const uint256& expected_revision)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(this);
-    if (found == transactions.end() || found->second.dirty) return false;
+    const auto state = FindTransaction(this);
+    if (!state) return false;
+    std::lock_guard<std::recursive_mutex> lock{state->mutex};
+    if (state->dirty) return false;
     return TrackCheckpoint(this, *m_batch, m_database, true, expected_revision);
 }
 
 bool WalletBatch::AdoptPaymasterCheckpoint(const uint256& expected_revision)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(this);
-    if (found == transactions.end() || found->second.dirty ||
+    const auto state = FindTransaction(this);
+    if (!state) return false;
+    std::lock_guard<std::recursive_mutex> lock{state->mutex};
+    if (state->dirty ||
         !TrackCheckpoint(this, *m_batch, m_database, false, expected_revision, true)) return false;
     // The external checkpoint is advanced by PrepareCommit before this erase
     // commits. A failed commit leaves the guard and a conservative mismatch.
     if (!m_batch->Erase(DBKeys::PAYMASTER_RESTORE_GUARD)) {
-        found->second.failed = true;
+        state->failed = true;
         return false;
     }
     return true;
@@ -373,13 +424,14 @@ bool WalletBatch::AdoptPaymasterCheckpoint(const uint256& expected_revision)
 
 bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(owner);
-    if (found == transactions.end()) return true;
-    auto& state = found->second;
+    const auto transaction = FindTransaction(owner);
+    if (!transaction) return true;
+    std::lock_guard<std::recursive_mutex> lock{transaction->mutex};
+    auto& state = *transaction;
     if (state.failed) return false;
     if (!state.dirty) return true;
     try {
+        std::lock_guard<std::recursive_mutex> file_guard{state.file_state->mutex};
         return WriteFile(state.path, state.next);
     } catch (const std::exception&) {
         return false;
@@ -388,22 +440,31 @@ bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
 
 void PaymasterCheckpointEnd(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    transactions.erase(owner);
+    // Destroy (and release its OS lock) outside the registry critical section.
+    std::shared_ptr<TransactionState> retired;
+    {
+        std::lock_guard<std::mutex> lock{registry_mutex};
+        const auto found = transactions.find(owner);
+        if (found == transactions.end()) return;
+        retired = std::move(found->second);
+        transactions.erase(found);
+    }
 }
 
 bool PaymasterCheckpointTracked(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(owner);
-    return found != transactions.end() && (found->second.dirty || found->second.failed);
+    const auto state = FindTransaction(owner);
+    if (!state) return false;
+    std::lock_guard<std::recursive_mutex> lock{state->mutex};
+    return state->dirty || state->failed;
 }
 
 void PaymasterCheckpointFailed(const WalletBatch* owner)
 {
-    std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-    const auto found = transactions.find(owner);
-    if (found != transactions.end()) found->second.failed = true;
+    const auto state = FindTransaction(owner);
+    if (!state) return;
+    std::lock_guard<std::recursive_mutex> lock{state->mutex};
+    state->failed = true;
 }
 
 bool WalletBatch::SetPaymasterCheckpointPending(bool pending)
@@ -414,8 +475,10 @@ bool WalletBatch::SetPaymasterCheckpointPending(bool pending)
         return false;
     }
     {
-        std::lock_guard<std::recursive_mutex> lock{checkpoint_mutex};
-        auto& state = transactions.at(this);
+        const auto transaction = FindTransaction(this);
+        if (!transaction) { TxnAbort(); return false; }
+        std::lock_guard<std::recursive_mutex> lock{transaction->mutex};
+        auto& state = *transaction;
         if (!state.dirty) {
             TxnAbort();
             return false;
