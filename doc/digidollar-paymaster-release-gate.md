@@ -4,6 +4,48 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Inbound and pending-balance corrections (2026-11-04)
+
+Starting source: `7f30be59f7e01fe4032f51f967e864d616dcee12`.
+The separately reviewed, explicitly authorized two-path policy extension is
+`856e914e27`; F2 is `b996d79fd3`, F1's shared validation/status preparation is
+`06bf97bcc3`, and its processing/regressions are `462c8587ec`. The separately
+authorized `finance_summary.revision` RPC-description correction is `6da38cc604`.
+The original task/official baselines in the change record remain unchanged.
+
+Targeted builds used MSVC 14.43.34808 x64, `/Od /MT /WX /std:c++20` and Windows
+SDK 10.0.26100.0. Modified C++ translation units and their tests were freshly
+compiled and isolated executables linked with existing dependencies. These were
+not clean product builds. Exact commands, source/header/object/executable hashes,
+exit codes and full logs are in `.ai/paymaster-correctness-494778a2fe72/verification.json`
+and its provenance files; F2's separate red/green evidence is in
+`.ai/paymaster-f2-verify-7c10c4a48681/verification.json`.
+
+| Executed check | Actual result |
+|---|---|
+| F1 new queue regression against baseline product objects | Expected failure, exit 201: the unknown recovery remained a throwing error instead of the required local rejection. The final manual/automatic case passes. |
+| F2 fresh baseline product TU plus new assertions | Expected failure, exit 201: five Summary expectations fail. With the corrected TU, all 30 assertions pass; ordinary DD spendability and reservation-balance selections also pass. |
+| Final independent native selection | Exit 0: 113 cases / 3,298 assertions, including protocol, PSBT, wire/leases, recovery, queue handling, F2 and selected persistence regressions. |
+| Final corruption/pruning classification; quote lookup; checkpoint/quote persistence | Three disjoint runs, all exit 0: 3 cases / 454 assertions; 1 / 31; 4 / 153. Together with the preceding row: 121 distinct cases / 3,936 assertions. |
+| Boundary checks | Five positive/negative fixtures passed. Committed candidate `462c8587ec` passed against local policy base `856e914e27`; this is not evidence of remote owner merge or hosting protections. |
+| Focused `wallet_paymaster_reorg.py`, RPC checks enabled | Exit 1 in `functional-reorg-3.log`: rejection, unchanged-value checks and the subsequent real payment through block inclusion completed, then the existing `getdigidollarsendsession` contract failed because required `observed_at` was absent. Full functional acceptance remains open. |
+| Python/static checks | Functional source parses; `git diff --check` passed. `flake8` is not installed, so its check was not run. |
+
+The 27-case F2-only pass overlaps the final independent selection and is not
+additional coverage. The first native attempts exposed fixture mistakes (empty
+runtime wallet name, semantic inbox replay across independent cases and a zero
+addnode semaphore during teardown); these were corrected without relaxing
+assertions or product guards. Their failed/aborted logs remain separate. The
+first functional attempt exposed the separately corrected finance RPC contract;
+the second used the wrong connection-type predicate for the inbound listener.
+
+The recovery classification fixture uses authenticated synthetic records; it
+does not establish successful fresh recovery signing. It does verify retained
+messages, exact stored-final replay after repair and unchanged database/checkpoint
+bytes. Full native/functional/Qt/platform/sanitizer and operational gates below
+remain operator work using the [runbook](digidollar-paymaster-testing.md). No
+release certification follows from these targeted results.
+
 ## Wallet safety candidate (2026-11-04)
 
 Source: working-tree corrections based on `b3b26ccbda5a`. Five changed C++

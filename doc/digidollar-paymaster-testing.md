@@ -106,6 +106,29 @@ The prefix includes split wallet suites. Windows equivalent:
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 ```
 
+For the inbound-message and pending-balance corrections, use the freshly built
+test executable from the repository root. This focused selection normally takes
+seconds to a few minutes; success requires exit zero and no failed or unexpectedly
+skipped selected cases:
+
+```powershell
+$focusedCases = @(
+    'paymaster_recovery_tests',
+    'paymaster_wallet_identity_tests/unknown_recovery_submit_is_consumed_before_normal_work,stale_submit_is_consumed_without_faulting_provider,automatic_submit_defers_before_wallet_or_index_wait',
+    'paymaster_wallet_security_tests/normal_submit_classifies_peer_payload_and_local_authority,provider_recovery_pre_signature_firewall_reloads_pool_and_budget,expired_unsigned_provider_history_is_compacted_atomically,quote_prevout_lookup_failure_preserves_local_authority',
+    'digidollar_mint_cleanup_tests/pending_balance_excludes_expired_mints_without_position_records',
+    'digidollar_wave17_spendability_tests',
+    'paymaster_wallet_identity_tests/paymaster_dd_reservations_are_owned_but_not_spendable,unreadable_paymaster_locks_fail_closed_for_coin_selection,paymaster_input_scan_reuses_pool_without_cross_scan_cache'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($focusedCases -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Inbound and pending-balance regressions failed' }
+```
+
+Then run `wallet_paymaster_reorg.py` using the [functional runner](#functional-selection)
+with freshly built daemon and CLI binaries. It must reject the unrelated recovery
+and finish the real payment/reorganization sequence with RPC contract checking
+enabled. A failure during fixture setup is not a pass for that regression.
+
 For the wallet-lock ownership and reorganization-readiness corrections, rebuild
 the changed sources and start with this focused selection:
 
@@ -196,6 +219,8 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Nonfinancial diagnostics | Transport `diagnostic_*`; `rpc_paymaster_endpoint.py` tests TCP/SOCKS5 isolation and no authentication; Qt `paymasterDiagnosticCommands`, `paymasterDiagnosticRefreshAndPrivacy`, `paymasterNodeConnectionEditor`. Local proxy coverage is not public Tor evidence. |
 | Selection, fee/privacy limits and failover | Client comparator cycle permutations/strict-order properties; directory/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
 | Exact authorization and same-ID retry | Wallet service/store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion. |
+| Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` rejects an unknown recovery on an authenticated local channel, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment. |
+| Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
 | Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
 | Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
@@ -308,7 +333,8 @@ Client-only fixtures retain the remote provider key in their artifacts, rather
 than enrolling that identity as the client's local provider.
 
 [Paymaster Security CI](../.github/workflows/paymaster-security.yml) is the
-executable reference for sanitizer, fuzz and functional selections. Run its
+executable reference for architecture, sanitizer and fuzz checks. Functional
+tests use the [runner selection above](#functional-selection). Run the workflow's
 current configuration rather than copying stale package lists. Inspect code
 analysis/dependency workflows as complementary checks, not proof of correctness.
 
