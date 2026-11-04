@@ -323,11 +323,41 @@ UniValue StopPaymaster(WalletContext& context, CWallet& target, bool persistent,
 
 namespace wallet {
 using namespace paymaster_app;
+namespace {
+void BackgroundFailure(WalletContext& context, CWallet& wallet,
+                       const DigiDollar::Paymaster::ApplicationError& failure)
+{
+    using namespace DigiDollar::Paymaster;
+    auto* manager = context.paymaster;
+    if (!manager) return;
+    if (failure.code == "PAYMASTER_PROVIDER_SERVICE_BUSY") return;
+    ProviderServiceState state{ProviderServiceState::FAULT};
+    if (failure.kind == ErrorKind::UNLOCK || failure.code == "PAYMASTER_WALLET_LOCKED") {
+        state = ProviderServiceState::WAITING_FOR_UNLOCK;
+    } else if (failure.code == "PAYMASTER_INVALID_MAINTENANCE_LEDGER" ||
+               failure.code == "PAYMASTER_PROVIDER_SYNCING" ||
+               failure.code == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
+               failure.code == "PAYMASTER_TXINDEX_NOT_READY" ||
+               failure.code == "PAYMASTER_NODE_NOT_READY") {
+        state = ProviderServiceState::WAITING_FOR_READINESS;
+    } else if (failure.code == "PAYMASTER_PROVIDER_DRAIN_ONLY" ||
+               failure.code == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED") {
+        state = ProviderServiceState::DRAIN_ONLY;
+    } else if (failure.code == "PAYMASTER_PROVIDER_NOT_RUNNING") {
+        state = ProviderServiceState::STOPPED;
+    }
+    const auto previous = manager->GetProviderServiceStatus(wallet.GetName());
+    if (previous.state != state || previous.last_error != failure.code) {
+        wallet.WalletLogPrintf("Paymaster background work paused: %s\n", failure.code);
+    }
+    manager->SetProviderServiceStatus(wallet.GetName(), state, failure.code);
+}
+
 // One bounded unit of work per queue keeps the validation scheduler responsive
 // and preserves fairness across wallets/providers. Temporary local failures
 // retain their lease for retry; permanent protocol failures are durably rejected
 // before the message is acknowledged.
-void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
+void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& wallet)
 {
     using namespace DigiDollar::Paymaster;
     Manager* const manager = context.paymaster;
@@ -479,9 +509,8 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         bool setup_pending{false};
         try {
             setup_pending = HasPendingPoolPreparation(wallet);
-        } catch (const UniValue&) {
-            manager->SetProviderServiceStatus(wallet.GetName(), ProviderServiceState::WAITING_FOR_READINESS,
-                                              "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+        } catch (const ApplicationError& failure) {
+            BackgroundFailure(context, wallet, failure);
             return;
         }
         // Do not replenish the same outputs twice. Existing signed payment
@@ -657,36 +686,6 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         }
     }
 
-    const auto run_step = [&](auto step) {
-        try {
-            step(context, wallet, ExecutionMode::AUTOMATIC);
-        } catch (const ApplicationError& failure) {
-            const std::string& error = failure.code;
-            if (error == "PAYMASTER_PROVIDER_SERVICE_BUSY") return;
-            // The reason must describe the state selected by this failed step,
-            // rather than an earlier liquidity wait from the same service tick.
-            first_error = error;
-            if (error == "PAYMASTER_WALLET_LOCKED") {
-                state = ProviderServiceState::WAITING_FOR_UNLOCK;
-            } else if (error == "PAYMASTER_PROVIDER_SYNCING" ||
-                       error == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
-                       error == "PAYMASTER_TXINDEX_NOT_READY" ||
-                       error == "PAYMASTER_NODE_NOT_READY") {
-                state = ProviderServiceState::WAITING_FOR_READINESS;
-            } else if (error == "PAYMASTER_PROVIDER_DRAIN_ONLY" ||
-                       error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED") {
-                state = ProviderServiceState::DRAIN_ONLY;
-            } else if (error == "PAYMASTER_PROVIDER_NOT_RUNNING") {
-                state = ProviderServiceState::STOPPED;
-            } else {
-                state = ProviderServiceState::FAULT;
-            }
-        } catch (const std::exception&) {
-            first_error = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
-            state = ProviderServiceState::FAULT;
-        }
-    };
-
     // A refill wait must not strand quote/recovery continuations. Fresh capacity
     // requests always require full current readiness in the request handler.
     // Drain-only providers still finish only already-authorized submissions.
@@ -695,13 +694,13 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
         state == ProviderServiceState::REPLENISHING_LIQUIDITY ||
         state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
     if (accept_new_requests || process_request_continuations) {
-        run_step(ProcessPaymasterRequests);
+        ProcessPaymasterRequests(context, wallet, ExecutionMode::AUTOMATIC);
     }
     if (state != ProviderServiceState::WAITING_FOR_UNLOCK &&
         state != ProviderServiceState::WAITING_FOR_READINESS &&
         state != ProviderServiceState::FAULT &&
         state != ProviderServiceState::STOPPED) {
-        run_step(ProcessPaymasterSubmits);
+        ProcessPaymasterSubmits(context, wallet, ExecutionMode::AUTOMATIC);
     }
     if (!first_error.empty() &&
         (previous.state != state || previous.last_error != first_error)) {
@@ -725,6 +724,33 @@ void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
     }
     manager->SetProviderServiceStatus(wallet.GetName(), state,
                                       std::move(first_error));
+}
+
+} // namespace
+
+bool RunPaymasterBackgroundWork(WalletContext& context, CWallet& wallet,
+                               const std::function<void()>& work)
+{
+    using namespace DigiDollar::Paymaster;
+    try {
+        work();
+        return true;
+    } catch (const ApplicationError& failure) {
+        BackgroundFailure(context, wallet, failure);
+    } catch (...) {
+        // Do not let one wallet stop the shared node scheduler. No action is
+        // replayed here, and no diagnostic text is interpreted as authority.
+        BackgroundFailure(context, wallet, ApplicationError{
+            ErrorKind::INTERNAL, "PAYMASTER_AUTOMATIC_SERVICE_ERROR"});
+    }
+    return false;
+}
+
+void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet)
+{
+    RunPaymasterBackgroundWork(context, wallet, [&] {
+        RunPaymasterProviderServiceCycleImpl(context, wallet);
+    });
 }
 
 } // namespace wallet

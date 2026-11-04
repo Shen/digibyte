@@ -326,13 +326,9 @@ void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet)
     if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderSettings(wallet, settings) || !settings.enabled || !AutomaticProviderStateIsSynchronized(wallet)) return;
     ProviderWorkGuard guard{*context.paymaster, wallet.GetName(), identity.provider_id, false};
     if (!guard.Acquired()) return;
-    try {
-        ContinuePoolPreparation(wallet);
-    } catch (const UniValue& error) {
-        wallet.WalletLogPrintf("Paymaster pool preparation paused: %s\n", error.write());
-    } catch (const std::exception& error) {
-        wallet.WalletLogPrintf("Paymaster pool preparation paused: %s\n", error.what());
-    }
+    // The per-wallet background boundary reports failures and suppresses
+    // evidence pruning for this maintenance pass.
+    ContinuePoolPreparation(wallet);
 }
 
 } // namespace wallet

@@ -10,12 +10,15 @@
 #include <hash.h>
 #include <key.h>
 #include <paymaster/directory.h>
+#include <paymaster/error.h>
 #include <paymaster/manager.h>
 #include <paymaster/wire.h>
 #include <rpc/request.h>
 #include <rpc/util.h>
 #include <script/standard.h>
+#include <scheduler.h>
 #include <streams.h>
+#include <test/util/logging.h>
 #include <util/time.h>
 #include <validationinterface.h>
 #include <wallet/context.h>
@@ -23,6 +26,7 @@
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
+#include <wallet/paymasterintegration.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -118,6 +122,126 @@ struct RawProviderSettingsV2 {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(background_service_contains_invalid_maintenance)
+{
+    SyncWithValidationInterfaceQueue();
+    for (const bool unsupported_version : {false, true}) {
+        CWallet provider{m_node.chain.get(), "invalid-maintenance", CreateMockableWalletDatabase()};
+        ProviderIdentityRecord identity;
+        std::string error;
+        {
+            LOCK(provider.cs_wallet);
+            provider.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            provider.SetupDescriptorScriptPubKeyMans();
+            BOOST_REQUIRE(CreatePaymasterIdentity(provider, "Review provider", 100, identity, error));
+            ProviderSettings settings;
+            settings.enabled = true;
+            settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+            settings.policy_hash = uint256::ONE;
+            settings.updated_at = 100;
+            BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.WritePaymasterSettings(settings));
+            DataStream key, value;
+            key << std::string{"pmmaintenance"};
+            if (unsupported_version) value << uint16_t{0xffff};
+            else value << uint8_t{0xff};
+            GetMockableDatabase(provider).m_records[SerializeData{key.begin(), key.end()}] =
+                SerializeData{value.begin(), value.end()};
+        }
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(provider, error), error);
+        Manager manager{true};
+        BOOST_REQUIRE(manager.StartProvider(provider.GetName(), identity.provider_id));
+        WalletContext context;
+        context.chain = m_node.chain.get();
+        context.args = m_node.args;
+        context.paymaster = &manager;
+        const auto records = GetMockableDatabase(provider).m_records;
+        size_t messages{0};
+        DebugLogHelper log{"Paymaster background work paused", [&](const std::string* line) {
+            if (line) ++messages;
+            return false;
+        }};
+        for (int tick = 0; tick < 2; ++tick) {
+            BOOST_CHECK_NO_THROW(RunPaymasterProviderServiceCycle(context, provider));
+            const auto status = manager.GetProviderServiceStatus(provider.GetName());
+            BOOST_CHECK(status.state == ProviderServiceState::WAITING_FOR_READINESS);
+            BOOST_CHECK_EQUAL(status.last_error, "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+            BOOST_CHECK(GetMockableDatabase(provider).m_records == records);
+        }
+        BOOST_CHECK_EQUAL(messages, 1U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(background_failure_isolates_wallets_and_scheduler)
+{
+    class ThrowingDatabase final : public MockableDatabase {
+    public:
+        bool fail{false};
+        std::unique_ptr<DatabaseBatch> MakeBatch(bool flush = true) override
+        {
+            if (fail) throw std::runtime_error("injected database failure");
+            return MockableDatabase::MakeBatch(flush);
+        }
+    };
+    SyncWithValidationInterfaceQueue();
+    auto database = std::make_unique<ThrowingDatabase>();
+    auto& broken_database = *database;
+    CWallet broken{m_node.chain.get(), "broken-background", std::move(database)};
+    CWallet healthy{m_node.chain.get(), "healthy-background", CreateMockableWalletDatabase()};
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    for (CWallet* provider : {&broken, &healthy}) {
+        LOCK(provider->cs_wallet);
+        provider->SetLastBlockProcessed(*m_node.chain->getHeight(),
+                                       m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+        provider->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider->SetupDescriptorScriptPubKeyMans();
+        ProviderIdentityRecord identity;
+        std::string error;
+        BOOST_REQUIRE(CreatePaymasterIdentity(*provider, provider->GetName(), 100, identity, error));
+        ProviderSettings settings;
+        settings.enabled = true;
+        settings.operation_mode = ProviderOperationMode::MANUAL;
+        settings.policy_hash = uint256::ONE;
+        settings.updated_at = 100;
+        BOOST_REQUIRE(WalletBatch{provider->GetDatabase()}.WritePaymasterSettings(settings));
+        BOOST_REQUIRE(manager.StartProvider(provider->GetName(), identity.provider_id));
+        context.wallets.emplace_back(provider, [](CWallet*) {});
+    }
+    broken_database.fail = true;
+    CScheduler scheduler;
+    int ticks{0};
+    for (int i = 0; i < 2; ++i) {
+        scheduler.scheduleFromNow([&] {
+            RunPaymasterProviderServices(context);
+            RunPeriodicPaymasterMaintenance(context, 200);
+            ++ticks;
+        }, std::chrono::milliseconds{0});
+    }
+    bool subsequent_task{false};
+    scheduler.scheduleFromNow([&] { subsequent_task = true; }, std::chrono::milliseconds{0});
+    scheduler.StopWhenDrained();
+    BOOST_CHECK_NO_THROW(scheduler.serviceQueue());
+    broken_database.fail = false;
+    BOOST_CHECK_EQUAL(ticks, 2);
+    BOOST_CHECK(subsequent_task);
+    BOOST_CHECK(manager.GetProviderServiceStatus(broken.GetName()).state == ProviderServiceState::FAULT);
+    BOOST_CHECK_EQUAL(manager.GetProviderServiceStatus(broken.GetName()).last_error,
+                      "PAYMASTER_AUTOMATIC_SERVICE_ERROR");
+    BOOST_CHECK(manager.GetProviderServiceStatus(healthy.GetName()).state == ProviderServiceState::MANUAL);
+
+    // A failed request must not fall through to another signing/mutation step.
+    bool continued{false};
+    BOOST_CHECK(!RunPaymasterBackgroundWork(context, broken, [&] {
+        throw ApplicationError(ErrorKind::REJECTED, "PAYMASTER_SAFETY_LIMIT_EXHAUSTED");
+        continued = true;
+    }));
+    BOOST_CHECK(!continued);
+    BOOST_CHECK(manager.GetProviderServiceStatus(broken.GetName()).state == ProviderServiceState::DRAIN_ONLY);
+}
 
 BOOST_AUTO_TEST_CASE(legacy_client_limits_upgrade_without_resetting_usage)
 {

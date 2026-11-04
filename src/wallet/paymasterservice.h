@@ -5,10 +5,14 @@
 #define DIGIBYTE_WALLET_PAYMASTERSERVICE_H
 #include <psbt.h>
 #include <univalue.h>
+#include <functional>
 #include <optional>
 namespace wallet {
 class CWallet;
 struct WalletContext;
+/** Contain one wallet's background failure; false forbids further work in this cycle. */
+bool RunPaymasterBackgroundWork(WalletContext& context, CWallet& wallet,
+                               const std::function<void()>& work);
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);
 namespace paymaster_app {
 enum class ExecutionMode { MANUAL, AUTOMATIC };

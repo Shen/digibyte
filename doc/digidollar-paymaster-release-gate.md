@@ -27,12 +27,12 @@ remains with the check executables. These are operation-count checks, not produc
 throughput measurements. No new consensus, PoW, activation or general script
 validation change was introduced.
 
-Review blocker: a corrupt maintenance ledger raises `ApplicationError` out of
-`RunPaymasterProviderServiceCycle`, whose local catch still expects `UniValue`.
-The scheduler path can terminate the node. An isolated test with freshly compiled
-service/pool units failed both containment/status assertions. Fix and regression
-coverage are required before release; full-history finance reconciliation also
-remains a scaling concern.
+The provider exception escape is corrected by a per-wallet background boundary.
+Fresh service, pool, integration and identity-test objects passed three targeted
+cases / 70 assertions covering corrupt/unknown records, scheduler and wallet
+isolation, duplicate-log suppression and retained equivocation evidence. This
+isolated MSVC link still reuses other existing objects. Full-history finance
+reconciliation remains a scaling concern until its incremental replacement passes.
 
 Open: the complete build, functional, Qt, ordinary DGB/DD, sanitizer and platform
 gates below. Server-side required statuses and bypass protection are not configured

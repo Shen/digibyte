@@ -8,6 +8,7 @@
 #include <wallet/paymasterintegration.h>
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterfinance.h>
+#include <paymaster/error.h>
 
 #include <base58.h>
 #include <chainparams.h>
@@ -114,28 +115,19 @@ void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
     // ambiguous reservation, or exceeding an approved fee limit.
     bool all_equivocation_scans_succeeded{true};
     for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
-        std::string error;
-        if (!DrainPaymasterEquivocationInbox(context, *wallet, error)) {
-            all_equivocation_scans_succeeded = false;
-            wallet->WalletLogPrintf(
-                "Paymaster equivocation-inbox maintenance failed: %s\n",
-                error);
-            error.clear();
-        }
-        if (!PaymasterStore{*wallet}.ReconcileFinalSessionsAtTip(now, error)) {
-            wallet->WalletLogPrintf("Paymaster periodic maintenance failed: %s\n",
-                                    error);
-        }
-        size_t recovered_maintenance{0};
-        error.clear();
-        if (!ReconcilePaymasterProviderMaintenance(
-                *wallet, recovered_maintenance, error)) {
-            wallet->WalletLogPrintf(
-                "Paymaster liquidity maintenance reconciliation failed: %s\n",
-                error);
-        } else {
+        const bool succeeded = RunPaymasterBackgroundWork(context, *wallet, [&] {
+            std::string error;
+            if (!DrainPaymasterEquivocationInbox(context, *wallet, error) ||
+                !PaymasterStore{*wallet}.ReconcileFinalSessionsAtTip(now, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            size_t recovered_maintenance{0};
+            if (!ReconcilePaymasterProviderMaintenance(*wallet, recovered_maintenance, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
             RunPaymasterPoolPreparation(context, *wallet);
-        }
+        });
+        all_equivocation_scans_succeeded &= succeeded;
     }
     // The manager is shared by all wallets. Expired signed artifacts can be
     // discarded only after every loaded wallet had an opportunity to persist
