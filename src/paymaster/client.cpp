@@ -27,6 +27,35 @@ bool IsP2TR(const CScript& script)
 
 } // namespace
 
+bool OfferCandidateLess(const OfferCandidate& lhs, const OfferCandidate& rhs,
+                        bool fixed_user_total)
+{
+    if (lhs.IsRecommendationDeprioritized() != rhs.IsRecommendationDeprioritized()) {
+        return !lhs.IsRecommendationDeprioritized();
+    }
+    if (fixed_user_total) {
+        if (lhs.service_fee.value != rhs.service_fee.value) return lhs.service_fee.value < rhs.service_fee.value;
+        if (lhs.payment.value != rhs.payment.value) return lhs.payment.value > rhs.payment.value;
+    } else if (lhs.user_total.value != rhs.user_total.value) {
+        return lhs.user_total.value < rhs.user_total.value;
+    }
+    if (lhs.reliability.sufficient_data != rhs.reliability.sufficient_data) {
+        return lhs.reliability.sufficient_data;
+    }
+    if (lhs.reliability.sufficient_data &&
+        lhs.reliability.success_rate_basis_points != rhs.reliability.success_rate_basis_points) {
+        return lhs.reliability.success_rate_basis_points > rhs.reliability.success_rate_basis_points;
+    }
+    const bool lhs_measured = lhs.latency_ewma_ms > 0;
+    const bool rhs_measured = rhs.latency_ewma_ms > 0;
+    if (lhs_measured != rhs_measured) return lhs_measured;
+    if (lhs_measured && lhs.latency_ewma_ms != rhs.latency_ewma_ms) {
+        return lhs.latency_ewma_ms < rhs.latency_ewma_ms;
+    }
+    if (lhs.provider_id != rhs.provider_id) return lhs.provider_id < rhs.provider_id;
+    return lhs.terms.offer_id < rhs.terms.offer_id;
+}
+
 bool IsEndpointAllowedForPrivacyProfile(
     const CService& endpoint,
     PrivacyProfile privacy_profile,
@@ -212,18 +241,7 @@ std::vector<OfferCandidate> BuildOfferCandidates(
         }
     }
     std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
-        if (lhs.IsRecommendationDeprioritized() != rhs.IsRecommendationDeprioritized()) {
-            return !lhs.IsRecommendationDeprioritized();
-        }
-        if (lhs.user_total.value != rhs.user_total.value) return lhs.user_total.value < rhs.user_total.value;
-        if (lhs.reliability.sufficient_data && rhs.reliability.sufficient_data &&
-            lhs.reliability.success_rate_basis_points != rhs.reliability.success_rate_basis_points) {
-            return lhs.reliability.success_rate_basis_points > rhs.reliability.success_rate_basis_points;
-        }
-        if (lhs.latency_ewma_ms > 0 && rhs.latency_ewma_ms > 0 &&
-            lhs.latency_ewma_ms != rhs.latency_ewma_ms) return lhs.latency_ewma_ms < rhs.latency_ewma_ms;
-        if (lhs.provider_id != rhs.provider_id) return lhs.provider_id < rhs.provider_id;
-        return lhs.terms.offer_id < rhs.terms.offer_id;
+        return OfferCandidateLess(lhs, rhs);
     });
     error.clear();
     return result;
@@ -277,19 +295,7 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
         }
     }
     std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
-        if (lhs.IsRecommendationDeprioritized() != rhs.IsRecommendationDeprioritized()) {
-            return !lhs.IsRecommendationDeprioritized();
-        }
-        if (lhs.service_fee.value != rhs.service_fee.value) return lhs.service_fee.value < rhs.service_fee.value;
-        if (lhs.payment.value != rhs.payment.value) return lhs.payment.value > rhs.payment.value;
-        if (lhs.reliability.sufficient_data && rhs.reliability.sufficient_data &&
-            lhs.reliability.success_rate_basis_points != rhs.reliability.success_rate_basis_points) {
-            return lhs.reliability.success_rate_basis_points > rhs.reliability.success_rate_basis_points;
-        }
-        if (lhs.latency_ewma_ms > 0 && rhs.latency_ewma_ms > 0 &&
-            lhs.latency_ewma_ms != rhs.latency_ewma_ms) return lhs.latency_ewma_ms < rhs.latency_ewma_ms;
-        if (lhs.provider_id != rhs.provider_id) return lhs.provider_id < rhs.provider_id;
-        return lhs.terms.offer_id < rhs.terms.offer_id;
+        return OfferCandidateLess(lhs, rhs, /*fixed_user_total=*/true);
     });
     error.clear();
     return result;

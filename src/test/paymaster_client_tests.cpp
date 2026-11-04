@@ -13,6 +13,9 @@
 #include <script/standard.h>
 #include <test/util/setup_common.h>
 
+#include <algorithm>
+#include <array>
+
 using namespace DigiDollar::Paymaster;
 
 namespace {
@@ -39,6 +42,63 @@ CScript TaprootScript(const CKey& key)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_client_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(recommendation_order_is_strict_with_missing_measurements)
+{
+    std::vector<OfferCandidate> candidates;
+    for (bool sufficient : {false, true}) {
+        for (int64_t latency : {int64_t{0}, int64_t{100}, int64_t{300}}) {
+            OfferCandidate candidate;
+            candidate.provider_id = uint256S("01");
+            candidate.terms.offer_id = uint256S("01");
+            candidate.payment = DDCents{1000};
+            candidate.service_fee = DDCents{10};
+            candidate.user_total = DDCents{1010};
+            candidate.reliability.sufficient_data = sufficient;
+            candidate.reliability.success_rate_basis_points = sufficient ? 8000 : 9000;
+            candidate.latency_ewma_ms = latency;
+            candidates.push_back(candidate);
+            candidate.provider_id = uint256S("02");
+            candidate.reliability.success_rate_basis_points = 6000;
+            candidates.push_back(candidate);
+        }
+    }
+    candidates.push_back(candidates.front()); // equivalence must also be transitive
+    auto deprioritized = candidates.back();
+    deprioritized.reliability.provider_failures = 1;
+    deprioritized.user_total = DDCents{1000};
+    candidates.push_back(deprioritized);
+    for (bool gross : {false, true}) {
+        const auto less = [gross](const auto& a, const auto& b) { return OfferCandidateLess(a, b, gross); };
+        const auto equivalent = [&](const auto& a, const auto& b) { return !less(a, b) && !less(b, a); };
+        for (const auto& a : candidates) {
+            BOOST_CHECK(!less(a, a));
+            for (const auto& b : candidates) {
+                BOOST_CHECK(!(less(a, b) && less(b, a)));
+                for (const auto& c : candidates) {
+                    BOOST_CHECK(!(less(a, b) && less(b, c)) || less(a, c));
+                    BOOST_CHECK(!(equivalent(a, b) && equivalent(b, c)) || equivalent(a, c));
+                }
+            }
+        }
+        // Former cycle: B < A by latency, A < C and C < B by identity.
+        auto a = candidates.front();
+        auto b = a;
+        auto c = a;
+        a.provider_id = uint256S("01"); a.latency_ewma_ms = 300;
+        b.provider_id = uint256S("03"); b.latency_ewma_ms = 100;
+        c.provider_id = uint256S("02"); c.latency_ewma_ms = 0;
+        const std::array<OfferCandidate, 3> cycle{a, b, c};
+        std::array<size_t, 3> order{0, 1, 2};
+        do {
+            std::vector<OfferCandidate> sorted{cycle[order[0]], cycle[order[1]], cycle[order[2]]};
+            std::sort(sorted.begin(), sorted.end(), less);
+            BOOST_CHECK(sorted[0].provider_id == b.provider_id);
+            BOOST_CHECK(sorted[1].provider_id == a.provider_id);
+            BOOST_CHECK(sorted[2].provider_id == c.provider_id);
+        } while (std::next_permutation(order.begin(), order.end()));
+    }
+}
 
 BOOST_AUTO_TEST_CASE(privacy_profile_routes_fail_closed)
 {

@@ -49,6 +49,12 @@ struct OfferCandidate {
     }
 };
 
+/** Strict weak ordering for advisory recommendations. Missing reliability and
+ * latency follow measured values at the same cost. fixed_user_total ranks
+ * fees/recipient amount for exact-gross candidates. */
+bool OfferCandidateLess(const OfferCandidate& lhs, const OfferCandidate& rhs,
+                        bool fixed_user_total = false);
+
 /** Public, non-secret fields needed to construct the intent before wallet
  * keys are accessed. The random session and nonce are supplied by the caller
  * so retries can reproduce the same request exactly. */
