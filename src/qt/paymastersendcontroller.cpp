@@ -891,7 +891,15 @@ SendController::FailureDecision SendController::failure(const RpcError& error, b
     decision.invalidate_review = true;
     decision.discard_uncreated_request = !persisted && error.data.find_value("session_absent").isTrue() &&
         PaymasterQt::Disposition(error) == QStringLiteral("retry_before_execution");
-    decision.allow_unsigned_cancel = known_unsigned && PaymasterQt::Disposition(error) == QStringLiteral("user_decision");
+    const QString code = PaymasterQt::StableCode(error);
+    const QString disposition = PaymasterQt::Disposition(error);
+    const bool transport_failed = disposition == QLatin1String("reconcile") &&
+        (code == QLatin1String("PAYMASTER_DIRECT_CONNECTION_FAILED") ||
+         code == QLatin1String("PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE"));
+    // This permits seeking safe closure, not executing it from the failed
+    // reply: a fresh authoritative snapshot must still allow abandon_unsigned.
+    decision.allow_unsigned_cancel = known_unsigned &&
+        (disposition == QLatin1String("user_decision") || transport_failed);
     return decision;
 }
 
@@ -1082,7 +1090,9 @@ void SendController::resetSession()
 
 SendController::FailureDecision SendController::failedReply(const RpcError& error)
 {
-    const auto decision = failure(error, m_state.sessionPersisted, m_state.artifact == QLatin1String("none") && allows(QStringLiteral("abandon_unsigned")));
+    const bool unsigned_preparation = canCancelPreparation() ||
+        (m_state.artifact == QLatin1String("none") && allows(QStringLiteral("abandon_unsigned")));
+    const auto decision = failure(error, m_state.sessionPersisted, unsigned_preparation);
     if (decision.invalidate_review) {
         clearReview();
     }

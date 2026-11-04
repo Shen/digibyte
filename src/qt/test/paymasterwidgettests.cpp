@@ -3667,7 +3667,7 @@ void PaymasterWidgetTests::paymasterClientAuthorizationIsTwoStageAndFailClosed()
 void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases_data()
 {
     QTest::addColumn<QString>("outcome");
-    for (const char* outcome : {"cancel_review", "empty_preview", "authorized", "completed", "stop", "rpc_error", "endpoint_unreachable", "session_disappeared", "quote_expires", "wallet_close", "auto_cancel", "auto_prepare", "privacy_prepare", "review_wallet_switch", "unlock_wallet_switch", "review_changed_controls"}) {
+    for (const char* outcome : {"cancel_review", "empty_preview", "authorized", "completed", "stop", "rpc_error", "endpoint_unreachable", "transport_signed_refresh", "session_disappeared", "quote_expires", "wallet_close", "auto_cancel", "auto_prepare", "privacy_prepare", "review_wallet_switch", "unlock_wallet_switch", "review_changed_controls"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
 }
@@ -3739,6 +3739,8 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
                     throw std::runtime_error("PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
                 }
                 auto result = sends.size() >= 5 ? PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED") : PaymasterSessionView("CREATED", "none", "", false);
+                if (outcome == QLatin1String("transport_signed_refresh"))
+                    result = PaymasterSessionView("PENDING_PROVIDER", "user_psbt", "USER_SIGNED");
                 if (outcome == QStringLiteral("quote_expires") && sends.size() >= 4) {
                     result = PaymasterSessionView("FAILED", "none", "REJECTED");
                     result.pushKV("requires_attention", false);
@@ -3767,8 +3769,16 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
             if (command != "senddigidollar") throw std::runtime_error("unexpected live-send RPC");
             sends.push_back(params);
             request_id = QString::fromStdString(params[6].find_value("request_id").get_str());
-            if ((outcome == QStringLiteral("rpc_error") || outcome == QStringLiteral("endpoint_unreachable") || outcome == QStringLiteral("session_disappeared")) && sends.size() == 2) {
-                throw std::runtime_error(outcome == QStringLiteral("endpoint_unreachable") ? "PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE" : "PAYMASTER_DIRECT_CONNECTION_FAILED");
+            if ((outcome == QStringLiteral("rpc_error") || outcome == QStringLiteral("endpoint_unreachable") || outcome == QStringLiteral("transport_signed_refresh") || outcome == QStringLiteral("session_disappeared")) && sends.size() == 2) {
+                const char* code = outcome == QStringLiteral("endpoint_unreachable") ? "PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE" : "PAYMASTER_DIRECT_CONNECTION_FAILED";
+                UniValue error{UniValue::VOBJ};
+                error.pushKV("code", -4);
+                error.pushKV("message", code);
+                UniValue data{UniValue::VOBJ};
+                data.pushKV("paymaster_code", code);
+                data.pushKV("disposition", "reconcile");
+                error.pushKV("data", std::move(data));
+                throw error;
             }
             if (outcome == QStringLiteral("quote_expires") && sends.size() == 4) {
                 throw std::runtime_error("PAYMASTER_NO_ELIGIBLE_OFFER");
@@ -3903,6 +3913,18 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
         QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterSessionState", Qt::DirectConnection));
         QCOMPARE(refreshes, 2);
         QCOMPARE(sends.size(), size_t{2});
+        return;
+    }
+    if (outcome == QStringLiteral("transport_signed_refresh")) {
+        QCOMPARE(refreshes, 1);
+        QVERIFY(!canceled); // Stale local prepare-only state cannot override Core's signed artifact.
+        QCOMPARE(client->m_send.view().artifact, QStringLiteral("user_psbt"));
+        QVERIFY(send_widget.findChild<QLineEdit*>("addressEdit")->isReadOnly());
+        QVERIFY(poll());
+        QCOMPARE(refreshes, 2);
+        QCOMPARE(sends.size(), size_t{2});
+        QCOMPARE(reviews, 0);
+        QVERIFY(!canceled);
         return;
     }
     if (outcome == QStringLiteral("rpc_error") || outcome == QStringLiteral("endpoint_unreachable")) {
@@ -15940,4 +15962,13 @@ void PaymasterWidgetTests::paymasterSendFailureDecisions()
     error.data.pushKV("disposition", "unknown_future_value");
     QVERIFY(!SendController::failure(error, false, true).discard_uncreated_request);
     QVERIFY(!SendController::failure(error, false, true).allow_unsigned_cancel);
+    error.data.pushKV("disposition", "reconcile");
+    error.data.pushKV("paymaster_code", "PAYMASTER_PROXY_OR_ENDPOINT_UNREACHABLE");
+    QVERIFY(SendController::failure(error, true, true).allow_unsigned_cancel);
+    QVERIFY(!SendController::failure(error, true, false).allow_unsigned_cancel);
+    error.data.pushKV("paymaster_code", "PAYMASTER_SESSION_DATABASE_READ");
+    QVERIFY(!SendController::failure(error, true, true).allow_unsigned_cancel);
+    error.message = QStringLiteral("PAYMASTER_DIRECT_CONNECTION_FAILED");
+    error.data = UniValue{UniValue::VOBJ};
+    QVERIFY(!SendController::failure(error, true, true).allow_unsigned_cancel);
 }
