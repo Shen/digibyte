@@ -143,9 +143,13 @@ private:
     UniValue buildPaymasterSendParams(const QString& address, CAmount amount_cents) const;
     void executePaymasterRpcAsync(
         std::string command, UniValue params, WalletModel::RpcCallback callback, bool needs_unlock = false);
+    void executePaymasterRpcAsyncDetailed(
+        std::string command, UniValue params, WalletModel::DetailedRpcCallback callback, bool needs_unlock = false);
     void executePaymasterTransfer(
         const QString& address, CAmount amount_cents, bool allow_unlock, bool retry_transport = false);
     void handlePaymasterResult(const UniValue& result, const QString& error,
+                               const QString& address, CAmount amount_cents);
+    void handlePaymasterResult(const UniValue& result, const WalletModel::RpcError& error,
                                const QString& address, CAmount amount_cents);
     bool updatePaymasterSessionView(
         const UniValue& result, QString* decode_error = nullptr);

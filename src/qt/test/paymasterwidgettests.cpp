@@ -108,6 +108,17 @@
 #include <QtWidgets/qtestsupport_widgets.h>
 
 namespace {
+UniValue MissingPaymasterSessionError()
+{
+    UniValue error = JSONRPCError(-4, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
+    UniValue data{UniValue::VOBJ};
+    data.pushKV("paymaster_code", "PAYMASTER_SESSION_NOT_FOUND");
+    data.pushKV("disposition", "reconcile");
+    data.pushKV("session_absent", true);
+    error.pushKV("data", std::move(data));
+    return error;
+}
+
 void SelectPaymasterPage(QStackedWidget* pages, QWidget* page)
 {
     auto* parent = qobject_cast<QStackedWidget*>(page->parentWidget());
@@ -7640,10 +7651,19 @@ void PaymasterWidgetTests::paymasterClientCoreCancellationRoundTrip()
         client->send("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx", 325);
     }
     if (lost_reply) {
-        // The live failed attempt is now closed automatically, using Core's
-        // actual capability checks and a final durable status read-back.
-        QCOMPARE(actions, (QStringList{"refresh", "abandon_unsigned", "refresh"}));
-        QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().contains("No payment was sent"));
+        if (cancel_preparation) {
+            // The explicit cancellation remains pending until the first RPC
+            // returns, then uses fresh Core capabilities and reads back once.
+            QCOMPARE(actions, (QStringList{"refresh", "abandon_unsigned", "refresh"}));
+            QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().contains("No payment was sent"));
+        } else {
+            // An unknown/lost response triggers observation only. The durable
+            // request must survive until the user explicitly cancels it.
+            QCOMPARE(actions, QStringList{"refresh"});
+            QVERIFY(store.GetSessionByRequestId(session.request_id, session));
+            QVERIFY(session.state != DigiDollar::Paymaster::SessionState::FAILED);
+            QVERIFY(QMetaObject::invokeMethod(client, "abandonUnsignedPaymasterSession", Qt::DirectConnection));
+        }
     } else {
         QCOMPARE(actions, QStringList{"refresh"});
         QVERIFY(QMetaObject::invokeMethod(client, "abandonUnsignedPaymasterSession", Qt::DirectConnection));
@@ -14769,6 +14789,8 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
         else if (method == "senddigidollar") {
             sent = params;
             pending_send = std::move(callback);
+        } else if (method == "resolvepaymastersession") {
+            throw MissingPaymasterSessionError();
         } else QFAIL("Unexpected RPC in offer-card test");
     });
     form.setWalletModel(gui.walletModel.get());
@@ -15150,7 +15172,7 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation_data()
 {
     QTest::addColumn<QString>("outcome");
     for (const char* outcome : {"first_quote", "between_polls", "during_poll", "lost_first_reply", "no_session", "malformed_first",
-                                "lost_cancel_reply", "malformed_cancel_reply", "refused", "signed_elsewhere", "status_error",
+                                "lost_cancel_reply", "malformed_cancel_reply", "refused", "signed_elsewhere", "status_error", "untrusted_absence_text",
                                 "malformed_status", "known_session_missing", "unlock_canceled", "wallet_switch", "privacy", "own_dgb", "approved"}) {
         QTest::newRow(outcome) << QString::fromLatin1(outcome);
     }
@@ -15220,6 +15242,8 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation()
             rpc_valid = false;
             callback({}, QStringLiteral("Unexpected mutation"));
         } else if (outcome == "no_session" || outcome == "known_session_missing") {
+            throw MissingPaymasterSessionError();
+        } else if (outcome == "untrusted_absence_text") {
             callback({}, QStringLiteral("PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found"));
         } else if (outcome == "status_error") {
             callback({}, QStringLiteral("Status unavailable"));
@@ -15326,7 +15350,7 @@ void PaymasterWidgetTests::paymasterClientPreparationCancellation()
         QVERIFY(!client->m_paymasterPreparationCancelRequested);
         return;
     }
-    const bool protected_outcome = outcome == "signed_elsewhere" || outcome == "status_error" ||
+    const bool protected_outcome = outcome == "signed_elsewhere" || outcome == "status_error" || outcome == "untrusted_absence_text" ||
         outcome == "malformed_status" || outcome == "known_session_missing" || outcome == "refused" || outcome == "privacy";
     if (protected_outcome) {
         QCOMPARE(client->m_paymasterRequestId, request_id);
