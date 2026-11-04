@@ -151,6 +151,12 @@ private:
                                const QString& address, CAmount amount_cents);
     void handlePaymasterResult(const UniValue& result, const WalletModel::RpcError& error,
                                const QString& address, CAmount amount_cents);
+    void handlePaymasterFailure(const WalletModel::RpcError& failure);
+    bool applyPaymasterReplySnapshot(
+        const UniValue& result, PaymasterQt::SendController::CompletionKind direct);
+    void completeDirectPaymasterReply(const UniValue& result, CAmount amount_cents);
+    void applyPreparedPaymasterReply(
+        const UniValue& result, const QString& address, CAmount amount_cents);
     bool updatePaymasterSessionView(
         const UniValue& result, QString* decode_error = nullptr);
     bool handleAuthoritativePaymasterCompletion(
