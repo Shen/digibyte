@@ -4,6 +4,21 @@
 
 Core C++ source for DigiByte. Bitcoin Core v26.2 base with multi-algo mining, Dandelion++, and DigiDollar.
 
+For all work, follow the
+[lean documentation rule](../doc/design/paymaster-integration-boundaries.md#lean-documentation).
+
+## PAYMASTER BOUNDARIES
+
+Follow [the canonical integration rules](../doc/design/paymaster-integration-boundaries.md)
+for `paymaster/`, `wallet/paymaster*`, `wallet/rpc/paymaster*`, `rpc/paymaster*`,
+`qt/paymaster*` and their shared-Core callers. Consult `PAYMASTER.md` and the
+Paymaster entries in `REPO_MAP_DIGIDOLLAR.md` before choosing a component.
+Keep domain rules shared, adapters thin and derived indexes non-authoritative.
+Document each shared-Core integration and its ordinary-wallet regression checks.
+Do not expand scope or weaken validation/tests/policy to complete a refactor.
+The versioned boundary policy and lint checks implement the mechanical subset
+of these rules; passing them does not replace semantic review.
+
 ## STRUCTURE
 
 ```

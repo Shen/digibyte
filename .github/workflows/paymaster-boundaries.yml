@@ -1,0 +1,34 @@
+name: Paymaster Boundaries
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-boundaries:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      # Only target-branch code is checked out/executed. The candidate is a
+      # fetched Git object and is read by the trusted checker as source data.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          # Read-only credentials are used only by trusted Git/checker steps.
+          persist-credentials: true
+      - name: Fetch candidate objects
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head"
+      - name: Check trusted installation and candidate boundaries
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ ! -f test/lint/lint-paymaster-boundaries.py ]; then
+            echo 'Owner-reviewed policy bootstrap is required in the target branch.'
+            exit 1
+          fi
+          python3 test/lint/lint-paymaster-boundaries.py --base "$BASE_SHA" --head "$HEAD_SHA"

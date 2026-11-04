@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "owned": [
+    "src/paymaster/*",
+    "src/wallet/paymaster*",
+    "src/wallet/rpc/paymaster*",
+    "src/rpc/paymaster*",
+    "src/qt/paymaster*",
+    "src/test/paymaster_*",
+    "src/test/fuzz/paymaster_*",
+    "src/wallet/test/paymaster_*",
+    "src/qt/test/paymaster*",
+    "test/functional/*paymaster*.py",
+    "test/functional/test_framework/paymaster*.py",
+    "doc/*paymaster*.md",
+    "doc/design/paymaster-change-record.json",
+    "PAYMASTER.md"
+  ],
+  "support": [
+    "src/AGENTS.md",
+    "ARCHITECTURE.md",
+    "REPO_MAP.md",
+    "REPO_MAP_DIGIDOLLAR.md",
+    "test/lint/README.md",
+    ".github/workflows/paymaster-security.yml"
+  ],
+  "shared": [
+    "src/wallet/wallet.cpp",
+    "src/wallet/wallet.h",
+    "src/wallet/walletdb.cpp",
+    "src/wallet/walletdb.h",
+    "src/wallet/interfaces.cpp",
+    "src/interfaces/wallet.h",
+    "src/qt/walletmodel.cpp",
+    "src/qt/walletmodel.h",
+    "src/qt/digibyte.cpp",
+    "src/qt/test/test_main.cpp",
+    "src/rpc/client.cpp",
+    "src/Makefile.am",
+    "src/Makefile.qt.include",
+    "src/Makefile.test.include",
+    "src/Makefile.test_util.include",
+    "test/functional/test_runner.py",
+    "src/wallet/db.h",
+    "src/wallet/sqlite.h",
+    "src/wallet/sqlite.cpp",
+    "src/wallet/bdb.h",
+    "src/wallet/bdb.cpp",
+    "src/wallet/test/util.h",
+    "src/wallet/test/db_tests.cpp"
+  ],
+  "forbidden": [
+    "src/consensus/*",
+    "src/crypto/*",
+    "src/script/*",
+    "src/pow.*",
+    "src/validation.*",
+    "src/versionbits.*",
+    "src/deployment*",
+    "src/kernel/chainparams.*",
+    "src/chainparams*",
+    "src/primitives/block.*"
+  ],
+  "controls": [
+    "test/lint/paymaster-boundaries.json",
+    "test/lint/lint-paymaster-boundaries.py",
+    "test/lint/test_paymaster_boundaries.py",
+    ".github/workflows/paymaster-boundaries.yml",
+    "doc/design/paymaster-integration-boundaries.md",
+    "contrib/devtools/circular-dependencies.py"
+  ],
+  "dependencies": [
+    {
+      "sources": [
+        "src/paymaster/*"
+      ],
+      "deny": [
+        "wallet/*",
+        "rpc/*",
+        "qt/*",
+        "qobject",
+        "qwidget",
+        "qthread",
+        "qt*/*"
+      ]
+    },
+    {
+      "sources": [
+        "src/wallet/paymaster*"
+      ],
+      "deny": [
+        "wallet/rpc/*",
+        "rpc/*",
+        "qt/*",
+        "qobject",
+        "qwidget",
+        "qthread",
+        "qt*/*"
+      ]
+    },
+    {
+      "sources": [
+        "src/qt/paymaster*"
+      ],
+      "deny": [
+        "wallet/*"
+      ]
+    }
+  ]
+}

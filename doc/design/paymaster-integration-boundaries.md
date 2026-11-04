@@ -5,6 +5,16 @@ wallet, validation, networking, RPC and Qt paths as well as Paymaster files.
 Baseline and integration ancestry are recorded in
 [the v9.26.7 integration note](../digidollar-paymaster-v9.26.7-integration.md).
 
+## Lean documentation
+
+This rule applies to all repository work. Document only what is needed to
+understand, operate, test or safely change the current system. Update existing
+documentation selectively; each fact has one authoritative location. Do not add
+progress reports, work chronicles or repeated summaries. A new document requires
+a concrete purpose not already covered. Remove obsolete intermediate states;
+retain current interfaces, safety constraints, migration instructions and required
+verification evidence. Keep handoffs to changes, checks and genuinely open items.
+
 ## Unchanged authority
 
 - Ordinary DigiDollar transfer consensus/script validation, activation and
@@ -63,3 +73,74 @@ Canonical operator behavior belongs in the
 [operator guide](../digidollar-paymaster-operator.md), not duplicated dated UI
 work logs. The [client contract](../digidollar-paymaster-integration.md) defines
 preparation, authorization and safe cancellation.
+
+## Dependency and reuse contract
+
+| Layer | Owns | Permitted dependencies |
+|---|---|---|
+| `paymaster/` | Protocol, amount arithmetic, selection and validation | Core value types/utilities; no wallet implementation, RPC handlers or Qt |
+| `wallet/paymaster*` | Application operations, signing, persistence, reconciliation | Paymaster domain and existing wallet/database interfaces; no RPC handlers or Qt |
+| `wallet/rpc/paymaster*`, `rpc/paymaster*` | Parameter decoding and result/error encoding | Domain/application services and existing RPC framework |
+| `qt/paymaster*` | Presentation, user input and wallet-bound asynchronous work | Domain value types and existing frontend interfaces/RPC adapters; no wallet implementation |
+
+The existing setup/CLI JSON views are adapter surfaces, not authorization
+sources. Extract application logic from RPC handlers rather than calling those
+handlers from a worker. Reuse wallet signing, database transactions, connection
+budgets and asynchronous infrastructure. Do not copy these systems into a
+Paymaster-specific replacement to reduce the apparent shared-Core diff.
+
+Each financial rule has one canonical implementation. Calling that implementation
+again at a different trust boundary is deliberate validation, not redundant
+business logic. Caches, transaction-to-session indexes and finance daily totals
+are derived data: validate authoritative records before granting financial
+authority, and rebuild invalid derived state without releasing reservations.
+
+## Shared-Core change contract
+
+`test/lint/paymaster-boundaries.json` is the executable path/dependency policy
+for this pre-release optimization. Shared changes are restricted to the listed
+integration points. Consensus, PoW, activation and general script validation
+are outside this task. Additional changes need a concrete scope decision, not
+an automatic expansion of the allowlist by the implementation agent.
+
+For every changed shared file, `doc/design/paymaster-change-record.json` records
+the purpose, existing API reused, ordinary callers affected and regression
+checks. The record is review evidence, not proof that the tests passed. Record
+actual results only in the [release evidence](../digidollar-paymaster-release-gate.md);
+the test guide owns commands and coverage. Compare both against
+the task baseline `5ddc3e268e` and the official baseline documented in the
+v9.26.7 integration note; do not attribute all historical fork changes to this
+optimization. There is no arbitrary line-count budget.
+
+Keep behavior-preserving extraction separate from behavioral changes when
+preparing commits. Update affected canonical guides when behavior or interfaces
+change, and link to them from maps. Unknown persisted versions,
+ambiguous outcomes and incomplete snapshots must remain fail-closed.
+
+## Enforcement and trusted policy bootstrap
+
+Run `python test/lint/lint-paymaster-boundaries.py` for dependency checks and
+`python test/lint/test_paymaster_boundaries.py` for positive/negative fixtures.
+The checker reuses the module mapping and graph helper in the existing
+`contrib/devtools/circular-dependencies.py` linter. It rejects each newly added
+edge that creates or extends a cycle against the target branch. Existing cycles
+are not new exceptions; the helper itself is a protected control.
+For a committed candidate, add `--base <trusted-base> --head <candidate>` to
+check changed paths and shared-Core records using policy from the base commit.
+The checker never executes candidate code. Computed, absolute and source-root-escaping
+includes are rejected in guarded layers; changed files are read as complete source
+for multiline include/cycle checks. Local default checks are advisory;
+they do not claim trusted-base enforcement.
+
+The separate `Paymaster Boundaries` workflow uses the target-branch checker and
+policy, with candidate source treated only as data. Policy/checker/workflow
+changes require a separate policy-only review. Initial installation requires
+the repository owner to review and merge these controls before making the
+`trusted-boundaries` status mandatory. A base without the controls fails with
+an explicit bootstrap message; it never silently adopts candidate policy.
+
+The repository owner must require the trusted status, protect policy changes,
+and deny agent identities permission to bypass merge controls. These hosting
+settings cannot be installed by editing `AGENTS.md`. Repository text and CI do
+not form an operating-system sandbox or prove absence of semantic duplication.
+Retain the operator's permission boundaries and review the shared-Core record.

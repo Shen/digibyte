@@ -8,6 +8,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/paymaster-security.yml'
+      - 'test/lint/*paymaster*'
+      - 'src/qt/test/paymaster*'
       - 'src/dandelion.cpp'
       - 'src/net.cpp'
       - 'src/net.h'
@@ -32,7 +34,7 @@ on:
       # adapters; changes there can affect Paymaster safety too.
       - 'src/wallet/**'
       - 'test/functional/*paymaster*.py'
-      - 'test/functional/test_framework/paymaster.py'
+      - 'test/functional/test_framework/paymaster*.py'
   schedule:
     - cron: '17 3 * * 0'
   workflow_dispatch:
@@ -45,6 +47,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  architecture-tests:
+    name: Paymaster architecture fixtures
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 test/lint/lint-paymaster-boundaries.py
+      - run: python3 test/lint/test_paymaster_boundaries.py
+
   asan-ubsan-unit:
     name: ASan and UBSan Paymaster unit tests
     runs-on: ubuntu-22.04

@@ -57,3 +57,21 @@ git remote add --fetch secp256k1 https://github.com/digibyte-core/secp256k1.git
 all-lint.py
 ===========
 Calls other scripts with the `lint-` prefix.
+
+Paymaster architecture checks
+============================
+
+From the repository root, run:
+
+```sh
+python3 test/lint/test_paymaster_boundaries.py
+python3 test/lint/lint-paymaster-boundaries.py
+```
+
+The default checks tracked and untracked Paymaster sources and new include
+cycles relative to HEAD. For a committed candidate, use
+`--base <trusted-target-commit> --head <candidate-commit>`; paths, dependency
+rules, the cycle helper and shared-Core evidence requirements come from the
+trusted target. Candidate Python is never executed. Initial policy installation
+and control changes require the separate owner review described in
+[the integration boundaries](../../doc/design/paymaster-integration-boundaries.md).
