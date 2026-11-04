@@ -108,6 +108,16 @@
 #include <QtWidgets/qtestsupport_widgets.h>
 
 namespace {
+UniValue ProviderApplicationError(const char* code, const char* disposition = "reconcile")
+{
+    UniValue error = JSONRPCError(-4, code);
+    UniValue data{UniValue::VOBJ};
+    data.pushKV("paymaster_code", code);
+    data.pushKV("disposition", disposition);
+    error.pushKV("data", std::move(data));
+    return error;
+}
+
 UniValue MissingPaymasterSessionError()
 {
     UniValue error = JSONRPCError(-4, "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found");
@@ -480,6 +490,7 @@ UniValue FinanceTestSnapshot()
     UniValue finance{UniValue::VOBJ};
     finance.pushKV("provider_id", provider_id);
     finance.pushKV("period", "30d");
+    finance.pushKV("revision", 1);
     finance.pushKV("service_fee_income_cents", 125);
     finance.pushKV("dgb_operating_cost_satoshis", 100000);
     finance.pushKV("successful_transfers", 5);
@@ -10608,7 +10619,7 @@ void PaymasterWidgetTests::paymasterSettingsRestart()
         mutations << QString::fromStdString(method);
         if (method == "setpaymasterenabled") {
             if (!params[0].get_bool()) {
-                if (scenario == "busy") throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+                if (scenario == "busy") throw ProviderApplicationError("PAYMASTER_PROVIDER_BUSY", "retry_before_execution");
                 if (scenario == "pause_ack") return UniValue{UniValue::VOBJ};
                 provider.pushKV("enabled", false);
                 provider.pushKV("running", false);
@@ -10625,7 +10636,7 @@ void PaymasterWidgetTests::paymasterSettingsRestart()
         }
         if (method == "setpaymasterpolicy") {
             written = true;
-            if (scenario == "save_error") throw std::runtime_error("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
+            if (scenario == "save_error") throw ProviderApplicationError("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
             auto saved = params[0]; saved.pushKV("policy_hash", std::string(64, 'b'));
             if (scenario != "readback") provider.pushKV("policy", saved);
             if (scenario == "privacy_after_save") panel->setPrivacy(true);
@@ -11378,7 +11389,7 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
         if (command == "setpaymasterliquiditypolicy") {
             ++writes; sent = params;
             if (scenario == "wallet_change") panel->setWalletModel(nullptr);
-            if (scenario == "lost_unsaved" || scenario == "stale_revision") throw std::runtime_error("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+            if (scenario == "lost_unsaved" || scenario == "stale_revision") throw ProviderApplicationError("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
             policy = params[0]; policy.pushKV("updated_at", 101);
             liquidity.pushKV("policy_configured", true);
             liquidity.pushKV("policy", policy);
@@ -13602,7 +13613,7 @@ void PaymasterWidgetTests::paymasterReserveReduction_data()
     QTest::addColumn<QString>("decision");
     for (const auto* theme : {"dark", "light"}) {
         for (const auto* decision : {"cancel", "approve", "blocked", "changed", "bad_receipt", "lost_reply", "wallet_change", "privacy",
-                                    "increased_fee", "bad_fee", "fee_limit", "wallet_limit", "busy", "busy_preview", "busy_timeout", "busy_changed", "busy_wallet", "busy_privacy"})
+                                    "increased_fee", "bad_fee", "fee_limit", "wallet_limit", "busy", "busy_preview", "busy_timeout", "busy_changed", "busy_wallet", "busy_privacy", "untrusted_busy"})
             QTest::newRow(qPrintable(QString::fromLatin1(theme) + '-' + decision)) << QString::fromLatin1(theme) << QString::fromLatin1(decision);
     }
 }
@@ -13677,16 +13688,17 @@ void PaymasterWidgetTests::paymasterReserveReduction()
                 options.find_value("dgb_only").isFalse() && options.find_value("maximum_fee_satoshis").getInt<int64_t>() == (execute ? proposed_fee : 50000000) &&
                 options.find_value("recommend_fee").isTrue() == !execute;
             if (decision == "blocked") throw std::runtime_error("PAYMASTER_REBALANCE_ACTIVE_RESERVATIONS");
-            if (execute && decision == "changed") throw std::runtime_error("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
-            if (!execute && decision == "busy_preview" && previews == 1) throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+            if (execute && decision == "changed") throw ProviderApplicationError("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+            if (!execute && decision == "busy_preview" && previews == 1) throw ProviderApplicationError("PAYMASTER_PROVIDER_BUSY", "retry_before_execution");
             if (execute && decision.startsWith("busy") && decision != "busy_preview" && (executions == 1 || decision == "busy_timeout")) {
                 if (decision == "busy_wallet") QTimer::singleShot(50, panel.get(), [&] { panel->setWalletModel(nullptr); });
                 if (decision == "busy_privacy") QTimer::singleShot(50, panel.get(), [&] { panel->setPrivacy(true); });
-                throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+                throw ProviderApplicationError("PAYMASTER_PROVIDER_BUSY", "retry_before_execution");
             }
-            if (execute && decision == "busy_changed") throw std::runtime_error("PAYMASTER_POOL_PLAN_CHANGED");
-            if (execute && decision == "fee_limit" && executions == 1) throw std::runtime_error("PAYMASTER_RETIREMENT_FEE_LIMIT");
-            if (execute && decision == "wallet_limit") throw std::runtime_error("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
+            if (execute && decision == "untrusted_busy") throw std::runtime_error("PAYMASTER_PROVIDER_BUSY");
+            if (execute && decision == "busy_changed") throw ProviderApplicationError("PAYMASTER_POOL_PLAN_CHANGED");
+            if (execute && decision == "fee_limit" && executions == 1) throw ProviderApplicationError("PAYMASTER_RETIREMENT_FEE_LIMIT");
+            if (execute && decision == "wallet_limit") throw ProviderApplicationError("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
             UniValue result;
             result.read(R"({"executed":false,"retired_admission_dgb_slots":6,"retired_operational_dgb_slots":2,
                 "retired_admission_carrier_slots":6,"retired_operational_carrier_slots":2,"retired_dgb_satoshis":100000000,
@@ -13746,7 +13758,7 @@ void PaymasterWidgetTests::paymasterReserveReduction()
     if (decision != "blocked" && decision != "bad_fee") QTRY_VERIFY(reviewed);
     if (decision == "busy" || decision == "busy_changed") QTRY_COMPARE(executions, 2);
     if (decision == "busy_timeout") QTRY_COMPARE(executions, 4);
-    if (decision == "busy_wallet" || decision == "busy_privacy") QTest::qWait(900);
+    if (decision == "busy_wallet" || decision == "busy_privacy" || decision == "untrusted_busy") QTest::qWait(900);
     QCoreApplication::processEvents();
     answer.stop();
     QCOMPARE(saves, 1);
@@ -14291,7 +14303,7 @@ void PaymasterWidgetTests::paymasterOfferSpendingLimitsReview()
         if (method == "getpaymastersafetystatus") return snapshot.find_value("safety");
         if (method == "setpaymasterpolicy") {
             ++offer_writes;
-            if (!compatible(params[0], saved_safety)) throw std::runtime_error("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
+            if (!compatible(params[0], saved_safety)) throw ProviderApplicationError("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
             saved_offer = params[0];
             auto persisted = params[0];
             persisted.pushKV("policy_hash", std::string(64, 'b'));

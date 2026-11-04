@@ -185,6 +185,9 @@ DIGIBYTE_QT_H = \
   qt/digidollartab.h \
   qt/paymasteramount.h \
   qt/paymasterconfirmation.h \
+  qt/paymasterprovider_internal.h \
+  qt/paymasterproviderviewhelpers.h \
+  qt/paymasterproviderview.h \
   qt/paymasterwidget.h \
   qt/paymasterwallet.h \
   qt/paymasterasync.h \
@@ -318,6 +321,13 @@ DIGIBYTE_QT_WALLET_CPP = \
   qt/walletview.cpp \
   qt/ddaddressbookpage.cpp \
   qt/digidollartab.cpp \
+  qt/paymasterproviderviewhelpers.cpp \
+  qt/paymasterprovider_overview.cpp \
+  qt/paymasterprovider_setup.cpp \
+  qt/paymasterprovider_configuration.cpp \
+  qt/paymasterprovider_liquidity.cpp \
+  qt/paymasterprovider_finance.cpp \
+  qt/paymasterprovider_recovery.cpp \
   qt/paymasterwidget.cpp \
   qt/paymasterwallet.cpp \
   qt/paymasterasync.cpp \

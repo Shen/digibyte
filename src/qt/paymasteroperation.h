@@ -18,6 +18,7 @@ public:
     Phase phase{Phase::Idle};
     QString title;
     QString error;
+    QString error_code;
     UniValue snapshot;
     UniValue reviewed;
     uint64_t generation{0};
@@ -40,9 +41,9 @@ public:
         return true;
     }
     void review(const UniValue& value) { reviewed = value; phase = Phase::Review; }
-    void execute() { phase = Phase::Executing; error.clear(); }
+    void execute() { phase = Phase::Executing; error.clear(); error_code.clear(); }
     void accepted() { phase = Phase::Waiting; }
-    void fail(const QString& reason) { error = reason; phase = Phase::Blocked; }
+    void fail(const QString& reason, const QString& code = {}) { error = reason; error_code = code; phase = Phase::Blocked; }
     bool stale(int64_t now) const { return received_at == 0 || now - received_at > 30; }
     bool busy() const { return phase == Phase::Checking || phase == Phase::Review || phase == Phase::Executing; }
 
@@ -103,7 +104,7 @@ public:
                 code.get_str() != "PAYMASTER_POOL_WAITING_CONFIRMATION" &&
                 code.get_str() != "PAYMASTER_POOL_WAITING_PARENT_CONFIRMATION") {
                 blocked = true;
-                error = QString::fromStdString(code.get_str());
+                error = error_code = QString::fromStdString(code.get_str());
             }
         }
         // A planned maintenance record may have no journal error yet. The
@@ -112,7 +113,7 @@ public:
         if (needs_creation && !blocked && service_error.isStr() &&
             service_error.get_str() == "PAYMASTER_MAINTENANCE_FEE_EXCEEDED") {
             blocked = true;
-            error = QString::fromStdString(service_error.get_str());
+            error = error_code = QString::fromStdString(service_error.get_str());
         }
         if (!busy() && operations.isArray()) {
             if (!operations.empty() || provider.find_value("start_requested").isTrue()) {
@@ -124,26 +125,26 @@ public:
                 const bool needs_processing = needs_creation || provider.find_value("start_requested").isTrue();
                 if (needs_refill && provider.find_value("liquidity").find_value("policy").find_value("automatic_replenishment").isFalse()) {
                     blocked = true;
-                    error = QStringLiteral("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED");
+                    error = error_code = QStringLiteral("PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED");
                 } else if (needs_processing && provider.find_value("enabled").isFalse()) {
                     blocked = true;
-                    error = QStringLiteral("PAYMASTER_PROVIDER_DISABLED");
+                    error = error_code = QStringLiteral("PAYMASTER_PROVIDER_DISABLED");
                 } else if (needs_processing && provider.find_value("wallet_locked").isTrue()) {
                     blocked = true;
-                    error = QStringLiteral("PAYMASTER_WALLET_LOCKED");
+                    error = error_code = QStringLiteral("PAYMASTER_WALLET_LOCKED");
                 } else if (startNeedsReserveApproval()) {
                     blocked = true;
-                    error = QStringLiteral("PAYMASTER_POOL_PREPARATION_REQUIRED");
+                    error = error_code = QStringLiteral("PAYMASTER_POOL_PREPARATION_REQUIRED");
                 }
                 phase = blocked ? Phase::Blocked : Phase::Waiting;
-                if (!blocked) error.clear();
+                if (!blocked) { error.clear(); error_code.clear(); }
             } else if (phase == Phase::Waiting || (phase == Phase::Blocked && observed_work)) {
                 // Work can disappear through cancellation without ready pools.
                 // Do not leave an old blocked task or infer successful funding.
                 phase = provider.find_value("pool_ready").isTrue() ? Phase::Complete : Phase::Idle;
                 if (phase == Phase::Idle) title.clear();
                 observed_work = false;
-                error.clear();
+                error.clear(); error_code.clear();
             }
         }
         return true;
