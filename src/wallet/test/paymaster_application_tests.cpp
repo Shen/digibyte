@@ -3,8 +3,17 @@
 
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/rpc/paymaster_internal.h>
+#include <chainparams.h>
+#include <consensus/validation.h>
+#include <index/txindex.h>
+#include <script/standard.h>
+#include <test/util/index.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
+#include <validation.h>
+#include <validationinterface.h>
+#include <wallet/test/util.h>
+#include <wallet/wallet.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -15,6 +24,149 @@ using namespace paymaster_app;
 using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(active_tip_resolution_rejects_empty_unknown_and_inactive_locators,
+                        TestChain100Setup)
+{
+    auto& chain = *m_node.chain;
+    const CBlockLocator locator = chain.getTipLocator();
+    const auto tip = ResolvePaymasterActiveTip(chain, locator);
+    BOOST_REQUIRE(tip);
+    BOOST_CHECK_EQUAL(tip->height, 100);
+    BOOST_CHECK(tip->hash == locator.vHave.front());
+    BOOST_CHECK(!ResolvePaymasterActiveTip(chain, CBlockLocator{}));
+
+    CBlockLocator unknown = locator;
+    unknown.vHave.front() = uint256::ONE;
+    // Known ancestors following an unknown first entry grant no readiness.
+    BOOST_CHECK(!ResolvePaymasterActiveTip(chain, unknown));
+
+    const CBlockLocator genesis = WITH_LOCK(cs_main,
+        return GetLocator(m_node.chainman->ActiveChain().Genesis()));
+    const auto genesis_tip = ResolvePaymasterActiveTip(chain, genesis);
+    BOOST_REQUIRE(genesis_tip);
+    BOOST_CHECK_EQUAL(genesis_tip->height, 0);
+    BOOST_CHECK(genesis_tip->hash == Params().GenesisBlock().GetHash());
+
+    CBlockIndex* invalidated = WITH_LOCK(cs_main,
+        return m_node.chainman->ActiveChain().Tip());
+    BlockValidationState state;
+    BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(state, invalidated));
+    // Reproduce a disconnect between locator capture and hash resolution.
+    // The old first hash is known, but its still-active ancestors are no fallback.
+    BOOST_CHECK(!ResolvePaymasterActiveTip(chain, locator));
+    const auto shortened = ResolvePaymasterActiveTip(chain, chain.getTipLocator());
+    BOOST_REQUIRE(shortened);
+    BOOST_CHECK_EQUAL(shortened->height, tip->height - 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(active_tip_resolution_handles_extension_and_same_height_replacement,
+                        TestChain100Setup)
+{
+    auto& chain = *m_node.chain;
+    const CBlockLocator original_locator = chain.getTipLocator();
+    const auto original = ResolvePaymasterActiveTip(chain, original_locator);
+    BOOST_REQUIRE(original);
+
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    // Extension leaves the captured block active without making it the latest tip.
+    const auto retained = ResolvePaymasterActiveTip(chain, original_locator);
+    BOOST_REQUIRE(retained);
+    BOOST_CHECK(retained->hash == original->hash);
+    BOOST_CHECK_EQUAL(retained->height, original->height);
+    const CBlockLocator extended_locator = chain.getTipLocator();
+    const auto extended = ResolvePaymasterActiveTip(chain, extended_locator);
+    BOOST_REQUIRE(extended);
+    BOOST_CHECK_EQUAL(extended->height, original->height + 1);
+    BOOST_CHECK(extended->hash != retained->hash);
+
+    CBlockIndex* invalidated = WITH_LOCK(cs_main,
+        return m_node.chainman->ActiveChain().Tip());
+    BlockValidationState state;
+    BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(state, invalidated));
+    coinbaseKey.MakeNewKey(true);
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    const auto replacement = ResolvePaymasterActiveTip(chain, chain.getTipLocator());
+    BOOST_REQUIRE(replacement);
+    BOOST_CHECK_EQUAL(replacement->height, extended->height);
+    BOOST_CHECK(replacement->hash != extended->hash);
+    BOOST_CHECK(!ResolvePaymasterActiveTip(chain, extended_locator));
+}
+
+BOOST_FIXTURE_TEST_CASE(provider_readiness_requires_matching_wallet_and_index_tip,
+                        TestChain100Setup)
+{
+    BOOST_REQUIRE(!g_txindex);
+    struct IndexCleanup {
+        ~IndexCleanup()
+        {
+            if (g_txindex) g_txindex->Interrupt();
+            SyncWithValidationInterfaceQueue();
+            if (g_txindex) g_txindex->Stop();
+            g_txindex.reset();
+        }
+    } index_cleanup;
+    CWallet wallet{m_node.chain.get(), "paymaster-readiness", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    const auto tip = ResolvePaymasterActiveTip(*m_node.chain, m_node.chain->getTipLocator());
+    BOOST_REQUIRE(tip);
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(tip->height, tip->hash);
+    }
+    BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(!ProviderTxIndexIsReady(wallet, false));
+    BOOST_CHECK(!ProviderTxIndexIsReady(wallet, true));
+
+    g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(m_node), 1 << 20, true);
+    BOOST_REQUIRE(g_txindex->Init());
+    BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(!ProviderTxIndexIsReady(wallet, false));
+    BOOST_CHECK(!ProviderTxIndexIsReady(wallet, true));
+    BOOST_REQUIRE(g_txindex->StartBackgroundSync());
+    IndexWaitSynced(*g_txindex);
+    BOOST_CHECK(AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(ProviderTxIndexIsReady(wallet, false));
+    BOOST_CHECK(ProviderTxIndexIsReady(wallet, true));
+
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(tip->height, uint256::ONE);
+    }
+    BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(ProviderTxIndexIsReady(wallet, false));
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(tip->height - 1, tip->hash);
+    }
+    BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(ProviderTxIndexIsReady(wallet, false));
+
+    // Retain a real, synchronized index at the old tip. No timing assumption
+    // about notification delivery can make the stale-index checks pass.
+    SyncWithValidationInterfaceQueue();
+    g_txindex->Stop();
+    CBlockIndex* invalidated = WITH_LOCK(cs_main,
+        return m_node.chainman->ActiveChain().Tip());
+    BlockValidationState state;
+    BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(state, invalidated));
+    coinbaseKey.MakeNewKey(true);
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    const auto replacement = ResolvePaymasterActiveTip(*m_node.chain, m_node.chain->getTipLocator());
+    BOOST_REQUIRE(replacement);
+    BOOST_REQUIRE_EQUAL(replacement->height, tip->height);
+    BOOST_REQUIRE(replacement->hash != tip->hash);
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetLastBlockProcessed(replacement->height, replacement->hash);
+    }
+    const IndexSummary stale = g_txindex->GetSummary();
+    BOOST_REQUIRE(stale.synced);
+    BOOST_REQUIRE_EQUAL(stale.best_block_height, replacement->height);
+    BOOST_REQUIRE(stale.best_block_hash == tip->hash);
+    BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
+    BOOST_CHECK(!ProviderTxIndexIsReady(wallet, false));
+}
 
 BOOST_AUTO_TEST_CASE(resume_terms_preserve_present_zero_and_false_values)
 {

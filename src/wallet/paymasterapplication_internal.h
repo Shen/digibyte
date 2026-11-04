@@ -9,6 +9,7 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/walletdb.h>
 #include <paymaster/validation.h>
+#include <interfaces/chain.h>
 #include <streams.h>
 #include <version.h>
 #include <logging.h>
@@ -16,6 +17,10 @@
 #include <string_view>
 class CConnman;
 namespace wallet::paymaster_app {
+/** Resolve only the captured locator tip while it remains on the active chain.
+ * Callers compare a fresh tip hash after inspecting wallet/index snapshots. */
+std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
+    interfaces::Chain& chain, const CBlockLocator& locator);
 SessionSnapshot CaptureSessionSnapshot(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
 PaymentResult CaptureSessionPayment(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
 

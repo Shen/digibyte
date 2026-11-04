@@ -205,11 +205,25 @@ std::string StableProviderServiceError(std::string error)
     return error;
 }
 
+std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
+    interfaces::Chain& chain, const CBlockLocator& locator)
+{
+    if (locator.vHave.empty()) return std::nullopt;
+    interfaces::BlockKey tip{locator.vHave.front()};
+    bool active{false};
+    // Resolve the captured hash, never a height that a reorg can invalidate.
+    // An inactive first entry must not fall back to an older locator ancestor.
+    if (!chain.findBlock(tip.hash, interfaces::FoundBlock().height(tip.height).inActiveChain(active)) ||
+        !active || tip.height < 0) {
+        return std::nullopt;
+    }
+    return tip;
+}
+
 bool AutomaticProviderStateIsSynchronized(CWallet& wallet)
 {
-    const std::optional<int> chain_height = wallet.chain().getHeight();
-    if (!chain_height) return false;
-    const uint256 chain_tip = wallet.chain().getBlockHash(*chain_height);
+    const auto chain_tip = ResolvePaymasterActiveTip(wallet.chain(), wallet.chain().getTipLocator());
+    if (!chain_tip) return false;
 
     int wallet_height{-1};
     uint256 wallet_tip;
@@ -218,18 +232,17 @@ bool AutomaticProviderStateIsSynchronized(CWallet& wallet)
         wallet_height = wallet.GetLastBlockHeight();
         wallet_tip = wallet.GetLastBlockHash();
     }
-    if (wallet_height != *chain_height || wallet_tip != chain_tip) return false;
+    if (wallet_height != chain_tip->height || wallet_tip != chain_tip->hash) return false;
 
     if (!g_txindex) return false;
     const IndexSummary txindex = g_txindex->GetSummary();
-    if (!txindex.synced || txindex.best_block_height != *chain_height ||
-        txindex.best_block_hash != chain_tip) {
+    if (!txindex.synced || txindex.best_block_height != chain_tip->height ||
+        txindex.best_block_hash != chain_tip->hash) {
         return false;
     }
 
-    const std::optional<int> current_height = wallet.chain().getHeight();
-    return current_height && *current_height == *chain_height &&
-           wallet.chain().getBlockHash(*current_height) == chain_tip;
+    const CBlockLocator current_tip = wallet.chain().getTipLocator();
+    return !current_tip.vHave.empty() && current_tip.vHave.front() == chain_tip->hash;
 }
 
 bool ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync)
@@ -237,18 +250,16 @@ bool ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync)
     if (!g_txindex) return false;
     if (wait_for_sync) return g_txindex->BlockUntilSyncedToCurrentChain();
 
-    const std::optional<int> chain_height = wallet.chain().getHeight();
-    if (!chain_height) return false;
-    const uint256 chain_tip = wallet.chain().getBlockHash(*chain_height);
+    const auto chain_tip = ResolvePaymasterActiveTip(wallet.chain(), wallet.chain().getTipLocator());
+    if (!chain_tip) return false;
     const IndexSummary txindex = g_txindex->GetSummary();
-    if (!txindex.synced || txindex.best_block_height != *chain_height ||
-        txindex.best_block_hash != chain_tip) {
+    if (!txindex.synced || txindex.best_block_height != chain_tip->height ||
+        txindex.best_block_hash != chain_tip->hash) {
         return false;
     }
 
-    const std::optional<int> current_height = wallet.chain().getHeight();
-    return current_height && *current_height == *chain_height &&
-           wallet.chain().getBlockHash(*current_height) == chain_tip;
+    const CBlockLocator current_tip = wallet.chain().getTipLocator();
+    return !current_tip.vHave.empty() && current_tip.vHave.front() == chain_tip->hash;
 }
 
 bool CapacityContinuationMayProceed(const ProviderReadiness& readiness)

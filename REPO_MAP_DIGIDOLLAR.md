@@ -841,6 +841,9 @@ preparation, client authorization, exact submission and accounting. RPC adapters
 call them directly. The provider loop calls services without fabricated RPC
 requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
+`ResolvePaymasterActiveTip` resolves the first captured locator hash to an active
+block and height. Provider readiness compares a fresh tip hash after wallet/index
+reads, avoiding height lookups that can become invalid during a reorganization.
 
 ### src/wallet/paymasterconfiguration*, paymasterproviderops*, paymasterpool*, paymasterintegration*
 
