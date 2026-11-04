@@ -931,6 +931,10 @@ class DigiDollarWallet {
 };
 ```
 
+Paymaster service ownership and internal mechanisms are defined in the
+[implementation guide](doc/digidollar-paymaster-implementation.md); shared-Core
+changes follow the [integration boundaries](doc/design/paymaster-integration-boundaries.md).
+
 Paymaster state is wallet scoped. `PaymasterStore` persists sessions, exact
 provider attempts, input reservations, final provider commits, self-recovery
 transactions, local reputation, sponsorship authorizations, and permanent

@@ -150,7 +150,5 @@ Task names follow the current saved operation kind and asset, not a preceding
 GUI action. No remaining active work clears a stale waiting/blocked task even
 when reserve capacity is still zero; cancellation does not imply ready reserves.
 
-Functional coverage: `wallet_paymaster_pool_setup.py`,
-`wallet_paymaster_partial_capacity.py`, `wallet_paymaster_operator.py`,
-`wallet_paymaster_readiness.py`. Wallet store/identity tests cover persisted
-commands, budgets and signing gates. See [testing](digidollar-paymaster-testing.md).
+See the [test coverage map](digidollar-paymaster-testing.md#coverage-map) for
+pool/readiness, cancellation, persisted-command and signing-gate regressions.

@@ -2,8 +2,7 @@
 
 This is a reproducible verification index, not a running work log. The
 [release gate](digidollar-paymaster-release-gate.md) separates historical evidence
-from checks still required for a candidate. Full pre-consolidation command/log
-history is available with `git show e7c2c8c4bd:doc/digidollar-paymaster-testing.md`.
+from checks still required for a candidate.
 
 Operational documentation primarily targets Mainnet. Run the tests here in
 isolated test environments, not with a Mainnet wallet. The
@@ -15,7 +14,9 @@ reachability or replace the candidate's release gates.
 
 Read repository instructions, [test guidance](../test/README.md),
 [functional guidance](../test/functional/README.md) and applicable build docs.
-Use a clean test data directory, never an operator wallet. Record:
+Use a clean test data directory, never an operator wallet. Summarize actual
+results in the [release evidence](digidollar-paymaster-release-gate.md), with
+full logs and binary hashes retained as build/CI artifacts. Record:
 
 - Source commit and dirty diff, compiler/dependencies and build configuration.
 - Exact executable provenance, command, selected cases and exit status.
@@ -69,7 +70,7 @@ if (-not (Test-Path -LiteralPath './build_msvc/msvc-autogen.py')) { throw 'Run t
 python ./build_msvc/msvc-autogen.py
 if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
 $buildArgs = @(
-    './build_msvc/digibyte.sln', '/t:Build',
+    './build_msvc/digibyte.sln', '/t:Rebuild',
     '/p:Configuration=Release', '/p:Platform=x64',
     "/p:QtBaseDir=$qtBase", "/p:VcpkgInstalledDir=$vcpkgInstalledDir",
     '/p:VcpkgManifestInstall=false', '/m:1', '/verbosity:minimal'
@@ -79,10 +80,10 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 ```
 
 If dependencies are absent, complete the normal prerequisite installation first;
-do not treat this block as a toolchain installer. The recorded local checks used
-MSVC 14.43 and static Qt 5.15.10. That is provenance, not a claim that an arbitrary
-Visual Studio/Qt combination is compatible. Preserve the project's selected
-toolset and consult build guidance for changes.
+do not treat this block as a toolchain installer. Preserve the project's selected
+toolset. `/t:Rebuild` is required because the database range-cursor change alters
+the `DatabaseBatch` interface: all binaries and test libraries must use the same
+headers. Prior isolated-check provenance is in the release evidence.
 
 After success, expected Release outputs are under `build_msvc/x64/Release/`.
 Start the intended GUI/daemon from that directory with the original network and
@@ -131,34 +132,67 @@ Remove-Item Env:DIGIBYTE_QT_TEST_OUTPUT -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster Qt tests failed' }
 ```
 
-Run from the repository root after a successful current-revision build with
-tests enabled. Allow several minutes or longer; some fixtures build chains.
+Use the `windows` plugin for Windows modal-dialog tests; the local Qt 5.15.10
+`minimal` plugin does not support the reserve-review dialog. Run from the
+repository root after a successful current-revision build with tests enabled. Allow several minutes or longer; some fixtures build chains.
 Success requires exit code zero and no failed tests. This suite still does not
 replace the functional matrix, ordinary-wallet regressions or release gates.
 
+## Architecture checks
+
+From the repository root:
+
+```powershell
+python test/lint/test_paymaster_boundaries.py
+if ($LASTEXITCODE -ne 0) { throw 'Boundary fixtures failed' }
+python test/lint/lint-paymaster-boundaries.py
+if ($LASTEXITCODE -ne 0) { throw 'Dependency/cycle checks failed' }
+```
+
+Local scans do not establish trusted-base change approval; see the
+[boundary contract](design/paymaster-integration-boundaries.md#enforcement-and-trusted-policy-bootstrap)
+for committed candidates. Required Core-change reasons stay in the
+[change record](design/paymaster-change-record.json).
+
 ## Coverage map
+
+Paths below are relative to `src/test/`, `src/wallet/test/`, `src/qt/test/` or
+`test/functional/` as applicable. Qt coverage is in `paymasterwidgettests.cpp`
+unless another suite is named. Test names describe coverage, not executed passes.
 
 | Invariant / behavior | Main test locations |
 |---|---|
-| Amounts, exact fees, manifests and signatures | `src/test/paymaster_types_tests.cpp`, `paymaster_txbuilder_tests.cpp`, `paymaster_psbt_tests.cpp`; wallet PSBT/security tests. |
-| Wire/channel proof and bounded admission | Protocol, wire, transport, admission unit suites; `p2p_paymaster.py`, `p2p_paymaster_connection_capacity.py`. |
-| Nonfinancial endpoint diagnostics | `paymaster_transport_tests/diagnostic_*` and `payment_without_selected_identity_is_not_a_diagnostic`: isolated keys, negotiation without authentication, suppressed metadata and cleanup. `rpc_paymaster_endpoint.py`: wallet-free TCP listener, rate limit, invalid/closed endpoint, Tor prerequisites, SOCKS5 forwarding, credential isolation and no-auth rejection. Uses a local proxy fixture, not public Tor. `wallet_paymaster_operator.py` retains the operator probe regression. Qt `paymasterOperatorNavigationAndVisibleTasks` checks RPC guidance and absence of the removed report-import control. `paymasterDiagnosticCommands` and `paymasterDiagnosticRefreshAndPrivacy` cover exact copyable IPv4/IPv6/Tor commands, network selection, loopback restrictions, malformed input, missing announcements, read failures, refresh and privacy/wallet clearing; they never run a probe. `paymasterConnectionLayout` includes the connection-test view with a long onion address in both themes and sizes. `paymasterNodeConnectionEditor` covers grouped addresses/features/capacity, readable mixed sources, pending restart values, incomplete metadata, read-only layouts at narrow/wide sizes, reviewed saves and stale/privacy guards. |
-| Selection, fee limits, model binding, failover | Directory/client/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
-| Explicit authorization and same-ID retry | Wallet store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`. |
-| Signed recovery and budget retention | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`. `wallet_paymaster_provider.py` retains the original authorization at 1 and 239 recovery confirmations and releases it at the 240-confirmation safety depth without charging the service fee twice. |
-| Finite setup, whole-slot refill, below-target readiness | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`. |
-| Maintenance time and confirmation sequencing | `paymaster_wallet_identity_tests/maintenance_reconciliation_preserves_accounting_time` covers future policy accounting time, clock rollback, lost-reply recovery, confirmation and conflict transitions. `wallet_paymaster_pool_setup.py` checks completed maintenance accounting and capital release. `wallet_paymaster_lifecycle.py` confirms carrier and DGB batches separately across restart and keeps existing capacity active during refill. `wallet_paymaster_provider.py` confirms a payment successor before expecting the next DGB replacement, with no duplicate maintenance or carrier. |
-| Preparation funding diagnostics | `wallet_paymaster_pool_setup.py --funding-diagnostics-only`: matching pool/operator DD and DGB capital snapshots, incoming confirmed funds reflected before another attempt, no status-read transactions and no new requirements for cancelled steps. The full test also checks the signed-step snapshot. Qt `paymasterPoolPreparationDiagnostics`: simultaneous DD/DGB shortfalls, pending confirmations, funded capital with fee checks remaining, missing/malformed observations, task/overview consistency, reserve navigation, two themes/sizes and privacy. `paymasterPoolPreparationStoredFeeDiagnostics` reads real wallet records without changing the saved approval or error. |
-| Restore/adoption/retirement and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
-| Selected uncreated funding cancellation | `paymaster_wallet_identity_tests/maintenance_cancellation*`: DGB/DD setup/refill, exact selection/preview, lost-reply signature evidence, write rollback, commit-failure checkpoint protection, provider-work exclusion and retained signed work. Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: review/decline, wallet/privacy switches, malformed receipts, unrelated old titles and zero-capacity cancellation. |
-| Excess release with missing reserves | `paymaster_wallet_identity_tests/rebalance_saved_targets_*`: empty/mixed DGB/DD pools, saved revision/target binding, previously released DD slots/model changes, no-op execution and retained reservation guards. Qt `paymasterGuidedCapitalTasks`, `paymasterReserveReduction`: DGB-only scope, exact amount/fee receipts and no-excess feedback. |
-| Manual provider signing approval | Qt `paymasterManualSubmitConfirmation`: approve/decline and wallet, privacy, stale-snapshot or paused-runtime changes during review. Core authorization and signing checks remain authoritative. |
-| Stopped service versus restart readiness | Qt `paymasterStoppedOverview`: missing/retained reserves, budgets, locked wallets, saved payment models, open payments, unknown/restore/checkpoint errors and absent/contradictory stop observations. Known prerequisites permit a reviewed one-shot start request, not payment readiness; missing settings/policy and unknown/restore/checkpoint errors do not. Pending requests disable repeat starts and remain cancellable. Rendering never dispatches a mutation. `paymasterOperatorConfirmationWalletBinding` checks the exact enable/start-with-readiness-wait sequence on both GUI surfaces, including budget/liquidity waits, cancellation and wallet/privacy changes. |
-| Operation settings and retirement display | Qt `paymasterOperatorNavigationAndVisibleTasks`, `paymasterConnectionLayout`: four main destinations, seven settings destinations and the nested connection-test view, lifecycle first, nested reserve links, back navigation, light/dark and narrow/wide layouts. `paymasterReserveSettingsRefresh`: periodic reserve observations preserve fee drafts after the move into Settings, cross-links remain read-only and privacy stops refresh. `paymasterHomeStartIsSeparateFromSettings` and `paymasterOperatorConfirmationWalletBinding`: shared Start/Pause guards, approval/cancellation, wallet/privacy changes. `paymasterStopAndRelease`, `paymasterRetirementLateResults`: stopped state after successful, empty or incomplete retirement, exact-release review and stale-result protection. These GUI fixtures mock RPC responses; they do not replace Core release tests. |
-| Cross-policy fee configuration | `paymaster_setup_tests`: model-specific fee conflicts, both values, inactive budgets, malformed amounts and read-only CLI status. Qt `paymasterConfigurationConflicts`: saved versus draft warnings, navigation, zero/matching/above-ceiling caps, mixed models and privacy clearing. `paymasterSafetyInputValidation`: inline amount/limit errors and no RPC for invalid edits. `paymasterConfigurationSaveRefresh`: immediate combined readback, delayed/failed/incomplete reads, rejected saves, exact acknowledgements, retained edits, privacy and wallet changes. |
-| Setup parity and funding guidance | `paymaster_setup_tests`: streamed capacity selection preserving approvals, required/available/missing amounts, pending funds, fee ceilings, malformed observations and signed/terminal steps. Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`: editable/persisted autostart, timer/manual funding refresh, missing amounts, confirmations, failed-read clearing, readiness transition and no extra mutation on refresh. |
-| GUI cancellation, affordability, async snapshots, setup | `src/qt/test/paymasterwidgettests.cpp`, DigiDollar/overview Qt fixtures. |
-| Ordinary behavior and historical migration | DGB/DD wallet tests plus the historical compatibility group below. |
+| Amounts, exact fees, manifests and signatures | `paymaster_types_tests.cpp`, `paymaster_txbuilder_tests.cpp`, `paymaster_psbt_tests.cpp`; wallet PSBT/security suites. |
+| Channel proof and bounded admission | Protocol/wire/transport/admission suites; `p2p_paymaster.py`, `p2p_paymaster_connection_capacity.py`. |
+| Nonfinancial diagnostics | Transport `diagnostic_*`; `rpc_paymaster_endpoint.py` tests TCP/SOCKS5 isolation and no authentication; Qt `paymasterDiagnosticCommands`, `paymasterDiagnosticRefreshAndPrivacy`, `paymasterNodeConnectionEditor`. Local proxy coverage is not public Tor evidence. |
+| Selection, fee/privacy limits and failover | Client comparator cycle permutations/strict-order properties; directory/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
+| Exact authorization and same-ID retry | Wallet service/store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion. |
+| Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
+| Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
+| Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
+| Setup parity and funding observations | `paymaster_setup_tests`; pool setup `--funding-diagnostics-only`; Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`, `paymasterPoolPreparationDiagnostics`, `paymasterPoolPreparationStoredFeeDiagnostics`: approvals, shortfalls, malformed/missing observations and read-only refresh. |
+| Backup, adoption and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
+| Cancellation of uncreated work | Identity `maintenance_cancellation*`; Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: exact preview, lost-reply signatures, rollback, checkpoint protection and retained signed work. |
+| Excess reserve release | Identity `rebalance_saved_targets_*`; Qt `paymasterGuidedCapitalTasks`, `paymasterReserveReduction`: missing/underfilled assets, saved revisions, DGB-only scope and exact receipts. |
+| Stop and retirement | Wire `manager_provider_stop_*`; identity `provider_stop_waits_for_work_without_bypassing_exclusion`, `capital_release_cancels_only_reviewed_uncreated_funding`; Qt `paymasterStoppedOverview`, `paymasterStopAndRelease`, `paymasterRetirementLateResults`: priority, atomic release and uncertain replies. |
+| Configuration and signing review | Setup suite; Qt `paymasterConfigurationConflicts`, `paymasterSafetyInputValidation`, `paymasterConfigurationSaveRefresh`, `paymasterManualSubmitConfirmation`, `paymasterOperatorConfirmationWalletBinding`: saved versus draft policy, current wallet/privacy/readiness and exact approval. |
+| GUI state, finance and navigation | Paymaster Qt suite covers unavailable/loading states, affordability, cancellation, two reads/one mutation, coalescing, wallet switch/shutdown, unlock lifetime, untrusted error text, finance pages/export, responsive themes and preserved drafts. Mocked RPC fixtures do not replace backend tests. |
+| Session index | Wallet store tests at 100/1,000/8,192 sessions: one reconstruction, point reads, commit/abort, reopen and invalidation. |
+| Finance v2 | Wallet identity/DB tests: 100,000 events, bounded/filter-bound pages, stale revisions, UTC periods, idempotence/reorg totals, atomic migration, corrupt/unknown versions and cache invalidation. |
+| Checkpoint concurrency | Wallet identity/security tests: independent identities, shared clone locks, read/replace, rollback/restore and checkpoint-ahead failures. |
+| Architecture controls | Boundary fixtures reject forbidden paths/dependencies, missing Core records, new cycles and candidate attempts to weaken trusted checks. |
+| Ordinary behavior and migration | DGB/DD wallet/DB/Qt tests with Paymaster disabled, both DB backends, sanitizers/platform builds and historical compatibility below. |
+
+## Functional selection
+
+Run the current-current matrix with built daemons/CLI and configured Python
+dependencies from the repository root. This is an operator check taking minutes
+or longer; require exit code zero and no failed variants:
+
+```powershell
+python ./test/functional/test_runner.py --jobs=1 --extended '--filter=^(wallet|rpc|p2p)_paymaster' --exclude=p2p_paymaster_v9_26_5_bridge.py
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster functional matrix failed' }
+```
 
 Example focused functional run from repository root with built daemons and
 configured Python dependencies:

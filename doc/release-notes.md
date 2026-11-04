@@ -11,10 +11,7 @@ Notes for earlier releases are under [release-notes/](release-notes/).
 
 ## Paymaster integration branch
 
-The fork-specific [Paymaster integration notes](digidollar-paymaster-v9.26.7-integration.md)
-and [client contract](digidollar-paymaster-integration.md) describe the additions
-on `integration/paymaster-v9.26.7`. They do not change the upstream release
-notes or establish release acceptance. The interfaces support a possible x402
-extension without committing to its implementation.
-
-Fork-specific changes are listed in the [Paymaster integration release notes](release-notes/paymaster-integration.md).
+The fork-specific [Paymaster release notes](release-notes/paymaster-integration.md)
+cover implemented behavior and migration on `integration/paymaster-v9.26.7`.
+[PAYMASTER.md](../PAYMASTER.md) links the operational guides and release evidence;
+these additions do not change upstream release notes or certify acceptance.

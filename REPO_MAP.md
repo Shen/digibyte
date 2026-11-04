@@ -1,26 +1,9 @@
 # REPO_MAP.md — DigiByte Core v9.26.2
 
-The Direct-capacity implementation, including the 2026-09-27 recovery/retry
-fixes in `1789c803be`, is documented in
-[Paymaster connection capacity](doc/digidollar-paymaster-connection-capacity.md):
-one outgoing channel by default (up to four), a dedicated bounded provider
-listener, fair wallet-scoped queueing, connection-start limits, routed inbox
-admission and protected reply/recovery quotas. Core ownership lives in
-`src/paymaster/transport.h`, `src/paymaster/manager.{h,cpp}`, `src/net.{h,cpp}`
-and `src/netbase.{h,cpp}`. Focused tests are
-`src/test/paymaster_transport_tests.cpp`, `src/test/paymaster_admission_tests.cpp`
-and `test/functional/p2p_paymaster_connection_capacity.py`.
-Migration, current passing checks and remaining release gates are documented
-in the capacity guide. Recovery releases the original payment lease; expected
-Capacity proofs are accepted on payment and recovery channels. `senddigidollar`
-forwards explicit `retry_transport` requests without changing financial authority.
-
-Direct channels now also require `CAP_CHANNEL_AUTH`. Provider signatures bind
-the local BIP324 session ID and a fresh challenge before payment metadata is
-sent. `wire.{h,cpp}`, `manager.{h,cpp}` and the wallet provider worker own this
-Paymaster-specific logic; the P2P adapter uses the existing transport session ID.
-`wallet_paymaster_checkpoint_rollback.py` reproduces the separate limitation of
-restoring an old matching wallet/checkpoint pair; it is a diagnostic test.
+[Paymaster transport ownership and limits](doc/digidollar-paymaster-connection-capacity.md)
+and the [Paymaster source map](REPO_MAP_DIGIDOLLAR.md#paymaster-network) cover the
+shared networking integration. Verification is recorded in the
+[release evidence](doc/digidollar-paymaster-release-gate.md).
 
 *Last validated: 2026-05-20 against `feature/digidollar-v1`*
 
@@ -1927,8 +1910,8 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 ### src/wallet/load.cpp / .h
 - `LoadWallets()`, `StartWallets()`, `FlushWallets()`, `StopWallets()` → wallet lifecycle hooks called from `init.cpp`
 - `StartWallets()` invokes Paymaster initialization and scheduler registration;
-  their implementation/declarations live in `wallet/rpc/paymaster_integration.cpp`
-  and `wallet/rpc/paymaster.h`, not in the generic wallet loader.
+  their implementation/declarations live in `wallet/paymasterintegration.cpp`
+  and `wallet/paymasterintegration.h`. The RPC header re-exports them for existing callers.
 
 ### src/wallet/receive.cpp / .h
 - `IsMine()`, `GetCredit()`, `GetDebit()`, `GetChange()`, `CachedTxIs*` → balance/ownership accounting for received UTXOs

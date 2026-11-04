@@ -87,12 +87,5 @@ budget history. Do not delete guards/checkpoints to make release succeed.
 
 See [operator guide](digidollar-paymaster-operator.md),
 [threat model](paymaster-threat-model.md) and [tests](digidollar-paymaster-testing.md).
-Relevant functional scenarios are `wallet_paymaster_backup_exit.py`,
-`wallet_paymaster_backup_adoption.py`, `wallet_paymaster_checkpoint_rollback.py`
-and `wallet_paymaster_lifecycle.py`.
-Targeted unit coverage includes `provider_stop_waits_for_work_without_bypassing_exclusion`
-and `capital_release_cancels_only_reviewed_uncreated_funding` in
-`paymaster_wallet_identity_tests`. The `manager_provider_stop_*` cases in
-`paymaster_wire_tests` cover stop priority, active-owner preservation, duplicate
-requests, failure cleanup and other-wallet independence. Qt coverage is in
-`paymasterStopAndRelease` and `paymasterRetirementLateResults`.
+The [test coverage map](digidollar-paymaster-testing.md#coverage-map) indexes
+backup/retirement, stop-priority, atomic cancellation and Qt late-result tests.

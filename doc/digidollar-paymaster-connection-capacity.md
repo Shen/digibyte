@@ -67,8 +67,7 @@ payment or imply permission to choose a new request ID.
 
 ## Verification
 
-Unit coverage: `paymaster_transport_tests`, `paymaster_admission_tests`,
-`paymaster_wire_tests`, `paymaster_protocol_tests`. Functional coverage:
-`p2p_paymaster_connection_capacity.py`, `p2p_paymaster.py`, and wallet failover/
-recovery tests. Real Tor, hostile TCP relay, prolonged saturation and current
-sanitizer/load checks remain separate release gates. See [testing](digidollar-paymaster-testing.md).
+The [coverage map](digidollar-paymaster-testing.md#coverage-map) identifies
+transport/admission, P2P and wallet failover/recovery tests. Public Tor, hostile
+relay, prolonged load and sanitizer evidence remain separate
+[release gates](digidollar-paymaster-release-gate.md#required-candidate-gates).

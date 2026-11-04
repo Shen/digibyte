@@ -181,16 +181,11 @@ digibyte-cli getbalance
 
 ### Optional Paymaster integration
 
-Paymaster supports one-recipient DD transfers with provider-funded DGB fees,
-using the existing transfer validation. Integrations must persist the request
-ID, prepare, explicitly accept the exact authorization commitment, and inspect
-that same session after response loss. `final=true` alone does not mean the
-recipient was paid. Never create replacement requests blindly.
-
-Use the version-1 [client contract](doc/digidollar-paymaster-integration.md)
-for units, readiness, fees, status and recovery. Protected wallet reserves are
-excluded from ordinary available balance. [PAYMASTER.md](PAYMASTER.md) links
-implementation, security boundaries and revision-specific verification.
+For provider-funded DGB fees on a single-recipient withdrawal, follow the
+[client contract](doc/digidollar-paymaster-integration.md). It defines durable
+request identity, exact authorization and confirmed-recipient success; a lost
+response never permits an automatic replacement withdrawal. Batch Paymaster
+withdrawals are not supported.
 
 ### Withdrawal Limits
 

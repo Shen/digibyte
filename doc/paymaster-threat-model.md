@@ -32,8 +32,7 @@ The GUI cannot grant authority by displaying an offer or clearing a form.
 | Setup/refill spends only approved funds/fees | Shared setup, finite commands, maintenance limits, whole-slot refill tests. |
 | Ordinary DigiByte checks remain intact | Integration boundaries and ordinary DGB/DD regression coverage. |
 
-These consolidate the earlier H1-H8 hardening work packages. Consensus/script
-checks, wallet history/index readiness and final transaction validation are
+Consensus/script checks, wallet history/index readiness and final transaction validation are
 mandatory. Performance or UI changes must not bypass them.
 
 ## Signing, accounting and recovery details
@@ -92,11 +91,6 @@ changes with selected regression evidence, not proof against every variant.
 | TM-008 | Public sponsorship budget drain. | Public callers may consume intentionally authorized budgets; caps/admission bound exposure, not Sybil abuse. |
 | TM-009 | Parser/injection robustness. | Selected mutation checks found no additional injection; fresh sanitizer, fuzz and load evidence still required. |
 
-A related recovery correction retains fee exposure after shallow cancel-to-self
-confirmation until reorg safety depth, repairs retained liabilities before new
-approvals and accounts once for an original payment that wins. Do not release
-budget solely because a competing recovery briefly confirmed.
-
 ## Residual operational risks
 
 - The operating unlock is wallet-wide and lasts until locking/unload/shutdown;
@@ -120,9 +114,8 @@ must not be confused with permission for fresh restricted signing.
 
 ## Evidence discipline
 
-For each security change record commit, compiler/build configuration, exact test
-selection, result and remaining limits. A selected translation-unit build or
-isolated test executable is not a full product build. Assertions from seeded
-quota fixtures are not independent security cases. Preserve failure reproductions
-and compare them with the corrected behavior. Follow the
-[test runbook](digidollar-paymaster-testing.md) and outstanding release gates.
+Record actual verification and limits in the
+[release evidence](digidollar-paymaster-release-gate.md), following the
+[runbook's result requirements](digidollar-paymaster-testing.md#preparation-and-result-recording).
+Preserve failure reproductions in test/build artifacts; selected tests do not
+establish full product or independent security acceptance.

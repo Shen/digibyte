@@ -57,6 +57,13 @@ Announcements last up to 600 seconds; quote default/maximum is 60 seconds.
 An announcement may become unavailable before expiry. Expiry does not prove
 already signed spending authority harmless.
 
+Offer comparisons share `OfferCandidateLess` in `src/paymaster/client.cpp`.
+Within the selected policy, non-deprioritized offers precede deprioritized ones;
+cost precedes sufficient reliability data, success rate, known/lower latency
+and provider/offer IDs. Fixed-total comparisons use lower fee then higher
+recipient amount. Unknown reliability/latency have explicit positions so sorting
+remains a strict order for every input permutation.
+
 ## Endpoint diagnostics
 
 Endpoint diagnostics are separate from authenticated payment channels.
@@ -111,37 +118,67 @@ belongs to the daemon; Qt/CLI control the same persisted state. Restoration
 sets a durable guard before load callbacks, and an independent checkpoint
 helps detect stale wallet copies. See the [threat model](paymaster-threat-model.md).
 
-Checkpoint file reads hold the same recursive mutex as atomic file replacement
+Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can
 deny replacement and make an unrelated wallet transaction fail its commit.
 Wallet-row reads finish before this file-only lock is acquired; database and
-checkpoint rollback protections still apply independently.
+checkpoint rollback protections still apply independently. A short registry lock
+only locates shared states; it performs no file/database I/O. Paths come from the
+single cached network data directory and the genesis/provider filename, normalized
+before lookup, so wallet clones share the same file lock. The OS lock, flush,
+rename and checkpoint-before-database-commit ordering remain mandatory.
+
+## Derived indexes and finance storage
+
+A wallet-scoped final/recovery transaction index is reconstructed from sessions
+once and updated only after a successful wallet transaction. Aborts invalidate it.
+A match triggers point reads and exact artifact validation; the index cannot grant
+payment permission. Corruption invalidates the lookup and forces reconstruction.
+
+Finance v2 stores immutable event identities individually, with transaction/time
+indexes, checked daily contributions and versioned totals/revision metadata in the
+existing wallet database. Wallet keys, balances and signed artifacts are not
+migrated by this change. Migration, accounting and page-consistency requirements
+are defined in the [operator guide](digidollar-paymaster-operator.md#finance-storage-and-page-consistency).
+
+Pagination uses bounded ordered database cursors. First pages reconcile history; subsequent
+pages reuse success only while wallet update counter, processed tip and finance
+revision match, for at most 60 seconds. Errors are not cached.
+
+## Execution and presentation
+
+RPC and background callers invoke the same native services with typed inputs.
+Financial guards remain inside those services, including restart/replay checks.
+RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
+
+One wallet work queue admits two concurrent reads and one mutation. Identical
+reads coalesce only within the same mutation generation. Signing preflight, unlock,
+execution and relock share one mutation slot. Cancelling the UI cannot cancel an
+already-started wallet operation or authorize its repetition. Wallet generations
+invalidate late replies; shutdown joins started workers before destroying their
+dependencies. Provider views share helpers instead of duplicating financial rules.
+
+Pool-preparation request bindings now hash typed recovery mappings with the local
+`Pool Request v2` tag, independent of JSON formatting. This is a local preview/replay
+binding, not a signed network message. Previously approved work remains journaled
+and is reconciled by its exact transaction; a stale preview must be reviewed again.
+No signed transaction or spending limit is rewritten.
 
 ## Source ownership
 
-| Paths | Responsibility |
-|---|---|
-| `src/paymaster/types.*`, `protocol.*`, `wire.*` | Typed records, commitments, bounded serialization. |
-| `src/paymaster/txbuilder.*`, `psbt.*` | Exact transaction/PSBT construction and validation. |
-| `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, budgets, reservations, sponsorship. |
-| `src/paymaster/client.*`, `directory.*`, `reputation.*`, `recovery.*`, `validation.*` | Discovery, selection, verification, retries/recovery. |
-| `src/paymaster/manager.*`, `transport.h`, `src/net.*`, `src/netbase.*` | Direct channels, queues and connection budgets. |
-| `src/wallet/paymasteridentity.*`, `paymasterpsbt.*`, `paymasterprovider.*` | Wallet keys, signatures and worker. |
-| `src/wallet/paymasterstore*`, `paymasterdb.cpp`, `paymastercheckpoint.*` | Atomic state, accounting, reconciliation, rollback protection. |
-| `src/wallet/rpc/paymaster*.cpp` | Wallet RPC orchestration and grouped implementations. |
-| `src/rpc/paymaster.cpp`, `src/rpc/digidollar.cpp` | Node configuration, diagnostics, directory/send entry points. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions/presets and interactive CLI; `DescribeSetupFunding` formats current preparation observations without inferring readiness from balances. GUI setup reuses the operator preparation formatter and refreshes its result through wallet-bound asynchronous reads. Both assistants review an explicit autostart choice. |
-| `src/qt/paymasterwidget.*`, `paymastersendwidget.*`, `paymasterwallet.*`, `paymasteramount.*` | Provider/send UI, wallet adapter and amounts. |
-
-Store code is split into provider/client/finalization/recovery/reconciliation/
-reputation units; RPC code into provider/client/discovery/processing/runtime/
-integration/send units. Review callers and shared helpers together.
+The [source map](../REPO_MAP_DIGIDOLLAR.md#paymaster-network) owns the module
+inventory; the [layer contract](design/paymaster-integration-boundaries.md#dependency-and-reuse-contract)
+defines permitted dependencies. Wallet services own financial decisions, RPCs
+adapt parameters/results, and Qt controllers/views manage interaction. Review
+the shared implementation together with all callers when changing a rule.
 
 ## Lifecycle at the authorization boundaries
 
 This is a conceptual review diagram, not a list of serialized state names.
 Actual session/attempt/phase enums live in `src/paymaster/reservation.h`; RPC
-views and permitted actions are derived in `src/wallet/rpc/paymaster_client.cpp`.
+views and permitted actions are derived in `src/wallet/paymasterclientview.cpp`.
+They carry an observation time; execution reloads the current records and validates
+authority again. An observation never grants permission to sign.
 
 ```mermaid
 flowchart TD
@@ -172,13 +209,12 @@ not collapse them into one success/failure flag. The detailed
 | Task | Start with these sources | Check alongside the change |
 |---|---|---|
 | Fee arithmetic or exact gross amount | `src/paymaster/provider_policy.cpp`, `txbuilder.cpp`, `client.cpp` | Cent rounding, carrier output validity, client percentage/absolute/day limits, deducted-fee and sweep cases. |
-| High-level payment API or retries | `src/wallet/rpc/paymaster_send.cpp`, `paymaster_integration.cpp`, `paymaster_client.cpp` | Same-ID replay, commitment acceptance, lost replies, terminal/pruned records and confirmed-recipient status. |
-| Persistence or recovery | `src/wallet/paymasterstore*.cpp`, `paymasterdb.cpp`, `paymastercheckpoint.cpp` | Atomic failure/reopen, retained authority, reorg, restore and stale-copy cases. |
-| Provider settings or startup | `src/paymaster/setup.cpp`, `cli.cpp`, `src/wallet/rpc/paymaster_provider.cpp`, `paymaster_runtime.cpp` | Shared GUI/CLI policy, unlock, persistent pause, startup/history waits and read-back of saved state. |
-| Pool/refill | `src/wallet/paymasterprovider.cpp`, `paymasterstore_provider.cpp`, `src/wallet/rpc/paymaster_provider.cpp` | Both assets, complete slots, finite versus recurring approval, fees and usable capacity below target. Selected uncreated funding cancellation binds a read-only preview, rejects wallet signature evidence and atomically disables recurring refill without releasing pools. |
-| Stop/retirement | `src/paymaster/manager.{h,cpp}`, `src/wallet/rpc/paymaster_runtime.cpp`, `paymaster_provider.cpp`, `src/wallet/paymasterprovider.cpp`, `src/qt/paymasterwidget.cpp` | Scoped stop priority over new work, bounded exclusive acquisition and failure cleanup, explicitly reviewed uncreated-task cancellation, atomic ledger/pool updates, lost transaction replies and unchanged restoration guards. |
-| Direct networking | `src/paymaster/manager.cpp`, `transport.h`, `wire.cpp`, `src/net.cpp` | Identity/session proof, early disclosure, quotas, ordinary P2P capacity and privacy-preserving retry. |
-| Client/provider UI | `src/qt/paymastersendwidget.cpp`, `paymasterwidget.cpp`, `paymasterwallet.cpp`, surrounding DD widgets | Unknown/loading states, wallet-bound asynchronous replies, cancellation, affordability and exact approval. |
+| High-level payment API or retries | `src/wallet/paymasterclient.cpp`, `paymasterclientview.cpp`, `paymasterrecoveryservice.cpp`; RPC send adapter | Durable identity, exact approval, replay and recipient-confirmation semantics. |
+| Persistence or recovery | `src/wallet/paymasterstore*.cpp`, `paymasterdb.cpp`, `paymastercheckpoint.cpp`, `paymasterfinance.cpp` | Atomicity, retained authority, migration, reorg and stale-copy protection. |
+| Provider settings, startup or stop | `src/wallet/paymasterconfiguration.cpp`, `paymasterservice.cpp`, `paymasterintegration.cpp` | Work exclusion, readiness, persistent pause, unlock and failure cleanup. |
+| Pool/refill and capital release | `src/wallet/paymasterproviderops.cpp`, `paymasterpool.cpp`, `paymasterprovider.cpp` | Exact plans, finite versus recurring approval, signed-work guards and atomic cancellation/release. |
+| Direct networking | `src/paymaster/manager.cpp`, `transport.h`, `wire.cpp`, `src/net.cpp` | Identity/session proof, disclosure, quotas and ordinary P2P capacity. |
+| Client/provider UI | `src/qt/paymastersendcontroller.cpp`, `paymasterprovider_*.cpp`, `paymasterasync.cpp`, `paymasterwallet.cpp` | Snapshot/error handling, wallet switch/shutdown, unlock lifetime and exact approval. |
 | Built-in help/config docs | `src/paymaster/help.h`, `src/init.cpp`, `src/digibyte-cli.cpp`, RPC registrations | Correct executable/context, real parameter names, no help-only command registered as a node argument. |
 
 Consult the [test coverage map](digidollar-paymaster-testing.md#coverage-map)

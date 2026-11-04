@@ -159,24 +159,10 @@ That mode requires the ordinary Paymaster result transaction to reach the old
 node's mempool and confirmed tip while message capture proves that the old node
 does not send or receive Paymaster announcements.
 
-The registered `wallet_paymaster_offer_selection.py --descriptors` scenario
-uses three current-version daemons: two independent USER_PAID providers
-advertise different fees and a DGB-less client must display both offers in
-exact-total-cost order, automatically use only the cheapest provider, and
-leave the unselected provider's pool, safety budget, and finance ledger
-unchanged. It also replaces a provider's announcement with higher and restored
-prices, verifies monotonic sequence handling, expires both stale announcements,
-and accepts only a freshly announced replacement.
-
-`wallet_paymaster_failover.py --descriptors` uses four current daemons and two
-client wallets to contend for one cheap operational slot. The second client
-must retain the exact same reserved DD inputs while falling back to a standby
-provider; fallback must be rejected after the user PSBT exists, exactly one
-payment may be committed, and canceling the unsigned contender must restore
-its balance without provider finance effects. `wallet_paymaster_reorg.py
---descriptors` confirms a real Paymaster transfer, reorganizes it onto an
-isolated longer branch, checks client/finance/pool rollback, and reconfirms the
-same txid without duplicate accounting.
+The [Paymaster coverage map](/doc/digidollar-paymaster-testing.md#coverage-map)
+locates current offer-selection, failover and reorganization scenarios and their
+invariants. Keep historical-reference setup above separate from those
+current-current functional tests.
 
 By default, up to 4 tests will be run in parallel by test_runner. To specify
 how many jobs to run, append `--jobs=n`

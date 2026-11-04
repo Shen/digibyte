@@ -80,29 +80,12 @@ offer changes use the reviewed save/restart path. Do not use tab changes as part
 of a save procedure. If a save fails, inspect its error/status and saved values
 before assuming the running offer changed.
 
-**Settings > Node connection** describes the local listener and its configuration.
-Addresses, required node features and connection capacity appear in separate
-groups. Each setting shows its value and readable configuration source;
-externally controlled values remain read-only. Pending restart notices show
-the running value separately from the saved edit value. The connection-test
-button opens the command view, with a back link to these settings.
-
-**Settings > Node connection > Connection test** provides copyable RPC-console and CLI
-commands for a second node, using the current announced `-paymasterendpoint`
-and network. It reads the running node's configuration, not unsaved edits or
-the local bind address. It does not discover a public IP behind NAT, create a
-Tor service or run the probe automatically. Configure the public IP/onion address
-and port in Node connection and restart if the announced endpoint is missing.
-The CLI example needs the second node's `-datadir` or `-rpcport` if nonstandard;
-use the executable's full path when it is not on PATH (`.\digibyte-cli.exe` in
-PowerShell when in its directory). Regtest loopback tests require both nodes on
-the same computer and do not establish Internet reachability.
-
-Run `checkpaymasterendpoint` from that second node and inspect its RPC result
-directly; JSON report import has been removed. Both
-numeric IP endpoints and Tor v3 onion endpoints are supported, subject to the
-[diagnostic prerequisites](digidollar-paymaster.md#start-and-verify-mainnet-operation).
-A reachable listener does not establish payment readiness or available reserves.
+**Settings > Node connection** separates running values, saved edits and
+externally controlled read-only settings. Its **Connection test** view supplies
+commands for a second node from the running advertised endpoint; it does not
+discover an external address or run a probe. Follow the
+[node startup and diagnostic instructions](digidollar-paymaster.md#start-and-verify-mainnet-operation)
+for IP/Tor prerequisites, CLI paths and result interpretation.
 
 **Settings > Start, pause & retire** is the first settings destination. It groups
 the operation controls and retirement review, with a checklist of each action's
@@ -127,33 +110,17 @@ budget is unused. Review the intended offer ceiling and limits; neither changes
 automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
 one-satoshi quote, not the saved offer ceiling or payment readiness.
 
-GUI Overview, **Offer & pricing**, and **Customer-payment budgets** show these
-configuration conflicts with the affected model and both DGB amounts. The
-settings pages link to each other without changing values. Each form compares
-its edits with the other policy's **saved** values; an unsaved correction does
-not clear the saved-state warning on Overview. The GUI setup review and CLI
-setup/status use the same comparison. A smaller budget for an inactive model
-does not block an offered model; a stored cap above the offer ceiling still
-needs correction under Core's policy validation.
+Overview, **Offer & pricing** and **Customer-payment budgets** identify conflicts
+by model and DGB amount. Forms compare edits with the other policy's saved values;
+unsaved changes do not clear Overview's saved-state warning. The GUI/CLI setup
+and status use the same comparison. Inactive models do not block an offered
+model, but Core still rejects a per-payment cap above its offer ceiling.
 
-The spending-limit form explains invalid amounts and limit relationships
-before saving and disables Save until they are corrected. A per-payment cap
-above the saved offer ceiling cannot be saved; a smaller positive cap may be
-saved but retains the readiness warning. Core rechecks every save against the
-current policy. Rejected saves keep your edits and show an explanation in the
-form instead of a technical error dialog.
-
-After Core confirms an offer or spending-limit save, the GUI immediately reads
-the combined provider status again. The previous overview warning is replaced
-by a loading state during that read. A failed read shows status unavailable,
-not the old conflict or a readiness claim. An unsaved edit or unconfirmed save
-does not clear the saved-state warning.
-
-Review the intended ceiling and finite limits explicitly. Separately saved
-policies may pass through an intermediate mismatch while being changed; the
-warning makes that state visible. No warning changes readiness, raises a limit
-or grants spending authority. Configuration mismatches do not expire like
-rolling budget usage.
+A smaller positive cap can be saved while retaining a readiness warning.
+Rejected saves preserve edits; successful saves reload combined provider status.
+Loading or failed readback is shown as unavailable. Separately saved policies
+can temporarily disagree: review both explicitly. Warnings never raise limits,
+grant signing authority or expire like rolling budget usage.
 
 | Action | Effect after confirmation |
 |---|---|
@@ -300,24 +267,12 @@ then stops service. It does not revoke existing signatures or release protected
 funds. A bare `stoppaymaster` can be undone later by saved autostart. Complete
 node shutdown is a separate operation; stopping a provider does not stop the node.
 
-The GUI shows **Paymaster is stopped** when a current snapshot confirms a
-disabled, non-running provider without a pending start request. Saved offers
-are marked as configured but stopped. Missing reserves or spending requirements
-for a later restart do not replace that service status. If refill is off and no
-work remains, the reserve card shows the retained or below-target reserves
-without asking for immediate refill approval. Unknown errors and wallet
-restore/checkpoint protection still take precedence; open payments remain in
-Activity. These display distinctions do not change start or signing checks.
-The same stopped status applies after ordinary retirement, including an empty
-pool or a declined release. It does not assert that reserves were retained or
-released; the release receipt and retirement review report that separately.
-Once a fresh snapshot confirms running again, old successful stop/release
-messages disappear. Unclear or failed release results remain available for review.
-
-`startpaymaster` with `wait_for_readiness=true` can retain a one-shot start
-request during the current wallet load when accepted. It is not persistent
-autostart, a wallet unlock or permission to exceed saved limits. Inspect the
-returned state and errors; acceptance is not proof of immediately serving.
+A confirmed stopped snapshot takes precedence over missing reserves or budgets
+for a future restart. Open payments, restore/checkpoint errors and uncertain
+release results remain visible; stopped status does not certify capital release.
+`startpaymaster` with `wait_for_readiness=true` can retain a one-shot request for
+the current wallet load. Inspect its returned state: acceptance is not readiness,
+persistent autostart, wallet unlock or additional spending approval.
 
 ## Encrypted wallets and headless service
 
@@ -375,17 +330,12 @@ counters overlap stages and must not be summed into a payment count.
 | Network statistics unavailable | Unknown snapshot, not zero supply or proof of lost funds; check synchronization/index diagnostics. |
 | Restore guard | Use supported reviewed adoption/recovery; do not clear records to bypass it. |
 
-For an approved preparation waiting for funds, Overview and the management task
-show each DD/DGB step's required capital, currently confirmed available funds
-and capital shortfall. Fund the selected wallet in the missing asset, plus DGB
-for network fees. An approved fee ceiling is not an estimate of the actual fee.
-The same available DGB can be shown for both steps; it is shared, not two balances.
-Protected reserves are excluded. Incoming funds still require confirmation and
-eligible inputs. If no transaction exists, waiting for blocks alone does not
-resolve a capital shortfall. Alternatively, cancel uncreated preparation and
-review a smaller target. **View reserve funding and next steps** opens the
-reserve settings. An already approved finite plan continues automatically when
-its prerequisites are met, even with automatic refill and autostart off.
+For an approved plan with no transaction, inspect each asset's capital shortfall
+and fee allowance as described in [setup](#gui-sequence). Fund the selected
+wallet or cancel uncreated work and review a smaller target; waiting for blocks
+alone cannot fix a capital shortfall. The existing finite approval can resume
+when prerequisites are met, independently of recurring refill and autostart.
+See [pool setup](digidollar-paymaster-pool-setup.md#finite-approved-setup).
 
 Use operator/provider, liquidity, safety and finance status plus client session
 inspection and node logs. Correlate time/wallet/request without publishing
@@ -400,23 +350,35 @@ autostart; independent checkpoints detect stale wallet copies. Only supported
 matching/quiescent states can be adopted after review. Do not operate cloned
 stores as independent instances of one identity.
 
-To retire, stop service, disable provider/autostart and resolve protected work,
-then preview and approve [capital release](paymaster-capital-release.md). That
-returns eligible reserves to ordinary selection without sending funds or
-erasing history.
-If a start could not fund its reserves, GUI retirement also reviews cancellation
-of funding tasks that created no transaction. CLI/RPC can request the same review
-with `releasepaymastercapital {"cancel_uncreated":true}`; repeat the option with
-the approved plan on execution. Signed or ambiguous work still blocks release.
-Stopping immediately gives the request priority over new provider work and
-briefly waits for active work. A continuing busy error means the stop has not
-been confirmed, not that funds were released. Confirmed Stop/Pause blocks refill
-execution while retaining its preferences; completing retirement also turns off
-automatic refill and revokes its fee approval. Failed stop attempts remove their
-temporary priority rather than leaving an invisible permanent pause.
+For retirement, follow the [capital-release procedure](paymaster-capital-release.md).
+It owns the stop/work-exclusion rules, exact plan approval, optional cancellation
+of uncreated tasks and lost-reply handling. Ordinary release returns eligible
+reserves to wallet selection without transferring funds or erasing history;
+restored-wallet recovery has additional guards.
 
 To cancel only uncreated reserve funding without retiring the provider, use
 **Cancel uncreated reserve work** in the management-task card. It previews the
 selected DGB/DD operations and turns automatic refill off on confirmation.
 Existing reserves and signed transactions remain protected. GUI and headless
 RPC steps are documented under [cancellation](digidollar-paymaster-pool-setup.md#cancellation-and-verification).
+
+## Finance storage and page consistency
+
+The pre-release finance store uses individual event records and derived time,
+transaction, UTC-day and all-time indexes in the existing wallet database.
+Existing v1 development history is validated and migrated atomically. A failed
+migration leaves the old records intact; unknown versions are rejected. Use a
+full wallet backup; CSV remains an accounting export rather than a recovery
+artifact. Older binaries cannot read the v2 finance header.
+
+`getpaymasterfinancestatus` reports a `revision`. Its `cursor` is an opaque hex
+value bound to provider, network, period/cutoff, revision and last position.
+Pass the returned value unchanged. If data changes between pages, the RPC
+returns `PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED`; refresh from the first page.
+The GUI also checks revision consistency and abandons an inconsistent CSV
+export before writing a file. Do not concatenate pages from different revisions.
+
+`today`, `7d` and `30d` use UTC calendar days: today alone, today plus the previous
+six days, and today plus the previous 29 days. Reorganizations remove an event's
+old confirmed contribution before applying its current contribution. Replayed
+transactions do not create a second booking.

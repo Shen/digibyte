@@ -1,8 +1,8 @@
 # DigiDollar, Oracle and Paymaster source map
 
-The DigiDollar/oracle inventory retains its documented historical baseline;
-Paymaster sections were reconciled on 2026-10-15 against `e7c2c8c4bd` on
-`integration/paymaster-v9.26.7`. This is not a new whole-repository audit.
+The DigiDollar/oracle inventory retains its documented historical baseline.
+Paymaster sections locate the current modules; candidate verification belongs
+in the release evidence below.
 
 Read `DIGIDOLLAR_ARCHITECTURE.md` and `DIGIDOLLAR_ORACLE_ARCHITECTURE.md` for
 DD/oracle context. For Paymaster start with [PAYMASTER.md](PAYMASTER.md),
@@ -677,8 +677,9 @@ Ordinary DD consensus/history checks remain authoritative. See
 
 ### src/wallet/rpc/paymaster*.{h,cpp}
 
-Wallet RPCs split into common orchestration, provider, client, discovery,
-processing, runtime, integration and send units. Exact method groups and
+Wallet RPC adapters cover provider, client, discovery, processing, runtime
+and send operations. Lifecycle implementation lives in `wallet/paymasterintegration.cpp`.
+Exact method groups and
 side-effect boundaries are in the [RPC reference](doc/digidollar-paymaster.md)
 and [client contract](doc/digidollar-paymaster-integration.md).
 
@@ -830,21 +831,38 @@ units share internal helpers. `paymasterdb.cpp` persists wallet records;
 `paymastercheckpoint.*` maintains an independent rollback checkpoint. See
 [threat model](doc/paymaster-threat-model.md) for retention and restore limits.
 
+### src/wallet/paymasterapplication*, paymasterservice*, paymasterclient*, paymasterprocessing*, paymasterfinance*
+
+Wallet services own readiness, provider lifecycle, inbound processing, offer
+preparation, client authorization, exact submission and accounting. RPC adapters
+call them directly. The provider loop calls services without fabricated RPC
+requests. Finance caching and persistence are described in the
+[implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
+
+### src/wallet/paymasterconfiguration*, paymasterproviderops*, paymasterpool*, paymasterintegration*
+
+Typed provider configuration and pool operations retain lifecycle/work guards in
+wallet services. Finite preparation and scheduled provider cycles invoke the same
+backend functions. The RPC integration header re-exports native lifecycle
+interfaces for existing callers; it owns no implementation.
+
+### src/wallet/paymasterclientview*, paymasterrecoveryservice*
+
+Typed current session capabilities, status-aware lookups and shared recovery
+orchestration. RPC/GUI callers cannot substitute displayed state for the backend's
+execution-time checks. Structured errors originate in `src/paymaster/error.h`.
+
+### src/wallet/paymastersessionindex.h / paymasterdb.cpp
+
+Derived final/recovery transaction-to-session lookup. Rebuild once, point-read
+matching authoritative records, publish index deltas after successful commits,
+invalidate on abort, and forget on wallet destruction. It grants no authority.
+
 ### src/wallet/load.{h,cpp}
-- Schedules wallet-wide Paymaster reconciliation every 30 seconds, alongside
-  the existing startup and chain-tip hooks. This drives the store's atomic
-  unsigned-quote and Capacity-reservation expiry even without a subsequent RPC
-  or block notification, while keeping loaded-wallet lifetimes safe through a
-  `GetWallets()` shared-pointer snapshot.
-- Schedules a short bounded provider-service pass for every loaded wallet.
-  Automatic providers perform at most one request step and one submit step per
-  pass; manual providers remain operator-driven, locked wallets pause without
-  consuming work, and opt-in autostart waits for readiness/unlock.
-- Startup and scheduled reconciliation recover historical pool successors and
-  durable maintenance transactions. The automatic pass attempts missing-target
-  repairs before processing requests. Full current payment readiness can keep
-  the service active through known refill waits, even below the saved target;
-  missing admission/payment capacity still blocks fresh requests.
+
+Invokes Paymaster startup and scheduler registration from
+`wallet/paymasterintegration.cpp`; the native lifecycle code owns reconciliation
+and loaded-wallet lifetime handling.
 
 ### src/wallet/paymasteridentity.{h,cpp}
 - Creates and loads the wallet-managed untweaked BIP86/x-only provider identity
@@ -1022,12 +1040,14 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 - ⚠️ `WalletBatch` encrypted DD key methods (T4-03a): `WriteCryptedDDOwnerKey()`, `ReadCryptedDDOwnerKey()`, `EraseCryptedDDOwnerKey()`, `WriteCryptedDDAddressKey()`, `ReadCryptedDDAddressKey()`, `EraseCryptedDDAddressKey()`
 - Paymaster methods and record-key definitions live in `src/wallet/paymasterdb.cpp`.
   They remain members of `WalletBatch`, sharing its original database batch,
-  write accounting and explicit transaction. No storage migration is involved.
+  write accounting and explicit transaction. Finance v1 development records are
+  validated and atomically migrated to v2; other record formats are unchanged.
 - ⚠️ Paymaster DB methods persist versioned provider pools, liquidity policy,
   restartable maintenance ledger, and the latest carrier-withdrawal preview so
   successor/maintenance recovery and exact plan execution survive restart.
 - ⚠️ Paymaster DB methods also persist a chain/provider-bound finance ledger,
-  derived UTC daily totals and provider backup-reminder timestamps. The full
+  individual finance events, time/transaction indexes, versioned metadata,
+  derived UTC daily/all-time totals and provider backup-reminder timestamps. The full
   wallet database is required to preserve this off-chain provider metadata.
 - ⚠️ DB keys: `DD_CRYPTED_ADDRESS_KEY` ("ddcaddrkey"), `DD_CRYPTED_OWNER_KEY` ("ddcownerkey")
 
@@ -1065,6 +1085,18 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   and can be enabled independently in the Qt wallet options.
 
 ### src/qt/paymasterwidget.cpp/h
+
+`paymasterwidget.cpp` composes the operator console. Methods are separated into
+`paymasterprovider_overview.cpp`, `_setup.cpp`, `_configuration.cpp`,
+`_liquidity.cpp`, `_finance.cpp` and `_recovery.cpp`. The private facade is in
+`paymasterprovider_internal.h`; shared representation validators/building blocks
+are maintained once in `paymasterproviderviewhelpers.*`. The public view contract
+is in `paymasterproviderview.h` (re-exported by `paymasterwidget.h`).
+
+`paymasterasync.*` supplies wallet-scoped scheduling (two reads, one mutation),
+coalescing, structured failures and shutdown joins. `paymastersendcontroller.*`
+validates session snapshots and makes failure decisions from structured backend
+facts. Diagnostic text is not authority to discard an ambiguous payment.
 
 Provider setup, settings, status, funds, activity and finance UI backed by
 Core/shared setup. Service readiness is separate from maintenance progress.
@@ -1430,8 +1462,8 @@ remote provider identity locally.
 |------|--------------|
 | `paymaster_wallet_identity_tests.cpp` | Descriptor/local-key eligibility and BIP86 identity persistence; legacy, watch-only, and external-signer rejection; fail-closed coin selection for unreadable reservation/pool safety records; prioritized bounded provider stop, timeout/write-failure cleanup, stopped automation and atomic, reviewed cancellation of uncreated reserve funding during retirement |
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs, role-limited signing, mutations before either party signs, and correctly signed malicious DD quotes rejected by independent client reconstruction |
-| `paymaster_wallet_store_tests.cpp` | Atomic sessions/reservations/commits, append-only artifacts, exact retry, unsigned quote expiry and reuse of in-memory-locked inputs, tombstones, self-recovery, restart, mempool, confirmation, reorg, retention, and no-mutation handling of unreadable expiry/reliability records; simulated begin/write/commit failures for fee-policy approval, signature persistence, fallback, cancellation and self-recovery, including lost replies and protection of newly reserved inputs |
-| `paymaster_wallet_security_tests.cpp` | Policy-change liveness, manifest/budget binding, the automated signature → DB commit → wallet insertion → broadcast restart matrix, final-witness validation, malicious client/provider persistence failures, durable restore quarantine, and real SQLite page-limit/commit-denial rollback and exact retry |
+| `paymaster_wallet_store_tests.cpp` | Durable session/attempt state, derived index, exact replay, recovery, reorg and transactional failure handling. |
+| `paymaster_wallet_security_tests.cpp` | Manifest/budget binding, crash windows, final validation, restore quarantine and real SQLite failure/reopen. |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries; full history ownership checks, descriptor-only missing-address-key recovery/persistence, self-send/receive/redemption-change rows and locked/reloaded key recognition; HD descriptor probe counts private expansions and rejects public-only/leaf-key ownership; unresolved locked descriptor matches recover after unlock instead of entering the foreign cache |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |
@@ -1460,6 +1492,9 @@ maintenance/load regression cases formerly embedded in `walletload_tests.cpp`.
 
 ### Python Functional Tests (`test/functional/`)
 
+Paymaster invariants and focused selections are in the
+[test coverage map](doc/digidollar-paymaster-testing.md#coverage-map).
+
 Authoritative registration is the `BASE_SCRIPTS` list in
 `test/functional/test_runner.py`. `feature_oracle_p2p.py` remains registered
 for historical compatibility but is a legacy/superseded scaffold; the live
@@ -1467,17 +1502,17 @@ oracle P2P proof is `digidollar_wave20_oracle_p2p.py`.
 
 | File | Coverage Area |
 |------|--------------|
-| `wallet_paymaster_readiness.py` | Pre-session client/provider rejection with disabled Paymaster or inactive DigiDollar, pruning, missing txindex or BIP324, and unsafe high-privacy logging/proxy/capture configuration |
-| `wallet_paymaster_partial_capacity.py` | Two confirmed operational slots remain usable below a three-slot refill target with no ordinary funding; automatic announcement renewal, exact unsigned offer, unchanged policy and explicit stop |
-| `p2p_paymaster.py` | Paymaster activation/negotiation, V1 direct-message rejection and size limits; bounded malformed announcements over two real V2 peers across reconnects with ping and block-relay liveness |
-| `wallet_paymaster_lifecycle.py` | Abrupt provider-process termination after client authorization; older authorized-client SQLite backup reconciliation at startup with change or via exact txindex observation without change, across RPC/CLI entry points, with one fee and no duplicate payment; staged DD-carrier then DGB replenishment with separate confirmations, pending-target accounting, restart idempotency, locked-wallet autostart pause, unlock continuation with existing confirmed capacity active during refill, and absence of duplicate maintenance transactions |
-| `wallet_paymaster_backup.py` | Real stale-provider SQLite restore with a durable pre-load quarantine: restart/autostart and manual start stay blocked; exact retained commits still replay through RPC/CLI; reserve preparation, retirement, withdrawal and capital release reject renewed authority. `--pending-offline` withholds a signed final from both mempools. Configuration changes cannot clear the guard; manual copying/renaming of an already guarded image preserves quarantine across load/restart. Client-only restore preserves DD balance and fee policy. |
-| `wallet_paymaster_backup_exit.py` | Current SQLite provider restore with a matching independent checkpoint: read-only RPC/CLI reviews, manual locks, atomic recovery release, permanent identity retirement, restart and blocked original copy, followed by an ordinary complete DD transfer. Stale-backup variants separately reject this recovery option. |
-| `wallet_paymaster_rpc.py` | HTTP authentication/method-whitelist and mixed-batch rejection, wallet-scoped session lookup/cancellation, direct RPC contracts, focused `--offer-models-only` dual-model/rounded-fee diagnostics through RPC and CLI, `--reserved-capacity-only` automatic admission/unsigned cancellation/expiry with three independent slots, plus automatic carrier-maintenance gates: deliberate zero target, disabled automation, missing paid-maintenance approval, exactly one pending replacement, restart without duplication, confirmation promotion, and rolling-budget exhaustion without another transaction |
-| `wallet_paymaster_provider.py` | Descriptor-provider identity/policy/pools, focused `--drain-recovery-only` unsigned-abandon/expiry regression with automatic re-admission and unchanged limits, discovery, high-privacy Clearnet/multi-attempt rejection before session creation, user-paid client without DGB, exact 50.00-DD wallet sweep to 49.75-DD recipient plus 0.25-DD provider fee, cent-rounding-gap rejection, public sponsorship and disabled-Restricted RPC/CLI rejection, provider-finance periods/pagination/native accounting and backup acknowledgement, exact result processing, recovery, wallet lock, restart persistence, runtime cleanup on wallet unload/reload, production-log redaction of payment artifacts, and optional official-pre-Paymaster third-node relay/validation with no Paymaster-announcement traffic |
-| `wallet_paymaster_offer_selection.py` | Three independent current-version daemons with two differently priced USER_PAID providers and one DGB-less client; verifies both visible offers, exact-total ordering, monotonic price replacements, stale-announcement expiry/fresh refresh, automatic cheapest selection, selected-provider-only capacity/intent/reservations, one completed transfer, and no pool/budget/finance mutation at the unselected provider |
-| `wallet_paymaster_failover.py` | Four current-version daemons with two independent providers, one relay, and two client wallets contending for a single cheap operational slot; verifies explicit pre-signature fallback, immutable DD inputs across providers, sequential direct-channel replacement, the post-user-PSBT no-fallback boundary, exactly one standby-provider payment, and clean release of the unsigned contender |
-| `wallet_paymaster_reorg.py` | Three current-version daemons create a confirmed Paymaster branch and a longer transaction-free competing branch; verifies session `CONFIRMED`→`MEMPOOL` rollback, finance `confirmed`→`pending`, successor liquidity `available`→`pending_successor`, and exact-txid reconfirmation without duplicate finance events |
+| `wallet_paymaster_readiness.py` | Feature, activation, storage/index, transport and privacy prerequisite rejection. |
+| `wallet_paymaster_partial_capacity.py` | Serving confirmed free slots below refill target without funding new reserves. |
+| `p2p_paymaster.py` | V2 negotiation, malformed announcements, resource bounds and relay liveness. |
+| `wallet_paymaster_lifecycle.py` | Crash/restart recovery, staged refill, unlock/autostart and duplicate prevention. |
+| `wallet_paymaster_backup.py` | Stale-provider restore quarantine, retained exact replay and client-only restore. |
+| `wallet_paymaster_backup_exit.py` | Reviewed matching-checkpoint recovery exit, permanent retirement and ordinary DD spending. |
+| `wallet_paymaster_rpc.py` | RPC authorization/scoping, offer-model and reserved-capacity variants, carrier-maintenance approvals. |
+| `wallet_paymaster_provider.py` | Provider policy/pools, full payment and drain-recovery variants, finance, backup, logging and optional old-node relay. |
+| `wallet_paymaster_offer_selection.py` | Two-provider price selection, expiry/replacement and unselected-provider isolation. |
+| `wallet_paymaster_failover.py` | Contended capacity, same-input fallback, post-signature exclusion and unsigned closure. |
+| `wallet_paymaster_reorg.py` | Client, finance and pool rollback/reconfirmation without duplicate accounting. |
 | `test_framework/paymaster_reference.py` | Shared official-reference selection, binary/version checks, absent-Paymaster RPC check, and RC2 Thaw Day configuration/assertions for the three historical compatibility scripts; twelve runner variants cover v9.26.5 and RC2 before/after activation |
 | `p2p_paymaster_v9_26_5_bridge.py` | Current provider and client separated only by an official v9.26.5 node; proves ordinary DGB/DD relay and old-node mining, no Paymaster-gossip relay or eligible offer across the old bridge, fail-closed selection, and discovery restoration after a direct current-current link |
 | `wallet_v9_26_5_compatibility.py --legacy-wallet/--descriptors` | Bidirectional official-reference/current DGB wallet transfers (v9.26.5 or RC2), descriptor-only bidirectional DD transfers, relay to both mempools, identical raw transactions, confirmation by the receiving version, exact wallet accounting/history, raw reference wallet-directory loading by the current daemon, preserved encryption/active-DD state, post-upgrade signing and spending, restart persistence, and a non-Paymaster round trip back to the reference release |
@@ -1630,8 +1665,8 @@ Wallet maintenance resumes finite approved commands separately from recurring
 refill permission. Whole-slot funding and confirmed-capacity readiness are
 covered by pool-setup, partial-capacity and readiness tests. See
 [pool setup](doc/digidollar-paymaster-pool-setup.md).
-`wallet/rpc/paymaster_provider.cpp` shares current, read-only DD/DGB preparation
-funding observations between pool and operator status. Qt uses those structured
+`wallet/paymasterpool.cpp` supplies shared read-only DD/DGB preparation funding
+observations to pool and operator status in `wallet/rpc/paymaster_provider.cpp`. Qt uses those structured
 amounts for capital shortfalls and confirmation/fee guidance, separately from
 the last saved execution error and the approved fee ceiling.
 

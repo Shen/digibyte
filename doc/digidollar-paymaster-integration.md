@@ -222,3 +222,23 @@ subject to local reliability handling. The countdown is announcement expiry,
 not reserved capacity: displayed offers can become unavailable earlier. Exact
 provider and fee are confirmed before authorization. Recipient/amount survive
 safe unsigned cancellation.
+
+## Structured execution failures
+
+Wallet application failures preserve the numeric RPC code and diagnostic
+`message`, and add `data.paymaster_code` plus `data.disposition`:
+
+| Disposition | Required caller behavior |
+|---|---|
+| `retry_before_execution` | The operation failed before execution; retry only the permitted operation with the same intended authorization. |
+| `reconcile` | Read durable state before deciding what to do. A missing reply is not evidence that nothing happened. |
+| `user_decision` | Obtain an explicit choice and recheck current backend permissions. |
+| `permanent` | Do not automatically repeat the operation. |
+
+Unknown/legacy errors default to reconciliation. Never match fragments of the
+human-readable message to release a request, authorize signing or retry a
+mutation. `data.session_absent=true` is explicit backend evidence of absence;
+it does not override an already observed persistent session. A caller must
+retain an ambiguous request ID until a current authoritative read resolves it.
+Some legacy adapters still return only `code` and `message`; the same conservative
+fallback applies.

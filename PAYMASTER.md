@@ -1,8 +1,8 @@
 # DigiDollar Paymaster: documentation guide
 
-Documentation baseline: `integration/paymaster-v9.26.7`, source revision
-`bab89065df`, reviewed on 2026-10-15. This identifies the source described here,
-not a release certification. See the [release gate](doc/digidollar-paymaster-release-gate.md).
+These guides describe the current Paymaster source in this checkout. The
+[release evidence](doc/digidollar-paymaster-release-gate.md) identifies the tested
+revisions and build limits; documentation is not release certification.
 
 ## Scope and integration rule
 
@@ -79,19 +79,16 @@ blanket operational approval. Unknown fields/status must not be interpreted as
 zero balance, successful payment, released inputs or permission to retry under
 a new ID. Use Core's returned capabilities and permitted actions.
 
-Keep task instructions and worked examples here; keep historical evidence in
-the release gate/Git. When code changes a unit, default, state, policy or public
-interface, update its canonical reference and example together. Prefer a small
-local explanation over requiring readers to reconstruct current behavior from
-commit history.
+Follow the [lean documentation rule](doc/design/paymaster-integration-boundaries.md#lean-documentation).
+The reference list below assigns each guide its responsibility.
 
-## Reading order
+## Reference documents
 
 | Document | Responsibility |
 |---|---|
 | [Implementation](doc/digidollar-paymaster-implementation.md) | Protocol, transaction construction, durable state and source ownership. |
 | [Integration boundaries](doc/design/paymaster-integration-boundaries.md) | Compatibility constraints and review of shared DigiByte code. |
-| [Threat model](doc/paymaster-threat-model.md) | Security invariants, corrected findings and residual risks. |
+| [Threat model](doc/paymaster-threat-model.md) | Security invariants and residual risks; findings retain their review IDs. |
 | [Client contract](doc/digidollar-paymaster-integration.md) | Prepare, authorize, resume, cancel and interpret payment status. |
 | [Node and RPC reference](doc/digidollar-paymaster.md) | Configuration, units, prerequisites and method groups. |
 | [Operator guide](doc/digidollar-paymaster-operator.md) | GUI/CLI setup, encrypted wallets, operation and diagnosis. |

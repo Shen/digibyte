@@ -37,15 +37,9 @@ snapshots remain integrated with those upstream changes.
 
 ## Verification scope
 
-The checkpoint compiled 12 selected MSVC/static-Qt translation units and linked
-incremental test executables. Twenty-six selected cases passed: six Core/RPC and
-20 Qt cases across ten functions. Python syntax and diff checks passed. Normal
-application/daemon/CLI linking, complete suites, functional execution and
-cross-platform verification did not run at this checkpoint. Earlier broad Qt
-failures were not retested by that selection.
-
-Later source corrections are described by the current [implementation](digidollar-paymaster-implementation.md),
-[integration boundaries](design/paymaster-integration-boundaries.md) and
-[release notes](release-notes/paymaster-integration.md). Follow the
-[test runbook](digidollar-paymaster-testing.md) and [release gate](digidollar-paymaster-release-gate.md)
-for a candidate build; this historical merge record is not a rolling pass.
+The merge's selected build/test evidence and its limitations are retained in the
+[release record](digidollar-paymaster-release-gate.md#historical-checkpoints).
+Current behavior belongs in the [implementation](digidollar-paymaster-implementation.md)
+and [release notes](release-notes/paymaster-integration.md). Use the
+[test runbook](digidollar-paymaster-testing.md) for a candidate build; this
+integration checkpoint is not a rolling pass.
