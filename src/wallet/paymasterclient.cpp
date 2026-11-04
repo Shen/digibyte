@@ -161,6 +161,129 @@ void ValidateClientPaymentOptions(const ClientPaymentOptions& input)
     if (restricted && input.maximum_attempts != 1)
         throw ApplicationError(ErrorKind::INVALID_INPUT, "Restricted sponsorship requires maximum_provider_attempts=1");
 }
+
+bool TryCommitClientCapacityProof(
+    Manager& manager, PaymasterStore& store, const QuoteParameters& input,
+    const PaymentSession& session, ProviderAttempt& attempt,
+    const PaymasterCapacityRequest& capacity_request, ChainstateManager& chainman,
+    int64_t now, std::string& error)
+{
+    const auto& provider_id = input.provider_id;
+    const auto& request_id = input.request_id;
+    PaymasterCapacityProof capacity_proof;
+    bool capacity_ready{false};
+    // Persist a simultaneously queued signed conflict before the
+    // acceptance loop can discard either locally invalid proof.
+    if (!DrainClientAttemptEquivocations(
+            manager, store, session, attempt, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    auto proof_lease = manager.LeaseCapacityProofs(
+        provider_id, attempt.client_nonce,
+        MAX_DIRECT_INBOX_MESSAGES_PER_SESSION);
+    const auto proofs = SelectCapacityProofMessages(
+        proof_lease.Messages(), provider_id, request_id,
+        session.session_id, attempt.client_nonce);
+    bool capacity_equivocation{false};
+    if (!PersistPendingCapacityEquivocationPair(
+            store, attempt.attempt_id, proofs,
+            capacity_equivocation, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    if (capacity_equivocation) {
+        if (!AcknowledgeEquivocationMessages(
+                manager, proofs, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_CAPACITY_EQUIVOCATION");
+    }
+    std::string rejected_proof_error;
+    for (const DirectMessage& direct : proofs) {
+        const auto* received =
+            std::get_if<PaymasterCapacityProof>(&direct.payload);
+        if (!received) {
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_proof_error =
+                "PAYMASTER_INVALID_CAPACITY_PROOF";
+            continue;
+        }
+
+        bool claim_equivocation{false};
+        const std::vector<unsigned char> encoded_proof =
+            SerializeCapacityProof(*received);
+        if (!store.StageCapacityProofClaimCandidate(
+                attempt.attempt_id, encoded_proof,
+                direct.received_at, claim_equivocation, error)) {
+            if (error !=
+                "PAYMASTER_INVALID_CAPACITY_CLAIM_CANDIDATE") {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_proof_error =
+                "PAYMASTER_INVALID_CAPACITY_CLAIM_CANDIDATE";
+            continue;
+        }
+        if (claim_equivocation) {
+            if (!AcknowledgeEquivocationMessages(
+                    manager, proofs, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_CAPACITY_EQUIVOCATION");
+        }
+        if (!store.GetAttempt(attempt.attempt_id, attempt)) {
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_ATTEMPT_NOT_FOUND");
+        }
+
+        std::string proof_error;
+        if (!ValidateCapacityProofAgainstChainstate(
+                *received, capacity_request,
+                attempt.provider_identity_key, chainman,
+                now, proof_error)) {
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_proof_error =
+                proof_error.empty() ? "PAYMASTER_INVALID_CAPACITY_PROOF" : std::move(proof_error);
+            continue;
+        }
+        capacity_proof = *received;
+        ValidatedCapacitySnapshot snapshot;
+        snapshot.snapshot_id = capacity_proof.snapshot_id;
+        snapshot.resource_commitment =
+            GetCapacityResourceCommitment(capacity_proof);
+        snapshot.provider_id = capacity_proof.provider_id;
+        snapshot.client_nonce = capacity_proof.client_nonce;
+        snapshot.funding_model = capacity_proof.funding_model;
+        snapshot.requires_carrier = capacity_proof.requires_carrier;
+        snapshot.request_hash = Hash(attempt.capacity_request);
+        snapshot.capacity_proof = SerializeCapacityProof(capacity_proof);
+        snapshot.created_at = capacity_proof.created_at;
+        snapshot.expires_at = capacity_proof.expires_at;
+        snapshot.validated_at = now;
+        if (!store.CommitValidatedCapacitySnapshot(
+                request_id, attempt.attempt_id, snapshot, now, error) ||
+            !store.GetAttempt(attempt.attempt_id, attempt)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        capacity_ready = true;
+        break;
+    }
+    if (!capacity_ready && !rejected_proof_error.empty()) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT,
+                           rejected_proof_error);
+    }
+    return capacity_ready;
+}
 } // namespace
 
 PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, const QuoteParameters& input)
@@ -622,116 +745,9 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
     PaymasterCapacityProof capacity_proof;
     bool capacity_ready = !attempt.capacity_snapshot.snapshot_id.IsNull();
     if (!capacity_ready) {
-        // Persist a simultaneously queued signed conflict before the
-        // acceptance loop can discard either locally invalid proof.
-        if (!DrainClientAttemptEquivocations(
-                *context.paymaster, store, session, attempt, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        auto proof_lease = context.paymaster->LeaseCapacityProofs(
-            provider_id, attempt.client_nonce,
-            MAX_DIRECT_INBOX_MESSAGES_PER_SESSION);
-        const auto proofs = SelectCapacityProofMessages(
-            proof_lease.Messages(), provider_id, request_id,
-            session.session_id, attempt.client_nonce);
-        bool capacity_equivocation{false};
-        if (!PersistPendingCapacityEquivocationPair(
-                store, attempt.attempt_id, proofs,
-                capacity_equivocation, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        if (capacity_equivocation) {
-            if (!AcknowledgeEquivocationMessages(
-                    *context.paymaster, proofs, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_CAPACITY_EQUIVOCATION");
-        }
-        std::string rejected_proof_error;
-        for (const DirectMessage& direct : proofs) {
-            const auto* received =
-                std::get_if<PaymasterCapacityProof>(&direct.payload);
-            if (!received) {
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_proof_error =
-                    "PAYMASTER_INVALID_CAPACITY_PROOF";
-                continue;
-            }
-
-            bool claim_equivocation{false};
-            const std::vector<unsigned char> encoded_proof =
-                SerializeCapacityProof(*received);
-            if (!store.StageCapacityProofClaimCandidate(
-                    attempt.attempt_id, encoded_proof,
-                    direct.received_at, claim_equivocation, error)) {
-                if (error !=
-                    "PAYMASTER_INVALID_CAPACITY_CLAIM_CANDIDATE") {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_proof_error =
-                    "PAYMASTER_INVALID_CAPACITY_CLAIM_CANDIDATE";
-                continue;
-            }
-            if (claim_equivocation) {
-                if (!AcknowledgeEquivocationMessages(
-                        *context.paymaster, proofs, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_CAPACITY_EQUIVOCATION");
-            }
-            if (!store.GetAttempt(attempt.attempt_id, attempt)) {
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_ATTEMPT_NOT_FOUND");
-            }
-
-            std::string proof_error;
-            if (!ValidateCapacityProofAgainstChainstate(
-                    *received, capacity_request,
-                    attempt.provider_identity_key, *node->chainman,
-                    now, proof_error)) {
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_proof_error =
-                    proof_error.empty() ? "PAYMASTER_INVALID_CAPACITY_PROOF" : std::move(proof_error);
-                continue;
-            }
-            capacity_proof = *received;
-            ValidatedCapacitySnapshot snapshot;
-            snapshot.snapshot_id = capacity_proof.snapshot_id;
-            snapshot.resource_commitment =
-                GetCapacityResourceCommitment(capacity_proof);
-            snapshot.provider_id = capacity_proof.provider_id;
-            snapshot.client_nonce = capacity_proof.client_nonce;
-            snapshot.funding_model = capacity_proof.funding_model;
-            snapshot.requires_carrier = capacity_proof.requires_carrier;
-            snapshot.request_hash = Hash(attempt.capacity_request);
-            snapshot.capacity_proof = SerializeCapacityProof(capacity_proof);
-            snapshot.created_at = capacity_proof.created_at;
-            snapshot.expires_at = capacity_proof.expires_at;
-            snapshot.validated_at = now;
-            if (!store.CommitValidatedCapacitySnapshot(
-                    request_id, attempt.attempt_id, snapshot, now, error) ||
-                !store.GetAttempt(attempt.attempt_id, attempt)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            capacity_ready = true;
-            break;
-        }
-        if (!capacity_ready && !rejected_proof_error.empty()) {
-            throw ApplicationError(ErrorKind::INVALID_INPUT,
-                               rejected_proof_error);
-        }
+        capacity_ready = TryCommitClientCapacityProof(
+            *context.paymaster, store, input, session, attempt,
+            capacity_request, *node->chainman, now, error);
     }
     if (!DrainClientAttemptEquivocations(
             *context.paymaster, store, session, attempt, error)) {
