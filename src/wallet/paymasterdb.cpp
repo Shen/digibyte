@@ -5,8 +5,14 @@
 #include <wallet/walletdb.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymastersessionindex.h>
+#include <paymaster/finance.h>
+
+#include <crypto/common.h>
+#include <hash.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
+#include <array>
 #include <ios>
 #include <memory>
 #include <map>
@@ -1630,25 +1636,521 @@ bool WalletBatch::HasPaymasterMaintenanceLedger()
     return m_batch->Exists(DBKeys::PAYMASTER_MAINTENANCE_LEDGER);
 }
 
+namespace {
+using namespace DigiDollar::Paymaster;
+const std::string FINANCE_EVENT{"pmfinevent"};
+const std::string FINANCE_TIME{"pmfintime"};
+const std::string FINANCE_TX{"pmfintx"};
+const std::string FINANCE_DAY{"pmfinday"};
+using FinanceOrder = std::array<unsigned char, 40>;
+using FinanceDay = std::array<unsigned char, 8>;
+
+template <typename T> struct StrictFinanceRecord : T {
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        stream >> static_cast<T&>(*this);
+        if (!stream.empty()) throw std::ios_base::failure("finance record trailing bytes");
+    }
+};
+
+struct FinanceVersion {
+    uint16_t version{0};
+    SERIALIZE_METHODS(FinanceVersion, obj) { READWRITE(obj.version); }
+};
+
+int64_t FinanceEventTime(const ProviderFinanceEvent& event)
+{
+    return event.state == ProviderFinanceEventState::CONFIRMED ? event.confirmed_at : event.created_at;
+}
+
+FinanceOrder FinanceTimeKey(const ProviderFinanceEvent& event)
+{
+    FinanceOrder key;
+    WriteBE64(key.data(), ~uint64_t(FinanceEventTime(event)));
+    // uint256 ordering compares its stored bytes. Complement them for the
+    // same descending tie-break without relying on little-endian integers.
+    for (size_t i = 0; i < 32; ++i) key[8 + i] = ~event.event_id.begin()[i];
+    return key;
+}
+
+FinanceDay FinanceDayKey(int64_t day)
+{
+    FinanceDay key;
+    WriteBE64(key.data(), uint64_t(day));
+    return key;
+}
+
+DataStream FinancePrefix(const std::string& type)
+{
+    DataStream prefix;
+    prefix << type;
+    return prefix;
+}
+
+bool ValidFinanceTotals(const ProviderFinanceTotals& totals)
+{
+    ProviderFinanceTotals checked;
+    std::string error;
+    if (totals.total.version != ProviderFinanceDailyTotals::CURRENT_VERSION ||
+        totals.total.day_start < 0 || !AddProviderFinanceTotals(checked, totals, error)) return false;
+    const uint64_t transfers = uint64_t(totals.total.user_paid_transfers) +
+        totals.total.public_sponsored_transfers + totals.total.restricted_sponsored_transfers;
+    if (transfers != totals.total.successful_transfers) return false;
+    int64_t income{0}, cost{0};
+    for (size_t i = 0; i < totals.income.size(); ++i) {
+        if (totals.income[i] > totals.total.dd_income.value - income ||
+            totals.cost[i] > totals.total.dgb_cost.value - cost) return false;
+        income += totals.income[i];
+        cost += totals.cost[i];
+    }
+    return true;
+}
+
+bool EmptyFinanceTotals(const ProviderFinanceTotals& totals)
+{
+    auto copy = totals;
+    copy.total.day_start = 0;
+    return copy == ProviderFinanceTotals{};
+}
+
+struct FinanceCursor {
+    uint16_t version{1};
+    uint256 genesis;
+    PaymasterId provider;
+    uint8_t period{0};
+    int64_t cutoff{0};
+    uint64_t revision{0};
+    FinanceOrder position{};
+    SERIALIZE_METHODS(FinanceCursor, obj)
+    {
+        READWRITE(obj.version, obj.genesis, obj.provider, obj.period,
+                  obj.cutoff, obj.revision, obj.position);
+    }
+};
+} // namespace
+
+DatabaseReadStatus WalletBatch::ReadPaymasterFinanceMetadata(ProviderFinanceMetadata& metadata)
+{
+    metadata = {};
+    FinanceVersion version;
+    auto status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, version);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (version.version != ProviderFinanceMetadata::CURRENT_VERSION) return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    StrictFinanceRecord<ProviderFinanceMetadata> record;
+    status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, record);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (record.genesis_hash.IsNull() || record.provider_id.IsNull() ||
+        record.history_complete_from <= 0 || record.updated_at < record.history_complete_from ||
+        record.revision == 0 || record.event_count > MAX_PROVIDER_FINANCE_EVENTS ||
+        record.totals.total.day_start != 0 || !ValidFinanceTotals(record.totals) ||
+        uint64_t(record.totals.total.successful_transfers) + record.totals.total.maintenance_transactions > record.event_count) {
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    metadata = record;
+    return DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterFinanceEvent(const uint256& event_id,
+                                                         ProviderFinanceEvent& event)
+{
+    event = {};
+    StrictFinanceRecord<ProviderFinanceEvent> record;
+    auto status = m_batch->ReadWithStatus(std::make_pair(FINANCE_EVENT, event_id), record);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    std::string error;
+    if (record.event_id != event_id || !ValidateProviderFinanceEvent(record, error)) return DatabaseReadStatus::READ_ERROR;
+    event = record;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::MigratePaymasterFinanceLedger(std::string& error)
+{
+    error.clear();
+    FinanceVersion version;
+    const auto status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, version);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    if (version.version == ProviderFinanceMetadata::CURRENT_VERSION) {
+        ProviderFinanceMetadata metadata;
+        if (ReadPaymasterFinanceMetadata(metadata) == DatabaseReadStatus::FOUND) return true;
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    if (version.version != ProviderFinanceLedger::CURRENT_VERSION) {
+        error = "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION";
+        return false;
+    }
+    StrictFinanceRecord<ProviderFinanceLedger> legacy;
+    if (m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, legacy) != DatabaseReadStatus::FOUND ||
+        !ValidateProviderFinanceLedger(legacy, error)) {
+        if (error.empty()) error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    if (!WritePaymasterFinanceLedger(legacy)) {
+        error = "PAYMASTER_FINANCE_MIGRATION_FAILED";
+        return false;
+    }
+    return true;
+}
+
+bool WalletBatch::WritePaymasterFinanceEvents(const ProviderFinanceMetadata& initial,
+                                             const std::vector<ProviderFinanceEvent>& events,
+                                             std::string& error)
+{
+    if (!MigratePaymasterFinanceLedger(error)) return false;
+    ProviderFinanceMetadata metadata;
+    const auto status = ReadPaymasterFinanceMetadata(metadata);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    const bool create = status == DatabaseReadStatus::NOT_FOUND;
+    if (create) {
+        metadata = initial;
+        metadata.version = ProviderFinanceMetadata::CURRENT_VERSION;
+        metadata.revision = 0;
+        metadata.event_count = 0;
+        metadata.totals = {};
+    }
+    if (metadata.genesis_hash.IsNull() || metadata.provider_id.IsNull() ||
+        metadata.genesis_hash != initial.genesis_hash || metadata.provider_id != initial.provider_id ||
+        metadata.history_complete_from <= 0 || metadata.updated_at < metadata.history_complete_from ||
+        metadata.revision == std::numeric_limits<uint64_t>::max()) {
+        error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
+        return false;
+    }
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) { error = "PAYMASTER_DATABASE_BEGIN"; return false; }
+    const auto fail = [&](const char* fallback) {
+        if (error.empty()) error = fallback;
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return false;
+    };
+    bool changed = create || (initial.earlier_history_partial && !metadata.earlier_history_partial);
+    metadata.earlier_history_partial |= initial.earlier_history_partial;
+    if (changed) metadata.updated_at = std::max(metadata.updated_at, initial.updated_at);
+    for (const auto& event : events) {
+        if (!ValidateProviderFinanceEvent(event, error) || event.genesis_hash != metadata.genesis_hash ||
+            event.provider_id != metadata.provider_id) return fail("PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH");
+        ProviderFinanceEvent old;
+        const auto old_status = ReadPaymasterFinanceEvent(event.event_id, old);
+        if (old_status != DatabaseReadStatus::FOUND && old_status != DatabaseReadStatus::NOT_FOUND) {
+            return fail("PAYMASTER_INVALID_FINANCE_EVENT");
+        }
+        const bool exists = old_status == DatabaseReadStatus::FOUND;
+        if (exists) {
+            if (!CheckProviderFinanceEventBinding(old, event, error)) return fail("PAYMASTER_FINANCE_EVENT_CONFLICT");
+            if (event.updated_at < old.updated_at) continue;
+            if (event.updated_at == old.updated_at) {
+                if (event.state != old.state || event.confirmed_at != old.confirmed_at) {
+                    return fail("PAYMASTER_FINANCE_EVENT_STATE_CONFLICT");
+                }
+                continue;
+            }
+        } else if (metadata.event_count >= MAX_PROVIDER_FINANCE_EVENTS) {
+            return fail("PAYMASTER_FINANCE_LEDGER_FULL");
+        }
+        const auto contribute = [&](const ProviderFinanceEvent& contribution, int sign) {
+            if (!ApplyProviderFinanceContribution(metadata.totals, contribution, sign, error)) return false;
+            if (contribution.state != ProviderFinanceEventState::CONFIRMED) return true;
+            const int64_t day = (contribution.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+            const auto key = std::make_pair(FINANCE_DAY, FinanceDayKey(day));
+            StrictFinanceRecord<ProviderFinanceTotals> daily;
+            const auto read = m_batch->ReadWithStatus(key, daily);
+            if (read != DatabaseReadStatus::FOUND && read != DatabaseReadStatus::NOT_FOUND) return false;
+            if (read == DatabaseReadStatus::FOUND &&
+                (daily.total.day_start != day || !ValidFinanceTotals(daily))) return false;
+            daily.total.day_start = day;
+            if (!ApplyProviderFinanceContribution(daily, contribution, sign, error)) return false;
+            if (EmptyFinanceTotals(daily)) return ErasePaymasterIC(key);
+            return WritePaymasterIC(key, static_cast<const ProviderFinanceTotals&>(daily));
+        };
+        if ((exists && !contribute(old, -1)) || !contribute(event, 1)) {
+            return fail("PAYMASTER_INVALID_FINANCE_TOTALS");
+        }
+        if (exists && !ErasePaymasterIC(std::make_pair(FINANCE_TIME, FinanceTimeKey(old)))) {
+            return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+        }
+        if (!WritePaymasterIC(std::make_pair(FINANCE_EVENT, event.event_id), event) ||
+            !WritePaymasterIC(std::make_pair(FINANCE_TIME, FinanceTimeKey(event)), event.event_id) ||
+            !WritePaymasterIC(std::make_pair(FINANCE_TX, std::make_pair(event.transaction_id, event.event_id)), event.event_id)) {
+            return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+        }
+        if (!exists) ++metadata.event_count;
+        metadata.updated_at = std::max(metadata.updated_at, event.updated_at);
+        changed = true;
+    }
+    if (changed) {
+        ++metadata.revision;
+        if (!WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata)) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+    }
+    if (own && !TxnCommit()) return fail("PAYMASTER_DATABASE_COMMIT");
+    return true;
+}
+
 bool WalletBatch::WritePaymasterFinanceLedger(
     const DigiDollar::Paymaster::ProviderFinanceLedger& ledger,
     bool overwrite)
 {
     std::string error;
-    return DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error) &&
-           WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, ledger, overwrite);
+    if (!ValidateProviderFinanceLedger(ledger, error) ||
+        (!overwrite && HasPaymasterFinanceLedger())) return false;
+    ProviderFinanceMetadata metadata;
+    FinanceVersion version;
+    const auto previous = m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, version);
+    if (previous != DatabaseReadStatus::FOUND && previous != DatabaseReadStatus::NOT_FOUND) return false;
+    if (previous == DatabaseReadStatus::FOUND) {
+        if (version.version == ProviderFinanceMetadata::CURRENT_VERSION) {
+            if (ReadPaymasterFinanceMetadata(metadata) != DatabaseReadStatus::FOUND ||
+                metadata.genesis_hash != ledger.genesis_hash || metadata.provider_id != ledger.provider_id ||
+                metadata.revision == std::numeric_limits<uint64_t>::max()) return false;
+        } else if (version.version != ProviderFinanceLedger::CURRENT_VERSION) {
+            return false;
+        }
+    }
+    metadata.genesis_hash = ledger.genesis_hash;
+    metadata.provider_id = ledger.provider_id;
+    metadata.history_complete_from = ledger.history_complete_from;
+    metadata.earlier_history_partial = ledger.earlier_history_partial;
+    metadata.updated_at = ledger.updated_at;
+    metadata.event_count = ledger.events.size();
+    metadata.totals = {};
+    ++metadata.revision;
+    std::map<int64_t, ProviderFinanceTotals> days;
+    for (const auto& event : ledger.events) {
+        if (!ApplyProviderFinanceContribution(metadata.totals, event, 1, error)) return false;
+        if (event.state == ProviderFinanceEventState::CONFIRMED) {
+            const int64_t day = (event.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+            auto& totals = days[day];
+            totals.total.day_start = day;
+            if (!ApplyProviderFinanceContribution(totals, event, 1, error)) return false;
+        }
+    }
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const auto fail = [&] {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return false;
+    };
+    // Snapshot replacement is reserved for migration/rebuild and legacy
+    // internal callers. Normal event updates use WritePaymasterFinanceEvents.
+    if (!PaymasterCheckpointWrite(this, *m_batch, m_database)) return fail();
+    for (const auto& prefix : {FINANCE_EVENT, FINANCE_TIME, FINANCE_TX, FINANCE_DAY}) {
+        if (!m_batch->ErasePrefix(FinancePrefix(prefix))) return fail();
+    }
+    for (const auto& event : ledger.events) {
+        if (!WritePaymasterIC(std::make_pair(FINANCE_EVENT, event.event_id), event) ||
+            !WritePaymasterIC(std::make_pair(FINANCE_TIME, FinanceTimeKey(event)), event.event_id) ||
+            !WritePaymasterIC(std::make_pair(FINANCE_TX, std::make_pair(event.transaction_id, event.event_id)), event.event_id)) return fail();
+    }
+    for (const auto& [day, totals] : days) {
+        if (!WritePaymasterIC(std::make_pair(FINANCE_DAY, FinanceDayKey(day)), totals)) return fail();
+    }
+    if (!WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata)) return fail();
+    if (own && !TxnCommit()) return fail();
+    return true;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterFinanceLedgerWithStatus(
     DigiDollar::Paymaster::ProviderFinanceLedger& ledger)
 {
     std::string error;
-    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
-        DBKeys::PAYMASTER_FINANCE_LEDGER, ledger);
+    ledger = {};
+    if (!MigratePaymasterFinanceLedger(error)) {
+        return error == "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" ?
+            DatabaseReadStatus::UNSUPPORTED_VERSION : DatabaseReadStatus::READ_ERROR;
+    }
+    ProviderFinanceMetadata metadata;
+    const auto status = ReadPaymasterFinanceMetadata(metadata);
     if (status != DatabaseReadStatus::FOUND) return status;
-    return DigiDollar::Paymaster::ValidateProviderFinanceLedger(ledger, error)
-               ? DatabaseReadStatus::FOUND
-               : DatabaseReadStatus::READ_ERROR;
+    ledger.genesis_hash = metadata.genesis_hash;
+    ledger.provider_id = metadata.provider_id;
+    ledger.history_complete_from = metadata.history_complete_from;
+    ledger.earlier_history_partial = metadata.earlier_history_partial;
+    ledger.updated_at = metadata.updated_at;
+    auto cursor = m_batch->GetNewPrefixCursor(FinancePrefix(FINANCE_EVENT));
+    if (!cursor) return DatabaseReadStatus::READ_ERROR;
+    ProviderFinanceTotals all;
+    std::map<int64_t, ProviderFinanceTotals> days;
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) break;
+        if (next != DatabaseCursor::Status::MORE || ledger.events.size() >= metadata.event_count) return DatabaseReadStatus::READ_ERROR;
+        try {
+            std::string type;
+            uint256 id;
+            ProviderFinanceEvent event;
+            key >> type >> id;
+            value >> event;
+            if (!key.empty() || !value.empty() || type != FINANCE_EVENT || event.event_id != id ||
+                event.genesis_hash != metadata.genesis_hash || event.provider_id != metadata.provider_id ||
+                !ApplyProviderFinanceContribution(all, event, 1, error)) return DatabaseReadStatus::READ_ERROR;
+            if (event.state == ProviderFinanceEventState::CONFIRMED) {
+                const int64_t day = (event.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+                auto& totals = days[day];
+                totals.total.day_start = day;
+                if (!ApplyProviderFinanceContribution(totals, event, 1, error)) return DatabaseReadStatus::READ_ERROR;
+            }
+            ledger.events.push_back(std::move(event));
+        } catch (const std::exception&) { return DatabaseReadStatus::READ_ERROR; }
+    }
+    if (ledger.events.size() != metadata.event_count || !(all == metadata.totals)) return DatabaseReadStatus::READ_ERROR;
+    cursor = m_batch->GetNewPrefixCursor(FinancePrefix(FINANCE_DAY));
+    if (!cursor) return DatabaseReadStatus::READ_ERROR;
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) break;
+        if (next != DatabaseCursor::Status::MORE) return DatabaseReadStatus::READ_ERROR;
+        try {
+            std::string type;
+            FinanceDay day_key;
+            ProviderFinanceTotals totals;
+            key >> type >> day_key;
+            value >> totals;
+            const auto expected = days.find(totals.total.day_start);
+            if (!key.empty() || !value.empty() || type != FINANCE_DAY ||
+                day_key != FinanceDayKey(totals.total.day_start) || expected == days.end() ||
+                !(totals == expected->second)) return DatabaseReadStatus::READ_ERROR;
+            ledger.daily_totals.push_back(totals.total);
+            days.erase(expected);
+        } catch (const std::exception&) { return DatabaseReadStatus::READ_ERROR; }
+    }
+    if (!days.empty()) return DatabaseReadStatus::READ_ERROR;
+    return ValidateProviderFinanceLedger(ledger, error) ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ReadPaymasterFinanceTransactionEvents(const uint256& txid,
+                                                        std::vector<ProviderFinanceEvent>& events)
+{
+    events.clear();
+    if (txid.IsNull()) return false;
+    DataStream prefix;
+    prefix << FINANCE_TX << txid;
+    auto cursor = m_batch->GetNewPrefixCursor(prefix);
+    if (!cursor) return false;
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) return true;
+        if (next != DatabaseCursor::Status::MORE || events.size() >= MAX_PROVIDER_FINANCE_EVENTS) return false;
+        try {
+            std::string type;
+            uint256 transaction, id;
+            uint256 indexed_id;
+            key >> type >> transaction >> id;
+            value >> indexed_id;
+            ProviderFinanceEvent event;
+            if (!key.empty() || !value.empty() || indexed_id != id || type != FINANCE_TX || transaction != txid ||
+                ReadPaymasterFinanceEvent(id, event) != DatabaseReadStatus::FOUND || event.transaction_id != txid) return false;
+            events.push_back(std::move(event));
+        } catch (const std::exception&) { return false; }
+    }
+}
+
+bool WalletBatch::ReadPaymasterFinanceReport(const ProviderFinanceQuery& query,
+                                            ProviderFinanceReport& report, std::string& error)
+{
+    report = {};
+    error.clear();
+    auto fail = [&](const char* reason) { report = {}; error = reason; return false; };
+    if (query.now <= 0 || query.now > std::numeric_limits<int64_t>::max() - PROVIDER_BUDGET_WINDOW_SECONDS || query.limit == 0 || query.limit > 10000 ||
+        uint8_t(query.period) > uint8_t(ProviderFinancePeriod::ALL) ||
+        (!query.include_events && !query.cursor.empty())) return fail("PAYMASTER_INVALID_FINANCE_QUERY");
+    if (!MigratePaymasterFinanceLedger(error)) return false;
+    if (ReadPaymasterFinanceMetadata(report.metadata) != DatabaseReadStatus::FOUND) return fail("PAYMASTER_FINANCE_READ_FAILED");
+    const int64_t today = (query.now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+    const std::array<int64_t, 4> cutoffs{today, std::max<int64_t>(0, today - 6 * PROVIDER_BUDGET_WINDOW_SECONDS),
+                                      std::max<int64_t>(0, today - 29 * PROVIDER_BUDGET_WINDOW_SECONDS), 0};
+    const int64_t cutoff = cutoffs[size_t(query.period)];
+    report.periods[size_t(ProviderFinancePeriod::ALL)] = report.metadata.totals;
+    // At most 366 calendar buckets are needed for all summaries and the chart.
+    DataStream start = FinancePrefix(FINANCE_DAY);
+    start << FinanceDayKey(std::max<int64_t>(0, today - 365 * PROVIDER_BUDGET_WINDOW_SECONDS));
+    DataStream end = FinancePrefix(FINANCE_DAY);
+    end << FinanceDayKey(today + PROVIDER_BUDGET_WINDOW_SECONDS);
+    auto cursor = m_batch->GetNewRangeCursor(start, end);
+    if (!cursor) return fail("PAYMASTER_FINANCE_READ_FAILED");
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) break;
+        if (next != DatabaseCursor::Status::MORE || report.days.size() >= 366) return fail("PAYMASTER_FINANCE_INDEX_INVALID");
+        try {
+            std::string type;
+            FinanceDay day;
+            ProviderFinanceTotals totals;
+            key >> type >> day;
+            value >> totals;
+            if (!key.empty() || !value.empty() || type != FINANCE_DAY ||
+                !ValidFinanceTotals(totals) || day != FinanceDayKey(totals.total.day_start) ||
+                totals.total.day_start % PROVIDER_BUDGET_WINDOW_SECONDS != 0) return fail("PAYMASTER_FINANCE_INDEX_INVALID");
+            for (size_t i = 0; i < 3; ++i) {
+                if (totals.total.day_start >= cutoffs[i] &&
+                    !AddProviderFinanceTotals(report.periods[i], totals, error)) return fail("PAYMASTER_FINANCE_INDEX_INVALID");
+            }
+            report.days.push_back(totals);
+        } catch (const std::exception&) { return fail("PAYMASTER_FINANCE_INDEX_INVALID"); }
+    }
+    if (!query.include_events) return true;
+    FinanceCursor page;
+    page.genesis = report.metadata.genesis_hash;
+    page.provider = report.metadata.provider_id;
+    page.period = uint8_t(query.period);
+    page.cutoff = cutoff;
+    page.revision = report.metadata.revision;
+    start = FinancePrefix(FINANCE_TIME);
+    if (!query.cursor.empty()) {
+        if (query.cursor.size() > 512 || !IsHex(query.cursor)) return fail("PAYMASTER_FINANCE_CURSOR_INVALID");
+        try {
+            DataStream bytes{ParseHex(query.cursor)};
+            FinanceCursor previous;
+            bytes >> previous;
+            if (!bytes.empty() || previous.version != page.version || previous.genesis != page.genesis ||
+                previous.provider != page.provider || previous.period != page.period) return fail("PAYMASTER_FINANCE_CURSOR_INVALID");
+            if (previous.cutoff != page.cutoff || previous.revision != page.revision) return fail("PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED");
+            start << previous.position << uint8_t{0}; // strict successor of the fixed-length key
+        } catch (const std::exception&) { return fail("PAYMASTER_FINANCE_CURSOR_INVALID"); }
+    }
+    end = FinancePrefix(FINANCE_TIME);
+    FinanceOrder last;
+    last.fill(255);
+    WriteBE64(last.data(), ~uint64_t(cutoff));
+    end << last << uint8_t{0};
+    cursor = m_batch->GetNewRangeCursor(start, end);
+    if (!cursor) return fail("PAYMASTER_FINANCE_READ_FAILED");
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) break;
+        if (next != DatabaseCursor::Status::MORE) return fail("PAYMASTER_FINANCE_INDEX_INVALID");
+        try {
+            std::string type;
+            FinanceOrder position;
+            uint256 id;
+            ProviderFinanceEvent event;
+            key >> type >> position;
+            value >> id;
+            if (!key.empty() || !value.empty() || type != FINANCE_TIME ||
+                ReadPaymasterFinanceEvent(id, event) != DatabaseReadStatus::FOUND || position != FinanceTimeKey(event) ||
+                FinanceEventTime(event) < cutoff || event.genesis_hash != page.genesis || event.provider_id != page.provider) return fail("PAYMASTER_FINANCE_INDEX_INVALID");
+            if (report.events.size() == query.limit) {
+                DataStream bytes;
+                bytes << page;
+                report.next_cursor = HexStr(bytes);
+                break;
+            }
+            page.position = position;
+            report.events.push_back(std::move(event));
+        } catch (const std::exception&) { return fail("PAYMASTER_FINANCE_INDEX_INVALID"); }
+    }
+    return true;
 }
 
 bool WalletBatch::ReadPaymasterFinanceLedger(

@@ -30,6 +30,7 @@
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
+#include <paymaster/finance.h>
 
 #include <algorithm>
 #include <array>
@@ -908,6 +909,185 @@ BOOST_AUTO_TEST_CASE(descriptor_wallet_identity_uses_untweaked_bip86_key)
     BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Ignored replacement", 101, replay, error));
     BOOST_CHECK_EQUAL(replay.provider_id, identity.provider_id);
     BOOST_CHECK_EQUAL(replay.display_name, identity.display_name);
+}
+
+BOOST_AUTO_TEST_CASE(finance_v2_migration_pagination_reorg_and_atomicity)
+{
+    auto database = CreateMockableWalletDatabase();
+    auto& mock = dynamic_cast<MockableDatabase&>(*database);
+    ProviderFinanceLedger legacy;
+    legacy.genesis_hash = uint256S("01");
+    legacy.provider_id = uint256S("02");
+    legacy.history_complete_from = 100;
+    legacy.updated_at = 100;
+    std::string error;
+    for (int i = 0; i < 5; ++i) {
+        ProviderFinanceEvent event;
+        event.event_id = uint256S(strprintf("%064x", i + 10));
+        event.transaction_id = uint256S("03");
+        event.genesis_hash = legacy.genesis_hash;
+        event.provider_id = legacy.provider_id;
+        event.kind = ProviderFinanceEventKind::TRANSFER;
+        event.funding_model = FundingModel::USER_PAID;
+        event.state = ProviderFinanceEventState::CONFIRMED;
+        event.created_at = 100;
+        event.confirmed_at = 86400 + i;
+        event.updated_at = event.confirmed_at;
+        event.dd_income = DDCents{3};
+        event.dgb_cost = DGBSatoshis{7};
+        BOOST_REQUIRE(UpsertProviderFinanceEvent(legacy, event, error));
+    }
+    BOOST_REQUIRE(database->MakeBatch()->Write(std::string{"pmfinance"}, legacy));
+    const auto original = mock.m_records;
+    WalletBatch batch{*database};
+    mock.m_fail_write_at = mock.m_write_count + 3;
+    BOOST_CHECK(!batch.MigratePaymasterFinanceLedger(error));
+    BOOST_CHECK(mock.m_records == original);
+    mock.m_fail_write_at.reset();
+    mock.m_fail_commit = true;
+    BOOST_CHECK(!batch.MigratePaymasterFinanceLedger(error));
+    BOOST_CHECK(mock.m_records == original);
+    mock.m_fail_commit = false;
+    BOOST_REQUIRE_MESSAGE(batch.MigratePaymasterFinanceLedger(error), error);
+    ProviderFinanceMetadata metadata;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceMetadata(metadata) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(metadata.event_count, 5U);
+    BOOST_CHECK_EQUAL(metadata.totals.total.dd_income.value, 15);
+    ProviderFinanceQuery query;
+    query.now = 86410;
+    query.period = ProviderFinancePeriod::ALL;
+    query.include_events = true;
+    query.limit = 2;
+    ProviderFinanceReport report;
+    BOOST_REQUIRE_MESSAGE(batch.ReadPaymasterFinanceReport(query, report, error), error);
+    BOOST_REQUIRE_EQUAL(report.events.size(), 2U);
+    BOOST_CHECK_EQUAL(report.events.front().confirmed_at, 86404);
+    BOOST_REQUIRE(!report.next_cursor.empty());
+    query.cursor = report.next_cursor;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceReport(query, report, error));
+    BOOST_REQUIRE_EQUAL(report.events.size(), 2U);
+    BOOST_CHECK_EQUAL(report.events.front().confirmed_at, 86402);
+    const auto revision = metadata.revision;
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(metadata, {legacy.events.front()}, error));
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceMetadata(metadata) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(metadata.revision, revision);
+    std::vector<ProviderFinanceEvent> indexed;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceTransactionEvents(uint256S("03"), indexed));
+    BOOST_CHECK_EQUAL(indexed.size(), 5U);
+
+    auto changed = legacy.events.back();
+    changed.state = ProviderFinanceEventState::INVALIDATED;
+    changed.confirmed_at = 0;
+    ++changed.updated_at;
+    const auto before = mock.m_records;
+    mock.m_fail_write_at = mock.m_write_count + 2;
+    BOOST_CHECK(!batch.WritePaymasterFinanceEvents(metadata, {changed}, error));
+    BOOST_CHECK(mock.m_records == before);
+    mock.m_fail_write_at.reset();
+    BOOST_REQUIRE_MESSAGE(batch.WritePaymasterFinanceEvents(metadata, {changed}, error), error);
+    BOOST_CHECK(!batch.ReadPaymasterFinanceReport(query, report, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED");
+    query.cursor.clear();
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceReport(query, report, error));
+    BOOST_CHECK_EQUAL(report.metadata.totals.total.dd_income.value, 12);
+    BOOST_CHECK_EQUAL(report.periods[0].total.successful_transfers, 4U);
+    changed.state = ProviderFinanceEventState::CONFIRMED;
+    changed.confirmed_at = 2 * 86400;
+    changed.updated_at = changed.confirmed_at;
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(metadata, {changed}, error));
+    query.now = changed.confirmed_at;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceReport(query, report, error));
+    BOOST_CHECK_EQUAL(report.metadata.totals.total.dd_income.value, 15);
+    BOOST_CHECK_EQUAL(report.periods[0].total.successful_transfers, 1U);
+    ProviderFinanceLedger reconstructed;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(reconstructed));
+    BOOST_CHECK_EQUAL(reconstructed.events.size(), 5U);
+    BOOST_CHECK_EQUAL(reconstructed.daily_totals.size(), 2U);
+    auto conflict = changed;
+    conflict.dd_income = DDCents{99};
+    BOOST_CHECK(!batch.WritePaymasterFinanceEvents(metadata, {conflict}, error));
+    // Unsupported headers cannot be overwritten by either API.
+    BOOST_REQUIRE(database->MakeBatch()->Write(std::string{"pmfinance"}, uint16_t{999}));
+    const auto unsupported = mock.m_records;
+    BOOST_CHECK(!batch.MigratePaymasterFinanceLedger(error));
+    BOOST_CHECK(!batch.WritePaymasterFinanceLedger(legacy));
+    BOOST_CHECK(mock.m_records == unsupported);
+}
+
+BOOST_AUTO_TEST_CASE(finance_v2_large_history_uses_bounded_range_reads)
+{
+    class CountingCursor final : public DatabaseCursor {
+        std::unique_ptr<DatabaseCursor> m_cursor;
+        size_t& m_rows;
+    public:
+        CountingCursor(std::unique_ptr<DatabaseCursor> cursor, size_t& rows) : m_cursor{std::move(cursor)}, m_rows{rows} {}
+        Status Next(DataStream& key, DataStream& value) override {
+            const auto result = m_cursor->Next(key, value);
+            if (result == Status::MORE) ++m_rows;
+            return result;
+        }
+    };
+    class CountingBatch final : public MockableBatch {
+        size_t& m_rows;
+    public:
+        CountingBatch(MockableData& data, bool& pass, size_t& rows) : MockableBatch(data, pass), m_rows{rows} {}
+        std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override {
+            return std::make_unique<CountingCursor>(MockableBatch::GetNewPrefixCursor(prefix), m_rows);
+        }
+        std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override {
+            return std::make_unique<CountingCursor>(MockableBatch::GetNewRangeCursor(begin, end), m_rows);
+        }
+    };
+    class CountingDatabase final : public MockableDatabase {
+    public:
+        size_t rows{0};
+        std::unique_ptr<DatabaseBatch> MakeBatch(bool = true) override {
+            return std::make_unique<CountingBatch>(m_records, m_pass, rows);
+        }
+    } database;
+    WalletBatch batch{database};
+    ProviderFinanceMetadata initial;
+    initial.genesis_hash = uint256S("01");
+    initial.provider_id = uint256S("02");
+    initial.history_complete_from = 100;
+    initial.updated_at = 100;
+    std::vector<ProviderFinanceEvent> events;
+    events.reserve(100000);
+    for (int i = 0; i < 100000; ++i) {
+        ProviderFinanceEvent event;
+        event.event_id = uint256S(strprintf("%064x", i + 10));
+        event.transaction_id = event.event_id;
+        event.genesis_hash = initial.genesis_hash;
+        event.provider_id = initial.provider_id;
+        event.kind = ProviderFinanceEventKind::TRANSFER;
+        event.funding_model = FundingModel::USER_PAID;
+        event.state = ProviderFinanceEventState::CONFIRMED;
+        event.created_at = 100 + i;
+        event.confirmed_at = 100 + i;
+        event.updated_at = 100 + i;
+        event.dd_income = DDCents{3};
+        event.dgb_cost = DGBSatoshis{7};
+        events.push_back(event);
+    }
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(batch.WritePaymasterFinanceEvents(initial, events, error), error);
+    ProviderFinanceQuery query;
+    query.now = 100100;
+    query.period = ProviderFinancePeriod::ALL;
+    query.limit = 17;
+    query.include_events = true;
+    ProviderFinanceReport report;
+    database.rows = 0;
+    BOOST_REQUIRE_MESSAGE(batch.ReadPaymasterFinanceReport(query, report, error), error);
+    BOOST_CHECK_EQUAL(report.metadata.event_count, 100000U);
+    BOOST_CHECK_EQUAL(report.metadata.totals.total.dd_income.value, 300000);
+    BOOST_CHECK_EQUAL(report.events.size(), 17U);
+    BOOST_CHECK_EQUAL(database.rows, 20U); // Two day buckets, 17 results and one lookahead.
+    query.cursor = report.next_cursor;
+    database.rows = 0;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceReport(query, report, error));
+    BOOST_CHECK_EQUAL(database.rows, 20U);
+    BOOST_CHECK_EQUAL(report.events.front().created_at, 100082);
 }
 
 BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)

@@ -31,6 +31,12 @@ struct WalletCollateralPosition;
 struct WalletDDBalance;
 class CDigiDollarOutput;
 
+namespace DigiDollar::Paymaster {
+struct ProviderFinanceMetadata;
+struct ProviderFinanceQuery;
+struct ProviderFinanceReport;
+} // namespace DigiDollar::Paymaster
+
 namespace wallet {
 class CKeyPool;
 class CMasterKey;
@@ -652,6 +658,19 @@ public:
     DatabaseReadStatus ReadPaymasterFinanceLedgerWithStatus(
         DigiDollar::Paymaster::ProviderFinanceLedger& ledger);
     bool HasPaymasterFinanceLedger();
+    bool MigratePaymasterFinanceLedger(std::string& error);
+    DatabaseReadStatus ReadPaymasterFinanceMetadata(
+        DigiDollar::Paymaster::ProviderFinanceMetadata& metadata);
+    DatabaseReadStatus ReadPaymasterFinanceEvent(const uint256& event_id,
+        DigiDollar::Paymaster::ProviderFinanceEvent& event);
+    bool WritePaymasterFinanceEvents(
+        const DigiDollar::Paymaster::ProviderFinanceMetadata& initial,
+        const std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events,
+        std::string& error);
+    bool ReadPaymasterFinanceReport(const DigiDollar::Paymaster::ProviderFinanceQuery& query,
+        DigiDollar::Paymaster::ProviderFinanceReport& report, std::string& error);
+    bool ReadPaymasterFinanceTransactionEvents(const uint256& txid,
+        std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events);
     bool WritePaymasterBackupStatus(
         const DigiDollar::Paymaster::ProviderBackupStatus& status,
         bool overwrite = true);
