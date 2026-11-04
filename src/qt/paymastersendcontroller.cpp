@@ -496,8 +496,8 @@ SendController::FailureDecision SendController::failure(const RpcError& error, b
     if (!error.failed) return decision;
     decision.invalidate_review = true;
     decision.discard_uncreated_request = !persisted && error.data.find_value("session_absent").isTrue() &&
-        error.disposition() == QStringLiteral("retry_before_execution");
-    decision.allow_unsigned_cancel = known_unsigned && error.disposition() == QStringLiteral("user_decision");
+        PaymasterQt::Disposition(error) == QStringLiteral("retry_before_execution");
+    decision.allow_unsigned_cancel = known_unsigned && PaymasterQt::Disposition(error) == QStringLiteral("user_decision");
     return decision;
 }
 } // namespace PaymasterQt

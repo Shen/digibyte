@@ -1,6 +1,7 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
 #include <qt/paymasterwallet.h>
+#include <qt/paymasterasync.h>
 
 #include <interfaces/node.h>
 

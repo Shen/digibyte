@@ -3081,7 +3081,7 @@ void PaymasterSendWidget::executePaymasterTransfer(
                              [guard, address, amount_cents, send_generation, request_id](UniValue result, WalletModel::RpcError error) {
                                  if (guard && guard->m_paymasterSendGeneration == send_generation && guard->m_paymasterRequestId == request_id) {
                                      ++guard->m_paymasterSendGeneration;
-                                     if (error.stableCode() == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED") && !guard->m_paymasterPreparationCancelRequested) {
+                                     if (PaymasterQt::StableCode(error) == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED") && !guard->m_paymasterPreparationCancelRequested) {
                                          guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
                                          guard->setPaymasterBusy(false);
                                          return;
@@ -4420,7 +4420,7 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
             // The first prepare-only call may fail before creating a session.
             // Only Core's status-aware absence result can release this local
             // compose state. A known session disappearing remains an error.
-            if (failure.failed && failure.stableCode() == QStringLiteral("PAYMASTER_SESSION_NOT_FOUND") &&
+            if (failure.failed && PaymasterQt::StableCode(failure) == QStringLiteral("PAYMASTER_SESSION_NOT_FOUND") &&
                 failure.data.find_value("session_absent").isTrue() &&
                 !guard->m_paymasterSessionPersisted && guard->m_paymasterSessionId.isEmpty() &&
                 (guard->m_paymasterArtifact.isEmpty() || guard->m_paymasterArtifact == QStringLiteral("none")) &&
@@ -4579,7 +4579,7 @@ void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
         "resolvepaymastersession", m_paymasterActiveRecoveryParams,
         [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, PaymasterQt::RpcError error) {
             if (!guard) return;
-            if (error.stableCode() == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED")) {
+            if (PaymasterQt::StableCode(error) == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED")) {
                 guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("RECOVERY_AWAITING_WALLET_UNLOCK"));
                 guard->m_paymasterRecoveryActive = false;
                 guard->setPaymasterBusy(false);

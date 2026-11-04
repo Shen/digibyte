@@ -1122,7 +1122,7 @@ bool PaymasterWidgetImpl::repairableLiquidityGap() const
 
 void PaymasterWidgetImpl::failGuidedTask(const QString& error)
 {
-    m_operation.fail(error, m_rpc_failure.stableCode());
+    m_operation.fail(error, PaymasterQt::StableCode(m_rpc_failure));
     m_task_error_toggle->setChecked(false);
     m_failed_guided_task = m_guided_task;
     m_guided_task.clear();
@@ -1450,9 +1450,9 @@ void PaymasterWidgetImpl::executeGuidedTask(const std::string& command, const Un
             else refreshStatus();
         }, false, [this, task, command, params](const QString& error) {
             if (waitForReserveReduction(error, [this, command, params] { executeGuidedTask(command, params); })) return;
-            const bool rejected_before_release = m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
-                m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_RETIREMENT_FEE_LIMIT") || m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT") ||
-                m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_POOL_PLAN_CHANGED") || m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+            const bool rejected_before_release = PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
+                PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_RETIREMENT_FEE_LIMIT") || PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT") ||
+                PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_POOL_PLAN_CHANGED") || PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
             failGuidedTask(task == QLatin1String("reduce_reserves") && !rejected_before_release
                 ? tr("The release was not fully confirmed. Some funds may already have been returned. Check wallet activity before reviewing a fresh plan; do not repeat the old execution.\n%1").arg(error)
                 : error);

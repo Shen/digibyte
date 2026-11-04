@@ -449,8 +449,8 @@ bool PaymasterWidgetImpl::waitForReserveReduction(const QString& error, std::fun
     // Only this exact Core rejection proves no transaction was started.
     // Never repeat an execution after a missing or ambiguous response.
     if (m_guided_task != QLatin1String("reduce_reserves") ||
-        m_rpc_failure.stableCode() != QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
-        m_rpc_failure.disposition() != QLatin1String("retry_before_execution") || m_guided_busy_retries >= 3) return false;
+        PaymasterQt::StableCode(m_rpc_failure) != QLatin1String("PAYMASTER_PROVIDER_BUSY") ||
+        PaymasterQt::Disposition(m_rpc_failure) != QLatin1String("retry_before_execution") || m_guided_busy_retries >= 3) return false;
     ++m_guided_busy_retries;
     m_guided_waiting_for_provider = true;
     renderCurrentTask();

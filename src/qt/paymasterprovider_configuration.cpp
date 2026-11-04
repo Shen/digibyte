@@ -1350,8 +1350,8 @@ void PaymasterWidgetImpl::saveProviderSafetyPolicy()
              invalidateSavedConfigurationDisplay();
              refreshStatus();
          }, false, [this](const QString& error) {
-             const bool rejected = m_rpc_failure.stableCode().startsWith(QStringLiteral("PAYMASTER_INVALID_SAFETY")) ||
-                 m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_SAFETY_LIMITS_REQUIRED");
+             const bool rejected = PaymasterQt::StableCode(m_rpc_failure).startsWith(QStringLiteral("PAYMASTER_INVALID_SAFETY")) ||
+                 PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_SAFETY_LIMITS_REQUIRED");
              m_provider_safety_status->setText(rejected
                  ? tr("Limits were not saved: they do not fit the current offer or the other budgets. Your edits have been kept. Review the current offer and highlighted limits before saving again.")
                  : tr("Saving the limits could not be confirmed. Your edits have been kept. Check the current saved status before trying again."));
@@ -1813,7 +1813,7 @@ void PaymasterWidgetImpl::savePolicy()
                      }, failed);
                  } else refreshStatus();
              }, false, [this, restart](const QString& error) {
-                 const bool safety_conflict = m_rpc_failure.stableCode() == QLatin1String("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
+                 const bool safety_conflict = PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
                  QString message = safety_conflict
                      ? tr("Offer not saved: the selected payment models or network-fee ceiling do not match the saved spending limits. Your saved offer is unchanged. Review and save compatible limits first, then save this offer.")
                      : tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying.");

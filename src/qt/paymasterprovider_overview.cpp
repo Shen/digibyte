@@ -3840,7 +3840,7 @@ void PaymasterWidgetImpl::dispatchRpcCall(PendingRpcCall request)
                 guard->m_wallet_generation != wallet_generation) {
                 return;
             }
-            if (error.stableCode() == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED"))
+            if (PaymasterQt::StableCode(error) == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED"))
                 error.message = tr("The wallet was not unlocked, so the signing operation was not started.");
             guard->finishRpcCall(
                 wallet_generation, output, std::move(handler),

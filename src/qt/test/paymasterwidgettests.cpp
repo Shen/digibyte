@@ -15629,8 +15629,8 @@ void PaymasterWidgetTests::paymasterAsyncPreservesStructuredErrors()
     QTRY_VERIFY_WITH_TIMEOUT(finished, 5000);
     QVERIFY(observed.error.failed);
     QCOMPARE(observed.error.code, -4);
-    QCOMPARE(observed.error.stableCode(), QStringLiteral("PAYMASTER_COMMIT_UNKNOWN"));
-    QCOMPARE(observed.error.disposition(), QStringLiteral("reconcile"));
+    QCOMPARE(PaymasterQt::StableCode(observed.error), QStringLiteral("PAYMASTER_COMMIT_UNKNOWN"));
+    QCOMPARE(PaymasterQt::Disposition(observed.error), QStringLiteral("reconcile"));
     QCOMPARE(observed.error.message, QStringLiteral("An operator-facing message"));
 }
 

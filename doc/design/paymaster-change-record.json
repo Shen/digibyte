@@ -1,5 +1,5 @@
 {
-  "task_baseline": "5ddc3e268e",
+  "task_baseline": "33c680cba1",
   "official_baseline": "d7265fb05e26e1e799876bcd526225e4826c3ba8",
   "shared_changes": {
     "src/wallet/wallet.cpp": {
@@ -69,22 +69,34 @@
       "regressions": "Finance migration/reorg/replay/failure tests and existing wallet DB tests."
     },
     "src/qt/walletmodel.h": {
-      "purpose": "Preserve structured asynchronous RPC errors and own/join wallet background workers; bound RPC reads and mutations using the shared worker bridge.",
-      "reused_api": "Existing WalletModel RPC bridge, QThread workers, QObject ownership and wallet leases; no WalletModel data-layout change.",
+      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
+      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
       "ordinary_callers": "Ordinary async wallet RPC callers retain their callback API; queued execution is bounded and shutdown waits for started work.",
-      "regressions": "Qt queue limits/coalescing/error/shutdown tests, encrypted signing and wallet-switch tests; ordinary DGB/DD widget suites remain required."
+      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
     },
     "src/qt/walletmodel.cpp": {
-      "purpose": "Preserve structured asynchronous RPC errors and own/join wallet background workers; bound RPC reads and mutations using the shared worker bridge.",
-      "reused_api": "Existing WalletModel RPC bridge, QThread workers, QObject ownership and wallet leases; no WalletModel data-layout change.",
+      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
+      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
       "ordinary_callers": "Ordinary async wallet RPC callers retain their callback API; queued execution is bounded and shutdown waits for started work.",
-      "regressions": "Qt queue limits/coalescing/error/shutdown tests, encrypted signing and wallet-switch tests; ordinary DGB/DD widget suites remain required."
+      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
     },
     "src/Makefile.qt.include": {
       "purpose": "Build and distribute Paymaster Qt queue/controller/view modules.",
       "reused_api": "Existing Qt library source lists and MSVC generator.",
       "ordinary_callers": "Build/source distribution only.",
       "regressions": "Targeted Qt compiles/link/tests and clean Qt builds."
+    },
+    "src/qt/walletasync.h": {
+      "purpose": "Own generic wallet RPC replies and asynchronous worker lifetime independently of Paymaster; preserve existing QThread execution and shutdown joins.",
+      "reused_api": "Existing wallet-bound queue, QObject ownership, QThread workers and RPC callbacks.",
+      "ordinary_callers": "WalletModel background work for ordinary DGB/DD and Paymaster; no domain rules in the shared bridge.",
+      "regressions": "Shared queue ordering/coalescing/shutdown tests; ordinary WalletTests and DGB/DD widget suites; clean build after WalletModel layout change."
+    },
+    "src/qt/walletasync.cpp": {
+      "purpose": "Own generic wallet RPC replies and asynchronous worker lifetime independently of Paymaster; preserve existing QThread execution and shutdown joins.",
+      "reused_api": "Existing wallet-bound queue, QObject ownership, QThread workers and RPC callbacks.",
+      "ordinary_callers": "WalletModel background work for ordinary DGB/DD and Paymaster; no domain rules in the shared bridge.",
+      "regressions": "Shared queue ordering/coalescing/shutdown tests; ordinary WalletTests and DGB/DD widget suites; clean build after WalletModel layout change."
     }
   }
 }

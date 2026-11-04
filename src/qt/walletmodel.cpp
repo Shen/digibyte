@@ -141,7 +141,8 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
     m_client_model(&client_model),
     m_node(client_model.node()),
     optionsModel(client_model.getOptionsModel()),
-    timer(new QTimer(this))
+    timer(new QTimer(this)),
+    m_async_work_queue(std::make_unique<WalletAsync::WorkQueue>(this))
 {
     fHaveWatchOnly = m_wallet->haveWatchOnly();
     addressTableModel = new AddressTableModel(this);
@@ -164,9 +165,7 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
 
 WalletModel::~WalletModel()
 {
-    for (QObject* child : children()) {
-        if (auto* queue = dynamic_cast<PaymasterQt::WorkQueue*>(child)) queue->stop();
-    }
+    m_async_work_queue->stop();
     {
         std::lock_guard<std::mutex> lock(g_dd_history_mutex);
         g_dd_history_models.erase(std::remove(g_dd_history_models.begin(), g_dd_history_models.end(), this), g_dd_history_models.end());
@@ -1593,12 +1592,9 @@ UniValue WalletModel::executeRpc(const std::string& command, const UniValue& par
     return m_node.executeRpc(command, params, uri);
 }
 
-PaymasterQt::WorkQueue& WalletModel::asyncWorkQueue()
+WalletAsync::WorkQueue& WalletModel::asyncWorkQueue()
 {
-    for (QObject* child : children()) {
-        if (auto* queue = dynamic_cast<PaymasterQt::WorkQueue*>(child)) return *queue;
-    }
-    return *new PaymasterQt::WorkQueue(this);
+    return *m_async_work_queue;
 }
 
 void WalletModel::executeRpcAsync(std::string command, UniValue params, RpcCallback callback)
@@ -1617,17 +1613,17 @@ void WalletModel::executeRpcAsyncDetailed(std::string command, UniValue params, 
     auto& queue = asyncWorkQueue();
     const bool read = command.starts_with("get") || command.starts_with("list");
     const std::string key = read ? command + "\n" + params.write() : std::string{};
-    queue.submit(read ? PaymasterQt::WorkQueue::Kind::READ : PaymasterQt::WorkQueue::Kind::MUTATION, key,
+    queue.submit(read ? WalletAsync::WorkQueue::Kind::READ : WalletAsync::WorkQueue::Kind::MUTATION, key,
         [&queue, node, wallet = m_wallet, command = std::move(command), params = std::move(params), uri]
-        (PaymasterQt::WorkQueue::Completion complete) mutable {
+        (WalletAsync::WorkQueue::Completion complete) mutable {
             queue.run([node, wallet, command = std::move(command), params = std::move(params), uri]() mutable {
                 // Retain the wallet lease for the entire operation. WorkQueue
                 // joins the worker before WalletModel releases its node access.
                 (void)wallet;
-                return PaymasterQt::RpcReply{node->executeRpc(command, params, uri), {}};
+                return WalletAsync::RpcReply{node->executeRpc(command, params, uri), {}};
             }, std::move(complete));
         },
-        [callback = std::move(callback)](PaymasterQt::RpcReply reply) mutable {
+        [callback = std::move(callback)](WalletAsync::RpcReply reply) mutable {
             if (callback) callback(std::move(reply.value), std::move(reply.error));
         });
 }
