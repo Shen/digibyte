@@ -727,6 +727,44 @@ bool ValidateAlternativeRecoverySubmitEnvelope(
     return true;
 }
 
+bool ValidateAlternativeRecoverySubmitPayload(
+    const AlternativeRecoverySubmit& submit,
+    const AlternativeRecoveryResponse& response,
+    const AlternativeRecoveryTemplate& trusted,
+    PartiallySignedTransaction& user_psbt,
+    std::string& error)
+{
+    user_psbt = {};
+    if (!ValidateAlternativeRecoverySubmitEnvelope(
+            submit, response.genesis_hash, error)) {
+        return false;
+    }
+    if (submit.request_id != response.request_id ||
+        submit.session_id != response.session_id ||
+        submit.recovery_id != response.recovery_id ||
+        submit.recovery_provider_id != response.recovery_provider_id ||
+        submit.recovery_request_hash != response.recovery_request_hash ||
+        submit.recovery_commit_key != response.recovery_commit_key ||
+        submit.template_commitment !=
+            response.manifest.template_commitment) {
+        error = "PAYMASTER_RECOVERY_SUBMIT_MISMATCH";
+        return false;
+    }
+
+    PartiallySignedTransaction decoded;
+    if (!DecodeCanonicalRecoveryPSBT(
+            submit.user_psbt, decoded,
+            "PAYMASTER_RECOVERY_SUBMIT_PSBT_NONCANONICAL", error) ||
+        !ValidateCollaborativePSBT(
+            decoded, trusted.trusted_template,
+            CollaborativeSignatureStage::USER_SIGNED, error)) {
+        return false;
+    }
+    user_psbt = std::move(decoded);
+    error.clear();
+    return true;
+}
+
 bool ValidateAlternativeRecoverySubmit(
     const AlternativeRecoverySubmit& submit,
     const AlternativeRecoveryResponse& response,
@@ -746,31 +784,16 @@ bool ValidateAlternativeRecoverySubmit(
             response, parameters.genesis_hash, now, error)) {
         return false;
     }
-    if (submit.request_id != response.request_id ||
-        submit.session_id != response.session_id ||
-        submit.recovery_id != response.recovery_id ||
-        submit.recovery_provider_id != response.recovery_provider_id ||
-        submit.recovery_request_hash != response.recovery_request_hash ||
-        submit.recovery_commit_key != response.recovery_commit_key ||
-        submit.template_commitment !=
-            response.manifest.template_commitment ||
-        !SameManifest(response.manifest, trusted.manifest)) {
+    if (!SameManifest(response.manifest, trusted.manifest)) {
         error = "PAYMASTER_RECOVERY_SUBMIT_MISMATCH";
         return false;
     }
-
-    PartiallySignedTransaction decoded;
-    if (!DecodeCanonicalRecoveryPSBT(
-            submit.user_psbt, decoded,
-            "PAYMASTER_RECOVERY_SUBMIT_PSBT_NONCANONICAL", error) ||
-        !ValidateAlternativeRecoveryPSBT(
-            decoded, trusted, parameters, chain_params, coins, chainstate, now,
-            CollaborativeSignatureStage::USER_SIGNED, error)) {
+    if (!ValidateAlternativeRecoveryTemplate(
+            trusted, parameters, chain_params, coins, chainstate, now, error)) {
         return false;
     }
-    user_psbt = std::move(decoded);
-    error.clear();
-    return true;
+    return ValidateAlternativeRecoverySubmitPayload(
+        submit, response, trusted, user_psbt, error);
 }
 
 bool ValidateAlternativeRecoveryResultEnvelope(

@@ -800,6 +800,80 @@ BOOST_AUTO_TEST_CASE(submit_and_result_firewalls_reject_cross_session_replay)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_RESULT_BINDING_MISMATCH");
 }
 
+BOOST_AUTO_TEST_CASE(submit_payload_firewall_preserves_full_chain_validation)
+{
+    const AlternativeRecoveryParameters parameters{Parameters()};
+    const CapacityChainstateCallbacks chainstate{Chainstate()};
+    AlternativeRecoveryTemplate recovery;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildAlternativeRecoveryTemplate(
+                              parameters, Params(), coins, chainstate, NOW,
+                              recovery, error),
+                          error);
+    const AlternativeRecoveryRequest request{Request(parameters)};
+    const AlternativeRecoveryResponse response{Response(parameters, request, recovery)};
+    AlternativeRecoverySubmit submit;
+    submit.genesis_hash = parameters.genesis_hash;
+    submit.request_id = response.request_id;
+    submit.session_id = response.session_id;
+    submit.recovery_id = response.recovery_id;
+    submit.recovery_provider_id = response.recovery_provider_id;
+    submit.recovery_request_hash = response.recovery_request_hash;
+    submit.recovery_commit_key = response.recovery_commit_key;
+    submit.template_commitment = response.manifest.template_commitment;
+    const PartiallySignedTransaction signed_psbt{UserSignedPSBT(recovery)};
+    submit.user_psbt = SerializeExact(signed_psbt);
+    PartiallySignedTransaction decoded;
+    BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoverySubmitPayload(
+                              submit, response, recovery, decoded, error), error);
+
+    const auto reject_payload = [&](const AlternativeRecoverySubmit& invalid, const std::string& expected) {
+        BOOST_CHECK(!ValidateAlternativeRecoverySubmitPayload(
+            invalid, response, recovery, decoded, error));
+        BOOST_CHECK_EQUAL(error, expected);
+        BOOST_CHECK(!ValidateAlternativeRecoverySubmit(
+            invalid, response, recovery, parameters, Params(), coins, chainstate,
+            NOW, decoded, error));
+        BOOST_CHECK_EQUAL(error, expected);
+    };
+    AlternativeRecoverySubmit invalid{submit};
+    invalid.request_id = "00000000-0000-4000-8000-000000000099";
+    reject_payload(invalid, "PAYMASTER_RECOVERY_SUBMIT_MISMATCH");
+    invalid = submit;
+    invalid.user_psbt.push_back(0);
+    reject_payload(invalid, "PAYMASTER_RECOVERY_SUBMIT_PSBT_NONCANONICAL");
+
+    PartiallySignedTransaction mutated{signed_psbt};
+    mutated.outputs.front().unknown[{0x42}] = {0x01};
+    invalid = submit;
+    invalid.user_psbt = SerializeExact(mutated);
+    reject_payload(invalid, "PAYMASTER_PSBT_OUTPUT_FIELDS");
+
+    mutated = signed_psbt;
+    bool changed_signature{false};
+    for (size_t index = 0; index < mutated.inputs.size(); ++index) {
+        if (recovery.trusted_template.input_roles[index] != InputRole::USER_DD) continue;
+        BOOST_REQUIRE(!mutated.inputs[index].final_script_witness.stack.empty());
+        BOOST_REQUIRE(!mutated.inputs[index].final_script_witness.stack.front().empty());
+        mutated.inputs[index].final_script_witness.stack.front().front() ^= 1;
+        changed_signature = true;
+        break;
+    }
+    BOOST_REQUIRE(changed_signature);
+    invalid.user_psbt = SerializeExact(mutated);
+    reject_payload(invalid, "PAYMASTER_PSBT_SIGNATURE_INVALID");
+
+    // The payload alone is not authority to sign: the full validator must still
+    // reject this exact, correctly signed payload after its DD input is spent.
+    BOOST_REQUIRE(coins.SpendCoin(parameters.persisted_user_dd_inputs.front()));
+    BOOST_CHECK(ValidateAlternativeRecoverySubmitPayload(
+        submit, response, recovery, decoded, error));
+    BOOST_CHECK(!ValidateAlternativeRecoverySubmit(
+        submit, response, recovery, parameters, Params(), coins, chainstate,
+        NOW, decoded, error));
+    BOOST_CHECK(!error.empty());
+}
+
 BOOST_AUTO_TEST_CASE(final_witness_and_post_expiry_authority_are_exact)
 {
     const AlternativeRecoveryParameters parameters{Parameters()};

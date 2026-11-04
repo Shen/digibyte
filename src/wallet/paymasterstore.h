@@ -576,6 +576,10 @@ public:
     bool GetAlternativeRecoveryById(
         const uint256& recovery_id,
         DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery) const;
+    /** Distinguish a missing peer-named recovery from unreadable local state. */
+    DatabaseReadStatus GetAlternativeRecoveryByIdWithStatus(
+        const uint256& recovery_id,
+        DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery) const;
     bool ListClientAlternativeRecoveries(
         std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries,
         std::string& error) const;

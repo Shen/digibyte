@@ -478,6 +478,16 @@ bool ValidateAlternativeRecoverySubmitEnvelope(
     const AlternativeRecoverySubmit& submit,
     const uint256& expected_genesis,
     std::string& error);
+
+/** Validate only peer-supplied bindings, encoding and USER signatures against
+ * an already locally validated response/template. This performs no chain or
+ * persistence reads and does not establish provider signing authority. */
+bool ValidateAlternativeRecoverySubmitPayload(
+    const AlternativeRecoverySubmit& submit,
+    const AlternativeRecoveryResponse& response,
+    const AlternativeRecoveryTemplate& trusted,
+    PartiallySignedTransaction& user_psbt,
+    std::string& error);
 /** Validate an exact user-signed submit against the persisted response and a
  * freshly rebuilt local recovery authority. */
 bool ValidateAlternativeRecoverySubmit(

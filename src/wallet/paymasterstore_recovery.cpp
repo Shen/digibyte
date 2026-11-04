@@ -759,8 +759,16 @@ bool PaymasterStore::GetAlternativeRecoveryById(
     const uint256& recovery_id,
     AlternativeRecoveryRecord& recovery) const
 {
+    return GetAlternativeRecoveryByIdWithStatus(recovery_id, recovery) ==
+           DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetAlternativeRecoveryByIdWithStatus(
+    const uint256& recovery_id,
+    AlternativeRecoveryRecord& recovery) const
+{
     LOCK(m_wallet.cs_wallet);
-    return WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterAlternativeRecovery(
+    return WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterAlternativeRecoveryWithStatus(
         recovery_id, recovery);
 }
 
