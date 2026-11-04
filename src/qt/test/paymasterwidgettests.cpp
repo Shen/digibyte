@@ -10233,7 +10233,7 @@ void PaymasterWidgetTests::paymasterSafetyInputValidation()
 void PaymasterWidgetTests::paymasterConfigurationSaveRefresh_data()
 {
     QTest::addColumn<QString>("scenario");
-    for (const char* scenario : {"safety", "offer", "read_error", "incomplete", "bad_ack", "rpc_error", "wallet_switch", "privacy"})
+    for (const char* scenario : {"safety", "offer", "read_error", "incomplete", "bad_ack", "rpc_error", "unclassified_rpc_error", "wallet_switch", "privacy"})
         QTest::newRow(scenario) << QString::fromLatin1(scenario);
 }
 
@@ -10265,6 +10265,29 @@ void PaymasterWidgetTests::paymasterConfigurationSaveRefresh()
 
     DigiDollarPaymasterWidget::RpcCallback pending;
     int writes{0}, reads{0}, dialogs{0};
+    if (scenario == "rpc_error") {
+        // A classified backend rejection carries metadata; a display string
+        // alone must never establish whether a write was rejected or committed.
+        panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue&) -> UniValue {
+            if (method == "setpaymastersafetypolicy") {
+                ++writes;
+                auto error = ProviderApplicationError("PAYMASTER_INVALID_SAFETY_LIMITS");
+                error.pushKV("message", "The policy was rejected by the backend");
+                throw error;
+            }
+            if (method == "getpaymasteroperatorinfo") { ++reads; return snapshot; }
+            return UniValue{UniValue::VOBJ};
+        });
+        QVERIFY(save->isEnabled());
+        save->click();
+        QCOMPARE(writes, 1);
+        QCOMPARE(reads, 1);
+        QVERIFY2(safety_status->text().contains("Limits were not saved"), qPrintable(safety_status->text()));
+        QVERIFY(!safety_status->text().contains("PAYMASTER_"));
+        QCOMPARE(amount->text(), QStringLiteral("0.50000000"));
+        QVERIFY(!warning->parentWidget()->isHidden());
+        return;
+    }
     QTimer close_unexpected_dialog;
     connect(&close_unexpected_dialog, &QTimer::timeout, panel.get(), [&] {
         if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) { ++dialogs; box->accept(); }
@@ -10273,7 +10296,7 @@ void PaymasterWidgetTests::paymasterConfigurationSaveRefresh()
     panel->setAsyncRpcExecutorForTesting([&](const std::string& method, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback done) {
         if (method == "setpaymastersafetypolicy" || method == "setpaymasterpolicy") {
             ++writes;
-            if (scenario == "rpc_error") { done(UniValue{}, QStringLiteral("PAYMASTER_INVALID_SAFETY_LIMITS")); return; }
+            if (scenario == "unclassified_rpc_error") { done(UniValue{}, QStringLiteral("PAYMASTER_INVALID_SAFETY_LIMITS")); return; }
             if (scenario == "bad_ack") { done(UniValue{UniValue::VOBJ}, {}); return; }
             auto persisted = params[0];
             if (scenario == "offer") {
@@ -10305,11 +10328,13 @@ void PaymasterWidgetTests::paymasterConfigurationSaveRefresh()
     QCOMPARE(reads, 1); // Read immediately, not after the periodic timer.
     QVERIFY(pending);
     QVERIFY(!save->isEnabled());
-    if (scenario == "rpc_error") {
-        QVERIFY(safety_status->text().contains("Limits were not saved"));
+    if (scenario == "unclassified_rpc_error") {
+        QVERIFY(safety_status->text().contains("could not be confirmed"));
+        QVERIFY(!safety_status->text().contains("Limits were not saved"));
         QVERIFY(!safety_status->text().contains("PAYMASTER_"));
         pending(snapshot, {});
-        QCOMPARE(amount->text(), QStringLiteral("0.50000000")); // Keep the rejected edit.
+        QCOMPARE(writes, 1); // An uncertain result does not repeat the mutation.
+        QCOMPARE(amount->text(), QStringLiteral("0.50000000"));
         QVERIFY(!warning->parentWidget()->isHidden());
         return;
     }
@@ -11656,6 +11681,89 @@ void PaymasterWidgetTests::paymasterOverviewFinanceWalletAndPrivacyBinding()
             QVERIFY(capital->isHidden());
             QVERIFY(panel->findChild<QWidget*>("paymasterOverviewFinanceDetails")->isHidden());
         }
+    }
+}
+
+void PaymasterWidgetTests::paymasterFinanceReconciliationReadRetry_data()
+{
+    QTest::addColumn<QString>("stream");
+    QTest::addColumn<bool>("wallet_change");
+    for (const char* stream : {"overview", "page", "export"}) {
+        QTest::newRow(stream) << QString::fromLatin1(stream) << false;
+        QTest::newRow(qPrintable(QString::fromLatin1(stream) + "_wallet_change")) << QString::fromLatin1(stream) << true;
+    }
+}
+
+void PaymasterWidgetTests::paymasterFinanceReconciliationReadRetry()
+{
+    QFETCH(QString, stream);
+    QFETCH(bool, wallet_change);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString filename = directory.filePath(QStringLiteral("finance.csv"));
+    panel->setFinanceExportFilenameForTesting(filename);
+    bool fail_next{stream == QLatin1String("overview")};
+    int failures{0};
+    QStringList commands;
+    std::vector<std::string> parameters;
+    panel->setRpcExecutorForTesting([&](const std::string& method, const UniValue& params) -> UniValue {
+        commands.push_back(QString::fromStdString(method));
+        parameters.push_back(params.write());
+        if (method == "getpaymasteroperatorinfo") return GuidedOperatorSnapshot();
+        if (method != "getpaymasterfinancestatus") throw std::runtime_error("Unexpected mutation during finance retry");
+        if (fail_next) {
+            fail_next = false;
+            ++failures;
+            UniValue error{UniValue::VOBJ};
+            error.pushKV("code", -4);
+            error.pushKV("message", "History is catching up"); // Prose does not select the retry policy.
+            UniValue data{UniValue::VOBJ};
+            data.pushKV("paymaster_code", "PAYMASTER_FINANCE_RECONCILING");
+            data.pushKV("disposition", "retry_before_execution");
+            error.pushKV("data", std::move(data));
+            throw error;
+        }
+        return params[0].find_value("include_events").isTrue() ? FinanceTestSnapshot() : PaymasterOverviewFinance();
+    });
+    panel->refreshStatus();
+    if (stream != QLatin1String("overview")) {
+        auto* tabs = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+        auto* page = panel->findChild<QScrollArea*>("paymasterFinancesPage");
+        QVERIFY(tabs && page);
+        fail_next = stream == QLatin1String("page");
+        tabs->setCurrentWidget(page);
+        if (stream == QLatin1String("export")) {
+            auto* export_button = panel->findChild<QPushButton*>("paymasterFinanceExport");
+            QVERIFY(export_button && export_button->isEnabled());
+            fail_next = true;
+            export_button->click();
+        }
+    }
+    QCOMPARE(failures, 1);
+    auto* status = panel->findChild<QLabel*>(stream == QLatin1String("overview")
+        ? "paymasterOverviewFinanceStatus" : "paymasterFinanceHistoryStatus");
+    QVERIFY(status);
+    QVERIFY(status->text().contains(QStringLiteral("Reconciling financial history")));
+    const int after_failure = commands.size();
+    const std::string failed_params = parameters.back();
+    QCOMPARE(commands.back(), QStringLiteral("getpaymasterfinancestatus"));
+    // Reconciliation is delayed and only repeats the same read. A wallet
+    // switch must invalidate that pending work before it accesses the wallet.
+    QTest::qWait(50);
+    QCOMPARE(commands.size(), after_failure);
+    if (wallet_change) {
+        panel->setWalletModel(nullptr);
+        QTest::qWait(350);
+        QCOMPARE(commands.size(), after_failure);
+        QVERIFY(!QFile::exists(filename));
+    } else {
+        QTRY_COMPARE_WITH_TIMEOUT(commands.size(), after_failure + 1, 3000);
+        QCOMPARE(commands.back(), QStringLiteral("getpaymasterfinancestatus"));
+        QCOMPARE(QString::fromStdString(parameters.back()), QString::fromStdString(failed_params));
+        QCOMPARE(failures, 1);
+        QVERIFY(!status->text().contains(QStringLiteral("Reconciling financial history")));
+        if (stream == QLatin1String("export")) QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(filename), 3000);
     }
 }
 

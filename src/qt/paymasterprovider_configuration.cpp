@@ -2,19 +2,523 @@
 // Distributed under the MIT software license, see COPYING.
 #include <qt/paymasterprovider_internal.h>
 
-bool PaymasterWidgetImpl::providerConfigurationComplete() const
+void ProviderConfiguration::buildWalletAccess(PageBindings& pages)
 {
-    return std::none_of(m_readiness_errors.cbegin(),
-                        m_readiness_errors.cend(),
-                        isProviderSetupReadinessError);
+    auto* access_group = new QGroupBox(tr("Wallet access"), pages.management_column);
+    access_group->setObjectName("paymasterConnectionWalletAccess");
+    auto* access_layout = new QVBoxLayout(access_group);
+    auto* access_help = new QLabel(tr("The provider needs an unlocked wallet to sign. Unlocking applies to the whole wallet, not just Paymaster. Choose a time limit or continuous operation until manual locking, wallet closure or node restart. No passphrase is saved; unlocking alone does not start the provider."), access_group);
+    access_help->setWordWrap(true);
+    access_layout->addWidget(access_help);
+    auto* unlock_operation = new QPushButton(tr("Unlock wallet for operation…"), access_group);
+    unlock_operation->setObjectName("paymasterUnlockOperation");
+    unlock_operation->setToolTip(tr("Choose continuous operation until manual lock or restart, or a timed wallet-wide unlock. No passphrase is saved."));
+    access_layout->addWidget(unlock_operation, 0, Qt::AlignLeft);
+    pages.management_layout->addWidget(access_group);
+    connect(unlock_operation, &QPushButton::clicked, widget(), [this] { m_panel.overview().unlockOperatorWallet(); });
 }
 
-void PaymasterWidgetImpl::restorePolicyDefaults()
+
+void ProviderConfiguration::alignForms()
+{
+    AlignPaymasterFormLabels(m_offer_forms);
+}
+
+void ProviderConfiguration::attachOperatorWarning(QVBoxLayout* layout)
+{
+    layout->addWidget(configurationWarningPanel(m_operator_config_warning, "paymasterOperatorConfigWarning",
+        tr("Review spending limits"), [this] { m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::SAFETY)); }));
+}
+
+void ProviderConfiguration::setBusy(bool busy)
+{
+    setPolicyMutationEnabled(m_policy_snapshot_representable);
+    setProviderSafetyMutationEnabled(m_provider_safety_snapshot_representable);
+    if (m_client_safety_group) m_client_safety_group->setEnabled(!busy && m_client_safety_snapshot_representable);
+    if (m_create_identity) m_create_identity->setEnabled(!busy && !m_panel.overview().hasIdentity() && m_display_name->hasAcceptableInput());
+}
+
+void ProviderConfiguration::buildNodeEditor(PageBindings& pages, QWidget* connection_column)
+{
+    m_node_editor_host = new QWidget(connection_column);
+    m_node_editor_host->setObjectName("paymasterNodeEditorHost");
+    m_node_editor_layout = new QVBoxLayout(m_node_editor_host);
+    m_node_editor_layout->setContentsMargins(0, 0, 0, 0);
+    pages.connection_layout->addWidget(m_node_editor_host);
+}
+
+void ProviderConfiguration::updateControls(bool running)
+{
+    if (m_save_provider_safety) {
+        const QString error = m_panel.privacyEnabled() ? QString{} : providerSafetyInputError();
+        m_save_provider_safety->setEnabled(!m_panel.privacyEnabled() && !m_panel.busy() && m_provider_safety_snapshot_representable && error.isEmpty());
+    }
+    if (m_operation_mode_select) {
+        m_operation_mode_select->setEnabled(!m_panel.busy());
+    }
+    if (m_save_runtime_settings) {
+        m_save_runtime_settings->setEnabled(
+            m_panel.hasRpcTransport() && m_runtime_settings_dirty && !m_panel.busy());
+        m_save_runtime_settings->setText(running ? tr("Save and restart provider…") : tr("Save processing mode"));
+    }
+}
+
+QStringList ProviderConfiguration::fundingBudgetSummary() const
+{
+    QStringList budgets;
+    const auto append_budget = [this, &budgets](const QString& name,
+                                                 const FundingSafetyControls& controls) {
+        FundingSafetyValues values;
+        if (!ProviderConfiguration::readFundingSafety(controls, values) || values.allZero()) return;
+        budgets.push_back(tr(
+            "%1: at most %2 DGB per transfer, %3 DGB per rolling hour and %4 DGB per rolling day; %5 transfers/hour and %6 transfers/day.")
+            .arg(name)
+            .arg(PaymasterFormatDGB(values.per_transaction))
+            .arg(PaymasterFormatDGB(values.per_hour))
+            .arg(PaymasterFormatDGB(values.per_day))
+            .arg(values.completed_per_hour)
+            .arg(values.completed_per_day));
+    };
+    if (m_user_paid->isChecked()) {
+        append_budget(tr("User paid"), m_user_paid_safety);
+    }
+    if (m_sponsored->isChecked() &&
+        m_scope->currentData().toString() == QLatin1String("restricted")) {
+        append_budget(tr("Restricted sponsored"),
+                      m_restricted_sponsored_safety);
+    } else if (m_sponsored->isChecked()) {
+        append_budget(tr("Public sponsored"), m_public_sponsored_safety);
+    }
+
+    return budgets;
+}
+
+QString ProviderConfiguration::safetyLimitExplanation() const
+{
+    qint64 applicable_per_transaction{std::numeric_limits<qint64>::max()};
+    const auto include_model = [&applicable_per_transaction](
+            const FundingSafetyControls& controls, bool selected) {
+        if (!selected) return;
+        FundingSafetyValues values;
+        if (ProviderConfiguration::readFundingSafety(controls, values) && values.per_transaction > 0) {
+            applicable_per_transaction = std::min(
+                applicable_per_transaction, values.per_transaction);
+        }
+    };
+    include_model(m_user_paid_safety, m_user_paid->isChecked());
+    include_model(
+        m_public_sponsored_safety,
+        m_sponsored->isChecked() &&
+            m_scope->currentData().toString() == QLatin1String("public"));
+    include_model(
+        m_restricted_sponsored_safety,
+        m_sponsored->isChecked() &&
+            m_scope->currentData().toString() == QLatin1String("restricted"));
+    if (applicable_per_transaction != std::numeric_limits<qint64>::max() &&
+        m_network_fee->value() > applicable_per_transaction) {
+        return tr(
+            "The advertised network-fee ceiling (%1 DGB) exceeds the applicable safety limit per transfer (%2 DGB). Lower the ceiling in Configuration or increase the limit in Safety limits, then save the changed setting.")
+            .arg(PaymasterFormatDGB(m_network_fee->value()))
+            .arg(PaymasterFormatDGB(applicable_per_transaction));
+    }
+    return tr("The configured provider budget or rate limit has been reached.");
+
+}
+
+void ProviderConfiguration::buildRuntimeSettings(PageBindings& pages, QWidget* operator_card)
+{
+    auto* operator_layout = qobject_cast<QVBoxLayout*>(operator_card->layout());
+    m_runtime_settings_toggle = new QPushButton(
+        tr("Change request processing"), pages.management_column);
+    m_runtime_settings_toggle->setObjectName("paymasterRuntimeSettingsToggle");
+    m_runtime_settings_toggle->setCheckable(true);
+    m_runtime_settings_toggle->setFlat(true);
+    pages.management_layout->insertWidget(2, m_runtime_settings_toggle, 0, Qt::AlignLeft);
+
+    m_runtime_settings_panel = new QGroupBox(
+        tr("Request processing"), pages.management_column);
+    m_runtime_settings_panel->setObjectName("paymasterRuntimeSettingsPanel");
+    auto* runtime_settings_form = new QFormLayout(m_runtime_settings_panel);
+    auto* runtime_settings_help = new QLabel(tr(
+        "Automatic is recommended and processes bounded queue work after you consciously start "
+        "the provider. Manual mode is intended only for diagnosis or expert-controlled operation. "
+        "Saving a mode change offers to restart the Paymaster service. Automatic processing and autostart are different: processing handles requests after Start; autostart additionally requests a start when this wallet loads. Neither bypasses wallet locking, readiness checks or spending limits."), m_runtime_settings_panel);
+    runtime_settings_help->setObjectName("paymasterRuntimeSettingsExplanation");
+    runtime_settings_help->setWordWrap(true);
+    runtime_settings_form->addRow(runtime_settings_help);
+    m_operation_mode_select = new NoWheelComboBox(m_runtime_settings_panel);
+    m_operation_mode_select->setObjectName("paymasterOperationMode");
+    m_operation_mode_select->addItem(
+        tr("Automatic — recommended"), QStringLiteral("automatic"));
+    m_operation_mode_select->addItem(
+        tr("Manual — expert mode"), QStringLiteral("manual"));
+    runtime_settings_form->addRow(tr("Processing mode:"), m_operation_mode_select);
+    auto* autostart_panel = new QWidget(operator_card);
+    autostart_panel->setObjectName("paymasterAutostartPanel");
+    auto* autostart_layout = new QVBoxLayout(autostart_panel);
+    autostart_layout->setContentsMargins(0, 8, 0, 0);
+    m_autostart = new QCheckBox(
+        tr("Automatically start Paymaster when this wallet is ready"), autostart_panel);
+    m_autostart->setObjectName("paymasterProviderAutostart");
+    m_autostart->setToolTip(tr(
+        "Autostart never stores a passphrase. An encrypted wallet waits for you to unlock it."));
+    autostart_layout->addWidget(m_autostart);
+    auto* autostart_help = new QLabel(tr(
+        "Applies now and after this wallet is loaded again, while the provider configuration is enabled. "
+        "An encrypted wallet still needs manual unlock after restart. Turning autostart off does not pause an already running provider."),
+        autostart_panel);
+    autostart_help->setWordWrap(true);
+    autostart_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    autostart_layout->addWidget(autostart_help);
+    m_autostart_status = new QLabel(autostart_panel);
+    m_autostart_status->setObjectName("paymasterAutostartStatus");
+    m_autostart_status->setWordWrap(true);
+    m_autostart_status->setTextFormat(Qt::PlainText);
+    autostart_layout->addWidget(m_autostart_status);
+    m_panel.liquidity().addQuickRefill(autostart_layout, autostart_panel, true);
+    auto* autostart_actions = new QHBoxLayout();
+    m_save_autostart = new QPushButton(tr("Save autostart"), autostart_panel);
+    m_save_autostart->setObjectName("paymasterSaveAutostart");
+    m_discard_autostart = new QPushButton(tr("Discard change"), autostart_panel);
+    m_discard_autostart->setObjectName("paymasterDiscardAutostart");
+    autostart_actions->addWidget(m_save_autostart);
+    autostart_actions->addWidget(m_discard_autostart);
+    autostart_actions->addStretch();
+    autostart_layout->addLayout(autostart_actions);
+    operator_layout->insertWidget(operator_layout->count() - 1, autostart_panel);
+    connect(m_save_autostart, &QPushButton::clicked, widget(), [this] { saveAutostart(); });
+    connect(m_discard_autostart, &QPushButton::clicked, widget(), [this] { discardAutostart(); });
+    m_save_runtime_settings = new QPushButton(
+        tr("Save processing mode"), m_runtime_settings_panel);
+    m_save_runtime_settings->setObjectName("savePaymasterRuntimeSettings");
+    m_save_runtime_settings->setProperty(
+        "paymasterRole", QStringLiteral("primaryAction"));
+    runtime_settings_form->addRow(m_save_runtime_settings);
+    auto* discard_mode = new QPushButton(tr("Discard processing change"), m_runtime_settings_panel);
+    runtime_settings_form->addRow(discard_mode);
+    connect(discard_mode, &QPushButton::clicked, widget(), [this] {
+        if (m_panel.busy()) return;
+        const QSignalBlocker blocker(m_operation_mode_select);
+        m_operation_mode_select->setCurrentIndex(m_operation_mode_select->findData(m_panel.overview().operationMode()));
+        m_runtime_settings_dirty = false;
+        m_panel.overview().updateProviderButtons();
+    });
+    m_runtime_settings_result = new QLabel(
+        tr("Automatic processing is the recommended default. Provider autostart is off by default."),
+        m_runtime_settings_panel);
+    m_runtime_settings_result->setObjectName("paymasterRuntimeSettingsResult");
+    m_runtime_settings_result->setWordWrap(true);
+    runtime_settings_form->addRow(m_runtime_settings_result);
+    pages.management_layout->insertWidget(3, m_runtime_settings_panel);
+    // The settings page itself is still hidden while it is built. Force
+    // an explicit show/hide transition so Qt remembers that this expert
+    // panel must remain collapsed when the page is shown later.
+    m_runtime_settings_panel->show();
+    m_runtime_settings_panel->hide();
+
+}
+
+
+ProviderTypes::OfferDraft ProviderConfiguration::offerDraft() const
+{
+    return {m_display_name->text(), m_user_paid->isChecked(), m_sponsored->isChecked(),
+            m_scope->currentData().toString(), m_fee_bps->value(), m_maximum_user_paid_service_fee->value(),
+            m_min_amount->value(), m_max_amount->value(), m_quote_ttl->value(), m_network_fee->value()};
+}
+
+ProviderTypes::QuoteLimits ProviderConfiguration::quoteLimits() const
+{
+    return {m_max_active_quotes_total->value(), m_max_active_quotes_per_netgroup->value(),
+            m_max_active_quotes_per_recipient->value(), m_max_quote_requests_per_netgroup->value()};
+}
+
+std::optional<ProviderTypes::FundingSafetyValues> ProviderConfiguration::fundingSafety(
+    DigiDollar::Paymaster::FundingModel model, DigiDollar::Paymaster::SponsorshipScope scope) const
+{
+    using namespace DigiDollar::Paymaster;
+    const auto& controls = model == FundingModel::USER_PAID ? m_user_paid_safety
+        : scope == SponsorshipScope::RESTRICTED ? m_restricted_sponsored_safety : m_public_sponsored_safety;
+    FundingSafetyValues values;
+    if (!readFundingSafety(controls, values)) return std::nullopt;
+    return values;
+}
+
+std::optional<ProviderTypes::FundingSafetyValues> ProviderConfiguration::selectedFundingSafety() const
+{
+    using namespace DigiDollar::Paymaster;
+    return fundingSafety(!m_user_paid->isChecked() && m_sponsored->isChecked() ? FundingModel::SPONSORED : FundingModel::USER_PAID,
+        m_scope->currentData().toString() == QLatin1String("restricted") ? SponsorshipScope::RESTRICTED : SponsorshipScope::PUBLIC);
+}
+
+void ProviderConfiguration::hideRuntimeSettings()
+{
+    if (m_runtime_settings_toggle) m_runtime_settings_toggle->setChecked(false);
+    if (m_runtime_settings_panel) m_runtime_settings_panel->setVisible(false);
+}
+
+void ProviderConfiguration::refreshFundingSafetyDisplays()
+{
+    updateFundingSafetyDisplay(m_user_paid_safety);
+    updateFundingSafetyDisplay(m_public_sponsored_safety);
+    updateFundingSafetyDisplay(m_restricted_sponsored_safety);
+}
+
+void ProviderConfiguration::clearConfigurationWarnings()
+{
+    for (auto* warning : {m_operator_config_warning, m_policy_config_warning, m_safety_config_warning}) {
+        if (!warning) continue;
+        warning->clear();
+        warning->parentWidget()->hide();
+    }
+}
+
+void ProviderConfiguration::observeRuntime(const UniValue& provider)
+{
+    m_autostart_enabled = provider.find_value("autostart").isTrue();
+    if (!m_runtime_settings_dirty) {
+        m_loading_runtime_settings = true;
+        const auto& mode = provider.find_value("operation_mode");
+        const int index = m_operation_mode_select->findData(mode.isStr() ? QString::fromStdString(mode.get_str()) : QStringLiteral("automatic"));
+        if (index >= 0) m_operation_mode_select->setCurrentIndex(index);
+        m_loading_runtime_settings = false;
+    }
+}
+
+void ProviderConfiguration::applySetupStatus(const UniValue& provider)
+{
+    observeRuntime(provider);
+    m_policy_loaded = !provider.find_value("has_policy").isBool() || provider.find_value("has_policy").isTrue();
+    m_provider_safety_configured = !provider.find_value("has_safety_policy").isBool() || provider.find_value("has_safety_policy").isTrue();
+}
+
+void ProviderConfiguration::markPersistentlyStopped()
+{
+    m_autostart_enabled = false;
+    m_autostart_dirty = m_autostart_pending_read = false;
+}
+
+void ProviderConfiguration::discardProviderEdits()
+{
+    m_policy_dirty = m_provider_safety_dirty = m_runtime_settings_dirty = false;
+}
+
+void ProviderConfiguration::setSnapshotAvailabilityForTesting(bool policy, bool safety)
+{
+    m_provider_safety_snapshot_available = safety;
+    m_policy_snapshot_representable = policy;
+    m_provider_safety_snapshot_representable = safety;
+}
+
+void ProviderConfiguration::updateIdentityText(const QString& text)
+{
+    if (m_offer_identity_id) m_offer_identity_id->setText(text);
+}
+
+void ProviderConfiguration::updateIdentityPresentation(bool exists, const QString& provider_id)
+{
+    if (!m_offer_identity_status) return;
+    m_panel.setStatusLabel(m_offer_identity_status,
+        exists ? tr("Ready · persistent identity is stored in this wallet") : tr("Action required · no provider identity has been created yet."),
+        exists ? QStringLiteral("ready") : QStringLiteral("action"));
+    updateIdentityText(exists ? m_panel.visibleProviderId(provider_id) : tr("Not created yet"));
+    m_create_identity->setVisible(!exists);
+    m_create_identity->setEnabled(!exists && m_display_name->hasAcceptableInput() && !m_panel.busy());
+}
+
+
+void ProviderConfiguration::observePolicy(const UniValue& result)
+{
+    const UniValue& policy = result.find_value("policy");
+    const UniValue& display_name = result.find_value("display_name");
+    if (display_name.isStr() && !m_policy_dirty) {
+        m_display_name->setText(QString::fromStdString(display_name.get_str()));
+    }
+    if (policy.isObject() && !m_policy_dirty) {
+        if (m_policy_readback_pending) {
+            const UniValue& policy_hash =
+                policy.find_value("policy_hash");
+            if (policy_hash.isStr() &&
+                QString::fromStdString(policy_hash.get_str()) ==
+                    m_pending_policy_hash) {
+                m_policy_readback_pending = false;
+                m_pending_policy_hash.clear();
+            }
+        }
+        if (!m_policy_readback_pending) loadPolicy(policy);
+    }
+}
+
+
+void ProviderConfiguration::applyWithProviderRestart(std::function<void(bool)> apply, std::function<void(const QString&)> failed)
+{
+    if (m_panel.privacyEnabled()) return;
+    if (m_panel.busy() || m_panel.hasPendingOperatorReview() || !m_panel.hasRpcTransport()) {
+        failed(tr("Settings were not saved because another Paymaster operation is still pending or the wallet is unavailable. Your edits have been kept."));
+        return;
+    }
+    const auto generation = m_panel.walletGeneration();
+    const auto settings_generation = m_settings_restart_generation;
+    if (!m_panel.hasCompleteMutationSnapshots()) {
+        // Offer and runtime settings suspend polling while being edited.
+        // Refresh expired observations before deciding whether to restart;
+        // never silently drop Save or weaken the 30-second freshness gate.
+        const auto context = m_panel.overview().operatorSnapshot();
+        failed(tr("Checking current provider status before saving. Your edits have been kept; no settings have been changed yet."));
+        m_panel.deferOperatorReview([this, generation, settings_generation, context, apply, failed] {
+            if (generation != m_panel.walletGeneration() || settings_generation != m_settings_restart_generation || m_panel.privacyEnabled()) return;
+            if (!m_panel.hasCompleteMutationSnapshots()) {
+                failed(tr("Settings were not saved: current provider status could not be verified. Your edits have been kept. Retry saving after the status check succeeds."));
+                return;
+            }
+            try {
+                if (!context.isNull()) DigiDollar::Paymaster::CheckSetupContext(context, m_panel.overview().operatorSnapshot());
+            } catch (const std::exception&) {
+                failed(tr("The provider wallet or identity changed during the status check. No settings were saved; review the selected wallet before retrying."));
+                return;
+            }
+            applyWithProviderRestart(apply, failed);
+        });
+        m_panel.overview().refreshOperatorStatus();
+        return;
+    }
+    if (!m_panel.overview().running()) { apply(false); return; }
+    m_panel.setRpcBusyState(true);
+    const auto answer = PaymasterWidgetImpl::askPlainTextQuestion(widget(), tr("Save settings and restart Paymaster"),
+        tr("Temporarily stop this Paymaster service, save the edited settings and start again after checking the saved values?\n\nNew requests pause briefly. Existing offers may become invalid and clients may need to request a new offer. Already signed payments and their reservations remain protected.\n\nThe saved autostart choice, reserves and spending limits are retained. If any step cannot be confirmed, no further step is attempted; review the status before resuming. DigiByte Core itself is not restarted."));
+    if (generation != m_panel.walletGeneration()) return;
+    m_panel.setRpcBusyState(false);
+    if (m_panel.privacyEnabled() || settings_generation != m_settings_restart_generation || !m_panel.hasRpcTransport()) return;
+    if (answer != QMessageBox::Yes) {
+        failed(tr("Saving was cancelled. Your edits have been kept; the provider was not stopped."));
+        return;
+    }
+    UniValue params{UniValue::VARR}; params.push_back(false);
+    m_panel.call("setpaymasterenabled", params, false, nullptr, [this, apply, failed, settings_generation](const UniValue& result) {
+        if (m_panel.privacyEnabled() || settings_generation != m_settings_restart_generation) return;
+        if (!result.find_value("enabled").isFalse() || !result.find_value("running").isFalse()) {
+            failed(tr("The service pause could not be confirmed. No setting change or restart was attempted. Refresh the provider status."));
+            return;
+        }
+        m_panel.overview().recordStopped();
+        apply(true);
+    }, false, [failed](const QString&) {
+        failed(tr("The service could not be paused. It may still be processing a payment. No setting change or restart was attempted. Check current status before trying again."));
+    });
+}
+
+void ProviderConfiguration::finishProviderSettingsRestart(std::function<bool(const UniValue&)> verified, std::function<void(const QString&)> failed)
+{
+    const auto generation = m_settings_restart_generation;
+    m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr, [this, verified, failed, generation](const UniValue& snapshot) {
+        if (m_panel.privacyEnabled() || generation != m_settings_restart_generation) return;
+        const auto& provider = snapshot.find_value("provider");
+        if (!provider.find_value("enabled").isFalse() || !provider.find_value("running").isFalse() || !verified(provider)) {
+            failed(tr("The saved settings or paused state could not be verified. Restart was not attempted. Refresh and review the provider before resuming."));
+            return;
+        }
+        UniValue params{UniValue::VARR}; params.push_back(true);
+        m_panel.call("setpaymasterenabled", params, false, nullptr, [this, failed, generation](const UniValue& result) {
+            if (m_panel.privacyEnabled() || generation != m_settings_restart_generation) return;
+            if (!result.find_value("enabled").isTrue()) {
+                failed(tr("The settings were saved, but provider enablement could not be confirmed. Check current status before resuming."));
+                return;
+            }
+            UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
+            options.pushKV("wait_for_readiness", true);
+            params.push_back(options);
+            m_panel.call("startpaymaster", params, false, nullptr, [this, failed, generation](const UniValue& result) {
+                if (m_panel.privacyEnabled() || generation != m_settings_restart_generation) return;
+                if (!IsCompleteProviderStartResult(result) ||
+                    (!result.find_value("running").isTrue() && !result.find_value("start_requested").isTrue())) {
+                    failed(tr("The settings were saved, but the provider start was not confirmed. Review the current status in Overview."));
+                    return;
+                }
+                m_panel.overview().refreshOperatorStatus();
+            }, false, [failed](const QString&) {
+                failed(tr("The settings were saved and the provider enabled, but start could not be confirmed. Check Overview; saved autostart may still start the service."));
+            });
+        }, false, [failed](const QString&) {
+            failed(tr("The settings were saved, but resuming the provider could not be confirmed. Check Overview before trying again."));
+        });
+    }, false, [failed](const QString&) {
+        failed(tr("The settings could not be read back. Restart was not attempted. Check current status before resuming."));
+    });
+}
+
+void ProviderConfiguration::closeWalletDialogs()
+{
+    if (m_node_connection_dialog) m_node_connection_dialog->reject();
+}
+
+void ProviderConfiguration::resetWalletPresentation()
+{
+    m_policy_readback_pending = false;
+    m_pending_policy_hash.clear();
+    m_unrepresentable_policy_snapshot = UniValue{UniValue::VOBJ};
+    applyRecommendedPolicyDefaults(/*mark_dirty=*/false);
+    restoreFundingSafetyDefaults(m_user_paid_safety, /*recommended_defaults=*/true, /*mark_dirty=*/false);
+    restoreFundingSafetyDefaults(m_public_sponsored_safety, /*recommended_defaults=*/false, /*mark_dirty=*/false);
+    restoreFundingSafetyDefaults(m_restricted_sponsored_safety, /*recommended_defaults=*/false, /*mark_dirty=*/false);
+    restoreQuoteSafetyDefaults(/*mark_dirty=*/false);
+    restoreClientSafetyDefaults(/*mark_dirty=*/false);
+    m_loading_runtime_settings = true;
+    m_autostart_enabled = false;
+    m_runtime_settings_dirty = false;
+    m_autostart_dirty = false;
+    m_autostart_pending_read = false;
+    m_autostart_message.clear();
+    if (m_inline_node_editor) delete m_inline_node_editor.data();
+    m_operation_mode_select->setCurrentIndex(m_operation_mode_select->findData(QStringLiteral("automatic")));
+    m_autostart->setChecked(false);
+    m_loading_runtime_settings = false;
+    m_runtime_settings_result->setText(tr(
+        "Automatic processing is the recommended default. Provider autostart is off by default."));
+    m_provider_safety_configured = false;
+    m_provider_safety_snapshot_representable = true;
+    m_unrepresentable_provider_safety_snapshot = UniValue{UniValue::VOBJ};
+    setProviderSafetyMutationEnabled(true);
+    m_policy_snapshot_representable = true;
+    setPolicyMutationEnabled(true);
+    m_provider_safety_snapshot_available = false;
+    m_client_safety_configured = false;
+    m_client_safety_snapshot_representable = true;
+    m_unrepresentable_client_safety_snapshot = UniValue{UniValue::VOBJ};
+    if (m_client_safety_group) m_client_safety_group->setEnabled(true);
+    m_display_name->clear();
+    m_provider_safety_status->setText(tr("Provider safety policy: not configured (provider not ready)"));
+    m_client_safety_status->setText(tr("Client safety policy: not configured (automatic Paymaster transfers unavailable)"));
+    m_provider_safety_usage->setText(tr("Budget usage is not available yet."));
+}
+
+void ProviderConfiguration::setPrivacy(bool privacy)
+{
+    ++m_settings_restart_generation;
+    if (privacy) {
+        closeWalletDialogs();
+        if (m_inline_node_editor) {
+            m_inline_node_editor->deleteLater();
+            m_inline_node_editor.clear();
+        }
+        if (m_panel.overview().hasIdentity()) m_offer_identity_id->setText(tr("Hidden by privacy mode"));
+    }
+    m_node_editor_host->setVisible(!privacy);
+    m_display_name->setEchoMode(privacy ? QLineEdit::Password : QLineEdit::Normal);
+    updateAutostartControls();
+}
+
+bool ProviderConfiguration::providerConfigurationComplete() const
+{
+    return std::none_of(m_panel.overview().readinessErrors().cbegin(),
+                        m_panel.overview().readinessErrors().cend(),
+                        ProviderSetup::isProviderSetupReadinessError);
+}
+
+void ProviderConfiguration::restorePolicyDefaults()
 {
     applyRecommendedPolicyDefaults(/*mark_dirty=*/true);
 }
 
-void PaymasterWidgetImpl::applyRecommendedPolicyDefaults(bool mark_dirty)
+void ProviderConfiguration::applyRecommendedPolicyDefaults(bool mark_dirty)
 {
     if (m_review_policy_limits) showPolicySaveStatus({});
     if (m_policy_limits_review) m_policy_limits_review->hide();
@@ -32,12 +536,12 @@ void PaymasterWidgetImpl::applyRecommendedPolicyDefaults(bool mark_dirty)
     m_policy_loaded = false;
     m_policy_dirty = mark_dirty;
     updatePolicyDisplay();
-    updateAutomaticRefreshTimer();
+    m_panel.overview().updateAutomaticRefreshTimer();
 }
 
-void PaymasterWidgetImpl::setPolicyMutationEnabled(bool enabled)
+void ProviderConfiguration::setPolicyMutationEnabled(bool enabled)
 {
-    const bool controls_enabled = enabled && !m_busy;
+    const bool controls_enabled = enabled && !m_panel.busy();
     m_sponsored->setEnabled(controls_enabled);
     m_user_paid->setEnabled(controls_enabled);
     m_scope->setEnabled(controls_enabled && m_sponsored->isChecked());
@@ -56,12 +560,12 @@ void PaymasterWidgetImpl::setPolicyMutationEnabled(bool enabled)
         m_restore_policy_defaults->setEnabled(controls_enabled);
     }
     if (m_save_policy) {
-        m_save_policy->setEnabled(enabled && !m_busy);
+        m_save_policy->setEnabled(enabled && !m_panel.busy());
     }
     if (m_review_policy_limits) m_review_policy_limits->setEnabled(controls_enabled);
 }
 
-void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
+void ProviderConfiguration::loadPolicy(const UniValue& policy)
 {
     if (!IsCompleteProviderPolicy(policy)) return;
     showPolicySaveStatus({});
@@ -84,13 +588,13 @@ void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
         GetIntField(policy, "quote_ttl", quote_ttl) &&
         GetInt64Field(policy, "maximum_network_fee_dgb_satoshis",
                       maximum_network_fee) &&
-        spinCanRepresent(m_fee_bps, fee_rate_bps) &&
-        spinCanRepresent(m_maximum_user_paid_service_fee,
+        PaymasterWidgetImpl::spinCanRepresent(m_fee_bps, fee_rate_bps) &&
+        PaymasterWidgetImpl::spinCanRepresent(m_maximum_user_paid_service_fee,
                          maximum_user_paid_service_fee) &&
-        spinCanRepresent(m_min_amount, min_amount_cents) &&
-        spinCanRepresent(m_max_amount, max_amount_cents) &&
-        spinCanRepresent(m_quote_ttl, quote_ttl) &&
-        spinCanRepresent(m_network_fee, maximum_network_fee);
+        PaymasterWidgetImpl::spinCanRepresent(m_min_amount, min_amount_cents) &&
+        PaymasterWidgetImpl::spinCanRepresent(m_max_amount, max_amount_cents) &&
+        PaymasterWidgetImpl::spinCanRepresent(m_quote_ttl, quote_ttl) &&
+        PaymasterWidgetImpl::spinCanRepresent(m_network_fee, maximum_network_fee);
     if (!representable) {
         // Preserve the complete authoritative object instead of feeding an
         // out-of-range qint64 through QSpinBox::setValue(), which would
@@ -116,24 +620,24 @@ void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
             QString::fromStdString(
                 policy.find_value("sponsorship_scope").get_str()));
         if (scope_index >= 0) m_scope->setCurrentIndex(scope_index);
-        if (spinCanRepresent(m_fee_bps, fee_rate_bps)) {
+        if (PaymasterWidgetImpl::spinCanRepresent(m_fee_bps, fee_rate_bps)) {
             m_fee_bps->setValue(fee_rate_bps);
         }
-        if (spinCanRepresent(m_maximum_user_paid_service_fee,
+        if (PaymasterWidgetImpl::spinCanRepresent(m_maximum_user_paid_service_fee,
                              maximum_user_paid_service_fee)) {
             m_maximum_user_paid_service_fee->setValue(
                 static_cast<int>(maximum_user_paid_service_fee));
         }
-        if (spinCanRepresent(m_min_amount, min_amount_cents)) {
+        if (PaymasterWidgetImpl::spinCanRepresent(m_min_amount, min_amount_cents)) {
             m_min_amount->setValue(min_amount_cents);
         }
-        if (spinCanRepresent(m_max_amount, max_amount_cents)) {
+        if (PaymasterWidgetImpl::spinCanRepresent(m_max_amount, max_amount_cents)) {
             m_max_amount->setValue(max_amount_cents);
         }
-        if (spinCanRepresent(m_quote_ttl, quote_ttl)) {
+        if (PaymasterWidgetImpl::spinCanRepresent(m_quote_ttl, quote_ttl)) {
             m_quote_ttl->setValue(quote_ttl);
         }
-        if (spinCanRepresent(m_network_fee, maximum_network_fee)) {
+        if (PaymasterWidgetImpl::spinCanRepresent(m_network_fee, maximum_network_fee)) {
             m_network_fee->setValue(
                 static_cast<int>(maximum_network_fee));
         }
@@ -141,22 +645,22 @@ void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
         setPolicyMutationEnabled(false);
         QString invalid_field;
         QString raw_value;
-        if (!spinCanRepresent(m_fee_bps, fee_rate_bps)) {
+        if (!PaymasterWidgetImpl::spinCanRepresent(m_fee_bps, fee_rate_bps)) {
             invalid_field = tr("service fee");
             raw_value = QString::number(fee_rate_bps);
-        } else if (!spinCanRepresent(m_maximum_user_paid_service_fee,
+        } else if (!PaymasterWidgetImpl::spinCanRepresent(m_maximum_user_paid_service_fee,
                                      maximum_user_paid_service_fee)) {
             invalid_field = tr("maximum user-paid service fee");
             raw_value = QString::number(maximum_user_paid_service_fee);
-        } else if (!spinCanRepresent(m_min_amount,
+        } else if (!PaymasterWidgetImpl::spinCanRepresent(m_min_amount,
                                      min_amount_cents)) {
             invalid_field = tr("minimum payment");
             raw_value = QString::number(min_amount_cents);
-        } else if (!spinCanRepresent(m_max_amount,
+        } else if (!PaymasterWidgetImpl::spinCanRepresent(m_max_amount,
                                      max_amount_cents)) {
             invalid_field = tr("maximum payment");
             raw_value = QString::number(max_amount_cents);
-        } else if (!spinCanRepresent(m_quote_ttl, quote_ttl)) {
+        } else if (!PaymasterWidgetImpl::spinCanRepresent(m_quote_ttl, quote_ttl)) {
             invalid_field = tr("quote lifetime");
             raw_value = QString::number(quote_ttl);
         } else {
@@ -166,8 +670,8 @@ void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
         m_funding_model_status->setText(tr(
             "The persisted provider policy contains a %1 value (%2) that this interface cannot represent exactly. The original Core policy is retained and all policy mutation is disabled.")
             .arg(invalid_field, raw_value));
-        updateProviderButtons();
-        updateAutomaticRefreshTimer();
+        m_panel.overview().updateProviderButtons();
+        m_panel.overview().updateAutomaticRefreshTimer();
         return;
     }
     const UniValue& funding_models = policy.find_value("funding_models");
@@ -210,12 +714,12 @@ void PaymasterWidgetImpl::loadPolicy(const UniValue& policy)
     m_policy_loaded = true;
     m_policy_dirty = false;
     updatePolicyDisplay();
-    updateAutomaticRefreshTimer();
+    m_panel.overview().updateAutomaticRefreshTimer();
 }
 
-QWidget* PaymasterWidgetImpl::configurationWarningPanel(QLabel*& label, const char* name, const QString& button_text, std::function<void()> navigate)
+QWidget* ProviderConfiguration::configurationWarningPanel(QLabel*& label, const char* name, const QString& button_text, std::function<void()> navigate)
 {
-    auto* panel = new QWidget(this);
+    auto* panel = new QWidget(widget());
     auto* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(0, 0, 0, 0);
     label = new QLabel(panel);
@@ -227,12 +731,12 @@ QWidget* PaymasterWidgetImpl::configurationWarningPanel(QLabel*& label, const ch
     auto* link = new QPushButton(button_text, panel);
     link->setObjectName(QString::fromLatin1(name) + QStringLiteral("Link"));
     layout->addWidget(link, 0, Qt::AlignLeft);
-    connect(link, &QPushButton::clicked, this, [this, navigate] { if (!m_busy && !m_privacy) navigate(); });
+    connect(link, &QPushButton::clicked, widget(), [this, navigate] { if (!m_panel.busy() && !m_panel.privacyEnabled()) navigate(); });
     panel->hide();
     return panel;
 }
 
-QString PaymasterWidgetImpl::configurationConflictText(const UniValue& offer, const UniValue& safety) const
+QString ProviderConfiguration::configurationConflictText(const UniValue& offer, const UniValue& safety) const
 {
     QStringList lines;
     const auto conflicts = DigiDollar::Paymaster::OperatorFeeLimitConflicts(offer, safety);
@@ -250,16 +754,16 @@ QString PaymasterWidgetImpl::configurationConflictText(const UniValue& offer, co
     return lines.join(QLatin1Char('\n'));
 }
 
-void PaymasterWidgetImpl::updateConfigurationWarnings()
+void ProviderConfiguration::updateConfigurationWarnings()
 {
     if (!m_operator_config_warning || !m_policy_config_warning || !m_safety_config_warning ||
         !m_restricted_sponsored_safety.completed_per_day) return;
     const auto display = [this](QLabel* label, const QString& heading, const QString& detail) {
-        label->parentWidget()->setVisible(!m_privacy && !detail.isEmpty());
-        setStatusLabel(label, m_privacy || detail.isEmpty() ? QString{} : heading + QLatin1Char('\n') + detail, QStringLiteral("action"));
+        label->parentWidget()->setVisible(!m_panel.privacyEnabled() && !detail.isEmpty());
+        m_panel.setStatusLabel(label, m_panel.privacyEnabled() || detail.isEmpty() ? QString{} : heading + QLatin1Char('\n') + detail, QStringLiteral("action"));
     };
-    const auto& saved_offer = m_operator_snapshot.find_value("provider").find_value("policy");
-    const auto& saved_safety = m_operator_snapshot.find_value("safety").find_value("policy");
+    const auto& saved_offer = m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy");
+    const auto& saved_safety = m_panel.overview().operatorSnapshot().find_value("safety").find_value("policy");
     display(m_operator_config_warning, tr("Saved configuration conflict"), configurationConflictText(saved_offer, saved_safety));
     UniValue offer{UniValue::VOBJ}, models{UniValue::VARR};
     if (m_user_paid->isChecked()) models.push_back("user_paid");
@@ -283,12 +787,12 @@ void PaymasterWidgetImpl::updateConfigurationWarnings()
         input_error.isEmpty() ? configurationConflictText(saved_offer, safety) : input_error);
 }
 
-void PaymasterWidgetImpl::updatePolicyDisplay()
+void ProviderConfiguration::updatePolicyDisplay()
 {
     updateConfigurationWarnings();
     const bool user_paid = m_user_paid->isChecked();
     m_user_paid_pricing->setVisible(user_paid);
-    m_save_policy->setText(m_core_running ? tr("Save and restart provider…") : tr("Save policy"));
+    m_save_policy->setText(m_panel.overview().running() ? tr("Save and restart provider…") : tr("Save policy"));
     if (m_fee_example) {
         m_fee_example->setFeeRate(
             m_fee_bps->value(), user_paid,
@@ -301,12 +805,12 @@ void PaymasterWidgetImpl::updatePolicyDisplay()
     // A complete but future/out-of-range Core policy is deliberately
     // retained outside the QSpinBox controls. Never let a later display
     // refresh re-enable individual editors from that read-only snapshot.
-    m_scope->setEnabled(!m_busy && m_policy_snapshot_representable &&
+    m_scope->setEnabled(!m_panel.busy() && m_policy_snapshot_representable &&
                         (sponsored || restricted));
-    m_fee_bps->setEnabled(!m_busy && m_policy_snapshot_representable &&
+    m_fee_bps->setEnabled(!m_panel.busy() && m_policy_snapshot_representable &&
                           user_paid);
     m_maximum_user_paid_service_fee->setEnabled(
-        !m_busy && m_policy_snapshot_representable && user_paid);
+        !m_panel.busy() && m_policy_snapshot_representable && user_paid);
 
     QString model_text;
     if (restricted) {
@@ -363,7 +867,7 @@ void PaymasterWidgetImpl::updatePolicyDisplay()
             .arg(model_text, minimum, maximum, pricing).arg(m_quote_ttl->value()).arg(network_fee, persistence));
 }
 
-PaymasterWidgetImpl::FundingSafetyControls PaymasterWidgetImpl::createFundingSafetyControls(
+PaymasterWidgetImpl::FundingSafetyControls ProviderConfiguration::createFundingSafetyControls(
     QTabWidget* tabs, const QString& title, const QString& object_prefix,
     bool recommended_defaults)
 {
@@ -391,13 +895,13 @@ PaymasterWidgetImpl::FundingSafetyControls PaymasterWidgetImpl::createFundingSaf
     help->setWordWrap(true);
     form->addRow(help);
     FundingSafetyControls controls;
-    controls.per_transaction = dgbAmountField(
+    controls.per_transaction = PaymasterWidgetImpl::dgbAmountField(
         page, recommended_defaults ? m_network_fee->value() : 0);
-    controls.reserved = dgbAmountField(page, recommended_defaults ? 100000000 : 0);
-    controls.per_hour = dgbAmountField(page, recommended_defaults ? 200000000 : 0);
-    controls.per_day = dgbAmountField(page, recommended_defaults ? 1000000000 : 0);
-    controls.completed_per_hour = spin(page, 0, 1000000, recommended_defaults ? 10 : 0);
-    controls.completed_per_day = spin(page, 0, 1000000, recommended_defaults ? 100 : 0);
+    controls.reserved = PaymasterWidgetImpl::dgbAmountField(page, recommended_defaults ? 100000000 : 0);
+    controls.per_hour = PaymasterWidgetImpl::dgbAmountField(page, recommended_defaults ? 200000000 : 0);
+    controls.per_day = PaymasterWidgetImpl::dgbAmountField(page, recommended_defaults ? 1000000000 : 0);
+    controls.completed_per_hour = PaymasterWidgetImpl::spin(page, 0, 1000000, recommended_defaults ? 10 : 0);
+    controls.completed_per_day = PaymasterWidgetImpl::spin(page, 0, 1000000, recommended_defaults ? 100 : 0);
     controls.per_transaction->setObjectName(object_prefix + QStringLiteral("MaxNetworkFeePerTransaction"));
     controls.reserved->setObjectName(object_prefix + QStringLiteral("MaxReservedNetworkFee"));
     controls.per_hour->setObjectName(object_prefix + QStringLiteral("MaxNetworkFeePerHour"));
@@ -438,7 +942,7 @@ PaymasterWidgetImpl::FundingSafetyControls PaymasterWidgetImpl::createFundingSaf
         ? tr("Restore the recommended finite starting limits for this model. Save the provider safety policy to activate them.")
         : tr("Set all six limits to zero so this unused model is safely disabled. Save the provider safety policy to activate the change."));
     form->addRow(restore_defaults);
-    connect(restore_defaults, &QPushButton::clicked, this,
+    connect(restore_defaults, &QPushButton::clicked, widget(),
             [this, controls, recommended_defaults] {
                 restoreFundingSafetyDefaults(controls, recommended_defaults);
             });
@@ -446,7 +950,7 @@ PaymasterWidgetImpl::FundingSafetyControls PaymasterWidgetImpl::createFundingSaf
     return controls;
 }
 
-void PaymasterWidgetImpl::restoreFundingSafetyDefaults(const FundingSafetyControls& controls,
+void ProviderConfiguration::restoreFundingSafetyDefaults(const FundingSafetyControls& controls,
                                   bool recommended_defaults,
                                   bool mark_dirty)
 {
@@ -470,7 +974,7 @@ void PaymasterWidgetImpl::restoreFundingSafetyDefaults(const FundingSafetyContro
     updateFundingSafetyDisplay(controls);
 }
 
-void PaymasterWidgetImpl::restoreQuoteSafetyDefaults(bool mark_dirty)
+void ProviderConfiguration::restoreQuoteSafetyDefaults(bool mark_dirty)
 {
     m_loading_provider_safety = true;
     m_max_active_quotes_total->setValue(16);
@@ -485,7 +989,7 @@ void PaymasterWidgetImpl::restoreQuoteSafetyDefaults(bool mark_dirty)
     }
 }
 
-void PaymasterWidgetImpl::restoreClientSafetyDefaults(bool mark_dirty)
+void ProviderConfiguration::restoreClientSafetyDefaults(bool mark_dirty)
 {
     m_loading_client_safety = true;
     m_client_fee_per_transaction->setValue(100);
@@ -499,25 +1003,25 @@ void PaymasterWidgetImpl::restoreClientSafetyDefaults(bool mark_dirty)
     updateClientSafetyDisplay();
 }
 
-void PaymasterWidgetImpl::markProviderSafetyDirty()
+void ProviderConfiguration::markProviderSafetyDirty()
 {
     m_provider_safety_dirty = true;
     if (!m_policy_limits_review->isHidden()) {
-        setStatusLabel(m_policy_limits_hint, tr("Spending limits have unsaved changes. Review and save them, then return to save the offer."), QStringLiteral("action"));
+        m_panel.setStatusLabel(m_policy_limits_hint, tr("Spending limits have unsaved changes. Review and save them, then return to save the offer."), QStringLiteral("action"));
     }
     m_provider_safety_status->setText(tr(
         "Unsaved provider safety changes — the previously saved limits remain active until these values are saved."));
-    updateProviderButtons();
+    m_panel.overview().updateProviderButtons();
 }
 
-void PaymasterWidgetImpl::markClientSafetyDirty()
+void ProviderConfiguration::markClientSafetyDirty()
 {
     m_client_safety_dirty = true;
     m_client_safety_status->setText(tr(
         "Unsaved client safety changes — the previously saved limits remain active until these values are saved."));
 }
 
-void PaymasterWidgetImpl::updateFundingSafetyDisplay(const FundingSafetyControls& controls,
+void ProviderConfiguration::updateFundingSafetyDisplay(const FundingSafetyControls& controls,
                                 bool persisted)
 {
     if (!controls.mode) return;
@@ -543,7 +1047,7 @@ void PaymasterWidgetImpl::updateFundingSafetyDisplay(const FundingSafetyControls
     }
 }
 
-void PaymasterWidgetImpl::updateClientSafetyDisplay(bool persisted)
+void ProviderConfiguration::updateClientSafetyDisplay(bool persisted)
 {
     if (!m_client_safety_mode) return;
     if (m_client_fee_per_transaction->value() == 0 &&
@@ -563,27 +1067,27 @@ void PaymasterWidgetImpl::updateClientSafetyDisplay(bool persisted)
     }
 }
 
-void PaymasterWidgetImpl::watchFundingSafetyControls(const FundingSafetyControls& controls)
+void ProviderConfiguration::watchFundingSafetyControls(const FundingSafetyControls& controls)
 {
     for (QLineEdit* control : {controls.per_transaction, controls.reserved,
                                controls.per_hour, controls.per_day}) {
-        connect(control, &QLineEdit::textChanged, this, [this, controls] {
+        connect(control, &QLineEdit::textChanged, widget(), [this, controls] {
             if (!m_loading_provider_safety) markProviderSafetyDirty();
             updateFundingSafetyDisplay(controls);
-            updateProviderButtons();
+            m_panel.overview().updateProviderButtons();
         });
     }
     for (QSpinBox* control : {controls.completed_per_hour,
                               controls.completed_per_day}) {
-        connect(control, qOverload<int>(&QSpinBox::valueChanged), this, [this, controls] {
+        connect(control, qOverload<int>(&QSpinBox::valueChanged), widget(), [this, controls] {
             if (!m_loading_provider_safety) markProviderSafetyDirty();
             updateFundingSafetyDisplay(controls);
-            updateProviderButtons();
+            m_panel.overview().updateProviderButtons();
         });
     }
 }
 
-bool PaymasterWidgetImpl::readFundingSafety(const FundingSafetyControls& controls,
+bool ProviderConfiguration::readFundingSafety(const FundingSafetyControls& controls,
                               FundingSafetyValues& values)
 {
     bool ok_per_transaction{false};
@@ -603,7 +1107,7 @@ bool PaymasterWidgetImpl::readFundingSafety(const FundingSafetyControls& control
     return ok_per_transaction && ok_reserved && ok_per_hour && ok_per_day;
 }
 
-UniValue PaymasterWidgetImpl::fundingSafetyToJSON(const FundingSafetyValues& values)
+UniValue ProviderConfiguration::fundingSafetyToJSON(const FundingSafetyValues& values)
 {
     UniValue result{UniValue::VOBJ};
     result.pushKV("maximum_network_fee_per_transaction_satoshis", values.per_transaction);
@@ -615,7 +1119,7 @@ UniValue PaymasterWidgetImpl::fundingSafetyToJSON(const FundingSafetyValues& val
     return result;
 }
 
-bool PaymasterWidgetImpl::fundingSafetyCanRepresent(
+bool ProviderConfiguration::fundingSafetyCanRepresent(
     const UniValue& value, const FundingSafetyControls& controls)
 {
     if (!IsCompleteFundingSafety(value)) return false;
@@ -642,17 +1146,17 @@ bool PaymasterWidgetImpl::fundingSafetyCanRepresent(
                     completed_per_hour) &&
         GetIntField(value, "maximum_completed_per_day",
                     completed_per_day) &&
-        dgbAmountCanRepresent(per_transaction) &&
-        dgbAmountCanRepresent(reserved) &&
-        dgbAmountCanRepresent(per_hour) &&
-        dgbAmountCanRepresent(per_day) &&
-        spinCanRepresent(controls.completed_per_hour,
+        PaymasterWidgetImpl::dgbAmountCanRepresent(per_transaction) &&
+        PaymasterWidgetImpl::dgbAmountCanRepresent(reserved) &&
+        PaymasterWidgetImpl::dgbAmountCanRepresent(per_hour) &&
+        PaymasterWidgetImpl::dgbAmountCanRepresent(per_day) &&
+        PaymasterWidgetImpl::spinCanRepresent(controls.completed_per_hour,
                          completed_per_hour) &&
-        spinCanRepresent(controls.completed_per_day,
+        PaymasterWidgetImpl::spinCanRepresent(controls.completed_per_day,
                          completed_per_day);
 }
 
-bool PaymasterWidgetImpl::providerSafetyCanRepresent(const UniValue& policy) const
+bool ProviderConfiguration::providerSafetyCanRepresent(const UniValue& policy) const
 {
     int maximum_active_quotes_total{0};
     int maximum_active_quotes_per_netgroup{0};
@@ -677,19 +1181,19 @@ bool PaymasterWidgetImpl::providerSafetyCanRepresent(const UniValue& policy) con
             policy,
             "maximum_quote_requests_per_netgroup_per_minute",
             maximum_quote_requests_per_netgroup) &&
-        spinCanRepresent(m_max_active_quotes_total,
+        PaymasterWidgetImpl::spinCanRepresent(m_max_active_quotes_total,
                          maximum_active_quotes_total) &&
-        spinCanRepresent(m_max_active_quotes_per_netgroup,
+        PaymasterWidgetImpl::spinCanRepresent(m_max_active_quotes_per_netgroup,
                          maximum_active_quotes_per_netgroup) &&
-        spinCanRepresent(m_max_active_quotes_per_recipient,
+        PaymasterWidgetImpl::spinCanRepresent(m_max_active_quotes_per_recipient,
                          maximum_active_quotes_per_recipient) &&
-        spinCanRepresent(m_max_quote_requests_per_netgroup,
+        PaymasterWidgetImpl::spinCanRepresent(m_max_quote_requests_per_netgroup,
                          maximum_quote_requests_per_netgroup);
 }
 
-void PaymasterWidgetImpl::setProviderSafetyMutationEnabled(bool enabled)
+void ProviderConfiguration::setProviderSafetyMutationEnabled(bool enabled)
 {
-    const bool controls_enabled = enabled && !m_busy;
+    const bool controls_enabled = enabled && !m_panel.busy();
     if (m_provider_safety_group) {
         m_provider_safety_group->setEnabled(controls_enabled);
     }
@@ -712,14 +1216,14 @@ void PaymasterWidgetImpl::setProviderSafetyMutationEnabled(bool enabled)
         control->setEnabled(controls_enabled);
     }
     if (m_save_provider_safety) {
-        m_save_provider_safety->setEnabled(enabled && !m_busy && providerSafetyInputError().isEmpty());
+        m_save_provider_safety->setEnabled(enabled && !m_panel.busy() && providerSafetyInputError().isEmpty());
     }
 }
 
-QString PaymasterWidgetImpl::providerSafetyInputError() const
+QString ProviderConfiguration::providerSafetyInputError() const
 {
     if (!m_save_provider_safety || !m_restricted_sponsored_safety.completed_per_day) return {};
-    const auto& offer = m_operator_snapshot.find_value("provider").find_value("policy");
+    const auto& offer = m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy");
     const auto& models = offer.find_value("funding_models");
     const auto offers = [&models](const char* name) {
         return models.isArray() && std::any_of(models.getValues().begin(), models.getValues().end(),
@@ -763,7 +1267,7 @@ QString PaymasterWidgetImpl::providerSafetyInputError() const
     return {};
 }
 
-void PaymasterWidgetImpl::loadFundingSafety(const UniValue& value,
+void ProviderConfiguration::loadFundingSafety(const UniValue& value,
                               const FundingSafetyControls& controls)
 {
     if (!IsCompleteFundingSafety(value)) return;
@@ -781,7 +1285,7 @@ void PaymasterWidgetImpl::loadFundingSafety(const UniValue& value,
         value.find_value("maximum_completed_per_day").getInt<int>());
 }
 
-bool PaymasterWidgetImpl::providerSafetyAllowsSelectedModels() const
+bool ProviderConfiguration::providerSafetyAllowsSelectedModels() const
 {
     // Core is authoritative for funding-model applicability and all limit
     // relationships. Qt only prevents activation with missing or unsaved
@@ -789,16 +1293,16 @@ bool PaymasterWidgetImpl::providerSafetyAllowsSelectedModels() const
     return m_provider_safety_configured && !m_provider_safety_dirty;
 }
 
-void PaymasterWidgetImpl::discardAutostart()
+void ProviderConfiguration::discardAutostart()
 {
     m_autostart_dirty = false;
     m_autostart_message.clear();
     const QSignalBlocker blocker(m_autostart);
     m_autostart->setChecked(m_autostart_enabled);
-    updateProviderButtons();
+    m_panel.overview().updateProviderButtons();
 }
 
-void PaymasterWidgetImpl::reconcileAutostart()
+void ProviderConfiguration::reconcileAutostart()
 {
     if (m_autostart_pending_read) {
         m_autostart_pending_read = false;
@@ -816,10 +1320,10 @@ void PaymasterWidgetImpl::reconcileAutostart()
     }
 }
 
-void PaymasterWidgetImpl::updateAutostartControls()
+void ProviderConfiguration::updateAutostartControls()
 {
-    const bool known = m_provider_info_snapshot_available && m_provider_settings_present;
-    const bool available = known && hasRpcTransport() && !m_busy && !m_privacy && !m_autostart_pending_read;
+    const bool known = m_panel.overview().providerInfoAvailable() && m_panel.overview().settingsPresent();
+    const bool available = known && m_panel.hasRpcTransport() && !m_panel.busy() && !m_panel.privacyEnabled() && !m_autostart_pending_read;
     m_autostart->setEnabled(available);
     m_save_autostart->hide();
     m_discard_autostart->hide();
@@ -830,29 +1334,22 @@ void PaymasterWidgetImpl::updateAutostartControls()
     if (m_autostart_pending_read) status = tr("Autostart could not be confirmed. Checking the saved wallet setting; do not repeat the change yet.");
     else if (m_autostart_dirty) status = tr("Saving autostart…");
     if (!m_autostart_message.isEmpty()) status += QStringLiteral("\n") + m_autostart_message;
-    m_autostart_status->setText(m_privacy ? tr("Hidden by privacy mode") : status);
+    m_autostart_status->setText(m_panel.privacyEnabled() ? tr("Hidden by privacy mode") : status);
     if (m_settings_autostart_status) m_settings_autostart_status->setText(m_autostart_status->text());
     for (auto* control : m_autostart_copies) {
         const QSignalBlocker blocker(control);
         control->setChecked(m_autostart->isChecked());
         control->setEnabled(available);
     }
-    updateQuickAutomation();
-    if (m_autostart_dirty || m_autostart_pending_read) {
-        m_operator_start->setEnabled(false);
-        m_operator_start->setToolTip(tr("Save or discard the autostart change before starting."));
-        if (m_operator_next_action == QLatin1String("start") ||
-            m_operator_next_action == QLatin1String("enable") ||
-            (m_operator_next_action == QLatin1String("review_liquidity") && !m_core_running))
-            m_operator_action->setEnabled(false);
-    }
-    updateLifecycleControls();
+    m_panel.liquidity().updateQuickAutomation();
+    if (m_autostart_dirty || m_autostart_pending_read) m_panel.overview().gateAutostartPending();
+    m_panel.overview().updateLifecycleControls();
 }
 
-void PaymasterWidgetImpl::saveAutostart()
+void ProviderConfiguration::saveAutostart()
 {
-    if (!hasRpcTransport() || m_busy || m_privacy || !m_autostart_dirty ||
-        m_autostart_pending_read || !m_provider_info_snapshot_available || !m_provider_settings_present) return;
+    if (!m_panel.hasRpcTransport() || m_panel.busy() || m_panel.privacyEnabled() || !m_autostart_dirty ||
+        m_autostart_pending_read || !m_panel.overview().providerInfoAvailable() || !m_panel.overview().settingsPresent()) return;
     const bool requested = m_autostart->isChecked();
     UniValue settings{UniValue::VOBJ}, params{UniValue::VARR};
     settings.pushKV("autostart", requested);
@@ -862,9 +1359,9 @@ void PaymasterWidgetImpl::saveAutostart()
         m_autostart_pending_read = true;
         m_autostart_message.clear();
         updateAutostartControls();
-        refreshStatus();
+        m_panel.refreshStatus();
     };
-    call("setpaymasterruntimesettings", params, false, nullptr,
+    m_panel.call("setpaymasterruntimesettings", params, false, nullptr,
         [this, requested, verify](const UniValue& result) {
             const auto& value = result.find_value("autostart");
             if (!value.isBool() || value.get_bool() != requested ||
@@ -876,16 +1373,16 @@ void PaymasterWidgetImpl::saveAutostart()
             m_autostart_dirty = false;
             m_autostart_message = tr("Autostart saved.");
             updateAutostartControls();
-            refreshStatus();
+            m_panel.refreshStatus();
         }, false, [verify](const QString&) { verify(); });
 }
 
-void PaymasterWidgetImpl::saveRuntimeSettings()
+void ProviderConfiguration::saveRuntimeSettings()
 {
-    if (!hasRpcTransport() || m_busy || !m_runtime_settings_dirty) {
-        m_runtime_settings_result->setText(!hasRpcTransport()
+    if (!m_panel.hasRpcTransport() || m_panel.busy() || !m_runtime_settings_dirty) {
+        m_runtime_settings_result->setText(!m_panel.hasRpcTransport()
             ? tr("Runtime settings were not saved because no wallet RPC transport is available.")
-            : m_busy
+            : m_panel.busy()
                 ? tr("Runtime settings were not saved because another wallet operation is still running.")
                 : tr("Runtime settings were not saved because there are no unsaved changes."));
         return;
@@ -898,14 +1395,14 @@ void PaymasterWidgetImpl::saveRuntimeSettings()
     params.push_back(std::move(settings));
     const ErrorHandler failed = [this](const QString& error) {
         m_runtime_settings_result->setText(error);
-        m_status->setText(error);
-        updateProviderButtons();
+        m_panel.showStatus(error);
+        m_panel.overview().updateProviderButtons();
     };
     const auto generation = m_settings_restart_generation;
     applyWithProviderRestart([this, params, selected_mode, failed, generation](bool restart) {
-        call("setpaymasterruntimesettings", params, false, nullptr,
+        m_panel.call("setpaymasterruntimesettings", params, false, nullptr,
              [this, selected_mode, restart, failed, generation](const UniValue& result) {
-                 if (m_privacy || generation != m_settings_restart_generation) return;
+                 if (m_panel.privacyEnabled() || generation != m_settings_restart_generation) return;
                  const UniValue& operation_mode =
                      result.find_value("operation_mode");
                  const UniValue& autostart = result.find_value("autostart");
@@ -915,16 +1412,15 @@ void PaymasterWidgetImpl::saveRuntimeSettings()
                          selected_mode) {
                      m_runtime_settings_result->setText(tr(
                          "Runtime settings were not confirmed by Core. The displayed edit remains unsaved; refresh the provider status before retrying."));
-                     updateProviderButtons();
+                     m_panel.overview().updateProviderButtons();
                      return;
                  }
-                 m_operation_mode = selected_mode;
+                 m_panel.overview().applyRuntimeSettings(selected_mode);
                  m_autostart_enabled = autostart.get_bool();
                  reconcileAutostart();
-                 m_provider_settings_present = true;
                  m_runtime_settings_dirty = false;
                  m_runtime_settings_result->setText(
-                     m_operation_mode == QLatin1String("manual")
+                     m_panel.overview().operationMode() == QLatin1String("manual")
                          ? tr("Saved: manual expert processing.")
                          : m_autostart_enabled
                                ? tr("Saved: automatic processing with provider autostart. No passphrase is stored; a locked wallet waits for unlock.")
@@ -934,7 +1430,7 @@ void PaymasterWidgetImpl::saveRuntimeSettings()
                          return provider.find_value("operation_mode").isStr() &&
                              provider.find_value("operation_mode").get_str() == selected_mode.toStdString();
                      }, failed);
-                 } else refreshStatus();
+                 } else m_panel.refreshStatus();
              }, /*show_error=*/false,
              [this](const QString& error) {
                  // Preserve the unsaved edit after a backend rejection and
@@ -942,18 +1438,18 @@ void PaymasterWidgetImpl::saveRuntimeSettings()
                  // prevents a failed RPC from looking like a successful save.
                  m_runtime_settings_result->setText(
                      tr("Runtime settings were not saved: %1").arg(error));
-                 updateProviderButtons();
+                 m_panel.overview().updateProviderButtons();
              });
     }, failed);
 }
 
-void PaymasterWidgetImpl::configureOperatorNode()
+void ProviderConfiguration::configureOperatorNode()
 {
-    if (m_privacy || m_busy || !hasRpcTransport() || m_node_connection_dialog) return;
-    const auto generation = m_wallet_generation;
-    call("getpaymasternodeconfig", {}, false, nullptr, [this, generation](const UniValue& current) {
-        QTimer::singleShot(0, this, [this, generation, current] {
-            if (generation == m_wallet_generation && !m_privacy && !m_node_connection_dialog)
+    if (m_panel.privacyEnabled() || m_panel.busy() || !m_panel.hasRpcTransport() || m_node_connection_dialog) return;
+    const auto generation = m_panel.walletGeneration();
+    m_panel.call("getpaymasternodeconfig", {}, false, nullptr, [this, generation](const UniValue& current) {
+        QTimer::singleShot(0, widget(), [this, generation, current] {
+            if (generation == m_panel.walletGeneration() && !m_panel.privacyEnabled() && !m_node_connection_dialog)
                 configureOperatorNodeFrom(current);
         });
     }, false, [this](const QString& error) {
@@ -966,10 +1462,10 @@ void PaymasterWidgetImpl::configureOperatorNode()
     });
 }
 
-void PaymasterWidgetImpl::configureOperatorNodeFrom(const UniValue& current)
+void ProviderConfiguration::configureOperatorNodeFrom(const UniValue& current)
 {
-    if (m_setup_wizard_active) {
-        QDialog dialog(this);
+    if (m_panel.setup().wizardActive()) {
+        QDialog dialog(widget());
         dialog.setObjectName("paymasterNodeConnectionDialog");
         dialog.setWindowTitle(tr("Node connection — all wallets"));
         dialog.resize(720, 650);
@@ -991,12 +1487,12 @@ void PaymasterWidgetImpl::configureOperatorNodeFrom(const UniValue& current)
     if (m_inline_node_editor) delete m_inline_node_editor.data();
     m_inline_node_editor = createNodeConfigEditor(current, m_node_editor_host);
     m_node_editor_layout->addWidget(m_inline_node_editor);
-    showOperatorPage(m_connection_page);
+    m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::CONNECTION));
 }
 
-QWidget* PaymasterWidgetImpl::createNodeConfigEditor(const UniValue& current, QWidget* parent)
+QWidget* ProviderConfiguration::createNodeConfigEditor(const UniValue& current, QWidget* parent)
 {
-    const auto generation = m_wallet_generation;
+    const auto generation = m_panel.walletGeneration();
     auto* panel = new QWidget(parent);
     panel->setObjectName("paymasterNodeConfigEditor");
     panel->setAttribute(Qt::WA_StyledBackground, true);
@@ -1216,14 +1712,14 @@ QWidget* PaymasterWidgetImpl::createNodeConfigEditor(const UniValue& current, QW
         if (auto* check = qobject_cast<QCheckBox*>(field.input)) connect(check, &QCheckBox::toggled, panel, invalidate);
     }
     const auto error_handler = [this, guard, generation, status, preview_button, save, contents](const QString& error) {
-        if (!guard || generation != m_wallet_generation || m_privacy) return;
+        if (!guard || generation != m_panel.walletGeneration() || m_panel.privacyEnabled()) return;
         contents->setEnabled(true); preview_button->setEnabled(true); save->setEnabled(false);
         status->setText(error.startsWith("PAYMASTER_CONFIG_OVERRIDE")
             ? tr("These settings are controlled by a start argument, settings.json or an included file. Change that source and restart the node, or remove its override before saving here. No configuration was saved.\nDetails: %1").arg(error)
             : tr("Configuration could not be completed. Your entries remain available.\n%1").arg(error));
     };
     connect(discard, &QPushButton::clicked, panel, [this, generation, fields, plan, save, status] {
-        if (m_busy || m_privacy || generation != m_wallet_generation) return;
+        if (m_panel.busy() || m_panel.privacyEnabled() || generation != m_panel.walletGeneration()) return;
         for (const auto& field : fields) {
             const QSignalBlocker blocker(field.input);
             if (auto* edit = qobject_cast<QLineEdit*>(field.input)) edit->setText(QString::fromStdString(field.original.get_str()));
@@ -1239,7 +1735,7 @@ QWidget* PaymasterWidgetImpl::createNodeConfigEditor(const UniValue& current, QW
         status->setText(tr("Edits discarded. The last loaded configuration is shown; refresh to check for file changes."));
     });
     connect(preview_button, &QPushButton::clicked, panel, [this, guard, generation, fields, plan, status, preview_button, save, contents, error_handler] {
-        if (m_busy || m_privacy || generation != m_wallet_generation) return;
+        if (m_panel.busy() || m_panel.privacyEnabled() || generation != m_panel.walletGeneration()) return;
         UniValue changes{UniValue::VOBJ};
         QStringList summary;
         for (const auto& field : fields) {
@@ -1266,9 +1762,9 @@ QWidget* PaymasterWidgetImpl::createNodeConfigEditor(const UniValue& current, QW
         UniValue params{UniValue::VARR}; params.push_back(changes);
         status->setText(tr("Checking these changes with Core…"));
         contents->setEnabled(false); preview_button->setEnabled(false);
-        call("preparepaymasternodeconfig", params, false, nullptr,
+        m_panel.call("preparepaymasternodeconfig", params, false, nullptr,
             [this, guard, generation, plan, changes, summary, status, preview_button, save, contents, error_handler](const UniValue& result) {
-                if (!guard || generation != m_wallet_generation || m_privacy) return;
+                if (!guard || generation != m_panel.walletGeneration() || m_panel.privacyEnabled()) return;
                 contents->setEnabled(true); preview_button->setEnabled(true);
                 if (!IsHex256Field(result, "plan_id") || !DigiDollar::Paymaster::SetupMatches(changes, result.find_value("settings")) ||
                     !DigiDollar::Paymaster::SetupMatches(result.find_value("settings"), changes)) { error_handler(tr("Core returned an incomplete or different preview.")); return; }
@@ -1278,28 +1774,28 @@ QWidget* PaymasterWidgetImpl::createNodeConfigEditor(const UniValue& current, QW
             }, false, error_handler);
     });
     connect(save, &QPushButton::clicked, panel, [this, guard, generation, plan, status, preview_button, save, contents, error_handler] {
-        if (m_busy || m_privacy || generation != m_wallet_generation || !plan->isObject()) return;
+        if (m_panel.busy() || m_panel.privacyEnabled() || generation != m_panel.walletGeneration() || !plan->isObject()) return;
         UniValue options{UniValue::VOBJ}, params{UniValue::VARR};
         options.pushKV("plan_id", plan->find_value("plan_id")); options.pushKV("settings", plan->find_value("settings")); params.push_back(options);
         *plan = UniValue{}; save->setEnabled(false); preview_button->setEnabled(false); contents->setEnabled(false);
         status->setText(tr("Saving the reviewed configuration…"));
-        call("applypaymasternodeconfig", params, false, nullptr,
+        m_panel.call("applypaymasternodeconfig", params, false, nullptr,
             [this, guard, generation, status, error_handler](const UniValue& result) {
-                if (!guard || generation != m_wallet_generation || m_privacy) return;
+                if (!guard || generation != m_panel.walletGeneration() || m_panel.privacyEnabled()) return;
                 if (!result.find_value("applied").isTrue() || !result.find_value("backup").isStr()) { error_handler(tr("Core did not confirm the configuration write. Check the file before trying again.")); return; }
-                m_operator_restart_required = true;
+                m_panel.overview().requireRestart();
                 status->setText(tr("Configuration saved. Restart the node to use it. Current running values are unchanged.\nBackup: %1").arg(QString::fromStdString(result.find_value("backup").get_str())));
             }, false, error_handler);
     });
     return panel;
 }
 
-void PaymasterWidgetImpl::saveProviderSafetyPolicy()
+void ProviderConfiguration::saveProviderSafetyPolicy()
 {
-    if (m_busy || m_privacy) return;
+    if (m_panel.busy() || m_panel.privacyEnabled()) return;
     const QString input_error = providerSafetyInputError();
     if (!input_error.isEmpty()) {
-        updateProviderButtons();
+        m_panel.overview().updateProviderButtons();
         return;
     }
     if (!m_provider_safety_snapshot_representable) {
@@ -1315,7 +1811,7 @@ void PaymasterWidgetImpl::saveProviderSafetyPolicy()
         !readFundingSafety(m_restricted_sponsored_safety,
                            restricted_sponsored)) {
         QMessageBox::warning(
-            this, tr("Paymaster provider safety policy"),
+            widget(), tr("Paymaster provider safety policy"),
             tr("One or more amounts are outside the supported whole-satoshi range."));
         return;
     }
@@ -1331,7 +1827,7 @@ void PaymasterWidgetImpl::saveProviderSafetyPolicy()
     const UniValue requested_policy = policy;
     UniValue params{UniValue::VARR};
     params.push_back(std::move(policy));
-    call("setpaymastersafetypolicy", std::move(params), false, nullptr,
+    m_panel.call("setpaymastersafetypolicy", std::move(params), false, nullptr,
          [this, requested_policy](const UniValue& result) {
              if (!IsExactProviderSafetyAcknowledgement(
                      requested_policy, result)) {
@@ -1343,34 +1839,32 @@ void PaymasterWidgetImpl::saveProviderSafetyPolicy()
              m_provider_safety_status->setText(tr("Spending limits saved."));
              if (!m_policy_limits_review->isHidden()) {
                  showPolicySaveStatus(tr("Spending limits saved. Review your offer edits and save the policy to activate them."));
-                 setStatusLabel(m_policy_limits_hint,
+                 m_panel.setStatusLabel(m_policy_limits_hint,
                      tr("Spending limits saved. Return to offer settings and save the policy to activate your offer changes."),
                      QStringLiteral("ready"));
              }
              invalidateSavedConfigurationDisplay();
-             refreshStatus();
+             m_panel.refreshStatus();
          }, false, [this](const QString& error) {
-             const bool rejected = PaymasterQt::StableCode(m_rpc_failure).startsWith(QStringLiteral("PAYMASTER_INVALID_SAFETY")) ||
-                 PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_SAFETY_LIMITS_REQUIRED");
+             const bool rejected = PaymasterQt::StableCode(m_panel.rpcFailure()).startsWith(QStringLiteral("PAYMASTER_INVALID_SAFETY")) ||
+                 PaymasterQt::StableCode(m_panel.rpcFailure()) == QLatin1String("PAYMASTER_SAFETY_LIMITS_REQUIRED");
              m_provider_safety_status->setText(rejected
                  ? tr("Limits were not saved: they do not fit the current offer or the other budgets. Your edits have been kept. Review the current offer and highlighted limits before saving again.")
                  : tr("Saving the limits could not be confirmed. Your edits have been kept. Check the current saved status before trying again."));
-             refreshStatus();
+             m_panel.refreshStatus();
          });
 }
 
-void PaymasterWidgetImpl::invalidateSavedConfigurationDisplay()
+void ProviderConfiguration::invalidateSavedConfigurationDisplay()
 {
     // A successful write makes the previous combined snapshot obsolete.
     // Do not keep displaying its conflict/readiness during readback, and
     // do not synthesize readiness from the write acknowledgement alone.
-    m_operator_snapshot = UniValue{};
-    m_status_age.invalidate();
-    m_provider_info_snapshot_available = false;
-    resetOperatorPresentation();
+    m_panel.overview().invalidateProviderObservation();
+    m_panel.overview().resetOperatorPresentation();
 }
 
-void PaymasterWidgetImpl::saveClientSafetyPolicy()
+void ProviderConfiguration::saveClientSafetyPolicy()
 {
     if (!m_client_safety_snapshot_representable) {
         m_client_safety_status->setText(tr(
@@ -1387,7 +1881,7 @@ void PaymasterWidgetImpl::saveClientSafetyPolicy()
                   requested_per_day);
     UniValue params{UniValue::VARR};
     params.push_back(std::move(policy));
-    call("setpaymasterclientsafetypolicy", std::move(params), false, nullptr,
+    m_panel.call("setpaymasterclientsafetypolicy", std::move(params), false, nullptr,
          [this, requested_per_transaction,
           requested_per_day](const UniValue& result) {
              if (!IsCompleteClientSafetyPolicy(result)) {
@@ -1419,7 +1913,7 @@ void PaymasterWidgetImpl::saveClientSafetyPolicy()
          });
 }
 
-QString PaymasterWidgetImpl::safetyClassStatus(const QString& name, const UniValue& value) const
+QString ProviderConfiguration::safetyClassStatus(const QString& name, const UniValue& value) const
 {
     if (!HasInt64Fields(
             value,
@@ -1439,7 +1933,7 @@ QString PaymasterWidgetImpl::safetyClassStatus(const QString& name, const UniVal
         .arg(value.find_value("spent_network_fee_last_day_satoshis").getInt<qint64>())
         .arg(value.find_value("completed_last_hour").getInt<qint64>())
         .arg(value.find_value("completed_last_day").getInt<qint64>())
-        .arg(yesNo(value.find_value("can_accept_minimum_quote").get_bool()));
+        .arg(m_panel.yesNo(value.find_value("can_accept_minimum_quote").get_bool()));
     QStringList errors;
     const UniValue& error_values = value.find_value("errors");
     if (error_values.isArray()) {
@@ -1451,7 +1945,7 @@ QString PaymasterWidgetImpl::safetyClassStatus(const QString& name, const UniVal
     return status;
 }
 
-void PaymasterWidgetImpl::applyProviderSafetyStatus(const UniValue& result)
+void ProviderConfiguration::applyProviderSafetyStatus(const UniValue& result)
 {
              const UniValue& configured = result.find_value("configured");
              const UniValue& policy = result.find_value("policy");
@@ -1463,7 +1957,7 @@ void PaymasterWidgetImpl::applyProviderSafetyStatus(const UniValue& result)
                  setProviderSafetyMutationEnabled(false);
                  m_provider_safety_status->setText(tr(
                      "Core returned an incomplete provider safety status. Guided setup remains unavailable until a complete refresh succeeds."));
-                 updateProviderButtons();
+                 m_panel.overview().updateProviderButtons();
                  return;
              }
              if (configured.get_bool() &&
@@ -1476,7 +1970,7 @@ void PaymasterWidgetImpl::applyProviderSafetyStatus(const UniValue& result)
                  setProviderSafetyMutationEnabled(false);
                  m_provider_safety_status->setText(tr(
                      "Core returned a complete provider safety policy containing a value that this interface cannot represent exactly. The persisted policy was retained unchanged and all provider-safety mutation is disabled."));
-                 updateProviderButtons();
+                 m_panel.overview().updateProviderButtons();
                  return;
              }
              m_unrepresentable_provider_safety_snapshot =
@@ -1519,17 +2013,17 @@ void PaymasterWidgetImpl::applyProviderSafetyStatus(const UniValue& result)
              usage.push_back(safetyClassStatus(tr("Public sponsored"), result.find_value("public_sponsored")));
              usage.push_back(safetyClassStatus(tr("Restricted sponsored"), result.find_value("restricted_sponsored")));
              m_provider_safety_usage->setText(usage.join('\n'));
-             updateProviderButtons();
+             m_panel.overview().updateProviderButtons();
 }
 
-void PaymasterWidgetImpl::refreshProviderSafetyStatus()
+void ProviderConfiguration::refreshProviderSafetyStatus()
 {
     if (!m_client_safety_dirty) {
         m_client_safety_status->setText(
             tr("Client safety policy: unavailable (automatic Paymaster transfers unavailable)"));
     }
-    updateProviderButtons();
-    call("getpaymastersafetystatus", {}, false, nullptr,
+    m_panel.overview().updateProviderButtons();
+    m_panel.call("getpaymastersafetystatus", {}, false, nullptr,
          [this](const UniValue& result) {
              applyProviderSafetyStatus(result);
              refreshClientSafetyStatus();
@@ -1540,18 +2034,18 @@ void PaymasterWidgetImpl::refreshProviderSafetyStatus()
              m_provider_safety_status->setText(tr(
                  "Provider safety status unavailable: %1. Saved values are retained locally but cannot be used by guided setup until a complete refresh succeeds.")
                      .arg(error));
-             updateProviderButtons();
+             m_panel.overview().updateProviderButtons();
              refreshClientSafetyStatus();
          });
 }
 
-void PaymasterWidgetImpl::refreshClientSafetyStatus()
+void ProviderConfiguration::refreshClientSafetyStatus()
 {
     if (!m_client_safety_dirty) {
         m_client_safety_status->setText(
             tr("Client safety policy: unavailable (automatic Paymaster transfers unavailable)"));
     }
-    call("getpaymasterclientsafetystatus", {}, false, nullptr,
+    m_panel.call("getpaymasterclientsafetystatus", {}, false, nullptr,
          [this](const UniValue& result) {
              if (!IsCompleteClientSafetyStatus(result)) {
                  m_client_safety_configured = false;
@@ -1572,7 +2066,7 @@ void PaymasterWidgetImpl::refreshClientSafetyStatus()
                      UniValue{UniValue::VOBJ};
                  m_client_safety_snapshot_representable = true;
                  if (m_client_safety_group) {
-                     m_client_safety_group->setEnabled(!m_busy);
+                     m_client_safety_group->setEnabled(!m_panel.busy());
                  }
              }
              if (policy.isObject() && !m_client_safety_dirty) {
@@ -1591,9 +2085,9 @@ void PaymasterWidgetImpl::refreshClientSafetyStatus()
                          "Core returned client-safety values outside the supported range. Automatic Paymaster transfers remain unavailable."));
                      return;
                  }
-                 if (!spinCanRepresent(m_client_fee_per_transaction,
+                 if (!PaymasterWidgetImpl::spinCanRepresent(m_client_fee_per_transaction,
                                        per_transaction) ||
-                     !spinCanRepresent(m_client_fee_per_day, per_day)) {
+                     !PaymasterWidgetImpl::spinCanRepresent(m_client_fee_per_day, per_day)) {
                      m_unrepresentable_client_safety_snapshot = policy;
                      m_client_safety_snapshot_representable = false;
                      m_client_safety_configured = false;
@@ -1608,7 +2102,7 @@ void PaymasterWidgetImpl::refreshClientSafetyStatus()
                      UniValue{UniValue::VOBJ};
                  m_client_safety_snapshot_representable = true;
                  if (m_client_safety_group) {
-                     m_client_safety_group->setEnabled(!m_busy);
+                     m_client_safety_group->setEnabled(!m_panel.busy());
                  }
                  m_loading_client_safety = true;
                  m_client_fee_per_transaction->setValue(
@@ -1661,17 +2155,17 @@ void PaymasterWidgetImpl::refreshClientSafetyStatus()
          }, false);
 }
 
-void PaymasterWidgetImpl::showPolicySaveStatus(const QString& message)
+void ProviderConfiguration::showPolicySaveStatus(const QString& message)
 {
-    setStatusLabel(m_policy_save_status, message, QStringLiteral("info"));
+    m_panel.setStatusLabel(m_policy_save_status, message, QStringLiteral("info"));
     m_policy_save_status->setVisible(!message.isEmpty());
     m_review_policy_limits->hide();
 }
 
-void PaymasterWidgetImpl::reviewPolicySpendingLimits()
+void ProviderConfiguration::reviewPolicySpendingLimits()
 {
-    if (m_busy || m_privacy || !m_policy_dirty) return;
-    showOperatorPage(m_safety_page);
+    if (m_panel.busy() || m_panel.privacyEnabled() || !m_policy_dirty) return;
+    m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::SAFETY));
     m_policy_limits_review->show();
     const bool restricted = m_scope->currentData().toString() == QLatin1String("restricted");
     m_funding_safety_tabs->setCurrentIndex(m_sponsored->isChecked() ? (restricted ? 2 : 1) : 0);
@@ -1679,14 +2173,14 @@ void PaymasterWidgetImpl::reviewPolicySpendingLimits()
     if (!m_policy_snapshot_representable || !m_provider_safety_snapshot_available ||
         !m_provider_safety_snapshot_representable || !m_provider_safety_configured ||
         !m_network_fee->hasAcceptableInput() ||
-        !GetInt64Field(m_operator_snapshot.find_value("provider").find_value("policy"),
+        !GetInt64Field(m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy"),
                        "maximum_network_fee_dgb_satoshis", saved_fee) || saved_fee <= 0) {
-        setStatusLabel(m_policy_limits_hint, tr("Refresh the current offer and spending limits before preparing changes."), QStringLiteral("action"));
+        m_panel.setStatusLabel(m_policy_limits_hint, tr("Refresh the current offer and spending limits before preparing changes."), QStringLiteral("action"));
         return;
     }
     // Never overwrite a manually edited budget, including incomplete text.
     if (m_provider_safety_dirty) {
-        setStatusLabel(m_policy_limits_hint,
+        m_panel.setStatusLabel(m_policy_limits_hint,
             tr("Your unsaved spending limits have been kept. Every selected payment model needs six positive limits; each per-transfer limit must fit both the saved and edited offer's network-fee ceiling. Save the limits, then return to save the offer."),
             QStringLiteral("action"));
         return;
@@ -1715,18 +2209,18 @@ void PaymasterWidgetImpl::reviewPolicySpendingLimits()
         updateFundingSafetyDisplay(controls[i]);
     }
     if (changed) markProviderSafetyDirty();
-    setStatusLabel(m_policy_limits_hint,
+    m_panel.setStatusLabel(m_policy_limits_hint,
         tr("Review these limits before saving: finite starting limits were filled only for selected models with zero limits, and per-transfer caps were lowered where needed to fit both offers. Other limits were kept. Sponsored payments spend your DGB without a DD service fee. Nothing is saved yet. Save the limits below, then return to save the offer."),
         QStringLiteral("action"));
 }
 
-void PaymasterWidgetImpl::savePolicy()
+void ProviderConfiguration::savePolicy()
 {
     if (m_scope->currentData().toString() == QLatin1String("restricted")) {
-        const QString message = readinessExplanation(QStringLiteral("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"));
-        m_status->setText(message);
+        const QString message = m_panel.overview().readinessExplanation(QStringLiteral("PAYMASTER_RESTRICTED_SPONSORSHIP_DISABLED"));
+        m_panel.showStatus(message);
         showPolicySaveStatus(message);
-        setStatusLabel(m_policy_save_status, message, QStringLiteral("action"));
+        m_panel.setStatusLabel(m_policy_save_status, message, QStringLiteral("action"));
         return; // Reject before pausing a provider or dispatching any RPC.
     }
     for (QSpinBox* control : {m_fee_bps, m_maximum_user_paid_service_fee,
@@ -1734,7 +2228,7 @@ void PaymasterWidgetImpl::savePolicy()
         if (!m_user_paid->isChecked() && (control == m_fee_bps || control == m_maximum_user_paid_service_fee)) continue;
         if (!control->hasAcceptableInput()) {
             const QString message = tr("Policy was not saved. Correct the highlighted value; your edits have been kept.");
-            m_status->setText(message);
+            m_panel.showStatus(message);
             showPolicySaveStatus(message);
             control->setFocus();
             return;
@@ -1747,7 +2241,7 @@ void PaymasterWidgetImpl::savePolicy()
     m_quote_ttl->interpretText();
     m_network_fee->interpretText();
     if (!m_policy_snapshot_representable) {
-        m_status->setText(tr(
+        m_panel.showStatus(tr(
             "Provider policy was not changed: the persisted Core value cannot be represented exactly by this interface."));
         return;
     }
@@ -1755,7 +2249,7 @@ void PaymasterWidgetImpl::savePolicy()
     if (m_sponsored->isChecked()) funding.push_back("sponsored");
     if (m_user_paid->isChecked()) funding.push_back("user_paid");
     if (funding.empty()) {
-        QMessageBox::warning(this, tr("Paymaster policy"), tr("Select at least one funding model."));
+        QMessageBox::warning(widget(), tr("Paymaster policy"), tr("Select at least one funding model."));
         return;
     }
     UniValue policy{UniValue::VOBJ};
@@ -1775,27 +2269,27 @@ void PaymasterWidgetImpl::savePolicy()
     UniValue params{UniValue::VARR};
     params.push_back(std::move(policy));
     const ErrorHandler failed = [this](const QString& error) {
-        m_status->setText(error);
+        m_panel.showStatus(error);
         showPolicySaveStatus(error);
-        setStatusLabel(m_policy_save_status, error, QStringLiteral("action"));
+        m_panel.setStatusLabel(m_policy_save_status, error, QStringLiteral("action"));
     };
     const auto generation = m_settings_restart_generation;
     applyWithProviderRestart([this, params, requested_policy, failed, generation](bool restart) {
         m_policy_dirty = true;
         showPolicySaveStatus(tr("Saving policy…"));
-        call("setpaymasterpolicy", params, false, nullptr,
+        m_panel.call("setpaymasterpolicy", params, false, nullptr,
              [this, requested_policy, restart, failed, generation](const UniValue& result) {
-                 if (m_privacy || generation != m_settings_restart_generation) return;
+                 if (m_panel.privacyEnabled() || generation != m_settings_restart_generation) return;
                  if (!IsExactProviderPolicyAcknowledgement(
                          requested_policy, result)) {
                      const QString message = tr(
                          "Core did not confirm the exact provider operating policy. The displayed edit remains unsaved; refresh before retrying. No automatic restart was attempted.");
-                     m_status->setText(message);
+                     m_panel.showStatus(message);
                      showPolicySaveStatus(message);
                      return;
                  }
                  m_policy_loaded = true;
-                 m_provider_settings_present = true;
+                 m_panel.overview().recordSettingsPresent();
                  m_pending_policy_hash = QString::fromStdString(
                      result.find_value("policy_hash").get_str());
                  m_policy_readback_pending = true;
@@ -1803,7 +2297,7 @@ void PaymasterWidgetImpl::savePolicy()
                  showPolicySaveStatus(tr("Policy saved."));
                  invalidateSavedConfigurationDisplay();
                  updatePolicyDisplay();
-                 updateAutomaticRefreshTimer();
+                 m_panel.overview().updateAutomaticRefreshTimer();
                  if (restart) {
                      const std::string hash = result.find_value("policy_hash").get_str();
                      finishProviderSettingsRestart([requested_policy, hash](const UniValue& provider) {
@@ -1811,19 +2305,659 @@ void PaymasterWidgetImpl::savePolicy()
                          return IsExactProviderPolicyAcknowledgement(requested_policy, saved) &&
                              saved.find_value("policy_hash").get_str() == hash;
                      }, failed);
-                 } else refreshStatus();
+                 } else m_panel.refreshStatus();
              }, false, [this, restart](const QString& error) {
-                 const bool safety_conflict = PaymasterQt::StableCode(m_rpc_failure) == QLatin1String("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
+                 const bool safety_conflict = PaymasterQt::StableCode(m_panel.rpcFailure()) == QLatin1String("PAYMASTER_PROVIDER_SAFETY_POLICY_CONFLICT");
                  QString message = safety_conflict
                      ? tr("Offer not saved: the selected payment models or network-fee ceiling do not match the saved spending limits. Your saved offer is unchanged. Review and save compatible limits first, then save this offer.")
                      : tr("The policy save could not be confirmed. Your edits have been kept. Check the current status before retrying.");
                  if (restart) message += tr(" The provider was paused and was not automatically restarted.");
-                 m_status->setText(message);
+                 m_panel.showStatus(message);
                  showPolicySaveStatus(message);
                  if (safety_conflict) {
-                     setStatusLabel(m_policy_save_status, message, QStringLiteral("action"));
+                     m_panel.setStatusLabel(m_policy_save_status, message, QStringLiteral("action"));
                      m_review_policy_limits->show();
                  }
              });
     }, failed);
+}
+
+void ProviderConfiguration::buildConnection(PageBindings& pages)
+{
+    pages.connection_scroll = new QScrollArea;
+    pages.connection_scroll->setObjectName("paymasterConnectionPage");
+    pages.connection_scroll->setWidgetResizable(true);
+    pages.connection = new QWidget(pages.connection_scroll);
+    pages.connection->setObjectName("paymasterConnectionContents");
+
+    auto* connection_column = CreatePaymasterPageColumn(pages.connection, pages.connection_layout);
+    AddPaymasterPageHeading(pages.connection_layout, connection_column, tr("Node connection"),
+                            tr("Connection settings apply to every wallet on this node. Review reachability and changes that need a restart."), QStringLiteral("paymasterConnection"));
+    pages.network_group = new QGroupBox(tr("Connection checks"), connection_column);
+    pages.network_group->setObjectName("paymasterConnectionNetwork");
+    pages.network_layout = new QVBoxLayout(pages.network_group);
+    auto* connection_help = new QLabel(tr("Local readiness means this node can accept connections. To check reachability, run checkpaymasterendpoint with the announced IP or Tor address from another node. The RPC result describes that connection attempt; it does not verify provider identity, available reserves or payments."), pages.network_group);
+    connection_help->setObjectName("paymasterConnectionHelp");
+    connection_help->setWordWrap(true);
+    pages.network_layout->addWidget(connection_help);
+    auto* configure_node = new QPushButton(tr("Refresh connection settings"), pages.network_group);
+    configure_node->setObjectName("paymasterReviewConnection");
+    pages.network_layout->addWidget(configure_node, 0, Qt::AlignLeft);
+    pages.connection_layout->addWidget(pages.network_group);
+    configure_node->setToolTip(tr("Review listener, endpoint and configuration changes before saving. Saved node changes require an explicit restart."));
+    connect(configure_node, &QPushButton::clicked, widget(), [this] { configureOperatorNode(); });
+    m_panel.bindPage(PaymasterWidgetImpl::Page::CONNECTION, pages.connection_scroll);
+
+}
+
+void ProviderConfiguration::buildConfiguration(PageBindings& pages)
+{
+    pages.configuration_scroll = new QScrollArea(m_panel.mainPages());
+    pages.configuration_scroll->setObjectName("paymasterConfigurationPage");
+    pages.configuration_scroll->setWidgetResizable(true);
+    auto* configuration = new QWidget(pages.configuration_scroll);
+    configuration->setObjectName("paymasterConfigurationContents");
+
+    auto* configuration_column = CreatePaymasterPageColumn(
+        configuration, pages.configuration_layout);
+    AddPaymasterPageHeading(
+        pages.configuration_layout, configuration_column, tr("Offer & pricing"),
+        tr("Choose who can use your service and the DD fee customers pay you. The DGB network-fee ceiling must fit your customer-payment budgets. Reserve capital and refill costs are configured separately."),
+        QStringLiteral("paymasterConfiguration"));
+
+    auto* identity_group = new QGroupBox(tr("Provider identity"), configuration_column);
+    identity_group->setProperty("paymasterRole", QStringLiteral("card"));
+    auto* identity_form = new QFormLayout(identity_group);
+    identity_form->setHorizontalSpacing(18);
+    identity_form->setVerticalSpacing(10);
+    identity_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* identity_help = new QLabel(tr(
+        "The identity lets clients verify that offers come from the same provider. It is stored in this wallet and should normally be created only once."), identity_group);
+    identity_help->setWordWrap(true);
+    identity_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    m_display_name = new QLineEdit(identity_group);
+    m_display_name->setObjectName("paymasterDisplayName");
+    m_display_name->setMaxLength(32);
+    m_display_name->setValidator(
+        new PaymasterDisplayNameValidator(m_display_name));
+    m_display_name->setPlaceholderText(tr("Name shown to clients"));
+    m_create_identity = new QPushButton(tr("Create provider identity"), identity_group);
+    pages.create_identity = m_create_identity;
+    pages.create_identity->setObjectName("paymasterCreateIdentity");
+    pages.create_identity->setProperty("paymasterRole", QStringLiteral("primaryAction"));
+    m_offer_identity_status = new QLabel(
+        tr("Action required · no provider identity has been created yet."),
+        identity_group);
+    m_offer_identity_status->setObjectName("paymasterOfferIdentityStatus");
+    m_offer_identity_status->setProperty("paymasterRole", QStringLiteral("statusText"));
+    m_offer_identity_status->setWordWrap(true);
+    m_offer_identity_id = new QLabel(tr("Not created yet"), identity_group);
+    m_offer_identity_id->setObjectName("paymasterOfferIdentityId");
+    m_offer_identity_id->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    m_offer_identity_id->setWordWrap(true);
+    m_offer_identity_id->setTextInteractionFlags(
+        Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    m_offer_identity_id->setAccessibleName(tr("Full provider identity"));
+    identity_form->addRow(identity_help);
+    identity_form->addRow(tr("Status:"), m_offer_identity_status);
+    auto* identity_details = new QWidget(identity_group);
+    auto* identity_details_layout = new QVBoxLayout(identity_details);
+    identity_details_layout->setContentsMargins(0, 0, 0, 0);
+    AddPaymasterDisclosure(identity_details_layout, identity_details, m_offer_identity_id,
+                           tr("Show provider ID"), tr("Hide provider ID"), QStringLiteral("paymasterIdentityDetailsToggle"));
+    identity_form->addRow(identity_details);
+    identity_form->addRow(tr("Display name:"), m_display_name);
+    identity_form->addRow(pages.create_identity);
+    pages.configuration_layout->addWidget(identity_group);
+
+    auto* policy_group = new QGroupBox(tr("Services offered"), configuration_column);
+    policy_group->setProperty("paymasterRole", QStringLiteral("card"));
+    auto* policy_form = new QFormLayout(policy_group);
+    policy_form->setHorizontalSpacing(18);
+    policy_form->setVerticalSpacing(10);
+    policy_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* policy_help = new QLabel(tr(
+        "The policy defines which transfers you are willing to support. Clients still verify every quote and transaction locally."), policy_group);
+    policy_help->setWordWrap(true);
+    policy_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    policy_form->addRow(policy_help);
+    m_sponsored = new QCheckBox(tr("Sponsored · provider pays the DGB fee"), policy_group);
+    m_sponsored->setObjectName("paymasterPolicySponsored");
+    m_sponsored->setProperty("paymasterRole", QStringLiteral("choiceCard"));
+    m_user_paid = new QCheckBox(tr("User paid · client pays a DD service fee"), policy_group);
+    m_user_paid->setObjectName("paymasterPolicyUserPaid");
+    m_user_paid->setProperty("paymasterRole", QStringLiteral("choiceCard"));
+    m_user_paid->setChecked(true);
+    auto* user_paid_help = new QLabel(tr(
+        "The client pays a service fee in DigiDollar; your provider wallet supplies the DGB network fee."), policy_group);
+    user_paid_help->setWordWrap(true);
+    user_paid_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    auto* sponsored_help = new QLabel(tr(
+        "Your provider pays the DGB network fee without charging a DigiDollar service fee. Use strict safety budgets to cap the cost."), policy_group);
+    sponsored_help->setWordWrap(true);
+    sponsored_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    auto* models = new PaymasterResponsiveCards(policy_group);
+    models->setObjectName("paymasterOfferModelCards");
+    auto* user_paid_card = new QFrame(models);
+    user_paid_card->setObjectName("paymasterUserPaidOfferCard");
+    user_paid_card->setProperty("paymasterRole", QStringLiteral("choicePanel"));
+    auto* user_paid_layout = new QVBoxLayout(user_paid_card);
+    user_paid_layout->setContentsMargins(14, 12, 14, 12);
+    user_paid_layout->addWidget(m_user_paid);
+    user_paid_layout->addWidget(user_paid_help);
+    user_paid_layout->addStretch();
+    auto* sponsored_card = new QFrame(models);
+    sponsored_card->setObjectName("paymasterSponsoredOfferCard");
+    sponsored_card->setProperty("paymasterRole", QStringLiteral("choicePanel"));
+    auto* sponsored_layout = new QVBoxLayout(sponsored_card);
+    sponsored_layout->setContentsMargins(14, 12, 14, 12);
+    sponsored_layout->addWidget(m_sponsored);
+    sponsored_layout->addWidget(sponsored_help);
+    sponsored_layout->addStretch();
+    models->addCard(user_paid_card);
+    models->addCard(sponsored_card);
+    const auto update_model_card = [](QFrame* card, bool selected) {
+        card->setProperty("selected", selected);
+        if (card->style()) {
+            card->style()->unpolish(card);
+            card->style()->polish(card);
+        }
+    };
+    connect(m_user_paid, &QCheckBox::toggled, user_paid_card,
+            [user_paid_card, update_model_card](bool checked) {
+                update_model_card(user_paid_card, checked);
+            });
+    connect(m_sponsored, &QCheckBox::toggled, sponsored_card,
+            [sponsored_card, update_model_card](bool checked) {
+                update_model_card(sponsored_card, checked);
+            });
+    update_model_card(user_paid_card, m_user_paid->isChecked());
+    update_model_card(sponsored_card, m_sponsored->isChecked());
+    m_scope = new NoWheelComboBox(policy_group);
+    m_scope->setObjectName("paymasterPolicySponsorshipScope");
+    m_scope->addItem(tr("Public — available to discovered clients"), QStringLiteral("public"));
+    m_scope->setToolTip(tr(
+        "Public sponsorship can be offered together with user-paid service."));
+    m_fee_bps = PaymasterWidgetImpl::scaledSpin(policy_group, 0, 10000, 50, 100, 2);
+    m_fee_bps->setObjectName("paymasterPolicyFeeBps");
+    m_fee_bps->setSingleStep(10);
+    m_fee_bps->setSuffix(tr(" %"));
+    m_fee_bps->setToolTip(tr(
+        "Service fee for user-paid transfers. 100 basis points equal 1%. Sponsored transfers always charge zero DigiDollar service fee."));
+    m_maximum_user_paid_service_fee = PaymasterWidgetImpl::scaledSpin(
+        policy_group, 0, 10000000, 0, 100, 2);
+    m_maximum_user_paid_service_fee->setObjectName(
+        "paymasterPolicyMaximumUserPaidServiceFeeCents");
+    m_maximum_user_paid_service_fee->setSuffix(tr(" DD"));
+    m_maximum_user_paid_service_fee->setToolTip(tr(
+        "Maximum DD service fee on one user-paid transfer. Enter 0 for no cap."));
+    m_min_amount = PaymasterWidgetImpl::scaledSpin(policy_group, 100, 10000000, 100, 100, 2);
+    m_min_amount->setObjectName("paymasterPolicyMinimumCents");
+    m_min_amount->setSuffix(tr(" DD"));
+    m_min_amount->setToolTip(tr("Smallest DigiDollar payment this provider will accept."));
+    m_max_amount = PaymasterWidgetImpl::scaledSpin(policy_group, 100, 10000000, 100000, 100, 2);
+    m_max_amount->setObjectName("paymasterPolicyMaximumCents");
+    m_max_amount->setSuffix(tr(" DD"));
+    m_max_amount->setToolTip(tr("Largest DigiDollar payment this provider will accept."));
+    m_quote_ttl = PaymasterWidgetImpl::spin(policy_group, 1, 60, 60);
+    m_quote_ttl->setObjectName("paymasterPolicyQuoteLifetime");
+    m_quote_ttl->setSuffix(tr(" seconds"));
+    m_quote_ttl->setToolTip(tr("How long a client may accept a quote before it expires."));
+    m_network_fee = PaymasterWidgetImpl::scaledSpin(policy_group, 1, 2000000000, 20000000,
+                               100000000, 8);
+    m_network_fee->setObjectName("paymasterPolicyMaximumNetworkFee");
+    m_network_fee->setSuffix(tr(" DGB"));
+    m_network_fee->setToolTip(tr(
+        "Absolute DGB network-fee ceiling for one Paymaster transaction. Guided setup keeps the active per-transaction safety value aligned with this ceiling and uses the other safety fields for aggregate spam protection."));
+    policy_form->addRow(tr("Payment models:"), models);
+    m_funding_model_status = new QLabel(policy_group);
+    m_funding_model_status->setObjectName("paymasterFundingModelExplanation");
+    m_funding_model_status->setWordWrap(true);
+    policy_form->addRow(QString(), m_funding_model_status);
+    m_sponsorship_label = new QLabel(tr("Who may use sponsorship:"), policy_group);
+    m_sponsorship_label->setBuddy(m_scope);
+    policy_form->addRow(m_sponsorship_label, m_scope);
+    m_user_paid_pricing = new QWidget(policy_group);
+    m_user_paid_pricing->setObjectName("paymasterUserPaidPricing");
+    auto* pricing_form = new QFormLayout(m_user_paid_pricing);
+    pricing_form->setContentsMargins(0, 0, 0, 0);
+    pricing_form->addRow(tr("User-paid service fee:"), m_fee_bps);
+    pricing_form->addRow(tr("Maximum user-paid service fee:"), m_maximum_user_paid_service_fee);
+    m_fee_example = new PaymasterFeeExample(m_user_paid_pricing);
+    m_fee_example->addToForm(pricing_form);
+    policy_form->addRow(m_user_paid_pricing);
+    policy_form->addRow(tr("Smallest payment:"), m_min_amount);
+    policy_form->addRow(tr("Largest payment:"), m_max_amount);
+    auto* offer_details_container = new QWidget(policy_group);
+    auto* offer_details_layout = new QVBoxLayout(offer_details_container);
+    offer_details_layout->setContentsMargins(0, 0, 0, 0);
+    auto* offer_details = new QWidget(offer_details_container);
+    auto* offer_details_form = new QFormLayout(offer_details);
+    offer_details_form->addRow(tr("Quote validity:"), m_quote_ttl);
+    offer_details_form->addRow(tr("Network-fee ceiling per transfer:"), m_network_fee);
+    auto* limits_help = new QLabel(tr(
+        "The payment range filters requests before a quote is created. Quote validity limits how long resources remain offered to one client. The network-fee ceiling is the absolute per-transfer guard; guided safety profiles keep their per-transfer value aligned with it and limit repeated requests through aggregate budgets and counters."), policy_group);
+    limits_help->setObjectName("paymasterPolicyLimitsExplanation");
+    limits_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    limits_help->setWordWrap(true);
+    offer_details_form->addRow(limits_help);
+    AddPaymasterDisclosure(offer_details_layout, offer_details_container, offer_details,
+                           tr("Quote duration and network-fee ceiling"), tr("Hide technical offer limits"), QStringLiteral("paymasterOfferDetailsToggle"));
+    policy_form->addRow(offer_details_container);
+    m_offer_forms = {identity_form, policy_form, pricing_form, offer_details_form};
+    for (QFormLayout* form : m_offer_forms) {
+        form->setHorizontalSpacing(18);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    }
+    AlignPaymasterFormLabels(m_offer_forms);
+    m_policy_summary = new QLabel(policy_group);
+    m_policy_summary->setObjectName("paymasterPolicySummary");
+    m_policy_summary->setProperty("paymasterRole", QStringLiteral("summaryText"));
+    m_policy_summary->setWordWrap(true);
+    policy_form->addRow(tr("Policy summary:"), m_policy_summary);
+    policy_form->addRow(configurationWarningPanel(m_policy_config_warning, "paymasterPolicyConfigWarning",
+        tr("Open spending limits"), [this] { m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::SAFETY)); }));
+    m_policy_save_status = new QLabel(policy_group);
+    m_policy_save_status->setObjectName("paymasterPolicySaveStatus");
+    m_policy_save_status->setProperty("paymasterRole", QStringLiteral("statusText"));
+    m_policy_save_status->setWordWrap(true);
+    m_policy_save_status->hide();
+    policy_form->addRow(QString{}, m_policy_save_status);
+    m_review_policy_limits = new QPushButton(tr("Prepare and review spending limits…"), policy_group);
+    m_review_policy_limits->setObjectName("paymasterReviewPolicyLimits");
+    m_review_policy_limits->hide();
+    policy_form->addRow(QString{}, m_review_policy_limits);
+    connect(m_review_policy_limits, &QPushButton::clicked, widget(), [this] { reviewPolicySpendingLimits(); });
+    m_save_policy = new QPushButton(tr("Save policy"), policy_group);
+    m_save_policy->setObjectName("savePaymasterPolicy");
+    m_save_policy->setProperty("paymasterRole", QStringLiteral("primaryAction"));
+    m_restore_policy_defaults = new QPushButton(
+        tr("Restore recommended defaults"), policy_group);
+    m_restore_policy_defaults->setObjectName("paymasterRestorePolicyDefaults");
+    m_restore_policy_defaults->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
+    m_restore_policy_defaults->setToolTip(tr(
+        "Reset only the unsaved policy form. This does not change the provider identity, safety limits or liquidity."));
+    auto* policy_buttons = new QHBoxLayout();
+    policy_buttons->addWidget(m_restore_policy_defaults);
+    policy_buttons->addStretch();
+    auto* discard_offer = new QPushButton(tr("Discard offer changes"), policy_group);
+    discard_offer->setObjectName("paymasterDiscardOffer");
+    policy_buttons->addWidget(discard_offer);
+    connect(discard_offer, &QPushButton::clicked, widget(), [this] {
+        if (!m_panel.busy() && m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy").isObject())
+            loadPolicy(m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy"));
+    });
+    policy_buttons->addWidget(m_save_policy);
+    policy_form->addRow(policy_buttons);
+    m_panel.overview().buildEnableStatus(pages.details_layout, policy_group);
+    pages.configuration_layout->addWidget(policy_group);
+    pages.configuration_layout->addStretch();
+    pages.configuration_scroll->setWidget(configuration);
+    ConfigureScrollArea(pages.configuration_scroll, configuration);
+    m_panel.bindPage(PaymasterWidgetImpl::Page::CONFIGURATION, pages.configuration_scroll);
+    // Offer is grouped with the other settings after all pages exist.
+
+}
+
+void ProviderConfiguration::buildSafety(PageBindings& pages)
+{
+    pages.safety_scroll = new QScrollArea(m_panel.mainPages());
+    pages.safety_scroll->setObjectName("paymasterSafetyPolicyPage");
+    pages.safety_scroll->setWidgetResizable(true);
+    auto* safety = new QWidget(pages.safety_scroll);
+    safety->setObjectName("paymasterSafetyPolicyContents");
+
+    auto* safety_column = CreatePaymasterPageColumn(safety, pages.safety_layout);
+    AddPaymasterPageHeading(
+        pages.safety_layout, safety_column, tr("Customer-payment budgets"),
+        tr("Limit the DGB network fees paid for customers, separately for each payment model. User-paid customers compensate you in DD; your wallet still pays the network fee in DGB."),
+        QStringLiteral("paymasterSafetyPolicy"));
+    auto* safety_warning = new QLabel(tr(
+        "These budgets cover customer payments only. Reserve capital and refill fees are separate. Limits are ceilings, not spending targets; each payment model and refill has its own budget, not one shared wallet limit."), safety_column);
+    safety_warning->setObjectName("paymasterSafetyPolicyWarning");
+    safety_warning->setProperty("paymasterRole", QStringLiteral("notice"));
+    safety_warning->setWordWrap(true);
+    pages.safety_layout->addWidget(safety_warning);
+    auto* safety_instructions = new QLabel(tr(
+        "Configure the models you actually offer, then save the provider safety policy. All six limits for an active model must be finite and greater than zero. Setting all six values to zero safely disables an unused model; zero never means unlimited. Start with the recommended values and lower them if the potential DGB cost is too high."), safety);
+    safety_instructions->setObjectName("paymasterSafetyPolicyInstructions");
+    safety_instructions->setWordWrap(true);
+    pages.safety_layout->addWidget(safety_instructions);
+    pages.safety_layout->addWidget(configurationWarningPanel(m_safety_config_warning, "paymasterSafetyConfigWarning",
+        tr("Open offer settings"), [this] { m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::CONFIGURATION)); }));
+
+    m_policy_limits_review = new QWidget(safety_column);
+    auto* limits_review_layout = new QVBoxLayout(m_policy_limits_review);
+    limits_review_layout->setContentsMargins(0, 0, 0, 0);
+    m_policy_limits_hint = new QLabel(m_policy_limits_review);
+    m_policy_limits_hint->setObjectName("paymasterPolicyLimitsHint");
+    m_policy_limits_hint->setProperty("paymasterRole", QStringLiteral("statusText"));
+    m_policy_limits_hint->setWordWrap(true);
+    limits_review_layout->addWidget(m_policy_limits_hint);
+    auto* return_to_offer = new QPushButton(tr("Return to offer settings"), m_policy_limits_review);
+    return_to_offer->setObjectName("paymasterReturnToOffer");
+    limits_review_layout->addWidget(return_to_offer, 0, Qt::AlignLeft);
+    connect(return_to_offer, &QPushButton::clicked, widget(), [this] { m_panel.showOperatorPage(m_panel.page(PaymasterWidgetImpl::Page::CONFIGURATION)); });
+    m_policy_limits_review->hide();
+    pages.safety_layout->addWidget(m_policy_limits_review);
+
+    auto* provider_safety = new QGroupBox(tr("Budgets by payment model"), safety_column);
+    provider_safety->setProperty("paymasterRole", QStringLiteral("card"));
+    auto* provider_safety_layout = new QVBoxLayout(provider_safety);
+    m_provider_safety_status = new QLabel(
+        tr("Provider safety policy: not configured (provider not ready)"),
+        provider_safety);
+    m_provider_safety_status->setObjectName("paymasterProviderSafetyStatus");
+    m_provider_safety_status->setWordWrap(true);
+    provider_safety_layout->addWidget(m_provider_safety_status);
+    auto* provider_limits_help = new QLabel(tr(
+        "Each tab controls one payment model. For an active model, match the per-payment limit to the offer's network-fee ceiling. Hourly and daily limits cap cumulative costs; additional limits protect simultaneous quotes and transaction counts."), provider_safety);
+    provider_limits_help->setObjectName("paymasterProviderSafetyExplanation");
+    provider_limits_help->setProperty("paymasterRole", QStringLiteral("mutedText"));
+    provider_limits_help->setWordWrap(true);
+    provider_safety_layout->addWidget(provider_limits_help);
+    auto* funding_tabs = m_funding_safety_tabs = new QTabWidget(provider_safety);
+    funding_tabs->setObjectName("paymasterFundingSafetyModels");
+    m_user_paid_safety = createFundingSafetyControls(
+        funding_tabs, tr("User paid"), QStringLiteral("paymasterSafetyUserPaid"),
+        /*recommended_defaults=*/true);
+    m_public_sponsored_safety = createFundingSafetyControls(
+        funding_tabs, tr("Public sponsored"), QStringLiteral("paymasterSafetyPublicSponsored"),
+        /*recommended_defaults=*/false);
+    m_restricted_sponsored_safety = createFundingSafetyControls(
+        funding_tabs, tr("Restricted sponsored"), QStringLiteral("paymasterSafetyRestrictedSponsored"),
+        /*recommended_defaults=*/false);
+    // Preserve stored limits in readback/save payloads, but do not offer
+    // configuration for the parked sponsorship mode.
+    funding_tabs->setTabVisible(2, false);
+    provider_safety_layout->addWidget(funding_tabs);
+
+    auto* quote_limits = new QGroupBox(tr("Quote and request limits"), provider_safety);
+    auto* quote_form = new QFormLayout(quote_limits);
+    auto* quote_help = new QLabel(tr(
+        "These limits reduce resource exhaustion. Total limits protect the wallet, netgroup limits restrict groups of related network addresses, and recipient buckets stop repeated quotes aimed at the same destination. Reaching a limit rejects new work but does not invalidate an already authorized transfer."), quote_limits);
+    quote_help->setObjectName("paymasterQuoteLimitsExplanation");
+    quote_help->setWordWrap(true);
+    quote_form->addRow(quote_help);
+    m_max_active_quotes_total = PaymasterWidgetImpl::spin(quote_limits, 1, 8192, 16);
+    m_max_active_quotes_total->setObjectName("paymasterSafetyMaxActiveQuotesTotal");
+    m_max_active_quotes_per_netgroup = PaymasterWidgetImpl::spin(quote_limits, 1, 8192, 4);
+    m_max_active_quotes_per_netgroup->setObjectName("paymasterSafetyMaxActiveQuotesPerNetgroup");
+    m_max_active_quotes_per_recipient = PaymasterWidgetImpl::spin(quote_limits, 1, 8192, 2);
+    m_max_active_quotes_per_recipient->setObjectName("paymasterSafetyMaxActiveQuotesPerRecipient");
+    m_max_quote_requests_per_netgroup = PaymasterWidgetImpl::spin(quote_limits, 1, 8192, 10);
+    m_max_quote_requests_per_netgroup->setObjectName("paymasterSafetyMaxQuoteRequestsPerNetgroupMinute");
+    quote_form->addRow(tr("Active quotes (total):"), m_max_active_quotes_total);
+    quote_form->addRow(tr("Active quotes per netgroup:"), m_max_active_quotes_per_netgroup);
+    quote_form->addRow(tr("Active quotes per recipient bucket:"), m_max_active_quotes_per_recipient);
+    quote_form->addRow(tr("Quote requests per netgroup/minute:"), m_max_quote_requests_per_netgroup);
+    pages.restore_quote_defaults = new QPushButton(
+        tr("Restore recommended quote limits"), quote_limits);
+    pages.restore_quote_defaults->setObjectName("paymasterRestoreQuoteSafetyDefaults");
+    pages.restore_quote_defaults->setProperty("paymasterRole", QStringLiteral("secondaryAction"));
+    quote_form->addRow(pages.restore_quote_defaults);
+    // Technical anti-abuse limits are available through the advanced
+    // disclosure below; the normal view stays focused on financial risk.
+
+    m_provider_safety_group = provider_safety;
+    m_save_provider_safety = new QPushButton(tr("Save customer-payment budgets"), provider_safety);
+    m_save_provider_safety->setObjectName("savePaymasterProviderSafetyPolicy");
+    m_save_provider_safety->setProperty("paymasterRole", QStringLiteral("primaryAction"));
+    provider_safety_layout->addWidget(m_save_provider_safety);
+    auto* usage_group = new QGroupBox(tr("Current budget usage"), provider_safety);
+    usage_group->setProperty("paymasterRole", QStringLiteral("technicalCard"));
+    auto* usage_layout = new QVBoxLayout(usage_group);
+    auto* usage_help = new QLabel(tr(
+        "This read-only status shows what is currently reserved or spent. Saving new limits does not reset existing accounting."), usage_group);
+    usage_help->setWordWrap(true);
+    usage_layout->addWidget(usage_help);
+    m_provider_safety_usage = new QLabel(usage_group);
+    m_provider_safety_usage->setObjectName("paymasterProviderSafetyUsage");
+    m_provider_safety_usage->setWordWrap(true);
+    m_provider_safety_usage->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_provider_safety_usage->setText(tr("Budget usage is not available yet."));
+    usage_layout->addWidget(m_provider_safety_usage);
+    pages.safety_layout->addWidget(provider_safety);
+
+    auto* advanced_safety = new QWidget(safety_column);
+    advanced_safety->setObjectName("paymasterAdvancedSafetyPanel");
+    auto* advanced_safety_layout = new QVBoxLayout(advanced_safety);
+    advanced_safety_layout->setContentsMargins(0, 0, 0, 0);
+    advanced_safety_layout->addWidget(safety_instructions);
+    advanced_safety_layout->addWidget(usage_group);
+    advanced_safety_layout->addWidget(quote_limits);
+    AddPaymasterDisclosure(
+        pages.safety_layout, safety_column, advanced_safety,
+        tr("Show advanced protection limits"),
+        tr("Hide advanced protection limits"),
+        QStringLiteral("paymasterAdvancedSafetyToggle"));
+
+    auto* client_safety = new QGroupBox(tr("Client service-fee limits"), safety);
+    m_client_safety_group = client_safety;
+    client_safety->setObjectName("paymasterClientSafetyGroup");
+    auto* client_safety_form = new QFormLayout(client_safety);
+    auto* client_safety_help = new QLabel(tr(
+        "These limits protect this wallet when it uses another Paymaster. They cap the DigiDollar service fee for one transfer and across a rolling day. The effective per-transfer limit is always the lowest applicable wallet, request and signed-offer limit."), client_safety);
+    client_safety_help->setObjectName("paymasterClientSafetyExplanation");
+    client_safety_help->setWordWrap(true);
+    client_safety_form->addRow(client_safety_help);
+    m_client_fee_per_transaction = PaymasterWidgetImpl::spin(client_safety, 0, 10000000, 100);
+    m_client_fee_per_transaction->setObjectName("paymasterClientSafetyMaxFeePerTransaction");
+    m_client_fee_per_day = PaymasterWidgetImpl::spin(client_safety, 0, 10000000, 1000);
+    m_client_fee_per_day->setObjectName("paymasterClientSafetyMaxFeePerDay");
+    m_client_safety_status = new QLabel(
+        tr("Client safety policy: not configured (automatic Paymaster transfers unavailable)"),
+        client_safety);
+    m_client_safety_status->setObjectName("paymasterClientSafetyStatus");
+    m_client_safety_status->setWordWrap(true);
+    m_client_safety_mode = new QLabel(client_safety);
+    m_client_safety_mode->setObjectName("paymasterClientSafetyMode");
+    m_client_safety_mode->setWordWrap(true);
+    m_save_client_safety = new QPushButton(tr("Save client safety policy"), client_safety);
+    m_save_client_safety->setObjectName("savePaymasterClientSafetyPolicy");
+    pages.restore_client_defaults = new QPushButton(
+        tr("Restore recommended client limits"), client_safety);
+    pages.restore_client_defaults->setObjectName("paymasterRestoreClientSafetyDefaults");
+    client_safety_form->addRow(tr("Maximum service fee per transfer (cents):"), m_client_fee_per_transaction);
+    client_safety_form->addRow(tr("Maximum service fees per rolling day (cents):"), m_client_fee_per_day);
+    client_safety_form->addRow(m_client_safety_mode);
+    client_safety_form->addRow(m_client_safety_status);
+    auto* client_buttons = new QHBoxLayout();
+    client_buttons->addWidget(pages.restore_client_defaults);
+    client_buttons->addStretch();
+    client_buttons->addWidget(m_save_client_safety);
+    client_safety_form->addRow(client_buttons);
+    // Client-side DD fee protection belongs to Send $DD. Keep these
+    // widgets alive for compatibility with the existing wallet status
+    // refresh path, but never expose them in the provider console.
+    client_safety->setVisible(false);
+    auto* discard_safety = new QPushButton(tr("Discard limit changes"), safety_column);
+    discard_safety->setObjectName("paymasterDiscardSafety");
+    pages.safety_layout->addWidget(discard_safety, 0, Qt::AlignLeft);
+    connect(discard_safety, &QPushButton::clicked, widget(), [this] {
+        if (!m_panel.busy() && m_panel.overview().operatorSnapshot().find_value("safety").isObject()) {
+            m_provider_safety_dirty = false;
+            applyProviderSafetyStatus(m_panel.overview().operatorSnapshot().find_value("safety"));
+            if (!m_policy_limits_review->isHidden()) {
+                m_panel.setStatusLabel(m_policy_limits_hint, tr("Limit edits discarded. The saved limits remain active; your offer edits are still unsaved."), QStringLiteral("action"));
+            }
+        }
+    });
+    pages.safety_layout->addStretch();
+    pages.safety_scroll->setWidget(safety);
+    ConfigureScrollArea(pages.safety_scroll, safety);
+    m_panel.bindPage(PaymasterWidgetImpl::Page::SAFETY, pages.safety_scroll);
+    // Spending limits are a settings subpage.
+
+    // Shared typography for the operator's funds and finance pages.
+
+}
+
+void ProviderConfiguration::buildAutomation(PageBindings& pages)
+{
+    pages.automation_scroll = new QScrollArea(m_panel.settingsPages());
+    pages.automation_scroll->setObjectName("paymasterAutomationPage");
+    auto* automation_contents = new QWidget(pages.automation_scroll);
+    automation_contents->setObjectName("paymasterAutomationContents");
+
+    auto* automation_column = CreatePaymasterPageColumn(automation_contents, pages.automation_layout);
+    AddPaymasterPageHeading(pages.automation_layout, automation_column, tr("Startup & processing"),
+        tr("Autostart requests operation when this wallet is ready. Automatic processing handles customer requests after startup. Both respect wallet locking, readiness and saved budgets."),
+        QStringLiteral("paymasterAutomation"));
+    auto* start = new QCheckBox(tr("Automatically start Paymaster when this wallet is ready"), automation_column);
+    start->setObjectName("paymasterSettingsAutostart");
+    m_autostart_copies.append(start);
+    pages.automation_layout->addWidget(start);
+    connect(start, &QCheckBox::toggled, widget(), [this](bool enabled) {
+        if (!m_panel.busy() && !m_panel.privacyEnabled()) m_autostart->setChecked(enabled);
+    });
+    auto* startup_help = new QLabel(tr("This switch saves immediately. An encrypted wallet still needs manual unlock after restart. Turning autostart off does not pause a running provider. The saved result is shown below."), automation_column);
+    startup_help->setWordWrap(true);
+    pages.automation_layout->addWidget(startup_help);
+    m_settings_autostart_status = new QLabel(automation_column);
+    m_settings_autostart_status->setObjectName("paymasterSettingsAutostartStatus");
+    m_settings_autostart_status->setWordWrap(true);
+    m_settings_autostart_status->setTextFormat(Qt::PlainText);
+    pages.automation_layout->addWidget(m_settings_autostart_status);
+    pages.automation_layout->addWidget(m_runtime_settings_toggle);
+    pages.automation_layout->addWidget(m_runtime_settings_panel);
+    auto* startup_link = new QPushButton(tr("View startup status on Overview"), automation_column);
+    startup_link->setObjectName("paymasterAutostartOverviewLink");
+    connect(startup_link, &QPushButton::clicked, widget(), [this] {
+        m_panel.mainPages()->setCurrentIndex(0);
+        m_autostart->setFocus(Qt::OtherFocusReason);
+    });
+    pages.automation_layout->addWidget(startup_link, 0, Qt::AlignLeft);
+    pages.automation_layout->addStretch();
+    pages.automation_scroll->setWidgetResizable(true);
+    pages.automation_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    pages.automation_scroll->setWidget(automation_contents);
+    ConfigureScrollArea(pages.automation_scroll, automation_contents);
+    m_panel.bindPage(PaymasterWidgetImpl::Page::AUTOMATION, pages.automation_scroll);
+
+}
+
+void ProviderConfiguration::connectConfiguration(PageBindings& pages)
+{
+    connect(m_runtime_settings_toggle, &QPushButton::toggled, widget(),
+            [this](bool visible) {
+                m_runtime_settings_panel->setVisible(visible);
+                m_runtime_settings_toggle->setText(
+                    visible ? tr("Hide request processing")
+                            : tr("Change request processing"));
+            });
+    connect(m_operation_mode_select,
+            qOverload<int>(&QComboBox::currentIndexChanged), widget(),
+            [this] {
+                if (!m_loading_runtime_settings) {
+                    m_runtime_settings_dirty = true;
+                    m_panel.overview().updateProviderButtons();
+                }
+            });
+    connect(m_autostart, &QCheckBox::toggled, widget(), [this] {
+        if (!m_loading_runtime_settings) {
+            m_autostart_dirty = m_autostart->isChecked() != m_autostart_enabled;
+            m_autostart_message.clear();
+            saveAutostart();
+            m_panel.overview().updateProviderButtons();
+        }
+    });
+    connect(m_save_runtime_settings, &QPushButton::clicked, widget(),
+            [this] { saveRuntimeSettings(); });
+    connect(pages.create_identity, &QPushButton::clicked, widget(), [this] {
+        if (!m_display_name->hasAcceptableInput()) {
+            QMessageBox::warning(
+                widget(), tr("Paymaster provider identity"),
+                tr("The display name must contain at most 32 printable ASCII characters and cannot contain '/' or '@'."));
+            return;
+        }
+        UniValue params{UniValue::VARR};
+        params.push_back(m_display_name->text().trimmed().toStdString());
+        m_panel.call("createpaymasteridentity", std::move(params), true);
+    });
+    connect(m_display_name, &QLineEdit::textChanged, widget(),
+            [ this, pages] {
+                pages.create_identity->setEnabled(
+                    !m_panel.overview().hasIdentity() &&
+                    m_display_name->hasAcceptableInput() && !m_panel.busy());
+            });
+    connect(m_save_policy, &QPushButton::clicked, widget(),
+            [this] { savePolicy(); });
+    connect(m_save_provider_safety, &QPushButton::clicked, widget(), [this] { saveProviderSafetyPolicy(); });
+    connect(m_save_client_safety, &QPushButton::clicked, widget(), [this] { saveClientSafetyPolicy(); });
+    connect(pages.restore_quote_defaults, &QPushButton::clicked,
+            widget(), [this] { restoreQuoteSafetyDefaults(); });
+    connect(pages.restore_client_defaults, &QPushButton::clicked,
+            widget(), [this] { restoreClientSafetyDefaults(); });
+    connect(m_restore_policy_defaults, &QPushButton::clicked,
+            widget(), [this] { restorePolicyDefaults(); });
+    watchFundingSafetyControls(m_user_paid_safety);
+    watchFundingSafetyControls(m_public_sponsored_safety);
+    watchFundingSafetyControls(m_restricted_sponsored_safety);
+    for (QSpinBox* control : {m_max_active_quotes_total,
+                              m_max_active_quotes_per_netgroup,
+                              m_max_active_quotes_per_recipient,
+                              m_max_quote_requests_per_netgroup}) {
+        connect(control, qOverload<int>(&QSpinBox::valueChanged), widget(), [this] {
+            if (!m_loading_provider_safety) markProviderSafetyDirty();
+            m_panel.overview().updateProviderButtons();
+        });
+    }
+    connect(m_sponsored, &QCheckBox::toggled, widget(), [this] {
+        if (!m_loading_policy) {
+            m_policy_dirty = true;
+            m_panel.liquidity().invalidatePoolPreviews();
+        }
+        updatePolicyDisplay();
+        m_panel.liquidity().updateLiquidityDisplay();
+        m_panel.overview().updateProviderButtons();
+        m_panel.overview().updateAutomaticRefreshTimer();
+    });
+    connect(m_user_paid, &QCheckBox::toggled, widget(), [this] {
+        if (!m_loading_policy) {
+            m_policy_dirty = true;
+            m_panel.liquidity().invalidatePoolPreviews();
+        }
+        updatePolicyDisplay();
+        m_panel.liquidity().updateLiquidityDisplay();
+        m_panel.overview().updateProviderButtons();
+        m_panel.overview().updateAutomaticRefreshTimer();
+    });
+    connect(m_scope, qOverload<int>(&QComboBox::currentIndexChanged), widget(), [this] {
+        if (!m_loading_policy) {
+            m_policy_dirty = true;
+            m_panel.liquidity().invalidatePoolPreviews();
+        }
+        updatePolicyDisplay();
+        m_panel.overview().updateProviderButtons();
+        m_panel.overview().updateAutomaticRefreshTimer();
+    });
+    for (QSpinBox* control : {m_fee_bps,
+                              m_maximum_user_paid_service_fee,
+                              m_min_amount, m_max_amount,
+                  m_quote_ttl, m_network_fee}) {
+        const auto edited = [this] {
+            if (!m_loading_policy) {
+                m_policy_dirty = true;
+                m_panel.liquidity().invalidatePoolPreviews();
+            }
+            updatePolicyDisplay();
+            m_panel.overview().updateAutomaticRefreshTimer();
+        };
+        connect(control, qOverload<int>(&QSpinBox::valueChanged), widget(), edited);
+        // Empty/partial text can leave the numeric value unchanged. It is
+        // still a draft and must survive status refresh/navigation.
+        connect(control->findChild<QLineEdit*>(), &QLineEdit::textEdited, widget(), edited);
+    }
+    connect(m_client_fee_per_transaction, qOverload<int>(&QSpinBox::valueChanged),
+            widget(), [this] {
+                if (!m_loading_client_safety) markClientSafetyDirty();
+                updateClientSafetyDisplay();
+            });
+    connect(m_client_fee_per_day, qOverload<int>(&QSpinBox::valueChanged),
+            widget(), [this] {
+                if (!m_loading_client_safety) markClientSafetyDirty();
+                updateClientSafetyDisplay();
+            });
 }
