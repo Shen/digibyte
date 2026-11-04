@@ -107,13 +107,15 @@ RPCHelpMan processpaymastersubmits()
 {
     return RPCHelpMan{
         "processpaymastersubmits",
-        "Process at most one addressed PMSUBMIT through the durable provider commit path.\n" +
+        "Process at most one addressed PMSUBMIT or PMRECOVERYSUBMIT through the durable provider commit path. "
+        "Permanently invalid peer submissions are discarded locally without a signed response; "
+        "local storage, readiness and signing failures retain the message.\n" +
             HELP_REQUIRING_PASSPHRASE,
         {},
         RPCResult{RPCResult::Type::OBJ, "", "Provider submit processing result", {
                                                                                      {RPCResult::Type::BOOL, "processed", "Whether a submit was available"},
                                                                                      {RPCResult::Type::BOOL, "queued", "Whether PMRESULT was queued"},
-                                                                                     {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether this stale or mismatched submission was discarded"},
+                                                                                     {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether only this permanently invalid peer submission was discarded"},
                                                                                      {RPCResult::Type::STR, "rejection_reason", /*optional=*/true, "Reason for discarding only this submission"},
                                                                                      {RPCResult::Type::STR, "message_type", /*optional=*/true, "submit or recovery_submit"},
                                                                                      {RPCResult::Type::STR, "request_id", /*optional=*/true, "Canonical request UUID"},
@@ -201,7 +203,7 @@ RPCHelpMan processpaymasterrequests()
                                                                                     {RPCResult::Type::BOOL, "queued", "Whether the signed response was queued"},
                                                                                     {RPCResult::Type::BOOL, "deferred", /*optional=*/true, "Whether this request is waiting within its original expiry for admission limits to recover"},
                                                                                     {RPCResult::Type::STR, "deferral_reason", /*optional=*/true, "Request admission limit; other eligible requests and submissions may continue"},
-                                                                                    {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether a permanently invalid inbound continuation was discarded"},
+                                                                                    {RPCResult::Type::BOOL, "rejected", /*optional=*/true, "Whether only this permanently invalid inbound request was discarded locally"},
                                                                                     {RPCResult::Type::STR, "rejection_reason", /*optional=*/true, "Stable reason for discarding a permanently invalid continuation"},
                                                                                     {RPCResult::Type::STR, "message_type", /*optional=*/true, "capacity, recovery_request, or quote"},
                                                                                     {RPCResult::Type::STR_HEX, "client_nonce", /*optional=*/true, "Capacity-bound client nonce"},

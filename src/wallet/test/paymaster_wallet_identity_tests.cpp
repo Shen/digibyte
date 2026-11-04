@@ -8,6 +8,8 @@
 
 #include <chainparams.h>
 #include <hash.h>
+#include <index/txindex.h>
+#include <interfaces/chain.h>
 #include <key.h>
 #include <paymaster/directory.h>
 #include <paymaster/error.h>
@@ -19,6 +21,7 @@
 #include <scheduler.h>
 #include <streams.h>
 #include <test/util/logging.h>
+#include <test/util/index.h>
 #include <util/time.h>
 #include <validationinterface.h>
 #include <wallet/context.h>
@@ -28,6 +31,7 @@
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterintegration.h>
+#include <wallet/paymasterservice.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -4002,6 +4006,115 @@ BOOST_AUTO_TEST_CASE(stale_submit_is_consumed_without_faulting_provider)
     BOOST_CHECK(!processpaymastersubmits().HandleRequest(request).find_value("processed").get_bool());
     BOOST_CHECK(context.paymaster->IsProviderRunning(provider_wallet.GetName(), identity.provider_id));
     BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+}
+
+BOOST_AUTO_TEST_CASE(unknown_recovery_submit_is_consumed_before_normal_work)
+{
+    BOOST_REQUIRE(!g_txindex);
+    struct IndexCleanup {
+        ~IndexCleanup()
+        {
+            if (g_txindex) g_txindex->Interrupt();
+            SyncWithValidationInterfaceQueue();
+            if (g_txindex) g_txindex->Stop();
+            g_txindex.reset();
+        }
+    } index_cleanup;
+    g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(m_node), 1 << 20, true);
+    BOOST_REQUIRE(g_txindex->Init());
+    BOOST_REQUIRE(g_txindex->StartBackgroundSync());
+    IndexWaitSynced(*g_txindex);
+
+    for (const bool automatic : {false, true}) {
+        CWallet wallet{m_node.chain.get(), "recovery-queue", CreateMockableWalletDatabase()};
+        BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+        WalletContext context;
+        context.chain = m_node.chain.get();
+        context.args = m_node.args;
+        Manager manager{true};
+        context.paymaster = &manager;
+        context.wallets.emplace_back(&wallet, [](CWallet*) {});
+        ProviderIdentityRecord identity;
+        std::string error;
+        {
+            LOCK(wallet.cs_wallet);
+            wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
+                                        m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            wallet.SetupDescriptorScriptPubKeyMans();
+            BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Recovery queue", GetTime(), identity, error));
+            ProviderSettings settings;
+            settings.enabled = true;
+            settings.policy_hash = uint256::ONE;
+            settings.updated_at = GetTime();
+            settings.operation_mode = automatic ? ProviderOperationMode::AUTOMATIC : ProviderOperationMode::MANUAL;
+            BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(settings));
+        }
+        BOOST_REQUIRE(manager.StartProvider(wallet.GetName(), identity.provider_id));
+        manager.SetProviderServiceStatus(wallet.GetName(), ProviderServiceState::ACTIVE);
+        AlternativeRecoverySubmit recovery;
+        recovery.genesis_hash = Params().GenesisBlock().GetHash();
+        recovery.recovery_provider_id = identity.provider_id;
+        recovery.request_id = "550e8400-e29b-41d4-a716-446655440089";
+        recovery.session_id = uint256S("91");
+        recovery.recovery_id = uint256S("92");
+        recovery.recovery_request_hash = uint256S("93");
+        recovery.recovery_commit_key = uint256S("94");
+        recovery.template_commitment = uint256S("95");
+        recovery.user_psbt = {1};
+        BOOST_REQUIRE(ValidateAlternativeRecoverySubmitEnvelope(recovery, recovery.genesis_hash, error));
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(31, uint256S("96"), 100, DirectPayload{recovery}, GetTime()));
+        PaymasterSubmit normal;
+        normal.genesis_hash = recovery.genesis_hash;
+        normal.provider_id = identity.provider_id;
+        normal.request_id = "550e8400-e29b-41d4-a716-446655440088";
+        normal.session_id = uint256S("81");
+        normal.quote_id = uint256S("82");
+        normal.commit_key = uint256S("83");
+        normal.template_commitment = uint256S("84");
+        normal.user_psbt = {1};
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(32, uint256S("85"), 100, DirectPayload{normal}, GetTime()));
+        const auto before = GetMockableDatabase(wallet).m_records;
+        for (const auto* expected_type : {"recovery_submit", "submit"}) {
+            if (automatic) {
+                paymaster_app::ProviderProcessingResult result;
+                BOOST_REQUIRE(RunPaymasterBackgroundWork(context, wallet, [&] {
+                    result = paymaster_app::ProcessPaymasterSubmits(context, wallet, paymaster_app::ExecutionMode::AUTOMATIC);
+                }));
+                BOOST_CHECK(result.processed.value_or(false));
+                BOOST_CHECK(!result.queued.value_or(false));
+                BOOST_CHECK(result.rejected.value_or(false));
+                if (std::string(expected_type) == "recovery_submit") {
+                    BOOST_CHECK_EQUAL(result.message_type.value_or(""), expected_type);
+                }
+                BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""),
+                    std::string(expected_type) == "submit" ? "PAYMASTER_SUBMIT_BINDING_MISMATCH" : "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH");
+            } else {
+                JSONRPCRequest request;
+                request.context = &context;
+                request.strMethod = "processpaymastersubmits";
+                request.params = UniValue{UniValue::VARR};
+                UniValue result;
+                try {
+                    result = processpaymastersubmits().HandleRequest(request);
+                } catch (const UniValue& rpc_error) {
+                    BOOST_FAIL(rpc_error.write());
+                }
+                BOOST_CHECK(result.find_value("processed").isTrue());
+                BOOST_CHECK(result.find_value("rejected").isTrue());
+                BOOST_CHECK(result.find_value("queued").isFalse());
+                if (std::string(expected_type) == "recovery_submit") {
+                    BOOST_CHECK_EQUAL(result.find_value("message_type").get_str(), expected_type);
+                }
+                BOOST_CHECK_EQUAL(result.find_value("rejection_reason").get_str(),
+                    std::string(expected_type) == "submit" ? "PAYMASTER_SUBMIT_BINDING_MISMATCH" : "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH");
+            }
+            BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+            BOOST_CHECK(manager.IsProviderRunning(wallet.GetName(), identity.provider_id));
+            BOOST_CHECK(manager.GetProviderServiceStatus(wallet.GetName()).state != ProviderServiceState::FAULT);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), std::string(expected_type) == "submit" ? 0U : 1U);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

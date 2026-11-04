@@ -63,6 +63,26 @@
 
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
+
+namespace {
+ProviderProcessingResult RejectProviderMessage(
+    Manager& manager, const DirectMessage& message,
+    const std::string& reason, const std::string& message_type)
+{
+    std::string error;
+    if (!AcknowledgeRejectedDirectMessage(manager, message, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    ProviderProcessingResult result;
+    result.processed = true;
+    result.queued = false;
+    result.rejected = true;
+    result.rejection_reason = reason;
+    result.message_type = message_type;
+    return result;
+}
+} // namespace
+
 PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransaction user_psbt, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
@@ -484,19 +504,31 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
         if (!submit || !ValidateAlternativeRecoverySubmitEnvelope(
                            *submit, Params().GenesisBlock().GetHash(),
                            error)) {
-            if (!AcknowledgeRejectedDirectMessage(
-                    *context.paymaster, direct, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                error.empty() ? "PAYMASTER_INVALID_RECOVERY_SUBMIT" : error);
+            return RejectProviderMessage(
+                *context.paymaster, direct,
+                error.empty() ? "PAYMASTER_INVALID_RECOVERY_SUBMIT" : error,
+                "recovery_submit");
         }
         PaymasterStore store{*wallet};
         AlternativeRecoveryRecord recovery;
-        if (!store.GetAlternativeRecoveryById(submit->recovery_id,
-                                              recovery) ||
-            !recovery.provider_side || recovery.expired ||
+        const auto recovery_status = store.GetAlternativeRecoveryByIdWithStatus(
+            submit->recovery_id, recovery);
+        if (recovery_status == DatabaseReadStatus::NOT_FOUND) {
+            return RejectProviderMessage(
+                *context.paymaster, direct,
+                "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH", "recovery_submit");
+        }
+        if (recovery_status != DatabaseReadStatus::FOUND) {
+            throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_RECOVERY_SUBMIT_DATABASE_READ");
+        }
+        // Only intact local records may classify a peer's payload. Unknown
+        // versions, corrupt authority and read failures retain the message.
+        if (!paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(
+                recovery, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        if (!recovery.provider_side || recovery.expired ||
             recovery.request_id != submit->request_id ||
             recovery.session_id != submit->session_id ||
             recovery.recovery_provider_id !=
@@ -507,9 +539,9 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                 submit->recovery_commit_key ||
             recovery.recovery_response.manifest.template_commitment !=
                 submit->template_commitment) {
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH");
+            return RejectProviderMessage(
+                *context.paymaster, direct,
+                "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH", "recovery_submit");
         }
 
         const auto queue_result = [&](const AlternativeRecoveryRecord& record) {
@@ -538,12 +570,16 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
 
         if (recovery.phase ==
             AlternativeRecoveryPhase::FINAL_COMMITTED) {
-            if (recovery.user_signed_psbt != submit->user_psbt ||
-                recovery.signed_result.status !=
+            if (recovery.signed_result.status !=
                     PaymasterResultStatus::FINAL_COMMITTED) {
                 throw ApplicationError(
-                    ErrorKind::INVALID_INPUT,
+                    ErrorKind::WALLET,
                     "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT");
+            }
+            if (recovery.user_signed_psbt != submit->user_psbt) {
+                return RejectProviderMessage(
+                    *context.paymaster, direct,
+                    "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT", "recovery_submit");
             }
             ProviderProcessingResult result;
             result.processed = true;
@@ -557,6 +593,26 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
             result.result_status = PaymasterResultStatus::FINAL_COMMITTED;
             result.recovery = recovery;
             return result;
+        }
+
+        if (recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED &&
+            recovery.phase != AlternativeRecoveryPhase::USER_SIGNED) {
+            throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT");
+        }
+        if (recovery.phase == AlternativeRecoveryPhase::USER_SIGNED &&
+            recovery.user_signed_psbt != submit->user_psbt) {
+            return RejectProviderMessage(
+                *context.paymaster, direct,
+                "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT", "recovery_submit");
+        }
+        if (recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED &&
+            recovery.recovery_response.expires_at <= now) {
+            // Consume the late request without changing reservations or any
+            // durable authority. Signed recovery has a separate retry firewall.
+            return RejectProviderMessage(
+                *context.paymaster, direct,
+                "PAYMASTER_RECOVERY_SUBMIT_EXPIRED", "recovery_submit");
         }
 
         node::NodeContext* node_ctx = wallet->chain().context();
@@ -580,14 +636,25 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                 recovery.recovery_request,
                 recovery.recovery_provider_identity_key, parameters,
                 Params(), *node_ctx->chainman, authorization_time, trusted,
-                unsigned_psbt, error) ||
-            !ValidateAlternativeRecoverySubmitAgainstChainstate(
+                unsigned_psbt, error)) {
+            throw ApplicationError(
+                ErrorKind::WALLET,
+                error.empty() ? "PAYMASTER_INVALID_RECOVERY_SUBMIT" : error);
+        }
+        if (!ValidateAlternativeRecoverySubmitPayload(
+                *submit, recovery.recovery_response, trusted, user_psbt, error)) {
+            return RejectProviderMessage(
+                *context.paymaster, direct, error, "recovery_submit");
+        }
+        // The payload check uses only the validated local template. Recheck
+        // full authority before persistence; a chain race remains local.
+        if (!ValidateAlternativeRecoverySubmitAgainstChainstate(
                 *submit, recovery.recovery_response, trusted,
                 parameters, Params(), *node_ctx->chainman,
                 authorization_time,
                 user_psbt, error)) {
             throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
+                ErrorKind::WALLET,
                 error.empty() ? "PAYMASTER_INVALID_RECOVERY_SUBMIT" : error);
         }
 
@@ -601,12 +668,6 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                     submit->recovery_id, recovery)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-        } else if (recovery.phase !=
-                       AlternativeRecoveryPhase::USER_SIGNED ||
-                   recovery.user_signed_psbt != submit->user_psbt) {
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT");
         }
         if (wallet->IsLocked()) {
             throw ApplicationError(
@@ -837,11 +898,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                            "PAYMASTER_SUBMIT_QUEUE_CORRUPT");
     }
     if (!ValidateSubmitEnvelope(*submit, Params().GenesisBlock().GetHash(), error)) {
-        if (!AcknowledgeRejectedDirectMessage(
-                *context.paymaster, direct, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        throw ApplicationError(ErrorKind::INVALID_INPUT, error);
+        return RejectProviderMessage(*context.paymaster, direct, error, "submit");
     }
     PaymasterStore store{*wallet};
     ProviderAttempt attempt;
@@ -873,18 +930,35 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
         return result;
     }
     PaymentSession session;
-    if (!store.GetSessionBySessionId(attempt.session_id, session) ||
-        session.request_id != submit->request_id) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_SUBMIT_SESSION_MISMATCH");
+    if (store.GetSessionBySessionIdWithStatus(attempt.session_id, session) !=
+        DatabaseReadStatus::FOUND) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_SESSION_DATABASE_READ");
     }
-
     PartiallySignedTransaction submitted_psbt;
+    PaymentIntent authorized_intent;
+    PaymasterQuote authorized_quote;
     CollaborativePSBTTemplate trusted;
+    if (!LoadAttemptAuthorizationArtifacts(attempt, authorized_intent,
+                                           authorized_quote, trusted, error) ||
+        !ValidateCollaborativePSBT(trusted.psbt, trusted,
+                                   CollaborativeSignatureStage::UNSIGNED, error) ||
+        !ValidateProviderAuthorizationManifest(attempt.provider_manifest,
+                                               authorized_intent, authorized_quote,
+                                               trusted, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    if (session.request_id != submit->request_id) {
+        return RejectProviderMessage(*context.paymaster, direct,
+                                     "PAYMASTER_SUBMIT_SESSION_MISMATCH", "submit");
+    }
     if (!DecodeRawPSBT(submitted_psbt, MakeByteSpan(submit->user_psbt), error) ||
-        !submitted_psbt.tx || !LoadTrustedTemplate(attempt, trusted, error) ||
-        !ValidateCollaborativePSBT(submitted_psbt, trusted,
+        !submitted_psbt.tx) {
+        return RejectProviderMessage(*context.paymaster, direct,
+                                     "PAYMASTER_INVALID_SUBMIT_PSBT", "submit");
+    }
+    if (!ValidateCollaborativePSBT(submitted_psbt, trusted,
                                    CollaborativeSignatureStage::USER_SIGNED, error)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, error);
+        return RejectProviderMessage(*context.paymaster, direct, error, "submit");
     }
 
     PaymasterResult provider_result;
@@ -1644,24 +1718,46 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     }
     validate_restricted_request();
 
+    // These preflight inputs are local. A malformed policy or clock must not
+    // turn a request into a permanent peer rejection.
+    if (!ValidateProviderPolicy(readiness.policy, error) || now <= 0) {
+        throw ApplicationError(
+            ErrorKind::WALLET,
+            error.empty() ? "PAYMASTER_INVALID_QUOTE_BUILD_PARAMETERS" : error);
+    }
     std::vector<CollaborativeInput> user_inputs;
     for (const COutPoint& outpoint : quote_request->intent.user_dd_inputs) {
         uint256 block_hash;
         CTransactionRef creating_tx;
         if (!g_txindex->FindTx(outpoint.hash, block_hash, creating_tx) || !creating_tx) {
-            throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_USER_PREVOUT_NOT_FOUND");
+            bool missing_or_spent;
+            {
+                LOCK(cs_main);
+                missing_or_spent = node->chainman->ActiveChainstate()
+                                       .CoinsTip().AccessCoin(outpoint).IsSpent();
+            }
+            if (missing_or_spent) {
+                return RejectProviderMessage(
+                    *context.paymaster, direct,
+                    "PAYMASTER_USER_PREVOUT_NOT_FOUND", "quote");
+            }
+            // A live UTXO proves that its creating transaction should be
+            // resolvable. FindTx(false) alone also covers local index/I/O errors.
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_USER_PREVOUT_LOOKUP_FAILED");
         }
         user_inputs.push_back({outpoint, creating_tx, InputRole::USER_DD});
     }
     ProviderQuotePreflightResult quote_preflight;
+    bool valid_preflight;
     {
         LOCK(cs_main);
-        if (!PreflightProviderQuoteRequest(
-                *quote_request, readiness.policy, user_inputs, Params(),
-                node->chainman->ActiveChainstate().CoinsTip(), now,
-                quote_preflight, error)) {
-            throw ApplicationError(ErrorKind::INVALID_INPUT, error);
-        }
+        valid_preflight = PreflightProviderQuoteRequest(
+            *quote_request, readiness.policy, user_inputs, Params(),
+            node->chainman->ActiveChainstate().CoinsTip(), now,
+            quote_preflight, error);
+    }
+    if (!valid_preflight) {
+        return RejectProviderMessage(*context.paymaster, direct, error, "quote");
     }
     const ServiceFeePlan* const fee_plan{&quote_preflight.fee_plan};
     const bool needs_carrier = fee_plan->output_kind == FeeOutputKind::CARRIER_SUCCESSOR;

@@ -809,6 +809,9 @@ and [client contract](doc/digidollar-paymaster-integration.md).
 ### src/wallet/digidollarwallet.cpp
 - Full implementation of DigiDollarWallet (~2000+ lines)
 - Integrates with wallet database, transaction builders, signing, mempool
+- `IsPendingDDTransaction` shares the existing pending-mint expiry classification
+  between `GetPendingDDBalance` and `GetDDBalanceSummary` under the wallet lock;
+  unknown height or missing metadata is not proof of expiry.
 - `IsDDOutputMine` retains its complete descriptor fallback and private-key
   recovery. Public Taproot spend data rejects nonmatching candidates before
   expensive private HD expansion; a candidate still requires the original
@@ -833,6 +836,8 @@ Split provider, client, finalization, recovery, reconciliation and reputation
 units share internal helpers. `paymasterdb.cpp` persists wallet records;
 `paymastercheckpoint.*` maintains an independent rollback checkpoint. See
 [threat model](doc/paymaster-threat-model.md) for retention and restore limits.
+`GetAlternativeRecoveryByIdWithStatus` distinguishes absent recovery IDs from
+local read/version failures before inbound processing validates stored shape.
 
 ### src/wallet/paymasterapplication*, paymasterservice*, paymasterclient*, paymasterprocessing*, paymasterfinance*
 
@@ -841,6 +846,10 @@ preparation, client authorization, exact submission and accounting. RPC adapters
 call them directly. The provider loop calls services without fabricated RPC
 requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
+Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
+`src/paymaster/recovery.cpp` after reconstructing trusted local state; the full
+validator retains chainstate checks. Permanent peer rejection and retained local
+failures are described under [execution](doc/digidollar-paymaster-implementation.md#execution-and-presentation).
 `ResolvePaymasterActiveTip` resolves the first captured locator hash to an active
 block and height. Provider readiness compares a fresh tip hash after wallet/index
 reads, avoiding height lookups that can become invalid during a reorganization.

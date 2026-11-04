@@ -10,11 +10,22 @@ After reconnection the payment returns to the mempool, client authority remains
 bound to the same transaction, provider successor liquidity becomes pending,
 and confirmed finance totals roll back. Reconfirmation must promote the same
 transaction and the same single finance event again.
+An unrelated recovery submission must be rejected locally before the valid
+payment is processed, without changing either party's financial state.
 """
 
+import struct
+
+from test_framework.messages import (
+    ser_string,
+    ser_uint256,
+)
 from test_framework.paymaster import (
     PaymasterFunctionalHarness,
+    assert_snapshot_equal,
     paymaster_node_args,
+    value_snapshot,
+    wait_for_paymaster_idle,
 )
 from test_framework.test_framework import DigiByteTestFramework
 from test_framework.util import assert_equal
@@ -75,6 +86,49 @@ class PaymasterReorgTest(DigiByteTestFramework):
             request_id, recipient.getdigidollaraddress(), 1_000)
         authorized = harness.authorize_quote(options, send)
         assert_equal(authorized["provider_id"], provider_id)
+
+        self.log.info("Reject an unknown recovery before completing the queued payment")
+        def submit_delivered():
+            send()
+            return any(
+                peer["inbound"]
+                and peer["bytesrecv_per_msg"].get("pmsubmit", 0) > 0
+                for peer in provider_node.getpeerinfo())
+
+        self.wait_until(submit_delivered)
+        peer = next(peer for peer in client_node.getpeerinfo()
+                    if peer["connection_type"] == "paymaster")
+        assert_equal(peer["transport_protocol_type"], "v2")
+        # AlternativeRecoverySubmit v2, encoded in its existing field order.
+        # Use the client's authenticated regtest channel and a distinct ID;
+        # this envelope does not grant spending authority.
+        recovery_payload = (
+            struct.pack("<H", 2)
+            + ser_uint256(int(client_node.getblockhash(0), 16))
+            + ser_string(b"550e8400-e29b-41d4-a716-446655442299")
+            + ser_uint256(0x91) + ser_uint256(0x92)
+            + ser_uint256(int(provider_id, 16))
+            + ser_uint256(0x93) + ser_uint256(0x94) + ser_uint256(0x95)
+            + ser_string(b"\x01")
+        )
+        before_rejection = value_snapshot(provider_node, provider, client, recipient)
+        client_node.sendmsgtopeer(peer["id"], "pmrecsub", recovery_payload.hex())
+        # A subsequent pong on this stream proves that the provider processed
+        # the injected envelope before its higher-priority submit queue is read.
+        pong_bytes = peer["bytesrecv_per_msg"].get("pong", 0)
+        client_node.ping()
+        self.wait_until(lambda: any(
+            current["id"] == peer["id"]
+            and current["bytesrecv_per_msg"].get("pong", 0) > pong_bytes
+            for current in client_node.getpeerinfo()))
+        rejected = wait_for_paymaster_idle(self, provider.processpaymastersubmits)
+        assert_equal(rejected["processed"], True)
+        assert_equal(rejected["rejected"], True)
+        assert_equal(rejected["queued"], False)
+        assert_equal(rejected["message_type"], "recovery_submit")
+        assert_equal(rejected["rejection_reason"], "PAYMASTER_RECOVERY_SUBMIT_BINDING_MISMATCH")
+        assert_snapshot_equal(
+            before_rejection, value_snapshot(provider_node, provider, client, recipient))
 
         commit = {}
 

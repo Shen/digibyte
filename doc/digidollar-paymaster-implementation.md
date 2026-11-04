@@ -157,6 +157,22 @@ results (`wallet/paymasterresults.h`). JSON encoding belongs to
 Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 
+Provider processing distinguishes permanent peer errors from local uncertainty.
+An unknown recovery ID, mismatched binding, invalid submitted PSBT/signature or
+divergent replay is acknowledged only for that message: the local result is
+`processed=true`, `rejected=true`, `queued=false`, with a stable `rejection_reason`.
+No new signed rejection is sent and no budget, reservation, pool, final bytes or
+checkpoint is released or reset. Read/version errors, corrupt persisted records
+or templates, missing indexed sessions, readiness/unlock/checkpoint failures and
+uncertain chain/index reads retain the message. A failed quote prevout lookup
+is permanent only when the active UTXO view proves the input absent or spent.
+
+`GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
+stored recovery shape is validated before interpreting nested bindings.
+`ValidateAlternativeRecoverySubmitPayload` checks peer bindings, canonical PSBT
+encoding and signatures against a previously validated local template. It does
+not replace the full chainstate validation or the checks immediately before signing.
+
 The generic `qt/walletasync.*` queue admits two concurrent pure reads. A mutation
 waits for earlier reads and blocks subsequent work until completion. Callers
 declare effects explicitly; unclassified work is a non-coalescible mutation.
