@@ -2972,59 +2972,144 @@ void ProviderOverview::showReservations(const UniValue& result)
     m_activity_summary->setText(lines.join('\n'));
 }
 
+namespace {
+enum class ActivityDisposition {
+    UNKNOWN,
+    NO_MESSAGE,
+    PROCESSED,
+    DEFERRED,
+    LOCAL_REJECTION,
+};
+
+struct ActivityResultView {
+    ActivityDisposition disposition{ActivityDisposition::UNKNOWN};
+    std::optional<bool> queued;
+    QString message_type;
+    QString result_status;
+    QString attempt_state;
+    QString rejection_code;
+    QString rejection_reason;
+    QString deferral_reason;
+    QString txid;
+};
+
+ActivityResultView DecodeActivityResult(const UniValue& result)
+{
+    if (!result.isObject()) return {};
+    ActivityResultView view;
+    std::optional<bool> processed, rejected, deferred;
+    const auto read_bool = [&](const char* name, std::optional<bool>& value) {
+        if (!result.exists(name)) return true;
+        const UniValue& field = result.find_value(name);
+        if (!field.isBool()) return false;
+        value = field.get_bool();
+        return true;
+    };
+    const auto read_text = [&](const char* name, QString& value) {
+        if (!result.exists(name)) return true;
+        const UniValue& field = result.find_value(name);
+        if (!field.isStr()) return false;
+        value = QString::fromStdString(field.get_str());
+        return true;
+    };
+    if (!read_bool("processed", processed) || !processed.has_value() ||
+        !read_bool("queued", view.queued) ||
+        !read_bool("rejected", rejected) ||
+        !read_bool("deferred", deferred) ||
+        !read_text("message_type", view.message_type) ||
+        !read_text("result_status", view.result_status) ||
+        !read_text("attempt_state", view.attempt_state) ||
+        !read_text("rejection_code", view.rejection_code) ||
+        !read_text("rejection_reason", view.rejection_reason) ||
+        !read_text("deferral_reason", view.deferral_reason) ||
+        !read_text("txid", view.txid)) {
+        return {};
+    }
+    const bool locally_rejected = rejected.value_or(false);
+    const bool waiting = deferred.value_or(false);
+    // Only positive, reported facts conflict. Absent optional flags and an
+    // unreported delivery state must not become known false values.
+    if ((locally_rejected && waiting) ||
+        (!*processed && (locally_rejected || waiting || view.queued.value_or(false))) ||
+        (view.queued.value_or(false) && (locally_rejected || waiting))) {
+        return {};
+    }
+    if (!*processed) {
+        view.disposition = ActivityDisposition::NO_MESSAGE;
+    } else if (waiting) {
+        view.disposition = ActivityDisposition::DEFERRED;
+    } else if (locally_rejected) {
+        view.disposition = ActivityDisposition::LOCAL_REJECTION;
+    } else {
+        view.disposition = ActivityDisposition::PROCESSED;
+    }
+    return view;
+}
+} // namespace
+
 QString ProviderOverview::formatActivityResult(const UniValue& result, bool submitted_payment) const
 {
-    if (!result.isObject()) {
+    const ActivityResultView view = DecodeActivityResult(result);
+    if (view.disposition == ActivityDisposition::UNKNOWN) {
         return tr("Core returned an unexpected processing result. See the technical result.");
     }
-    const UniValue& processed_value = result.find_value("processed");
-    const bool processed = processed_value.isBool() && processed_value.get_bool();
-    if (!processed) {
+    if (view.disposition == ActivityDisposition::NO_MESSAGE) {
         return submitted_payment
-            ? tr("No submitted payment is waiting in this provider wallet.")
-            : tr("No capacity, quote, or recovery request is waiting in this provider wallet.");
+            ? tr("No submitted payment was processed by this operation.")
+            : tr("No capacity, quote, or recovery request was processed by this operation.");
     }
 
-    const QString type = activityText(result, "message_type");
     QString type_description;
-    if (type == QLatin1String("capacity")) {
+    if (view.message_type == QLatin1String("capacity")) {
         type_description = tr("capacity check");
-    } else if (type == QLatin1String("quote")) {
+    } else if (view.message_type == QLatin1String("quote")) {
         type_description = tr("quote request");
-    } else if (type == QLatin1String("recovery_request")) {
+    } else if (view.message_type == QLatin1String("recovery_request")) {
         type_description = tr("recovery-provider request");
-    } else if (type == QLatin1String("recovery_submit")) {
+    } else if (view.message_type == QLatin1String("recovery_submit")) {
         type_description = tr("recovery submission");
-    } else if (type == QLatin1String("submit")) {
+    } else if (view.message_type == QLatin1String("submit") ||
+               (view.message_type.isEmpty() && submitted_payment)) {
         type_description = tr("submitted payment");
     } else {
-        type_description = type.isEmpty() ? tr("provider message") : type;
+        type_description = tr("provider message");
     }
 
-    const UniValue& queued_value = result.find_value("queued");
-    const bool queued = queued_value.isBool() && queued_value.get_bool();
     QStringList lines;
-    lines.push_back(tr("Processed one %1.").arg(type_description));
-    lines.push_back(queued
-        ? tr("The signed provider response was queued for delivery to the client.")
-        : tr("The provider response was not queued. Check the technical result before retrying."));
-    const QString result_status = activityText(result, "result_status");
-    const QString attempt_state = activityText(result, "attempt_state");
-    const QString rejection_code = activityText(result, "rejection_code");
-    const QString txid = activityText(result, "txid");
-    if (!result_status.isEmpty()) {
-        lines.push_back(tr("Result status: %1").arg(result_status));
+    if (view.disposition == ActivityDisposition::DEFERRED) {
+        lines.push_back(tr("The %1 was deferred. It remains waiting within its original expiry.").arg(type_description));
+        if (!view.deferral_reason.isEmpty()) {
+            lines.push_back(tr("Deferral reason: %1").arg(view.deferral_reason));
+        }
+    } else if (view.disposition == ActivityDisposition::LOCAL_REJECTION) {
+        lines.push_back(tr("The %1 was discarded locally.").arg(type_description));
+        if (!view.rejection_reason.isEmpty()) {
+            lines.push_back(tr("Rejection reason: %1").arg(view.rejection_reason));
+        }
+    } else {
+        lines.push_back(tr("Processed one %1.").arg(type_description));
+        if (!view.queued.has_value()) {
+            lines.push_back(tr("The provider response delivery status was not reported. See the technical result."));
+        } else {
+            lines.push_back(*view.queued
+                ? tr("The signed provider response was queued for delivery to the client.")
+                : tr("The provider response was not queued. Check the technical result before retrying."));
+        }
     }
-    if (!attempt_state.isEmpty()) {
-        lines.push_back(tr("Payment state: %1").arg(attempt_state));
+    if (!view.result_status.isEmpty()) {
+        lines.push_back(tr("Result status: %1").arg(view.result_status));
     }
-    if (!rejection_code.isEmpty()) {
-        lines.push_back(tr("Rejected safely: %1").arg(rejection_code));
+    if (!view.attempt_state.isEmpty()) {
+        lines.push_back(tr("Payment state: %1").arg(view.attempt_state));
     }
-    if (!txid.isEmpty()) {
-        lines.push_back(tr("Transaction: %1").arg(txid));
+    if (!view.rejection_code.isEmpty()) {
+        lines.push_back(tr("Rejected safely: %1").arg(view.rejection_code));
     }
-    if (!submitted_payment) {
+    if (!view.txid.isEmpty()) {
+        lines.push_back(tr("Transaction: %1").arg(view.txid));
+    }
+    if (!submitted_payment && view.disposition == ActivityDisposition::PROCESSED &&
+        view.message_type == QLatin1String("quote")) {
         lines.push_back(tr(
             "If more clients are waiting, process another request. A quote may now hold a reservation."));
     }
@@ -4018,6 +4103,7 @@ void ProviderOverview::buildActivity(PageBindings& pages)
         tr("No request or submitted payment has been processed from this screen yet."),
         m_activity_result_group);
     m_activity_action_result->setObjectName("paymasterActivityActionResult");
+    m_activity_action_result->setTextFormat(Qt::PlainText);
     m_activity_action_result->setWordWrap(true);
     m_activity_action_result->setTextInteractionFlags(Qt::TextSelectableByMouse);
     activity_result_layout->addWidget(m_activity_action_result);

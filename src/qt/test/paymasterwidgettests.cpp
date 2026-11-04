@@ -2130,85 +2130,268 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflow
 
 void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStates()
 {
-    std::unique_ptr<const PlatformStyle> platform_style(
-        PlatformStyle::instantiate("other"));
-    DigiDollarTab tab(platform_style.get());
-    tab.setPaymasterMutationSnapshotsAvailableForTesting(true, true, true);
-    QStringList commands;
+    using wallet::paymaster_app::ProviderProcessingResult;
+    using wallet::paymaster_rpc::internal::ToJSON;
+    struct ActivityCase {
+        const char* name;
+        UniValue result;
+        bool submitted_payment;
+        QString summary;
+        QStringList details;
+        QStringList absent;
+    };
+    std::vector<ActivityCase> cases;
+    const auto add_native = [&](const char* name, const ProviderProcessingResult& result,
+                                bool submitted_payment, const QString& summary,
+                                QStringList details = {}, QStringList absent = {}) {
+        cases.push_back({name, ToJSON(result), submitted_payment, summary,
+                         std::move(details), std::move(absent)});
+    };
+    const QString queued = QString::fromLatin1("The signed provider response was queued for delivery to the client.");
+    const QString not_queued = QString::fromLatin1("The provider response was not queued. Check the technical result before retrying.");
+    const QString delivery_unknown = QString::fromLatin1("The provider response delivery status was not reported. See the technical result.");
+    const QString unexpected = QString::fromLatin1("Core returned an unexpected processing result. See the technical result.");
+    const QString reservation_hint = QString::fromLatin1("A quote may now hold a reservation.");
+    const QStringList no_response_claim{queued, not_queued, reservation_hint, QString::fromLatin1("process another request")};
 
-    tab.setPaymasterRpcExecutorForTesting(
-        [&](const std::string& command, const UniValue&) {
-            commands.push_back(QString::fromStdString(command));
-            if (command == "processpaymasterrequests") {
-                UniValue result{UniValue::VOBJ};
-                result.pushKV("processed", true);
-                result.pushKV("message_type", "quote");
-                result.pushKV("queued", true);
-                return result;
-            }
-            if (command == "listpaymasterreservations") {
-                UniValue result{UniValue::VARR};
-                UniValue reservation{UniValue::VOBJ};
-                reservation.pushKV("purpose", "operational");
-                reservation.pushKV("asset", "dd_carrier");
-                reservation.pushKV("dd_cents", 103);
-                reservation.pushKV("state", "reserved");
-                result.push_back(std::move(reservation));
-                return result;
-            }
-            if (command == "getpaymasterinfo") {
-                throw std::runtime_error("injected follow-up refresh unavailable");
-            }
-            throw std::runtime_error("unexpected injected activity RPC");
-        });
-
-    QStackedWidget* operator_tabs = tab.findChild<QStackedWidget*>(
-        QStringLiteral("paymasterOperatorPages"));
-    QVERIFY(operator_tabs != nullptr);
-    for (int index = 0; index < operator_tabs->count(); ++index) {
-        operator_tabs->widget(index)->setEnabled(true);
-        operator_tabs->widget(index)->setProperty("paymasterPageAvailable", true);
+    // Use the real result serializer for valid outcomes. Synthetic JSON below
+    // is reserved for malformed or contradictory responses at the UI boundary.
+    {
+        ProviderProcessingResult result;
+        result.processed = true;
+        result.queued = false;
+        result.message_type = "capacity";
+        result.deferred = true;
+        result.deferral_reason = "PAYMASTER_SAFETY_LIMIT_EXHAUSTED";
+        add_native("capacity_deferred", result, false,
+            QString::fromLatin1("The capacity check was deferred. It remains waiting within its original expiry."),
+            {QString::fromLatin1("Deferral reason: PAYMASTER_SAFETY_LIMIT_EXHAUSTED")}, no_response_claim);
+        result.message_type = "quote";
+        result.deferral_reason = "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED";
+        add_native("quote_deferred", result, false,
+            QString::fromLatin1("The quote request was deferred. It remains waiting within its original expiry."),
+            {QString::fromLatin1("Deferral reason: PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED")}, no_response_claim);
+        result.deferral_reason.reset();
+        result.queued.reset();
+        add_native("deferred_optional_details_absent", result, false,
+            QString::fromLatin1("The quote request was deferred. It remains waiting within its original expiry."),
+            {}, no_response_claim);
     }
 
-    UniValue running{UniValue::VOBJ};
-    running.pushKV("wallet_eligible", true);
-    running.pushKV("enabled", true);
-    running.pushKV("ready", true);
-    running.pushKV("running", true);
-    running.pushKV("wallet_locked", false);
-    running.pushKV("operation_mode", "manual");
-    running.pushKV("service_state", "manual");
-    running.pushKV("readiness_errors", UniValue{UniValue::VARR});
-    tab.setPaymasterReadinessStatusForTesting(running);
+    {
+        ProviderProcessingResult result;
+        result.processed = true;
+        result.queued = true;
+        result.message_type = "quote";
+        add_native("quote_queued", result, false, QString::fromLatin1("Processed one quote request."),
+            {queued, reservation_hint}, {not_queued, delivery_unknown});
+        result.queued = false;
+        add_native("quote_not_queued", result, false, QString::fromLatin1("Processed one quote request."),
+            {not_queued, reservation_hint}, {queued, delivery_unknown});
+        result.rejected = false;
+        result.deferred = false;
+        add_native("optional_flags_known_false", result, false, QString::fromLatin1("Processed one quote request."),
+            {not_queued}, {QString::fromLatin1("was deferred"), QString::fromLatin1("was discarded")});
+        result.queued.reset();
+        add_native("quote_delivery_unknown", result, false, QString::fromLatin1("Processed one quote request."),
+            {delivery_unknown}, {queued, not_queued});
+        result.message_type.reset();
+        add_native("submit_delivery_unknown", result, true, QString::fromLatin1("Processed one submitted payment."),
+            {delivery_unknown}, {queued, not_queued, reservation_hint});
+        result.queued = true;
+        add_native("submit_without_message_type", result, true, QString::fromLatin1("Processed one submitted payment."),
+            {queued}, {not_queued, delivery_unknown, reservation_hint});
+        result.message_type = "recovery_submit";
+        add_native("recovery_submit_queued", result, true, QString::fromLatin1("Processed one recovery submission."),
+            {queued}, {reservation_hint});
+        result.message_type = "recovery_request";
+        add_native("recovery_request_queued", result, false, QString::fromLatin1("Processed one recovery-provider request."),
+            {queued}, {reservation_hint});
+    }
 
-    QPushButton* process_request = tab.findChild<QPushButton*>(
-        QStringLiteral("paymasterProcessOneRequest"));
-    QPushButton* refresh = tab.findChild<QPushButton*>(
-        QStringLiteral("paymasterRefreshReservations"));
-    QLabel* action_result = tab.findChild<QLabel*>(
-        QStringLiteral("paymasterActivityActionResult"));
-    QLabel* summary = tab.findChild<QLabel*>(
-        QStringLiteral("paymasterActivitySummary"));
-    QVERIFY(process_request != nullptr);
-    QVERIFY(refresh != nullptr);
-    QVERIFY(action_result != nullptr);
-    QVERIFY(summary != nullptr);
-    QVERIFY(process_request->isEnabled());
+    {
+        ProviderProcessingResult result;
+        result.processed = true;
+        result.queued = false;
+        result.rejected = true;
+        result.message_type = "quote";
+        result.rejection_reason = "PAYMASTER_INVALID_QUOTE_REQUEST";
+        add_native("quote_rejected_locally", result, false, QString::fromLatin1("The quote request was discarded locally."),
+            {QString::fromLatin1("Rejection reason: PAYMASTER_INVALID_QUOTE_REQUEST")}, no_response_claim);
+        result.message_type = "submit";
+        result.rejection_reason = "PAYMASTER_SUBMIT_BINDING_MISMATCH";
+        add_native("submit_rejected_locally", result, true, QString::fromLatin1("The submitted payment was discarded locally."),
+            {QString::fromLatin1("Rejection reason: PAYMASTER_SUBMIT_BINDING_MISMATCH")}, no_response_claim);
+        result.message_type = "recovery_submit";
+        result.rejection_reason = "PAYMASTER_RECOVERY_UNKNOWN";
+        add_native("recovery_submit_rejected_locally", result, true, QString::fromLatin1("The recovery submission was discarded locally."),
+            {QString::fromLatin1("Rejection reason: PAYMASTER_RECOVERY_UNKNOWN")}, no_response_claim);
+        result.message_type = "capacity";
+        result.rejection_reason = "<b>PAYMASTER_INVALID_CAPACITY_REQUEST</b>";
+        add_native("literal_rejection_reason", result, false, QString::fromLatin1("The capacity check was discarded locally."),
+            {QString::fromLatin1("Rejection reason: <b>PAYMASTER_INVALID_CAPACITY_REQUEST</b>")}, no_response_claim);
+        result.rejection_reason.reset();
+        result.queued.reset();
+        add_native("rejection_optional_details_absent", result, false, QString::fromLatin1("The capacity check was discarded locally."),
+            {}, no_response_claim);
+    }
 
-    process_request->click();
-    QCOMPARE(commands.value(0), QStringLiteral("processpaymasterrequests"));
-    QVERIFY(action_result->text().contains(QStringLiteral("quote request")));
-    QVERIFY(action_result->text().contains(QStringLiteral("queued")));
+    {
+        ProviderProcessingResult result;
+        result.processed = true;
+        result.queued = true;
+        result.result_status = DigiDollar::Paymaster::PaymasterResultStatus::REJECTED;
+        result.rejection_code = "PAYMASTER_TEMPLATE_INPUT_UNAVAILABLE";
+        const QStringList signed_rejection{QString::fromLatin1("Result status: rejected"),
+            QString::fromLatin1("Rejected safely: PAYMASTER_TEMPLATE_INPUT_UNAVAILABLE")};
+        add_native("signed_rejection_queued", result, true, QString::fromLatin1("Processed one submitted payment."),
+            signed_rejection + QStringList{queued}, {not_queued, QString::fromLatin1("discarded locally"), reservation_hint});
+        result.queued = false;
+        add_native("signed_rejection_not_queued", result, true, QString::fromLatin1("Processed one submitted payment."),
+            signed_rejection + QStringList{not_queued}, {queued, QString::fromLatin1("discarded locally"), reservation_hint});
+    }
 
-    commands.clear();
-    refresh->click();
-    QCOMPARE(commands.value(0), QStringLiteral("listpaymasterreservations"));
-    QVERIFY(summary->text().contains(QStringLiteral("1 unavailable")));
-    auto* reservations = tab.findChild<QTableWidget*>("paymasterActivityReservations");
-    QVERIFY(reservations);
-    QCOMPARE(reservations->rowCount(), 1);
-    QVERIFY(reservations->item(0, 1)->text().contains(QStringLiteral("1.03 DD carrier")));
-    QVERIFY(reservations->item(0, 2)->text().contains(QStringLiteral("reserved for in-progress work")));
+    {
+        ProviderProcessingResult result;
+        result.processed = false;
+        result.queued = false;
+        add_native("request_no_message", result, false,
+            QString::fromLatin1("No capacity, quote, or recovery request was processed by this operation."), {}, no_response_claim);
+        add_native("submit_no_message", result, true,
+            QString::fromLatin1("No submitted payment was processed by this operation."), {}, no_response_claim);
+        result.queued.reset();
+        add_native("no_message_delivery_absent", result, false,
+            QString::fromLatin1("No capacity, quote, or recovery request was processed by this operation."), {}, no_response_claim);
+        result.processed.reset();
+        add_native("processed_absent", result, false, unexpected, {}, no_response_claim);
+        add_native("submit_processed_absent", result, true, unexpected, {}, no_response_claim);
+    }
+
+    const std::pair<const char*, const char*> malformed[] = {
+        {"non_object", "[]"},
+        {"processed_null", R"({"processed":null,"queued":false})"},
+        {"processed_string", R"({"processed":"false","queued":false})"},
+        {"processed_number", R"({"processed":0,"queued":false})"},
+        {"queued_null", R"({"processed":true,"queued":null})"},
+        {"queued_string", R"({"processed":true,"queued":"false"})"},
+        {"queued_number", R"({"processed":true,"queued":0})"},
+        {"rejected_string", R"({"processed":true,"queued":false,"rejected":"false"})"},
+        {"deferred_number", R"({"processed":true,"queued":false,"deferred":0})"},
+        {"message_type_number", R"({"processed":true,"queued":true,"message_type":0})"},
+        {"rejection_reason_object", R"({"processed":true,"rejected":true,"rejection_reason":{}})"},
+        {"deferral_reason_null", R"({"processed":true,"deferred":true,"deferral_reason":null})"},
+        {"rejection_code_bool", R"({"processed":true,"queued":false,"rejection_code":false})"},
+        {"result_status_number", R"({"processed":true,"queued":true,"result_status":0})"},
+        {"attempt_state_bool", R"({"processed":true,"queued":true,"attempt_state":false})"},
+        {"txid_number", R"({"processed":true,"queued":true,"txid":0})"},
+        {"rejected_and_deferred", R"({"processed":true,"queued":false,"rejected":true,"deferred":true})"},
+        {"not_processed_but_queued", R"({"processed":false,"queued":true})"},
+        {"not_processed_but_rejected", R"({"processed":false,"rejected":true})"},
+        {"not_processed_but_deferred", R"({"processed":false,"deferred":true})"},
+        {"queued_but_rejected", R"({"processed":true,"queued":true,"rejected":true})"},
+        {"queued_but_deferred", R"({"processed":true,"queued":true,"deferred":true})"},
+    };
+    for (const auto& [name, json] : malformed) {
+        UniValue value;
+        QVERIFY2(value.read(json), name);
+        cases.push_back({name, std::move(value), false, unexpected, {}, no_response_claim});
+    }
+
+    for (const ActivityCase& test_case : cases) {
+        std::unique_ptr<const PlatformStyle> platform_style(PlatformStyle::instantiate("other"));
+        DigiDollarTab tab(platform_style.get());
+        tab.setPaymasterMutationSnapshotsAvailableForTesting(true, true, true);
+        QStringList commands;
+        std::vector<UniValue> parameters;
+        const QString processing_command = test_case.submitted_payment
+            ? QString::fromLatin1("processpaymastersubmits") : QString::fromLatin1("processpaymasterrequests");
+        tab.setPaymasterRpcExecutorForTesting(
+            [&](const std::string& command, const UniValue& params) {
+                commands.push_back(QString::fromStdString(command));
+                parameters.push_back(params);
+                if (QString::fromStdString(command) == processing_command) return test_case.result;
+                if (command == "listpaymasterreservations") {
+                    UniValue reservations{UniValue::VARR};
+                    UniValue reservation{UniValue::VOBJ};
+                    reservation.pushKV("purpose", "operational");
+                    reservation.pushKV("asset", "dd_carrier");
+                    reservation.pushKV("dd_cents", 103);
+                    reservation.pushKV("state", "reserved");
+                    reservations.push_back(std::move(reservation));
+                    return reservations;
+                }
+                if (command == "getpaymasteroperatorinfo") {
+                    throw std::runtime_error("injected follow-up refresh unavailable");
+                }
+                throw std::runtime_error("unexpected injected activity RPC");
+            });
+
+        auto* operator_tabs = tab.findChild<QStackedWidget*>("paymasterOperatorPages");
+        QVERIFY(operator_tabs);
+        for (int index = 0; index < operator_tabs->count(); ++index) {
+            operator_tabs->widget(index)->setEnabled(true);
+            operator_tabs->widget(index)->setProperty("paymasterPageAvailable", true);
+        }
+        UniValue running;
+        QVERIFY(running.read(R"({"wallet_eligible":true,"enabled":true,"ready":true,"running":true,
+            "wallet_locked":false,"operation_mode":"manual","service_state":"manual","readiness_errors":[]})"));
+        tab.setPaymasterReadinessStatusForTesting(running);
+
+        auto* action = tab.findChild<QPushButton*>(test_case.submitted_payment
+            ? "paymasterProcessOneSubmit" : "paymasterProcessOneRequest");
+        auto* action_result = tab.findChild<QLabel*>("paymasterActivityActionResult");
+        auto* technical_result = tab.findChild<QPlainTextEdit*>("paymasterActivityTechnicalResult");
+        QVERIFY(action);
+        QVERIFY(action_result);
+        QVERIFY(technical_result);
+        QVERIFY2(action->isEnabled(), test_case.name);
+        bool confirmation_seen{false};
+        bool action_disabled_during_confirmation{false};
+        if (test_case.submitted_payment) {
+            QTimer::singleShot(0, &tab, [&] {
+                if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    confirmation_seen = dialog->windowTitle() == QLatin1String("Process one submitted Paymaster payment?");
+                    action_disabled_during_confirmation = !action->isEnabled();
+                    dialog->done(QMessageBox::Yes);
+                }
+            });
+        }
+        action->click();
+        QCOMPARE(confirmation_seen, test_case.submitted_payment);
+        QCOMPARE(action_disabled_during_confirmation, test_case.submitted_payment);
+        // Exactly one explicit processing action, followed only by the existing
+        // status read. Neither rendering nor a missing response may retry it.
+        const QStringList expected_commands{processing_command, QString::fromLatin1("getpaymasteroperatorinfo")};
+        QCOMPARE(commands, expected_commands);
+        QVERIFY(parameters.front().isArray());
+        QCOMPARE(parameters.front().size(), size_t{0});
+        QVERIFY2(action_result->text().section(QLatin1Char('\n'), 0, 0) == test_case.summary, test_case.name);
+        for (const QString& expected : test_case.details) {
+            QVERIFY2(action_result->text().contains(expected), qPrintable(QString::fromLatin1(test_case.name) + ": " + expected));
+        }
+        for (const QString& absent : test_case.absent) {
+            QVERIFY2(!action_result->text().contains(absent), qPrintable(QString::fromLatin1(test_case.name) + ": " + absent));
+        }
+        QCOMPARE(action_result->textFormat(), Qt::PlainText);
+        QCOMPARE(technical_result->toPlainText(), QString::fromStdString(test_case.result.write(2)));
+
+        if (QString::fromLatin1(test_case.name) == QLatin1String("quote_queued")) {
+            auto* refresh = tab.findChild<QPushButton*>("paymasterRefreshReservations");
+            auto* summary = tab.findChild<QLabel*>("paymasterActivitySummary");
+            QVERIFY(refresh);
+            QVERIFY(summary);
+            commands.clear();
+            refresh->click();
+            const QStringList expected_refresh{QString::fromLatin1("listpaymasterreservations"), QString::fromLatin1("getpaymasteroperatorinfo")};
+            QCOMPARE(commands, expected_refresh);
+            QVERIFY(summary->text().contains(QString::fromLatin1("1 unavailable")));
+            auto* reservations = tab.findChild<QTableWidget*>("paymasterActivityReservations");
+            QVERIFY(reservations);
+            QCOMPARE(reservations->rowCount(), 1);
+            QVERIFY(reservations->item(0, 1)->text().contains(QString::fromLatin1("1.03 DD carrier")));
+            QVERIFY(reservations->item(0, 2)->text().contains(QString::fromLatin1("reserved for in-progress work")));
+        }
+    }
 }
 
 void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
