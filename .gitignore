@@ -134,6 +134,8 @@ win32-build
 test/config.ini
 test/cache/*
 test/.mypy_cache/
+build_msvc/paymaster-tests**
+/build_msvc/paymaster-optimization-check/
 
 !src/leveldb*/Makefile
 
