@@ -226,7 +226,9 @@ RPCHelpMan getdigidollarsendsession()
                 throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND",
                     "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found", ErrorDisposition::RECONCILE, true);
             }
-            return SessionToJSON(session, &store);
+            UniValue result = SessionToJSON(session, &store);
+            result.pushKV("observed_at", GetTime());
+            return result;
         }),
     };
 }
