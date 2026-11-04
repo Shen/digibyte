@@ -1212,7 +1212,13 @@ bool ProviderLiquidity::repairableLiquidityGap() const
 
 void ProviderLiquidity::failGuidedTask(const QString& error)
 {
-    m_operation.fail(error, PaymasterQt::StableCode(m_panel.rpcFailure()));
+    failGuidedTask(error, PaymasterQt::StableCode(m_panel.rpcFailure()));
+}
+
+void ProviderLiquidity::failGuidedTask(const QString& error, const QString& error_code)
+{
+    // Local presentation checks supply their code explicitly; never infer it from RPC message text.
+    m_operation.fail(error, error_code);
     m_panel.overview().closeTaskErrorDetails();
     m_failed_guided_task = m_guided_task;
     m_guided_task.clear();
@@ -1260,7 +1266,8 @@ void ProviderLiquidity::beginGuidedTask(const QString& task, bool start_after)
                     return;
                 }
                 if (!m_panel.recovery().hasReleasableCarrier()) {
-                    failGuidedTask(QStringLiteral("PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE"));
+                    const auto code = QStringLiteral("PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE");
+                    failGuidedTask(code, code);
                     return;
                 }
                 previewGuidedTask(task);

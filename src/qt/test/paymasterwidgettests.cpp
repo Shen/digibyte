@@ -108,9 +108,9 @@
 #include <QtWidgets/qtestsupport_widgets.h>
 
 namespace {
-UniValue ProviderApplicationError(const char* code, const char* disposition = "reconcile")
+UniValue ProviderApplicationError(const char* code, const char* disposition = "reconcile", int rpc_code = RPC_WALLET_ERROR)
 {
-    UniValue error = JSONRPCError(-4, code);
+    UniValue error = JSONRPCError(rpc_code, code);
     UniValue data{UniValue::VOBJ};
     data.pushKV("paymaster_code", code);
     data.pushKV("disposition", disposition);
@@ -12579,11 +12579,11 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
         }
         if (command != "preparepaymasterpool") throw std::runtime_error("Unexpected guided operation");
         if (params[0].find_value("operational_carrier_slots").getInt<int>() != 1)
-            throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+            throw ProviderApplicationError("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL", "reconcile", RPC_INVALID_PARAMETER);
         const bool execute = params[0].find_value("execute").isTrue();
         execute ? ++executions : ++previews;
         if (outcome == "retry" && previews == 1)
-            throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+            throw ProviderApplicationError("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL", "reconcile", RPC_INVALID_PARAMETER);
         UniValue result;
         result.read(R"({"accepted":false,"cancelled":false,"executed":false,"preparation":[],
             "maximum_fee_satoshis":50000000,"maximum_total_fee_satoshis":50000000,
@@ -12691,7 +12691,8 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks_data()
     for (const char* mode : {"all_excess", "release_slot", "rebalancepaymasterpool"})
         for (const char* decision : {"approve", "cancel", "lost_reply"})
             QTest::newRow((std::string(mode) + "-" + decision).c_str()) << QString::fromLatin1(mode) << QString::fromLatin1(decision);
-    for (const char* decision : {"below_minimum", "zero_earnings", "one_cent_short", "minimum_error", "unknown_error"})
+    for (const char* decision : {"below_minimum", "zero_earnings", "one_cent_short", "minimum_error", "unknown_error",
+                                 "known_code_text_only", "known_code_unstructured_rpc"})
         QTest::newRow(decision) << QStringLiteral("all_excess") << QString::fromLatin1(decision);
     for (const char* decision : {"fresh_selection", "selection_reordered", "empty_pool", "invalid_pool", "pool_read_error",
                                  "slot_unavailable_preview", "slot_unavailable_execute", "plan_changed", "target_zero"})
@@ -12786,7 +12787,11 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
             params[0].find_value("txid").get_str() != current_reserve.find_value("txid").get_str())
             throw std::runtime_error("The review used a cached or different reserve");
         if ((!execute && blocked_preview) || (execute && blocked_execute))
-            throw std::runtime_error(release_error.toStdString());
+            throw ProviderApplicationError(release_error.toStdString().c_str());
+        if (decision == "known_code_text_only")
+            throw std::runtime_error("PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE");
+        if (decision == "known_code_unstructured_rpc")
+            throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE");
         if (decision == QLatin1String("minimum_error"))
             throw std::runtime_error("PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED: Amount below minimum DigiDollar output. Minimum: 100 cents");
         if (decision == QLatin1String("unknown_error"))
@@ -12853,7 +12858,8 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
         QCOMPARE(pauses, 0);
         return;
     }
-    if (decision == QLatin1String("minimum_error") || decision == QLatin1String("unknown_error")) {
+    if (decision == QLatin1String("minimum_error") || decision == QLatin1String("unknown_error") ||
+        decision == "known_code_text_only" || decision == "known_code_unstructured_rpc") {
         action->click();
         auto* status = panel->findChild<QLabel*>("paymasterTaskStatus");
         QVERIFY(status);
@@ -12864,7 +12870,13 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
             QVERIFY(!status->text().contains("PAYMASTER_TEST_WITHDRAWAL_FAILURE"));
             auto* details = panel->findChild<QLabel*>("paymasterTaskErrorDetails");
             QVERIFY(details && details->isHidden());
-            QVERIFY(details->text().contains("PAYMASTER_TEST_WITHDRAWAL_FAILURE"));
+            QVERIFY(details->text().contains(decision == "unknown_error" ? "PAYMASTER_TEST_WITHDRAWAL_FAILURE" : "PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE"));
+            auto* retry = panel->findChild<QPushButton*>("paymasterContinueTask");
+            QVERIFY(retry && retry->isEnabled());
+            QCOMPARE(retry->text(), QStringLiteral("Check current status"));
+            const int reads_before = pool_reads;
+            retry->click();
+            QCOMPARE(pool_reads, reads_before);
         }
         QCOMPARE(previews, 1);
         QCOMPARE(executions, 0);
@@ -12926,6 +12938,16 @@ void PaymasterWidgetTests::paymasterGuidedCapitalTasks()
         QCOMPARE(pauses, blocked_execute ? 1 : 0);
         QCOMPARE(approvals, blocked_execute ? 1 : 0);
         QVERIFY(pool_reads >= 1);
+        if (decision == "empty_pool") {
+            const int reads_before = pool_reads;
+            retry->click();
+            QTRY_VERIFY(pool_reads > reads_before);
+            QCOMPARE(previews, 0);
+            QCOMPARE(executions, 0);
+            QCOMPARE(pauses, 0);
+            QCOMPARE(approvals, 0);
+            QCOMPARE(retry->text(), QStringLiteral("Refresh reserves"));
+        }
         if (decision == "slot_unavailable_preview") {
             const QString capture = qEnvironmentVariable("DIGIBYTE_PAYMASTER_RELEASE_SCREENSHOT");
             if (!capture.isEmpty()) {

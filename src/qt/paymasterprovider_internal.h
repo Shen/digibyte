@@ -799,6 +799,7 @@ public:
     bool repairableLiquidityGap() const;
 
     void failGuidedTask(const QString& error);
+    void failGuidedTask(const QString& error, const QString& error_code);
 
     void beginGuidedTask(const QString& task, bool start_after = false);
 
