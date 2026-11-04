@@ -1544,99 +1544,18 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
     return result;
 }
 
-} // namespace
-
-ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
+ProviderProcessingResult ProcessProviderQuoteRequest(
+    const ProviderRequestProcessingContext& request,
+    const DirectMessage& direct, ProviderProcessingResult& result)
 {
-    CWallet* const wallet = &target;
-    using namespace DigiDollar::Paymaster;
-    const bool automatic_service = mode == ExecutionMode::AUTOMATIC;
-    if (automatic_service) {
-        if (!AutomaticProviderStateIsSynchronized(*wallet)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PROVIDER_SYNCING");
-        }
-    } else {
-        wallet->BlockUntilSyncedToCurrentChain();
-    }
-    const ProviderReadiness readiness =
-        GetProviderReadiness(*wallet, context, !automatic_service);
-    if (automatic_service &&
-        std::find(readiness.errors.begin(), readiness.errors.end(),
-                  "PAYMASTER_REQUIRES_READY_TXINDEX") !=
-            readiness.errors.end()) {
-        throw ApplicationError(ErrorKind::WALLET,
-                           "PAYMASTER_PROVIDER_SYNCING");
-    }
-    if (!context.paymaster || !readiness.have_identity ||
-        !context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id)) {
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_NOT_RUNNING");
-    }
-    if (readiness.settings.operation_mode ==
-            ProviderOperationMode::AUTOMATIC &&
-        !automatic_service) {
-        throw ApplicationError(ErrorKind::WALLET,
-                           "PAYMASTER_AUTOMATIC_SERVICE_ACTIVE");
-    }
-    ProviderWorkGuard work_guard{*context.paymaster,
-                                 wallet->GetName(),
-                                 readiness.identity.provider_id};
-    if (!work_guard.Acquired()) {
-        throw ApplicationError(ErrorKind::WALLET,
-                           "PAYMASTER_PROVIDER_SERVICE_BUSY");
-    }
-    ProviderProcessingResult result;
-    std::optional<ProviderProcessingResult> deferred_capacity;
-    result.queued = false;
-    const int64_t now = GetTime();
-    std::string error;
-    node::NodeContext* node = wallet->chain().context();
-    if (!node || !node->chainman) {
-        throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
-    }
-    const ProviderRequestProcessingContext request_context{
-        context, wallet, readiness, node, automatic_service, now, error};
-
-    // A reserved operational slot intentionally makes staged pool
-    // readiness false for *new* clients. The same automatic service
-    // must nevertheless continue the already capacity-bound quote
-    // request behind it. Skip fresh capacity work while liquidity is
-    // unavailable, then fall through to recovery/quote continuations.
-    if (!automatic_service || readiness.ready) {
-        const auto capacity_lease =
-            context.paymaster->LeaseCapacityRequests(
-                readiness.identity.provider_id, 1);
-        const auto& capacity_messages = capacity_lease.Messages();
-        if (!capacity_messages.empty()) {
-            result = ProcessProviderCapacityRequest(
-                request_context, capacity_messages.front());
-            if (!result.deferred.value_or(false)) return result;
-        }
-    }
-
-    if (result.deferred.value_or(false)) {
-        // Capacity throttling must not starve already admitted work.
-        deferred_capacity = result;
-        result = {};
-        result.queued = false;
-    }
-
-    const auto recovery_lease =
-        context.paymaster->LeaseRecoveryRequests(
-            readiness.identity.provider_id, 1);
-    const auto& recovery_messages = recovery_lease.Messages();
-    if (!recovery_messages.empty()) {
-        return ProcessProviderRecoveryRequest(
-            request_context, recovery_messages.front(), result);
-    }
-
-    const auto quote_lease = context.paymaster->LeaseQuoteRequests(
-        readiness.identity.provider_id, 1);
-    const auto& messages = quote_lease.Messages();
-    result.processed = !messages.empty();
-    if (messages.empty()) return deferred_capacity ? *deferred_capacity : result;
+    WalletContext& context = request.context;
+    CWallet* const wallet = request.wallet;
+    const ProviderReadiness& readiness = request.readiness;
+    node::NodeContext* const node = request.node;
+    const bool automatic_service = request.automatic_service;
+    const int64_t now = request.now;
+    std::string& error = request.error;
     result.message_type = "quote";
-    const DirectMessage& direct = messages.front();
     ProviderInboundMessageGuard message_guard{*context.paymaster,
                                               direct};
     const auto* quote_request =
@@ -1788,7 +1707,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
 
         const uint256 message_id = Hash(persisted_attempt.signed_quote);
         const bool queued = context.paymaster->QueueOutboundDirectMessage(
-            messages.front().peer_id, message_id,
+            direct.peer_id, message_id,
             persisted_attempt.signed_quote.size(), DirectPayload{response}, now);
         if (queued && node->connman) node->connman->WakeMessageHandler();
         result.queued = queued;
@@ -1801,7 +1720,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
         return result;
     }
 
-    if (messages.front().canonical_netgroup.empty()) {
+    if (direct.canonical_netgroup.empty()) {
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
     }
@@ -1866,7 +1785,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     const CAmount network_fee{COIN / 10};
     if (!store.CheckProviderQuoteAdmission(
             *quote_request, Hash(redacted_request),
-            messages.front().canonical_netgroup, needs_carrier,
+            direct.canonical_netgroup, needs_carrier,
             DGBSatoshis{network_fee}, now,
             provider_netgroup_bucket, error)) {
         if (IsPermanentCapacityContinuationError(error)) {
@@ -2054,7 +1973,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     const std::vector<unsigned char> response_bytes = SerializeQuoteResponse(response);
     const uint256 message_id = Hash(response_bytes);
     const bool queued = context.paymaster->QueueOutboundDirectMessage(
-        messages.front().peer_id, message_id, response_bytes.size(), DirectPayload{response}, now);
+        direct.peer_id, message_id, response_bytes.size(), DirectPayload{response}, now);
     if (queued && node->connman) node->connman->WakeMessageHandler();
     result.queued = queued;
     result.request_id = response.request_id;
@@ -2064,6 +1983,100 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     result.quote_id = response.quote.quote_id;
     result.template_commitment = response.quote.template_commitment;
     return result;
+}
+
+} // namespace
+
+ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
+{
+    CWallet* const wallet = &target;
+    using namespace DigiDollar::Paymaster;
+    const bool automatic_service = mode == ExecutionMode::AUTOMATIC;
+    if (automatic_service) {
+        if (!AutomaticProviderStateIsSynchronized(*wallet)) {
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_PROVIDER_SYNCING");
+        }
+    } else {
+        wallet->BlockUntilSyncedToCurrentChain();
+    }
+    const ProviderReadiness readiness =
+        GetProviderReadiness(*wallet, context, !automatic_service);
+    if (automatic_service &&
+        std::find(readiness.errors.begin(), readiness.errors.end(),
+                  "PAYMASTER_REQUIRES_READY_TXINDEX") !=
+            readiness.errors.end()) {
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_PROVIDER_SYNCING");
+    }
+    if (!context.paymaster || !readiness.have_identity ||
+        !context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_NOT_RUNNING");
+    }
+    if (readiness.settings.operation_mode ==
+            ProviderOperationMode::AUTOMATIC &&
+        !automatic_service) {
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_AUTOMATIC_SERVICE_ACTIVE");
+    }
+    ProviderWorkGuard work_guard{*context.paymaster,
+                                 wallet->GetName(),
+                                 readiness.identity.provider_id};
+    if (!work_guard.Acquired()) {
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_PROVIDER_SERVICE_BUSY");
+    }
+    ProviderProcessingResult result;
+    std::optional<ProviderProcessingResult> deferred_capacity;
+    result.queued = false;
+    const int64_t now = GetTime();
+    std::string error;
+    node::NodeContext* node = wallet->chain().context();
+    if (!node || !node->chainman) {
+        throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
+    }
+    const ProviderRequestProcessingContext request_context{
+        context, wallet, readiness, node, automatic_service, now, error};
+
+    // A reserved operational slot intentionally makes staged pool
+    // readiness false for *new* clients. The same automatic service
+    // must nevertheless continue the already capacity-bound quote
+    // request behind it. Skip fresh capacity work while liquidity is
+    // unavailable, then fall through to recovery/quote continuations.
+    if (!automatic_service || readiness.ready) {
+        const auto capacity_lease =
+            context.paymaster->LeaseCapacityRequests(
+                readiness.identity.provider_id, 1);
+        const auto& capacity_messages = capacity_lease.Messages();
+        if (!capacity_messages.empty()) {
+            result = ProcessProviderCapacityRequest(
+                request_context, capacity_messages.front());
+            if (!result.deferred.value_or(false)) return result;
+        }
+    }
+
+    if (result.deferred.value_or(false)) {
+        // Capacity throttling must not starve already admitted work.
+        deferred_capacity = result;
+        result = {};
+        result.queued = false;
+    }
+
+    const auto recovery_lease =
+        context.paymaster->LeaseRecoveryRequests(
+            readiness.identity.provider_id, 1);
+    const auto& recovery_messages = recovery_lease.Messages();
+    if (!recovery_messages.empty()) {
+        return ProcessProviderRecoveryRequest(
+            request_context, recovery_messages.front(), result);
+    }
+
+    const auto quote_lease = context.paymaster->LeaseQuoteRequests(
+        readiness.identity.provider_id, 1);
+    const auto& messages = quote_lease.Messages();
+    result.processed = !messages.empty();
+    if (messages.empty()) return deferred_capacity ? *deferred_capacity : result;
+    return ProcessProviderQuoteRequest(request_context, messages.front(), result);
 }
 
 PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)
