@@ -30,6 +30,7 @@
     "src/wallet/walletdb.cpp",
     "src/wallet/walletdb.h",
     "src/wallet/interfaces.cpp",
+    "src/wallet/digidollarwallet.cpp",
     "src/interfaces/wallet.h",
     "src/qt/walletmodel.cpp",
     "src/qt/walletmodel.h",
@@ -51,6 +52,7 @@
     "src/wallet/bdb.h",
     "src/wallet/bdb.cpp",
     "src/wallet/test/util.h",
+    "src/wallet/test/digidollar_mint_cleanup_tests.cpp",
     "src/wallet/test/db_tests.cpp"
   ],
   "forbidden": [
