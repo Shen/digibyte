@@ -308,11 +308,11 @@ bool RebuildProviderFinances(CWallet& wallet,
                                size_t& changed_events,
                                std::string& error)
 {
-    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
     using namespace DigiDollar::Paymaster;
     changed_events = 0;
     error.clear();
     LOCK(wallet.cs_wallet);
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
     WalletBatch batch{wallet.GetDatabase()};
     ProviderIdentityRecord identity;
     const DatabaseReadStatus identity_status =
@@ -595,8 +595,8 @@ bool RebuildProviderFinances(CWallet& wallet,
 
 bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error)
 {
-    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster incremental finance reconciliation", BCLog::BENCH);
     LOCK(wallet.cs_wallet);
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster incremental finance reconciliation", BCLog::BENCH);
     changed_events = 0;
     error.clear();
     WalletBatch batch{wallet.GetDatabase()};
