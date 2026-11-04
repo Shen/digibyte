@@ -10,7 +10,8 @@ Starting source: `7f30be59f7e01fe4032f51f967e864d616dcee12`.
 The separately reviewed, explicitly authorized two-path policy extension is
 `856e914e27`; F2 is `b996d79fd3`, F1's shared validation/status preparation is
 `06bf97bcc3`, and its processing/regressions are `462c8587ec`. The separately
-authorized `finance_summary.revision` RPC-description correction is `6da38cc604`.
+authorized `finance_summary.revision` RPC-description correction is `6da38cc604`;
+the separately authorized `observed_at` output correction is `ef213fb746`.
 The original task/official baselines in the change record remain unchanged.
 
 Targeted builds used MSVC 14.43.34808 x64, `/Od /MT /WX /std:c++20` and Windows
@@ -27,8 +28,8 @@ and its provenance files; F2's separate red/green evidence is in
 | F2 fresh baseline product TU plus new assertions | Expected failure, exit 201: five Summary expectations fail. With the corrected TU, all 30 assertions pass; ordinary DD spendability and reservation-balance selections also pass. |
 | Final independent native selection | Exit 0: 113 cases / 3,298 assertions, including protocol, PSBT, wire/leases, recovery, queue handling, F2 and selected persistence regressions. |
 | Final corruption/pruning classification; quote lookup; checkpoint/quote persistence | Three disjoint runs, all exit 0: 3 cases / 454 assertions; 1 / 31; 4 / 153. Together with the preceding row: 121 distinct cases / 3,936 assertions. |
-| Boundary checks | Five positive/negative fixtures passed. Committed candidate `462c8587ec` passed against local policy base `856e914e27`; this is not evidence of remote owner merge or hosting protections. |
-| Focused `wallet_paymaster_reorg.py`, RPC checks enabled | Exit 1 in `functional-reorg-3.log`: rejection, unchanged-value checks and the subsequent real payment through block inclusion completed, then the existing `getdigidollarsendsession` contract failed because required `observed_at` was absent. Full functional acceptance remains open. |
+| Boundary checks | Five positive/negative fixtures passed. Committed code candidate `ef213fb746` passed against local policy base `856e914e27`; this is not evidence of remote owner merge or hosting protections. |
+| Focused `wallet_paymaster_reorg.py`, RPC checks enabled | Exit 0 in `functional-reorg-4.log` (45.406 seconds): rejection, unchanged balances/pools/budgets, genuine USER_PAID payment, block inclusion, reorganization and reconfirmation without duplicate accounting. Uses `digibyted-observation.exe`, SHA256 `8145cc5c0064d349a529833637ba903de0777a4eddb54ac6222d76c88904cbdf`; seven modified product TUs were freshly compiled. Exact CLI/test hashes and command are in `functional-reorg-4.json`. |
 | Python/static checks | Functional source parses; `git diff --check` passed. `flake8` is not installed, so its check was not run. |
 
 The 27-case F2-only pass overlaps the final independent selection and is not
@@ -38,6 +39,11 @@ addnode semaphore during teardown); these were corrected without relaxing
 assertions or product guards. Their failed/aborted logs remain separate. The
 first functional attempt exposed the separately corrected finance RPC contract;
 the second used the wrong connection-type predicate for the inbound listener.
+The third completed rejection/payment but failed on the pre-existing missing
+`observed_at` field. The fourth passes after the separately approved correction;
+neither RPC contract checking nor any original reorg assertion was disabled.
+`source-freeze-ef213fb7.json` verifies that the committed product and functional
+test sources match the successful compile/run manifests.
 
 The recovery classification fixture uses authenticated synthetic records; it
 does not establish successful fresh recovery signing. It does verify retained

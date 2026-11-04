@@ -129,6 +129,21 @@ with freshly built daemon and CLI binaries. It must reject the unrelated recover
 and finish the real payment/reorganization sequence with RPC contract checking
 enabled. A failure during fixture setup is not a pass for that regression.
 
+The missing targeted Python check can be run in an unused workspace environment
+with the repository CI's flake8 version
+(`ci/lint/04_install.sh`); this needs package-download access and normally takes
+minutes. Do not overwrite an existing environment:
+
+```powershell
+python -m venv .ai/paymaster-lint-env
+& ./.ai/paymaster-lint-env/Scripts/python.exe -m pip install flake8==6.1.0
+& ./.ai/paymaster-lint-env/Scripts/python.exe -m flake8 --version
+& ./.ai/paymaster-lint-env/Scripts/python.exe -m flake8 test/functional/wallet_paymaster_reorg.py --select=F401,F821,F823,E9
+```
+
+This narrow check does not replace the repository Python lint selection in
+`test/lint/lint-python.py` and its CI dependencies.
+
 For the wallet-lock ownership and reorganization-readiness corrections, rebuild
 the changed sources and start with this focused selection:
 
