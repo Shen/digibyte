@@ -37,7 +37,6 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/spend.h>
-#include <univalue.h>
 #include <util/chaintype.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
@@ -382,88 +381,16 @@ bool LoadClientSessionView(PaymasterStore& store,
     return true;
 }
 
-UniValue AllowedActionsToJSON(const ClientSessionView& view)
+ClientRecoveryResult CaptureClientSession(PaymasterStore& store, const PaymentSession& session, std::string_view action)
 {
-    UniValue actions{UniValue::VARR};
-    for (const std::string& action : view.allowed_actions) {
-        actions.push_back(action);
-    }
-    return actions;
-}
-
-UniValue ClientSessionSnapshotToJSON(PaymasterStore& store,
-                                     const PaymentSession& session,
-                                     std::string_view action)
-{
-    ClientSessionView view;
+    ClientRecoveryResult result;
     std::string error;
-    if (!LoadClientSessionView(store, session, GetTime(), view, error)) {
+    if (!LoadClientSessionView(store, session, GetTime(), result.view, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("action", std::string{action});
-    UniValue session_result = SessionToJSON(session, &store);
-    if (view.recipient_address && !session_result.exists("to_address")) {
-        session_result.pushKV("to_address", *view.recipient_address);
-    }
-    result.pushKV("session", std::move(session_result));
-    if (view.attempt) {
-        result.pushKV("attempt", AttemptToJSON(*view.attempt));
-    } else {
-        result.pushKV("attempt", UniValue{UniValue::VNULL});
-    }
-    result.pushKV("artifact", view.artifact);
-    if (view.recovery) {
-        result.pushKV("recovery", AlternativeRecoveryToJSON(*view.recovery));
-    } else {
-        result.pushKV("recovery", UniValue{UniValue::VNULL});
-    }
-    if (view.provider_result) {
-        result.pushKV("result_status",
-                      ResultStatusName(view.provider_result->status));
-        result.pushKV("result_sequence",
-                      view.provider_result->result_sequence);
-    } else {
-        result.pushKV("result_status", UniValue{UniValue::VNULL});
-        result.pushKV("result_sequence", UniValue{UniValue::VNULL});
-    }
-    result.pushKV("requires_attention", view.requires_attention);
-    result.pushKV("allowed_actions", AllowedActionsToJSON(view));
-    result.pushKV("observed_at", view.observed_at);
-    return result;
-}
-
-UniValue ClientSessionSummaryToJSON(const PaymasterStore& store,
-                                    const PaymentSession& session,
-                                    const ClientSessionView& view)
-{
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("request_id", session.request_id);
-    result.pushKV("session_id", session.session_id.GetHex());
-    if (session.requested_amount.value > 0) {
-        result.pushKV("requested_amount_cents", session.requested_amount.value);
-    }
-    result.pushKV("requested_fee_mode", FeeModeName(session.fee_mode_requested));
-    result.pushKV("fee_mode_used", FeeModeName(session.fee_mode_used));
-    result.pushKV("session_state", std::string{SessionStateName(session.state)});
-    if (session.pending_phase != PendingPhase::NONE) {
-        result.pushKV("pending_phase", std::string{PendingPhaseName(session.pending_phase)});
-    }
-    result.pushKV("created_at", session.created_at);
-    result.pushKV("updated_at", session.updated_at);
-    result.pushKV("provider_attempts",
-                  static_cast<uint64_t>(session.attempt_ids.size()));
-    if (!session.final_txid.IsNull()) {
-        result.pushKV("txid", session.final_txid.GetHex());
-    }
-    if (!session.recovery_txid.IsNull()) {
-        result.pushKV("recovery_txid", session.recovery_txid.GetHex());
-    }
-    AddSessionPaymentStatus(result, session, &store);
-    result.pushKV("artifact", view.artifact);
-    result.pushKV("requires_attention", view.requires_attention);
-    result.pushKV("allowed_actions", AllowedActionsToJSON(view));
-    result.pushKV("observed_at", view.observed_at);
+    result.action = action;
+    result.session = CaptureSessionPayment(session, &store);
+    if (result.view.recipient_address && !result.session.to_address) result.session.to_address = result.view.recipient_address;
     return result;
 }
 

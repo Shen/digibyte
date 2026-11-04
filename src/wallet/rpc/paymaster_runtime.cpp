@@ -107,7 +107,7 @@ RPCHelpMan startpaymaster()
                 RPCTypeCheckObj(options, {{"wait_for_readiness", UniValueType(UniValue::VBOOL)}}, true, true);
                 wait_for_readiness = options.find_value("wait_for_readiness").isTrue();
             }
-            return StartPaymaster(context, *wallet, wait_for_readiness, ExecutionMode::MANUAL);
+            return ToJSON(StartPaymaster(context, *wallet, wait_for_readiness, ExecutionMode::MANUAL));
         }),
     };
 }
@@ -137,7 +137,7 @@ RPCHelpMan stoppaymaster()
                 if (!options.find_value("pause_setup").isNull()) pause_setup = options.find_value("pause_setup").get_bool();
                 if (pause_setup && !persistent) throw JSONRPCError(RPC_INVALID_PARAMETER, "pause_setup requires persistent=true");
             }
-            return StopPaymaster(context, *wallet, persistent, pause_setup);
+            return ToJSON(StopPaymaster(context, *wallet, persistent, pause_setup));
         }),
     };
 }

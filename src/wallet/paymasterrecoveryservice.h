@@ -16,7 +16,7 @@ struct ClientRecoveryOptions {
     bool prepare_only{false};
     bool retry_transport{false};
 };
-UniValue ResolvePaymasterSession(WalletContext& context, CWallet& wallet,
+ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& wallet,
     const ClientSessionLookup& lookup, const std::string& action, const ClientRecoveryOptions& options);
 } // namespace paymaster_app
 } // namespace wallet

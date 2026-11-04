@@ -44,7 +44,6 @@
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>

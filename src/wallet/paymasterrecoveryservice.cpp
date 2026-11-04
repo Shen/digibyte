@@ -38,7 +38,6 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/spend.h>
-#include <univalue.h>
 #include <util/chaintype.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
@@ -56,7 +55,7 @@
 
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
-UniValue ResolveAlternativePaymasterRecovery(
+ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     WalletContext& context,
     CWallet& wallet,
     PaymasterStore& store,
@@ -278,14 +277,14 @@ UniValue ResolveAlternativePaymasterRecovery(
         // Every resolve mutation returns the same authoritative envelope as a
         // refresh. Callers can therefore replace the complete snapshot and
         // never retain an artifact from an older recovery phase.
-        UniValue result = ClientSessionSnapshotToJSON(
+        ClientRecoveryResult result = CaptureClientSession(
             store, current_session, "cancel_to_self");
-        result.pushKV("queued", queue.queued);
-        result.pushKV("connection_pending", queue.connection_pending);
-        result.pushKV("route_available", queue.route_available);
-        if (broadcast) result.pushKV("broadcast", *broadcast);
+        result.queued = queue.queued;
+        result.connection_pending = queue.connection_pending;
+        result.route_available = queue.route_available;
+        if (broadcast) result.broadcast = *broadcast;
         if (!broadcast_error.empty()) {
-            result.pushKV("broadcast_error", broadcast_error);
+            result.broadcast_error = broadcast_error;
         }
         return result;
     };
@@ -979,7 +978,7 @@ UniValue ResolveAlternativePaymasterRecovery(
 }
 
 
-UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
+ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& target,
     const ClientSessionLookup& lookup, const std::string& action, const ClientRecoveryOptions& options)
 {
     CWallet* const wallet = &target;
@@ -1015,7 +1014,7 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
                 "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found", ErrorDisposition::RECONCILE, true);
         }
         if (action == "refresh") {
-            return ClientSessionSnapshotToJSON(store, session, action);
+            return CaptureClientSession(store, session, action);
         }
         ClientSessionView view;
         std::string view_error;
@@ -1043,7 +1042,7 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
         if (const auto* node = wallet->chain().context(); node && node->connman) {
             node->connman->CancelPaymasterOperation(wallet->m_paymaster_transport_owner.GetHex(), session.session_id.GetHex() + ":");
         }
-        return ClientSessionSnapshotToJSON(store, session, action);
+        return CaptureClientSession(store, session, action);
     }
 
     if (session.attempt_ids.empty()) {
@@ -1067,7 +1066,7 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
         // A lost provider reply does not make an already confirmed
         // payment recoverable. Validate and settle that exact payment
         // before testing its now-spent inputs or preparing recovery.
-        return ClientSessionSnapshotToJSON(store, session, action);
+        return CaptureClientSession(store, session, action);
     }
     if (action == "retry_same" && attempt_id == session.attempt_ids.back() &&
         context.paymaster && context.paymaster->Enabled()) {
@@ -1076,10 +1075,10 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
             // Collect an already received result before rechecking
             // Capacity that may have been spent by this exact payment.
             const auto received = ProcessPaymasterResult(context, *wallet, session.request_id);
-            if (received.find_value("processed").isTrue()) {
+            if (received.processed.value_or(false)) {
                 if (!store.GetSessionByRequestId(session.request_id, session))
                     throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
-                return ClientSessionSnapshotToJSON(store, session, action);
+                return CaptureClientSession(store, session, action);
             }
         }
     }
@@ -1107,7 +1106,7 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
         if (const auto* node = wallet->chain().context(); node && node->connman) {
             node->connman->CancelPaymasterOperation(wallet->m_paymaster_transport_owner.GetHex(), session.session_id.GetHex() + ":");
         }
-        return ClientSessionSnapshotToJSON(store, session, action);
+        return CaptureClientSession(store, session, action);
     }
 
     if (!attempt.final_transaction.empty() &&
@@ -1169,14 +1168,13 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_SESSION_DATABASE_READ");
         }
-        UniValue result = ClientSessionSnapshotToJSON(
+        ClientRecoveryResult result = CaptureClientSession(
             store, session, action);
-        result.pushKV("raw_transaction",
-                      HexStr(attempt.final_transaction));
-        result.pushKV("txid", attempt.final_txid.GetHex());
-        result.pushKV("broadcast", broadcast);
+        result.raw_transaction = attempt.final_transaction;
+        result.txid = attempt.final_txid;
+        result.broadcast = broadcast;
         if (!broadcast_error.empty()) {
-            result.pushKV("broadcast_error", broadcast_error);
+            result.broadcast_error = broadcast_error;
         }
         return result;
     }
@@ -1202,15 +1200,13 @@ UniValue ResolvePaymasterSession(WalletContext& context, CWallet& target,
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_SESSION_DATABASE_READ");
         }
-        UniValue result = ClientSessionSnapshotToJSON(
+        ClientRecoveryResult result = CaptureClientSession(
             store, session, action);
-        result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
+        result.psbt = attempt.user_signed_psbt;
         if (action == "retry_same") {
-            result.pushKV("queued", queue_state.queued);
-            result.pushKV("connection_pending",
-                          queue_state.connection_pending);
-            result.pushKV("route_available",
-                          queue_state.route_available);
+            result.queued = queue_state.queued;
+            result.connection_pending = queue_state.connection_pending;
+            result.route_available = queue_state.route_available;
         }
         return result;
     } else {

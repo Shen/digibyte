@@ -46,7 +46,6 @@
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -66,7 +65,7 @@
 
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
-UniValue StartPaymaster(WalletContext& context, CWallet& target, bool wait_for_readiness, ExecutionMode mode)
+ProviderStartResult StartPaymaster(WalletContext& context, CWallet& target, bool wait_for_readiness, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
     const bool automatic_autostart = mode == ExecutionMode::AUTOMATIC;
@@ -84,10 +83,6 @@ UniValue StartPaymaster(WalletContext& context, CWallet& target, bool wait_for_r
     std::string restore_error;
     if (!CheckPaymasterProviderRestoreGuard(*wallet, restore_error)) {
         throw ApplicationError(ErrorKind::WALLET, restore_error);
-    }
-    UniValue recovery_errors{UniValue::VARR};
-    for (const std::string& recovery_error : recovery.errors) {
-        recovery_errors.push_back(recovery_error);
     }
     ProviderIdentityRecord guarded_identity;
     std::optional<ProviderWorkGuard> start_guard;
@@ -213,16 +208,15 @@ UniValue StartPaymaster(WalletContext& context, CWallet& target, bool wait_for_r
             });
         }
     }
-    UniValue result{UniValue::VOBJ};
+    ProviderStartResult result;
     const bool start_requested = context.paymaster &&
         context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id);
-    result.pushKV("start_requested", start_requested);
-    result.pushKV("running", running);
-    result.pushKV("ready", readiness.ready);
-    result.pushKV("drain_only", drain_only && running);
-    result.pushKV("operation_mode", ProviderOperationModeName(
-                                        readiness.settings.operation_mode));
-    result.pushKV("autostart", readiness.settings.autostart);
+    result.start_requested = start_requested;
+    result.running = running;
+    result.ready = readiness.ready;
+    result.drain_only = drain_only && running;
+    result.operation_mode = readiness.settings.operation_mode;
+    result.autostart = readiness.settings.autostart;
     ProviderServiceState service_state{ProviderServiceState::STOPPED};
     if (running) {
         if (drain_only) {
@@ -252,32 +246,26 @@ UniValue StartPaymaster(WalletContext& context, CWallet& target, bool wait_for_r
                 : StableProviderServiceError(
                       readiness.errors.front()));
     }
-    result.pushKV("service_state",
-                  ProviderServiceStateName(service_state));
+    result.service_state = service_state;
     if (readiness.have_safety_policy) {
-        result.pushKV("safety_policy",
-                      ProviderSafetyPolicyToJSON(
-                          readiness.safety_policy));
+        result.safety_policy = readiness.safety_policy;
     }
-    if (!readiness.identity.provider_id.IsNull()) result.pushKV("provider_id", readiness.identity.provider_id.GetHex());
+    if (!readiness.identity.provider_id.IsNull()) result.provider_id = readiness.identity.provider_id;
     if (running) {
-        result.pushKV("endpoint", readiness.endpoint.ToStringAddrPort());
+        result.endpoint = readiness.endpoint;
         if (announcement.sequence != 0) {
-            result.pushKV("announcement_sequence", announcement.sequence);
+            result.announcement_sequence = announcement.sequence;
         }
     }
-    result.pushKV("recovery_candidates", recovery.candidates);
-    result.pushKV("recovered_broadcasts", recovery.recovered);
-    result.pushKV("expired_commits", 0);
-    result.pushKV("recovery_errors", std::move(recovery_errors));
-    result.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
+    result.recovery = recovery;
+    result.readiness_errors = readiness.errors;
     if (const auto* node = wallet->chain().context(); node && node->connman) {
-        result.pushKV("transport", PaymasterTransportToJSON(*node->connman));
+        result.transport = CapturePaymasterTransport(*node->connman);
     }
     return result;
 }
 
-UniValue StopPaymaster(WalletContext& context, CWallet& target, bool persistent, bool pause_setup)
+ProviderStopResult StopPaymaster(WalletContext& context, CWallet& target, bool persistent, bool pause_setup)
 {
     if (pause_setup && !persistent) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_PAUSE_REQUIRES_PERSISTENT_STOP",
@@ -314,9 +302,7 @@ UniValue StopPaymaster(WalletContext& context, CWallet& target, bool persistent,
     if (context.paymaster) {
         context.paymaster->StopProvider(wallet->GetName());
     }
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("running", false);
-    return result;
+    return {};
 }
 
 } // namespace wallet::paymaster_app
@@ -396,17 +382,12 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
         }
 
         try {
-            const UniValue result = StartPaymaster(context, wallet, false, ExecutionMode::AUTOMATIC);
-            running = result.find_value("running").isTrue();
+            const ProviderStartResult result = StartPaymaster(context, wallet, false, ExecutionMode::AUTOMATIC);
+            running = result.running;
             if (!running) {
                 std::string error{"PAYMASTER_PROVIDER_NOT_READY"};
-                const UniValue& readiness_errors =
-                    result.find_value("readiness_errors");
-                if (readiness_errors.isArray() &&
-                    !readiness_errors.getValues().empty() &&
-                    readiness_errors[0].isStr()) {
-                    error = StableProviderServiceError(
-                        readiness_errors[0].get_str());
+                if (!result.readiness_errors.empty()) {
+                    error = StableProviderServiceError(result.readiness_errors.front());
                 }
                 manager->SetProviderServiceStatus(
                     wallet.GetName(),

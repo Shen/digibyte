@@ -3,7 +3,7 @@
 #ifndef DIGIBYTE_WALLET_PAYMASTERCLIENT_H
 #define DIGIBYTE_WALLET_PAYMASTERCLIENT_H
 #include <paymaster/client.h>
-#include <univalue.h>
+#include <wallet/paymasterresults.h>
 #include <optional>
 namespace wallet {
 class CWallet;
@@ -38,9 +38,9 @@ struct AutomaticPaymentParameters : ClientPaymentOptions {
     std::optional<DigiDollar::Paymaster::PaymasterId> preferred_provider;
     std::optional<uint256> preferred_offer;
 };
-UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& wallet,
+PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& wallet,
     const AutomaticPaymentParameters& parameters, const std::vector<COutPoint>* preset_inputs = nullptr);
-UniValue RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& parameters);
+PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& parameters);
 } // namespace paymaster_app
 } // namespace wallet
 #endif // DIGIBYTE_WALLET_PAYMASTERCLIENT_H

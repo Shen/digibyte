@@ -44,7 +44,6 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
@@ -109,56 +108,6 @@ std::string PreparationFeeLimit(const char* phase, CAmount fee, CAmount limit)
 {
     return strprintf("PAYMASTER_POOL_FEE_LIMIT: %s fee %s DGB exceeds approved setup limit %s DGB",
                      phase, FormatMoney(fee), FormatMoney(limit));
-}
-
-void AddPreparationDiagnostic(UniValue& item, const ProviderMaintenanceRecord& record)
-{
-    const std::string error = record.state == ProviderMaintenanceState::CONFIRMED ? "" : record.preparation_error;
-    const auto separator = error.find(':');
-    // Keep the existing stable fee-limit token in error. Optional diagnostic
-    // text carries amounts/phase without changing the journal format or caps.
-    if (error.rfind("PAYMASTER_POOL_FEE_", 0) == 0 && separator != std::string::npos) {
-        item.pushKV("error", error.substr(0, separator));
-        item.pushKV("diagnostic", error.substr(separator + 2));
-    } else {
-        item.pushKV("error", error);
-    }
-}
-
-// Current funding observations, not a fee quote or a new spending approval.
-// Share these between pool and operator RPCs; a saved execution error can be
-// older than an incoming payment. No transaction or change key is created here.
-void AddPreparationFunding(UniValue& item, CWallet& wallet, const ProviderMaintenanceRecord& record)
-{
-    if (!record.IsPreparation() || !record.transaction_id.IsNull() ||
-        record.state == ProviderMaintenanceState::CONFIRMED ||
-        record.state == ProviderMaintenanceState::RELEASED ||
-        record.state == ProviderMaintenanceState::FAILED) return;
-    LOCK(wallet.cs_wallet);
-    CAmount required_dgb{0}, required_dd{0};
-    for (const auto& output : record.outputs) {
-        required_dgb += record.kind == ProviderMaintenanceKind::PREPARE_DGB ? output.dgb_value.value : 0;
-        required_dd += record.kind == ProviderMaintenanceKind::PREPARE_CARRIER ? output.carrier_value.value : 0;
-    }
-    CCoinControl control;
-    control.m_min_depth = 1;
-    const CAmount confirmed = AvailableCoins(wallet, &control).GetTotalAmount();
-    control.m_min_depth = 0;
-    const CAmount available = AvailableCoins(wallet, &control).GetTotalAmount();
-    item.pushKV("required_output_satoshis", required_dgb);
-    item.pushKV("confirmed_available_satoshis", confirmed);
-    item.pushKV("available_including_unconfirmed_satoshis", available);
-    item.pushKV("capital_shortfall_satoshis", std::max<CAmount>(0, required_dgb - confirmed));
-    item.pushKV("funding_shortfall_upper_bound_satoshis", std::max<CAmount>(0, required_dgb + record.maximum_fee.value - available));
-    if (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER) {
-        item.pushKV("required_output_cents", required_dd);
-        if (const auto* dd_wallet = wallet.GetDDWallet()) {
-            const auto balance = dd_wallet->GetDDBalanceSummary();
-            item.pushKV("confirmed_available_cents", balance.spendable);
-            item.pushKV("pending_cents", balance.pending);
-            item.pushKV("capital_shortfall_cents", std::max<CAmount>(0, required_dd - balance.spendable));
-        }
-    }
 }
 
 std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record, PaymasterCheckpointOperation& checkpoint)
@@ -291,22 +240,49 @@ bool HasPendingPoolPreparation(CWallet& wallet)
     });
 }
 
-UniValue PoolPreparationToJSON(CWallet& wallet)
+// Current funding observations, not a fee quote or a new spending approval.
+// Share these between pool and operator RPCs; a saved execution error can be
+// older than an incoming payment. No transaction or change key is created here.
+PreparationFunding CapturePreparationFunding(CWallet& wallet, const ProviderMaintenanceRecord& record)
 {
-    UniValue result{UniValue::VARR};
+    PreparationFunding result;
+    if (!record.IsPreparation() || !record.transaction_id.IsNull() ||
+        record.state == ProviderMaintenanceState::CONFIRMED ||
+        record.state == ProviderMaintenanceState::RELEASED ||
+        record.state == ProviderMaintenanceState::FAILED) return result;
+    LOCK(wallet.cs_wallet);
+    CAmount required_dgb{0}, required_dd{0};
+    for (const auto& output : record.outputs) {
+        required_dgb += record.kind == ProviderMaintenanceKind::PREPARE_DGB ? output.dgb_value.value : 0;
+        required_dd += record.kind == ProviderMaintenanceKind::PREPARE_CARRIER ? output.carrier_value.value : 0;
+    }
+    CCoinControl control;
+    control.m_min_depth = 1;
+    const CAmount confirmed = AvailableCoins(wallet, &control).GetTotalAmount();
+    control.m_min_depth = 0;
+    const CAmount available = AvailableCoins(wallet, &control).GetTotalAmount();
+    result.required_output_satoshis = required_dgb;
+    result.confirmed_available_satoshis = confirmed;
+    result.available_including_unconfirmed_satoshis = available;
+    result.capital_shortfall_satoshis = std::max<CAmount>(0, required_dgb - confirmed);
+    result.funding_shortfall_upper_bound_satoshis = std::max<CAmount>(0, required_dgb + record.maximum_fee.value - available);
+    if (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER) {
+        result.required_output_cents = DDCents{required_dd};
+        if (const auto* dd_wallet = wallet.GetDDWallet()) {
+            const auto balance = dd_wallet->GetDDBalanceSummary();
+            result.confirmed_available_cents = DDCents{balance.spendable};
+            result.pending_cents = DDCents{balance.pending};
+            result.capital_shortfall_cents = DDCents{std::max<CAmount>(0, required_dd - balance.spendable)};
+        }
+    }
+    return result;
+}
+
+std::vector<PreparationSnapshot> CapturePoolPreparation(CWallet& wallet)
+{
+    std::vector<PreparationSnapshot> result;
     for (const auto& record : ReadPreparationLedger(wallet).records) {
-        if (!record.IsPreparation()) continue;
-        UniValue item{UniValue::VOBJ};
-        item.pushKV("plan_id", record.plan_id.GetHex());
-        item.pushKV("operation_id", record.operation_id.GetHex());
-        item.pushKV("asset", record.kind == ProviderMaintenanceKind::PREPARE_DGB ? "dgb" : "dd_carrier");
-        item.pushKV("state", record.state == ProviderMaintenanceState::CONFIRMED ? "complete" : record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.state == ProviderMaintenanceState::RELEASED ? "cancelled" : record.transaction_id.IsNull() ? "pending_creation" : "pending_confirmation");
-        AddPreparationDiagnostic(item, record);
-        item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
-        item.pushKV("actual_fee_satoshis", record.actual_fee.value);
-        if (!record.transaction_id.IsNull()) item.pushKV("txid", record.transaction_id.GetHex());
-        AddPreparationFunding(item, wallet, record);
-        result.push_back(std::move(item));
+        if (record.IsPreparation()) result.push_back({record, CapturePreparationFunding(wallet, record)});
     }
     return result;
 }

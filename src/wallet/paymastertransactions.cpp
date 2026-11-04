@@ -44,7 +44,6 @@
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -61,65 +60,104 @@
 
 
 namespace wallet::paymaster_app {
-UniValue FundingSafetyLimitsToJSON(
-    const DigiDollar::Paymaster::FundingSafetyLimits& limits)
-{
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("maximum_network_fee_per_transaction_satoshis",
-                  limits.maximum_network_fee_per_transaction.value);
-    result.pushKV("maximum_reserved_network_fee_satoshis",
-                  limits.maximum_reserved_network_fee.value);
-    result.pushKV("maximum_network_fee_per_hour_satoshis",
-                  limits.maximum_network_fee_per_hour.value);
-    result.pushKV("maximum_network_fee_per_day_satoshis",
-                  limits.maximum_network_fee_per_day.value);
-    result.pushKV("maximum_completed_per_hour", limits.maximum_completed_per_hour);
-    result.pushKV("maximum_completed_per_day", limits.maximum_completed_per_day);
-    return result;
-}
-UniValue ProviderSafetyPolicyToJSON(
-    const DigiDollar::Paymaster::ProviderSafetyPolicy& policy)
-{
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("user_paid", FundingSafetyLimitsToJSON(policy.user_paid));
-    result.pushKV("public_sponsored", FundingSafetyLimitsToJSON(policy.public_sponsored));
-    result.pushKV("restricted_sponsored", FundingSafetyLimitsToJSON(policy.restricted_sponsored));
-    result.pushKV("maximum_active_quotes_total", policy.maximum_active_quotes_total);
-    result.pushKV("maximum_active_quotes_per_netgroup",
-                  policy.maximum_active_quotes_per_netgroup);
-    result.pushKV("maximum_active_quotes_per_recipient",
-                  policy.maximum_active_quotes_per_recipient);
-    result.pushKV("maximum_quote_requests_per_netgroup_per_minute",
-                  policy.maximum_quote_requests_per_netgroup_per_minute);
-    result.pushKV("updated_at", policy.updated_at);
-    return result;
-}
-UniValue PaymasterTransportToJSON(const CConnman& connman,
+TransportSnapshot CapturePaymasterTransport(const CConnman& connman,
     std::optional<DigiDollar::Paymaster::DirectState> state)
 {
-    const auto& budget = connman.GetPaymasterBudget();
-    const auto used = connman.GetPaymasterUsage();
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("state", state ? DigiDollar::Paymaster::DirectStateName(*state) : budget.outbound ? "available" : "disabled");
-    result.pushKV("outbound_limit", budget.outbound);
-    result.pushKV("inbound_limit", budget.inbound);
-    result.pushKV("handshake_limit", budget.handshakes);
-    result.pushKV("outbound_in_use", used.outgoing);
-    result.pushKV("inbound_in_use", used.incoming);
-    result.pushKV("handshakes_in_use", used.handshakes);
-    result.pushKV("queued", uint64_t(connman.GetPaymasterQueueSize()));
-    result.pushKV("listener_ready", connman.PaymasterListenerReady());
-    result.pushKV("external_reachability", "unknown");
-    return result;
-}
-UniValue ReadinessErrorsToJSON(const std::vector<std::string>& errors)
-{
-    UniValue result{UniValue::VARR};
-    for (const std::string& error : errors)
-        result.push_back(error);
-    return result;
+    return {state, connman.GetPaymasterBudget(), connman.GetPaymasterUsage(),
+            static_cast<uint64_t>(connman.GetPaymasterQueueSize()), connman.PaymasterListenerReady()};
 }
 using namespace DigiDollar::Paymaster;
+SessionSnapshot CaptureSessionSnapshot(const PaymentSession& session, const PaymasterStore* store)
+{
+    SessionSnapshot result;
+    result.session = session;
+    result.observation_requested = store != nullptr;
+    auto& observation = result.observation;
+    if (store && !store->GetSessionObservation(session, observation, result.observation_error)) {
+        const auto tip_hash = observation.tip_hash;
+        const auto tip_height = observation.tip_height;
+        observation = {};
+        observation.tip_hash = tip_hash;
+        observation.tip_height = tip_height;
+        observation.payment.txid = session.final_txid;
+        observation.recovery.txid = session.recovery_txid;
+    }
+    return result;
+}
+
+PaymentResult CaptureSessionPayment(const PaymentSession& session, const PaymasterStore* store)
+{
+    PaymentResult result;
+    result.session = CaptureSessionSnapshot(session, store);
+    result.request_id = session.request_id;
+    result.session_id = session.session_id;
+    result.requested_fee_mode = session.fee_mode_requested;
+    result.fee_mode_used = session.fee_mode_used;
+    result.session_state = session.state;
+    if (session.requested_amount.value > 0) {
+        result.requested_amount_cents = session.requested_amount;
+        result.subtract_paymaster_fee_from_amount = session.subtract_paymaster_fee_from_amount;
+        result.send_all_spendable_dd = session.send_all_spendable_dd;
+    }
+    if (!session.final_txid.IsNull()) result.txid = session.final_txid;
+    // The session owns the provider-independent gross order while its latest
+    // client authorization manifest owns the exact provider-dependent split.
+    // Surface both together when the durable attempt is still available so
+    // status queries and exact retries never report the gross amount as the
+    // recipient amount in subtract-fee mode.
+    if (store && !session.provider_side) {
+        for (auto it = session.attempt_ids.rbegin();
+             it != session.attempt_ids.rend(); ++it) {
+            ProviderAttempt attempt;
+            if (!store->GetAttempt(*it, attempt)) continue;
+            const ClientAuthorizationManifest& manifest =
+                attempt.client_manifest;
+            if (manifest.manifest_id.IsNull() ||
+                manifest.version !=
+                    ClientAuthorizationManifest::CURRENT_VERSION ||
+                manifest.recipient_amount.value < 0 ||
+                manifest.service_fee.value < 0 ||
+                manifest.recipient_amount.value >
+                    std::numeric_limits<int64_t>::max() -
+                        manifest.service_fee.value) {
+                continue;
+            }
+            result.provider_id = manifest.provider_id;
+            result.privacy_profile = attempt.privacy_profile;
+            result.offer_id = manifest.offer_id;
+            result.policy_hash = manifest.policy_hash;
+            result.funding_model = manifest.funding_model;
+            result.payment_cents = manifest.recipient_amount;
+            result.service_fee_cents = manifest.service_fee;
+            result.user_total_cents = DDCents{manifest.recipient_amount.value +
+                    manifest.service_fee.value};
+            if (const auto address = DigiDollarAddressForScript(
+                    manifest.recipient_script)) {
+                result.to_address = *address;
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+void FillMissingPaymentTerms(PaymentResult& target, const PaymentResult& source)
+{
+    if (!target.requested_fee_mode) target.requested_fee_mode = source.requested_fee_mode;
+    if (!target.fee_mode_used) target.fee_mode_used = source.fee_mode_used;
+    if (!target.provider_id) target.provider_id = source.provider_id;
+    if (!target.offer_id) target.offer_id = source.offer_id;
+    if (!target.policy_hash) target.policy_hash = source.policy_hash;
+    if (!target.funding_model) target.funding_model = source.funding_model;
+    if (!target.payment_cents) target.payment_cents = source.payment_cents;
+    if (!target.service_fee_cents) target.service_fee_cents = source.service_fee_cents;
+    if (!target.user_total_cents) target.user_total_cents = source.user_total_cents;
+    if (!target.requested_amount_cents) target.requested_amount_cents = source.requested_amount_cents;
+    if (!target.subtract_paymaster_fee_from_amount) target.subtract_paymaster_fee_from_amount = source.subtract_paymaster_fee_from_amount;
+    if (!target.send_all_spendable_dd) target.send_all_spendable_dd = source.send_all_spendable_dd;
+    if (!target.authorization_commitment) target.authorization_commitment = source.authorization_commitment;
+}
+
 DigiDollar::Paymaster::DirectKey PaymentChannelKey(
     const CWallet& wallet, const DigiDollar::Paymaster::PaymentSession& session,
     const DigiDollar::Paymaster::PaymasterId& provider)
@@ -143,31 +181,6 @@ const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state)
     }
 }
 
-std::string ResultStatusName(DigiDollar::Paymaster::PaymasterResultStatus status)
-{
-    using DigiDollar::Paymaster::PaymasterResultStatus;
-    switch (status) {
-    case PaymasterResultStatus::NO_FINAL_COMMIT: return "no_final_commit";
-    case PaymasterResultStatus::USER_PSBT_ACCEPTED: return "user_psbt_accepted";
-    case PaymasterResultStatus::FINAL_COMMITTED: return "final_committed";
-    case PaymasterResultStatus::BROADCAST_ATTEMPTED: return "broadcast_attempted";
-    case PaymasterResultStatus::SLOT_UNAVAILABLE: return "slot_unavailable";
-    case PaymasterResultStatus::REJECTED: return "rejected";
-    }
-    return "unknown";
-}
-
-std::string FeeModeName(DigiDollar::Paymaster::FeeMode mode)
-{
-    using DigiDollar::Paymaster::FeeMode;
-    switch (mode) {
-    case FeeMode::DGB: return "dgb";
-    case FeeMode::PAYMASTER: return "paymaster";
-    case FeeMode::AUTO: return "auto";
-    }
-    return "unknown";
-}
-
 std::optional<std::string> DigiDollarAddressForScript(const CScript& script)
 {
     CTxDestination destination;
@@ -176,203 +189,6 @@ std::optional<std::string> DigiDollarAddressForScript(const CScript& script)
     const CDigiDollarAddress decoded{address};
     if (address.empty() || !decoded.IsValid()) return std::nullopt;
     return address;
-}
-
-void AddSessionPaymentStatus(UniValue& result,
-                             const DigiDollar::Paymaster::PaymentSession& session,
-                             const PaymasterStore* store)
-{
-    using namespace DigiDollar::Paymaster;
-    PaymasterSessionObservation observation;
-    std::string error;
-    if (store) {
-        if (!store->GetSessionObservation(session, observation, error)) {
-            // A partially validated snapshot must not leak a positive claim.
-            const auto tip_hash = observation.tip_hash;
-            const auto tip_height = observation.tip_height;
-            observation = {};
-            observation.tip_hash = tip_hash;
-            observation.tip_height = tip_height;
-            observation.payment.txid = session.final_txid;
-            observation.recovery.txid = session.recovery_txid;
-        }
-        const auto transaction = [](const PaymasterTransactionObservation& value) {
-            UniValue json{UniValue::VOBJ};
-            json.pushKV("details_available", value.details_available);
-            json.pushKV("observation_available", value.observation_available);
-            if (!value.txid.IsNull()) json.pushKV("txid", value.txid.GetHex());
-            if (value.observation_available) {
-                json.pushKV("confirmations", value.confirmations);
-                json.pushKV("in_mempool", value.in_mempool);
-            }
-            if (!value.block_hash.IsNull()) {
-                json.pushKV("block_hash", value.block_hash.GetHex());
-                json.pushKV("block_height", value.block_height);
-            }
-            if (value.recipient_vout) {
-                UniValue recipient{UniValue::VOBJ};
-                recipient.pushKV("vout", *value.recipient_vout);
-                recipient.pushKV("script_pub_key", HexStr(value.recipient_script));
-                recipient.pushKV("amount_cents", value.recipient_amount.value);
-                json.pushKV("recipient", std::move(recipient));
-            }
-            return json;
-        };
-        UniValue view{UniValue::VOBJ};
-        view.pushKV("observed_tip_hash", observation.tip_hash.GetHex());
-        view.pushKV("observed_tip_height", observation.tip_height);
-        if (!error.empty()) view.pushKV("error", error);
-        view.pushKV("payment", transaction(observation.payment));
-        view.pushKV("recovery", transaction(observation.recovery));
-        result.pushKV("payment_view", std::move(view));
-    }
-    const bool paid = observation.PaymentConfirmed(session.state);
-    const bool recovered = observation.recovery.observation_available &&
-                           observation.recovery.confirmations > 0;
-    const std::string status{observation.Status(session.state)};
-    result.pushKV("status", status);
-    result.pushKV("payment_confirmed", paid);
-    result.pushKV("final", IsTerminal(session.state));
-    result.pushKV("confirmation_state", paid ? "payment_confirmed" :
-                  (recovered ? "recovery_confirmed" :
-                   (status == "conflicted" ? "conflicted" : "unconfirmed")));
-    std::string broadcast_state{"not_attempted"};
-    if (paid || recovered) broadcast_state = "confirmed";
-    else if (observation.payment.in_mempool || observation.recovery.in_mempool ||
-             session.state == SessionState::MEMPOOL ||
-             session.pending_phase == PendingPhase::CANCEL_MEMPOOL) broadcast_state = "accepted_mempool";
-    else if (session.state == SessionState::STEMPOOL) broadcast_state = "accepted_stempool";
-    else if (session.state == SessionState::PENDING_PROVIDER ||
-             !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) broadcast_state = "unknown";
-    result.pushKV("broadcast_state", broadcast_state);
-}
-
-UniValue SessionToJSON(
-    const DigiDollar::Paymaster::PaymentSession& session,
-    const PaymasterStore* store)
-{
-    using namespace DigiDollar::Paymaster;
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("request_id", session.request_id);
-    result.pushKV("session_id", session.session_id.GetHex());
-    result.pushKV("canonical_request_hash", session.canonical_request_hash.GetHex());
-    if (session.requested_amount.value > 0) {
-        result.pushKV("requested_amount_cents", session.requested_amount.value);
-        result.pushKV("subtract_paymaster_fee_from_amount",
-                      session.subtract_paymaster_fee_from_amount);
-        result.pushKV("send_all_spendable_dd",
-                      session.send_all_spendable_dd);
-    }
-    result.pushKV("requested_fee_mode", FeeModeName(session.fee_mode_requested));
-    result.pushKV("fee_mode_used", FeeModeName(session.fee_mode_used));
-    result.pushKV("session_state", std::string{SessionStateName(session.state)});
-    if (session.pending_phase != PendingPhase::NONE) {
-        result.pushKV("pending_phase", std::string{PendingPhaseName(session.pending_phase)});
-    }
-    AddSessionPaymentStatus(result, session, store);
-    result.pushKV("created_at", session.created_at);
-    result.pushKV("updated_at", session.updated_at);
-    if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
-    if (!session.recovery_txid.IsNull()) {
-        result.pushKV("recovery_txid", session.recovery_txid.GetHex());
-    }
-
-    UniValue inputs{UniValue::VARR};
-    for (const auto& input : session.user_inputs) {
-        UniValue entry{UniValue::VOBJ};
-        entry.pushKV("txid", input.hash.GetHex());
-        entry.pushKV("vout", input.n);
-        inputs.push_back(std::move(entry));
-    }
-    result.pushKV("reserved_user_inputs", std::move(inputs));
-    result.pushKV("provider_attempts", static_cast<uint64_t>(session.attempt_ids.size()));
-
-    // The session owns the provider-independent gross order while its latest
-    // client authorization manifest owns the exact provider-dependent split.
-    // Surface both together when the durable attempt is still available so
-    // status queries and exact retries never report the gross amount as the
-    // recipient amount in subtract-fee mode.
-    if (store && !session.provider_side) {
-        for (auto it = session.attempt_ids.rbegin();
-             it != session.attempt_ids.rend(); ++it) {
-            ProviderAttempt attempt;
-            if (!store->GetAttempt(*it, attempt)) continue;
-            const ClientAuthorizationManifest& manifest =
-                attempt.client_manifest;
-            if (manifest.manifest_id.IsNull() ||
-                manifest.version !=
-                    ClientAuthorizationManifest::CURRENT_VERSION ||
-                manifest.recipient_amount.value < 0 ||
-                manifest.service_fee.value < 0 ||
-                manifest.recipient_amount.value >
-                    std::numeric_limits<int64_t>::max() -
-                        manifest.service_fee.value) {
-                continue;
-            }
-            result.pushKV("provider_id", manifest.provider_id.GetHex());
-            result.pushKV(
-                "privacy_profile",
-                attempt.privacy_profile == PrivacyProfile::HIGH
-                    ? "high" : "standard");
-            result.pushKV("offer_id", manifest.offer_id.GetHex());
-            result.pushKV("policy_hash", manifest.policy_hash.GetHex());
-            result.pushKV(
-                "funding_model",
-                manifest.funding_model == FundingModel::SPONSORED
-                    ? "sponsored"
-                    : "user_paid");
-            result.pushKV("payment_cents",
-                          manifest.recipient_amount.value);
-            result.pushKV("service_fee_cents",
-                          manifest.service_fee.value);
-            result.pushKV(
-                "user_total_cents",
-                manifest.recipient_amount.value +
-                    manifest.service_fee.value);
-            if (const auto address = DigiDollarAddressForScript(
-                    manifest.recipient_script)) {
-                result.pushKV("to_address", *address);
-            }
-            break;
-        }
-    }
-    return result;
-}
-
-UniValue AttemptToJSON(const DigiDollar::Paymaster::ProviderAttempt& attempt)
-{
-    using namespace DigiDollar::Paymaster;
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("attempt_id", attempt.attempt_id.GetHex());
-    result.pushKV("provider_id", attempt.provider_id.GetHex());
-    if (!attempt.provider_endpoint.empty()) {
-        result.pushKV("provider_endpoint", attempt.provider_endpoint);
-    }
-    result.pushKV("attempt_state", std::string{AttemptStateName(attempt.state)});
-    result.pushKV("privacy_profile",
-                  attempt.privacy_profile == PrivacyProfile::HIGH
-                      ? "high" : "standard");
-    if (!attempt.quote_id.IsNull()) result.pushKV("quote_id", attempt.quote_id.GetHex());
-    if (!attempt.template_commitment.IsNull()) {
-        result.pushKV("template_commitment", attempt.template_commitment.GetHex());
-    }
-    if (!attempt.unsigned_txid.IsNull()) result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-    if (!attempt.commit_key.IsNull()) result.pushKV("commit_key", attempt.commit_key.GetHex());
-    if (attempt.quote_expires_at > 0) result.pushKV("quote_expires_at", attempt.quote_expires_at);
-    if (attempt.retry_until > 0) result.pushKV("retry_until", attempt.retry_until);
-    if (!attempt.client_manifest.manifest_id.IsNull()) {
-        result.pushKV("authorization_commitment",
-                      attempt.client_manifest.manifest_id.GetHex());
-        result.pushKV("authorization_accepted",
-                      attempt.accepted_client_manifest_id ==
-                              attempt.client_manifest.manifest_id &&
-                          attempt.client_manifest_accepted_at > 0);
-    }
-    if (attempt.client_manifest_accepted_at > 0) {
-        result.pushKV("authorization_accepted_at",
-                      attempt.client_manifest_accepted_at);
-    }
-    return result;
 }
 
 bool ReconcileConfirmedClientPayment(
@@ -1253,103 +1069,6 @@ template bool QueueRecoveryMessage<DigiDollar::Paymaster::AlternativeRecoverySub
     RecoveryQueueState&,
     std::string&);
 
-std::string AlternativeRecoveryPhaseName(
-    DigiDollar::Paymaster::AlternativeRecoveryPhase phase)
-{
-    using DigiDollar::Paymaster::AlternativeRecoveryPhase;
-    switch (phase) {
-    case AlternativeRecoveryPhase::CAPACITY_PENDING: return "capacity_pending";
-    case AlternativeRecoveryPhase::REQUEST_READY: return "request_ready";
-    case AlternativeRecoveryPhase::RESPONSE_VALIDATED: return "response_validated";
-    case AlternativeRecoveryPhase::USER_SIGNED: return "user_signed";
-    case AlternativeRecoveryPhase::FINAL_COMMITTED: return "final_committed";
-    }
-    return "unknown";
-}
-
-UniValue AlternativeRecoveryToJSON(
-    const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery)
-{
-    using namespace DigiDollar::Paymaster;
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("recovery_id", recovery.recovery_id.GetHex());
-    result.pushKV("recovery_provider_id",
-                  recovery.recovery_provider_id.GetHex());
-    result.pushKV("offer_id", recovery.offer_id.GetHex());
-    result.pushKV("policy_hash", recovery.policy_hash.GetHex());
-    result.pushKV("original_commit_key",
-                  recovery.original_commit_key.GetHex());
-    result.pushKV("original_template_commitment",
-                  recovery.original_template_commitment.GetHex());
-    result.pushKV("privacy_profile",
-                  recovery.privacy_profile == PrivacyProfile::HIGH ? "high" : "standard");
-    result.pushKV("phase", AlternativeRecoveryPhaseName(recovery.phase));
-    result.pushKV("expired", recovery.expired);
-    UniValue user_inputs{UniValue::VARR};
-    for (const COutPoint& outpoint : recovery.recovery_request.user_dd_inputs) {
-        UniValue input{UniValue::VOBJ};
-        input.pushKV("txid", outpoint.hash.GetHex());
-        input.pushKV("vout", outpoint.n);
-        user_inputs.push_back(std::move(input));
-    }
-    result.pushKV("user_dd_inputs", std::move(user_inputs));
-    UniValue wallet_returns{UniValue::VARR};
-    for (const AlternativeRecoveryReturn& wallet_return :
-         recovery.recovery_request.wallet_returns) {
-        UniValue output{UniValue::VOBJ};
-        output.pushKV("script_pub_key", HexStr(wallet_return.script_pub_key));
-        CTxDestination destination;
-        if (ExtractDestination(wallet_return.script_pub_key, destination)) {
-            output.pushKV("address", EncodeDestination(destination));
-        }
-        output.pushKV("amount_cents", wallet_return.amount.value);
-        wallet_returns.push_back(std::move(output));
-    }
-    result.pushKV("wallet_returns", std::move(wallet_returns));
-    if (!recovery.capacity_snapshot.snapshot_id.IsNull()) {
-        result.pushKV("capacity_snapshot_id",
-                      recovery.capacity_snapshot.snapshot_id.GetHex());
-        result.pushKV("capacity_resource_commitment",
-                      recovery.capacity_snapshot.resource_commitment.GetHex());
-    }
-    if (!recovery.recovery_authorization.authorization_commitment.IsNull()) {
-        result.pushKV(
-            "authorization_commitment",
-            recovery.recovery_authorization.authorization_commitment.GetHex());
-        result.pushKV(
-            "authorization_accepted",
-            !recovery.provider_side &&
-                recovery.accepted_recovery_authorization_commitment ==
-                    recovery.recovery_authorization.authorization_commitment &&
-                recovery.recovery_authorization_accepted_at > 0);
-        result.pushKV("maximum_service_fee_cents",
-                      recovery.recovery_authorization.maximum_service_fee.value);
-        result.pushKV("service_fee_cents",
-                      recovery.recovery_authorization.service_fee.value);
-        result.pushKV("network_fee_satoshis",
-                      recovery.recovery_authorization.network_fee.value);
-    } else {
-        result.pushKV("maximum_service_fee_cents",
-                      recovery.selected_maximum_service_fee.value);
-        result.pushKV("service_fee_cents",
-                      recovery.selected_service_fee.value);
-    }
-    if (recovery.recovery_authorization_accepted_at > 0) {
-        result.pushKV("authorization_accepted_at",
-                      recovery.recovery_authorization_accepted_at);
-    }
-    if (!recovery.final_transaction.empty()) {
-        result.pushKV("raw_transaction", HexStr(recovery.final_transaction));
-        if (recovery.signed_result.txid) {
-            result.pushKV("txid", recovery.signed_result.txid->GetHex());
-        }
-        result.pushKV("wtxid", recovery.expected_wtxid.GetHex());
-    }
-    result.pushKV("expires_at",
-                  recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED ? recovery.recovery_response.expires_at : recovery.capacity_request.expires_at);
-    return result;
-}
-
 bool BuildRecoveryParametersFromRecord(
     CWallet& wallet,
     const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery,
@@ -1764,49 +1483,43 @@ bool FindDurableClientAuthorizationAttempt(
     return false;
 }
 
-UniValue DurableClientAuthorizationToJSON(
+PaymentResult CaptureDurableClientAuthorization(
     const DigiDollar::Paymaster::PaymentSession& session,
     const DigiDollar::Paymaster::ProviderAttempt& attempt,
     const DigiDollar::Paymaster::PaymentIntent& intent,
     const DigiDollar::Paymaster::PaymasterQuote& quote)
 {
     using namespace DigiDollar::Paymaster;
-    UniValue result = SessionToJSON(session);
-    result.pushKV("provider_id", attempt.provider_id.GetHex());
-    result.pushKV("offer_id", intent.offer_id.GetHex());
-    result.pushKV("policy_hash", intent.policy_hash.GetHex());
-    result.pushKV("funding_model",
-                  intent.funding_model == FundingModel::SPONSORED ? "sponsored" : "user_paid");
-    result.pushKV("payment_cents", intent.recipient_amount.value);
-    result.pushKV("service_fee_cents", quote.service_fee.value);
-    result.pushKV("user_total_cents",
-                  intent.recipient_amount.value + quote.service_fee.value);
+    PaymentResult result = CaptureSessionPayment(session);
+    result.provider_id = attempt.provider_id;
+    result.offer_id = intent.offer_id;
+    result.policy_hash = intent.policy_hash;
+    result.funding_model = intent.funding_model;
+    result.payment_cents = intent.recipient_amount;
+    result.service_fee_cents = quote.service_fee;
+    result.user_total_cents = DDCents{intent.recipient_amount.value + quote.service_fee.value};
     if (const auto address = DigiDollarAddressForScript(
             intent.recipient_script)) {
-        result.pushKV("to_address", *address);
+        result.to_address = *address;
     }
-    result.pushKV("expires_at", intent.expires_at);
-    result.pushKV("queued", false);
-    result.pushKV("connection_pending", false);
-    result.pushKV("capacity_pending", false);
-    result.pushKV("capacity_snapshot_id",
-                  attempt.capacity_snapshot.snapshot_id.GetHex());
-    result.pushKV("quote_id", attempt.quote_id.GetHex());
-    result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-    result.pushKV("template_commitment",
-                  attempt.template_commitment.GetHex());
-    result.pushKV("authorization_commitment",
-                  attempt.client_manifest.manifest_id.GetHex());
+    result.expires_at = intent.expires_at;
+    result.queued = false;
+    result.connection_pending = false;
+    result.capacity_pending = false;
+    result.capacity_snapshot_id = attempt.capacity_snapshot.snapshot_id;
+    result.quote_id = attempt.quote_id;
+    result.unsigned_txid = attempt.unsigned_txid;
+    result.template_commitment = attempt.template_commitment;
+    result.authorization_commitment = attempt.client_manifest.manifest_id;
     const bool authorization_accepted =
         attempt.accepted_client_manifest_id ==
             attempt.client_manifest.manifest_id &&
         attempt.client_manifest_accepted_at > 0;
-    result.pushKV("authorization_accepted", authorization_accepted);
+    result.authorization_accepted = authorization_accepted;
     if (authorization_accepted) {
-        result.pushKV("authorization_accepted_at",
-                      attempt.client_manifest_accepted_at);
+        result.authorization_accepted_at = attempt.client_manifest_accepted_at;
     }
-    result.pushKV("psbt", EncodeBase64(attempt.unsigned_psbt));
+    result.psbt = attempt.unsigned_psbt;
     return result;
 }
 

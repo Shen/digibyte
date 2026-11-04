@@ -44,7 +44,6 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/moneystr.h>
 #include <util/strencodings.h>
@@ -68,52 +67,7 @@
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
 
-namespace {
-std::string PoolPurposeName(DigiDollar::Paymaster::PoolPurpose purpose)
-{
-    return purpose == DigiDollar::Paymaster::PoolPurpose::ADMISSION ? "admission" : "operational";
-}
 
-std::string PoolAssetName(DigiDollar::Paymaster::PoolAsset asset)
-{
-    return asset == DigiDollar::Paymaster::PoolAsset::DGB ? "dgb" : "dd_carrier";
-}
-
-std::string PoolEntryStateName(DigiDollar::Paymaster::PoolEntryState state)
-{
-    using DigiDollar::Paymaster::PoolEntryState;
-    switch (state) {
-    case PoolEntryState::AVAILABLE: return "available";
-    case PoolEntryState::RESERVED: return "reserved";
-    case PoolEntryState::PENDING_SUCCESSOR: return "pending_successor";
-    case PoolEntryState::SPENT: return "spent";
-    case PoolEntryState::COMMITTED: return "committed";
-    case PoolEntryState::RELEASED: return "released";
-    case PoolEntryState::INVALIDATED: return "invalidated";
-    }
-    return "unknown";
-}
-
-} // namespace
-
-UniValue PoolEntryToJSON(const DigiDollar::Paymaster::ProviderPoolEntry& entry)
-{
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("txid", entry.outpoint.hash.GetHex());
-    result.pushKV("vout", entry.outpoint.n);
-    result.pushKV("purpose", PoolPurposeName(entry.purpose));
-    result.pushKV("asset", PoolAssetName(entry.asset));
-    result.pushKV("state", PoolEntryStateName(entry.state));
-    result.pushKV("dgb_satoshis", entry.dgb_value.value);
-    result.pushKV("dd_cents", entry.carrier_value.value);
-    result.pushKV("confirmation_height", entry.confirmation_height);
-    if (!entry.reservation_id.IsNull()) result.pushKV("reservation_id", entry.reservation_id.GetHex());
-    if (!entry.origin_commit_key.IsNull()) {
-        result.pushKV("origin_commit_key", entry.origin_commit_key.GetHex());
-    }
-    result.pushKV("updated_at", entry.updated_at);
-    return result;
-}
 
 uint256 CarrierWithdrawalPlanId(
     const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan)
@@ -131,13 +85,12 @@ uint256 CarrierWithdrawalPlanId(
 }
 
 
-UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, const CarrierWithdrawalParameters& parameters)
+CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, const CarrierWithdrawalParameters& parameters)
 {
     auto* wallet = &wallet_ref;
     EnsureProviderRestoreSafe(*wallet);
 
     const auto mode = parameters.mode;
-    const char* mode_name = mode == CarrierWithdrawalMode::ALL_EXCESS ? "all_excess" : "release_slot";
     const bool execute = parameters.execute;
     if (mode != CarrierWithdrawalMode::ALL_EXCESS && mode != CarrierWithdrawalMode::RELEASE_SLOT)
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_CARRIER_WITHDRAWAL_MODE");
@@ -329,27 +282,19 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
                     ? "PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED"
                     : plan_error);
         }
-        UniValue result{UniValue::VOBJ};
-        result.pushKV("executed", false);
-        result.pushKV("plan_id", plan.plan_id.GetHex());
-        result.pushKV("mode", mode_name);
-        result.pushKV("source_carriers", plan.source_carriers.size());
-        result.pushKV("expires_at", plan.expires_at);
+        CarrierWithdrawalResult result;
+        result.executed = false;
+        result.plan_id = plan.plan_id;
+        result.mode = mode;
+        result.source_carriers = plan.source_carriers.size();
+        result.expires_at = plan.expires_at;
         if (mode == CarrierWithdrawalMode::ALL_EXCESS) {
-            result.pushKV(
-                "withdrawable_excess_cents",
-                plan.excess_amount.value);
-            result.pushKV(
-                "retained_carrier_cents",
-                static_cast<int64_t>(
-                    plan.replacement_carriers.size()) * 100);
-            result.pushKV(
-                "estimated_network_fee_satoshis",
-                plan.estimated_fee.value);
+            result.withdrawable_excess_cents = plan.excess_amount;
+            result.retained_carrier_cents = DDCents{static_cast<int64_t>(
+                    plan.replacement_carriers.size()) * 100};
+            result.estimated_network_fee_satoshis = plan.estimated_fee.value;
         } else {
-            result.pushKV(
-                "operational_carrier_target",
-                plan.target_operational_carriers_after_release);
+            result.operational_carrier_target = plan.target_operational_carriers_after_release;
         }
         return result;
     }
@@ -402,24 +347,16 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
                          ProviderMaintenanceState::BROADCAST ||
                      existing->state ==
                          ProviderMaintenanceState::CONFIRMED)) {
-                    UniValue result{UniValue::VOBJ};
-                    result.pushKV("executed", true);
-                    result.pushKV("plan_id", plan.plan_id.GetHex());
-                    result.pushKV("mode", mode_name);
-                    result.pushKV(
-                        "txid",
-                        existing->transaction_id.GetHex());
-                    result.pushKV(
-                        "withdrawable_excess_cents",
-                        plan.excess_amount.value);
-                    result.pushKV(
-                        "retained_carrier_cents",
-                        static_cast<int64_t>(
+                    CarrierWithdrawalResult result;
+                    result.executed = true;
+                    result.plan_id = plan.plan_id;
+                    result.mode = mode;
+                    result.txid = existing->transaction_id;
+                    result.withdrawable_excess_cents = plan.excess_amount;
+                    result.retained_carrier_cents = DDCents{static_cast<int64_t>(
                             plan.replacement_carriers.size()) *
-                            100);
-                    result.pushKV(
-                        "estimated_network_fee_satoshis",
-                        existing->actual_fee.value);
+                            100};
+                    result.estimated_network_fee_satoshis = existing->actual_fee.value;
                     return result;
                 }
             } else if (batch.HasPaymasterMaintenanceLedger()) {
@@ -444,14 +381,12 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
                 if (source != terminal_pool.end() &&
                     terminal_policy.target_operational_carriers ==
                         plan.target_operational_carriers_after_release) {
-                    UniValue result{UniValue::VOBJ};
-                    result.pushKV("executed", true);
-                    result.pushKV("plan_id", plan.plan_id.GetHex());
-                    result.pushKV("mode", mode_name);
-                    result.pushKV(
-                        "operational_carrier_target",
-                        terminal_policy
-                            .target_operational_carriers);
+                    CarrierWithdrawalResult result;
+                    result.executed = true;
+                    result.plan_id = plan.plan_id;
+                    result.mode = mode;
+                    result.operational_carrier_target = terminal_policy
+                            .target_operational_carriers;
                     return result;
                 }
             }
@@ -544,13 +479,11 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
             }
             liquidity_policy = current_policy;
         }
-        UniValue result{UniValue::VOBJ};
-        result.pushKV("executed", true);
-        result.pushKV("plan_id", plan.plan_id.GetHex());
-        result.pushKV("mode", mode_name);
-        result.pushKV(
-            "operational_carrier_target",
-            liquidity_policy.target_operational_carriers);
+        CarrierWithdrawalResult result;
+        result.executed = true;
+        result.plan_id = plan.plan_id;
+        result.mode = mode;
+        result.operational_carrier_target = liquidity_policy.target_operational_carriers;
         return result;
     }
 
@@ -595,18 +528,13 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
         if (existing != ledger.records.end() &&
             (existing->state == ProviderMaintenanceState::BROADCAST ||
              existing->state == ProviderMaintenanceState::CONFIRMED)) {
-            UniValue result{UniValue::VOBJ};
-            result.pushKV("executed", true);
-            result.pushKV("plan_id", plan.plan_id.GetHex());
-            result.pushKV("mode", mode_name);
-            result.pushKV(
-                "txid", existing->transaction_id.GetHex());
-            result.pushKV(
-                "withdrawable_excess_cents",
-                plan.excess_amount.value);
-            result.pushKV(
-                "estimated_network_fee_satoshis",
-                existing->actual_fee.value);
+            CarrierWithdrawalResult result;
+            result.executed = true;
+            result.plan_id = plan.plan_id;
+            result.mode = mode;
+            result.txid = existing->transaction_id;
+            result.withdrawable_excess_cents = plan.excess_amount;
+            result.estimated_network_fee_satoshis = existing->actual_fee.value;
             return result;
         }
     }
@@ -887,26 +815,20 @@ UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet_ref, c
                 "PAYMASTER_DATABASE_COMMIT");
         }
     }
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("executed", true);
-    result.pushKV("plan_id", plan.plan_id.GetHex());
-    result.pushKV("mode", mode_name);
-    result.pushKV("txid", txid.GetHex());
-    result.pushKV(
-        "withdrawable_excess_cents",
-        plan.excess_amount.value);
-    result.pushKV(
-        "retained_carrier_cents",
-        static_cast<int64_t>(
-            plan.replacement_carriers.size()) * 100);
-    result.pushKV(
-        "estimated_network_fee_satoshis",
-        actual_fee);
+    CarrierWithdrawalResult result;
+    result.executed = true;
+    result.plan_id = plan.plan_id;
+    result.mode = mode;
+    result.txid = txid;
+    result.withdrawable_excess_cents = plan.excess_amount;
+    result.retained_carrier_cents = DDCents{static_cast<int64_t>(
+            plan.replacement_carriers.size()) * 100};
+    result.estimated_network_fee_satoshis = actual_fee;
     if (!checkpoint.Complete(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
     return result;
 }
 
-UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const PoolPreparationParameters& parameters)
+PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const PoolPreparationParameters& parameters)
 {
     auto* wallet = &wallet_ref;
     EnsureProviderRestoreSafe(*wallet);
@@ -1143,23 +1065,23 @@ UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const
     });
     const bool resume_preview = !execute && !proposed_policy && pending_match != ledger.records.end();
     const uint256 plan_id = resume_preview ? pending_match->plan_id : plan_hasher.GetSHA256();
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("plan_id", plan_id.GetHex());
-    result.pushKV("preview_only", proposed_policy);
-    result.pushKV("admission_dgb_slots", admission);
-    result.pushKV("operational_dgb_slots", operational);
-    result.pushKV("admission_carrier_slots", admission_carriers);
-    result.pushKV("operational_carrier_slots", operational_carriers);
-    result.pushKV("missing_admission_dgb_slots", missing_admission);
-    result.pushKV("missing_operational_dgb_slots", missing_operational);
-    result.pushKV("missing_admission_carrier_slots", missing_admission_carriers);
-    result.pushKV("missing_operational_carrier_slots", missing_operational_carriers);
-    result.pushKV("admission_dgb_satoshis_each", admission_value);
-    result.pushKV("operational_dgb_satoshis_each", operational_value);
-    result.pushKV("carrier_cents_each", carrier_value);
-    result.pushKV("total_output_satoshis", *total);
-    result.pushKV("total_carrier_cents", total_carriers);
-    result.pushKV("maximum_fee_satoshis", fee_limit);
+    PoolPreparationResult result;
+    result.plan_id = plan_id;
+    result.preview_only = proposed_policy;
+    result.admission_dgb_slots = admission;
+    result.operational_dgb_slots = operational;
+    result.admission_carrier_slots = admission_carriers;
+    result.operational_carrier_slots = operational_carriers;
+    result.missing_admission_dgb_slots = missing_admission;
+    result.missing_operational_dgb_slots = missing_operational;
+    result.missing_admission_carrier_slots = missing_admission_carriers;
+    result.missing_operational_carrier_slots = missing_operational_carriers;
+    result.admission_dgb_satoshis_each = admission_value;
+    result.operational_dgb_satoshis_each = operational_value;
+    result.carrier_cents_each = DDCents{carrier_value};
+    result.total_output_satoshis = *total;
+    result.total_carrier_cents = DDCents{total_carriers};
+    result.maximum_fee_satoshis = fee_limit;
     int64_t total_fee_limit = fee_limit *
         ((missing_admission + missing_operational > 0) +
          (missing_admission_carriers + missing_operational_carriers > 0));
@@ -1174,12 +1096,12 @@ UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const
             total_fee_limit = *combined;
         }
     }
-    result.pushKV("maximum_total_fee_satoshis", total_fee_limit);
-    result.pushKV("accepted", false);
-    result.pushKV("cancelled", false);
-    result.pushKV("preparation", PoolPreparationToJSON(*wallet));
+    result.maximum_total_fee_satoshis = total_fee_limit;
+    result.accepted = false;
+    result.cancelled = false;
+    result.preparation = CapturePoolPreparation(*wallet);
     if (!execute) {
-        result.pushKV("executed", false);
+        result.executed = false;
         return result;
     }
 
@@ -1209,10 +1131,10 @@ UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const
         }
         if (!found) throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_POOL_PLAN_NOT_FOUND");
         if (cancelled) WritePreparationLedger(*wallet, ledger);
-        result.pushKV("cancelled", cancelled);
-        result.pushKV("executed", false);
-        result.pushKV("plan_id", supplied_id.GetHex());
-        result.pushKV("preparation", PoolPreparationToJSON(*wallet));
+        result.cancelled = cancelled;
+        result.executed = false;
+        result.plan_id = supplied_id;
+        result.preparation = CapturePoolPreparation(*wallet);
         return result;
     }
     const bool already_authorized = replay;
@@ -1285,27 +1207,26 @@ UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet_ref, const
         if (!record.IsPreparation() || record.plan_id != supplied_id || record.transaction_id.IsNull()) continue;
         executed |= prior_transactions.count(record.transaction_id) == 0;
         if (record.kind == ProviderMaintenanceKind::PREPARE_DGB) {
-            result.pushKV("dgb_txid", record.transaction_id.GetHex());
-            result.pushKV("txid", record.transaction_id.GetHex());
-            result.pushKV("network_fee_satoshis", record.actual_fee.value);
+            result.dgb_txid = record.transaction_id;
+            result.txid = record.transaction_id;
+            result.network_fee_satoshis = record.actual_fee.value;
         } else {
-            result.pushKV("dd_txid", record.transaction_id.GetHex());
+            result.dd_txid = record.transaction_id;
         }
     }
-    if (!result.exists("txid") && result.exists("dd_txid")) result.pushKV("txid", result.find_value("dd_txid"));
-    result.pushKV("accepted", true);
-    result.pushKV("preparation", PoolPreparationToJSON(*wallet));
-    result.pushKV("executed", executed);
-    result.pushKV("plan_id", supplied_id.GetHex());
+    if (!result.txid && result.dd_txid) result.txid = result.dd_txid;
+    result.accepted = true;
+    result.preparation = CapturePoolPreparation(*wallet);
+    result.executed = executed;
+    result.plan_id = supplied_id;
     existing.clear();
     GetPaymasterProviderPoolEntries(*wallet, existing);
-    UniValue pool{UniValue::VARR};
-    for (const auto& entry : existing) pool.push_back(PoolEntryToJSON(entry));
-    result.pushKV("pool", std::move(pool));
+    auto pool = std::move(existing);
+    result.pool = std::move(pool);
     return result;
 }
 
-UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, const PoolRebalanceParameters& parameters)
+PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, const PoolRebalanceParameters& parameters)
 {
     auto* wallet = &wallet_ref;
     EnsureProviderRestoreSafe(*wallet);
@@ -1548,28 +1469,28 @@ UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, con
     if (expected_revision.has_value()) plan_hasher << std::string{"liquidity_revision"} << *expected_revision;
     const uint256 plan_id = plan_hasher.GetSHA256();
 
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("plan_id", plan_id.GetHex());
-    result.pushKV("retired_admission_dgb_slots", retired_admission_dgb);
-    result.pushKV("retired_operational_dgb_slots", retired_operational_dgb);
-    result.pushKV("retired_admission_carrier_slots", retired_admission_dd);
-    result.pushKV("retired_operational_carrier_slots", retired_operational_dd);
-    result.pushKV("retired_dgb_satoshis", *retired_dgb_value);
-    result.pushKV("retired_carrier_cents", *retired_dd_value);
+    PoolRebalanceResult result;
+    result.plan_id = plan_id;
+    result.retired_admission_dgb_slots = retired_admission_dgb;
+    result.retired_operational_dgb_slots = retired_operational_dgb;
+    result.retired_admission_carrier_slots = retired_admission_dd;
+    result.retired_operational_carrier_slots = retired_operational_dd;
+    result.retired_dgb_satoshis = *retired_dgb_value;
+    result.retired_carrier_cents = DDCents{*retired_dd_value};
     if (recommend_fee) {
-        result.pushKV("estimated_dgb_fee_satoshis", estimated_dgb_fee);
-        result.pushKV("estimated_dd_fee_satoshis", estimated_dd_fee);
-        result.pushKV("wallet_maximum_fee_satoshis", wallet->m_default_max_tx_fee);
+        result.estimated_dgb_fee_satoshis = estimated_dgb_fee;
+        result.estimated_dd_fee_satoshis = estimated_dd_fee;
+        result.wallet_maximum_fee_satoshis = wallet->m_default_max_tx_fee;
     }
     if (bounded) {
         const int transactions = int(!retire_dgb.empty()) + int(!retire_dd.empty());
         if (transactions > 0 && maximum_fee > MAX_MONEY / transactions)
             throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_RETIREMENT_FEE_LIMIT");
-        result.pushKV("maximum_network_fee_satoshis", maximum_fee);
-        result.pushKV("maximum_total_fee_satoshis", maximum_fee * transactions);
+        result.maximum_network_fee_satoshis = maximum_fee;
+        result.maximum_total_fee_satoshis = maximum_fee * transactions;
     }
     if (!execute) {
-        result.pushKV("executed", false);
+        result.executed = false;
         return result;
     }
 
@@ -1583,7 +1504,7 @@ UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, con
                            "PAYMASTER_POOL_PLAN_CHANGED");
     }
     if (retire_dgb.empty() && retire_dd.empty()) {
-        result.pushKV("executed", false);
+        result.executed = false;
         return result;
     }
 
@@ -1628,7 +1549,7 @@ UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, con
     LOCK(wallet->cs_wallet);
     PaymasterCheckpointOperation checkpoint{*wallet};
     bool executed{false};
-    std::string dd_txid;
+    std::optional<uint256> dd_txid;
     CTransactionRef dd_tx;
     CAmount dd_fee{0};
     if (!retire_dd.empty()) {
@@ -1670,7 +1591,7 @@ UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, con
                 {}, &transfer_error)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
         }
-        dd_txid = dd_tx->GetHash().GetHex();
+        dd_txid = dd_tx->GetHash();
         dd_fee = fee->value;
         if (!dd_wallet->RecordPaymasterSendHistory(dd_tx->GetHash(),
                 GetScriptForDestination(recipients.front().first.GetDigiDollarDestination()),
@@ -1728,19 +1649,18 @@ UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet_ref, con
 
     if (checkpoint.Active() && !checkpoint.Complete(finance_error)) throw ApplicationError(ErrorKind::WALLET, finance_error);
 
-    UniValue pool{UniValue::VARR};
-    for (const auto& entry : entries)
-        pool.push_back(PoolEntryToJSON(entry));
-    result.pushKV("executed", executed);
-    if (!dd_txid.empty()) {
-        result.pushKV("dd_txid", dd_txid);
-        result.pushKV("dd_network_fee_satoshis", dd_fee);
+    auto pool = std::move(entries);
+    result.executed = executed;
+    if (dd_txid.has_value()) {
+        result.dd_txid = dd_txid;
+        result.dd_network_fee_satoshis = dd_fee;
     }
     if (dgb_tx) {
-        result.pushKV("dgb_txid", dgb_tx->GetHash().GetHex());
-        result.pushKV("network_fee_satoshis", dgb_fee);
+        result.dgb_txid = dgb_tx->GetHash();
+        result.network_fee_satoshis = dgb_fee;
     }
-    result.pushKV("pool", std::move(pool));
+    result.pool = std::move(pool);
     return result;
 }
+
 } // namespace wallet::paymaster_app

@@ -33,6 +33,7 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/rpc/paymaster.h>
+#include <wallet/rpc/paymaster_results.h>
 #include <wallet/walletdb.h>
 
 #include <exception>
@@ -109,7 +110,7 @@ using paymaster_store::internal::ProviderPoolReadError;
 
 using wallet::ReconcileProviderFinances;
 
-RPCResult PoolPreparationResult();
+RPCResult PoolPreparationResultSchema();
 
 // Liquidity planning and accounting. Maintenance builders must operate on a
 // reconciled pool and persist restartable plans before broadcasting.

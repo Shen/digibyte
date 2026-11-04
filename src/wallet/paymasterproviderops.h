@@ -4,14 +4,13 @@
 #define DIGIBYTE_WALLET_PAYMASTERPROVIDEROPS_H
 #include <paymaster/provider.h>
 #include <primitives/transaction.h>
-#include <univalue.h>
+#include <wallet/paymasterresults.h>
 #include <optional>
 
 namespace wallet {
 class CWallet;
 struct WalletContext;
 namespace paymaster_app {
-UniValue PoolEntryToJSON(const DigiDollar::Paymaster::ProviderPoolEntry& entry);
 uint256 CarrierWithdrawalPlanId(const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan);
 struct PoolTargets {
     int admission{0};
@@ -44,9 +43,9 @@ struct CarrierWithdrawalParameters {
     std::optional<uint256> plan_id;
     std::optional<COutPoint> source;
 };
-UniValue PreparePaymasterPool(WalletContext& context, CWallet& wallet, const PoolPreparationParameters& parameters);
-UniValue RebalancePaymasterPool(WalletContext& context, CWallet& wallet, const PoolRebalanceParameters& parameters);
-UniValue WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet, const CarrierWithdrawalParameters& parameters);
+PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wallet, const PoolPreparationParameters& parameters);
+PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wallet, const PoolRebalanceParameters& parameters);
+CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet& wallet, const CarrierWithdrawalParameters& parameters);
 } // namespace paymaster_app
 } // namespace wallet
 #endif // DIGIBYTE_WALLET_PAYMASTERPROVIDEROPS_H

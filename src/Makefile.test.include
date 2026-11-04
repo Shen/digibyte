@@ -379,6 +379,7 @@ DIGIBYTE_TESTS += \
   wallet/test/paymaster_wallet_security_tests.cpp \
   wallet/test/paymaster_wallet_psbt_tests.cpp \
   wallet/test/paymaster_wallet_identity_tests.cpp \
+  wallet/test/paymaster_application_tests.cpp \
   wallet/test/rh59_coincontrol_dd_lock_bypass_tests.cpp \
   wallet/test/digidollar_wave16_persistence_tests.cpp \
   wallet/test/digidollar_wave17_spendability_tests.cpp \

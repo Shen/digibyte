@@ -4,18 +4,21 @@
 #ifndef DIGIBYTE_WALLET_PAYMASTERAPPLICATION_INTERNAL_H
 #define DIGIBYTE_WALLET_PAYMASTERAPPLICATION_INTERNAL_H
 #include <wallet/paymasterapplication.h>
+#include <wallet/paymasterresults.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/walletdb.h>
 #include <paymaster/validation.h>
-#include <net.h>
 #include <streams.h>
 #include <version.h>
-#include <univalue.h>
 #include <logging.h>
 #include <optional>
 #include <string_view>
+class CConnman;
 namespace wallet::paymaster_app {
+SessionSnapshot CaptureSessionSnapshot(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
+PaymentResult CaptureSessionPayment(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
+
 template <typename T>
 bool DeserializePaymasterBytes(const std::vector<unsigned char>& bytes, const char* field, T& decoded, std::string& error)
 {
@@ -44,13 +47,8 @@ DigiDollar::Paymaster::DDCents PreviewMaximumServiceFee(CWallet& wallet, DigiDol
 void RecordUnavailableClientProvider(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
                                      const DigiDollar::Paymaster::ProviderAttempt& attempt, int64_t now);
 using FinalTransactionPresence = ExactFinalTransactionPresence;
-UniValue FundingSafetyLimitsToJSON(
-    const DigiDollar::Paymaster::FundingSafetyLimits& limits);
-UniValue ProviderSafetyPolicyToJSON(
-    const DigiDollar::Paymaster::ProviderSafetyPolicy& policy);
-UniValue PaymasterTransportToJSON(const CConnman& connman,
+TransportSnapshot CapturePaymasterTransport(const CConnman& connman,
     std::optional<DigiDollar::Paymaster::DirectState> state = std::nullopt);
-UniValue ReadinessErrorsToJSON(const std::vector<std::string>& errors);
 class ProviderInboundMessageGuard final
 {
 public:
@@ -109,16 +107,7 @@ DigiDollar::Paymaster::DirectKey PaymentChannelKey(
     const CWallet& wallet, const DigiDollar::Paymaster::PaymentSession& session,
     const DigiDollar::Paymaster::PaymasterId& provider);
 const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state);
-std::string ResultStatusName(DigiDollar::Paymaster::PaymasterResultStatus status);
-std::string FeeModeName(DigiDollar::Paymaster::FeeMode mode);
 std::optional<std::string> DigiDollarAddressForScript(const CScript& script);
-void AddSessionPaymentStatus(UniValue& result,
-                             const DigiDollar::Paymaster::PaymentSession& session,
-                             const PaymasterStore* store = nullptr);
-UniValue SessionToJSON(
-    const DigiDollar::Paymaster::PaymentSession& session,
-    const PaymasterStore* store = nullptr);
-UniValue AttemptToJSON(const DigiDollar::Paymaster::ProviderAttempt& attempt);
 std::vector<unsigned char> SerializeQuoteRequest(
     const DigiDollar::Paymaster::PaymasterQuoteRequest& quote_request);
 std::vector<unsigned char> SerializeCapacityRequest(
@@ -236,10 +225,6 @@ bool QueueRecoveryMessage(
     RecoveryQueueState& state,
     std::string& error);
 
-std::string AlternativeRecoveryPhaseName(
-    DigiDollar::Paymaster::AlternativeRecoveryPhase phase);
-UniValue AlternativeRecoveryToJSON(
-    const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery);
 bool BuildRecoveryParametersFromRecord(
     CWallet& wallet,
     const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery,
@@ -256,7 +241,7 @@ bool HasDurableClientAuthorization(
     int64_t observation_time);
 /** Observe an already authorized exact payment; never sign, submit, or broadcast.
  * Returns true on completion and copies the full records before pruning can run.
- * Throws an RPC error on failed validation or persistence. */
+ * Throws an ApplicationError on failed validation or persistence. */
 bool ReconcileConfirmedClientPayment(
     CWallet& wallet, DigiDollar::Paymaster::PaymentSession& session,
     DigiDollar::Paymaster::ProviderAttempt& attempt);
@@ -291,7 +276,7 @@ bool FindDurableClientAuthorizationAttempt(
     DigiDollar::Paymaster::PaymentIntent& intent,
     DigiDollar::Paymaster::PaymasterQuote& quote,
     std::string& error);
-UniValue DurableClientAuthorizationToJSON(
+PaymentResult CaptureDurableClientAuthorization(
     const DigiDollar::Paymaster::PaymentSession& session,
     const DigiDollar::Paymaster::ProviderAttempt& attempt,
     const DigiDollar::Paymaster::PaymentIntent& intent,
@@ -354,9 +339,6 @@ ProviderCommitRecoveryResult RecoverProviderCommit(
     PaymasterStore& store,
     const DigiDollar::Paymaster::ProviderCommitRecord& commit,
     int64_t now);
-
-// Policy conversion is kept at the RPC boundary; PaymasterStore consumes only
-// validated typed policies and never UniValue supplied by a peer or caller.
 
 } // namespace wallet::paymaster_app
 #endif

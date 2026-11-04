@@ -388,6 +388,7 @@ DIGIBYTE_CORE_H = \
   wallet/rpc/wallet.h \
   wallet/rpc/paymaster.h \
   wallet/rpc/paymaster_internal.h \
+  wallet/rpc/paymaster_results.h \
   wallet/rpc/paymaster_send.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
@@ -402,6 +403,7 @@ DIGIBYTE_CORE_H = \
   wallet/paymasterfinance.h \
   wallet/paymasterfinancecache.h \
   wallet/paymasterapplication.h \
+  wallet/paymasterresults.h \
   wallet/paymasterclientview.h \
   wallet/paymasterrecoveryservice.h \
   wallet/paymasterproviderops.h \
@@ -590,6 +592,7 @@ libdigibyte_wallet_a_SOURCES = \
   wallet/rpc/paymaster_processing.cpp \
   wallet/rpc/paymaster_provider.cpp \
   wallet/rpc/paymaster_runtime.cpp \
+  wallet/rpc/paymaster_results.cpp \
   wallet/scriptpubkeyman.cpp \
   wallet/spend.cpp \
   wallet/transaction.cpp \

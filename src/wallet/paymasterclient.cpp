@@ -38,7 +38,6 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/spend.h>
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -164,7 +163,7 @@ void ValidateClientPaymentOptions(const ClientPaymentOptions& input)
 }
 } // namespace
 
-UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const QuoteParameters& input)
+PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, const QuoteParameters& input)
 {
     ValidateClientPaymentOptions(input);
     CWallet* const wallet = &target;
@@ -246,7 +245,7 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
                     error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-            return DurableClientAuthorizationToJSON(
+            return CaptureDurableClientAuthorization(
                 durable_session, durable_attempt, durable_intent,
                 durable_quote);
         }
@@ -330,7 +329,7 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
                 *context.paymaster, store, durable_session, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        return SessionToJSON(durable_session, &store);
+        return CaptureSessionPayment(durable_session, &store);
     }
 
     const DDCents effective_fee_cap =
@@ -399,7 +398,7 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
                 *context.paymaster, store, session, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        return SessionToJSON(session, &store);
+        return CaptureSessionPayment(session, &store);
     }
     if (!store.BindClientPaymentOrder(
             request_id, DDCents{requested_amount}, subtract_fee,
@@ -463,17 +462,17 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
             PaymentChannelKey(*wallet, session, provider_id), candidate.endpoint, privacy == PrivacyProfile::HIGH);
         if (transport.state != DirectState::READY || !transport.lease) {
             if (!transport.Pending()) throw ApplicationError(ErrorKind::NODE_CAPACITY, PaymasterTransportError(transport.state));
-            UniValue result = SessionToJSON(session);
-            result.pushKV("provider_id", provider_id.GetHex());
-            result.pushKV("offer_id", candidate.terms.offer_id.GetHex());
-            result.pushKV("policy_hash", candidate.terms.policy_hash.GetHex());
-            result.pushKV("payment_cents", candidate.payment.value);
-            result.pushKV("service_fee_cents", candidate.service_fee.value);
-            result.pushKV("user_total_cents", candidate.user_total.value);
-            result.pushKV("transport", PaymasterTransportToJSON(*transport_node->connman, transport.state));
-            result.pushKV("queued", false);
-            result.pushKV("connection_pending", true);
-            result.pushKV("capacity_pending", true);
+            PaymentResult result = CaptureSessionPayment(session);
+            result.provider_id = provider_id;
+            result.offer_id = candidate.terms.offer_id;
+            result.policy_hash = candidate.terms.policy_hash;
+            result.payment_cents = candidate.payment;
+            result.service_fee_cents = candidate.service_fee;
+            result.user_total_cents = candidate.user_total;
+            result.transport = CapturePaymasterTransport(*transport_node->connman, transport.state);
+            result.queued = false;
+            result.connection_pending = true;
+            result.capacity_pending = true;
             return result;
         }
         reservation_lease = transport.lease;
@@ -769,20 +768,19 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_SESSION_NOT_FOUND");
         }
-        UniValue result = SessionToJSON(session);
-        result.pushKV("provider_id", provider_id.GetHex());
-        result.pushKV("offer_id", candidate.terms.offer_id.GetHex());
-        result.pushKV("policy_hash", candidate.terms.policy_hash.GetHex());
-        result.pushKV("funding_model",
-                      intent.funding_model == FundingModel::SPONSORED ? "sponsored" : "user_paid");
-        result.pushKV("payment_cents", candidate.payment.value);
-        result.pushKV("service_fee_cents", candidate.service_fee.value);
-        result.pushKV("user_total_cents", candidate.user_total.value);
-        result.pushKV("expires_at", intent.expires_at);
-        result.pushKV("transport", PaymasterTransportToJSON(*node->connman, transport.state));
-        result.pushKV("queued", capacity_queued);
-        result.pushKV("connection_pending", capacity_connection_pending);
-        result.pushKV("capacity_pending", true);
+        PaymentResult result = CaptureSessionPayment(session);
+        result.provider_id = provider_id;
+        result.offer_id = candidate.terms.offer_id;
+        result.policy_hash = candidate.terms.policy_hash;
+        result.funding_model = intent.funding_model;
+        result.payment_cents = candidate.payment;
+        result.service_fee_cents = candidate.service_fee;
+        result.user_total_cents = candidate.user_total;
+        result.expires_at = intent.expires_at;
+        result.transport = CapturePaymasterTransport(*node->connman, transport.state);
+        result.queued = capacity_queued;
+        result.connection_pending = capacity_connection_pending;
+        result.capacity_pending = true;
         return result;
     }
     try {
@@ -1056,42 +1054,37 @@ UniValue RequestPaymasterQuote(WalletContext& context, CWallet& target, const Qu
     if (!store.GetSessionByRequestId(request_id, session)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
     }
-    UniValue result = SessionToJSON(session);
-    result.pushKV("provider_id", provider_id.GetHex());
-    result.pushKV("offer_id", candidate.terms.offer_id.GetHex());
-    result.pushKV("policy_hash", candidate.terms.policy_hash.GetHex());
-    result.pushKV("funding_model",
-                  intent.funding_model == FundingModel::SPONSORED ? "sponsored" : "user_paid");
-    result.pushKV("payment_cents", candidate.payment.value);
-    result.pushKV("service_fee_cents", candidate.service_fee.value);
-    result.pushKV("user_total_cents", candidate.user_total.value);
-    result.pushKV("expires_at", intent.expires_at);
-    result.pushKV("queued", queued);
-    result.pushKV("connection_pending", connection_pending);
-    result.pushKV("capacity_pending", false);
-    result.pushKV("capacity_snapshot_id",
-                  attempt.capacity_snapshot.snapshot_id.GetHex());
+    PaymentResult result = CaptureSessionPayment(session);
+    result.provider_id = provider_id;
+    result.offer_id = candidate.terms.offer_id;
+    result.policy_hash = candidate.terms.policy_hash;
+    result.funding_model = intent.funding_model;
+    result.payment_cents = candidate.payment;
+    result.service_fee_cents = candidate.service_fee;
+    result.user_total_cents = candidate.user_total;
+    result.expires_at = intent.expires_at;
+    result.queued = queued;
+    result.connection_pending = connection_pending;
+    result.capacity_pending = false;
+    result.capacity_snapshot_id = attempt.capacity_snapshot.snapshot_id;
     if (!attempt.quote_id.IsNull()) {
-        result.pushKV("quote_id", attempt.quote_id.GetHex());
-        result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-        result.pushKV("template_commitment", attempt.template_commitment.GetHex());
-        result.pushKV("authorization_commitment",
-                      attempt.client_manifest.manifest_id.GetHex());
+        result.quote_id = attempt.quote_id;
+        result.unsigned_txid = attempt.unsigned_txid;
+        result.template_commitment = attempt.template_commitment;
+        result.authorization_commitment = attempt.client_manifest.manifest_id;
         const bool authorization_accepted =
             attempt.accepted_client_manifest_id ==
                 attempt.client_manifest.manifest_id &&
             attempt.client_manifest_accepted_at > 0;
-        result.pushKV("authorization_accepted",
-                      authorization_accepted);
+        result.authorization_accepted = authorization_accepted;
         if (authorization_accepted) {
-            result.pushKV("authorization_accepted_at",
-                          attempt.client_manifest_accepted_at);
+            result.authorization_accepted_at = attempt.client_manifest_accepted_at;
         }
-        result.pushKV("psbt", EncodeBase64(attempt.unsigned_psbt));
+        result.psbt = attempt.unsigned_psbt;
     }
     return result;
 }
-UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& target,
+PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& target,
     const AutomaticPaymentParameters& input, const std::vector<COutPoint>* preset_inputs)
 {
     ValidateClientPaymentOptions(input);
@@ -1186,11 +1179,10 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
                     *context.paymaster, store, durable_session, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-            UniValue resume = DurableClientAuthorizationToJSON(
+            PaymentResult resume = CaptureDurableClientAuthorization(
                 durable_session, durable_attempt, durable_intent,
                 durable_quote);
-            resume.pushKV("authorization_required",
-                          !supplied_authorization_commitment.has_value());
+            resume.authorization_required = !supplied_authorization_commitment.has_value();
             if (!supplied_authorization_commitment) return resume;
             if (*supplied_authorization_commitment !=
                 durable_attempt.client_manifest.manifest_id) {
@@ -1199,22 +1191,10 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
                     "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH");
             }
 
-            static constexpr const char* RESUME_FIELDS[]{
-                "requested_fee_mode", "fee_mode_used", "provider_id",
-                "offer_id", "policy_hash", "funding_model",
-                "payment_cents", "service_fee_cents", "user_total_cents",
-                "requested_amount_cents",
-                "subtract_paymaster_fee_from_amount",
-                "send_all_spendable_dd",
-                "authorization_commitment", "authorization_accepted",
-                "authorization_accepted_at"};
-            const auto copy_resume_fields = [&resume](UniValue& target) {
-                for (const char* field : RESUME_FIELDS) {
-                    const UniValue& value = resume.find_value(field);
-                    if (!value.isNull() && target.find_value(field).isNull()) {
-                        target.pushKV(field, value);
-                    }
-                }
+            const auto copy_resume_fields = [&resume](PaymentResult& target) {
+                FillMissingPaymentTerms(target, resume);
+                if (!target.authorization_accepted) target.authorization_accepted = resume.authorization_accepted;
+                if (!target.authorization_accepted_at) target.authorization_accepted_at = resume.authorization_accepted_at;
             };
 
             // A provider can commit and broadcast the exact transaction
@@ -1224,8 +1204,8 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
             // the provider Capacity outpoint as spent, but reports a false
             // failure even though it was spent by the exact final transaction
             // that is waiting in the result inbox.
-            UniValue provider_result = ProcessPaymasterResult(context, *wallet, request_id);
-            if (provider_result.find_value("processed").isTrue()) {
+            PaymentResult provider_result = ProcessPaymasterResult(context, *wallet, request_id);
+            if (provider_result.processed.value_or(false)) {
                 copy_resume_fields(provider_result);
                 return provider_result;
             }
@@ -1240,7 +1220,7 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
             if (durable_session.state == SessionState::STEMPOOL ||
                 durable_session.state == SessionState::MEMPOOL ||
                 !durable_session.final_txid.IsNull()) {
-                UniValue committed = SessionToJSON(durable_session, &store);
+                PaymentResult committed = CaptureSessionPayment(durable_session, &store);
                 copy_resume_fields(committed);
                 return committed;
             }
@@ -1256,11 +1236,11 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
                         PaymentChannelKey(*wallet, durable_session, durable_attempt.provider_id));
                 }
             }
-            UniValue authorization = AuthorizePaymasterPSBT(context, *wallet,
-                EncodeBase64(durable_attempt.unsigned_psbt), supplied_authorization_commitment);
+            PaymentResult authorization = AuthorizePaymasterPSBT(context, *wallet,
+                durable_attempt.unsigned_psbt, supplied_authorization_commitment);
             copy_resume_fields(authorization);
             provider_result = ProcessPaymasterResult(context, *wallet, request_id);
-            if (provider_result.find_value("processed").isTrue()) {
+            if (provider_result.processed.value_or(false)) {
                 copy_resume_fields(provider_result);
                 return provider_result;
             }
@@ -1398,7 +1378,7 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
                     *context.paymaster, store, persisted_session, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-            return SessionToJSON(persisted_session, &store);
+            return CaptureSessionPayment(persisted_session, &store);
         }
         persisted_inputs = persisted_session.user_inputs;
         if (!persisted_session.attempt_ids.empty()) {
@@ -1610,30 +1590,22 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
     quote.payment = selected->payment.value;
     quote.requested_amount = amount;
     quote.inputs = std::move(selected_inputs);
-    UniValue quote_result = RequestPaymasterQuote(context, *wallet, quote);
-    if (quote_result.find_value("funding_model").isNull()) {
-        quote_result.pushKV(
-            "funding_model",
-            selected->terms.funding_model == FundingModel::SPONSORED ? "sponsored" : "user_paid");
+    PaymentResult quote_result = RequestPaymasterQuote(context, *wallet, quote);
+    if (!quote_result.funding_model) {
+        quote_result.funding_model = selected->terms.funding_model;
     }
 
-    const auto copy_quote_fields = [&quote_result](UniValue& target) {
-        static constexpr const char* FIELDS[]{
-            "requested_fee_mode", "fee_mode_used", "provider_id", "offer_id",
-            "policy_hash", "funding_model",
-            "payment_cents", "service_fee_cents", "user_total_cents", "expires_at",
-            "requested_amount_cents",
-            "subtract_paymaster_fee_from_amount", "send_all_spendable_dd",
-            "quote_id", "unsigned_txid", "template_commitment",
-            "authorization_required", "authorization_commitment"};
-        for (const char* field : FIELDS) {
-            const UniValue& value = quote_result.find_value(field);
-            if (!value.isNull() && target.find_value(field).isNull()) target.pushKV(field, value);
-        }
+    const auto copy_quote_fields = [&quote_result](PaymentResult& target) {
+        FillMissingPaymentTerms(target, quote_result);
+        if (!target.expires_at) target.expires_at = quote_result.expires_at;
+        if (!target.quote_id) target.quote_id = quote_result.quote_id;
+        if (!target.unsigned_txid) target.unsigned_txid = quote_result.unsigned_txid;
+        if (!target.template_commitment) target.template_commitment = quote_result.template_commitment;
+        if (!target.authorization_required) target.authorization_required = quote_result.authorization_required;
     };
 
-    const UniValue& psbt = quote_result.find_value("psbt");
-    if (psbt.isNull()) {
+    const auto& psbt = quote_result.psbt;
+    if (!psbt) {
         if (supplied_authorization_commitment) {
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_AUTHORIZATION_NOT_READY");
@@ -1641,15 +1613,11 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
         return quote_result;
     }
 
-    const UniValue& unsigned_txid_value = quote_result.find_value("unsigned_txid");
-    if (!unsigned_txid_value.isStr()) {
-        throw ApplicationError(ErrorKind::WALLET,
-                           "PAYMASTER_AUTHORIZATION_TEMPLATE_MISSING");
+    if (!quote_result.unsigned_txid) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_AUTHORIZATION_TEMPLATE_MISSING");
     }
     ProviderAttempt authorization_attempt;
-    if (unsigned_txid_value.get_str().size() != 64 || !IsHex(unsigned_txid_value.get_str()))
-        throw ApplicationError(ErrorKind::INTERNAL, "PAYMASTER_AUTHORIZATION_TEMPLATE_MISSING");
-    const uint256 unsigned_txid = uint256S(unsigned_txid_value.get_str());
+    const uint256& unsigned_txid = *quote_result.unsigned_txid;
     if (!store.GetAttemptByUnsignedTxid(unsigned_txid, authorization_attempt)) {
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_AUTHORIZATION_ATTEMPT_MISSING");
@@ -1666,10 +1634,9 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH");
     }
-    quote_result.pushKV("authorization_required",
-                        !supplied_authorization_commitment.has_value());
-    if (quote_result.find_value("authorization_commitment").isNull()) {
-        quote_result.pushKV("authorization_commitment", commitment.GetHex());
+    quote_result.authorization_required = !supplied_authorization_commitment.has_value();
+    if (!quote_result.authorization_commitment) {
+        quote_result.authorization_commitment = commitment;
     }
     // A high-level call can never silently turn a freshly received quote into
     // a USER signature. The caller must round-trip the exact manifest hash.
@@ -1702,24 +1669,23 @@ UniValue RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& targe
         if (!store.GetSessionByRequestId(request_id, session)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
         }
-        UniValue paused = SessionToJSON(session);
+        PaymentResult paused = CaptureSessionPayment(session);
         copy_quote_fields(paused);
         const bool authorization_accepted =
             authorization_attempt.accepted_client_manifest_id == commitment &&
             authorization_attempt.client_manifest_accepted_at > 0;
-        paused.pushKV("authorization_accepted", authorization_accepted);
+        paused.authorization_accepted = authorization_accepted;
         if (authorization_accepted) {
-            paused.pushKV("authorization_accepted_at",
-                          authorization_attempt.client_manifest_accepted_at);
+            paused.authorization_accepted_at = authorization_attempt.client_manifest_accepted_at;
         }
         return paused;
     }
 
-    UniValue authorization = AuthorizePaymasterPSBT(context, *wallet, psbt.get_str(), supplied_authorization_commitment);
+    PaymentResult authorization = AuthorizePaymasterPSBT(context, *wallet, *psbt, supplied_authorization_commitment);
     copy_quote_fields(authorization);
 
-    UniValue provider_result = ProcessPaymasterResult(context, *wallet, request_id);
-    if (provider_result.find_value("processed").isTrue()) {
+    PaymentResult provider_result = ProcessPaymasterResult(context, *wallet, request_id);
+    if (provider_result.processed.value_or(false)) {
         copy_quote_fields(provider_result);
         return provider_result;
     }

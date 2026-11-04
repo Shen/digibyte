@@ -97,6 +97,12 @@
       "reused_api": "Existing wallet-bound queue, QObject ownership, QThread workers and RPC callbacks.",
       "ordinary_callers": "WalletModel background work for ordinary DGB/DD and Paymaster; no domain rules in the shared bridge.",
       "regressions": "Shared queue ordering/coalescing/shutdown tests; ordinary WalletTests and DGB/DD widget suites; clean build after WalletModel layout change."
+    },
+    "src/Makefile.test.include": {
+      "purpose": "Register native Paymaster service/RPC contract tests.",
+      "reused_api": "Existing wallet test source list and MSVC generator.",
+      "ordinary_callers": "Test build/source distribution only.",
+      "regressions": "Targeted compile/link/contract tests; clean operator test build."
     }
   }
 }

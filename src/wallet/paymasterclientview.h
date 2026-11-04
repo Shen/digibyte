@@ -4,7 +4,7 @@
 #define DIGIBYTE_WALLET_PAYMASTERCLIENTVIEW_H
 #include <paymaster/recovery.h>
 #include <paymaster/reservation.h>
-#include <univalue.h>
+#include <wallet/paymasterresults.h>
 #include <optional>
 #include <string_view>
 #include <variant>
@@ -32,10 +32,20 @@ struct ClientSessionView {
 };
 bool LoadClientSessionView(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
                            int64_t now, ClientSessionView& view, std::string& error);
-UniValue ClientSessionSnapshotToJSON(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
-                                     std::string_view action);
-UniValue ClientSessionSummaryToJSON(const PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
-                                    const ClientSessionView& view);
+struct ClientRecoveryResult {
+    std::string action;
+    PaymentResult session;
+    ClientSessionView view;
+    std::optional<bool> queued;
+    std::optional<bool> connection_pending;
+    std::optional<bool> route_available;
+    std::optional<bool> broadcast;
+    std::optional<std::string> broadcast_error;
+    std::optional<std::vector<unsigned char>> raw_transaction;
+    std::optional<std::vector<unsigned char>> psbt;
+    std::optional<uint256> txid;
+};
+ClientRecoveryResult CaptureClientSession(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session, std::string_view action);
 bool IsActiveClientSession(const DigiDollar::Paymaster::PaymentSession& session, const ClientSessionView& view);
 } // namespace paymaster_app
 } // namespace wallet

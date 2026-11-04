@@ -106,7 +106,7 @@ RPCHelpMan createpaymasteridentity()
         PaymasterRpcAdapter([](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            return CreateProviderIdentity(*wallet, request.params[0].get_str());
+            return ToJSON(CreateProviderIdentity(*wallet, request.params[0].get_str()));
         }),
     };
 }
@@ -145,7 +145,7 @@ RPCHelpMan setpaymasterpolicy()
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             auto& context = EnsureWalletContext(request.context);
-            return SaveProviderPolicy(context, *wallet, ParseProviderPolicy(request.params[0].get_obj()));
+            return ToJSON(SaveProviderPolicy(context, *wallet, ParseProviderPolicy(request.params[0].get_obj())));
         }),
     };
 }
@@ -174,7 +174,7 @@ RPCHelpMan setpaymastersafetypolicy()
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             auto& context = EnsureWalletContext(request.context);
-            return SaveProviderSafetyPolicy(context, *wallet, ParseProviderSafetyPolicy(request.params[0].get_obj()));
+            return ToJSON(SaveProviderSafetyPolicy(context, *wallet, ParseProviderSafetyPolicy(request.params[0].get_obj())));
         }),
     };
 }
@@ -266,7 +266,7 @@ RPCHelpMan setpaymasterclientsafetypolicy()
         PaymasterRpcAdapter([](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            return SaveClientSafetyPolicy(*wallet, ParseClientSafetyPolicy(request.params[0].get_obj()));
+            return ToJSON(SaveClientSafetyPolicy(*wallet, ParseClientSafetyPolicy(request.params[0].get_obj())));
         }),
     };
 }
@@ -366,7 +366,7 @@ RPCHelpMan createrestrictedpaymasterdescriptor()
             auto& context = EnsureWalletContext(request.context);
             const auto key_bytes = ParseHexV(request.params[0], "sponsor_authorization_key");
             if (key_bytes.size() != 32) throw JSONRPCError(RPC_INVALID_PARAMETER, "sponsor_authorization_key must be exactly 32 bytes");
-            return CreateRestrictedDescriptor(context, *wallet, XOnlyPubKey{MakeUCharSpan(key_bytes)}, request.params[1].get_str(), request.params[2].isNull() ? 300 : request.params[2].getInt<int64_t>());
+            return ToJSON(CreateRestrictedDescriptor(context, *wallet, XOnlyPubKey{MakeUCharSpan(key_bytes)}, request.params[1].get_str(), request.params[2].isNull() ? 300 : request.params[2].getInt<int64_t>()));
         }),
     };
 }
@@ -390,7 +390,7 @@ RPCHelpMan setpaymasterenabled()
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             auto& context = EnsureWalletContext(request.context);
-            return EnableProvider(context, *wallet, request.params[0].get_bool());
+            return ToJSON(EnableProvider(context, *wallet, request.params[0].get_bool()));
         }),
     };
 }
@@ -435,7 +435,7 @@ RPCHelpMan setpaymasterruntimesettings()
                 mode = name == "automatic" ? ProviderOperationMode::AUTOMATIC : ProviderOperationMode::MANUAL;
             }
             if (!value.find_value("autostart").isNull()) autostart = value.find_value("autostart").get_bool();
-            return SaveProviderRuntime(context, *wallet, mode, autostart);
+            return ToJSON(SaveProviderRuntime(context, *wallet, mode, autostart));
         }),
     };
 }
@@ -499,7 +499,7 @@ RPCHelpMan setpaymasterliquiditypolicy()
                 value.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>()};
             std::optional<int64_t> expected_revision;
             if (!request.params[1].isNull()) expected_revision = request.params[1].getInt<int64_t>();
-            return SaveLiquidityPolicy(context, *wallet, policy, expected_revision);
+            return ToJSON(SaveLiquidityPolicy(context, *wallet, policy, expected_revision));
         }),
     };
 }
@@ -566,7 +566,7 @@ RPCHelpMan cancelpaymastermaintenance()
             if (execute) plan = ParseHashV(options.find_value("plan_id"), "plan_id");
             else if (!options.find_value("plan_id").isNull())
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_MAINTENANCE_PREVIEW_TAKES_NO_PLAN");
-            return CancelProviderMaintenance(context, *wallet, operations, execute, plan);
+            return ToJSON(CancelProviderMaintenance(context, *wallet, operations, execute, plan));
         })};
 }
 
@@ -620,7 +620,7 @@ RPCHelpMan releasepaymastercapital()
             } else if (!options.find_value("plan_id").isNull()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CAPITAL_PREVIEW_TAKES_NO_PLAN");
             }
-            return ReleaseProviderCapital(context, *wallet, execute, plan, recovery, cancel_uncreated);
+            return ToJSON(ReleaseProviderCapital(context, *wallet, execute, plan, recovery, cancel_uncreated));
         }),
     };
 }
@@ -670,7 +670,7 @@ RPCHelpMan adoptpaymasterbackup()
             } else if (!options.find_value("plan_id").isNull()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_BACKUP_PREVIEW_TAKES_NO_PLAN");
             }
-            return AdoptProviderBackup(context, *wallet, execute, plan, options.find_value("independent_checkpoint").isTrue());
+            return ToJSON(AdoptProviderBackup(context, *wallet, execute, plan, options.find_value("independent_checkpoint").isTrue()));
         }),
     };
 }
@@ -742,12 +742,12 @@ RPCHelpMan withdrawpaymastercarrier()
                 if (index < 0 || index > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_INVALID_CARRIER_OUTPOINT");
                 parameters.source = COutPoint{ParseHashV(options.find_value("txid"), "txid"), static_cast<uint32_t>(index)};
             }
-            return WithdrawPaymasterCarrier(context, *wallet, parameters);
+            return ToJSON(WithdrawPaymasterCarrier(context, *wallet, parameters));
         }),
     };
 }
 
-RPCResult paymaster_rpc::internal::PoolPreparationResult()
+RPCResult paymaster_rpc::internal::PoolPreparationResultSchema()
 {
     return {RPCResult::Type::ARR, "preparation", "Durable finite setup steps; no provider start is implied", {
         {RPCResult::Type::OBJ, "", "Setup step", {
@@ -802,7 +802,7 @@ RPCHelpMan preparepaymasterpool()
                                                                                                                 }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Pool preparation preview or transaction", {
-                PoolPreparationResult(),
+                PoolPreparationResultSchema(),
                                                                                            {RPCResult::Type::BOOL, "executed", "Whether this call committed a wallet transaction"},
                                                                                            {RPCResult::Type::BOOL, "cancelled", "Whether unsigned steps were cancelled"},
                 {RPCResult::Type::BOOL, "accepted", "Whether a finite automatic setup was authorized"},
@@ -875,7 +875,7 @@ RPCHelpMan preparepaymasterpool()
                     parameters.recovery_outputs->push_back({item.find_value("vout").getInt<uint32_t>(), purpose == "admission" ? PoolPurpose::ADMISSION : PoolPurpose::OPERATIONAL});
                 }
             }
-            return PreparePaymasterPool(context, *wallet, parameters);
+            return ToJSON(PreparePaymasterPool(context, *wallet, parameters));
         }),
     };
 }
@@ -958,7 +958,7 @@ RPCHelpMan rebalancepaymasterpool()
             parameters.recommend_fee = options.find_value("recommend_fee").isTrue();
             if (!options.find_value("maximum_fee_satoshis").isNull()) parameters.maximum_fee = options.find_value("maximum_fee_satoshis").getInt<int64_t>();
             if (!options.find_value("expected_liquidity_updated_at").isNull()) parameters.expected_revision = options.find_value("expected_liquidity_updated_at").getInt<int64_t>();
-            return RebalancePaymasterPool(context, *wallet, parameters);
+            return ToJSON(RebalancePaymasterPool(context, *wallet, parameters));
         }),
     };
 }
@@ -1392,7 +1392,7 @@ RPCHelpMan acknowledgepaymasterproviderbackup()
             auto wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             RPCTypeCheckObj(request.params[0], {{"external_backup", UniValueType(UniValue::VBOOL)}}, false, true);
-            return AcknowledgeProviderBackup(*wallet, request.params[0].find_value("external_backup").get_bool());
+            return ToJSON(AcknowledgeProviderBackup(*wallet, request.params[0].find_value("external_backup").get_bool()));
         }),
     };
 }

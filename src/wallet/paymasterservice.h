@@ -4,7 +4,7 @@
 #ifndef DIGIBYTE_WALLET_PAYMASTERSERVICE_H
 #define DIGIBYTE_WALLET_PAYMASTERSERVICE_H
 #include <psbt.h>
-#include <univalue.h>
+#include <wallet/paymasterresults.h>
 #include <functional>
 #include <optional>
 namespace wallet {
@@ -16,15 +16,15 @@ bool RunPaymasterBackgroundWork(WalletContext& context, CWallet& wallet,
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);
 namespace paymaster_app {
 enum class ExecutionMode { MANUAL, AUTOMATIC };
-UniValue StartPaymaster(WalletContext& context, CWallet& wallet, bool wait_for_readiness, ExecutionMode mode);
-UniValue StopPaymaster(WalletContext& context, CWallet& wallet, bool persistent, bool pause_setup);
-UniValue SubmitPaymasterTransaction(CWallet& wallet, PartiallySignedTransaction psbt, ExecutionMode mode);
-UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& wallet, ExecutionMode mode);
-UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& wallet, ExecutionMode mode);
-UniValue ProcessPaymasterResult(WalletContext& context, CWallet& wallet, const std::string& request_id);
-UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, PartiallySignedTransaction candidate,
+ProviderStartResult StartPaymaster(WalletContext& context, CWallet& wallet, bool wait_for_readiness, ExecutionMode mode);
+ProviderStopResult StopPaymaster(WalletContext& context, CWallet& wallet, bool persistent, bool pause_setup);
+PaymentResult SubmitPaymasterTransaction(CWallet& wallet, PartiallySignedTransaction psbt, ExecutionMode mode);
+ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet& wallet, ExecutionMode mode);
+ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& wallet, ExecutionMode mode);
+PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& wallet, const std::string& request_id);
+PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, PartiallySignedTransaction candidate,
                               const std::optional<uint256>& authorization_commitment);
-UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, const std::string& encoded_psbt,
+PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, const std::vector<unsigned char>& encoded_psbt,
                               const std::optional<uint256>& authorization_commitment);
 } // namespace paymaster_app
 } // namespace wallet

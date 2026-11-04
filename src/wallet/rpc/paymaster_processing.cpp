@@ -98,7 +98,7 @@ RPCHelpMan processpaymasterresult()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            return ProcessPaymasterResult(context, *wallet, request.params[0].get_str());
+            return ToJSON(ProcessPaymasterResult(context, *wallet, request.params[0].get_str()));
         }),
     };
 }
@@ -183,7 +183,7 @@ RPCHelpMan processpaymastersubmits()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            return ProcessPaymasterSubmits(context, *wallet, ExecutionMode::MANUAL);
+            return ToJSON(ProcessPaymasterSubmits(context, *wallet, ExecutionMode::MANUAL));
         }),
     };
 }
@@ -219,7 +219,7 @@ RPCHelpMan processpaymasterrequests()
             WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            return ProcessPaymasterRequests(context, *wallet, ExecutionMode::MANUAL);
+            return ToJSON(ProcessPaymasterRequests(context, *wallet, ExecutionMode::MANUAL));
         }),
     };
 }

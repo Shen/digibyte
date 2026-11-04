@@ -45,7 +45,6 @@
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 
-#include <univalue.h>
 #include <util/overflow.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -64,7 +63,7 @@
 
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
-UniValue SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransaction user_psbt, ExecutionMode mode)
+PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransaction user_psbt, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
     using namespace DigiDollar::Paymaster;
@@ -411,28 +410,28 @@ UniValue SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransaction 
         !store.GetAttempt(attempt.attempt_id, attempt)) {
         throw ApplicationError(ErrorKind::WALLET, "Failed to reload durable provider commit");
     }
-    UniValue result{UniValue::VOBJ};
-    if (signed_now) result.pushKV("psbt", EncodeBase64(SerializePSBT(full_psbt)));
-    result.pushKV("hex", HexStr(committed.final_transaction));
-    result.pushKV("txid", committed.final_txid.GetHex());
-    result.pushKV("broadcast", recovery.broadcast);
-    if (!recovery.error.empty()) result.pushKV("broadcast_error", recovery.error);
-    result.pushKV("request_id", authoritative.request_id);
-    result.pushKV("session_id", authoritative.session_id.GetHex());
-    result.pushKV("provider_id", attempt.provider_id.GetHex());
-    result.pushKV("attempt_id", attempt.attempt_id.GetHex());
-    result.pushKV("quote_id", attempt.quote_id.GetHex());
-    result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-    result.pushKV("template_commitment", attempt.template_commitment.GetHex());
-    result.pushKV("session_state", std::string{DigiDollar::Paymaster::SessionStateName(authoritative.state)});
-    result.pushKV("attempt_state", std::string{DigiDollar::Paymaster::AttemptStateName(attempt.state)});
-    result.pushKV("result_status", ResultStatusName(recovery.provider_result.status));
-    result.pushKV("result_sequence", recovery.provider_result.result_sequence);
-    result.pushKV("expires_at", attempt.retry_until);
+    PaymentResult result;
+    if (signed_now) result.psbt = SerializePSBT(full_psbt);
+    result.final_transaction = committed.final_transaction;
+    result.txid = committed.final_txid;
+    result.broadcast = recovery.broadcast;
+    if (!recovery.error.empty()) result.broadcast_error = recovery.error;
+    result.request_id = authoritative.request_id;
+    result.session_id = authoritative.session_id;
+    result.provider_id = attempt.provider_id;
+    result.attempt_id = attempt.attempt_id;
+    result.quote_id = attempt.quote_id;
+    result.unsigned_txid = attempt.unsigned_txid;
+    result.template_commitment = attempt.template_commitment;
+    result.session_state = authoritative.state;
+    result.attempt_state = attempt.state;
+    result.result_status = recovery.provider_result.status;
+    result.result_sequence = recovery.provider_result.result_sequence;
+    result.expires_at = attempt.retry_until;
     return result;
 }
 
-UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, ExecutionMode mode)
+ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet& target, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
     using namespace DigiDollar::Paymaster;
@@ -546,22 +545,17 @@ UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, Execut
                     ErrorKind::INVALID_INPUT,
                     "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT");
             }
-            UniValue result{UniValue::VOBJ};
-            result.pushKV("processed", true);
-            result.pushKV("queued", queue_result(recovery));
-            result.pushKV("message_type", "recovery_submit");
-            result.pushKV("request_id", recovery.request_id);
-            result.pushKV("session_id", recovery.session_id.GetHex());
-            result.pushKV("provider_id",
-                          recovery.recovery_provider_id.GetHex());
-            result.pushKV("commit_key",
-                          recovery.recovery_response.recovery_commit_key
-                              .GetHex());
-            result.pushKV("txid",
-                          recovery.signed_result.txid->GetHex());
-            result.pushKV("result_status", "final_committed");
-            result.pushKV("recovery",
-                          AlternativeRecoveryToJSON(recovery));
+            ProviderProcessingResult result;
+            result.processed = true;
+            result.queued = queue_result(recovery);
+            result.message_type = "recovery_submit";
+            result.request_id = recovery.request_id;
+            result.session_id = recovery.session_id;
+            result.provider_id = recovery.recovery_provider_id;
+            result.commit_key = recovery.recovery_response.recovery_commit_key;
+            result.txid = *recovery.signed_result.txid;
+            result.result_status = PaymasterResultStatus::FINAL_COMMITTED;
+            result.recovery = recovery;
             return result;
         }
 
@@ -806,31 +800,29 @@ UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, Execut
                 IsTransientPaymasterFinalizationError(broadcast_error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
                 broadcast_error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED" : strprintf("PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED: %s", broadcast_error));
         }
-        UniValue result{UniValue::VOBJ};
-        result.pushKV("processed", true);
-        result.pushKV("queued", queue_result(recovery));
-        result.pushKV("message_type", "recovery_submit");
-        result.pushKV("request_id", recovery.request_id);
-        result.pushKV("session_id", recovery.session_id.GetHex());
-        result.pushKV("provider_id",
-                      recovery.recovery_provider_id.GetHex());
-        result.pushKV("commit_key", commit.commit_key.GetHex());
-        result.pushKV("txid", commit.final_txid.GetHex());
-        result.pushKV("result_status", "final_committed");
-        result.pushKV("broadcast", broadcast);
+        ProviderProcessingResult result;
+        result.processed = true;
+        result.queued = queue_result(recovery);
+        result.message_type = "recovery_submit";
+        result.request_id = recovery.request_id;
+        result.session_id = recovery.session_id;
+        result.provider_id = recovery.recovery_provider_id;
+        result.commit_key = commit.commit_key;
+        result.txid = commit.final_txid;
+        result.result_status = PaymasterResultStatus::FINAL_COMMITTED;
+        result.broadcast = broadcast;
         if (!broadcast_error.empty()) {
-            result.pushKV("broadcast_error", broadcast_error);
+            result.broadcast_error = broadcast_error;
         }
-        result.pushKV("recovery",
-                      AlternativeRecoveryToJSON(recovery));
+        result.recovery = recovery;
         return result;
     }
     const auto submit_lease =
         context.paymaster->LeaseSubmits(identity.provider_id, 1);
     const auto& messages = submit_lease.Messages();
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("processed", !messages.empty());
-    result.pushKV("queued", false);
+    ProviderProcessingResult result;
+    result.processed = !messages.empty();
+    result.queued = false;
     if (messages.empty()) return result;
     const DirectMessage& direct = messages.front();
     ProviderInboundMessageGuard message_guard{*context.paymaster,
@@ -876,8 +868,8 @@ UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, Execut
         // Consume only this message so it cannot pin the service queue.
         if (!AcknowledgeRejectedDirectMessage(*context.paymaster, direct, error))
             throw ApplicationError(ErrorKind::WALLET, error);
-        result.pushKV("rejected", true);
-        result.pushKV("rejection_reason", "PAYMASTER_SUBMIT_BINDING_MISMATCH");
+        result.rejected = true;
+        result.rejection_reason = "PAYMASTER_SUBMIT_BINDING_MISMATCH";
         return result;
     }
     PaymentSession session;
@@ -904,7 +896,7 @@ UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, Execut
             error);
     }
 
-    UniValue committed;
+    PaymentResult committed;
     if (!rejected) {
         committed = SubmitPaymasterTransaction(*wallet, std::move(submitted_psbt), mode);
         if (!store.GetProviderResult(submit->commit_key, provider_result) ||
@@ -924,23 +916,23 @@ UniValue ProcessPaymasterSubmits(WalletContext& context, CWallet& target, Execut
         messages.front().peer_id, Hash(encoded), encoded.size(), DirectPayload{message}, GetTime());
     node::NodeContext* node = wallet->chain().context();
     if (queued && node && node->connman) node->connman->WakeMessageHandler();
-    result.pushKV("queued", queued);
-    result.pushKV("request_id", message.request_id);
-    result.pushKV("session_id", message.session_id.GetHex());
-    result.pushKV("provider_id", provider_result.provider_id.GetHex());
-    result.pushKV("commit_key", provider_result.commit_key.GetHex());
-    if (provider_result.txid) result.pushKV("txid", provider_result.txid->GetHex());
-    result.pushKV("result_status", ResultStatusName(provider_result.status));
-    result.pushKV("attempt_state", std::string{AttemptStateName(attempt.state)});
+    result.queued = queued;
+    result.request_id = message.request_id;
+    result.session_id = message.session_id;
+    result.provider_id = provider_result.provider_id;
+    result.commit_key = provider_result.commit_key;
+    if (provider_result.txid) result.txid = *provider_result.txid;
+    result.result_status = provider_result.status;
+    result.attempt_state = attempt.state;
     if (rejected) {
-        result.pushKV("rejection_code", "PAYMASTER_TEMPLATE_INPUT_UNAVAILABLE");
+        result.rejection_code = "PAYMASTER_TEMPLATE_INPUT_UNAVAILABLE";
     } else {
-        result.pushKV("commit", committed);
+        result.commit = committed;
     }
     return result;
 }
 
-UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
+ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
     using namespace DigiDollar::Paymaster;
@@ -979,9 +971,9 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_PROVIDER_SERVICE_BUSY");
     }
-    UniValue result{UniValue::VOBJ};
-    UniValue deferred_capacity;
-    result.pushKV("queued", false);
+    ProviderProcessingResult result;
+    std::optional<ProviderProcessingResult> deferred_capacity;
+    result.queued = false;
     const int64_t now = GetTime();
     std::string error;
     node::NodeContext* node = wallet->chain().context();
@@ -1000,8 +992,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                 readiness.identity.provider_id, 1);
         const auto& capacity_messages = capacity_lease.Messages();
         if (!capacity_messages.empty()) {
-            result.pushKV("processed", true);
-            result.pushKV("message_type", "capacity");
+            result.processed = true;
+            result.message_type = "capacity";
             const DirectMessage& direct = capacity_messages.front();
             ProviderInboundMessageGuard message_guard{*context.paymaster,
                                                       direct};
@@ -1015,8 +1007,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                         *context.paymaster, direct, error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);
                 }
-                result.pushKV("rejected", true);
-                result.pushKV("rejection_reason", error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error);
+                result.rejected = true;
+                result.rejection_reason = error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error;
                 return result;
             }
             if (wallet->IsLocked()) {
@@ -1066,8 +1058,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                 if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
                     error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
                     message_guard.Defer();
-                    result.pushKV("deferred", true);
-                    result.pushKV("deferral_reason", error);
+                    result.deferred = true;
+                    result.deferral_reason = error;
                 } else {
                     throw ApplicationError(ErrorKind::WALLET, error);
                 }
@@ -1079,20 +1071,20 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                     capacity_messages.front().peer_id, message_id,
                     proof_bytes.size(), proof, now);
                 if (queued && node->connman) node->connman->WakeMessageHandler();
-                result.pushKV("queued", queued);
-                result.pushKV("provider_id", proof.provider_id.GetHex());
-                result.pushKV("client_nonce", proof.client_nonce.GetHex());
-                result.pushKV("capacity_snapshot_id", proof.snapshot_id.GetHex());
+                result.queued = queued;
+                result.provider_id = proof.provider_id;
+                result.client_nonce = proof.client_nonce;
+                result.capacity_snapshot_id = proof.snapshot_id;
                 return result;
             }
         }
     }
 
-    if (result.find_value("deferred").isTrue()) {
+    if (result.deferred.value_or(false)) {
         // Capacity throttling must not starve already admitted work.
         deferred_capacity = result;
-        result = UniValue{UniValue::VOBJ};
-        result.pushKV("queued", false);
+        result = {};
+        result.queued = false;
     }
 
     const auto recovery_lease =
@@ -1100,8 +1092,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
             readiness.identity.provider_id, 1);
     const auto& recovery_messages = recovery_lease.Messages();
     if (!recovery_messages.empty()) {
-        result.pushKV("processed", true);
-        result.pushKV("message_type", "recovery_request");
+        result.processed = true;
+        result.message_type = "recovery_request";
         const DirectMessage& direct = recovery_messages.front();
         ProviderInboundMessageGuard message_guard{*context.paymaster,
                                                   direct};
@@ -1171,18 +1163,13 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
             if (queued && node->connman) {
                 node->connman->WakeMessageHandler();
             }
-            result.pushKV("queued", queued);
-            result.pushKV("request_id", persisted.request_id);
-            result.pushKV("session_id",
-                          persisted.session_id.GetHex());
-            result.pushKV("provider_id",
-                          persisted.recovery_provider_id.GetHex());
-            result.pushKV("recovery_id",
-                          persisted.recovery_id.GetHex());
-            result.pushKV(
-                "template_commitment",
-                persisted.recovery_response.manifest
-                    .template_commitment.GetHex());
+            result.queued = queued;
+            result.request_id = persisted.request_id;
+            result.session_id = persisted.session_id;
+            result.provider_id = persisted.recovery_provider_id;
+            result.recovery_id = persisted.recovery_id;
+            result.template_commitment = persisted.recovery_response.manifest
+                    .template_commitment;
             return result;
         }
 
@@ -1508,23 +1495,21 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
         if (queued && node->connman) {
             node->connman->WakeMessageHandler();
         }
-        result.pushKV("queued", queued);
-        result.pushKV("request_id", response.request_id);
-        result.pushKV("session_id", response.session_id.GetHex());
-        result.pushKV("provider_id",
-                      response.recovery_provider_id.GetHex());
-        result.pushKV("recovery_id", recovery_id.GetHex());
-        result.pushKV("template_commitment",
-                      response.manifest.template_commitment.GetHex());
+        result.queued = queued;
+        result.request_id = response.request_id;
+        result.session_id = response.session_id;
+        result.provider_id = response.recovery_provider_id;
+        result.recovery_id = recovery_id;
+        result.template_commitment = response.manifest.template_commitment;
         return result;
     }
 
     const auto quote_lease = context.paymaster->LeaseQuoteRequests(
         readiness.identity.provider_id, 1);
     const auto& messages = quote_lease.Messages();
-    result.pushKV("processed", !messages.empty());
-    if (messages.empty()) return deferred_capacity.isNull() ? result : deferred_capacity;
-    result.pushKV("message_type", "quote");
+    result.processed = !messages.empty();
+    if (messages.empty()) return deferred_capacity ? *deferred_capacity : result;
+    result.message_type = "quote";
     const DirectMessage& direct = messages.front();
     ProviderInboundMessageGuard message_guard{*context.paymaster,
                                               direct};
@@ -1546,8 +1531,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                 *context.paymaster, direct, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        result.pushKV("rejected", true);
-        result.pushKV("rejection_reason", error);
+        result.rejected = true;
+        result.rejection_reason = error;
         return result;
     }
     std::optional<SponsorshipAuthorizationRecord> sponsorship;
@@ -1630,14 +1615,13 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
             messages.front().peer_id, message_id,
             persisted_attempt.signed_quote.size(), DirectPayload{response}, now);
         if (queued && node->connman) node->connman->WakeMessageHandler();
-        result.pushKV("queued", queued);
-        result.pushKV("request_id", response.request_id);
-        result.pushKV("session_id", response.session_id.GetHex());
-        result.pushKV("provider_id", response.quote.provider_id.GetHex());
-        result.pushKV("attempt_id", persisted_attempt.attempt_id.GetHex());
-        result.pushKV("quote_id", response.quote.quote_id.GetHex());
-        result.pushKV("template_commitment",
-                      response.quote.template_commitment.GetHex());
+        result.queued = queued;
+        result.request_id = response.request_id;
+        result.session_id = response.session_id;
+        result.provider_id = response.quote.provider_id;
+        result.attempt_id = persisted_attempt.attempt_id;
+        result.quote_id = response.quote.quote_id;
+        result.template_commitment = response.quote.template_commitment;
         return result;
     }
 
@@ -1699,8 +1683,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
                     *context.paymaster, direct, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-            result.pushKV("rejected", true);
-            result.pushKV("rejection_reason", rejection_reason);
+            result.rejected = true;
+            result.rejection_reason = rejection_reason;
             return result;
         }
         if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED") {
@@ -1709,8 +1693,8 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
             // Keep the exact continuation in the fair inbox and repeat
             // all admission checks next time, within its original TTL.
             message_guard.Defer();
-            result.pushKV("deferred", true);
-            result.pushKV("deferral_reason", error);
+            result.deferred = true;
+            result.deferral_reason = error;
             return result;
         }
         throw ApplicationError(
@@ -1874,17 +1858,17 @@ UniValue ProcessPaymasterRequests(WalletContext& context, CWallet& target, Execu
     const bool queued = context.paymaster->QueueOutboundDirectMessage(
         messages.front().peer_id, message_id, response_bytes.size(), DirectPayload{response}, now);
     if (queued && node->connman) node->connman->WakeMessageHandler();
-    result.pushKV("queued", queued);
-    result.pushKV("request_id", response.request_id);
-    result.pushKV("session_id", response.session_id.GetHex());
-    result.pushKV("provider_id", response.quote.provider_id.GetHex());
-    result.pushKV("attempt_id", attempt.attempt_id.GetHex());
-    result.pushKV("quote_id", response.quote.quote_id.GetHex());
-    result.pushKV("template_commitment", response.quote.template_commitment.GetHex());
+    result.queued = queued;
+    result.request_id = response.request_id;
+    result.session_id = response.session_id;
+    result.provider_id = response.quote.provider_id;
+    result.attempt_id = attempt.attempt_id;
+    result.quote_id = response.quote.quote_id;
+    result.template_commitment = response.quote.template_commitment;
     return result;
 }
 
-UniValue ProcessPaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)
+PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)
 {
     CWallet* const wallet = &target;
     if (!context.paymaster || !context.paymaster->Enabled()) {
@@ -2141,98 +2125,85 @@ UniValue ProcessPaymasterResult(WalletContext& context, CWallet& target, const s
             }
         }
     }
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("processed", observed_payment || accepted_result.has_value());
-    result.pushKV("request_id", request_id);
-    result.pushKV("session_id", session.session_id.GetHex());
-    result.pushKV("provider_id", attempt.provider_id.GetHex());
+    PaymentResult result;
+    result.processed = observed_payment || accepted_result.has_value();
+    result.request_id = request_id;
+    result.session_id = session.session_id;
+    result.provider_id = attempt.provider_id;
     // Always echo the exact durable authorization, including on the
     // final result response. Callers must never reconstruct a funding
     // model or fee from a stale directory preview, and Qt needs to
     // distinguish a completed payment from a changed pre-signing
     // authorization without guessing missing fields.
-    result.pushKV("offer_id", authorized_intent.offer_id.GetHex());
-    result.pushKV("policy_hash", authorized_intent.policy_hash.GetHex());
-    result.pushKV(
-        "funding_model",
-        authorized_intent.funding_model == FundingModel::SPONSORED
-            ? "sponsored"
-            : "user_paid");
-    result.pushKV("payment_cents",
-                  authorized_intent.recipient_amount.value);
-    result.pushKV("service_fee_cents",
-                  authorized_quote.service_fee.value);
-    result.pushKV("user_total_cents",
-                  authorized_intent.recipient_amount.value +
-                      authorized_quote.service_fee.value);
-    result.pushKV("authorization_commitment",
-                  attempt.client_manifest.manifest_id.GetHex());
-    result.pushKV(
-        "authorization_accepted",
-        attempt.accepted_client_manifest_id ==
+    result.offer_id = authorized_intent.offer_id;
+    result.policy_hash = authorized_intent.policy_hash;
+    result.funding_model = authorized_intent.funding_model;
+    result.payment_cents = authorized_intent.recipient_amount;
+    result.service_fee_cents = authorized_quote.service_fee;
+    result.user_total_cents = DDCents{authorized_intent.recipient_amount.value +
+                      authorized_quote.service_fee.value};
+    result.authorization_commitment = attempt.client_manifest.manifest_id;
+    result.authorization_accepted = attempt.accepted_client_manifest_id ==
                 attempt.client_manifest.manifest_id &&
-            attempt.client_manifest_accepted_at > 0);
-    result.pushKV("session_state", std::string{SessionStateName(session.state)});
-    result.pushKV("attempt_state", std::string{AttemptStateName(attempt.state)});
+            attempt.client_manifest_accepted_at > 0;
+    result.session_state = session.state;
+    result.attempt_state = attempt.state;
     if (accepted_result) {
-        result.pushKV("result_status", ResultStatusName(accepted_result->status));
-        result.pushKV("result_sequence", accepted_result->result_sequence);
-        if (accepted_result->txid) result.pushKV("txid", accepted_result->txid->GetHex());
+        result.result_status = accepted_result->status;
+        result.result_sequence = accepted_result->result_sequence;
+        if (accepted_result->txid) result.txid = *accepted_result->txid;
     }
-    if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
+    if (!session.final_txid.IsNull()) result.txid = session.final_txid;
     return result;
 }
 
-UniValue SignedClientPSBTToJSON(const PaymentSession& session,
+PaymentResult CaptureSignedClientPSBT(const PaymentSession& session,
                                const ProviderAttempt& attempt,
                                const PaymasterSubmitQueueState& queue_state)
 {
-    UniValue result{UniValue::VOBJ};
-    result.pushKV("psbt", EncodeBase64(attempt.user_signed_psbt));
-    result.pushKV("request_id", session.request_id);
-    result.pushKV("session_id", session.session_id.GetHex());
-    result.pushKV("provider_id", attempt.provider_id.GetHex());
-    result.pushKV("attempt_id", attempt.attempt_id.GetHex());
-    result.pushKV("quote_id", attempt.quote_id.GetHex());
-    result.pushKV("unsigned_txid", attempt.unsigned_txid.GetHex());
-    result.pushKV("template_commitment", attempt.template_commitment.GetHex());
+    PaymentResult result;
+    result.psbt = attempt.user_signed_psbt;
+    result.request_id = session.request_id;
+    result.session_id = session.session_id;
+    result.provider_id = attempt.provider_id;
+    result.attempt_id = attempt.attempt_id;
+    result.quote_id = attempt.quote_id;
+    result.unsigned_txid = attempt.unsigned_txid;
+    result.template_commitment = attempt.template_commitment;
     if (!attempt.client_manifest.manifest_id.IsNull()) {
-        result.pushKV("authorization_commitment",
-                      attempt.client_manifest.manifest_id.GetHex());
+        result.authorization_commitment = attempt.client_manifest.manifest_id;
     }
     const bool authorization_accepted =
         attempt.accepted_client_manifest_id ==
             attempt.client_manifest.manifest_id &&
         !attempt.accepted_client_manifest_id.IsNull() &&
         attempt.client_manifest_accepted_at > 0;
-    result.pushKV("authorization_accepted",
-                  authorization_accepted);
+    result.authorization_accepted = authorization_accepted;
     if (authorization_accepted) {
-        result.pushKV("authorization_accepted_at",
-                      attempt.client_manifest_accepted_at);
+        result.authorization_accepted_at = attempt.client_manifest_accepted_at;
     }
-    result.pushKV("session_state", std::string{DigiDollar::Paymaster::SessionStateName(session.state)});
-    result.pushKV("attempt_state", std::string{DigiDollar::Paymaster::AttemptStateName(attempt.state)});
-    result.pushKV("expires_at", attempt.retry_until);
-    result.pushKV("queued", queue_state.queued);
-    result.pushKV("connection_pending", queue_state.connection_pending);
-    result.pushKV("route_available", queue_state.route_available);
-    if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
+    result.session_state = session.state;
+    result.attempt_state = attempt.state;
+    result.expires_at = attempt.retry_until;
+    result.queued = queue_state.queued;
+    result.connection_pending = queue_state.connection_pending;
+    result.route_available = queue_state.route_available;
+    if (!session.final_txid.IsNull()) result.txid = session.final_txid;
     return result;
 }
 
-UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, const std::string& encoded_psbt,
+PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, const std::vector<unsigned char>& encoded_psbt,
                               const std::optional<uint256>& authorization_commitment)
 {
     std::string error;
     if (!CheckPaymasterClientReadiness(wallet, context, error)) throw ApplicationError(ErrorKind::GENERAL, error);
     PartiallySignedTransaction candidate;
-    if (!DecodeBase64PSBT(candidate, encoded_psbt, error) || !candidate.tx)
+    if (!DeserializePaymasterBytes(encoded_psbt, "PSBT", candidate, error) || !candidate.tx)
         throw ApplicationError(ErrorKind::DESERIALIZATION, strprintf("Paymaster PSBT decode failed: %s", error));
     return AuthorizePaymasterPSBT(context, wallet, std::move(candidate), authorization_commitment);
 }
 
-UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, PartiallySignedTransaction candidate,
+PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, PartiallySignedTransaction candidate,
                               const std::optional<uint256>& supplied_authorization_commitment)
 {
     CWallet* const wallet = &target;
@@ -2268,7 +2239,7 @@ UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Partial
     if (ReconcileConfirmedClientPayment(*wallet, session, attempt) ||
         (session.state == SessionState::CONFIRMED &&
          !session.final_txid.IsNull() && session.final_txid == attempt.final_txid)) {
-        return SignedClientPSBTToJSON(session, attempt, {});
+        return CaptureSignedClientPSBT(session, attempt, {});
     }
     const int64_t now = GetTime();
     PaymentIntent authorized_intent;
@@ -2509,7 +2480,7 @@ UniValue AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Partial
             error == "PAYMASTER_DIRECT_QUEUE_FULL" ? ErrorKind::NODE_CAPACITY : ErrorKind::WALLET,
             error);
     }
-    return SignedClientPSBTToJSON(authoritative, attempt, queue_state);
+    return CaptureSignedClientPSBT(authoritative, attempt, queue_state);
 }
 
 } // namespace wallet::paymaster_app

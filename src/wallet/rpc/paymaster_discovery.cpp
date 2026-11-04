@@ -380,7 +380,7 @@ RPCHelpMan requestpaymasterquote()
             input.requested_amount = options.find_value("requested_amount_cents").isNull() ? input.payment : options.find_value("requested_amount_cents").getInt<int64_t>();
             input.inputs = ParsePaymasterInputs(options.find_value("selected_inputs"));
             if (!options.find_value("offer_id").isNull()) input.offer_id = ParseHashO(options, "offer_id");
-            return RequestPaymasterQuote(context, *wallet, input);
+            return ToJSON(RequestPaymasterQuote(context, *wallet, input));
         }),
     };
 }
@@ -404,7 +404,7 @@ UniValue RequestAutomaticPaymasterQuote(const JSONRPCRequest& request,
     if (!options.find_value("authorization_commitment").isNull()) input.authorization_commitment = ParseHashO(options, "authorization_commitment");
     if (!options.find_value("preferred_provider_id").isNull()) input.preferred_provider = ParseHashO(options, "preferred_provider_id");
     if (!options.find_value("preferred_offer_id").isNull()) input.preferred_offer = ParseHashO(options, "preferred_offer_id");
-    return RequestAutomaticPaymasterPayment(context, *wallet, input, preset_inputs);
+    return ToJSON(RequestAutomaticPaymasterPayment(context, *wallet, input, preset_inputs));
     });
 }
 
@@ -502,7 +502,7 @@ RPCHelpMan getpaymasterpoolinfo()
         "Return the persisted admission and operational Paymaster pool without modifying it.\n",
         {},
         RPCResult{RPCResult::Type::OBJ, "", "Provider pool information", {
-            PoolPreparationResult(),
+            PoolPreparationResultSchema(),
                                                                              {RPCResult::Type::BOOL, "prepared", "Whether a valid pool record exists"},
                                                                              {RPCResult::Type::BOOL, "ready", "Whether admission proof and an operational slot are ready"},
                                                                              {RPCResult::Type::NUM, "entries", "Number of pool entries"},

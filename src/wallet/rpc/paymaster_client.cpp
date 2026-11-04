@@ -502,7 +502,7 @@ RPCHelpMan resolvepaymastersession()
             if (!options.find_value("recovery_authorization_commitment").isNull()) parsed.authorization_commitment = ParseHashO(options, "recovery_authorization_commitment");
             parsed.prepare_only = options.find_value("prepare_only").isTrue();
             parsed.retry_transport = options.find_value("retry_transport").isTrue();
-            return ResolvePaymasterSession(context, *wallet, ParseClientSessionLookup(request.params[0].get_obj()), action, parsed);
+            return ToJSON(ResolvePaymasterSession(context, *wallet, ParseClientSessionLookup(request.params[0].get_obj()), action, parsed));
         }),
     };
 }
@@ -561,7 +561,7 @@ RPCHelpMan walletprocesspaymasterpsbt()
                 supplied_authorization_commitment =
                     ParseHashV(request.params[1], "authorization_commitment");
             }
-            return AuthorizePaymasterPSBT(context, *wallet, std::move(candidate), supplied_authorization_commitment);
+            return ToJSON(AuthorizePaymasterPSBT(context, *wallet, std::move(candidate), supplied_authorization_commitment));
         }),
     };
 }
@@ -604,7 +604,7 @@ RPCHelpMan submitpaymasterdigidollar()
             if (!DecodeBase64PSBT(psbt, request.params[0].get_str(), error) || !psbt.tx) {
                 throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Paymaster PSBT decode failed: %s", error));
             }
-            return SubmitPaymasterTransaction(*wallet, std::move(psbt), ExecutionMode::MANUAL);
+            return ToJSON(SubmitPaymasterTransaction(*wallet, std::move(psbt), ExecutionMode::MANUAL));
         }),
     };
 }
