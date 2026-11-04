@@ -284,6 +284,158 @@ bool TryCommitClientCapacityProof(
     }
     return capacity_ready;
 }
+
+bool TryCommitClientQuoteResponse(
+    Manager& manager, CWallet& wallet, node::NodeContext& node, PaymasterStore& store,
+    const QuoteParameters& input, const PaymentSession& session, ProviderAttempt& attempt,
+    const PaymasterQuoteRequest& quote_request, const OfferCandidate& candidate,
+    DDCents effective_fee_cap, const std::vector<DirectMessage>& responses,
+    int64_t now, std::string& error)
+{
+    const auto& provider_id = input.provider_id;
+    const auto& request_id = input.request_id;
+    bool quote_received{false};
+    bool quote_equivocation{false};
+    if (!PersistPendingQuoteEquivocationPair(
+            store, attempt.attempt_id, responses,
+            quote_equivocation, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    if (quote_equivocation) {
+        if (!AcknowledgeEquivocationMessages(
+                manager, responses, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_QUOTE_EQUIVOCATION");
+    }
+    std::string rejected_quote_error;
+    ErrorKind rejected_quote_code{ErrorKind::INVALID_INPUT};
+    for (const DirectMessage& direct : responses) {
+        const auto* response =
+            std::get_if<PaymasterQuoteResponse>(&direct.payload);
+        if (!response) {
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_quote_error =
+                "PAYMASTER_INVALID_QUOTE_RESPONSE";
+            continue;
+        }
+
+        bool claim_equivocation{false};
+        const std::vector<unsigned char> encoded_quote =
+            SerializeQuoteResponse(*response);
+        if (!store.StageQuoteResponseClaimCandidate(
+                attempt.attempt_id, encoded_quote,
+                direct.received_at, claim_equivocation, error)) {
+            if (error !=
+                "PAYMASTER_INVALID_QUOTE_CLAIM_CANDIDATE") {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_quote_error =
+                "PAYMASTER_INVALID_QUOTE_CLAIM_CANDIDATE";
+            continue;
+        }
+        if (claim_equivocation) {
+            if (!AcknowledgeEquivocationMessages(
+                    manager, responses, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_QUOTE_EQUIVOCATION");
+        }
+        if (!store.GetAttempt(attempt.attempt_id, attempt)) {
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_ATTEMPT_NOT_FOUND");
+        }
+
+        CollaborativePSBTTemplate trusted;
+        ClientAuthorizationManifest client_manifest;
+        std::string response_error;
+        ErrorKind response_error_code{ErrorKind::INVALID_INPUT};
+        bool valid_response{
+            ValidateQuoteResponseForRequest(*response, quote_request, candidate.terms, candidate.identity_key, effective_fee_cap, now, response_error) &&
+            ValidateQuoteAgainstCapacitySnapshot(
+                response->quote, attempt.capacity_snapshot,
+                response_error) &&
+            BuildTrustedQuoteTemplate(
+                wallet, quote_request.intent, response->quote,
+                Params(), *node.chainman, trusted,
+                response_error) &&
+            BuildClientAuthorizationManifest(
+                quote_request.intent, response->quote,
+                attempt.capacity_snapshot, trusted,
+                effective_fee_cap,
+                session.requested_amount.value > 0
+                    ? session.requested_amount
+                    : quote_request.intent.recipient_amount,
+                session.subtract_paymaster_fee_from_amount,
+                session.send_all_spendable_dd, client_manifest,
+                response_error)};
+        if (valid_response &&
+            !ValidateClientAuthorizationOwnership(
+                wallet, client_manifest, response_error)) {
+            valid_response = false;
+            response_error_code = ErrorKind::WALLET;
+        }
+        if (!valid_response) {
+            if (!AcknowledgeRejectedDirectMessage(
+                    manager, direct, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            rejected_quote_error =
+                response_error.empty() ? "PAYMASTER_INVALID_QUOTE_RESPONSE" : std::move(response_error);
+            rejected_quote_code = response_error_code;
+            continue;
+        }
+        attempt.state = AttemptState::QUOTED;
+        attempt.intent_hash = response->quote.intent_hash;
+        attempt.quote_id = response->quote.quote_id;
+        attempt.unsigned_txid = response->quote.unsigned_txid;
+        attempt.template_commitment = response->quote.template_commitment;
+        attempt.commit_key = GetPaymasterCommitKey(
+            provider_id, attempt.client_nonce, attempt.intent_hash,
+            attempt.quote_id, attempt.template_commitment);
+        attempt.signed_quote = SerializeQuoteResponse(*response);
+        attempt.client_manifest = std::move(client_manifest);
+        attempt.unsigned_transaction = SerializeTransaction(response->quote.unsigned_transaction);
+        attempt.unsigned_psbt = SerializePSBT(trusted.psbt);
+        attempt.input_roles.clear();
+        attempt.input_roles.reserve(trusted.input_roles.size());
+        static_assert(static_cast<uint8_t>(InputRole::USER_DD) ==
+                      static_cast<uint8_t>(ReservationRole::USER_DD));
+        static_assert(static_cast<uint8_t>(InputRole::PROVIDER_DGB) ==
+                      static_cast<uint8_t>(ReservationRole::PROVIDER_DGB));
+        for (const InputRole role : trusted.input_roles) {
+            attempt.input_roles.push_back(static_cast<ReservationRole>(role));
+        }
+        attempt.quote_expires_at = response->quote.expires_at;
+        attempt.retry_until = response->quote.retry_until;
+        attempt.updated_at = std::max(attempt.updated_at, now);
+        if (!store.UpdateAttempt(request_id, attempt, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        quote_received = true;
+        node.connman->ReleasePaymasterConnection(PaymentChannelKey(wallet, session, provider_id));
+        if (!DrainClientAttemptEquivocations(
+                manager, store, session, attempt,
+                error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        break;
+    }
+    if (!quote_received && !rejected_quote_error.empty()) {
+        throw ApplicationError(rejected_quote_code,
+                           rejected_quote_error);
+    }
+    return quote_received;
+}
 } // namespace
 
 PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, const QuoteParameters& input)
@@ -901,146 +1053,9 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             request_id, session.session_id, provider_id,
             GetPaymentIntentHash(quote_request.intent),
             MAX_DIRECT_INBOX_MESSAGES_PER_SESSION);
-        const auto& responses = response_lease.Messages();
-        bool quote_equivocation{false};
-        if (!PersistPendingQuoteEquivocationPair(
-                store, attempt.attempt_id, responses,
-                quote_equivocation, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        if (quote_equivocation) {
-            if (!AcknowledgeEquivocationMessages(
-                    *context.paymaster, responses, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_QUOTE_EQUIVOCATION");
-        }
-        std::string rejected_quote_error;
-        ErrorKind rejected_quote_code{ErrorKind::INVALID_INPUT};
-        for (const DirectMessage& direct : responses) {
-            const auto* response =
-                std::get_if<PaymasterQuoteResponse>(&direct.payload);
-            if (!response) {
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_quote_error =
-                    "PAYMASTER_INVALID_QUOTE_RESPONSE";
-                continue;
-            }
-
-            bool claim_equivocation{false};
-            const std::vector<unsigned char> encoded_quote =
-                SerializeQuoteResponse(*response);
-            if (!store.StageQuoteResponseClaimCandidate(
-                    attempt.attempt_id, encoded_quote,
-                    direct.received_at, claim_equivocation, error)) {
-                if (error !=
-                    "PAYMASTER_INVALID_QUOTE_CLAIM_CANDIDATE") {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_quote_error =
-                    "PAYMASTER_INVALID_QUOTE_CLAIM_CANDIDATE";
-                continue;
-            }
-            if (claim_equivocation) {
-                if (!AcknowledgeEquivocationMessages(
-                        *context.paymaster, responses, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_QUOTE_EQUIVOCATION");
-            }
-            if (!store.GetAttempt(attempt.attempt_id, attempt)) {
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_ATTEMPT_NOT_FOUND");
-            }
-
-            CollaborativePSBTTemplate trusted;
-            ClientAuthorizationManifest client_manifest;
-            std::string response_error;
-            ErrorKind response_error_code{ErrorKind::INVALID_INPUT};
-            bool valid_response{
-                ValidateQuoteResponseForRequest(*response, quote_request, candidate.terms, candidate.identity_key, effective_fee_cap, now, response_error) &&
-                ValidateQuoteAgainstCapacitySnapshot(
-                    response->quote, attempt.capacity_snapshot,
-                    response_error) &&
-                BuildTrustedQuoteTemplate(
-                    *wallet, quote_request.intent, response->quote,
-                    Params(), *node->chainman, trusted,
-                    response_error) &&
-                BuildClientAuthorizationManifest(
-                    quote_request.intent, response->quote,
-                    attempt.capacity_snapshot, trusted,
-                    effective_fee_cap,
-                    session.requested_amount.value > 0
-                        ? session.requested_amount
-                        : quote_request.intent.recipient_amount,
-                    session.subtract_paymaster_fee_from_amount,
-                    session.send_all_spendable_dd, client_manifest,
-                    response_error)};
-            if (valid_response &&
-                !ValidateClientAuthorizationOwnership(
-                    *wallet, client_manifest, response_error)) {
-                valid_response = false;
-                response_error_code = ErrorKind::WALLET;
-            }
-            if (!valid_response) {
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                rejected_quote_error =
-                    response_error.empty() ? "PAYMASTER_INVALID_QUOTE_RESPONSE" : std::move(response_error);
-                rejected_quote_code = response_error_code;
-                continue;
-            }
-            attempt.state = AttemptState::QUOTED;
-            attempt.intent_hash = response->quote.intent_hash;
-            attempt.quote_id = response->quote.quote_id;
-            attempt.unsigned_txid = response->quote.unsigned_txid;
-            attempt.template_commitment = response->quote.template_commitment;
-            attempt.commit_key = GetPaymasterCommitKey(
-                provider_id, attempt.client_nonce, attempt.intent_hash,
-                attempt.quote_id, attempt.template_commitment);
-            attempt.signed_quote = SerializeQuoteResponse(*response);
-            attempt.client_manifest = std::move(client_manifest);
-            attempt.unsigned_transaction = SerializeTransaction(response->quote.unsigned_transaction);
-            attempt.unsigned_psbt = SerializePSBT(trusted.psbt);
-            attempt.input_roles.clear();
-            attempt.input_roles.reserve(trusted.input_roles.size());
-            static_assert(static_cast<uint8_t>(InputRole::USER_DD) ==
-                          static_cast<uint8_t>(ReservationRole::USER_DD));
-            static_assert(static_cast<uint8_t>(InputRole::PROVIDER_DGB) ==
-                          static_cast<uint8_t>(ReservationRole::PROVIDER_DGB));
-            for (const InputRole role : trusted.input_roles) {
-                attempt.input_roles.push_back(static_cast<ReservationRole>(role));
-            }
-            attempt.quote_expires_at = response->quote.expires_at;
-            attempt.retry_until = response->quote.retry_until;
-            attempt.updated_at = std::max(attempt.updated_at, now);
-            if (!store.UpdateAttempt(request_id, attempt, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            quote_received = true;
-            node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
-            if (!DrainClientAttemptEquivocations(
-                    *context.paymaster, store, session, attempt,
-                    error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            break;
-        }
-        if (!quote_received && !rejected_quote_error.empty()) {
-            throw ApplicationError(rejected_quote_code,
-                               rejected_quote_error);
-        }
+        quote_received = TryCommitClientQuoteResponse(
+            *context.paymaster, *wallet, *node, store, input, session, attempt,
+            quote_request, candidate, effective_fee_cap, response_lease.Messages(), now, error);
 
         NodeId peer_id{-1};
         if (!quote_received && attempt.state == AttemptState::CANDIDATE) {
