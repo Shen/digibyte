@@ -1639,34 +1639,59 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     const std::vector<unsigned char> redacted_request =
         SerializeRedactedQuoteRequest(*quote_request);
     PaymentSession persisted_session;
-    if (store.GetSessionByRequestId(quote_request->intent.request_id,
-                                    persisted_session)) {
+    const auto session_status = store.GetSessionByRequestIdWithStatus(
+        quote_request->intent.request_id, persisted_session);
+    if (session_status != DatabaseReadStatus::FOUND &&
+        session_status != DatabaseReadStatus::NOT_FOUND) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+    }
+    if (session_status == DatabaseReadStatus::FOUND) {
+        // An intact client session or retained tombstone owns this request ID,
+        // but does not promise a provider attempt that can answer this peer.
+        if (!persisted_session.provider_side) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
+        }
         ProviderAttempt persisted_attempt;
-        const uint256 canonical_request_hash = Hash(redacted_request);
-        if (!persisted_session.provider_side ||
-            persisted_session.session_id != quote_request->intent.session_id ||
-            persisted_session.canonical_request_hash != canonical_request_hash ||
-            persisted_session.attempt_ids.size() != 1 ||
+        PaymentIntent authorized_intent;
+        PaymasterQuote authorized_quote;
+        CollaborativePSBTTemplate trusted;
+        // Validate saved authority independently of the incoming request. A
+        // conflicting peer must never hide a damaged local attempt as rejection.
+        if (persisted_session.attempt_ids.size() != 1 ||
             !store.GetAttempt(persisted_session.attempt_ids.front(), persisted_attempt) ||
-            persisted_attempt.session_id != quote_request->intent.session_id ||
-            persisted_attempt.provider_id != readiness.identity.provider_id ||
-            persisted_attempt.client_nonce != quote_request->intent.client_nonce ||
-            persisted_attempt.intent_hash != GetPaymentIntentHash(quote_request->intent) ||
-            persisted_attempt.quote_request != redacted_request ||
-            persisted_attempt.signed_quote.empty()) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REQUEST_ID_CONFLICT");
+            !LoadAttemptAuthorizationArtifacts(persisted_attempt, authorized_intent,
+                authorized_quote, trusted, error) ||
+            persisted_session.request_id != authorized_intent.request_id ||
+            persisted_session.session_id != authorized_intent.session_id ||
+            persisted_session.canonical_request_hash != Hash(persisted_attempt.quote_request) ||
+            persisted_attempt.session_id != authorized_intent.session_id ||
+            persisted_attempt.provider_id != authorized_intent.provider_id ||
+            persisted_attempt.client_nonce != authorized_intent.client_nonce ||
+            persisted_attempt.intent_hash != GetPaymentIntentHash(authorized_intent) ||
+            persisted_attempt.created_at <= 0 ||
+            persisted_attempt.quote_expires_at <= persisted_attempt.created_at ||
+            persisted_attempt.retry_until < persisted_attempt.quote_expires_at ||
+            persisted_attempt.created_at != authorized_quote.created_at ||
+            persisted_attempt.quote_expires_at != authorized_quote.expires_at ||
+            persisted_attempt.retry_until != authorized_quote.retry_until) {
+            throw ApplicationError(ErrorKind::WALLET,
+                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
         }
-        if (persisted_attempt.quote_expires_at <= now ||
-            persisted_attempt.retry_until < now) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_RETRY_EXPIRED");
-        }
-        validate_restricted_request();
 
+        PaymasterQuoteRequest persisted_request;
         PaymasterQuoteResponse response;
         try {
+            CDataStream request_stream{persisted_attempt.quote_request, SER_NETWORK,
+                                       ::PROTOCOL_VERSION};
+            request_stream >> persisted_request;
             SpanReader stream{::PROTOCOL_VERSION, persisted_attempt.signed_quote};
             stream >> response;
-            if (!stream.empty() || SerializeQuoteResponse(response) !=
+            if (!request_stream.empty() ||
+                SerializeRedactedQuoteRequest(persisted_request) != persisted_attempt.quote_request ||
+                !IsSupportedDirectProtocolVersion(persisted_request.version) ||
+                !IsSupportedDirectProtocolVersion(response.version) ||
+                !stream.empty() || SerializeQuoteResponse(response) !=
                                        persisted_attempt.signed_quote) {
                 throw std::ios_base::failure("non-canonical persisted quote");
             }
@@ -1674,15 +1699,30 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
         }
-        if (response.request_id != quote_request->intent.request_id ||
-            response.session_id != quote_request->intent.session_id ||
-            response.quote.provider_id != readiness.identity.provider_id ||
+        if (response.request_id != persisted_session.request_id ||
+            response.session_id != persisted_session.session_id ||
+            response.quote.provider_id != persisted_attempt.provider_id ||
             response.quote.quote_id != persisted_attempt.quote_id ||
             response.quote.template_commitment !=
                 persisted_attempt.template_commitment) {
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
         }
+        if (persisted_session.session_id != quote_request->intent.session_id ||
+            persisted_session.canonical_request_hash != Hash(redacted_request) ||
+            persisted_attempt.provider_id != readiness.identity.provider_id ||
+            persisted_attempt.client_nonce != quote_request->intent.client_nonce ||
+            persisted_attempt.intent_hash != GetPaymentIntentHash(quote_request->intent) ||
+            persisted_attempt.quote_request != redacted_request) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
+        }
+        if (persisted_attempt.quote_expires_at <= now ||
+            persisted_attempt.retry_until < now) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_PROVIDER_RETRY_EXPIRED", "quote");
+        }
+        validate_restricted_request();
 
         const uint256 message_id = Hash(persisted_attempt.signed_quote);
         const bool queued = context.paymaster->QueueOutboundDirectMessage(
