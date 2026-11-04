@@ -106,6 +106,23 @@ The prefix includes split wallet suites. Windows equivalent:
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 ```
 
+For the wallet-lock ownership and reorganization-readiness corrections, rebuild
+the changed sources and start with this focused selection:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_store_tests/unsigned_client_cleanup*:paymaster_wallet_store_tests/unsigned_client_cancel_failures_and_lost_reply_preserve_input_ownership:paymaster_wallet_store_tests/ambiguous_authorization_is_protected_and_prunes_to_tombstone:paymaster_application_tests/*' --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'Wallet safety regressions failed' }
+```
+
+These cases preserve later manual locks through repeated cancellation, pruning
+and actual wallet reload; reject unreadable reservations; and check transaction
+rollback. Readiness cases capture a real locator before invalidating its tip and
+reject stale hashes, including replacement at the same height. They also exercise
+both readiness functions with a real in-memory transaction index. Mock database
+failures do not simulate physical I/O failure or individual `EraseKey` failures.
+Then run the complete store/load suites and ordinary wallet regressions as an
+operator check; isolated links are not clean product-build evidence.
+
 Qt uses `DIGIBYTE_QT_TEST_SUITE` and optional `DIGIBYTE_QT_TEST_FUNCTION`
 filters implemented by `src/qt/test/test_main.cpp`. Select `PaymasterWidgetTests`
 and relevant `DigiDollarWidgetTests` cases from the current fixture. Clear filters
@@ -244,9 +261,13 @@ does not establish what held or blocked the port during the failed run.
 Follow [test/README.md](../test/README.md) to obtain the official v9.26.5 daemon.
 `V9_26_5_DIGIBYTED` selects it; `PRE_PAYMASTER_DIGIBYTED` is a compatibility
 fallback. It is an old-version interoperability input, not the current baseline.
+The selection below expands registered variants for v9.26.5 and v9.26.6rc2,
+including Thaw Day. Supply both official reference binaries; skipped variants do
+not establish compatibility.
 
 ```sh
 V9_26_5_DIGIBYTED=/path/to/v9.26.5/bin/digibyted \
+V9_26_6RC2_DIGIBYTED=/path/to/v9.26.6rc2/bin/digibyted \
   python test/functional/test_runner.py --jobs=1 wallet_v9_26_5_compatibility.py wallet_v9_26_5_inplace_upgrade.py p2p_paymaster_v9_26_5_bridge.py
 ```
 

@@ -4,6 +4,25 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Wallet safety candidate (2026-11-04)
+
+Source: working-tree corrections based on `b3b26ccbda5a`. Five changed C++
+translation units, including both test files, compiled with the existing MSVC
+14.43 x64 Release configuration and linked against existing objects/libraries.
+This was not a clean product build. Local artifacts, source hashes, exact commands
+and per-selection executable hashes are under `.ai/paymaster-wallet-safety-74ee9bccf034/`.
+
+| Executed selection | Result |
+|---|---|
+| Manual-lock cancellation/pruning, corrupt/versioned reservations, actual reload, deterministic tip invalidation/replacement, complete application and wallet-load suites | 18 cases / 449 assertions passed. |
+| Selected PSBT/signature, transaction, reservation, recovery, admission, transport, database and ordinary DGB/DD wallet regressions | 72 cases / 4,012 assertions passed. |
+
+These selections are disjoint and use `tests.exe` with SHA256
+`9c7197b67cd67de8fa1b5c6aee7b86d9fe8f61bbbc9b95323d21b635a51396a9`.
+The complete store suite, clean builds, functional/Qt matrices and remaining
+candidate gates below remain open. Operator commands use the runbook and the
+local `operator-checks.ps1`; no operator stage was run by the agent.
+
 ## Optimization candidate (2026-11-04)
 
 The review-fix series starts at `33c680cba1`; comparison bases and required
