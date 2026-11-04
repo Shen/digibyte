@@ -71,13 +71,13 @@
     "src/qt/walletmodel.h": {
       "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
       "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
-      "ordinary_callers": "Ordinary async wallet RPC callers retain their callback API; queued execution is bounded and shutdown waits for started work.",
+      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers.",
       "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
     },
     "src/qt/walletmodel.cpp": {
       "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
       "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
-      "ordinary_callers": "Ordinary async wallet RPC callers retain their callback API; queued execution is bounded and shutdown waits for started work.",
+      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers.",
       "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
     },
     "src/Makefile.qt.include": {
@@ -103,6 +103,18 @@
       "reused_api": "Existing wallet test source list and MSVC generator.",
       "ordinary_callers": "Test build/source distribution only.",
       "regressions": "Targeted compile/link/test and clean operator test build."
+    },
+    "src/qt/test/wallettests.cpp": {
+      "purpose": "Exercise generic queue effect defaults, mutation barriers, start failures and typed-worker shutdown independently of Paymaster.",
+      "reused_api": "Existing WalletTests fixture and QThread lifecycle.",
+      "ordinary_callers": "Ordinary wallet test registration; no product behavior.",
+      "regressions": "New async tests plus existing DGB balance/send tests; rebuild Qt moc registration."
+    },
+    "src/qt/test/wallettests.h": {
+      "purpose": "Exercise generic queue effect defaults, mutation barriers, start failures and typed-worker shutdown independently of Paymaster.",
+      "reused_api": "Existing WalletTests fixture and QThread lifecycle.",
+      "ordinary_callers": "Ordinary wallet test registration; no product behavior.",
+      "regressions": "New async tests plus existing DGB balance/send tests; rebuild Qt moc registration."
     }
   }
 }

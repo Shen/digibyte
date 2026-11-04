@@ -6,9 +6,11 @@
 #include <univalue.h>
 #include <QObject>
 #include <QString>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
+#include <string>
 #include <vector>
 
 class QThread;
@@ -27,18 +29,26 @@ struct RpcReply {
     RpcError error;
 };
 
+enum class TaskKind { READ, MUTATION };
+struct TaskOptions {
+    TaskKind kind{TaskKind::MUTATION};
+    bool coalesce{false};
+};
+
 /** One queue per wallet. All scheduling and delivery happen on its Qt thread;
  * blocking work uses the existing QThread workers. Shutdown discards queued
  * work and joins started workers before their node/wallet dependencies die. */
 class WorkQueue final : public QObject {
 public:
-    enum class Kind { READ, MUTATION };
+    using Kind = TaskKind;
     using Completion = std::function<void(RpcReply)>;
     using Start = std::function<void(Completion)>;
     explicit WorkQueue(QObject* parent = nullptr) : QObject(parent) {}
     ~WorkQueue() override;
-    void submit(Kind kind, std::string key, Start start, Completion completion);
+    void submit(TaskOptions options, std::string key, Start start, Completion completion);
     void run(std::function<RpcReply()> work, Completion completion);
+    /** Schedule an existing typed worker with the same limits and shutdown ownership. */
+    void schedule(QThread* worker, TaskOptions options);
     void track(QThread* worker);
     void stop();
     bool stopping() const { return m_stopping; }

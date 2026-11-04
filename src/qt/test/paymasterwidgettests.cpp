@@ -15547,12 +15547,12 @@ void PaymasterWidgetTests::paymasterAsyncLimitsAndCoalescing()
     std::vector<WorkQueue::Completion> reads, writes;
     int callbacks{0};
     const auto read = [&](const char* key) {
-        queue.submit(WorkQueue::Kind::READ, key,
+        queue.submit({WorkQueue::Kind::READ, true}, key,
             [&](WorkQueue::Completion complete) { reads.push_back(std::move(complete)); },
             [&](RpcReply) { ++callbacks; });
     };
     const auto mutate = [&] {
-        queue.submit(WorkQueue::Kind::MUTATION, {},
+        queue.submit({WorkQueue::Kind::MUTATION, false}, {},
             [&](WorkQueue::Completion complete) { writes.push_back(std::move(complete)); },
             [&](RpcReply) { ++callbacks; });
     };
@@ -15564,7 +15564,7 @@ void PaymasterWidgetTests::paymasterAsyncLimitsAndCoalescing()
     mutate();
     read("status"); // Cannot join the snapshot preceding queued mutations.
     QCOMPARE(reads.size(), size_t{2});
-    QCOMPARE(writes.size(), size_t{1});
+    QCOMPARE(writes.size(), size_t{0});
     auto done = reads[0];
     done({});
     QCOMPARE(callbacks, 2);
@@ -15572,12 +15572,16 @@ void PaymasterWidgetTests::paymasterAsyncLimitsAndCoalescing()
     done({}); // A duplicate completion never releases another operation's slot.
     QCOMPARE(callbacks, 2);
     done = reads[1]; done({});
-    QCOMPARE(reads.size(), size_t{4});
+    QCOMPARE(reads.size(), size_t{3});
+    QCOMPARE(writes.size(), size_t{0});
+    done = reads[2]; done({});
+    QCOMPARE(writes.size(), size_t{1});
     done = writes[0]; done({});
     QCOMPARE(writes.size(), size_t{2});
-    done = reads[2]; done({});
-    done = reads[3]; done({});
+    QCOMPARE(reads.size(), size_t{3});
     done = writes[1]; done({});
+    QCOMPARE(reads.size(), size_t{4});
+    done = reads[3]; done({});
     QCOMPARE(callbacks, 7);
 }
 
@@ -15589,7 +15593,7 @@ void PaymasterWidgetTests::paymasterAsyncShutdownDrainsWorkers()
     auto released = release.get_future().share();
     std::atomic<bool> finished{false};
     bool callback{false}, queued_started{false};
-    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion complete) {
+    queue.submit({WorkQueue::Kind::MUTATION, false}, {}, [&](WorkQueue::Completion complete) {
         queue.run([&] {
             entered.set_value();
             released.wait();
@@ -15597,7 +15601,7 @@ void PaymasterWidgetTests::paymasterAsyncShutdownDrainsWorkers()
             return RpcReply{};
         }, std::move(complete));
     }, [&](RpcReply) { callback = true; });
-    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion) {
+    queue.submit({WorkQueue::Kind::MUTATION, false}, {}, [&](WorkQueue::Completion) {
         queued_started = true;
     }, {});
     entered.get_future().wait();
@@ -15616,7 +15620,7 @@ void PaymasterWidgetTests::paymasterAsyncPreservesStructuredErrors()
     WorkQueue queue;
     bool finished{false};
     RpcReply observed;
-    queue.submit(WorkQueue::Kind::MUTATION, {}, [&](WorkQueue::Completion complete) {
+    queue.submit({WorkQueue::Kind::MUTATION, false}, {}, [&](WorkQueue::Completion complete) {
         queue.run([]() -> RpcReply {
             UniValue error = JSONRPCError(-4, "An operator-facing message");
             UniValue data{UniValue::VOBJ};

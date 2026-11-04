@@ -39,7 +39,7 @@ void PaymasterQt::ExecuteSigningRpcAsyncDetailed(WalletModel& model, std::string
     QPointer<WorkQueue> queue{&model.asyncWorkQueue()};
     // Hold one mutation slot across preflight, the unlock dialog and signing.
     // Merely checking IsLocked can wait, so it too stays off the Qt thread.
-    queue->submit(WorkQueue::Kind::MUTATION, {},
+    queue->submit({WorkQueue::Kind::MUTATION, false}, {},
         [queue, guard, wallet, node, uri, command = std::move(command), params = std::move(params), is_current]
         (WorkQueue::Completion complete) mutable {
             queue->run([wallet] { return RpcReply{UniValue{wallet->isLocked()}, {}}; },

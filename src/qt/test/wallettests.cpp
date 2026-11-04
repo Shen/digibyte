@@ -25,6 +25,7 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
+#include <qt/walletasync.h>
 #include <script/solver.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
@@ -34,7 +35,10 @@
 #include <paymaster/provider.h>
 
 #include <chrono>
+#include <atomic>
+#include <future>
 #include <memory>
+#include <thread>
 
 #include <QAbstractButton>
 #include <QAction>
@@ -43,10 +47,12 @@
 #include <QClipboard>
 #include <QObject>
 #include <QPushButton>
+#include <QPointer>
 #include <QTimer>
 #include <QSignalSpy>
 #include <QVBoxLayout>
 #include <QTextEdit>
+#include <QThread>
 #include <QListView>
 #include <QDialogButtonBox>
 
@@ -743,4 +749,85 @@ void WalletTests::sendValidationExplainsInvalidFields()
     QVERIFY(messages.at(0).at(1).toString().contains("Pay To"));
     QCOMPARE(wallet->mapWallet.size(), before);
     QCOMPARE(unlocks.count(), 0);
+}
+
+void WalletTests::asyncExplicitEffectsAndStartFailure()
+{
+    using namespace WalletAsync;
+    WorkQueue queue;
+    std::vector<WorkQueue::Completion> reads, writes;
+    int delivered{0};
+    const auto read = [&] {
+        queue.submit({TaskKind::READ, false}, "same-key",
+            [&](WorkQueue::Completion complete) { reads.push_back(std::move(complete)); },
+            [&](RpcReply) { ++delivered; });
+    };
+    read();
+    read(); // Equal keys alone never opt into coalescing.
+    queue.submit({}, "get-operation", [&](WorkQueue::Completion complete) {
+        writes.push_back(std::move(complete));
+    }, [&](RpcReply) { ++delivered; });
+    read();
+    QCOMPARE(reads.size(), size_t{2});
+    QVERIFY(writes.empty());
+    auto complete = reads[0]; complete({});
+    QVERIFY(writes.empty());
+    complete = reads[1]; complete({});
+    QCOMPARE(writes.size(), size_t{1});
+    QCOMPARE(reads.size(), size_t{2});
+    complete = writes[0]; complete({});
+    QCOMPARE(reads.size(), size_t{3});
+    complete = reads[2]; complete({});
+    QCOMPARE(delivered, 4);
+
+    RpcError failure;
+    queue.submit({}, {}, [](WorkQueue::Completion) {
+        throw std::runtime_error("worker start failed");
+    }, [&](RpcReply reply) { failure = std::move(reply.error); });
+    QVERIFY(failure.failed);
+    QCOMPARE(failure.message, QStringLiteral("worker start failed"));
+    bool resumed{false};
+    queue.submit({}, {}, [](WorkQueue::Completion done) { done({}); },
+                 [&](RpcReply) { resumed = true; });
+    QVERIFY(resumed);
+
+    WorkQueue::Completion read_done;
+    queue.submit({TaskKind::READ, true}, "shared", [&](WorkQueue::Completion done) {
+        read_done = std::move(done);
+    }, [](RpcReply) { throw std::runtime_error("display failed"); });
+    bool other_reader{false}, next_mutation{false};
+    queue.submit({TaskKind::READ, true}, "shared", [](WorkQueue::Completion) {
+        QFAIL("Coalesced read started twice");
+    }, [&](RpcReply) { other_reader = true; });
+    queue.submit({}, {}, [](WorkQueue::Completion done) { done({}); },
+                 [&](RpcReply) { next_mutation = true; });
+    QTest::ignoreMessage(QtWarningMsg, "Wallet asynchronous result callback failed");
+    read_done({});
+    QVERIFY(other_reader);
+    QVERIFY(next_mutation);
+}
+
+void WalletTests::asyncTypedWorkerShutdown()
+{
+    using namespace WalletAsync;
+    WorkQueue queue;
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    std::atomic<bool> finished{false};
+    bool queued_started{false};
+    queue.schedule(QThread::create([&] {
+        entered.set_value();
+        released.wait();
+        finished = true;
+    }), {TaskKind::READ, false});
+    QPointer<QThread> queued{QThread::create([&] { queued_started = true; })};
+    queue.schedule(queued, {});
+    entered.get_future().wait();
+    std::thread unblock([&] { release.set_value(); });
+    queue.stop();
+    unblock.join();
+    QVERIFY(finished.load());
+    QVERIFY(!queued_started);
+    QVERIFY(queued.isNull());
+    QCoreApplication::processEvents();
 }

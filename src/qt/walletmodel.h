@@ -272,6 +272,8 @@ public:
     using DetailedRpcCallback = std::function<void(UniValue result, RpcError error)>;
     void executeRpcAsync(std::string command, UniValue params, RpcCallback callback);
     void executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback);
+    void executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback,
+                                 WalletAsync::TaskOptions options);
     WalletAsync::WorkQueue& asyncWorkQueue();
 
     /**

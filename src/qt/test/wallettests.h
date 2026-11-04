@@ -23,6 +23,8 @@ private Q_SLOTS:
     void walletTests();
     void dgbBalanceBreakdown();
     void sendValidationExplainsInvalidFields();
+    void asyncExplicitEffectsAndStartFailure();
+    void asyncTypedWorkerShutdown();
 };
 
 #endif // DIGIBYTE_QT_TEST_WALLETTESTS_H

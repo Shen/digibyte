@@ -39,12 +39,16 @@ void WorkQueue::stop()
         delete worker;
     }
     m_workers.clear();
+    // schedule() also owns workers which have not passed their queue barrier.
+    for (auto* worker : findChildren<QThread*>(QString{}, Qt::FindDirectChildrenOnly)) delete worker;
 }
 
-void WorkQueue::submit(Kind kind, std::string key, Start start, Completion completion)
+void WorkQueue::submit(TaskOptions options, std::string key, Start start, Completion completion)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     if (m_stopping) return;
+    const auto kind = options.kind;
+    if (!options.coalesce || kind != Kind::READ) key.clear();
     if (kind == Kind::READ && !key.empty()) {
         for (const auto& job : m_jobs) {
             if (job->kind == kind && job->key == key && job->generation == m_generation && !job->completed) {
@@ -64,27 +68,38 @@ void WorkQueue::submit(Kind kind, std::string key, Start start, Completion compl
 
 void WorkQueue::pump()
 {
-    if (m_stopping) return;
+    if (m_stopping || m_mutating) return;
     // Copy the launch list: a test/validation failure may complete immediately.
     std::vector<std::shared_ptr<Job>> launch;
     for (const auto& job : m_jobs) {
         if (job->running || job->completed) continue;
         if (job->kind == Kind::READ) {
-            if (m_reads == 2) continue;
+            if (m_reads == 2) break;
             ++m_reads;
         } else {
-            if (m_mutating) continue;
+            // Mutations are FIFO barriers. Earlier reads finish first, and
+            // no following read starts until this mutation has completed.
+            if (m_reads != 0) break;
             m_mutating = true;
         }
         job->running = true;
         launch.push_back(job);
+        if (job->kind == Kind::MUTATION) break;
     }
     QPointer<WorkQueue> guard{this};
     for (const auto& job : launch) {
         if (!guard || guard->m_stopping) return;
-        job->start([guard, job](RpcReply reply) {
-            if (guard && !guard->m_stopping) guard->complete(job, std::move(reply));
-        });
+        try {
+            job->start([guard, job](RpcReply reply) {
+                if (guard && !guard->m_stopping) guard->complete(job, std::move(reply));
+            });
+        } catch (const UniValue& error) {
+            if (guard && !guard->m_stopping) guard->complete(job, {{}, RpcError::fromRpc(error)});
+        } catch (const std::exception& error) {
+            if (guard && !guard->m_stopping) guard->complete(job, {{}, {true, 0, QString::fromUtf8(error.what()), {}}});
+        } catch (...) {
+            if (guard && !guard->m_stopping) guard->complete(job, {{}, {true, 0, QStringLiteral("Unable to start wallet operation"), {}}});
+        }
     }
 }
 
@@ -94,14 +109,20 @@ void WorkQueue::complete(const std::shared_ptr<Job>& job, RpcReply reply)
     if (job->completed) return;
     job->completed = true;
     if (job->kind == Kind::READ) --m_reads;
-    else { m_mutating = false; ++m_generation; }
+    else m_mutating = false;
     m_jobs.remove(job);
     QPointer<WorkQueue> guard{this};
     // Callers can close their wallet in a callback. Do not dereference this
     // again unless the QObject still exists.
     for (auto& callback : job->callbacks) {
         if (!guard || guard->m_stopping) return;
-        if (callback) callback(reply);
+        try {
+            if (callback) callback(reply);
+        } catch (...) {
+            // Delivery failure must not strand coalesced readers or later work.
+            // Never replay an operation because its UI callback failed.
+            qWarning("Wallet asynchronous result callback failed");
+        }
     }
     if (guard && !guard->m_stopping) guard->pump();
 }
@@ -138,6 +159,7 @@ void WorkQueue::track(QThread* worker)
 {
     Q_ASSERT(QThread::currentThread() == thread());
     Q_ASSERT(!m_stopping);
+    worker->setParent(this);
     m_workers.push_back(worker);
     connect(worker, &QThread::finished, this, [this, worker] {
         const auto found = std::find(m_workers.begin(), m_workers.end(), worker);
@@ -145,5 +167,22 @@ void WorkQueue::track(QThread* worker)
         m_workers.erase(found);
         worker->deleteLater();
     });
+}
+
+void WorkQueue::schedule(QThread* worker, TaskOptions options)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    Q_ASSERT(!worker->isRunning());
+    // A discarded, not-yet-started worker must also release its captured wallet.
+    worker->setParent(this);
+    if (m_stopping) {
+        delete worker;
+        return;
+    }
+    submit(options, {}, [this, worker](Completion complete) {
+        connect(worker, &QThread::finished, this, [complete = std::move(complete)]() mutable { complete({}); });
+        track(worker);
+        worker->start();
+    }, {});
 }
 } // namespace WalletAsync

@@ -243,8 +243,7 @@ void WalletModel::pollBalanceChanged()
             if (update_confirmations && guard->transactionTableModel) guard->transactionTableModel->updateConfirmations();
         }, Qt::QueuedConnection);
     });
-    asyncWorkQueue().track(thread);
-    thread->start();
+    asyncWorkQueue().schedule(thread, {WalletAsync::TaskKind::READ, false});
 }
 
 void WalletModel::checkBalanceChanged(const interfaces::WalletBalances& new_balances)
@@ -1415,8 +1414,7 @@ void WalletModel::getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback)
             },
             Qt::QueuedConnection);
     });
-    asyncWorkQueue().track(thread);
-    thread->start();
+    asyncWorkQueue().schedule(thread, {WalletAsync::TaskKind::READ, false});
 }
 
 void WalletModel::getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback)
@@ -1451,8 +1449,7 @@ void WalletModel::getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback
                 if (guard && callback) callback(balances, collateral, std::move(mint_error), std::move(error));
             }, Qt::QueuedConnection);
     });
-    asyncWorkQueue().track(thread);
-    thread->start();
+    asyncWorkQueue().schedule(thread, {WalletAsync::TaskKind::READ, false});
 }
 
 WalletModel::DigiDollarBalanceSummary WalletModel::getDigiDollarBalanceSummary() const
@@ -1607,13 +1604,19 @@ void WalletModel::executeRpcAsync(std::string command, UniValue params, RpcCallb
 
 void WalletModel::executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback)
 {
+    executeRpcAsyncDetailed(std::move(command), std::move(params), std::move(callback), {});
+}
+
+void WalletModel::executeRpcAsyncDetailed(std::string command, UniValue params, DetailedRpcCallback callback,
+                                         WalletAsync::TaskOptions options)
+{
     const QByteArray encoded_name = QUrl::toPercentEncoding(getWalletName());
     const std::string uri = "/wallet/" + std::string(encoded_name.constData(), encoded_name.length());
     interfaces::Node* const node = &m_node;
     auto& queue = asyncWorkQueue();
-    const bool read = command.starts_with("get") || command.starts_with("list");
+    const bool read = options.kind == WalletAsync::TaskKind::READ && options.coalesce;
     const std::string key = read ? command + "\n" + params.write() : std::string{};
-    queue.submit(read ? WalletAsync::WorkQueue::Kind::READ : WalletAsync::WorkQueue::Kind::MUTATION, key,
+    queue.submit(options, key,
         [&queue, node, wallet = m_wallet, command = std::move(command), params = std::move(params), uri]
         (WalletAsync::WorkQueue::Completion complete) mutable {
             queue.run([node, wallet, command = std::move(command), params = std::move(params), uri]() mutable {
@@ -1648,10 +1651,6 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
     m_digi_dollar_history_requests.push_back({count, skip, std::move(callback)});
     if (m_digi_dollar_history_refresh_in_flight) return;
     m_digi_dollar_history_refresh_in_flight = true;
-    {
-        std::lock_guard<std::mutex> lock(g_dd_history_mutex);
-        ++g_dd_history_reads[&m_node];
-    }
 
     QElapsedTimer history_timer;
     history_timer.start();
@@ -1663,9 +1662,25 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
     QPointer<WalletModel> guard{this};
     const interfaces::Node* const node = &m_node;
     QPointer<QObject> dispatcher{QCoreApplication::instance()};
+    {
+        std::lock_guard<std::mutex> lock(g_dd_history_mutex);
+        ++g_dd_history_reads[node];
+    }
+    // Count queued reads too. The lease also releases the reservation if
+    // shutdown discards a worker before it starts or before delivery.
+    auto history_read = std::shared_ptr<const interfaces::Node>(node, [dispatcher](const interfaces::Node* observed_node) {
+        {
+            std::lock_guard<std::mutex> lock(g_dd_history_mutex);
+            const auto found = g_dd_history_reads.find(observed_node);
+            if (found != g_dd_history_reads.end() && --found->second == 0) g_dd_history_reads.erase(found);
+        }
+        if (dispatcher) QMetaObject::invokeMethod(dispatcher, [observed_node] {
+            NotifyDigiDollarHistoryReaders(observed_node);
+        }, Qt::QueuedConnection);
+    });
 
     QThread* thread = QThread::create(
-        [guard, wallet, history_timer, node, dispatcher]() mutable {
+        [guard, wallet, history_timer, node, dispatcher, history_read = std::move(history_read)]() mutable {
             const qint64 worker_started_ms = history_timer.elapsed();
             UniValue result;
             QString error;
@@ -1688,16 +1703,10 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
             QMetaObject::invokeMethod(
                 dispatcher,
                 [guard, result = std::move(result), error = std::move(error),
-                 history_timer, worker_started_ms, read_finished_ms, wallet_name, node]() mutable {
-                    {
-                        std::lock_guard<std::mutex> lock(g_dd_history_mutex);
-                        const auto found = g_dd_history_reads.find(node);
-                        if (found != g_dd_history_reads.end() && --found->second == 0) g_dd_history_reads.erase(found);
-                    }
-                    if (!guard) {
-                        NotifyDigiDollarHistoryReaders(node);
-                        return;
-                    }
+                 history_timer, worker_started_ms, read_finished_ms, wallet_name,
+                 history_read = std::move(history_read)]() mutable {
+                    history_read.reset();
+                    if (!guard) return;
 
                     const qint64 delivered_ms = history_timer.elapsed();
                     if (delivered_ms >= 1000) {
@@ -1721,7 +1730,6 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
                     std::vector<DigiDollarHistoryRequest> requests =
                         std::move(guard->m_digi_dollar_history_requests);
                     guard->m_digi_dollar_history_requests.clear();
-                    NotifyDigiDollarHistoryReaders(node);
                     for (DigiDollarHistoryRequest& request : requests) {
                         if (!guard || !request.callback) continue;
                         const UniValue response = error.isEmpty()
@@ -1733,8 +1741,7 @@ void WalletModel::getDigiDollarTransactionHistoryAsync(int count, int skip, RpcC
                 },
                 Qt::QueuedConnection);
         });
-    asyncWorkQueue().track(thread);
-    thread->start();
+    asyncWorkQueue().schedule(thread, {WalletAsync::TaskKind::READ, false});
     NotifyDigiDollarHistoryReaders(node);
 }
 
@@ -1761,8 +1768,7 @@ void WalletModel::getDigiDollarReceiveRequestsAsync(ReceiveRequestsCallback call
             },
             Qt::QueuedConnection);
     });
-    asyncWorkQueue().track(thread);
-    thread->start();
+    asyncWorkQueue().schedule(thread, {WalletAsync::TaskKind::READ, false});
 }
 
 UniValue WalletModel::getCachedDigiDollarTransactionHistory(int count, int skip)
