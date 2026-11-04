@@ -1137,6 +1137,35 @@ public:
     bool showSetupWizard();
 
 private:
+    struct SetupWizardContext;
+    struct SetupOfferControls;
+    struct SetupSafetyControls;
+    struct SetupPoolControls;
+    struct SetupReviewControls;
+    struct SetupProgressControls;
+
+    bool setupWizardAvailable();
+    QCheckBox* buildSetupWalletPages(PaymasterSetupWizard& wizard, const SetupWizardContext& context);
+    void buildSetupIdentityPage(PaymasterSetupWizard& wizard, SetupOfferControls& offer);
+    void buildSetupFundingPage(PaymasterSetupWizard& wizard, SetupOfferControls& offer);
+    void buildSetupPolicyPage(PaymasterSetupWizard& wizard, SetupOfferControls& offer);
+    SetupOfferControls buildSetupOfferPage(PaymasterSetupWizard& wizard, const std::shared_ptr<bool>& replace_unrepresentable_policy);
+    SetupSafetyControls buildSetupSafetyPage(PaymasterSetupWizard& wizard, const SetupOfferControls& offer);
+    SetupPoolControls buildSetupLiquidityPage(PaymasterSetupWizard& wizard, const SetupOfferControls& offer, const SetupSafetyControls& safety);
+    SetupReviewControls buildSetupReviewPage(PaymasterSetupWizard& wizard, const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool);
+    static QString setupStepLabel(const std::string& method);
+    SetupProgressControls buildSetupProgressPage(PaymasterSetupWizard& wizard);
+    void addSetupStartChoice(SetupReviewControls& review_controls, const SetupPoolControls& pool);
+    UniValue readSetupPolicy(const SetupOfferControls& offer);
+    UniValue readSetupPoolOptions(const SetupPoolControls& pool, bool execute);
+    DigiDollar::Paymaster::SetupChoices readSetupChoices(const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool);
+    QString formatSetupPoolPreview(const UniValue& result);
+    void renderSetupReview(const SetupWizardContext& context, const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool, const SetupReviewControls& review_controls);
+    QString setupReviewError(const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupReviewControls& review_controls);
+    void connectSetupReview(PaymasterSetupWizard& wizard, const SetupWizardContext& context, const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool, const SetupReviewControls& review_controls);
+    void renderSetupStatus(const QPointer<QLabel>& funding_label, const UniValue& expected, const UniValue& current);
+    std::shared_ptr<bool> connectSetupExecution(PaymasterSetupWizard& wizard, const SetupWizardContext& context, const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool, const SetupProgressControls& progress);
+
     PaymasterSetupMode m_setup_mode{PaymasterSetupMode::UNDECIDED};
     QGroupBox* m_setup_choice{nullptr};
     QPushButton* m_guided_setup{nullptr};

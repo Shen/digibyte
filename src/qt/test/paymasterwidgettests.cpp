@@ -5484,15 +5484,19 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_
 {
     QTest::addColumn<bool>("deferred_funding");
     QTest::addColumn<bool>("encrypted_start");
-    QTest::newRow("already-funded") << false << false;
-    QTest::newRow("disabled-provider-accepted-pending") << true << false;
-    QTest::newRow("encrypted-start") << true << true;
+    QTest::addColumn<QString>("wallet_change_stage");
+    QTest::newRow("already-funded") << false << false << QString{};
+    QTest::newRow("disabled-provider-accepted-pending") << true << false << QString{};
+    QTest::newRow("encrypted-start") << true << true << QString{};
+    QTest::newRow("wallet-change-open-wizard") << false << false << QStringLiteral("open");
+    QTest::newRow("wallet-change-pending-preview") << false << false << QStringLiteral("preview");
 }
 
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep()
 {
     QFETCH(bool, deferred_funding);
     QFETCH(bool, encrypted_start);
+    QFETCH(QString, wallet_change_stage);
     int operating_unlocks{0}, reviewed_starts{0};
     bool operating_default_seen{false};
     bool missing_funding = deferred_funding;
@@ -5555,7 +5559,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
             "maximum_maintenance_fee_per_day_satoshis", 1000000000);
         return policy;
     };
-    tab.setPaymasterRpcExecutorForTesting(
+    const auto setup_rpc =
         [&](const std::string& command, const UniValue& params) {
             if (command == "startpaymaster" ||
                 command == "setpaymasterenabled" ||
@@ -5813,7 +5817,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 return result;
             }
             throw std::runtime_error("injected unrelated status unavailable");
-        });
+        };
+    tab.setPaymasterRpcExecutorForTesting(setup_rpc);
     tab.setWalletModel(mini_gui.walletModel.get());
     tab.setClientModel(mini_gui.clientModel.get());
 
@@ -5859,6 +5864,93 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
 
     malformed_provider_snapshot = false;
     tab.setWalletModel(mini_gui.walletModel.get());
+
+    if (!wallet_change_stage.isEmpty()) {
+        auto* panel = static_cast<DigiDollarPaymasterWidget*>(
+            tab.findChild<QWidget*>(QStringLiteral("paymasterWidget")));
+        QVERIFY(panel);
+        QPointer<QWizard> wizard_guard;
+        DigiDollarPaymasterWidget::RpcCallback late_preview;
+        UniValue preview_reply;
+        int preview_requests{0};
+        bool unexpected_rpc{false};
+        bool wizard_closed{false};
+        bool preview_was_pending{false};
+        bool stale_preview_ignored{false};
+        QTimer::singleShot(0, &tab, [&] {
+            auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
+            if (!wizard || wizard->objectName() != QLatin1String("PaymasterSetupWizard")) return;
+            wizard_guard = wizard;
+            auto* review_page = wizard->findChild<QWizardPage*>("paymasterSetupReviewPage");
+            auto* preview_status = wizard->findChild<QLabel*>("paymasterSetupLiquidityPreviewStatus");
+            if (wallet_change_stage == QLatin1String("preview")) {
+                auto* wallet_confirmation = wizard->findChild<QCheckBox*>("paymasterSetupWalletConfirmation");
+                auto* approval = wizard->findChild<QCheckBox*>("paymasterSetupMaintenanceApproval");
+                if (!wallet_confirmation || !approval || !review_page || !preview_status) {
+                    wizard->reject();
+                    return;
+                }
+                panel->setAsyncRpcExecutorForTesting(
+                    [&](const std::string& command, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback callback) {
+                        if (command != "preparepaymasterpool" ||
+                            !params[0].find_value("preview_policy").isObject() ||
+                            params[0].find_value("execute").isTrue() || late_preview) {
+                            unexpected_rpc = true;
+                            return;
+                        }
+                        ++preview_requests;
+                        preview_reply = setup_rpc(command, params);
+                        late_preview = std::move(callback);
+                    });
+                wallet_confirmation->setChecked(true);
+                for (int page_guard{0}; wizard->currentPage() != review_page && page_guard < 10; ++page_guard) {
+                    wizard->next();
+                }
+                approval->setChecked(true);
+                preview_was_pending = wizard->currentPage() == review_page &&
+                    late_preview && !review_page->isComplete();
+            }
+            // Leave and reselect the same model: the old generation must stay
+            // invalid even when the WalletModel pointer becomes equal again.
+            tab.setWalletModel(nullptr);
+            wizard_closed = !wizard->isVisible();
+            panel->setAsyncRpcExecutorForTesting({});
+            tab.setWalletModel(mini_gui.walletModel.get());
+            if (late_preview) {
+                const QString old_preview_text = preview_status->text();
+                const QString current_wallet_status = provider_status->text();
+                // The modal stack and page still exist here. QPointer lifetime
+                // checks alone cannot protect this old-wallet continuation.
+                late_preview(preview_reply, {});
+                stale_preview_ignored = preview_status->text() == old_preview_text &&
+                    !review_page->isComplete() && provider_status->text() == current_wallet_status;
+            }
+            wizard->reject();
+        });
+        guided_setup->click();
+        QVERIFY(wizard_closed);
+        QVERIFY(wizard_guard.isNull());
+        QVERIFY(!unexpected_rpc);
+        QCOMPARE(preview_requests, wallet_change_stage == QLatin1String("preview") ? 1 : 0);
+        if (wallet_change_stage == QLatin1String("preview")) {
+            QVERIFY(preview_was_pending);
+            QVERIFY(stale_preview_ignored);
+        }
+        QVERIFY(guided_setup->isEnabled());
+        QCOMPARE(mutation_rpc_calls, 0);
+        QCOMPARE(operating_policy_attempts, 0);
+        QCOMPARE(safety_attempts, 0);
+        QCOMPARE(operating_unlocks, 0);
+        QCOMPARE(reviewed_starts, 0);
+        QCOMPARE(pool_approvals, 0);
+        QVERIFY(setup_write_order.isEmpty());
+        QVERIFY(safety_payloads.isEmpty());
+        QVERIFY(enabled_requests.isEmpty());
+        QVERIFY(advertised_policy.isNull());
+        QVERIFY(safety_policy.isNull());
+        QVERIFY(liquidity_policy.isNull());
+        return;
+    }
 
     // Model the unconfigured status that previously replaced the UI's 3/1
     // carrier preset with zeroes before the wizard was opened.
