@@ -1006,6 +1006,118 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
     return result;
 }
 
+namespace {
+struct ProviderRequestProcessingContext {
+    WalletContext& context;
+    CWallet* wallet;
+    const ProviderReadiness& readiness;
+    node::NodeContext* node;
+    bool automatic_service;
+    int64_t now;
+    std::string& error;
+};
+
+ProviderProcessingResult ProcessProviderCapacityRequest(
+    const ProviderRequestProcessingContext& request,
+    const DirectMessage& direct)
+{
+    WalletContext& context = request.context;
+    CWallet* const wallet = request.wallet;
+    const ProviderReadiness& readiness = request.readiness;
+    node::NodeContext* const node = request.node;
+    const int64_t now = request.now;
+    std::string& error = request.error;
+    ProviderProcessingResult result;
+    result.queued = false;
+    result.processed = true;
+    result.message_type = "capacity";
+    ProviderInboundMessageGuard message_guard{*context.paymaster,
+                                              direct};
+    const auto* capacity_request = std::get_if<PaymasterCapacityRequest>(
+        &direct.payload);
+    if (!capacity_request || !ValidateCapacityRequestEnvelope(
+                                 *capacity_request,
+                                 Params().GenesisBlock().GetHash(),
+                                 now, error)) {
+        if (!AcknowledgeRejectedDirectMessage(
+                *context.paymaster, direct, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        result.rejected = true;
+        result.rejection_reason = error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error;
+        return result;
+    }
+    if (wallet->IsLocked()) {
+        throw ApplicationError(ErrorKind::UNLOCK,
+                           "Provider wallet unlock is required for a capacity proof");
+    }
+    bool have_stored_response{false};
+    if (!readiness.ready && CapacityContinuationMayProceed(readiness)) {
+        // An exact retry can arrive after its own proof reserved
+        // the last slot. Do not mistake it for fresh admission.
+        LOCK(wallet->cs_wallet);
+        WalletBatch batch{wallet->GetDatabase()};
+        std::vector<unsigned char> stored_response;
+        have_stored_response = batch.ReadPaymasterCapacityResponse(
+            Hash(SerializeCapacityRequest(*capacity_request)), stored_response);
+    }
+    if (!CapacityRequestMayProceed(readiness, have_stored_response)) {
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_PROVIDER_NOT_RUNNING");
+    }
+    uint256 reference_block;
+    int tip_height{-1};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = node->chainman->ActiveChain().Tip();
+        if (tip) {
+            reference_block = tip->GetBlockHash();
+            tip_height = tip->nHeight;
+        }
+    }
+    if (reference_block.IsNull() || tip_height < 0) {
+        throw ApplicationError(ErrorKind::GENERAL,
+                           "PAYMASTER_CAPACITY_CHAINSTATE_UNAVAILABLE");
+    }
+    if (direct.canonical_netgroup.empty()) {
+        throw ApplicationError(ErrorKind::WALLET,
+                           "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
+    }
+    PaymasterCapacityProof proof;
+    std::vector<ProviderPoolEntry> reserved;
+    if (!ReserveAndBuildPaymasterCapacityProof(
+            *wallet, readiness.identity, *capacity_request,
+            Params().GenesisBlock().GetHash(), reference_block,
+            tip_height, /*minimum_confirmations=*/1,
+            direct.canonical_netgroup, now,
+            proof, reserved, error)) {
+        if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
+            error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
+            message_guard.Defer();
+            result.deferred = true;
+            result.deferral_reason = error;
+        } else {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+    } else {
+        const std::vector<unsigned char> proof_bytes =
+            SerializeCapacityProof(proof);
+        const uint256 message_id = Hash(proof_bytes);
+        const bool queued = context.paymaster->QueueCapacityProof(
+            direct.peer_id, message_id,
+            proof_bytes.size(), proof, now);
+        if (queued && node->connman) node->connman->WakeMessageHandler();
+        result.queued = queued;
+        result.provider_id = proof.provider_id;
+        result.client_nonce = proof.client_nonce;
+        result.capacity_snapshot_id = proof.snapshot_id;
+        return result;
+    }
+    return result;
+}
+
+} // namespace
+
 ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
 {
     CWallet* const wallet = &target;
@@ -1054,6 +1166,8 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     if (!node || !node->chainman) {
         throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
     }
+    const ProviderRequestProcessingContext request_context{
+        context, wallet, readiness, node, automatic_service, now, error};
 
     // A reserved operational slot intentionally makes staged pool
     // readiness false for *new* clients. The same automatic service
@@ -1066,91 +1180,9 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
                 readiness.identity.provider_id, 1);
         const auto& capacity_messages = capacity_lease.Messages();
         if (!capacity_messages.empty()) {
-            result.processed = true;
-            result.message_type = "capacity";
-            const DirectMessage& direct = capacity_messages.front();
-            ProviderInboundMessageGuard message_guard{*context.paymaster,
-                                                      direct};
-            const auto* capacity_request = std::get_if<PaymasterCapacityRequest>(
-                &direct.payload);
-            if (!capacity_request || !ValidateCapacityRequestEnvelope(
-                                         *capacity_request,
-                                         Params().GenesisBlock().GetHash(),
-                                         now, error)) {
-                if (!AcknowledgeRejectedDirectMessage(
-                        *context.paymaster, direct, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                result.rejected = true;
-                result.rejection_reason = error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error;
-                return result;
-            }
-            if (wallet->IsLocked()) {
-                throw ApplicationError(ErrorKind::UNLOCK,
-                                   "Provider wallet unlock is required for a capacity proof");
-            }
-            bool have_stored_response{false};
-            if (!readiness.ready && CapacityContinuationMayProceed(readiness)) {
-                // An exact retry can arrive after its own proof reserved
-                // the last slot. Do not mistake it for fresh admission.
-                LOCK(wallet->cs_wallet);
-                WalletBatch batch{wallet->GetDatabase()};
-                std::vector<unsigned char> stored_response;
-                have_stored_response = batch.ReadPaymasterCapacityResponse(
-                    Hash(SerializeCapacityRequest(*capacity_request)), stored_response);
-            }
-            if (!CapacityRequestMayProceed(readiness, have_stored_response)) {
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_PROVIDER_NOT_RUNNING");
-            }
-            uint256 reference_block;
-            int tip_height{-1};
-            {
-                LOCK(cs_main);
-                const CBlockIndex* tip = node->chainman->ActiveChain().Tip();
-                if (tip) {
-                    reference_block = tip->GetBlockHash();
-                    tip_height = tip->nHeight;
-                }
-            }
-            if (reference_block.IsNull() || tip_height < 0) {
-                throw ApplicationError(ErrorKind::GENERAL,
-                                   "PAYMASTER_CAPACITY_CHAINSTATE_UNAVAILABLE");
-            }
-            if (capacity_messages.front().canonical_netgroup.empty()) {
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
-            }
-            PaymasterCapacityProof proof;
-            std::vector<ProviderPoolEntry> reserved;
-            if (!ReserveAndBuildPaymasterCapacityProof(
-                    *wallet, readiness.identity, *capacity_request,
-                    Params().GenesisBlock().GetHash(), reference_block,
-                    tip_height, /*minimum_confirmations=*/1,
-                    capacity_messages.front().canonical_netgroup, now,
-                    proof, reserved, error)) {
-                if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
-                    error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
-                    message_guard.Defer();
-                    result.deferred = true;
-                    result.deferral_reason = error;
-                } else {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-            } else {
-                const std::vector<unsigned char> proof_bytes =
-                    SerializeCapacityProof(proof);
-                const uint256 message_id = Hash(proof_bytes);
-                const bool queued = context.paymaster->QueueCapacityProof(
-                    capacity_messages.front().peer_id, message_id,
-                    proof_bytes.size(), proof, now);
-                if (queued && node->connman) node->connman->WakeMessageHandler();
-                result.queued = queued;
-                result.provider_id = proof.provider_id;
-                result.client_nonce = proof.client_nonce;
-                result.capacity_snapshot_id = proof.snapshot_id;
-                return result;
-            }
+            result = ProcessProviderCapacityRequest(
+                request_context, capacity_messages.front());
+            if (!result.deferred.value_or(false)) return result;
         }
     }
 
