@@ -49,6 +49,35 @@ static constexpr CAmount MIN_DD_TRANSFER_FEE_RATE{35000000}; // 0.35 DGB/kB
 static constexpr CAmount MIN_DD_TRANSFER_FEE{10000000};       // 0.1 DGB
 static constexpr CAmount TRANSFER_BUILDER_PRICE_UNUSED{1};    // Transfers are price-independent.
 
+bool IsPendingDDTransaction(const wallet::CWallet& wallet,
+                            const wallet::CWalletTx& wtx,
+                            CAmount dd_amount) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+bool IsPendingDDTransaction(const wallet::CWallet& wallet,
+                            const wallet::CWalletTx& wtx,
+                            CAmount dd_amount)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (wallet.GetTxDepthInMainChain(wtx) != 0 || !wtx.isUnconfirmed()) return false;
+
+    // Share the pending classification without consulting Paymaster records.
+    // A local mint can lack a saved position, so inspect its payload. Missing
+    // metadata or height is not proof of expiry, and a reorg can make it valid
+    // again; this read must never discard records or release locks.
+    if (DigiDollar::GetDigiDollarTxType(*wtx.tx) == DigiDollar::DD_TX_MINT && !wtx.InMempool() &&
+        wallet.HasLastBlockHeight()) {
+        int64_t unlock_height;
+        uint32_t lock_tier;
+        if (DigiDollarWallet::ExtractUnlockHeightFromOpReturn(*wtx.tx, unlock_height) &&
+            DigiDollarWallet::ExtractTierFromOpReturn(*wtx.tx, lock_tier) &&
+            DigiDollarWallet::MintLockWindowHasPassed(WalletCollateralPosition(wtx.tx->GetHash(), dd_amount, 0,
+                lock_tier, unlock_height), wallet.GetLastBlockHeight() + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 CScript BuildDDTransferMetadataScript(const std::vector<CAmount>& amounts)
 {
     CScript metadata;
@@ -4358,7 +4387,7 @@ DigiDollarBalanceSummary DigiDollarWallet::GetDDBalanceSummary() const
         const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(outpoint.hash);
         const int depth = wtx ? m_wallet->GetTxDepthInMainChain(*wtx) : 1;
         if (depth < 1) {
-            if (depth == 0 && wtx && wtx->isUnconfirmed()) {
+            if (wtx && IsPendingDDTransaction(*m_wallet, *wtx, dd_amount)) {
                 summary.pending += dd_amount;
             }
             continue;
@@ -4398,21 +4427,7 @@ CAmount DigiDollarWallet::GetPendingDDBalance() const {
 
             LOCK(m_wallet->cs_wallet);
             const wallet::CWalletTx* wtx = m_wallet->GetWalletTx(outpoint.hash);
-            if (wtx && m_wallet->GetTxDepthInMainChain(*wtx) == 0 && wtx->isUnconfirmed()) {
-                // An expired mint cannot confirm on the current chain. Read its
-                // payload because older attempts may have no saved position.
-                // Keep the records: a reorganization can make it valid again.
-                if (DigiDollar::GetDigiDollarTxType(*wtx->tx) == DigiDollar::DD_TX_MINT && !wtx->InMempool() &&
-                    m_wallet->HasLastBlockHeight()) {
-                    int64_t unlock_height;
-                    uint32_t lock_tier;
-                    if (ExtractUnlockHeightFromOpReturn(*wtx->tx, unlock_height) &&
-                        ExtractTierFromOpReturn(*wtx->tx, lock_tier) &&
-                        MintLockWindowHasPassed(WalletCollateralPosition(outpoint.hash, dd_amount, 0,
-                            lock_tier, unlock_height), m_wallet->GetLastBlockHeight() + 1)) {
-                        continue;
-                    }
-                }
+            if (wtx && IsPendingDDTransaction(*m_wallet, *wtx, dd_amount)) {
                 pending += dd_amount;
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: GetPendingDDBalance counting unconfirmed DD UTXO %s:%u (%lld cents)\n",
                          outpoint.hash.ToString(), outpoint.n, static_cast<long long>(dd_amount));

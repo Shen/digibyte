@@ -816,6 +816,7 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
     dd_wallet.AddDDUTXO(token, 10000);
     BOOST_REQUIRE(dd_wallet.GetDDTimeLocks(false).empty());
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 10000);
     BOOST_CHECK_EQUAL(dd_wallet.GetTotalDDBalance(), 0);
 
     // The next block would leave less than the tier's full lock period.
@@ -824,6 +825,7 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
         m_wallet.SetLastBlockProcessed(760, uint256::ONE);
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 0);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 0);
     BOOST_CHECK(dd_wallet.HasDDUTXO(token));
     {
         LOCK(m_wallet.cs_wallet);
@@ -833,22 +835,26 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
     }
     // A shorter chain makes the same attempt valid again. No records were removed.
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 10000);
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.SetLastBlockProcessed(760, uint256::ONE);
         m_wallet.mapWallet.at(id).m_state = TxStateInMempool{};
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 10000);
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.mapWallet.at(id).m_state = TxStateInactive{};
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 0);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 0);
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.SetLastBlockProcessed(-1, uint256{});
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 10000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 10000);
 
     // Missing metadata is not proof of expiry. Keep that separate attempt pending.
     const auto unknown = MakeMintShapedTx(owner_key);
@@ -859,6 +865,7 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
     }
     dd_wallet.AddDDUTXO(COutPoint(unknown->GetHash(), 1), 2500);
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 2500);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 2500);
 
     // A ten-year mint must still leave ten full years from its confirmation
     // block. A distant unlock date alone does not keep the attempt valid.
@@ -873,11 +880,13 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
     }
     dd_wallet.AddDDUTXO(COutPoint(long_mint->GetHash(), 1), 10000);
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 12500);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 12500);
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.SetLastBlockProcessed(1000, uint256::ONE);
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 2500);
+    BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 2500);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

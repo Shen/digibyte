@@ -2,6 +2,18 @@
   "task_baseline": "33c680cba1",
   "official_baseline": "d7265fb05e26e1e799876bcd526225e4826c3ba8",
   "shared_changes": {
+    "src/wallet/digidollarwallet.cpp": {
+      "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance.",
+      "reused_api": "LockDDWallet, ExtractUnlockHeightFromOpReturn, ExtractTierFromOpReturn and MintLockWindowHasPassed; both balance APIs share the file-local IsPendingDDTransaction predicate under the existing wallet lock.",
+      "ordinary_callers": "Ordinary DD balance/send RPCs and Qt balance views; GetPendingDDBalance preserves its existing classification and error behavior. Paymaster CapturePreparationFunding reads summary.pending.",
+      "regressions": "Both APIs agree at heights 759/760, after height rollback, with/without mempool membership, unknown height, missing metadata and the long lock tier; ordinary DD spendability and Paymaster reservation-balance tests."
+    },
+    "src/wallet/test/digidollar_mint_cleanup_tests.cpp": {
+      "purpose": "Extend the existing pending-mint regression to enforce the same classification in the ordinary DD and Paymaster-aware balance APIs.",
+      "reused_api": "Existing pending_balance_excludes_expired_mints_without_position_records fixture and GetDDBalanceSummary; retain all GetPendingDDBalance expectations.",
+      "ordinary_callers": "Test coverage for ordinary DD pending balances and their UI/pool-funding consumers; no product interface change.",
+      "regressions": "Existing mint-cleanup fixture plus ordinary DD spendability and Paymaster reservation-balance selections."
+    },
     "src/wallet/wallet.cpp": {
       "purpose": "Drop derived Paymaster session lookups and finance page reconciliation caches when the owning wallet is destroyed; no CWallet layout or ordinary send change.",
       "reused_api": "Existing CWallet destructor and WalletDatabase ownership.",
