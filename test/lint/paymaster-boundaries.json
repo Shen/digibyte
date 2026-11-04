@@ -75,6 +75,10 @@
   ],
   "dependencies": [
     {
+      "sources": ["src/qt/walletmodel.cpp", "src/qt/walletmodel.h"],
+      "deny": ["qt/paymaster*", "paymaster/*"]
+    },
+    {
       "sources": ["src/qt/walletasync.cpp", "src/qt/walletasync.h"],
       "deny": ["qt/paymaster*", "paymaster/*", "wallet/*", "rpc/*"]
     },

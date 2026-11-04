@@ -28,6 +28,7 @@ class BoundaryTests(unittest.TestCase):
                              ('src/wallet/paymasterservice.cpp', 'qt/walletmodel.h'),
                              ('src/qt/walletasync.cpp', 'qt/paymasterasync.h'),
                              ('src/qt/walletasync.h', 'paymaster/error.h'),
+                             ('src/qt/walletmodel.cpp', 'qt/paymasterasync.h'),
                              ('src/qt/paymasterpage.cpp', 'wallet/wallet.h')]:
             with self.subTest(path=path, header=header):
                 self.assertTrue(BOUNDARIES.dependency_errors(path, f'#include "{header}"\n', POLICY))
@@ -124,6 +125,9 @@ class BoundaryTests(unittest.TestCase):
             self.assertTrue(any('forbidden dependency' in error for error in BOUNDARIES.check(root)))
             source.write_text('#include <interfaces/wallet.h>\n', encoding='utf-8')
             self.assertFalse(BOUNDARIES.check(root))
+            model = source.with_name('walletmodel.h')
+            model.write_text('#include <qt/paymasterasync.h>\n', encoding='utf-8')
+            self.assertTrue(any('forbidden dependency' in error for error in BOUNDARIES.check(root)))
 
 
 if __name__ == '__main__':

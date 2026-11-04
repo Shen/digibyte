@@ -94,6 +94,7 @@ on Paymaster, wallet implementations or RPC handlers. Paymaster adapters own
 error interpretation and explicit task policies. Shared wallet tests cover this
 bridge alongside ordinary DGB/DD behavior. Approved integration paths include
 these bridge files and `qt/test/wallettests.*`; they are not Paymaster-owned code.
+`WalletModel` depends on this generic bridge, never on Paymaster views or types.
 
 Each financial rule has one canonical implementation. Calling that implementation
 again at a different trust boundary is deliberate validation, not redundant
