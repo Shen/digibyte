@@ -7595,8 +7595,17 @@ void PaymasterWidgetTests::paymasterClientUncreatedRequestReturnsToCompose()
             }
             form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount")->setChecked(true);
             QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->text().isEmpty());
-            QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
         }
+        // Verified absence releases the request, but its old offer preview is
+        // invalidated. A new UUID requires a current offer, even if inputs did
+        // not change while recovering from the first preparation failure.
+        QVERIFY(client->m_send.view().requestId.isEmpty());
+        QVERIFY(!client->hasCurrentPaymasterOffer());
+        client->send(recipient, 325);
+        QCOMPARE(request_ids.size(), 1);
+        QCOMPARE(actions, QStringList{"refresh"});
+        QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+        QVERIFY(client->hasCurrentPaymasterOffer());
         client->send(recipient, 325);
         QCOMPARE(request_ids.size(), 2);
         if (outcome == QLatin1String("input_selection") || outcome == QLatin1String("small_change")) QVERIFY(last_subtract_fee);
@@ -8792,9 +8801,12 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     QCOMPARE(table->rowCount(), 1);
     QCOMPARE(offer_reads, 1);
 
-    client->setPaymasterSessionForTesting(
-        QStringLiteral("CONFIRMED"), QStringLiteral("final_transaction"),
-        true, recipient, 3.25, QStringLiteral("MEMPOOL"));
+    // A state label alone cannot release the durable request. Establish the
+    // same validated payment proof used by the actual completion handler,
+    // without clearing the form so both presentation states remain testable.
+    const UniValue confirmed = PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
+    QVERIFY(client->updatePaymasterSessionView(confirmed));
+    QCOMPARE(client->m_send.completion(confirmed).kind, PaymasterQt::SendController::CompletionKind::PAYMENT);
     if (already_cleared) {
         // Successful send clears the form while the durable session still
         // protects its history. Clearing it again emits no textChanged signal.
