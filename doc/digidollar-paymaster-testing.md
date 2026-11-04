@@ -19,7 +19,8 @@ results in the [release evidence](digidollar-paymaster-release-gate.md), with
 full logs and binary hashes retained as build/CI artifacts. Record:
 
 - Source commit and dirty diff, compiler/dependencies and build configuration.
-- Exact executable provenance, command, selected cases and exit status.
+- Exact executable provenance and SHA256, command, selected cases, random/port
+  seeds and exit status.
 - Failed/skipped tests and environmental limitations; keep full logs privately.
 - Whether this was a normal product build or isolated/incremental compilation.
 
@@ -35,10 +36,90 @@ actual dependency configuration. Normal build entry points are `./autogen.sh`,
 `./configure` with the required wallet/Qt options, then `make`. Do not reuse a
 sanitizer-only configuration that disables the daemon for functional tests.
 
+### Linux CI profiles and separate evidence
+
+Use the existing [CI runner](../ci/README.md) from a clean candidate checkout in
+a disposable Linux VM or Docker-capable Linux/WSL environment. Prerequisites are
+`bash`, `python3`, a running Docker daemon accessible to the operator, network
+access for the declared images/packages/dependencies, and enough memory/disk for
+full builds. Verify the host with `bash --version`, `python3 --version`,
+`docker version` and `docker info`; install missing prerequisites using the CI
+guide before starting. Keep `DANGER_RUN_CI_ON_HOST` unset. The runner installs
+packages, uses named caches and performs setup changes inside its disposable
+environment. Each profile can take tens of minutes to hours, including downloads;
+these are operator/CI jobs, separate from targeted local tests.
+
+Select one profile below, run from the repository root, and retain its complete
+console output and exit status. Repeat separately for all required profiles:
+
+```bash
+profile=native_qt5  # Also run native_tidy, native_asan and native_tsan separately.
+log="../paymaster-${profile}-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ).log"
+set -o pipefail
+env -i HOME="$HOME" PATH="$PATH" USER="$USER" MAKEJOBS="-j1" \
+    FILE_ENV="./ci/test/00_setup_env_${profile}.sh" \
+    bash ./ci/test_run_all.sh 2>&1 | tee "$log"
+ci_status=$?
+printf 'CI exit status: %s\n' "$ci_status" | tee -a "$log"
+test "$ci_status" -eq 0
+```
+
+Use the versioned profiles as the source for exact package/configuration choices;
+do not copy their package lists into another setup. Record the selected commit,
+profile, compiler version, actual language mode, configuration, test selections
+and any source patches applied by the stage.
+Preserve build/test and sanitizer logs as CI artifacts before container teardown.
+An installation or configure failure leaves the later checks unexecuted.
+
+| Evidence | Existing profile and acceptance scope |
+|---|---|
+| Linux/C++17 | [`native_qt5`](../ci/test/00_setup_env_native_qt5.sh) uses Ubuntu 20.04, GCC 9, system Qt5 and depends. `configure.ac` selects C++17 by default; verify that mode in the compiler/configure output. This profile builds Qt, runs native unit tests sequentially and runs extended functional/previous-release tests. Its sequential path does **not** execute the Qt test binary; record Qt execution separately. |
+| Tidy with repository plugin | [`native_tidy`](../ci/test/00_setup_env_native_tidy.sh) uses LLVM/Clang 17, Bear and the repository's `.clang-tidy`. Require a current compilation database, successful `digibyte-tidy` and `digibyte-tidy-tests` targets, and analysis loading `/tidy-build/libdigibyte-tidy.so`. The stage also runs IWYU; it disables unit/functional/fuzz execution. An unavailable plugin or a parser/configuration error is not a clean analysis result. |
+| ASan/UBSan with Qt | [`native_asan`](../ci/test/00_setup_env_native_asan.sh) uses Clang 17, Qt5 and **C++20**, with address, float-divide-by-zero, integer and undefined sanitizers. Its `make check` includes the Qt test target when enabled; require the actual Qt log, plus the native and functional results. The local container profile requests `SYS_PTRACE` for sanitizer operation. This run does not establish C++17 compatibility. |
+| Thread sanitizer | [`native_tsan`](../ci/test/00_setup_env_native_tsan.sh) uses Clang 17/libc++, depends and `--with-sanitizers=thread`, separately from ASan. Require completed native/Qt/functional selections and inspect the TSAN output directory; a build alone is not concurrency evidence. |
+
+The [stage script](../ci/test/06_script_b.sh) supplies sanitizer options and the
+versioned suppression files. Keep them in the evidence; do not add suppressions,
+disable checks or reinterpret a nonzero stage result to obtain a pass. A filtered
+Tidy console excerpt does not replace the tool's exit status and complete
+diagnostics. The [Paymaster Security workflow](../.github/workflows/paymaster-security.yml)
+has separate headless sanitizer-unit/fuzz jobs with GUI and daemon disabled;
+those jobs do not satisfy the ASan/Qt or functional requirements above.
+
+Inside the configured Tidy environment, verify the loaded check explicitly:
+
+```bash
+clang-tidy-17 --load=/tidy-build/libdigibyte-tidy.so \
+    --checks='-*,digibyte-unterminated-logprintf' --list-checks
+```
+
+The output must include `digibyte-unterminated-logprintf`. Use the real build's
+compilation database; previous MSVC/STL parser diagnostics need reassessment
+under that supported configuration, not new blanket suppressions.
+
+For separate Qt execution from a successfully configured Linux build directory,
+use its freshly built binary and the [selection rules below](#unit-and-qt-selection).
+For an instrumented build retain that profile's sanitizer environment and
+suppression paths. This example runs the complete Paymaster suite with the Linux
+headless platform; native-display and ordinary-wallet Qt checks remain separate:
+
+```bash
+env -u DIGIBYTE_QT_TEST_FUNCTION -u DIGIBYTE_QT_TEST_OUTPUT \
+    QT_QPA_PLATFORM=minimal QT_STYLE_OVERRIDE=Fusion \
+    DIGIBYTE_QT_TEST_SUITE=PaymasterWidgetTests \
+    ./src/qt/test/test_digibyte-qt
+```
+
+Require exit zero, no failed cases and an explanation for skips. Clear the suite
+filter as well when recording a complete Qt run. Keep every profile's result
+separate; Windows/MSVC results do not replace Linux/C++17, Tidy-plugin or
+sanitizer execution.
+
 ### Windows build from PowerShell
 
 Follow the [MSVC prerequisites](../build_msvc/README.md), including the static
-Qt build/patch and vcpkg dependencies. Run from the repository root. Stop
+Qt build/patch and vcpkg dependencies. Run from the repository root of a fresh
+checkout of the candidate commit. Stop
 processes using the executables that will be replaced. A normal build can take
 minutes to hours depending on how much is already built; use its exit code and
 final error summary, not the existence of an old executable, as the result.
@@ -50,8 +131,8 @@ vcpkg installed root (the directory containing `x64-windows-static/lib`). A
 nested local vcpkg layout may require a different root than this example.
 
 ```powershell
-$qtBase = 'C:/Qt_static'
-$vcpkgInstalledDir = 'C:/dev/digibyte/build_msvc/vcpkg_installed/'
+$qtBase = 'D:/QT51510/install'
+$vcpkgInstalledDir = 'D:/Digibyte/digibyte-fork/build_msvc/vcpkg_installed/x64-windows-static/'
 ```
 
 Then run this block in the same PowerShell. It assumes dependencies already
@@ -72,12 +153,18 @@ if ($LASTEXITCODE -ne 0) { throw 'Project generation failed' }
 $buildArgs = @(
     './build_msvc/digibyte.sln', '/t:Rebuild',
     '/p:Configuration=Release', '/p:Platform=x64',
+    '/p:PlatformToolset=v143', '/p:VCToolsVersion=14.43.34808',
     "/p:QtBaseDir=$qtBase", "/p:VcpkgInstalledDir=$vcpkgInstalledDir",
     '/p:VcpkgManifestInstall=false', '/m:1', '/verbosity:minimal'
 )
 & $msbuildPath @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 ```
+
+These paths identify the locally verified static Qt 5.15.10 and nested vcpkg
+installation; the candidate Windows profile uses v143/MSVC 14.43.34808. The
+fresh source checkout may reuse those dependencies. Verify the requested toolset
+is installed before running; do not silently substitute another version.
 
 If dependencies are absent, complete the normal prerequisite installation first;
 do not treat this block as a toolchain installer. Preserve the project's selected
@@ -106,8 +193,8 @@ The prefix includes split wallet suites. Windows equivalent:
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 ```
 
-For the inbound-message and pending-balance corrections, use the freshly built
-test executable from the repository root. This focused selection normally takes
+For inbound classification, persisted client state and pending-balance regressions,
+use the freshly built test executable from the repository root. This focused selection normally takes
 seconds to a few minutes; success requires exit zero and no failed or unexpectedly
 skipped selected cases:
 
@@ -116,20 +203,34 @@ $focusedCases = @(
     'paymaster_recovery_tests',
     'paymaster_wallet_identity_tests/unknown_recovery_submit_is_consumed_before_normal_work,stale_submit_is_consumed_without_faulting_provider,automatic_submit_defers_before_wallet_or_index_wait',
     'paymaster_wallet_security_tests/normal_submit_classifies_peer_payload_and_local_authority,provider_recovery_pre_signature_firewall_reloads_pool_and_budget,expired_unsigned_provider_history_is_compacted_atomically,quote_prevout_lookup_failure_preserves_local_authority',
+    'paymaster_wallet_security_tests/quote_request_*,expired_quote_retry_is_consumed,identical_quote_retry_reuses_signed_response,automatic_quote_rejection_allows_following_work',
+    'paymaster_wallet_security_tests/client_recovery_read_failure_stops_new_preparation,provider_recovery_read_failure_retains_request_and_replay',
+    'paymaster_wallet_store_tests/client_view_*,client_recovery_status_getter_preserves_absence_and_bool_compatibility,client_result_status_getter_preserves_absence_and_bool_compatibility,client_result_read_failure_retains_incoming_message,confirmed_client_payment_bypasses_prior_result_read,final_result_read_failure_does_not_sign_replacement',
     'digidollar_mint_cleanup_tests/pending_balance_excludes_expired_mints_without_position_records',
     'digidollar_wave17_spendability_tests',
     'paymaster_wallet_identity_tests/paymaster_dd_reservations_are_owned_but_not_spendable,unreadable_paymaster_locks_fail_closed_for_coin_selection,paymaster_input_scan_reuses_pool_without_cross_scan_cache'
 )
 & ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($focusedCases -join ':')" --report_level=detailed
-if ($LASTEXITCODE -ne 0) { throw 'Inbound and pending-balance regressions failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Inbound, persisted-state or pending-balance regressions failed' }
 ```
 
-Then run `wallet_paymaster_reorg.py` using the [functional runner](#functional-selection)
-with freshly built daemon and CLI binaries. It must reject the unrelated recovery
-and finish the real payment/reorganization sequence with RPC contract checking
-enabled. A failure during fixture setup is not a pass for that regression.
+The quote cases distinguish consumed peer conflicts/expired retries from unreadable
+local authority, and preserve exact signed replay and subsequent automatic work.
+The client-view cases exercise the list and resolve RPCs as well as native reads:
+missing records remain distinct from corruption or unsupported versions. Result
+processing must retain incoming messages until prior state is readable, while
+already confirmed payments retain their existing reconciliation path. Recovery
+tests check both the read-error stop and the existing absence/continuation guards;
+they do not replace the complete recovery-payment scenarios.
 
-The missing targeted Python check can be run in an unused workspace environment
+Then run `wallet_paymaster_reorg.py` using the [functional runner](#functional-selection)
+with freshly built daemon and CLI binaries. It must consume a conflicting quote
+request and reject the unrelated recovery over authenticated v2 channels, preserve
+the original financial state, and finish the real payment/reorganization sequence
+without duplicate finance events, with RPC contract checking enabled. A failure
+during fixture setup is not a pass for that regression.
+
+The targeted Python check can be run in an unused workspace environment
 with the repository CI's flake8 version
 (`ci/lint/04_install.sh`); this needs package-download access and normally takes
 minutes. Do not overwrite an existing environment:
@@ -163,9 +264,22 @@ operator check; isolated links are not clean product-build evidence.
 
 Qt uses `DIGIBYTE_QT_TEST_SUITE` and optional `DIGIBYTE_QT_TEST_FUNCTION`
 filters implemented by `src/qt/test/test_main.cpp`. Select `PaymasterWidgetTests`
-and relevant `DigiDollarWidgetTests` cases from the current fixture. Clear filters
-before claiming a complete Qt run. A targeted result including init/cleanup
-is not that many independent feature cases.
+and relevant `DigiDollarWidgetTests` cases from the current fixture. For the
+manual Activity result contract, select
+`paymasterManualActivityUsesExpectedRpcAndReadableStates`: native result
+serialization, deferred/local-rejection/signed-result states, optional delivery
+status, malformed or contradictory fields and literal diagnostic text. Both
+request processing and explicitly confirmed submit processing issue one processing
+RPC and the existing status read; formatting must not introduce another mutation.
+The [operator state table](digidollar-paymaster-operator.md#manual-activity-results)
+defines the displayed meaning. Clear filters before claiming a complete Qt run.
+A targeted result including init/cleanup is not that many independent feature cases.
+
+For the private setup/send extractions, retain the existing setup-boundary,
+failed-step retry, one-approval restore, capital-task, layout/theme and sender
+authorization/cancellation/lost-reply selections. Setup-boundary rows also
+remove and rebind a wallet while the wizard is open or its preview is pending;
+neither the old dialog nor its callback may authorize work for the new binding.
 
 Direct mint/send fixtures must await the model's asynchronous DGB balance cache
 with `DigiDollarTest::SyncDGBBalance`; one `pollBalanceChanged()` call is not a
@@ -234,7 +348,8 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Nonfinancial diagnostics | Transport `diagnostic_*`; `rpc_paymaster_endpoint.py` tests TCP/SOCKS5 isolation and no authentication; Qt `paymasterDiagnosticCommands`, `paymasterDiagnosticRefreshAndPrivacy`, `paymasterNodeConnectionEditor`. Local proxy coverage is not public Tor evidence. |
 | Selection, fee/privacy limits and failover | Client comparator cycle permutations/strict-order properties; directory/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
 | Exact authorization and same-ID retry | Wallet service/store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion. |
-| Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` rejects an unknown recovery on an authenticated local channel, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment. |
+| Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote classification fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` consumes a conflicting quote request and rejects an unknown recovery over authenticated v2 channels, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment without duplicate finance events. |
+| Persisted read errors and action gating | Store `client_view_*`, status-getter and result-read cases cover corrupt/future records, dangling recovery indexes, full result binding/signature checks, structured list/resolve errors, retained result messages and unchanged protected state. Security recovery-read cases reach the application operations through their normal readiness gates. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
 | Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |

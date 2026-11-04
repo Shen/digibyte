@@ -317,6 +317,25 @@ visible until expiry and become unavailable sooner. Exact offers reserve
 capacity; listings do not. An open offer is not a completed payment. Activity
 counters overlap stages and must not be summed into a payment count.
 
+### Manual Activity results
+
+In manual mode, **Activity** reports the outcome of the selected processing call.
+Inspect its technical result when the outcome is unclear; the status refresh is
+a separate observation and does not repeat that processing operation.
+
+| Result | Meaning and next check |
+|---|---|
+| Deferred (`deferred=true`) | The work remains waiting within its original expiry. Inspect `deferral_reason` and the current prerequisite or limit. |
+| Locally rejected (`rejected=true`) | The incoming message was discarded locally. `rejection_reason` explains the decision; it does not describe a signed provider response. |
+| Signed rejection detail (`rejection_code`) | Keep this provider outcome separate from the local discard reason and inspect the accompanying result status. |
+| Nothing processed (`processed=false`) | This call processed no matching work; it does not prove that every queue is empty. |
+| Response delivery (`queued`) | `true` means queued for delivery, not delivered or confirmed. `false` means not queued; an absent value means delivery status was not reported. |
+| Unexpected result | Missing/malformed required fields or contradictory state flags cannot establish success or an empty queue. Inspect the unchanged technical JSON. |
+
+The summary distinguishes capacity checks, quote requests, recovery requests and
+submitted payments. Diagnostic text is displayed literally. A transaction ID or
+queued response still requires the existing chain-confirmation checks.
+
 ## Diagnosis
 
 | Observation | Interpretation and next check |

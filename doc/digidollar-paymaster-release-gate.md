@@ -4,104 +4,83 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
-## Inbound and pending-balance corrections (2026-11-04)
+## Current review corrections and extraction candidate
 
-Starting source: `7f30be59f7e01fe4032f51f967e864d616dcee12`.
-The separately reviewed, explicitly authorized two-path policy extension is
-`856e914e27`; F2 is `b996d79fd3`, F1's shared validation/status preparation is
-`06bf97bcc3`, and its processing/regressions are `462c8587ec`. The separately
-authorized `finance_summary.revision` RPC-description correction is `6da38cc604`;
-the separately authorized `observed_at` output correction is `ef213fb746`.
-The original task/official baselines in the change record remain unchanged.
+Starting source: `98c717f738e765cf1dbbbb94ed95afbda118b382`.
+Code candidate checked on 2026-11-04: `f28c2dcdc041d27d9799cf9da93da5b346b685e0`.
+The task and official comparison bases
+remain those in the [change record](design/paymaster-change-record.json).
 
-Targeted builds used MSVC 14.43.34808 x64, `/Od /MT /WX /std:c++20` and Windows
-SDK 10.0.26100.0. Modified C++ translation units and their tests were freshly
-compiled and isolated executables linked with existing dependencies. These were
-not clean product builds. Exact commands, source/header/object/executable hashes,
-exit codes and full logs are in `.ai/paymaster-correctness-494778a2fe72/verification.json`
-and its provenance files; F2's separate red/green evidence is in
-`.ai/paymaster-f2-verify-7c10c4a48681/verification.json`.
+Changed translation units and tests were freshly compiled with MSVC 14.43.34808 x64
+and `/Od /MT /WX /std:c++20`; Qt checks used static Qt 5.15.10, Windows/Fusion.
+Executables were isolated links with reused objects/libraries, not clean product
+builds. Exact selections, source diffs, response files, executable provenance,
+exit codes and full logs are retained under `.ai/paymaster-implementation-98c717f7/`.
+Failed baseline/fixture attempts remain separate from successful runs.
+`source-freeze-f28c2dcdc0.json` verifies the committed source against those
+compile/run manifests. Unchanged dependency libraries and header dependencies
+are not a complete clean-build provenance chain. Native/Qt runs from O2 onward
+record the fixed `RANDOM_CTX_SEED` in their JSON; earlier runs did not explicitly
+set that seed. Initial R1 runs hit a Windows long-temporary-path failure also
+reproduced with the unchanged executable; subsequent runs use a short test path.
 
-| Executed check | Actual result |
+| Executed check | Bounded result |
 |---|---|
-| F1 new queue regression against baseline product objects | Expected failure, exit 201: the unknown recovery remained a throwing error instead of the required local rejection. The final manual/automatic case passes. |
-| F2 fresh baseline product TU plus new assertions | Expected failure, exit 201: five Summary expectations fail. With the corrected TU, all 30 assertions pass; ordinary DD spendability and reservation-balance selections also pass. |
-| Final independent native selection | Exit 0: 113 cases / 3,298 assertions, including protocol, PSBT, wire/leases, recovery, queue handling, F2 and selected persistence regressions. |
-| Final corruption/pruning classification; quote lookup; checkpoint/quote persistence | Three disjoint runs, all exit 0: 3 cases / 454 assertions; 1 / 31; 4 / 153. Together with the preceding row: 121 distinct cases / 3,936 assertions. |
-| Boundary checks | Five positive/negative fixtures passed. Committed code candidate `ef213fb746` passed against local policy base `856e914e27`; this is not evidence of remote owner merge or hosting protections. |
-| Focused `wallet_paymaster_reorg.py`, RPC checks enabled | Exit 0 in `functional-reorg-4.log` (45.406 seconds): rejection, unchanged balances/pools/budgets, genuine USER_PAID payment, block inclusion, reorganization and reconfirmation without duplicate accounting. Uses `digibyted-observation.exe`, SHA256 `8145cc5c0064d349a529833637ba903de0777a4eddb54ac6222d76c88904cbdf`; seven modified product TUs were freshly compiled. Exact CLI/test hashes and command are in `functional-reorg-4.json`. |
-| Python/static checks | Functional source parses; `git diff --check` passed. `flake8` is not installed, so its check was not run. |
+| Quote conflict/retry correction (R1) and saved-quote signature follow-up | Regressions fail against the preceding product and pass after correction: initial selection 7 cases / 550 assertions; signature/identity follow-up 9 / 700. Logs: `r1-baseline-test-shorttmp`, `r1-fixed-test`, `r1-followup-{baseline,fixed}-test`. These selections overlap. |
+| Persisted client reads and action gating (R2) | Baseline list/resolve/view regressions fail; corrected getter, view, confirmed-payment and application selection passes 14 cases / 597 assertions (`r2-{baseline,fixed}-test`). Corrupt/future state is not treated as absence. |
+| Manual Activity presentation (R3) | The existing Qt function fails on deferred-result presentation before correction, then passes with native result serialization and malformed/conflicting-result coverage (`r3-{baseline,fixed}-test`). One feature function; init/cleanup are not extra cases. |
+| Related status fallbacks (O2) | Baseline regressions fail; corrected recovery/result selection passes 13 cases / 1,033 assertions (`o2-{baseline,fixed}-test`). The retained-message and stored-replay fixtures do not establish a complete fresh recovery payment. |
+| Client/provider phase extraction (O3/O4) | Client capacity and quote stages each pass the same 8 cases / 414 assertions. Provider capacity, recovery and quote stages each pass the same 15 / 994. Logs: `o3-{capacity,quote}-test`, `o4-{capacity,recovery,quote}-test`; repeated stages are not additional coverage. |
+| Setup extraction and separate guided-task correction (O5) | Five setup-boundary rows, theme and layout selections pass, including wallet removal during an open wizard/pending preview. A separate local-error baseline still fails after correcting RPC mocks to the real structured format; its fix passes 34 capital-task rows, 13 restoration rows and one structured-error function. Logs: `o5-switch-test`, `o5-layout`, `o5-paymasterGuidedSetupRendersConsistentTheme`, `qt-local-error-*`. Counts exclude init/cleanup. |
+| Authenticated conflict/payment/reorg scenario (O1) | `pm98-reorg1` exits zero: conflicting request ID over authenticated v2 transport is consumed, an unrelated recovery is rejected, and the genuine payment is included, reorganized and reconfirmed without duplicate accounting. Binary/source details are in `pm98-reorg1-binaries.json` and its run record. This is the recorded intermediate candidate, not the final-source rerun. |
 
-The 27-case F2-only pass overlaps the final independent selection and is not
-additional coverage. The first native attempts exposed fixture mistakes (empty
-runtime wallet name, semantic inbox replay across independent cases and a zero
-addnode semaphore during teardown); these were corrected without relaxing
-assertions or product guards. Their failed/aborted logs remain separate. The
-first functional attempt exposed the separately corrected finance RPC contract;
-the second used the wrong connection-type predicate for the inbound listener.
-The third completed rejection/payment but failed on the pre-existing missing
-`observed_at` field. The fourth passes after the separately approved correction;
-neither RPC contract checking nor any original reorg assertion was disabled.
-`source-freeze-ef213fb7.json` verifies that the committed product and functional
-test sources match the successful compile/run manifests.
+The closing checks below use source matching the code candidate. Their native
+selections are disjoint; all selected tests passed. Unselected native tests are
+reported as skipped by Boost and are not counted as coverage.
 
-The recovery classification fixture uses authenticated synthetic records; it
-does not establish successful fresh recovery signing. It does verify retained
-messages, exact stored-final replay after repair and unchanged database/checkpoint
-bytes. Full native/functional/Qt/platform/sanitizer and operational gates below
-remain operator work using the [runbook](digidollar-paymaster-testing.md). No
-release certification follows from these targeted results.
-
-## Wallet safety candidate (2026-11-04)
-
-Source: working-tree corrections based on `b3b26ccbda5a`. Five changed C++
-translation units, including both test files, compiled with the existing MSVC
-14.43 x64 Release configuration and linked against existing objects/libraries.
-This was not a clean product build. Local artifacts, source hashes, exact commands
-and per-selection executable hashes are under `.ai/paymaster-wallet-safety-74ee9bccf034/`.
-
-| Executed selection | Result |
+| Final-source verification | Actual result |
 |---|---|
-| Manual-lock cancellation/pruning, corrupt/versioned reservations, actual reload, deterministic tip invalidation/replacement, complete application and wallet-load suites | 18 cases / 449 assertions passed. |
-| Selected PSBT/signature, transaction, reservation, recovery, admission, transport, database and ordinary DGB/DD wallet regressions | 72 cases / 4,012 assertions passed. |
+| Native selections | Exit 0: 15 cases / 994 assertions in `o4-quote-test`, plus 29 / 2,114 in `final-native-complement`; 44 distinct cases / 3,108 assertions, including three ordinary DB cursor cases. Executable: `o4-quote.exe`. |
+| Qt selections | Exit 0: six sender functions (`o6-*`, including 17 live-send and 19 cancellation rows), manual Activity, six manual-submit confirmation rows, and four ordinary `WalletTests` functions (`final-*`). Twelve functions, with init/cleanup excluded. Executable: `o6-send.exe`. Existing layout/property and QSignalSpy warnings remain in logs; these are not warning-free/full-suite claims. |
+| Functional selection | Exit 0 in `pm98-reorg2.log`, 24.36 seconds: real v2 conflict, subsequent payment, reorg and reconfirmation; RPC contract checking retained. Seed `2563184631`, port seed `267`. `final-daemon.exe` was freshly relinked; the existing CLI was reused. Exact test/CLI hashes are in `pm98-reorg2-binaries.json`. |
+| Boundary checks and comparison bases | Code candidate passes the pinned `98c717f7` checker/policy and five extracted fixtures. The `33c680cba1` comparison rejects historical control changes and shared files outside its older policy; the official `d7265fb05e26e1e799876bcd526225e4826c3ba8` base rejects missing policy/bootstrap. Evidence and separate diffs are under `.ai/ap5/runs/f28c2dcdc041d27d9799cf9da93da5b346b685e0/`. Neither historical rejection is converted into a pass. |
 
-These selections are disjoint and use `tests.exe` with SHA256
-`9c7197b67cd67de8fa1b5c6aee7b86d9fe8f61bbbc9b95323d21b635a51396a9`.
-The complete store suite, clean builds, functional/Qt matrices and remaining
-candidate gates below remain open. Operator commands use the runbook and the
-local `operator-checks.ps1`; no operator stage was run by the agent.
+Executable SHA256 fingerprints:
 
-## Optimization candidate (2026-11-04)
-
-The review-fix series starts at `33c680cba1`; comparison bases and required
-Core-change reasons are in the [change record](design/paymaster-change-record.json).
-Local checks use MSVC 14.43 Release flags, static Qt 5.15.10 and isolated links
-against existing dependencies, not a clean product build.
-Local artifacts are under `build_msvc/paymaster-optimization-check/`; exact
-selections, output paths and executable hashes are in `verified-checks.json` there.
-
-| Source / executable | Executed selection and result |
+| Executable | SHA256 |
 |---|---|
-| `6ad3fa7242`, `tests-6ad3fa7242.exe` | 21 cases / 8,673 assertions passed: native service/RPC contracts, finance migration/pagination/incremental work, actual finance RPC backlog, commit failure/restore, background wallet/scheduler isolation, session views, cancellation and stale submits. |
-| Same native executable, `db_tests/*` | Seven ordinary database cases / 935 assertions passed, including prefix and bounded range cursors on the available backends. |
-| `24172ca820`, `tests.exe`, `paymaster_wallet_finance_tests/*` | Six cases / 8,353 assertions passed again after placing timing inside the wallet lock. These overlap the native selection above. |
-| `4c8c60d00c`, `qt-tests.exe`, Windows/Fusion | 32 functions passed: 13 provider and 19 sender/controller/queue functions, including finance read retries, exact confirmations, lost replies, cancellation, recovery and shutdown. The prior executable was replaced by the following relink; its hash and results remain recorded. |
-| `75d9351e46`, relinked `qt-tests.exe`, Windows/Fusion | Eleven functions passed: two sender fixtures strengthened to require fresh offers and validated completion, plus nine ordinary wallet/DD queue, balance, validation and view-lifetime regressions. Together the Qt selections cover 43 distinct functions. |
-| `75d9351e46`, local architecture checks | Five positive/negative boundary fixtures passed; committed dependency, path, Core-record and cycle checks passed against policy base `d298087a9a`. This is local evidence, not server approval of the separately committed controls. |
+| `o4-quote.exe` | `6b0c2103eeaa8b313281ae775739121cafddd1a925660c090bb4e9c53db2c091` |
+| `o6-send.exe` | `6c8225c9efecfff6595bcc6b664b95c7312fb6c969d5d03b88e63d96c50d71a7` |
+| `final-daemon.exe` | `9c6258233423397e884fdf2368492e62f75757eda37c285048ccbf3078d067b8` |
 
-The native selection covers 100, 1,000 and 8,192 sessions plus 100,000 finance
-events. Unchanged warm finance reads scanned no history; one transaction at the
-three session sizes used one bounded index query. These are operation-count
-checks with local timing, not production throughput measurements. After a failed
-commit the ahead checkpoint remains binding: tests require explicit restore
-quarantine before observation-only reconciliation, without restoring signing
-permission. No consensus, PoW, activation or signed-format change is introduced.
+Do not sum overlapping selections or infer a protocol/compatibility pass from
+source searches. Protocol-definition/diff review and executed behavioral tests
+are separate evidence. The earlier potential `_Rep` leak diagnostic remains
+unresolved; successful targeted assertions neither confirm nor disprove it.
+Functional Python syntax and whitespace checks passed. `flake8` was unavailable;
+the workspace-only installation attempt failed, so no flake8 pass is claimed.
 
-Open: the complete build, functional, Qt, ordinary DGB/DD, sanitizer and platform
-gates below. Server-side required statuses and bypass protection are not configured
-or verified; owner-reviewed installation of the
-[boundary controls](design/paymaster-integration-boundaries.md#enforcement-and-trusted-policy-bootstrap)
-is required. Commands are in the [test runbook](digidollar-paymaster-testing.md).
+The local Qt test compile uses `/bigobj`. The proposed normal MSVC project change
+is **not approved or applied**; the normal project rebuild prerequisite remains
+open. Its bounded patch is retained at
+`.ai/paymaster-implementation-98c717f7/r3-msvc-bigobj/project-and-record.patch`;
+the trusted policy was not expanded. Complete Windows/Linux product builds,
+Linux/C++17, Tidy with the repository
+plugin, sanitizer runs and the release gates below remain operator work using
+the [runbook](digidollar-paymaster-testing.md). These isolated results do not
+establish those checks.
+
+The operator-selected hosting target is `Shen/digibyte`, branch
+`integration/paymaster-v9.26.7`. The boundary checker, policy, fixture tests and
+workflow exist locally at `98c717f7`; their extracted hashes and comparison
+runner are retained under `.ai/ap5/`. Remote owner approval, mandatory status
+checks, bypass protection and the actual PR base have **not been verified**.
+Local controls and local check results are not evidence of their installation or
+enforcement on that hosting target.
+Final boundary/integration acceptance therefore remains open, as requested by
+the operator. If a PR exists, its verified base SHA must replace the locally
+selected pre-correction base for the final hosting check. The full-fork MSVC
+`int128` adaptation remains subject to its separate platform/equivalence proof.
 
 ## Required candidate gates
 
@@ -132,6 +111,9 @@ are not reconstructed from the test counts.
 
 | Source / date | Retained evidence | Scope or limitation |
 |---|---|---|
+| `7f30be59f7` through `ef213fb746`, 2026-11-04 | Inbound/pending-balance corrections: red/green regressions, 121 distinct selected native cases / 3,936 assertions, focused payment/reorg and local boundary checks passed. | Isolated MSVC links; overlapping F2 reruns excluded. Detailed provenance and limitations remain in this file at `98c717f7`. |
+| Corrections based on `b3b26ccbda5a`, 2026-11-04 | Wallet safety: 18 cases / 449 assertions and a separate 72 / 4,012 selection passed, covering lock ownership, readiness, reload and selected ordinary-wallet paths. | Recorded working-tree corrections and isolated links; no complete store suite or clean product build. Details remain at `98c717f7`. |
+| `6ad3fa7242` through `75d9351e46`, 2026-11-04 | Optimization: 21 native cases / 8,673 assertions, seven ordinary DB cases / 935 assertions, 43 selected Qt functions and local boundary checks passed. | Finance reruns overlap; operation-count tests are not throughput evidence. Isolated links and no remote control approval; details remain at `98c717f7`. |
 | `33c680cba1`, 2026-11-04 | Prior optimization: targeted identity, selection/index, finance and security checks plus selected Qt workflows passed; four boundary fixtures passed. | Earlier source and isolated links; detailed evidence remains in that revision of this file. |
 | `1789c803be`, 2026-09-27 | 284 selected unit cases / 10,767 assertions; nine functional tests. | Older RC2 branch. |
 | `e5cfa2da3e`, 2026-10-06 | Twelve translation units; 26 selected Core/Qt cases. | No normal product link or functional run. |
@@ -165,6 +147,7 @@ The full earlier evidence, seeds, failure reproductions and former acceptance-ID
 mapping remain in Git:
 
 ```sh
+git show 98c717f7:doc/digidollar-paymaster-release-gate.md
 git show 5ddc3e268e:doc/digidollar-paymaster-release-gate.md
 git show e7c2c8c4bd:doc/paymaster-threat-model.md
 ```

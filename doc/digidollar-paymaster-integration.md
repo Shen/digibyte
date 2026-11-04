@@ -152,7 +152,7 @@ recovery confirmation cannot be substituted for recipient-payment evidence.
 | `getpaymasterclientinfo` | Local capability/readiness snapshot; no provider traffic, finance reconciliation, reservation, signature or index wait. |
 | `getpaymasteroffers` | Local directory preview; no reservation, authorization or availability guarantee. |
 | `getdigidollarsendsession {"request_id":"..."}` | Read the existing order; `session_id` can also identify it. |
-| `listdigidollarsendsessions` | Bounded pages; follow the cursor, use `active_only=false` for completed history. |
+| `listdigidollarsendsessions` | Bounded pages; follow the cursor, use `active_only=false` for completed history. A failed session view rejects the whole page; no partial successful list is returned. |
 | `resolvepaymastersession` | Follow `allowed_actions`. `refresh` can persist received evidence, but grants no new payment authority. Other actions can mutate, communicate or sign. |
 
 High-level send/session responses include `status`, `final`,
@@ -242,3 +242,17 @@ it does not override an already observed persistent session. A caller must
 retain an ambiguous request ID until a current authoritative read resolves it.
 Some legacy adapters still return only `code` and `message`; the same conservative
 fallback applies.
+
+For `listdigidollarsendsessions` and `resolvepaymastersession`, an unreadable
+recovery or provider result produces wallet error `-4` with disposition `reconcile`:
+`PAYMASTER_RECOVERY_DATABASE_READ`, `PAYMASTER_RESULT_DATABASE_READ`, or
+`PAYMASTER_UNSUPPORTED_PERSISTED_VERSION`. These errors do not assert
+`session_absent=true`. A recovery index whose target is missing is a read error,
+not evidence that no recovery exists. Only verified absence permits the ordinary
+missing-artifact view; errors must not become `recovery: null`, `result_status: null`
+or permission to retry the original payment.
+
+After such an error, invalidate cached permitted actions while retaining the order
+identity and financial evidence. A failed list refresh does not remove known
+orders. Obtain a successful authoritative view before attempting another action;
+the session-only `getdigidollarsendsession` response is not an action capability.
