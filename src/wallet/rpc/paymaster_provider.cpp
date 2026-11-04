@@ -1451,6 +1451,7 @@ RPCHelpMan getpaymasterinfo()
                                                                             {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
                                                                             {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
                                                                             {RPCResult::Type::BOOL, "history_partially_reconstructable", "Whether older exact history is unavailable"},
+                                                                            {RPCResult::Type::NUM, "revision", "Accounting revision of this summary"},
                                                                         }},
                                                                         {RPCResult::Type::STR_HEX, "provider_id", /*optional=*/true, "Provider identity"},
                                                                         {RPCResult::Type::STR, "endpoint", /*optional=*/true, "Published provider endpoint"},
