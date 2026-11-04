@@ -158,12 +158,16 @@ class BerkeleyCursor : public DatabaseCursor
 private:
     Dbc* m_cursor;
     std::vector<std::byte> m_key_prefix;
+    std::vector<std::byte> m_range_start;
+    std::vector<std::byte> m_range_end;
     bool m_first{true};
 
 public:
     // Constructor for cursor for records matching the prefix
     // To match all records, an empty prefix may be provided.
-    explicit BerkeleyCursor(BerkeleyDatabase& database, const BerkeleyBatch& batch, Span<const std::byte> prefix = {});
+    explicit BerkeleyCursor(BerkeleyDatabase& database, const BerkeleyBatch& batch,
+                            Span<const std::byte> prefix = {}, Span<const std::byte> begin = {},
+                            Span<const std::byte> end = {});
     ~BerkeleyCursor() override;
 
     Status Next(DataStream& key, DataStream& value) override;
@@ -201,6 +205,7 @@ public:
 
     std::unique_ptr<DatabaseCursor> GetNewCursor() override;
     std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override;
+    std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override;
     bool TxnBegin() override;
     bool TxnCommit() override;
     bool TxnAbort() override;

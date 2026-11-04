@@ -706,8 +706,12 @@ void BerkeleyDatabase::ReloadDbEnv()
     env->ReloadDbEnv();
 }
 
-BerkeleyCursor::BerkeleyCursor(BerkeleyDatabase& database, const BerkeleyBatch& batch, Span<const std::byte> prefix)
-    : m_key_prefix(prefix.begin(), prefix.end())
+BerkeleyCursor::BerkeleyCursor(BerkeleyDatabase& database, const BerkeleyBatch& batch,
+                                Span<const std::byte> prefix, Span<const std::byte> begin,
+                                Span<const std::byte> end)
+    : m_key_prefix(prefix.begin(), prefix.end()),
+      m_range_start(begin.empty() ? m_key_prefix : std::vector<std::byte>{begin.begin(), begin.end()}),
+      m_range_end(end.begin(), end.end())
 {
     if (!database.m_db.get()) {
         throw std::runtime_error(STR_INTERNAL_BUG("BerkeleyDatabase does not exist"));
@@ -724,10 +728,10 @@ DatabaseCursor::Status BerkeleyCursor::Next(DataStream& ssKey, DataStream& ssVal
 {
     if (m_cursor == nullptr) return Status::FAIL;
     // Read at cursor
-    SafeDbt datKey(m_key_prefix.data(), m_key_prefix.size());
+    SafeDbt datKey(m_range_start.data(), m_range_start.size());
     SafeDbt datValue;
     int ret = -1;
-    if (m_first && !m_key_prefix.empty()) {
+    if (m_first && !m_range_start.empty()) {
         ret = m_cursor->get(datKey, datValue, DB_SET_RANGE);
     } else {
         ret = m_cursor->get(datKey, datValue, DB_NEXT);
@@ -741,6 +745,10 @@ DatabaseCursor::Status BerkeleyCursor::Next(DataStream& ssKey, DataStream& ssVal
     }
 
     Span<const std::byte> raw_key = SpanFromDbt(datKey);
+    if (!m_range_end.empty() && !std::lexicographical_compare(
+            raw_key.begin(), raw_key.end(), m_range_end.begin(), m_range_end.end())) {
+        return Status::DONE;
+    }
     if (!m_key_prefix.empty() && std::mismatch(raw_key.begin(), raw_key.end(), m_key_prefix.begin(), m_key_prefix.end()).second != m_key_prefix.end()) {
         return Status::DONE;
     }
@@ -770,6 +778,13 @@ std::unique_ptr<DatabaseCursor> BerkeleyBatch::GetNewPrefixCursor(Span<const std
 {
     if (!pdb) return nullptr;
     return std::make_unique<BerkeleyCursor>(m_database, *this, prefix);
+}
+
+std::unique_ptr<DatabaseCursor> BerkeleyBatch::GetNewRangeCursor(
+    Span<const std::byte> begin, Span<const std::byte> end)
+{
+    if (!pdb) return nullptr;
+    return std::make_unique<BerkeleyCursor>(m_database, *this, Span<const std::byte>{}, begin, end);
 }
 
 bool BerkeleyBatch::TxnBegin()

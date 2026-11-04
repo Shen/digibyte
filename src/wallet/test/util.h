@@ -119,6 +119,16 @@ public:
     std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override {
         return std::make_unique<MockableCursor>(m_records, m_pass, prefix);
     }
+    std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override
+    {
+        auto cursor = std::make_unique<MockableCursor>(m_records, m_pass);
+        cursor->m_cursor = m_records.lower_bound(SerializeData{begin.begin(), begin.end()});
+        cursor->m_cursor_end = end.empty() ? m_records.end() :
+            m_records.lower_bound(SerializeData{end.begin(), end.end()});
+        // An inverted/empty range must not walk past the end iterator.
+        if (!end.empty() && !(begin < end)) cursor->m_cursor = cursor->m_cursor_end;
+        return cursor;
+    }
     bool TxnBegin() override
     {
         // A file that refuses everything cannot start a transaction either, a

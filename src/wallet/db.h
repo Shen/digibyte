@@ -136,6 +136,10 @@ public:
     virtual bool TxnBegin() = 0;
     virtual bool TxnCommit() = 0;
     virtual bool TxnAbort() = 0;
+    /** Ordered byte-key range [begin, end). Empty end means unbounded.
+     * Unsupported backends return nullptr; callers must fail closed. */
+    virtual std::unique_ptr<DatabaseCursor> GetNewRangeCursor(
+        Span<const std::byte> begin, Span<const std::byte> end) { return nullptr; }
 };
 
 /** An instance of this class represents one database.

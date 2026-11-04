@@ -590,11 +590,20 @@ std::unique_ptr<DatabaseCursor> SQLiteBatch::GetNewPrefixCursor(Span<const std::
         end_range.clear();
     }
 
+    return GetNewRangeCursor(start_range, end_range);
+}
+
+std::unique_ptr<DatabaseCursor> SQLiteBatch::GetNewRangeCursor(
+    Span<const std::byte> begin, Span<const std::byte> end)
+{
+    if (!m_database.m_db) return nullptr;
+    std::vector<std::byte> start_range(begin.begin(), begin.end());
+    std::vector<std::byte> end_range(end.begin(), end.end());
     auto cursor = std::make_unique<SQLiteCursor>(start_range, end_range);
     if (!cursor) return nullptr;
 
-    const char* stmt_text = end_range.empty() ? "SELECT key, value FROM main WHERE key >= ?" :
-                                                "SELECT key, value FROM main WHERE key >= ? AND key < ?";
+    const char* stmt_text = end_range.empty() ? "SELECT key, value FROM main WHERE key >= ? ORDER BY key" :
+                                                "SELECT key, value FROM main WHERE key >= ? AND key < ? ORDER BY key";
     int res = sqlite3_prepare_v2(m_database.m_db, stmt_text, -1, &cursor->m_cursor_stmt, nullptr);
     if (res != SQLITE_OK) {
         throw std::runtime_error(strprintf(

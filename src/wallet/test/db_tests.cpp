@@ -204,5 +204,35 @@ BOOST_AUTO_TEST_CASE(db_cursor_prefix_byte_test)
     }
 }
 
+BOOST_AUTO_TEST_CASE(db_cursor_explicit_range_test)
+{
+    for (const auto& database : TestDatabases(m_path_root)) {
+        auto batch = database->MakeBatch();
+        for (const auto& key : {"a", "b", "ba", "c", "\xff"}) {
+            BOOST_REQUIRE(batch->Write(StringBytes(key), StringBytes(key)));
+        }
+        const auto check = [&](std::string_view begin, std::string_view end, const std::vector<std::string>& expected) {
+            auto cursor = batch->GetNewRangeCursor(StringBytes(begin), StringBytes(end));
+            BOOST_REQUIRE(cursor);
+            std::vector<std::string> actual;
+            while (true) {
+                DataStream key, value;
+                const auto next = cursor->Next(key, value);
+                if (next == DatabaseCursor::Status::DONE) break;
+                BOOST_REQUIRE(next == DatabaseCursor::Status::MORE);
+                actual.emplace_back(reinterpret_cast<const char*>(key.data()), key.size());
+                BOOST_REQUIRE(actual.size() <= 5);
+            }
+            BOOST_CHECK_EQUAL_COLLECTIONS(actual.begin(), actual.end(), expected.begin(), expected.end());
+        };
+        check("b", "c", {"b", "ba"});
+        check("bb", "\xff", {"c"});
+        check("b", "b", {});
+        check("c", "b", {});
+        check("c", "", {"c", "\xff"});
+        check("", "b", {"a"});
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet

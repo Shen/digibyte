@@ -69,6 +69,7 @@ public:
 
     std::unique_ptr<DatabaseCursor> GetNewCursor() override;
     std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override;
+    std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override;
     bool TxnBegin() override;
     bool TxnCommit() override;
     bool TxnAbort() override;
