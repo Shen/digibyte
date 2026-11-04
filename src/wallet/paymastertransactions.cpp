@@ -1729,7 +1729,13 @@ bool GetOrCreateFinalProviderResult(CWallet& wallet,
                                     DigiDollar::Paymaster::PaymasterResult& result,
                                     std::string& error)
 {
-    if (store.GetProviderResult(commit.commit_key, result)) return true;
+    const DatabaseReadStatus status = store.GetProviderResultWithStatus(commit.commit_key, result);
+    if (status == DatabaseReadStatus::FOUND) return true;
+    if (status != DatabaseReadStatus::NOT_FOUND) {
+        error = status == DatabaseReadStatus::UNSUPPORTED_VERSION
+            ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RESULT_DATABASE_READ";
+        return false;
+    }
     if (!BuildFinalProviderResult(wallet, commit, now, result, error)) return false;
     return store.StoreProviderResult(result, result.genesis_hash, error);
 }

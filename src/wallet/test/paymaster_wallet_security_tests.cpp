@@ -37,6 +37,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterservice.h>
+#include <wallet/paymasterrecoveryservice.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -59,6 +60,12 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+namespace wallet::paymaster_app {
+ClientRecoveryResult ResolveAlternativePaymasterRecovery(WalletContext& context, CWallet& wallet,
+    PaymasterStore& store, DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::ProviderAttempt& original_attempt, const ClientRecoveryOptions& options);
+} // namespace wallet::paymaster_app
 
 using namespace DigiDollar::Paymaster;
 using namespace wallet;
@@ -875,7 +882,7 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         }
     } services_cleanup{*m_node.connman};
 
-    QuoteRequestProcessingSetup()
+    explicit QuoteRequestProcessingSetup(int outbound_connections = 0)
     {
         BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
         environment.settings.operation_mode = ProviderOperationMode::MANUAL;
@@ -934,6 +941,7 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         options.nMaxConnections = 8;
         options.nMaxAddnode = 1;
         options.paymaster_inbound = 2;
+        options.paymaster_outbound = outbound_connections;
         options.m_msgproc = m_node.peerman.get();
         options.m_use_addrman_outgoing = false;
         options.vBinds = {LookupNumeric("127.0.0.1:0")};
@@ -1014,6 +1022,106 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         context.paymaster = &manager;
     }
 };
+
+struct ClientRecoveryReadSetup : QuoteRequestProcessingSetup {
+    ClientRecoveryReadSetup() : QuoteRequestProcessingSetup{1} {}
+};
+
+AlternativeRecoveryRequest MakeRecoveryReadRequest(const ProviderSecurityEnvironment& environment,
+                                                   const uint256& seed, int64_t now)
+{
+    AlternativeRecoveryRequest request;
+    request.genesis_hash = Params().GenesisBlock().GetHash();
+    request.request_id = "550e8400-e29b-41d4-a716-446655441099";
+    request.session_id = SecurityTestId(seed, 101);
+    request.original_provider_id = SecurityTestId(seed, 102);
+    request.recovery_provider_id = environment.identity.provider_id;
+    request.offer_id = SecurityTestId(seed, 103);
+    request.policy_hash = SecurityTestId(seed, 104);
+    request.original_commit_key = SecurityTestId(seed, 105);
+    request.original_template_commitment = SecurityTestId(seed, 106);
+    request.client_nonce = SecurityTestId(seed, 107);
+    request.capacity_snapshot_id = SecurityTestId(seed, 108);
+    request.capacity_resource_commitment = SecurityTestId(seed, 109);
+    request.capacity_request.genesis_hash = request.genesis_hash;
+    request.capacity_request.provider_id = request.recovery_provider_id;
+    request.capacity_request.request_id = request.request_id;
+    request.capacity_request.session_id = request.session_id;
+    request.capacity_request.client_nonce = request.client_nonce;
+    request.capacity_request.funding_model = FundingModel::USER_PAID;
+    request.capacity_request.requested_slots = 1;
+    request.capacity_request.created_at = now;
+    request.capacity_request.expires_at = now + 30;
+    request.user_dd_inputs = {COutPoint{SecurityTestId(seed, 110), 0}};
+    request.user_input_proofs = {{request.user_dd_inputs.front(), std::vector<unsigned char>(64, 1)}};
+    request.wallet_returns = {{NewTaprootScript(), DDCents{900}}};
+    request.maximum_service_fee = request.service_fee = DDCents{100};
+    request.created_at = now;
+    request.expires_at = now + 25;
+    return request;
+}
+
+AlternativeRecoveryRecord MakeRecoveryReadReplay(const ProviderSecurityEnvironment& environment,
+                                                 const AlternativeRecoveryRequest& request, int64_t now)
+{
+    AlternativeRecoveryRecord record;
+    record.provider_side = true;
+    record.request_id = request.request_id;
+    record.session_id = request.session_id;
+    record.original_provider_id = request.original_provider_id;
+    record.recovery_provider_id = request.recovery_provider_id;
+    record.recovery_provider_identity_key = environment.identity.identity_key;
+    record.recovery_provider_endpoint = "127.0.0.1:18445";
+    record.offer_id = request.offer_id;
+    record.policy_hash = request.policy_hash;
+    record.original_commit_key = request.original_commit_key;
+    record.original_template_commitment = request.original_template_commitment;
+    record.client_nonce = request.client_nonce;
+    record.capacity_request = request.capacity_request;
+    record.recovery_request = request;
+    record.recovery_id = GetAlternativeRecoveryId(request.request_id, request.session_id,
+        request.recovery_provider_id, request.client_nonce);
+    record.recovery_request_hash = GetAlternativeRecoveryRequestHash(request);
+    record.phase = AlternativeRecoveryPhase::RESPONSE_VALIDATED;
+    record.created_at = record.updated_at = now;
+    auto& response = record.recovery_response;
+    response.genesis_hash = request.genesis_hash;
+    response.request_id = request.request_id;
+    response.session_id = request.session_id;
+    response.recovery_id = record.recovery_id;
+    response.recovery_provider_id = record.recovery_provider_id;
+    response.recovery_request_hash = record.recovery_request_hash;
+    response.manifest.request_id = request.request_id;
+    response.manifest.session_id = request.session_id;
+    response.manifest.original_provider_id = request.original_provider_id;
+    response.manifest.recovery_provider_id = request.recovery_provider_id;
+    response.manifest.offer_id = request.offer_id;
+    response.manifest.policy_hash = request.policy_hash;
+    response.manifest.original_commit_key = request.original_commit_key;
+    response.manifest.original_template_commitment = request.original_template_commitment;
+    response.manifest.capacity_snapshot_id = request.capacity_snapshot_id;
+    response.manifest.capacity_resource_commitment = request.capacity_resource_commitment;
+    response.manifest.user_dd_inputs = request.user_dd_inputs;
+    response.manifest.wallet_returns = request.wallet_returns;
+    response.manifest.maximum_service_fee = request.maximum_service_fee;
+    response.manifest.service_fee = request.service_fee;
+    response.manifest.network_fee = DGBSatoshis{500};
+    response.manifest.unsigned_txid = request.original_commit_key;
+    response.manifest.template_commitment = request.original_template_commitment;
+    response.manifest.expires_at = now + 20;
+    response.manifest.manifest_id = GetAlternativeRecoveryManifestId(response.manifest);
+    response.unsigned_psbt = {1};
+    response.created_at = now;
+    response.expires_at = now + 20;
+    response.recovery_commit_key = GetAlternativeRecoveryCommitKey(response);
+    response.identity_signature.resize(64);
+    BOOST_REQUIRE(environment.identity_key.SignSchnorr(GetAlternativeRecoveryResponseSignatureHash(response),
+        response.identity_signature, nullptr, uint256{}));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResponse(response, request,
+        environment.identity.identity_key, now, error), error);
+    return record;
+}
 
 } // namespace
 
@@ -4616,6 +4724,138 @@ BOOST_FIXTURE_TEST_CASE(automatic_quote_rejection_allows_following_work,
     BOOST_CHECK(SerializePaymasterSecurityObject(*response) == fixture.attempt.signed_quote);
     BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
     BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_read_failure_stops_new_preparation,
+                        ClientRecoveryReadSetup)
+{
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(paymaster_app::CheckPaymasterClientReadiness(wallet, context, error), error);
+    PaymasterStore store{wallet};
+    PaymentSession session;
+    BOOST_REQUIRE(store.CreateOrJoinSession("550e8400-e29b-41d4-a716-446655441099",
+        SecurityTestId(seed, 120), FeeMode::PAYMASTER, now, session, error) == CreatePaymasterSessionResult::CREATED);
+    const paymaster_app::ClientRecoveryOptions options;
+    const auto invoke = [&] {
+        return paymaster_app::ResolveAlternativePaymasterRecovery(context, wallet, store, session, fixture.attempt, options);
+    };
+    // True absence still enters the existing new-recovery eligibility gate.
+    BOOST_CHECK_EXCEPTION(invoke(), ApplicationError, [](const ApplicationError& failure) {
+        return failure.code == "PAYMASTER_ALTERNATIVE_RECOVERY_NOT_ALLOWED";
+    });
+    auto& database = GetMockableDatabase(wallet);
+    const auto absent_rows = database.m_records;
+    const uint256 recovery_id = SecurityTestId(seed, 121);
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        BOOST_TEST_CONTEXT("client recovery read scenario " << scenario) {
+            database.m_records = absent_rows;
+            {
+                LOCK(wallet.cs_wallet);
+                auto batch = wallet.GetDatabase().MakeBatch();
+                BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST, session.request_id), recovery_id));
+                if (scenario != 2) {
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery_id),
+                        uint16_t(AlternativeRecoveryRecord::CURRENT_VERSION + scenario)));
+                }
+            }
+            const auto before = database.m_records;
+            const auto checkpoint_before = CheckpointBytes();
+            const size_t messages_before = manager.DirectMessageCount();
+            const size_t outbound_before = manager.OutboundDirectMessageCount();
+            const char* expected = scenario == 1 ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ";
+            BOOST_CHECK_EXCEPTION(invoke(), ApplicationError, [&](const ApplicationError& failure) {
+                return failure.code == expected && failure.kind == ErrorKind::WALLET &&
+                    failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+            });
+            BOOST_CHECK(database.m_records == before);
+            BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), messages_before);
+            BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), outbound_before);
+        }
+    }
+    // A readable record still reaches the existing continuation checks.
+    database.m_records = absent_rows;
+    auto request = MakeRecoveryReadRequest(environment, seed, now);
+    request.request_id = session.request_id;
+    request.session_id = session.session_id;
+    request.capacity_request.session_id = session.session_id;
+    auto record = MakeRecoveryReadReplay(environment, request, now);
+    record.provider_side = false;
+    record.expired = true;
+    {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(record));
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecoveryRequest(session.request_id, record.recovery_id));
+    }
+    const auto before = database.m_records;
+    BOOST_CHECK_EXCEPTION(invoke(), ApplicationError, [](const ApplicationError& failure) {
+        return failure.code == "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT" && failure.kind == ErrorKind::INVALID_INPUT;
+    });
+    BOOST_CHECK(database.m_records == before);
+}
+
+BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_replay,
+                        QuoteRequestProcessingSetup)
+{
+    const auto request = MakeRecoveryReadRequest(environment, seed, now);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryRequestEnvelope(request,
+        Params().GenesisBlock().GetHash(), now, error), error);
+    const auto record = MakeRecoveryReadReplay(environment, request, now);
+    const auto key = std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, record.recovery_id);
+    const auto encoded = SerializePaymasterSecurityObject(request);
+    const uint256 message_id{Hash(encoded)};
+    auto& database = GetMockableDatabase(wallet);
+    const auto absent_rows = database.m_records;
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        BOOST_TEST_CONTEXT("provider recovery read scenario " << scenario) {
+            database.m_records = absent_rows;
+            Manager transport{true};
+            context.paymaster = &transport;
+            BOOST_REQUIRE(transport.StartProvider(wallet.GetName(), environment.identity.provider_id));
+            BOOST_REQUIRE(transport.CanReceiveDirectMessage(44, DirectPayload{request}, DirectAdmissionClass::REQUEST, now));
+            BOOST_REQUIRE(transport.EnqueueNetworkDirectMessage(44, message_id, encoded.size(),
+                DirectPayload{request}, now, 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+            {
+                LOCK(wallet.cs_wallet);
+                auto batch = wallet.GetDatabase().MakeBatch();
+                if (scenario < 2) {
+                    BOOST_REQUIRE(batch->Write(key, uint16_t(AlternativeRecoveryRecord::CURRENT_VERSION + scenario)));
+                } else if (scenario == 3) {
+                    BOOST_REQUIRE(batch->Write(key, record));
+                }
+            }
+            const auto before = database.m_records;
+            const auto checkpoint_before = CheckpointBytes();
+            if (scenario == 3) {
+                const auto replay = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
+                BOOST_CHECK(replay.processed.value_or(false));
+                BOOST_CHECK(replay.queued.value_or(false));
+                BOOST_CHECK(transport.HasOutboundDirectMessage(44, Hash(SerializePaymasterSecurityObject(record.recovery_response))));
+                const auto lease = transport.LeaseRecoveryRequests(environment.identity.provider_id, 1);
+                BOOST_CHECK(lease.Messages().empty());
+            } else {
+                // Absence proceeds to the existing offer-policy check; corrupt
+                // state must stop before creating new quote authority.
+                const char* expected = scenario == 0 ? "PAYMASTER_RECOVERY_DATABASE_READ" :
+                    scenario == 1 ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_POLICY_MISMATCH";
+                BOOST_CHECK_EXCEPTION(paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL),
+                    ApplicationError, [&](const ApplicationError& failure) {
+                        return failure.code == expected && failure.disposition == ErrorDisposition::RECONCILE &&
+                            failure.kind == (scenario == 2 ? ErrorKind::INVALID_INPUT : ErrorKind::WALLET);
+                    });
+                const auto lease = transport.LeaseRecoveryRequests(environment.identity.provider_id, 1);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                BOOST_CHECK(lease.Messages().front().message_id == message_id);
+                BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 1U);
+                BOOST_CHECK_EQUAL(transport.OutboundDirectMessageCount(), 0U);
+            }
+            BOOST_CHECK(database.m_records == before);
+            BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+            context.paymaster = &manager;
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

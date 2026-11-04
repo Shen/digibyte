@@ -83,7 +83,14 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     const auto& accepted_commitment = options.authorization_commitment;
 
     AlternativeRecoveryRecord recovery;
-    if (!store.GetAlternativeRecovery(session.request_id, recovery)) {
+    const DatabaseReadStatus recovery_status =
+        store.GetAlternativeRecoveryWithStatus(session.request_id, recovery);
+    if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+        throw ApplicationError(ErrorKind::WALLET,
+            recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
+    }
+    if (recovery_status == DatabaseReadStatus::NOT_FOUND) {
         if (session.state != SessionState::PENDING_PROVIDER ||
             original_attempt.provider_id.IsNull() ||
             original_attempt.commit_key.IsNull() ||

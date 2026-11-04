@@ -1214,7 +1214,13 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
             recovery_request->recovery_provider_id,
             recovery_request->client_nonce);
         AlternativeRecoveryRecord persisted;
-        if (store.GetAlternativeRecoveryById(recovery_id, persisted)) {
+        const DatabaseReadStatus recovery_status = store.GetAlternativeRecoveryByIdWithStatus(recovery_id, persisted);
+        if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+            throw ApplicationError(ErrorKind::WALLET,
+                recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                    ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
+        }
+        if (recovery_status == DatabaseReadStatus::FOUND) {
             if (!persisted.provider_side || persisted.expired ||
                 persisted.recovery_request_hash !=
                     GetAlternativeRecoveryRequestHash(*recovery_request) ||
@@ -2049,6 +2055,20 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED" : error);
     }
     const bool observed_payment = ReconcileConfirmedClientPayment(*wallet, session, attempt);
+    uint64_t minimum_sequence{1};
+    if (!observed_payment) {
+        PaymasterResult previous;
+        const DatabaseReadStatus result_status = store.GetProviderResultWithStatus(attempt.commit_key, previous);
+        if (result_status == DatabaseReadStatus::FOUND) {
+            minimum_sequence = previous.result_sequence;
+        } else if (result_status != DatabaseReadStatus::NOT_FOUND) {
+            // Keep the incoming result queued until its durable predecessor
+            // can be read; TakeResults consumes the selected message.
+            throw ApplicationError(ErrorKind::WALLET,
+                result_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                    ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RESULT_DATABASE_READ");
+        }
+    }
     const auto messages = observed_payment ? std::vector<DirectMessage>{} : context.paymaster->TakeResults(
         request_id, session.session_id, attempt.provider_id, 1);
     std::optional<PaymasterResult> accepted_result;
@@ -2056,8 +2076,6 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
     if (!messages.empty()) {
         const auto* message = std::get_if<PaymasterResultMessage>(&messages.front().payload);
         if (!message) throw ApplicationError(ErrorKind::INTERNAL, "PAYMASTER_RESULT_QUEUE_CORRUPT");
-        PaymasterResult previous;
-        const uint64_t minimum_sequence = store.GetProviderResult(attempt.commit_key, previous) ? previous.result_sequence : 1;
         if (!ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
                                      attempt.provider_id, attempt.commit_key,
                                      attempt.provider_identity_key, minimum_sequence, error)) {
