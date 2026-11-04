@@ -4604,6 +4604,106 @@ BOOST_FIXTURE_TEST_CASE(quote_request_collision_preserves_local_corruption,
     BOOST_REQUIRE(batch->Write(session_key, session));
 }
 
+BOOST_FIXTURE_TEST_CASE(quote_request_collision_validates_saved_quote_authority,
+                        QuoteRequestProcessingSetup)
+{
+    const auto attempt_key = std::make_pair(DBKeys::PAYMASTER_ATTEMPT, fixture.attempt.attempt_id);
+    auto batch = wallet.GetDatabase().MakeBatch();
+    const std::array<const char*, 5> fields{
+        "signature bit", "identity key", "decodable PSBT", "input roles", "quote envelope"};
+    for (size_t field = 0; field < fields.size(); ++field) {
+        BOOST_TEST_CONTEXT(fields[field]) {
+            auto changed = fixture.attempt;
+            auto response = fixture.response;
+            std::string error;
+            if (field == 0) {
+                BOOST_REQUIRE_EQUAL(response.quote.identity_signature.size(), 64U);
+                response.quote.identity_signature.front() ^= 1;
+                changed.signed_quote = SerializePaymasterSecurityObject(response);
+            }
+            if (field == 1) {
+                CKey other_identity;
+                other_identity.MakeNewKey(true);
+                changed.provider_identity_key = XOnlyPubKey{other_identity.GetPubKey()};
+                BOOST_REQUIRE(changed.provider_identity_key.IsFullyValid());
+                BOOST_REQUIRE(GetPaymasterId(changed.provider_identity_key) != changed.provider_id);
+            }
+            if (field == 2) {
+                PartiallySignedTransaction psbt;
+                BOOST_REQUIRE_MESSAGE(DecodeRawPSBT(psbt, MakeByteSpan(changed.unsigned_psbt), error), error);
+                BOOST_REQUIRE(psbt.tx);
+                ++psbt.tx->nLockTime;
+                changed.unsigned_psbt = SerializePaymasterSecurityObject(psbt);
+            }
+            if (field == 3) {
+                BOOST_REQUIRE_EQUAL(changed.input_roles.size(), 2U);
+                changed.input_roles.front() = ReservationRole::USER_DGB;
+            }
+            if (field == 4) {
+                CollaborativePSBTTemplate trusted;
+                BOOST_REQUIRE_MESSAGE(DecodeRawPSBT(trusted.psbt,
+                    MakeByteSpan(changed.unsigned_psbt), error), error);
+                trusted.input_roles = {InputRole::USER_DD, InputRole::PROVIDER_DGB};
+                // Preserve both signature and template binding, leaving only
+                // the existing envelope rule (rate divisible by ten) invalid.
+                response.quote.fee_rate_bps = 1;
+                response.quote.template_commitment = GetCollaborativeTemplateCommitment(
+                    fixture.request.intent, response.quote, trusted);
+                BOOST_REQUIRE(environment.identity_key.SignSchnorr(
+                    GetPaymasterQuoteSignatureHash(response.quote),
+                    response.quote.identity_signature, nullptr, uint256{}));
+                changed.template_commitment = response.quote.template_commitment;
+                changed.commit_key = GetPaymasterCommitKey(changed.provider_id,
+                    changed.client_nonce, changed.intent_hash, changed.quote_id,
+                    changed.template_commitment);
+                changed.signed_quote = SerializePaymasterSecurityObject(response);
+                BOOST_REQUIRE(changed.provider_identity_key.VerifySchnorr(
+                    GetPaymasterQuoteSignatureHash(response.quote),
+                    response.quote.identity_signature));
+                BOOST_REQUIRE(!ValidateQuoteResponseEnvelope(response,
+                    Params().GenesisBlock().GetHash(), response.quote.created_at, error));
+            }
+            BOOST_REQUIRE(batch->Write(attempt_key, changed));
+            CheckClassification(ConflictingRequest(), true, "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
+            BOOST_REQUIRE(batch->Write(attempt_key, fixture.attempt));
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(quote_request_historical_provider_uses_saved_identity,
+                        QuoteRequestProcessingSetup)
+{
+    auto previous_environment = MakeProviderEnvironment(now, 2000);
+    ProviderQuoteFixture previous;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(previous_environment,
+        fixture.request.intent.request_id, seed, now, previous, error,
+        nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash(),
+        /*intent_ttl=*/60, /*quote_ttl=*/20), error);
+    BOOST_REQUIRE(previous.attempt.provider_id != environment.identity.provider_id);
+    BOOST_REQUIRE(previous.attempt.attempt_id == fixture.attempt.attempt_id);
+    BOOST_REQUIRE(previous.attempt.session_id == fixture.attempt.session_id);
+    BOOST_REQUIRE_MESSAGE(ValidateQuoteResponseEnvelope(previous.response,
+        Params().GenesisBlock().GetHash(), previous.response.quote.created_at, error), error);
+    BOOST_REQUIRE(previous.attempt.provider_identity_key.VerifySchnorr(
+        GetPaymasterQuoteSignatureHash(previous.response.quote),
+        previous.response.quote.identity_signature));
+
+    // Exercise the classification of independently signed historical artifacts
+    // with a different current provider route, not the rotation workflow itself.
+    PaymasterStore store{wallet};
+    PaymentSession session;
+    BOOST_REQUIRE(store.GetSessionByRequestId(fixture.request.intent.request_id, session));
+    session.canonical_request_hash = Hash(previous.attempt.quote_request);
+    session.user_inputs = previous.request.intent.user_dd_inputs;
+    auto batch = wallet.GetDatabase().MakeBatch();
+    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ATTEMPT,
+        previous.attempt.attempt_id), previous.attempt));
+    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_SESSION,
+        session.request_id), session));
+    CheckClassification(fixture.request, false, "PAYMASTER_REQUEST_ID_CONFLICT");
+}
+
 BOOST_FIXTURE_TEST_CASE(quote_request_client_session_and_tombstone_are_consumed,
                         QuoteRequestProcessingSetup)
 {

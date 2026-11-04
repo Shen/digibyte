@@ -1710,7 +1710,17 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
             response.quote.provider_id != persisted_attempt.provider_id ||
             response.quote.quote_id != persisted_attempt.quote_id ||
             response.quote.template_commitment !=
-                persisted_attempt.template_commitment) {
+                persisted_attempt.template_commitment ||
+            !ValidateQuoteResponseEnvelope(response, Params().GenesisBlock().GetHash(),
+                response.quote.created_at, error) ||
+            !persisted_attempt.provider_identity_key.IsFullyValid() ||
+            GetPaymasterId(persisted_attempt.provider_identity_key) !=
+                persisted_attempt.provider_id ||
+            !persisted_attempt.provider_identity_key.VerifySchnorr(
+                GetPaymasterQuoteSignatureHash(response.quote),
+                response.quote.identity_signature) ||
+            response.quote.template_commitment !=
+                GetCollaborativeTemplateCommitment(authorized_intent, response.quote, trusted)) {
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
         }
