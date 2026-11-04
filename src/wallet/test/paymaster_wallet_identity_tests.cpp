@@ -24,6 +24,7 @@
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymasterfinance.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterintegration.h>
@@ -1214,7 +1215,7 @@ BOOST_AUTO_TEST_CASE(finance_v2_large_history_uses_bounded_range_reads)
     BOOST_CHECK_EQUAL(report.events.front().created_at, 100082);
 }
 
-BOOST_AUTO_TEST_CASE(finance_report_continuations_invalidate_on_wallet_changes_and_errors)
+BOOST_AUTO_TEST_CASE(finance_reports_reconcile_only_relevant_notifications_and_retry_errors)
 {
     class RangeBatch final : public MockableBatch {
         bool& m_block_ranges;
@@ -1255,20 +1256,27 @@ BOOST_AUTO_TEST_CASE(finance_report_continuations_invalidate_on_wallet_changes_a
         LOCK(wallet.cs_wallet);
         BOOST_REQUIRE(WalletBatch{rows}.WriteName("cache-fixture", "changed"));
     }
-    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // A wallet write invalidates it.
+    BOOST_CHECK(ReconcileProviderFinanceReport(wallet, true, error)); // Unrelated wallet writes are irrelevant.
+    wallet.NotifyTransactionChanged(uint256S("1234"), CT_UPDATED);
+    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // Relevant work must read its transaction index.
     BOOST_CHECK(!error.empty());
     rows.block_ranges = false;
-    BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, true, error)); // Failed rebuild was not cached.
+    BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, true, error)); // Failed work remains pending.
     {
         LOCK(wallet.cs_wallet);
         wallet.SetLastBlockProcessed(1, uint256S("1234"));
     }
     rows.block_ranges = true;
-    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // Reorg/tip also invalidates it.
+    BOOST_CHECK(ReconcileProviderFinanceReport(wallet, true, error)); // Wallet transaction notifications carry chain changes.
     rows.block_ranges = false;
     BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, false, error));
     rows.block_ranges = true;
-    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, false, error)); // First pages always reconcile.
+    BOOST_CHECK(ReconcileProviderFinanceReport(wallet, false, error)); // Unchanged first pages do not scan history either.
+    size_t changed{0};
+    BOOST_CHECK(!RebuildProviderFinances(wallet, changed, error)); // An explicit restore/rebuild still verifies all records.
+    BOOST_CHECK(!ReconcileProviderFinanceReport(wallet, true, error)); // A failed rebuild cannot publish current totals.
+    rows.block_ranges = false;
+    BOOST_REQUIRE(ReconcileProviderFinanceReport(wallet, true, error));
 }
 
 BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)

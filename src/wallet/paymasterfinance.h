@@ -18,10 +18,17 @@ class CWallet;
 inline constexpr const char* PAYMASTER_RETIREMENT_PROVIDER_KEY{"paymaster_retirement_provider"};
 
 bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error);
-/** Subsequent report pages may reuse a successful reconciliation while the
- * wallet database and processed chain tip are unchanged. The first page always
- * reconciles. Errors are never cached; reopening a wallet starts cold. */
+/** Full reconstruction for wallet load, restore, migration or explicit repair.
+ * Normal reconciliation uses transaction notifications and committed source
+ * changes, with at most this many jobs/events in one wallet-locked step. */
+inline constexpr size_t MAX_FINANCE_RECONCILIATION_WORK{256};
+bool RebuildProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error);
+/** Both first and continuation pages use bounded incremental reconciliation.
+ * A backlog returns PAYMASTER_FINANCE_RECONCILING, never stale current totals. */
 bool ReconcileProviderFinanceReport(CWallet& wallet, bool continuation, std::string& error);
+/** Requires cs_wallet; only observes the derived work state. It performs no
+ * reconciliation or database reads and never grants payment authority. */
+bool AreProviderFinancesCurrent(const CWallet& wallet);
 std::optional<DigiDollar::Paymaster::DGBSatoshis> GetProviderFinanceTransactionFee(
     CWallet& wallet, const CTransactionRef& transaction);
 bool RecordProviderFinanceTransaction(CWallet& wallet,

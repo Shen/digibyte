@@ -666,11 +666,13 @@ public:
     bool WritePaymasterFinanceEvents(
         const DigiDollar::Paymaster::ProviderFinanceMetadata& initial,
         const std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events,
-        std::string& error);
+        std::string& error, bool queue_reconciliation = true);
     bool ReadPaymasterFinanceReport(const DigiDollar::Paymaster::ProviderFinanceQuery& query,
         DigiDollar::Paymaster::ProviderFinanceReport& report, std::string& error);
     bool ReadPaymasterFinanceTransactionEvents(const uint256& txid,
-        std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events);
+        std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events,
+        size_t limit = DigiDollar::Paymaster::MAX_PROVIDER_FINANCE_EVENTS,
+        const uint256& after = {}, bool* has_more = nullptr);
     bool WritePaymasterBackupStatus(
         const DigiDollar::Paymaster::ProviderBackupStatus& status,
         bool overwrite = true);

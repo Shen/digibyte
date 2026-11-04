@@ -5,6 +5,7 @@
 #include <wallet/walletdb.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymastersessionindex.h>
+#include <wallet/paymasterfinancecache.h>
 
 #include <common/system.h>
 #include <key_io.h>
@@ -1973,6 +1974,7 @@ bool WalletBatch::TxnCommit()
     const bool committed = PaymasterCheckpointPrepareCommit(this) && m_batch->TxnCommit();
     if (!committed && PaymasterCheckpointTracked(this)) m_batch->TxnAbort();
     PaymasterSessionIndexEnd(this, committed);
+    PaymasterFinanceTransactionEnd(this, committed);
     PaymasterCheckpointEnd(this);
     return committed;
 }

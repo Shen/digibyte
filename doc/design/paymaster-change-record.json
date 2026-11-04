@@ -9,10 +9,10 @@
       "regressions": "Paymaster unload/reopen/index tests; ordinary wallet unload and shutdown tests."
     },
     "src/wallet/walletdb.cpp": {
-      "purpose": "Publish queued derived session-index changes only after successful DB commit.",
+      "purpose": "Publish derived session-index and finance work only after successful DB commit; discard queued observations on rollback/destruction.",
       "reused_api": "Existing WalletBatch transaction and Paymaster checkpoint notifications.",
       "ordinary_callers": "All WalletBatch commits; no queued Paymaster change is a no-op.",
-      "regressions": "Session index commit/abort/failure tests and existing wallet database transaction tests."
+      "regressions": "Finance and session-index commit/abort/failure tests; ordinary wallet database transactions."
     },
     "src/Makefile.am": {
       "purpose": "Register Paymaster-only domain/application modules and headers in existing build libraries.",
@@ -63,7 +63,7 @@
       "regressions": "Range and existing prefix-cursor tests across all wallet backends."
     },
     "src/wallet/walletdb.h": {
-      "purpose": "Declare Paymaster finance metadata, event, migration and bounded-report operations.",
+      "purpose": "Declare bounded transaction-index finance reads and commit-aware reconciliation writes using the existing event format.",
       "reused_api": "Existing WalletBatch and DatabaseCursor transactions.",
       "ordinary_callers": "No ordinary wallet key or transaction format changes.",
       "regressions": "Finance migration/reorg/replay/failure tests and existing wallet DB tests."
@@ -99,10 +99,10 @@
       "regressions": "Shared queue ordering/coalescing/shutdown tests; ordinary WalletTests and DGB/DD widget suites; clean build after WalletModel layout change."
     },
     "src/Makefile.test.include": {
-      "purpose": "Register native Paymaster service/RPC contract tests.",
+      "purpose": "Register native Paymaster RPC-contract and incremental-finance tests.",
       "reused_api": "Existing wallet test source list and MSVC generator.",
       "ordinary_callers": "Test build/source distribution only.",
-      "regressions": "Targeted compile/link/contract tests; clean operator test build."
+      "regressions": "Targeted compile/link/test and clean operator test build."
     }
   }
 }

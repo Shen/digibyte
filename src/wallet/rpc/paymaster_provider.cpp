@@ -1082,9 +1082,6 @@ RPCHelpMan getpaymasterfinancestatus()
             // the rest of this RPC already observes the newer chain tip.
             wallet->BlockUntilSyncedToCurrentChain();
             std::string error;
-            if (!ReconcileProviderFinanceReport(*wallet, !cursor.empty(), error)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, error);
-            }
             ProviderFinanceQuery query;
             query.now = GetTime();
             query.period = period == "today" ? ProviderFinancePeriod::TODAY :
@@ -1100,6 +1097,13 @@ RPCHelpMan getpaymasterfinancestatus()
             ProviderMaintenanceLedger maintenance;
             {
                 LOCK(wallet->cs_wallet);
+                // Keep reconciliation and the report on one wallet snapshot:
+                // a committed source change must not enter between them.
+                if (!ReconcileProviderFinanceReport(*wallet, !cursor.empty(), error)) {
+                    throw ApplicationError(ErrorKind::WALLET, error,
+                        error == "PAYMASTER_FINANCE_RECONCILING"
+                            ? ErrorDisposition::RETRY_BEFORE_EXECUTION : ErrorDisposition::RECONCILE);
+                }
                 WalletBatch batch{wallet->GetDatabase()};
                 if (!batch.ReadPaymasterIdentity(identity) ||
                     !batch.ReadPaymasterFinanceReport(query, report, error)) {
@@ -1582,16 +1586,20 @@ RPCHelpMan getpaymasterinfo()
                     result.pushKV("backup_status", std::move(backup_status));
                 }
 
-                ProviderFinanceMetadata finance;
-                if (finance_current && WalletBatch{wallet->GetDatabase()}.ReadPaymasterFinanceMetadata(finance) == DatabaseReadStatus::FOUND &&
-                    finance.provider_id == readiness.identity.provider_id && finance.genesis_hash == Params().GenesisBlock().GetHash()) {
-                    UniValue summary{UniValue::VOBJ};
-                    summary.pushKV("service_fee_income_cents", finance.totals.total.dd_income.value);
-                    summary.pushKV("dgb_operating_cost_satoshis", finance.totals.total.dgb_cost.value);
-                    summary.pushKV("successful_transfers", finance.totals.total.successful_transfers);
-                    summary.pushKV("history_partially_reconstructable", finance.earlier_history_partial);
-                    summary.pushKV("revision", finance.revision);
-                    result.pushKV("finance_summary", std::move(summary));
+                {
+                    LOCK(wallet->cs_wallet);
+                    ProviderFinanceMetadata finance;
+                    if (finance_current && AreProviderFinancesCurrent(*wallet) &&
+                        WalletBatch{wallet->GetDatabase()}.ReadPaymasterFinanceMetadata(finance) == DatabaseReadStatus::FOUND &&
+                        finance.provider_id == readiness.identity.provider_id && finance.genesis_hash == Params().GenesisBlock().GetHash()) {
+                        UniValue summary{UniValue::VOBJ};
+                        summary.pushKV("service_fee_income_cents", finance.totals.total.dd_income.value);
+                        summary.pushKV("dgb_operating_cost_satoshis", finance.totals.total.dgb_cost.value);
+                        summary.pushKV("successful_transfers", finance.totals.total.successful_transfers);
+                        summary.pushKV("history_partially_reconstructable", finance.earlier_history_partial);
+                        summary.pushKV("revision", finance.revision);
+                        result.pushKV("finance_summary", std::move(summary));
+                    }
                 }
             }
             if (readiness.endpoint.IsValid()) {

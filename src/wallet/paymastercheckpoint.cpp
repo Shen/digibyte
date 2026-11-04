@@ -4,6 +4,7 @@
 
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymastersessionindex.h>
+#include <wallet/paymasterfinancecache.h>
 
 #include <chainparams.h>
 #include <hash.h>
@@ -442,6 +443,7 @@ bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
 void PaymasterCheckpointEnd(const WalletBatch* owner)
 {
     PaymasterSessionIndexEnd(owner);
+    PaymasterFinanceTransactionEnd(owner);
     // Destroy (and release its OS lock) outside the registry critical section.
     std::shared_ptr<TransactionState> retired;
     {

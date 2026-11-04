@@ -5,6 +5,7 @@
 #include <wallet/walletdb.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymastersessionindex.h>
+#include <wallet/paymasterfinancecache.h>
 #include <paymaster/finance.h>
 
 #include <crypto/common.h>
@@ -218,6 +219,7 @@ bool WalletBatch::WritePaymasterIC(const K& key, const T& value, bool overwrite)
         if (own) TxnAbort();
         return false;
     }
+    QueuePaymasterFinanceRecord(this, m_database, value);
     if (!own || TxnCommit()) return true;
     TxnAbort();
     return false;
@@ -1798,7 +1800,7 @@ bool WalletBatch::MigratePaymasterFinanceLedger(std::string& error)
 
 bool WalletBatch::WritePaymasterFinanceEvents(const ProviderFinanceMetadata& initial,
                                              const std::vector<ProviderFinanceEvent>& events,
-                                             std::string& error)
+                                             std::string& error, bool queue_reconciliation)
 {
     if (!MigratePaymasterFinanceLedger(error)) return false;
     ProviderFinanceMetadata metadata;
@@ -1882,6 +1884,7 @@ bool WalletBatch::WritePaymasterFinanceEvents(const ProviderFinanceMetadata& ini
         }
         if (!exists) ++metadata.event_count;
         metadata.updated_at = std::max(metadata.updated_at, event.updated_at);
+        if (queue_reconciliation) QueuePaymasterFinanceEvent(this, m_database, event.event_id);
         changed = true;
     }
     if (changed) {
@@ -1952,6 +1955,7 @@ bool WalletBatch::WritePaymasterFinanceLedger(
         if (!WritePaymasterIC(std::make_pair(FINANCE_DAY, FinanceDayKey(day)), totals)) return fail();
     }
     if (!WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata)) return fail();
+    QueuePaymasterFinanceRebuild(this, m_database);
     if (own && !TxnCommit()) return fail();
     return true;
 }
@@ -2027,28 +2031,42 @@ DatabaseReadStatus WalletBatch::ReadPaymasterFinanceLedgerWithStatus(
 }
 
 bool WalletBatch::ReadPaymasterFinanceTransactionEvents(const uint256& txid,
-                                                        std::vector<ProviderFinanceEvent>& events)
+                                                        std::vector<ProviderFinanceEvent>& events,
+                                                        size_t limit, const uint256& after, bool* has_more)
 {
     events.clear();
-    if (txid.IsNull()) return false;
+    if (has_more) *has_more = false;
+    if (txid.IsNull() || limit == 0 || limit > MAX_PROVIDER_FINANCE_EVENTS) return false;
     DataStream prefix;
     prefix << FINANCE_TX << txid;
-    auto cursor = m_batch->GetNewPrefixCursor(prefix);
+    SerializeData end{prefix.begin(), prefix.end()};
+    while (!end.empty() && end.back() == std::byte{0xff}) end.pop_back();
+    if (!end.empty()) end.back() = std::byte{static_cast<unsigned char>(std::to_integer<unsigned char>(end.back()) + 1)};
+    DataStream start;
+    start << FINANCE_TX << txid;
+    if (!after.IsNull()) start << after;
+    auto cursor = m_batch->GetNewRangeCursor(start, end);
     if (!cursor) return false;
     while (true) {
         DataStream key, value;
         const auto next = cursor->Next(key, value);
         if (next == DatabaseCursor::Status::DONE) return true;
-        if (next != DatabaseCursor::Status::MORE || events.size() >= MAX_PROVIDER_FINANCE_EVENTS) return false;
+        if (next != DatabaseCursor::Status::MORE) return false;
         try {
             std::string type;
             uint256 transaction, id;
             uint256 indexed_id;
             key >> type >> transaction >> id;
             value >> indexed_id;
+            if (!key.empty() || !value.empty() || indexed_id != id || type != FINANCE_TX || transaction != txid) return false;
+            if (!after.IsNull() && !(after < id)) continue;
+            if (events.size() == limit) {
+                if (!has_more) return false;
+                *has_more = true;
+                return true;
+            }
             ProviderFinanceEvent event;
-            if (!key.empty() || !value.empty() || indexed_id != id || type != FINANCE_TX || transaction != txid ||
-                ReadPaymasterFinanceEvent(id, event) != DatabaseReadStatus::FOUND || event.transaction_id != txid) return false;
+            if (ReadPaymasterFinanceEvent(id, event) != DatabaseReadStatus::FOUND || event.transaction_id != txid) return false;
             events.push_back(std::move(event));
         } catch (const std::exception&) { return false; }
     }
