@@ -400,6 +400,7 @@ DIGIBYTE_CORE_H = \
   wallet/paymasteridentity.h \
   wallet/paymasterprovider.h \
   wallet/paymasterstore.h \
+  wallet/paymastersessionindex.h \
   wallet/paymasterstore_internal.h \
   wallet/wallettool.h \
   wallet/walletutil.h \

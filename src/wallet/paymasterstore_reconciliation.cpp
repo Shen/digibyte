@@ -5,6 +5,7 @@
 /** \file Durable final rebroadcast, wallet reconciliation, reorgs, and pruning. */
 
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 
 #include <logging/timer.h>
 #include <wallet/paymasterstore_internal.h>
@@ -586,7 +587,7 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
         std::vector<PaymentSession> sessions;
-        if (!batch.ListPaymasterSessions(sessions)) {
+        if (!ListPaymasterFinalSessions(batch, m_wallet.GetDatabase(), txid, sessions)) {
             error = "PAYMASTER_SESSION_DATABASE_READ";
             return false;
         }
@@ -826,6 +827,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             error = "PAYMASTER_SESSION_DATABASE_READ";
             return false;
         }
+        PrimePaymasterSessionIndex(m_wallet.GetDatabase(), sessions);
         for (const PaymentSession& session : sessions) {
             if (session.provider_side && session.state == SessionState::FAILED &&
                 TimeDeltaExceeds(now, session.updated_at, CAPACITY_REPLAY_RETENTION_SECONDS) &&

@@ -4,15 +4,154 @@
 
 #include <wallet/walletdb.h>
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymastersessionindex.h>
 
 #include <algorithm>
 #include <ios>
 #include <memory>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace wallet {
+namespace {
+using FinalIds = std::pair<uint256, uint256>;
+struct SessionIndex {
+    bool valid{false};
+    uint64_t revision{0};
+    std::map<uint256, std::set<std::string>> by_transaction;
+    std::map<std::string, FinalIds> by_request;
+
+    void Update(const std::string& request, const std::optional<FinalIds>& ids)
+    {
+        const auto old = by_request.find(request);
+        if (old != by_request.end()) {
+            for (const auto& txid : {old->second.first, old->second.second}) {
+                auto entry = by_transaction.find(txid);
+                if (entry == by_transaction.end()) continue;
+                entry->second.erase(request);
+                if (entry->second.empty()) by_transaction.erase(entry);
+            }
+            by_request.erase(old);
+        }
+        if (!ids || (ids->first.IsNull() && ids->second.IsNull())) return;
+        by_request.emplace(request, *ids);
+        for (const auto& txid : {ids->first, ids->second}) {
+            if (!txid.IsNull()) by_transaction[txid].insert(request);
+        }
+    }
+};
+struct PendingSessionIndex {
+    WalletDatabase* database{nullptr};
+    std::map<std::string, std::optional<FinalIds>> updates;
+};
+
+SessionIndex BuildSessionIndex(const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
+{
+    SessionIndex index;
+    for (const auto& session : sessions) {
+        index.Update(session.request_id, FinalIds{session.final_txid, session.recovery_txid});
+    }
+    index.valid = true;
+    return index;
+}
+// Lock order: wallet/database transaction -> index mutex. Never perform database
+// I/O or invoke wallet callbacks while holding this registry lock.
+std::mutex session_index_mutex;
+std::map<WalletDatabase*, SessionIndex> session_indexes;
+std::map<const WalletBatch*, PendingSessionIndex> pending_session_indexes;
+
+void QueueSessionIndex(const WalletBatch* owner, WalletDatabase& database,
+                       const std::string& request, std::optional<FinalIds> ids)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& pending = pending_session_indexes[owner];
+    pending.database = &database;
+    pending.updates[request] = std::move(ids);
+}
+} // namespace
+
+void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    const auto pending = pending_session_indexes.find(owner);
+    if (pending == pending_session_indexes.end()) return;
+    const auto index = session_indexes.find(pending->second.database);
+    if (index != session_indexes.end()) {
+        ++index->second.revision;
+        if (!committed) {
+            index->second.valid = false;
+        } else if (index->second.valid) {
+            for (const auto& [request, ids] : pending->second.updates) {
+                index->second.Update(request, ids);
+            }
+        }
+    }
+    pending_session_indexes.erase(pending);
+}
+
+void ForgetPaymasterSessionIndex(WalletDatabase& database)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes.erase(&database);
+}
+
+void PrimePaymasterSessionIndex(WalletDatabase& database,
+                                const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
+{
+    auto rebuilt = BuildSessionIndex(sessions);
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    rebuilt.revision = session_indexes[&database].revision + 1;
+    session_indexes[&database] = std::move(rebuilt);
+}
+
+bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
+                                const uint256& txid,
+                                std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
+{
+    sessions.clear();
+    std::set<std::string> requests;
+    bool rebuild;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        const auto& index = session_indexes[&database];
+        rebuild = !index.valid;
+        revision = index.revision;
+        const auto found = index.by_transaction.find(txid);
+        if (!rebuild && found != index.by_transaction.end()) requests = found->second;
+    }
+    if (rebuild) {
+        std::vector<DigiDollar::Paymaster::PaymentSession> all;
+        if (!batch.ListPaymasterSessions(all)) return false;
+        auto rebuilt = BuildSessionIndex(all);
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        auto& index = session_indexes[&database];
+        // A concurrently completed write requires a new snapshot, never a
+        // falsely empty lookup. Normal callers are serialized by cs_wallet.
+        if (index.revision != revision) return false;
+        rebuilt.revision = revision;
+        index = std::move(rebuilt);
+        const auto found = index.by_transaction.find(txid);
+        if (found != index.by_transaction.end()) requests = found->second;
+    }
+    for (const auto& request : requests) {
+        DigiDollar::Paymaster::PaymentSession session;
+        if (batch.ReadPaymasterSessionWithStatus(request, session) != DatabaseReadStatus::FOUND ||
+            (session.final_txid != txid && session.recovery_txid != txid)) {
+            ForgetPaymasterSessionIndex(database);
+            sessions.clear();
+            return false;
+        }
+        sessions.push_back(std::move(session));
+    }
+    return true;
+}
+
 namespace DBKeys {
 const std::string PAYMASTER_SESSION{"pmsession"};
 const std::string PAYMASTER_RECOVERY{"pmrecovery"};
@@ -124,7 +263,17 @@ bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSess
         session.version != DigiDollar::Paymaster::PaymentSession::CURRENT_VERSION) {
         return false;
     }
-    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), session, overwrite);
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), session, overwrite)) {
+        if (own) TxnAbort();
+        return false;
+    }
+    QueueSessionIndex(this, m_database, session.request_id,
+                      FinalIds{session.final_txid, session.recovery_txid});
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterSessionWithStatus(
@@ -195,7 +344,16 @@ bool WalletBatch::ListPaymasterSessions(
 
 bool WalletBatch::ErasePaymasterSession(const std::string& request_id)
 {
-    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, request_id));
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_SESSION, request_id))) {
+        if (own) TxnAbort();
+        return false;
+    }
+    QueueSessionIndex(this, m_database, request_id, std::nullopt);
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 bool WalletBatch::WritePaymasterRecovery(

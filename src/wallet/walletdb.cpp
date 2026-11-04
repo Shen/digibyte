@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #include <wallet/walletdb.h>
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymastersessionindex.h>
 
 #include <common/system.h>
 #include <key_io.h>
@@ -1971,6 +1972,7 @@ bool WalletBatch::TxnCommit()
 {
     const bool committed = PaymasterCheckpointPrepareCommit(this) && m_batch->TxnCommit();
     if (!committed && PaymasterCheckpointTracked(this)) m_batch->TxnAbort();
+    PaymasterSessionIndexEnd(this, committed);
     PaymasterCheckpointEnd(this);
     return committed;
 }

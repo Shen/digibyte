@@ -28,6 +28,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
@@ -44,6 +45,33 @@ using namespace DigiDollar::Paymaster;
 using namespace wallet;
 
 namespace {
+
+class SessionIndexDatabase : public MockableDatabase
+{
+    class Batch : public MockableBatch {
+        SessionIndexDatabase& m_database;
+    public:
+        explicit Batch(SessionIndexDatabase& db)
+            : MockableBatch(db.m_records, db.m_pass, &db.m_on_write, &db.m_refuse_write,
+                            db.m_txn_pass, &db.m_fail_write_at, &db.m_write_count, &db.m_fail_commit),
+              m_database(db) {}
+        std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override
+        {
+            DataStream expected;
+            expected << DBKeys::PAYMASTER_SESSION;
+            if (prefix.size() == expected.size() && std::equal(prefix.begin(), prefix.end(), expected.begin())) {
+                ++m_database.session_scans;
+            }
+            return MockableBatch::GetNewPrefixCursor(prefix);
+        }
+    };
+public:
+    size_t session_scans{0};
+    std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
+    {
+        return std::make_unique<Batch>(*this);
+    }
+};
 
 class ScopedRecoveryMockTime
 {
@@ -579,6 +607,66 @@ void CheckPaymasterWriteFailures(wallet::CWallet& wallet, size_t writes,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(final_session_index_scales_and_tracks_committed_changes)
+{
+    SyncWithValidationInterfaceQueue();
+    for (const size_t count : {100U, 1000U, 8192U}) {
+        auto owned = std::make_unique<SessionIndexDatabase>();
+        auto& database = *owned;
+        wallet::CWallet wallet{m_node.chain.get(), "session-index", std::move(owned)};
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{database};
+        BOOST_REQUIRE(batch.TxnBegin());
+        PaymentSession last;
+        for (size_t i = 0; i < count; ++i) {
+            PaymentSession session;
+            session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            session.session_id = uint256S(strprintf("%064x", i + 1));
+            session.final_txid = session.session_id;
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+            last = session;
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+        std::vector<PaymentSession> selected;
+        for (size_t i = 0; i < count; ++i) {
+            BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database,
+                uint256S(strprintf("%064x", i + 1)), selected));
+            BOOST_REQUIRE_EQUAL(selected.size(), 1U);
+        }
+        BOOST_CHECK_EQUAL(database.session_scans, 1U);
+
+        const auto original = last.final_txid;
+        last.final_txid = uint256S("ffff");
+        BOOST_REQUIRE(batch.WritePaymasterSession(last));
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, original, selected));
+        BOOST_CHECK(selected.empty());
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, last.final_txid, selected));
+        BOOST_REQUIRE_EQUAL(selected.size(), 1U);
+        BOOST_CHECK_EQUAL(database.session_scans, 1U);
+
+        BOOST_REQUIRE(batch.TxnBegin());
+        BOOST_REQUIRE(batch.ErasePaymasterSession(last.request_id));
+        BOOST_REQUIRE(batch.TxnAbort());
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, last.final_txid, selected));
+        BOOST_CHECK_EQUAL(selected.size(), 1U);
+        BOOST_CHECK_EQUAL(database.session_scans, 2U);
+
+        database.FailCommit();
+        last.final_txid = original;
+        BOOST_CHECK(!batch.WritePaymasterSession(last));
+        database.ClearFailureInjection();
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, uint256S("ffff"), selected));
+        BOOST_CHECK_EQUAL(selected.size(), 1U);
+        BOOST_REQUIRE(batch.ErasePaymasterSession(last.request_id));
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, uint256S("ffff"), selected));
+        BOOST_CHECK(selected.empty());
+
+        ForgetPaymasterSessionIndex(database); // same reconstruction used on reopen
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, uint256::ONE, selected));
+        BOOST_CHECK_EQUAL(selected.size(), 1U);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(client_session_v4_and_tombstone_v2_compatibility_vectors)
 {

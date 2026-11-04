@@ -77,6 +77,7 @@
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -111,6 +112,7 @@ CWallet::CWallet(interfaces::Chain* chain, const std::string& name, std::unique_
 // CWallet destructor - defined here to support unique_ptr with incomplete type (DigiDollarWallet)
 CWallet::~CWallet()
 {
+    ForgetPaymasterSessionIndex(GetDatabase());
     // Should not have slots connected at this point.
     assert(NotifyUnload.empty());
 }

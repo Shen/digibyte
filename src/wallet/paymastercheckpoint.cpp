@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymastersessionindex.h>
 
 #include <chainparams.h>
 #include <hash.h>
@@ -440,6 +441,7 @@ bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
 
 void PaymasterCheckpointEnd(const WalletBatch* owner)
 {
+    PaymasterSessionIndexEnd(owner);
     // Destroy (and release its OS lock) outside the registry critical section.
     std::shared_ptr<TransactionState> retired;
     {
