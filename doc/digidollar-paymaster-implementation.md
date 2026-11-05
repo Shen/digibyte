@@ -110,7 +110,14 @@ discarded to admit new work.
 
 Protected DGB/DD reserves are excluded from ordinary coin selection and shown
 separately from available funds; wallet total includes them. Manual locks and
-DD collateral remain distinct. Finite setup and recurring refill have separate
+DD collateral remain distinct. A reservation adds its own coin-lock reason;
+cancel, expiry and pruning remove only that reason after a successful commit.
+An explicit manual lock set during the reservation survives cleanup, including
+wallet reload when persistent. Ordinary unlock removes only ordinary ownership.
+The existing `lockedutxo` key retains `'1'` for ordinary locks; `'P'` and `'B'`
+represent Paymaster and shared ownership. Legacy ambiguous `'1'` rows remain
+conservatively locked until explicitly unlocked. Invalid values fail wallet load
+and cannot be rewritten by cleanup. Finite setup and recurring refill have separate
 approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
 See [pool setup](digidollar-paymaster-pool-setup.md).

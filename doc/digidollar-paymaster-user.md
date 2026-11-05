@@ -102,6 +102,9 @@ Closing the window or restarting does not undo signed work. An unsigned local
 cancellation may leave the provider's reservation until expiry; it does not
 charge a service fee or send the payment. After signing, cancellation is not a
 simple undo: the original and a recovery transaction may compete for confirmation.
+Manual coin locks are independent: cancelling preparation or expiring an offer
+does not remove a manual lock set during preparation. Persistent manual locks
+also survive wallet restart.
 
 ## If something appears stuck
 

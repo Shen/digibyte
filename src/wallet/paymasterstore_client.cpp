@@ -416,7 +416,7 @@ bool PaymasterStore::ReserveInputs(
             !batch.WritePaymasterReservation(reservation, false)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
-        if (!batch.WriteLockedUTXO(reservation.outpoint)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        if (!batch.WritePaymasterLockedUTXO(reservation.outpoint)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     session.user_inputs = std::move(user_inputs);
     session.fee_mode_used = used_mode;
@@ -428,7 +428,7 @@ bool PaymasterStore::ReserveInputs(
         return false;
     }
     for (const auto& reservation : reservations)
-        m_wallet.LockCoin(reservation.outpoint);
+        m_wallet.LockPaymasterCoin(reservation.outpoint);
     return true;
 }
 
@@ -659,7 +659,7 @@ bool PaymasterStore::PreparePaymentIntent(const std::string& request_id,
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
     for (const InputReservation& reservation : reservations) {
         if (!batch.WritePaymasterReservation(reservation, false) ||
-            !batch.WriteLockedUTXO(reservation.outpoint)) {
+            !batch.WritePaymasterLockedUTXO(reservation.outpoint)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
@@ -677,7 +677,7 @@ bool PaymasterStore::PreparePaymentIntent(const std::string& request_id,
         return false;
     }
     for (const InputReservation& reservation : reservations)
-        m_wallet.LockCoin(reservation.outpoint);
+        m_wallet.LockPaymasterCoin(reservation.outpoint);
     return true;
 }
 
@@ -1876,7 +1876,7 @@ bool PaymasterStore::AbandonUnsignedClientSession(const std::string& request_id,
     }
     for (const COutPoint& outpoint : session.user_inputs) {
         if (!batch.ErasePaymasterReservation(outpoint) ||
-            !batch.EraseLockedUTXO(outpoint)) {
+            !batch.ErasePaymasterLockedUTXO(outpoint)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
@@ -1885,7 +1885,7 @@ bool PaymasterStore::AbandonUnsignedClientSession(const std::string& request_id,
         return false;
     }
     for (const COutPoint& outpoint : session.user_inputs) {
-        m_wallet.UnlockCoin(outpoint);
+        m_wallet.UnlockPaymasterCoin(outpoint);
     }
     return true;
 }

@@ -549,8 +549,8 @@ CMutableTransaction SeedLegacyClientRecovery(wallet::CWallet& wallet,
     BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
         artifacts.user_input, session.request_id, session.session_id,
         ReservationRole::USER_DD, true, 101}));
-    BOOST_REQUIRE(batch.WriteLockedUTXO(artifacts.user_input));
-    wallet.LockCoin(artifacts.user_input);
+    BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(artifacts.user_input));
+    wallet.LockPaymasterCoin(artifacts.user_input);
     CMutableTransaction transaction;
     transaction.SetDigiDollarType(::DD_TX_TRANSFER);
     transaction.vin.emplace_back(artifacts.user_input);
@@ -634,8 +634,8 @@ void SeedClientViewPayment(WalletTestingSetup& fixture, PaymentSession& session,
     BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
         artifacts.user_input, session.request_id, session.session_id,
         ReservationRole::USER_DD, true, 101}));
-    BOOST_REQUIRE(batch.WriteLockedUTXO(artifacts.user_input));
-    wallet.LockCoin(artifacts.user_input);
+    BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(artifacts.user_input));
+    wallet.LockPaymasterCoin(artifacts.user_input);
 }
 
 AlternativeRecoveryRecord MakeClientViewRecovery(const PaymentSession& session,
@@ -2400,11 +2400,36 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     {
         LOCK(expiry_wallet.cs_wallet);
         // Copying the database does not recreate the running wallet's locks.
-        expiry_wallet.LockCoin(user_input);
+        expiry_wallet.LockPaymasterCoin(user_input);
         BOOST_REQUIRE(expiry_wallet.IsLockedCoin(user_input));
     }
     auto& expiry_mock = GetMockableDatabase(expiry_wallet);
     const MockableData before_expiry = expiry_mock.m_records;
+    {
+        // Expiring the same unsigned quote must retain an ordinary persistent
+        // lock added while its reservation was still active, including reload.
+        wallet::CWallet manual_wallet{m_node.chain.get(), "manual-lock-quote-expiry",
+                                      DuplicateMockDatabase(expiry_wallet.GetDatabase())};
+        BOOST_REQUIRE(manual_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        {
+            LOCK(manual_wallet.cs_wallet);
+            WalletBatch batch{manual_wallet.GetDatabase()};
+            BOOST_REQUIRE(manual_wallet.LockCoin(user_input, &batch));
+        }
+        size_t expired{0};
+        BOOST_REQUIRE_MESSAGE(PaymasterStore{manual_wallet}.ExpireProviderQuotes(121, expired, error), error);
+        BOOST_CHECK_EQUAL(expired, 1U);
+        BOOST_CHECK(!IsPaymasterInputReserved(manual_wallet, user_input));
+        {
+            LOCK(manual_wallet.cs_wallet);
+            BOOST_CHECK(manual_wallet.IsLockedCoin(user_input));
+        }
+        wallet::CWallet reloaded{m_node.chain.get(), "manual-lock-after-quote-expiry",
+                                DuplicateMockDatabase(manual_wallet.GetDatabase())};
+        BOOST_REQUIRE(reloaded.LoadWallet() == DBErrors::LOAD_OK);
+        LOCK(reloaded.cs_wallet);
+        BOOST_CHECK(reloaded.IsLockedCoin(user_input));
+    }
     size_t expired_quotes{0};
     expiry_mock.FailWriteAt(2);
     BOOST_CHECK(!expiry_store.ExpireProviderQuotes(
@@ -7226,6 +7251,201 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cancel_failures_and_lost_reply_preserve_inp
         BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterReservation(input, reservation));
         BOOST_CHECK_EQUAL(reservation.request_id, next_request);
         BOOST_CHECK(reopened.IsLockedCoin(input));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(active_reservation_cleanup_preserves_manual_lock_ownership)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    for (const bool prune : {false, true}) {
+        for (const bool reload : {false, true}) {
+            BOOST_TEST_CONTEXT("prune " << prune << ", reload before cleanup " << reload) {
+                wallet::CWallet original{m_node.chain.get(), "active-manual-locks",
+                                         DuplicateMockDatabase(m_wallet.GetDatabase())};
+                PaymasterStore original_store{original};
+                PaymentSession session;
+                std::string error;
+                constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440095";
+                const COutPoint automatic{uint256S("f231"), 0};
+                const COutPoint transient{uint256S("f232"), 0};
+                const COutPoint persistent{uint256S("f233"), 0};
+                BOOST_REQUIRE(original_store.CreateOrJoinSession(request_id, uint256S("f234"),
+                    FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+                BOOST_REQUIRE_MESSAGE(original_store.ReserveInputs(request_id,
+                    {{automatic, ReservationRole::USER_DD}, {transient, ReservationRole::USER_DD},
+                     {persistent, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error), error);
+                {
+                    LOCK(original.cs_wallet);
+                    // These are added while Paymaster already owns all three locks.
+                    BOOST_REQUIRE(original.LockCoin(transient));
+                    WalletBatch batch{original.GetDatabase()};
+                    BOOST_REQUIRE(original.LockCoin(persistent, &batch));
+                }
+                if (prune) {
+                    BOOST_REQUIRE(original_store.TransitionSession(request_id, SessionState::FAILED,
+                        PendingPhase::NONE, {}, 102, error));
+                }
+                std::unique_ptr<wallet::CWallet> restarted;
+                wallet::CWallet* wallet = &original;
+                if (reload) {
+                    restarted = std::make_unique<wallet::CWallet>(m_node.chain.get(), "active-manual-locks-reloaded",
+                        DuplicateMockDatabase(original.GetDatabase()));
+                    BOOST_REQUIRE(restarted->LoadWallet() == DBErrors::LOAD_OK);
+                    wallet = restarted.get();
+                }
+                PaymasterStore store{*wallet};
+                const auto cleanup = [&](std::string& failure) {
+                    return prune ? store.PruneFinalSession(request_id, failure)
+                                 : store.AbandonUnsignedClientSession(request_id, 103, failure);
+                };
+                CheckPaymasterWriteFailures(*wallet, 2, cleanup, [&] {
+                    for (const auto& input : {automatic, transient, persistent}) {
+                        BOOST_CHECK(IsPaymasterInputReserved(*wallet, input));
+                        LOCK(wallet->cs_wallet);
+                        BOOST_CHECK(wallet->IsLockedCoin(input));
+                    }
+                });
+                BOOST_REQUIRE_MESSAGE(cleanup(error), error);
+                for (const auto& input : {automatic, transient, persistent}) {
+                    BOOST_CHECK(!IsPaymasterInputReserved(*wallet, input));
+                }
+                {
+                    LOCK(wallet->cs_wallet);
+                    BOOST_CHECK(!wallet->IsLockedCoin(automatic));
+                    BOOST_CHECK_EQUAL(wallet->IsLockedCoin(transient), !reload);
+                    BOOST_CHECK(wallet->IsLockedCoin(persistent));
+                    const COutPoint existing{uint256S("f235"), 0};
+                    std::vector<COutPoint> listed{existing};
+                    wallet->ListLockedCoins(listed);
+                    BOOST_CHECK(listed.front() == existing);
+                    BOOST_CHECK_EQUAL(std::count(listed.begin(), listed.end(), persistent), 1);
+                    BOOST_CHECK_EQUAL(listed.size(), reload ? 2U : 3U);
+                }
+                wallet::CWallet after_cleanup{m_node.chain.get(), "manual-locks-after-cleanup",
+                                              DuplicateMockDatabase(wallet->GetDatabase())};
+                BOOST_REQUIRE(after_cleanup.LoadWallet() == DBErrors::LOAD_OK);
+                LOCK(after_cleanup.cs_wallet);
+                BOOST_CHECK(!after_cleanup.IsLockedCoin(automatic));
+                BOOST_CHECK(!after_cleanup.IsLockedCoin(transient));
+                BOOST_CHECK(after_cleanup.IsLockedCoin(persistent));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(manual_unlock_does_not_remove_active_reservation_lock)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440096";
+    const COutPoint input{uint256S("f241"), 0};
+    const COutPoint failed_input{uint256S("f243"), 0};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f242"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE(store.ReserveInputs(request_id,
+        {{input, ReservationRole::USER_DD}, {failed_input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        auto& database = GetMockableDatabase(m_wallet);
+        const MockableData before{database.m_records};
+        database.FailWriteAt(0);
+        BOOST_CHECK(!m_wallet.LockCoin(failed_input, &batch));
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before);
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+        BOOST_REQUIRE(m_wallet.UnlockCoin(input, &batch));
+        BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+        BOOST_REQUIRE(m_wallet.UnlockAllCoins());
+        BOOST_CHECK(m_wallet.IsLockedCoin(input));
+    }
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
+    // A rejected manual-lock write must not create an in-memory manual owner.
+    auto before_cleanup = DuplicateMockDatabase(m_wallet.GetDatabase());
+    BOOST_REQUIRE(store.AbandonUnsignedClientSession(request_id, 102, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsLockedCoin(input));
+        BOOST_CHECK(!m_wallet.IsLockedCoin(failed_input));
+    }
+    wallet::CWallet restarted{m_node.chain.get(), "manual-unlock-active-reservation",
+                              std::move(before_cleanup)};
+    BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(restarted.cs_wallet);
+        BOOST_CHECK(restarted.IsLockedCoin(input));
+    }
+    BOOST_REQUIRE(PaymasterStore{restarted}.AbandonUnsignedClientSession(request_id, 102, error));
+    LOCK(restarted.cs_wallet);
+    BOOST_CHECK(!restarted.IsLockedCoin(input));
+    BOOST_CHECK(!restarted.IsLockedCoin(failed_input));
+}
+
+BOOST_AUTO_TEST_CASE(legacy_ambiguous_lock_record_is_preserved_as_manual)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440097";
+    const COutPoint input{uint256S("f251"), 0};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f252"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error));
+    // Pre-ownership wallets wrote this same byte for automatic and manual locks.
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(
+        std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(input.hash, input.n)), uint8_t{'1'}));
+    wallet::CWallet restarted{m_node.chain.get(), "legacy-ambiguous-lock",
+                              DuplicateMockDatabase(m_wallet.GetDatabase())};
+    BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_REQUIRE(PaymasterStore{restarted}.AbandonUnsignedClientSession(request_id, 102, error));
+    BOOST_CHECK(!IsPaymasterInputReserved(restarted, input));
+    LOCK(restarted.cs_wallet);
+    BOOST_CHECK(restarted.IsLockedCoin(input));
+    WalletBatch batch{restarted.GetDatabase()};
+    BOOST_REQUIRE(restarted.UnlockCoin(input, &batch));
+    BOOST_CHECK(!restarted.IsLockedCoin(input));
+}
+
+BOOST_AUTO_TEST_CASE(unknown_lock_owners_fail_closed_without_releasing_reservations)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655440098";
+    const COutPoint input{uint256S("f261"), 0};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f262"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error));
+    DataStream key_stream;
+    key_stream << std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(input.hash, input.n));
+    const SerializeData key{key_stream.begin(), key_stream.end()};
+    auto& database = GetMockableDatabase(m_wallet);
+    const MockableData valid{database.m_records};
+    for (const auto& invalid : std::vector<SerializeData>{{}, {std::byte{0x58}}, {std::byte{0x50}, std::byte{0}}}) {
+        database.m_records = valid;
+        database.m_records[key] = invalid;
+        const MockableData before{database.m_records};
+        BOOST_CHECK(!store.AbandonUnsignedClientSession(request_id, 102, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
+        BOOST_CHECK(database.m_records == before);
+        BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
+        {
+            LOCK(m_wallet.cs_wallet);
+            WalletBatch batch{m_wallet.GetDatabase()};
+            BOOST_CHECK(!m_wallet.LockCoin(input, &batch));
+            BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        }
+        wallet::CWallet reloaded{m_node.chain.get(), "unknown-coin-lock-owner",
+                                 DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_CHECK(reloaded.LoadWallet() == DBErrors::CORRUPT);
     }
 }
 

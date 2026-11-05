@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <ios>
 #include <optional>
 #include <string>
 
@@ -310,14 +311,69 @@ bool WalletBatch::WriteDescriptorCacheItems(const uint256& desc_id, const Descri
     return true;
 }
 
+namespace {
+/** Ordinary lock records retain their original byte. Older readers ignore
+ * the value and still protect every record, including the new owner values.
+ * A legacy '1' cannot distinguish a manual lock from an old reservation, so
+ * retain it as ordinary ownership rather than risk releasing a manual lock. */
+struct LockedUTXOOwners {
+    static constexpr uint8_t ORDINARY{1};
+    static constexpr uint8_t PAYMASTER{2};
+    uint8_t reasons{0};
+
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        uint8_t value;
+        stream >> value;
+        if (!stream.empty()) throw std::ios_base::failure("trailing coin lock data");
+        switch (value) {
+        case '1': reasons = ORDINARY; break;
+        case 'P': reasons = PAYMASTER; break;
+        case 'B': reasons = ORDINARY | PAYMASTER; break;
+        default: throw std::ios_base::failure("unknown coin lock owner");
+        }
+    }
+
+    uint8_t Encoded() const
+    {
+        return reasons == ORDINARY ? '1' : reasons == PAYMASTER ? 'P' : 'B';
+    }
+};
+} // namespace
+
+bool WalletBatch::UpdateLockedUTXO(const COutPoint& output, CoinLockReason reason, bool locked)
+{
+    const auto key = std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(output.hash, output.n));
+    LockedUTXOOwners owners;
+    const auto status = m_batch->ReadWithStatus(key, owners);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return false;
+    const uint8_t bit = reason == CoinLockReason::ORDINARY ? LockedUTXOOwners::ORDINARY : LockedUTXOOwners::PAYMASTER;
+    const uint8_t previous = owners.reasons;
+    if (locked) owners.reasons |= bit;
+    else owners.reasons &= ~bit;
+    if (owners.reasons == previous) return true;
+    if (owners.reasons == 0) return EraseIC(key);
+    return WriteIC(key, owners.Encoded());
+}
+
 bool WalletBatch::WriteLockedUTXO(const COutPoint& output)
 {
-    return WriteIC(std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(output.hash, output.n)), uint8_t{'1'});
+    return UpdateLockedUTXO(output, CoinLockReason::ORDINARY, true);
 }
 
 bool WalletBatch::EraseLockedUTXO(const COutPoint& output)
 {
-    return EraseIC(std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(output.hash, output.n)));
+    return UpdateLockedUTXO(output, CoinLockReason::ORDINARY, false);
+}
+
+bool WalletBatch::WritePaymasterLockedUTXO(const COutPoint& output)
+{
+    return UpdateLockedUTXO(output, CoinLockReason::PAYMASTER, true);
+}
+
+bool WalletBatch::ErasePaymasterLockedUTXO(const COutPoint& output)
+{
+    return UpdateLockedUTXO(output, CoinLockReason::PAYMASTER, false);
 }
 
 // DigiDollar UTXO persistence methods (Fix #5)
@@ -1624,7 +1680,16 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
                                                  uint32_t n;
                                                  key >> hash;
                                                  key >> n;
-                                                 pwallet->LockCoin(COutPoint(hash, n));
+                                                 LockedUTXOOwners owners;
+                                                 try {
+                                                     value >> owners;
+                                                 } catch (const std::exception& exception) {
+                                                     err = strprintf("Invalid locked UTXO record: %s", exception.what());
+                                                     return DBErrors::CORRUPT;
+                                                 }
+                                                 const COutPoint outpoint{hash, n};
+                                                 if (owners.reasons & LockedUTXOOwners::ORDINARY) pwallet->LockCoin(outpoint);
+                                                 if (owners.reasons & LockedUTXOOwners::PAYMASTER) pwallet->LockPaymasterCoin(outpoint);
                                                  return DBErrors::LOAD_OK;
                                              });
     result = std::max(result, locked_utxo_res.m_result);

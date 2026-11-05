@@ -1228,7 +1228,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
     if (!prune_unsigned && !batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     for (const COutPoint& outpoint : reservations_to_erase) {
         if (!batch.ErasePaymasterReservation(outpoint) ||
-            !batch.EraseLockedUTXO(outpoint)) {
+            !batch.ErasePaymasterLockedUTXO(outpoint)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
@@ -1287,7 +1287,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
     }
     pruned = true;
     for (const COutPoint& outpoint : reservations_to_erase)
-        m_wallet.UnlockCoin(outpoint);
+        m_wallet.UnlockPaymasterCoin(outpoint);
     return true;
 }
 

@@ -306,6 +306,11 @@ separately; wallet total includes them. Funds outside the pool may still be
 insufficient for refill plus transaction fees. Manual locks, unconfirmed funds
 and locked DD collateral are separate constraints.
 
+After upgrading a wallet with older, ambiguous reservation-lock records, a coin
+may remain manually locked after its Paymaster session closes. This preserves
+any prior manual lock. Review the session, then explicitly unlock the ordinary
+coin lock if intended; this does not remove an active Paymaster reservation.
+
 The target is desired capacity, not an all-or-nothing service requirement.
 Confirmed free complete slots can serve while further refill waits for funds.
 Refill creates fewer **whole slots** when necessary, waits for confirmation,

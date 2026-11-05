@@ -1768,7 +1768,7 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
                             reservation.role != ReservationRole::USER_DD ||
                             reservation.authorization_may_exist ||
                             !batch.ErasePaymasterReservation(outpoint) ||
-                            !batch.EraseLockedUTXO(outpoint)) {
+                            !batch.ErasePaymasterLockedUTXO(outpoint)) {
                             return Abort(
                                 batch, error,
                                 "PAYMASTER_RESERVATION_NOT_EXPIRABLE");
@@ -1779,12 +1779,11 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
                     error = "PAYMASTER_DATABASE_COMMIT";
                     return false;
                 }
-                // The database reservation and persistent lock are gone only
-                // after commit. Release the matching process-local lock too,
-                // otherwise the next send fails until the wallet is reloaded.
+                // Release only the reservation's lock reason after commit;
+                // manual or DigiDollar ownership must remain protected.
                 if (!other_live_attempt) {
                     for (const COutPoint& outpoint : session.user_inputs) {
-                        m_wallet.UnlockCoin(outpoint);
+                        m_wallet.UnlockPaymasterCoin(outpoint);
                     }
                 }
                 ++expired_quotes;
