@@ -20,7 +20,6 @@
 #include <version.h>
 
 #include <algorithm>
-#include <limits>
 #include <map>
 
 namespace DigiDollar::Paymaster {
@@ -535,17 +534,21 @@ bool ValidateClientAuthorizationManifest(
     }
     if (manifest.requested_amount.value <= 0 ||
         manifest.requested_amount.value > MAX_DD_OUTPUT_CENTS ||
+        manifest.recipient_amount.value <= 0 ||
+        manifest.recipient_amount.value > MAX_DD_OUTPUT_CENTS ||
+        manifest.service_fee.value < 0 ||
+        manifest.service_fee.value > MAX_DD_OUTPUT_CENTS ||
         (manifest.send_all_spendable_dd &&
          !manifest.subtract_paymaster_fee_from_amount)) {
         error = "PAYMASTER_CLIENT_AUTH_AMOUNT_INVALID";
         return false;
     }
+    // A self-consistent persisted manifest may still contain invalid amounts.
+    // Bound both operands before arithmetic; their sum is at most twice the
+    // DD-output ceiling, safely within int64_t.
     if (manifest.subtract_paymaster_fee_from_amount) {
-        if (manifest.recipient_amount.value >
-                std::numeric_limits<int64_t>::max() -
-                    manifest.service_fee.value ||
-            manifest.recipient_amount.value + manifest.service_fee.value !=
-                manifest.requested_amount.value) {
+        if (manifest.recipient_amount.value + manifest.service_fee.value !=
+            manifest.requested_amount.value) {
             error = "PAYMASTER_CLIENT_AUTH_GROSS_AMOUNT_MISMATCH";
             return false;
         }

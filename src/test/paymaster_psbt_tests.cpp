@@ -13,6 +13,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <initializer_list>
+#include <limits>
+#include <utility>
+
 using namespace DigiDollar::Paymaster;
 
 BOOST_AUTO_TEST_SUITE(paymaster_psbt_tests)
@@ -187,6 +191,62 @@ BOOST_AUTO_TEST_CASE(template_commitment_binds_quote_psbt_prevouts_and_roles_wit
     BOOST_CHECK(GetCollaborativeTemplateCommitment(intent, quote, changed_sighash) != commitment);
 }
 
+BOOST_AUTO_TEST_CASE(client_authorization_rejects_invalid_amounts_before_arithmetic)
+{
+    struct InvalidAmounts
+    {
+        int64_t requested;
+        int64_t recipient;
+        int64_t fee;
+    };
+    const InvalidAmounts invalid_amounts[]{
+        {100, 101, -1},
+        {100, 100, std::numeric_limits<int64_t>::min()},
+        {100, 100, std::numeric_limits<int64_t>::max()},
+        {100, std::numeric_limits<int64_t>::min(), -1},
+        {100, std::numeric_limits<int64_t>::max(), 1},
+        {100, 0, 100},
+        {100, -1, 101},
+        {100, MAX_DD_OUTPUT_CENTS + 1, 0},
+        {100, 100, MAX_DD_OUTPUT_CENTS + 1},
+        {0, 100, 0},
+        {-1, 100, 0},
+        {std::numeric_limits<int64_t>::min(), 100, 0},
+        {MAX_DD_OUTPUT_CENTS + 1, 100, 0},
+        {std::numeric_limits<int64_t>::max(), 100, 0},
+    };
+    PaymentIntent intent;
+    PaymasterQuote quote;
+    ValidatedCapacitySnapshot capacity;
+    CollaborativePSBTTemplate trusted;
+    for (const auto& amounts : invalid_amounts) {
+        for (const bool subtract_fee : {false, true}) {
+            BOOST_TEST_CONTEXT("requested=" << amounts.requested << ", recipient=" << amounts.recipient
+                                            << ", fee=" << amounts.fee << ", subtract=" << subtract_fee) {
+                ClientAuthorizationManifest manifest;
+                manifest.requested_amount = DDCents{amounts.requested};
+                manifest.recipient_amount = DDCents{amounts.recipient};
+                manifest.service_fee = DDCents{amounts.fee};
+                manifest.maximum_service_fee = DDCents{MAX_DD_OUTPUT_CENTS};
+                manifest.subtract_paymaster_fee_from_amount = subtract_fee;
+                // Recompute the ID and round-trip the stored shape so rejection
+                // cannot depend on a stale hash or failed deserialization.
+                manifest.manifest_id = GetClientAuthorizationManifestId(manifest);
+                CDataStream stream{SER_NETWORK, ::PROTOCOL_VERSION};
+                stream << manifest;
+                ClientAuthorizationManifest restored;
+                stream >> restored;
+                BOOST_REQUIRE(stream.empty());
+                BOOST_REQUIRE(restored.manifest_id == GetClientAuthorizationManifestId(restored));
+                std::string error;
+                BOOST_CHECK(!ValidateClientAuthorizationManifest(
+                    restored, intent, quote, capacity, trusted, error));
+                BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTH_AMOUNT_INVALID");
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(authorization_manifests_fail_closed_on_asset_or_role_changes)
 {
     const CTransactionRef user_prev = MakePrevTx(1000, 11);
@@ -310,6 +370,40 @@ BOOST_AUTO_TEST_CASE(authorization_manifests_fail_closed_on_asset_or_role_change
     BOOST_CHECK_EQUAL(exact_gross.requested_amount.value, 900);
     BOOST_CHECK(exact_gross.subtract_paymaster_fee_from_amount);
     BOOST_CHECK(exact_gross.send_all_spendable_dd);
+
+    // Amount-range checks must preserve zero-fee sponsorship and an exact
+    // positive-fee gross total at the existing DD-output ceiling.
+    for (const auto& amounts : {std::pair<int64_t, int64_t>{100, 0},
+                               {MAX_DD_OUTPUT_CENTS, 0},
+                               {MAX_DD_OUTPUT_CENTS - 100, 100}}) {
+        PaymentIntent bounded_intent{intent};
+        bounded_intent.recipient_amount = DDCents{amounts.first};
+        bounded_intent.funding_model = amounts.second == 0 ? FundingModel::SPONSORED : FundingModel::USER_PAID;
+        PaymasterQuote bounded_quote{quote};
+        bounded_quote.funding_model = bounded_intent.funding_model;
+        bounded_quote.service_fee = DDCents{amounts.second};
+        if (amounts.second != 0) bounded_quote.provider_fee_script = CScript{} << OP_TRUE;
+        bounded_quote.intent_hash = GetPaymentIntentHash(bounded_intent);
+        bounded_quote.template_commitment = GetCollaborativeTemplateCommitment(bounded_intent, bounded_quote, trusted);
+        PaymasterCapacityProof bounded_proof{capacity_proof};
+        bounded_proof.funding_model = bounded_intent.funding_model;
+        ValidatedCapacitySnapshot bounded_capacity{capacity};
+        bounded_capacity.funding_model = bounded_proof.funding_model;
+        bounded_capacity.resource_commitment = GetCapacityResourceCommitment(bounded_proof);
+        CDataStream bounded_stream{SER_NETWORK, ::PROTOCOL_VERSION};
+        bounded_stream << bounded_proof;
+        const auto bounded_bytes = MakeUCharSpan(bounded_stream);
+        bounded_capacity.capacity_proof.assign(bounded_bytes.begin(), bounded_bytes.end());
+        for (const bool subtract_fee : {false, true}) {
+            const DDCents requested{amounts.first + (subtract_fee ? amounts.second : 0)};
+            ClientAuthorizationManifest bounded_manifest;
+            BOOST_REQUIRE_MESSAGE(BuildClientAuthorizationManifest(
+                bounded_intent, bounded_quote, bounded_capacity, trusted, DDCents{amounts.second}, requested,
+                subtract_fee, /*send_all_spendable_dd=*/false, bounded_manifest, error), error);
+            BOOST_CHECK(ValidateClientAuthorizationManifest(
+                bounded_manifest, bounded_intent, bounded_quote, bounded_capacity, trusted, error));
+        }
+    }
 
     ClientAuthorizationManifest wrong_gross{exact_gross};
     wrong_gross.requested_amount = DDCents{901};
