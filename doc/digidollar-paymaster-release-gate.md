@@ -4,6 +4,47 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Request identity, carrier arithmetic and finance paging
+
+Source candidate `bfad9a900a83a50491f278e8b55e65186bc8983a`,
+based on `e019ec279b850974e1ea42c5b712b91faa4a23ff`, checked on 2026-11-05. Both accepted client-resume paths now compare the complete
+canonical order; preferred-offer checks reuse the first-attempt binding.
+Historical Restricted bindings remain readable without renewing authority.
+Client reconstruction reuses `ComputeCarrierSuccessor`, moved unchanged into
+the existing amount module. Finance paging uses revision-bound event identities
+and stores each page's events once. Tidy CI retains complete diagnostics and
+the actual pipeline status, including a silent successful analysis.
+
+Changed native translation units and the affected provider Qt units, test unit
+and regenerated MOC were freshly compiled with MSVC 14.43.34808,
+`/Od /MT /WX /std:c++20`; Qt uses static 5.15.10. These are isolated links with
+reused objects/libraries, not clean product builds. Commands, source/header/object
+hashes, seeds, failures and full outputs are retained under
+`.ai/implement-e019-c/`, `.ai/verify-a-e019-20261105-r1/`,
+`.ai/implement-e019-qt/` and `.ai/implement-e019-ci/`.
+
+| Executed check | Bounded result |
+|---|---|
+| Native amount/PSBT and historical request binding | Exit 0: 14 cases / 540 assertions, including carrier minimum/maximum and 0/1/99/100-cent fee outputs, exact transaction reconstruction and historical Restricted request identity. |
+| Checkpoint concurrency | Both unchanged cases pass twice with the same isolated binary and short workspace TEMP/TMP: 2 cases / 15 assertions per run; repeats are not additional coverage. Long artifact paths still abort. The captured stack resolves through filesystem `remove_all` in `BasicTestingSetup` teardown and `terminate`/`abort`; no checkpoint assertion or product guard was relaxed. Earlier write-assertion/abort results and incomplete object provenance remain separate from these successful runs. |
+| Qt | Four selected functions exit 0: new finance paging, existing finance/backup workflow, explicit queue effects/start failure and ordinary DGB balance. Existing stylesheet and QSignalSpy warnings remain; no full-Qt pass is claimed. |
+| Descriptor provider functional | Exit 0, 94.875 seconds; seed 1015350342, port seed 1861. Covers both new RPC retry regressions, unchanged resume after tighter policy, user-paid/public payments, exact gross/sweep, recovery and encrypted restart/unload. Freshly linked daemon and existing CLI. |
+| Tidy pipeline regression | Seven isolated Bash executions verify old/new silent/informational success, stderr-only analyzer failure and failed log output. Bash syntax passes. This uses a simulated analyzer and is not a Tidy/plugin analysis. |
+
+The first full provider run reached the new regressions and then exposed an
+existing comparison of a quote replay with the status endpoint's additional
+`observed_at`. The correction checks that observation separately as a positive
+integer and preserves exact comparison of every other field; the full rerun
+passes. Initial diagnostic links with missing test-main inputs, failed long-path
+runs and a debugger-only reader pass are retained and are not passing evidence.
+
+The shared CI-line correction was explicitly requested as review work package F;
+its ordinary callers and regressions are recorded in the change record. Boundary
+policy and hosting settings are unchanged. Final trusted owner acceptance,
+complete clean builds, Linux/C++17, supported Tidy17/plugin, sanitizers and full
+matrices remain operator/CI work. The short-path checkpoint runs do not certify
+arbitrary Windows path lengths or a complete transitive build provenance chain.
+
 ## Manifest amounts, authoritative status and inbound classification
 
 Working-tree corrections based on `3c850446b45f865de5bab494ab03fd3283203085`,
