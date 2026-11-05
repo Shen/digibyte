@@ -49,8 +49,11 @@ class PaymasterBackupAdoptionTest(PaymasterProviderBackupExitTest):
         assert_raises_rpc_error(-8, "PAYMASTER_BACKUP_INDEPENDENT_CHECKPOINT_REQUIRED",
                                 cli.adoptpaymasterbackup, execute)
         execute["independent_checkpoint"] = True
-        assert_raises_rpc_error(-4, "PAYMASTER_BACKUP_PLAN_CHANGED", cli.adoptpaymasterbackup,
+        assert_raises_rpc_error(-8, "PAYMASTER_INVALID_OPERATION_APPROVAL", cli.adoptpaymasterbackup,
                                 dict(execute, plan_id="00" * 32))
+        wrong_plan = "01" * 32 if preview["plan_id"] != "01" * 32 else "02" * 32
+        assert_raises_rpc_error(-4, "PAYMASTER_BACKUP_PLAN_CHANGED", cli.adoptpaymasterbackup,
+                                dict(execute, plan_id=wrong_plan))
         entry = next(entry for entry in pool_before if entry["state"] == "available" and entry["asset"] == "dgb")
         outpoint = {key: entry[key] for key in ("txid", "vout")}
         assert restored.lockunspent(False, [outpoint])
