@@ -15,6 +15,19 @@
 
 namespace DigiDollar::Paymaster {
 
+std::optional<DDCents> ComputeCarrierSuccessor(
+    DDCents carrier, DDCents service_fee, std::string& error)
+{
+    if (carrier.value < 100 || carrier.value > MAX_DD_OUTPUT_CENTS ||
+        service_fee.value < 1 || service_fee.value >= 100 ||
+        carrier.value > MAX_DD_OUTPUT_CENTS - service_fee.value) {
+        error = "PAYMASTER_INVALID_CARRIER_SUCCESSOR";
+        return std::nullopt;
+    }
+    error.clear();
+    return DDCents{carrier.value + service_fee.value};
+}
+
 std::optional<DDCents> ComputePaymasterFee(DDCents payment,
                                          uint32_t fee_rate_bps,
                                          DDCents maximum_service_fee)

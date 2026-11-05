@@ -961,11 +961,6 @@ std::optional<ServiceFeePlan> EvaluateServiceFee(const ProviderPolicy& policy,
                                                  DDCents payment,
                                                  std::string& error);
 
-/** Return the exact carrier successor amount for a sub-1-DD fee. */
-std::optional<DDCents> ComputeCarrierSuccessor(DDCents carrier,
-                                               DDCents service_fee,
-                                               std::string& error);
-
 } // namespace DigiDollar::Paymaster
 
 #endif // DIGIBYTE_PAYMASTER_PROVIDER_H

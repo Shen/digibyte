@@ -14,6 +14,7 @@
 #include <ios>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -133,6 +134,10 @@ struct EnumByteFormatter {
 std::optional<DDCents> ComputePaymasterFee(
     DDCents payment, uint32_t fee_rate_bps,
     DDCents maximum_service_fee = DDCents{});
+
+/** Return the exact carrier successor amount for a sub-1-DD fee. */
+std::optional<DDCents> ComputeCarrierSuccessor(
+    DDCents carrier, DDCents service_fee, std::string& error);
 
 /** Invert the capped rounded Paymaster fee formula for a fixed total wallet
  * outflow. Returns the unique recipient payment whose service fee makes
