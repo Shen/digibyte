@@ -19,6 +19,7 @@ void ProviderFinance::resetWalletPresentation()
     m_finance_last_result = UniValue{UniValue::VOBJ};
     m_finance_selected_summary->setText(tr("Load the selected reporting period to view income and costs."));
     m_finance_pages.clear();
+    m_finance_event_ids.clear();
     m_finance_page_index = -1;
     m_finance_loaded = false;
     m_finance_loading = false;
@@ -186,6 +187,7 @@ void ProviderFinance::requestSelectedFinanceStatus()
             // different period selector while its replacement is pending
             // or after that replacement fails validation.
             m_finance_pages.clear();
+            m_finance_event_ids.clear();
             m_finance_page_index = -1;
             m_finance_loaded = false;
             m_finance_last_result = UniValue{UniValue::VOBJ};
@@ -254,25 +256,11 @@ void ProviderFinance::requestFinancePage(const QString& requested_period,
                          "Finance data could not be loaded: Core returned a duplicate event in one page."));
                      return;
                  }
-                 if (!replace_pages) {
-                     for (const FinancePage& existing_page :
-                          m_finance_pages) {
-                         const bool duplicate = std::any_of(
-                             existing_page.events.cbegin(),
-                             existing_page.events.cend(),
-                             [&event_id](const UniValue& existing) {
-                                 return QString::fromStdString(
-                                     existing.find_value("event_id")
-                                         .get_str()) == event_id;
-                             });
-                         if (duplicate) {
-                             finishFinancePageFailure(tr(
-                                 "Finance data could not be loaded: Core repeated an event across cursor pages."));
-                             return;
-                         }
-                     }
+                 if (!replace_pages && m_finance_event_ids.count(event_id) != 0) {
+                     finishFinancePageFailure(tr(
+                         "Finance data could not be loaded: Core repeated an event across cursor pages."));
+                     return;
                  }
-                 page.events.push_back(event);
              }
              const UniValue& next_cursor =
                  result.find_value("next_cursor");
@@ -280,7 +268,7 @@ void ProviderFinance::requestFinancePage(const QString& requested_period,
                  ? QString::fromStdString(next_cursor.get_str())
                  : QString{};
              if (!page.next_cursor.isEmpty() &&
-                 (page.events.empty() ||
+                 (page.result.find_value("events").empty() ||
                   page.next_cursor == cursor)) {
                  finishFinancePageFailure(tr(
                      "Finance data could not be loaded: Core returned an invalid next-page cursor."));
@@ -290,10 +278,12 @@ void ProviderFinance::requestFinancePage(const QString& requested_period,
              if (replace_pages) {
                  m_finance_pages.clear();
                  m_finance_pages.push_back(std::move(page));
+                 m_finance_event_ids = std::move(page_event_ids);
                  m_finance_page_index = 0;
                  m_finance_loaded = true;
              } else {
                  m_finance_pages.push_back(std::move(page));
+                 m_finance_event_ids.merge(page_event_ids);
                  m_finance_page_index =
                      static_cast<int>(m_finance_pages.size()) - 1;
              }
@@ -384,7 +374,7 @@ void ProviderFinance::updateFinanceControls()
         m_finance_page_status->setText(tr("No booking page loaded"));
     } else {
         const int rows = static_cast<int>(
-            m_finance_pages.at(m_finance_page_index).events.size());
+            m_finance_pages.at(m_finance_page_index).result.find_value("events").size());
         m_finance_page_status->setText(
             tr("Page %1 · %2 booking(s)")
                 .arg(m_finance_page_index + 1)
@@ -406,7 +396,7 @@ void ProviderFinance::renderFinancePage(int index)
     }
     m_finance_page_index = index;
     const FinancePage& page = m_finance_pages.at(index);
-    applyFinanceStatus(page.result, page.events);
+    applyFinanceStatus(page.result, page.result.find_value("events").getValues());
     updateFinanceControls();
 }
 

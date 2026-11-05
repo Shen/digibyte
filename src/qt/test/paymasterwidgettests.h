@@ -84,6 +84,7 @@ private Q_SLOTS:
     void paymasterManualSubmitConfirmation_data();
     void paymasterManualSubmitConfirmation();
     void paymasterFinancesAndBackupWorkflow();
+    void paymasterFinancePaging();
     void paymasterFinanceOperatorPresentation_data();
     void paymasterFinanceOperatorPresentation();
     void paymasterFundsOperatorPresentation_data();

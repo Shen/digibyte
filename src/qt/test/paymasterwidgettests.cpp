@@ -2915,6 +2915,129 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     }
 }
 
+void PaymasterWidgetTests::paymasterFinancePaging()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto* pages = panel->findChild<QStackedWidget*>("paymasterOperatorPages");
+    auto* finance_page = panel->findChild<QWidget*>("paymasterFinancesPage");
+    auto* refresh = panel->findChild<QPushButton*>("paymasterFinanceRefresh");
+    auto* previous = panel->findChild<QPushButton*>("paymasterFinancePreviousPage");
+    auto* next = panel->findChild<QPushButton*>("paymasterFinanceNextPage");
+    auto* period = panel->findChild<QComboBox*>("paymasterFinancePeriod");
+    auto* bookings = panel->findChild<QTableWidget*>("paymasterFinanceEvents");
+    auto* status = panel->findChild<QLabel*>("paymasterFinanceHistoryStatus");
+    auto* page_status = panel->findChild<QLabel*>("paymasterFinancePageStatus");
+    QVERIFY(pages && finance_page && refresh && previous && next && period && bookings && status && page_status);
+
+    enum class PageFault { NONE, DUPLICATE_IN_PAGE, DUPLICATE_PREVIOUS_PAGE };
+    PageFault fault{PageFault::NONE};
+    std::string provider(64, 'a');
+    int revision{1};
+    std::array<int, 3> event_ids{{1, 2, 3}};
+    int reads{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command != "getpaymasterfinancestatus") throw std::runtime_error("unexpected finance paging RPC");
+        ++reads;
+        const auto& cursor = params[0].find_value("cursor");
+        const size_t index = cursor.isNull() ? 0 : cursor.get_str() == "01" ? 1 : 2;
+        UniValue result = FinanceTestSnapshot();
+        UniValue events{UniValue::VARR};
+        const auto add_event = [&](int id) {
+            UniValue event = result.find_value("events")[0];
+            event.pushKV("event_id", QStringLiteral("%1").arg(id, 64, 16, QLatin1Char('0')).toStdString());
+            event.pushKV("dd_income_cents", id);
+            events.push_back(std::move(event));
+        };
+        add_event(event_ids.at(index));
+        if (index == 2 && fault != PageFault::NONE) {
+            add_event(fault == PageFault::DUPLICATE_IN_PAGE ? event_ids.at(index) : event_ids.front());
+        }
+        result.pushKV("provider_id", provider);
+        result.pushKV("revision", revision);
+        result.pushKV("period", params[0].find_value("period"));
+        result.pushKV("events", std::move(events));
+        result.pushKV("next_cursor", index == 2 ? UniValue{} : UniValue{index == 0 ? "01" : "02"});
+        return result;
+    });
+    // No wallet is needed for this presentation fixture. Enable only its
+    // isolated finance surface, as in the existing accounting workflow test.
+    finance_page->setEnabled(true);
+    finance_page->setProperty("paymasterPageAvailable", true);
+    pages->setCurrentWidget(finance_page);
+    refresh->click();
+    QCOMPARE(bookings->rowCount(), 1);
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.01"));
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.02"));
+    QVERIFY(page_status->text().contains(QStringLiteral("Page 2")));
+
+    fault = PageFault::DUPLICATE_IN_PAGE;
+    next->click();
+    QVERIFY(status->text().contains(QStringLiteral("duplicate event in one page")));
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.02"));
+    fault = PageFault::DUPLICATE_PREVIOUS_PAGE;
+    next->click();
+    QVERIFY(status->text().contains(QStringLiteral("repeated an event across cursor pages")));
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.02"));
+    fault = PageFault::NONE;
+    ++revision;
+    next->click();
+    QVERIFY(status->text().contains(QStringLiteral("revision changed")));
+    --revision;
+    provider.assign(64, 'b');
+    next->click();
+    QVERIFY(status->text().contains(QStringLiteral("revision changed")));
+    provider.assign(64, 'a');
+    next->click();
+    // Both failed duplicate pages contained event 3. They must not pollute
+    // the accepted-page history or prevent this valid retry from succeeding.
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.03"));
+    QVERIFY(page_status->text().contains(QStringLiteral("Page 3")));
+    QVERIFY(!next->isEnabled());
+
+    const int loaded_reads = reads;
+    previous->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.02"));
+    previous->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.01"));
+    next->click();
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.03"));
+    QCOMPARE(reads, loaded_reads);
+
+    // A replacement starts a new history. Reuse an older event on its
+    // second page so stale duplicate identities cannot hide behind the
+    // replacement first page's independently unique event.
+    ++revision;
+    event_ids = {{4, 1, 3}};
+    refresh->click();
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.01"));
+    QVERIFY(page_status->text().contains(QStringLiteral("Page 2")));
+    provider.assign(64, 'b');
+    event_ids = {{5, 4, 3}};
+    refresh->click();
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.04"));
+    event_ids = {{6, 5, 3}};
+    period->setCurrentIndex(period->findData(QStringLiteral("today")));
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.05"));
+    QVERIFY(page_status->text().contains(QStringLiteral("Page 2")));
+
+    panel->setWalletModel(nullptr);
+    QCOMPARE(bookings->rowCount(), 0);
+    panel->setEnabled(true);
+    finance_page->setEnabled(true);
+    finance_page->setProperty("paymasterPageAvailable", true);
+    pages->setCurrentWidget(finance_page);
+    event_ids = {{7, 6, 3}};
+    refresh->click();
+    next->click();
+    QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.06"));
+    QVERIFY(page_status->text().contains(QStringLiteral("Page 2")));
+}
+
 void PaymasterWidgetTests::paymasterClientConfirmationRequiresObservation()
 {
     TestChain100Setup test;

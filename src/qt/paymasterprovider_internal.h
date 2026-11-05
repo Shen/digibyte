@@ -119,7 +119,6 @@ struct ProviderTypes
 
     struct FinancePage {
         UniValue result{UniValue::VOBJ};
-        std::vector<UniValue> events;
         QString request_cursor;
         QString next_cursor;
     };
@@ -1015,6 +1014,8 @@ private:
     QTableWidget* m_finance_events{nullptr};
     UniValue m_finance_last_result{UniValue::VOBJ};
     std::vector<FinancePage> m_finance_pages;
+    // IDs belong to these provider/revision-bound pages, never a failed read.
+    std::set<QString> m_finance_event_ids;
     int m_finance_page_index{-1};
     bool m_finance_loaded{false};
     bool m_finance_loading{false};
