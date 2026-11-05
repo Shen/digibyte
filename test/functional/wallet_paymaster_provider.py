@@ -1508,6 +1508,11 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
         self.wait_until(lambda: client.getdigidollarsendsession(
             user_paid_lookup)["session_state"] == "CONFIRMED")
         finalized_user_paid = client.getdigidollarsendsession(user_paid_lookup)
+        # The session-view endpoint adds the time of this read. Quote replay
+        # returns the same durable session without that endpoint-only field.
+        observed_at = finalized_user_paid.pop("observed_at")
+        assert_equal(type(observed_at), int)
+        assert observed_at > 0
         assert_equal(finalized_user_paid["final"], True)
         assert_equal(finalized_user_paid["txid"], final_txid)
         assert_equal(len(finalized_user_paid["reserved_user_inputs"]), 1)
@@ -1542,8 +1547,11 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 "authorization_commitment", "authorization_accepted",
                 "authorization_accepted_at", "psbt"):
             assert quote_field not in tombstone_retry
-        assert_equal(client.getdigidollarsendsession(user_paid_lookup),
-                     finalized_user_paid)
+        observed_after_retry = client.getdigidollarsendsession(user_paid_lookup)
+        retry_observed_at = observed_after_retry.pop("observed_at")
+        assert_equal(type(retry_observed_at), int)
+        assert retry_observed_at > 0
+        assert_equal(observed_after_retry, finalized_user_paid)
 
         self.log.info(
             "Recycle the USER_PAID carrier again without duplicate maintenance")
