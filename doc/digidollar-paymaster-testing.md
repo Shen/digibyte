@@ -193,6 +193,26 @@ The prefix includes split wallet suites. Windows equivalent:
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster unit tests failed' }
 ```
 
+Use a short isolated `TEMP`/`TMP` for Windows checkpoint tests. The fixture
+appends a random 64-character directory and checkpoint filenames; deeply nested
+artifact paths can fail in `BasicTestingSetup`'s ordinary filesystem cleanup.
+The fixture destructor can then terminate the process, hiding the test result.
+Keep the original assertions and record the failed long-path run separately.
+For example, from this workspace after building the selected test executable:
+
+```powershell
+$checkpointTemp = 'D:\Digibyte\digibyte-fork\.ai\ctmp'
+New-Item -ItemType Directory -Force -Path $checkpointTemp | Out-Null
+$savedTemp, $savedTmp = $env:TEMP, $env:TMP
+try {
+    $env:TEMP = $env:TMP = $checkpointTemp
+    & ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/checkpoint_readers_do_not_block_atomic_replacement,checkpoint_independent_identities_progress_while_another_write_is_paused' --report_level=detailed
+    if ($LASTEXITCODE -ne 0) { throw 'Checkpoint tests failed' }
+} finally {
+    $env:TEMP, $env:TMP = $savedTemp, $savedTmp
+}
+```
+
 For inbound classification, persisted client state and pending-balance regressions,
 use the freshly built test executable from the repository root. This focused selection normally takes
 seconds to a few minutes; success requires exit zero and no failed or unexpectedly
