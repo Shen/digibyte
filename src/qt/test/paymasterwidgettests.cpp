@@ -5537,6 +5537,10 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_
     QTest::newRow("privacy-pending-read-error") << false << false << QStringLiteral("privacy-read-error");
     QTest::newRow("privacy-started-mutation-success") << false << false << QStringLiteral("privacy-mutation-success");
     QTest::newRow("privacy-started-mutation-error") << false << false << QStringLiteral("privacy-mutation-error");
+    QTest::newRow("wallet-change-pending-read-success") << false << false << QStringLiteral("wallet-read-success");
+    QTest::newRow("wallet-change-pending-read-error") << false << false << QStringLiteral("wallet-read-error");
+    QTest::newRow("wallet-change-started-mutation-success") << false << false << QStringLiteral("wallet-mutation-success");
+    QTest::newRow("wallet-change-started-mutation-error") << false << false << QStringLiteral("wallet-mutation-error");
 }
 
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep()
@@ -5912,12 +5916,14 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     malformed_provider_snapshot = false;
     tab.setWalletModel(mini_gui.walletModel.get());
 
-    if (wallet_change_stage.startsWith(QLatin1String("privacy-"))) {
+    if (wallet_change_stage.startsWith(QLatin1String("privacy-")) ||
+        wallet_change_stage.startsWith(QLatin1String("wallet-"))) {
         auto* panel = static_cast<DigiDollarPaymasterWidget*>(
             tab.findChild<QWidget*>(QStringLiteral("paymasterWidget")));
         QVERIFY(panel);
         const bool pending_mutation = wallet_change_stage.contains(QLatin1String("mutation"));
         const bool failed_reply = wallet_change_stage.endsWith(QLatin1String("error"));
+        const bool switch_wallet = wallet_change_stage.startsWith(QLatin1String("wallet-"));
         QPointer<QWizard> wizard_guard;
         DigiDollarPaymasterWidget::RpcCallback late_reply;
         UniValue reply;
@@ -5957,7 +5963,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 });
             wizard->next();
             execution_pending = wizard->currentPage() == progress && bool(late_reply);
-            panel->setPrivacy(true);
+            if (switch_wallet) tab.setWalletModel(nullptr);
+            else panel->setPrivacy(true);
             QVERIFY(!wizard->isVisible());
         });
         guided_setup->click();
@@ -5984,7 +5991,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
             if (command == "getpaymasteroperatorinfo") ++refreshed;
             return setup_rpc(command, params);
         });
-        panel->setPrivacy(false);
+        if (switch_wallet) tab.setWalletModel(mini_gui.walletModel.get());
+        else panel->setPrivacy(false);
         QVERIFY(refreshed > 0);
         QCOMPARE(setup_write_order, writes_before_reply);
         return;

@@ -1144,6 +1144,7 @@ private:
     struct SetupPoolControls;
     struct SetupReviewControls;
     struct SetupProgressControls;
+    struct SetupExecution;
 
     bool setupWizardAvailable();
     QCheckBox* buildSetupWalletPages(PaymasterSetupWizard& wizard, const SetupWizardContext& context);
