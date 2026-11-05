@@ -36,6 +36,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 #include <util/chaintype.h>
 #include <util/overflow.h>
@@ -70,11 +71,30 @@ bool FindClientSession(const ClientSessionLookup& lookup, PaymasterStore& store,
         ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_SESSION_READ_FAILED");
 }
 
+bool IsUnsignedAttempt(const ProviderAttempt& attempt)
+{
+    return (attempt.state == AttemptState::CANDIDATE ||
+            attempt.state == AttemptState::QUOTED ||
+            attempt.state == AttemptState::REJECTED ||
+            attempt.state == AttemptState::QUOTE_EXPIRED) &&
+           attempt.user_signed_psbt.empty() &&
+           attempt.final_transaction.empty() && attempt.final_txid.IsNull() &&
+           attempt.provider_signed_at == 0 &&
+           attempt.provider_signed_result.empty();
+}
+
 bool LoadClientIntentDisplayBinding(const PaymentSession& session,
                                     const ProviderAttempt& attempt,
                                     std::string& recipient_address,
                                     std::string& error)
 {
+    if (!session.attempt_ids.empty() &&
+        attempt.attempt_id == session.attempt_ids.back() &&
+        !session.final_txid.IsNull() &&
+        attempt.final_txid != session.final_txid) {
+        error = "PAYMASTER_FINAL_SESSION_BINDING_MISMATCH";
+        return false;
+    }
     PaymentIntent intent;
     try {
         SpanReader stream{::PROTOCOL_VERSION, attempt.unsigned_intent};
@@ -147,6 +167,17 @@ bool LoadClientIntentDisplayBinding(const PaymentSession& session,
     }
 
     const ClientAuthorizationManifest& manifest = attempt.client_manifest;
+    if (manifest.manifest_id.IsNull()) {
+        // A candidate may legitimately be waiting for its first quote. Quoted
+        // or signed work must retain its manifest even after rejection/expiry.
+        if (!IsUnsignedAttempt(attempt) || attempt.state == AttemptState::QUOTED ||
+            !attempt.signed_quote.empty() || !attempt.unsigned_transaction.empty() ||
+            !attempt.unsigned_psbt.empty() || !attempt.accepted_client_manifest_id.IsNull() ||
+            attempt.client_manifest_accepted_at != 0) {
+            error = "PAYMASTER_CLIENT_AUTH_MANIFEST_REQUIRED";
+            return false;
+        }
+    }
     if (!manifest.manifest_id.IsNull() &&
         (manifest.version != ClientAuthorizationManifest::CURRENT_VERSION ||
          GetClientAuthorizationManifestId(manifest) != manifest.manifest_id ||
@@ -164,6 +195,19 @@ bool LoadClientIntentDisplayBinding(const PaymentSession& session,
         error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
         return false;
     }
+    if (!manifest.manifest_id.IsNull()) {
+        if (!paymaster_store::internal::ValidateAttemptAuthorizationManifest(
+                attempt, /*provider_side=*/false, error)) {
+            return false;
+        }
+        if (session.requested_amount.value > 0 &&
+            (manifest.requested_amount != session.requested_amount ||
+             manifest.subtract_paymaster_fee_from_amount != session.subtract_paymaster_fee_from_amount ||
+             manifest.send_all_spendable_dd != session.send_all_spendable_dd)) {
+            error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
+            return false;
+        }
+    }
 
     const auto address = DigiDollarAddressForScript(intent.recipient_script);
     if (!address ||
@@ -174,18 +218,6 @@ bool LoadClientIntentDisplayBinding(const PaymentSession& session,
     }
     recipient_address = *address;
     return true;
-}
-
-bool IsUnsignedAttempt(const ProviderAttempt& attempt)
-{
-    return (attempt.state == AttemptState::CANDIDATE ||
-            attempt.state == AttemptState::QUOTED ||
-            attempt.state == AttemptState::REJECTED ||
-            attempt.state == AttemptState::QUOTE_EXPIRED) &&
-           attempt.user_signed_psbt.empty() &&
-           attempt.final_transaction.empty() && attempt.final_txid.IsNull() &&
-           attempt.provider_signed_at == 0 &&
-           attempt.provider_signed_result.empty();
 }
 
 bool LoadClientSessionView(PaymasterStore& store,

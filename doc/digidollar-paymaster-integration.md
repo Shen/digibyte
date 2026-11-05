@@ -132,6 +132,11 @@ returns an action envelope containing `session` and current permitted actions.
 Confirmation can change on reorg. Re-read the current view instead of treating
 a previously observed success string as irrevocable settlement. Missing optional
 fields are unavailable evidence, not zero-valued amounts or a free service fee.
+Provider, fee and recipient terms come from the latest attempt bound to the
+session. An unreadable or inconsistent latest attempt fails with a reconciliation
+error; earlier attempts never supply replacement terms. A valid attempt still
+waiting for a quote has no exact fee terms. Retained completion records without
+attempt details likewise do not restore those terms or prove payment.
 
 Core derives `allowed_actions`; a frontend may remove an action but cannot add
 financial authority. Use only actions documented for the method being called.

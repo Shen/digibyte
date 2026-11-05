@@ -23,6 +23,11 @@ std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
     interfaces::Chain& chain, const CBlockLocator& locator);
 SessionSnapshot CaptureSessionSnapshot(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
 PaymentResult CaptureSessionPayment(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
+/** Validate persisted client display terms without renewing expired authority. */
+bool LoadClientIntentDisplayBinding(
+    const DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::ProviderAttempt& attempt,
+    std::string& recipient_address, std::string& error);
 
 template <typename T>
 bool DeserializePaymasterBytes(const std::vector<unsigned char>& bytes, const char* field, T& decoded, std::string& error)

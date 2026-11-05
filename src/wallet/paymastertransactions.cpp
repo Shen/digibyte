@@ -102,26 +102,25 @@ PaymentResult CaptureSessionPayment(const PaymentSession& session, const Paymast
     if (!session.final_txid.IsNull()) result.txid = session.final_txid;
     // The session owns the provider-independent gross order while its latest
     // client authorization manifest owns the exact provider-dependent split.
-    // Surface both together when the durable attempt is still available so
-    // status queries and exact retries never report the gross amount as the
-    // recipient amount in subtract-fee mode.
-    if (store && !session.provider_side) {
-        for (auto it = session.attempt_ids.rbegin();
-             it != session.attempt_ids.rend(); ++it) {
-            ProviderAttempt attempt;
-            if (!store->GetAttempt(*it, attempt)) continue;
-            const ClientAuthorizationManifest& manifest =
-                attempt.client_manifest;
-            if (manifest.manifest_id.IsNull() ||
-                manifest.version !=
-                    ClientAuthorizationManifest::CURRENT_VERSION ||
-                manifest.recipient_amount.value < 0 ||
-                manifest.service_fee.value < 0 ||
-                manifest.recipient_amount.value >
-                    std::numeric_limits<int64_t>::max() -
-                        manifest.service_fee.value) {
-                continue;
-            }
+    // An unreadable or invalid current attempt is unknown, never permission to
+    // display an older provider's terms alongside the current session/txid.
+    if (store && !session.provider_side && !session.attempt_ids.empty()) {
+        const uint256& attempt_id = session.attempt_ids.back();
+        ProviderAttempt attempt;
+        if (!store->GetAttempt(attempt_id, attempt) ||
+            attempt.attempt_id != attempt_id ||
+            attempt.session_id != session.session_id) {
+            throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ");
+        }
+        std::string recipient_address;
+        std::string error;
+        if (!LoadClientIntentDisplayBinding(session, attempt,
+                                            recipient_address, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        const ClientAuthorizationManifest& manifest = attempt.client_manifest;
+        if (!manifest.manifest_id.IsNull()) {
             result.provider_id = manifest.provider_id;
             result.privacy_profile = attempt.privacy_profile;
             result.offer_id = manifest.offer_id;
@@ -131,11 +130,7 @@ PaymentResult CaptureSessionPayment(const PaymentSession& session, const Paymast
             result.service_fee_cents = manifest.service_fee;
             result.user_total_cents = DDCents{manifest.recipient_amount.value +
                     manifest.service_fee.value};
-            if (const auto address = DigiDollarAddressForScript(
-                    manifest.recipient_script)) {
-                result.to_address = *address;
-            }
-            break;
+            result.to_address = std::move(recipient_address);
         }
     }
     return result;

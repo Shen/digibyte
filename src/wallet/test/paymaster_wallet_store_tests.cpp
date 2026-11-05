@@ -254,43 +254,52 @@ bool BuildValidClientResultArtifacts(wallet::CWallet& wallet,
                                      const ProviderPolicy* provider_policy = nullptr,
                                      bool with_dd_output = false,
                                      bool rpc_binding = false,
-                                     DDCents service_fee = DDCents{0})
+                                     DDCents service_fee = DDCents{0},
+                                     const ValidClientResultArtifacts* previous = nullptr)
 {
     artifacts.provider_identity_key = CKey{};
     artifacts.attempt = ProviderAttempt{};
     artifacts.final_transaction = CMutableTransaction{};
     artifacts.user_input = COutPoint{};
     artifacts.genesis_hash.SetNull();
-    CKey wallet_key;
-    wallet_key.MakeNewKey(true);
-    FlatSigningProvider signing_provider;
-    std::unique_ptr<Descriptor> descriptor = Parse(
-        "tr(" + EncodeSecret(wallet_key) + ")", signing_provider, error,
-        /*require_checksum=*/false);
-    if (!descriptor) return false;
-    WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
-    {
+    CScript wallet_script;
+    CTransactionRef user_tx;
+    if (previous) {
         LOCK(wallet.cs_wallet);
-        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-        if (!wallet.AddWalletDescriptor(
-                wallet_descriptor, signing_provider, "", false)) {
-            error = "PAYMASTER_TEST_DESCRIPTOR";
-            return false;
+        wallet_script = previous->attempt.client_manifest.recipient_script;
+        user_tx = wallet.mapWallet.at(previous->user_input.hash).tx;
+    } else {
+        CKey wallet_key;
+        wallet_key.MakeNewKey(true);
+        FlatSigningProvider signing_provider;
+        std::unique_ptr<Descriptor> descriptor = Parse(
+            "tr(" + EncodeSecret(wallet_key) + ")", signing_provider, error,
+            /*require_checksum=*/false);
+        if (!descriptor) return false;
+        WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+        {
+            LOCK(wallet.cs_wallet);
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            if (!wallet.AddWalletDescriptor(
+                    wallet_descriptor, signing_provider, "", false)) {
+                error = "PAYMASTER_TEST_DESCRIPTOR";
+                return false;
+            }
         }
-    }
 
-    TaprootBuilder taproot;
-    taproot.Finalize(XOnlyPubKey{wallet_key.GetPubKey()});
-    const CScript wallet_script = GetScriptForDestination(taproot.GetOutput());
-    CMutableTransaction user_previous;
-    user_previous.vin.emplace_back(COutPoint{attempt_id, 1});
-    user_previous.vout.emplace_back(4000, wallet_script);
-    const CTransactionRef user_tx = MakeTransactionRef(std::move(user_previous));
-    {
-        LOCK(wallet.cs_wallet);
-        if (!wallet.AddToWallet(user_tx, TxStateInMempool{})) {
-            error = "PAYMASTER_TEST_WALLET_TX";
-            return false;
+        TaprootBuilder taproot;
+        taproot.Finalize(XOnlyPubKey{wallet_key.GetPubKey()});
+        wallet_script = GetScriptForDestination(taproot.GetOutput());
+        CMutableTransaction user_previous;
+        user_previous.vin.emplace_back(COutPoint{attempt_id, 1});
+        user_previous.vout.emplace_back(4000, wallet_script);
+        user_tx = MakeTransactionRef(std::move(user_previous));
+        {
+            LOCK(wallet.cs_wallet);
+            if (!wallet.AddToWallet(user_tx, TxStateInMempool{})) {
+                error = "PAYMASTER_TEST_WALLET_TX";
+                return false;
+            }
         }
     }
     CMutableTransaction provider_previous;
@@ -638,6 +647,28 @@ void SeedClientViewPayment(WalletTestingSetup& fixture, PaymentSession& session,
     wallet.LockPaymasterCoin(artifacts.user_input);
 }
 
+void SeedClientFallbackViewPayment(WalletTestingSetup& fixture, PaymentSession& session,
+                                   ValidClientResultArtifacts& previous,
+                                   ValidClientResultArtifacts& current)
+{
+    SeedClientViewPayment(fixture, session, previous);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildValidClientResultArtifacts(fixture.m_wallet, session,
+        session.request_id, uint256S("d8"), 102, current, error, nullptr, true, true,
+        DDCents{20}, &previous), error);
+    previous.attempt.state = AttemptState::REJECTED;
+    previous.attempt.user_signed_psbt.clear();
+    previous.attempt.accepted_client_manifest_id.SetNull();
+    previous.attempt.client_manifest_accepted_at = 0;
+    session.attempt_ids.push_back(current.attempt.attempt_id);
+    session.requested_amount = DDCents{1000};
+    LOCK(fixture.m_wallet.cs_wallet);
+    WalletBatch batch{fixture.m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(previous.attempt));
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(current.attempt));
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+}
+
 AlternativeRecoveryRecord MakeClientViewRecovery(const PaymentSession& session,
                                                   const ValidClientResultArtifacts& artifacts)
 {
@@ -676,7 +707,8 @@ PaymasterResult MakeClientViewResult(const ValidClientResultArtifacts& artifacts
 }
 
 void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSession& session,
-                                   const char* expected_error)
+                                   const char* expected_error,
+                                   bool check_payment_snapshot = false)
 {
     auto& wallet = fixture.m_wallet;
     PaymasterStore store{wallet};
@@ -723,6 +755,17 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
     BOOST_CHECK_EXCEPTION(listdigidollarsendsessions().HandleRequest(request), UniValue, expected_rpc_error);
     UniValue lookup{UniValue::VOBJ};
     lookup.pushKV("request_id", session.request_id);
+    if (check_payment_snapshot) {
+        BOOST_CHECK_EXCEPTION(paymaster_app::CaptureSessionPayment(session, &store), ApplicationError,
+            [&](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET && failure.code == expected_error &&
+                    failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+            });
+        request.strMethod = "getdigidollarsendsession";
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back(lookup);
+        BOOST_CHECK_EXCEPTION(getdigidollarsendsession().HandleRequest(request), UniValue, expected_rpc_error);
+    }
     for (const char* action : {"refresh", "retry_same", "fallback", "abandon_unsigned", "cancel_to_self"}) {
         BOOST_TEST_CONTEXT("resolve action " << action) {
             request.strMethod = "resolvepaymastersession";
@@ -892,13 +935,14 @@ BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
                                             100, session, error) == CreatePaymasterSessionResult::CREATED);
     ValidClientResultArtifacts artifacts;
     BOOST_REQUIRE_MESSAGE(BuildValidClientResultArtifacts(m_wallet, session, request_id,
-        uint256S("901"), 101, artifacts, error, nullptr, true), error);
+        uint256S("901"), 101, artifacts, error, nullptr, true, true), error);
     auto& attempt = artifacts.attempt;
     const auto transaction = MakeTransactionRef(artifacts.final_transaction);
     attempt.state = AttemptState::MEMPOOL;
     attempt.final_txid = transaction->GetHash();
     attempt.final_transaction = SerializePaymasterTestObject(artifacts.final_transaction);
     session.attempt_ids = {attempt.attempt_id};
+    session.user_inputs = {artifacts.user_input};
     session.final_txid = attempt.final_txid;
     session.state = SessionState::CONFIRMED; // deliberately stale persisted state
     {
@@ -963,6 +1007,136 @@ BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
     BOOST_CHECK_EQUAL(database.m_write_count, 0U);
     BOOST_CHECK(database.m_records == records);
     database.ClearFailureInjection();
+}
+
+BOOST_AUTO_TEST_CASE(session_payment_snapshot_rejects_unknown_current_attempt)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts previous;
+    ValidClientResultArtifacts current;
+    SeedClientFallbackViewPayment(*this, session, previous, current);
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto valid_rows = database.m_records;
+    const auto valid_session = session;
+    BOOST_REQUIRE(previous.attempt.provider_id != current.attempt.provider_id);
+    const auto snapshot = paymaster_app::CaptureSessionPayment(session, &store);
+    BOOST_REQUIRE(snapshot.provider_id);
+    BOOST_CHECK(*snapshot.provider_id == current.attempt.provider_id);
+    BOOST_REQUIRE(snapshot.service_fee_cents);
+    BOOST_CHECK_EQUAL(snapshot.service_fee_cents->value, 20);
+    BOOST_REQUIRE(snapshot.user_total_cents);
+    BOOST_CHECK_EQUAL(snapshot.user_total_cents->value, 1020);
+    const auto resolved = paymaster_app::CaptureClientSession(store, session, "refresh");
+    BOOST_CHECK(resolved.session.provider_id == snapshot.provider_id);
+    BOOST_CHECK(database.m_records == valid_rows);
+
+    for (int scenario = 0; scenario < 14; ++scenario) {
+        BOOST_TEST_CONTEXT("current snapshot scenario " << scenario) {
+            database.m_records = valid_rows;
+            session = valid_session;
+            const char* expected_error = "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ";
+            {
+                LOCK(m_wallet.cs_wallet);
+                auto batch = m_wallet.GetDatabase().MakeBatch();
+                const auto key = std::make_pair(DBKeys::PAYMASTER_ATTEMPT, current.attempt.attempt_id);
+                auto invalid = current.attempt;
+                if (scenario == 0) {
+                    BOOST_REQUIRE(batch->Erase(key));
+                } else if (scenario == 1 || scenario == 2) {
+                    const uint16_t version = ProviderAttempt::CURRENT_VERSION + (scenario == 2);
+                    BOOST_REQUIRE(batch->Write(key, version));
+                } else {
+                    if (scenario == 3) invalid.attempt_id = uint256S("d9");
+                    if (scenario == 4) invalid.session_id = uint256S("da");
+                    if (scenario == 5) {
+                        invalid.client_manifest.manifest_id = uint256S("db");
+                        expected_error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
+                    }
+                    if (scenario == 6) {
+                        invalid.client_manifest.service_fee = DDCents{21};
+                        invalid.client_manifest.manifest_id = GetClientAuthorizationManifestId(invalid.client_manifest);
+                        expected_error = "PAYMASTER_CLIENT_AUTH_BINDING_MISMATCH";
+                    }
+                    if (scenario == 7) {
+                        ++invalid.client_manifest.version;
+                        expected_error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
+                    }
+                    if (scenario == 8) {
+                        invalid.client_manifest = {};
+                        expected_error = "PAYMASTER_CLIENT_AUTH_MANIFEST_REQUIRED";
+                    }
+                    if (scenario == 9) {
+                        // Never pair the current txid with another attempt's terms.
+                        session.final_txid = previous.attempt.unsigned_txid;
+                        expected_error = "PAYMASTER_FINAL_SESSION_BINDING_MISMATCH";
+                    }
+                    if (scenario == 10) {
+                        invalid.client_manifest.provider_id = previous.attempt.provider_id;
+                        invalid.client_manifest.manifest_id = GetClientAuthorizationManifestId(invalid.client_manifest);
+                        expected_error = "PAYMASTER_PERSISTED_MANIFEST_BINDING_MISMATCH";
+                    }
+                    if (scenario == 11) {
+                        invalid.unsigned_intent.clear();
+                        expected_error = "PAYMASTER_PERSISTED_INTENT_CORRUPT";
+                    }
+                    if (scenario == 12) {
+                        invalid.client_manifest.service_fee = DDCents{std::numeric_limits<int64_t>::max()};
+                        invalid.client_manifest.manifest_id = GetClientAuthorizationManifestId(invalid.client_manifest);
+                        expected_error = "PAYMASTER_CLIENT_AUTH_AMOUNT_INVALID";
+                    }
+                    if (scenario == 13) {
+                        invalid.signed_quote.clear();
+                        expected_error = "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_ENCODING";
+                    }
+                    BOOST_REQUIRE(batch->Write(key, invalid));
+                    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterSession(session));
+                }
+            }
+            CheckUnreadableClientArtifact(*this, session, expected_error, /*check_payment_snapshot=*/true);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(session_payment_snapshot_preserves_unquoted_current_attempt)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts previous;
+    ValidClientResultArtifacts current;
+    SeedClientFallbackViewPayment(*this, session, previous, current);
+    PaymasterStore store{m_wallet};
+    ProviderAttempt pending;
+    pending.attempt_id = current.attempt.attempt_id;
+    pending.session_id = session.session_id;
+    pending.provider_id = current.attempt.provider_id;
+    pending.provider_identity_key = current.attempt.provider_identity_key;
+    pending.client_nonce = current.attempt.client_nonce;
+    pending.privacy_profile = current.attempt.privacy_profile;
+    pending.unsigned_intent = current.attempt.unsigned_intent;
+    pending.created_at = pending.updated_at = 102;
+    for (const auto state : {AttemptState::CANDIDATE, AttemptState::REJECTED, AttemptState::QUOTE_EXPIRED}) {
+        pending.state = state;
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(pending));
+        }
+        const auto before = GetMockableDatabase(m_wallet).m_records;
+        const auto snapshot = paymaster_app::CaptureSessionPayment(session, &store);
+        BOOST_CHECK(!snapshot.provider_id);
+        BOOST_CHECK(!snapshot.service_fee_cents);
+        BOOST_CHECK(!snapshot.payment_cents);
+        BOOST_CHECK(!snapshot.user_total_cents);
+        BOOST_REQUIRE(snapshot.requested_amount_cents);
+        BOOST_CHECK_EQUAL(snapshot.requested_amount_cents->value, 1000);
+        BOOST_CHECK(snapshot.subtract_paymaster_fee_from_amount == std::optional<bool>{false});
+        const auto resolved = paymaster_app::CaptureClientSession(store, session, "refresh");
+        BOOST_REQUIRE(resolved.view.attempt);
+        BOOST_CHECK(resolved.view.attempt->attempt_id == pending.attempt_id);
+        BOOST_CHECK(!resolved.session.service_fee_cents);
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(capacity_replay_readiness_requires_exact_stored_response)
