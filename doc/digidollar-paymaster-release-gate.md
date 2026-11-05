@@ -4,6 +4,40 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Manifest amounts, authoritative status and inbound classification
+
+Working-tree corrections based on `3c850446b45f865de5bab494ab03fd3283203085`,
+checked on 2026-11-05. This review's R3–R5 cover bounded manifest arithmetic,
+latest-attempt status bindings and exact local-authority error regressions.
+Three changed production and three changed test translation units, plus the
+wallet PSBT test unit, were freshly compiled with MSVC 14.43.34808,
+`/Od /MT /WX /std:c++20`. Native and daemon links reuse other objects and
+libraries; they are not clean product builds. Commands, source/object/binary
+hashes, seeds, patches and full logs are in `.ai/fix-r3-r5-3c850446/`;
+`source-freeze.json` binds the final sources and executables.
+
+| Executed check | Bounded result |
+|---|---|
+| Native final selection | `native-fixed-tests` exits 0: 20 distinct cases / 1,752 assertions. Covers serialized/rehashed extreme amounts and valid boundaries, 14 current-attempt corruption scenarios through capture/get/list/resolve, unquoted fallback, reorg observations, retained authority and exact error classification. The earlier six-case selection overlaps and is not additional coverage. |
+| Status regression before correction | The two new snapshot cases fail against the previous implementation: 93 of 340 assertions fail. Both pass in the final selection; old provider/fee terms are no longer substituted. |
+| Functional provider fallback | Descriptor `wallet_paymaster_failover.py` exits 0, 84.70 seconds: contended capacity, a different provider with the same reserved DD inputs, signed fallback exclusion and unsigned closure. |
+| Functional payment/reorg | Descriptor `wallet_paymaster_reorg.py` exits 0, 39.05 seconds: authenticated conflict/recovery rejection, real payment, reorg and reconfirmation without duplicate accounting. Both runs use seed `1015350342`, port seed `732`, isolated datadirs, freshly linked daemon and reused CLI. |
+| Local controls | Five boundary fixtures, working-tree dependency/cycle checks and whitespace checks pass. Separate policy/product patches and an unapproved policy-first fixture are retained with `boundary-package.json`; that fixture's product comparison passes. The task-baseline comparison still rejects the control/scope changes; the official baseline still requires bootstrap. |
+
+The initial new amount test needed named default-initialized objects for MSVC;
+the initial daemon link duplicated the old client-view object. Both were fixed
+before the successful runs, with their failed logs retained. Neither failure
+is counted as a product runtime regression.
+
+Package D remains an owner/hosting acceptance gate. The control-only proposal
+and [required acceptance evidence](design/paymaster-integration-boundaries.md#owner-acceptance-evidence)
+are separate from the product fixes. Authenticated GitHub access and effective
+remote rules/PR SHAs have not been verified; local fixture commits are not
+owner approval. No hosting settings were changed. Clean supported builds,
+Linux/C++17, repository Tidy, sanitizers (including UBSan for the new amount
+vectors), Qt and complete matrices remain operator/CI checks in the
+[runbook](digidollar-paymaster-testing.md).
+
 ## Recovery, coin-lock ownership and Qt continuation corrections
 
 Working-tree candidate based on `988bb8e621c42b33d1da337fc2aead4c19608026`,
