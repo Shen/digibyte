@@ -210,6 +210,8 @@ invalidate late replies; shutdown joins started workers before destroying their
 dependencies. Provider components own their panel state and workflows; the send
 controller owns session transitions and emits effects for the widget to execute.
 Both reuse shared formatting and backend financial rules.
+Finance CSV uses ungrouped exact decimal
+amounts; display-only thousands grouping never enters numeric export columns.
 `ClientModel` owns node-status reads through the same generic queue, also in
 wallet-disabled Qt builds. Its destructor drains started reads before Core can
 destroy indexes, oracle state or chainstate. DD Overview callbacks retain their

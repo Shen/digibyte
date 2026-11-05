@@ -815,12 +815,16 @@ QString ProviderFinance::writeFinanceFile(const FinanceExportState& data, std::a
         const QString state = event.find_value("state").isStr()
             ? QString::fromStdString(event.find_value("state").get_str())
             : QString{};
+        // CSV amount cells are machine-readable decimals. Grouping belongs
+        // only in the on-screen monetary display, never in exported numbers.
         stream << csvCell(QDateTime::fromSecsSinceEpoch(
                               created_at, Qt::UTC).toString(Qt::ISODate))
                << ',' << csvCell(financeEventKind(kind))
                << ',' << csvCell(financeEventState(state))
-               << ',' << PaymasterWidgetImpl::ddAmount(dd_income)
-               << ',' << PaymasterWidgetImpl::dgbAmount(dgb_cost)
+               << ',' << DigiByteUnits::format(DigiByteUnits::Unit::uDGB, dd_income,
+                                              /*plussign=*/false, DigiByteUnits::SeparatorStyle::NEVER)
+               << ',' << DigiByteUnits::format(DigiByteUnits::Unit::DGB, dgb_cost,
+                                              /*plussign=*/false, DigiByteUnits::SeparatorStyle::NEVER)
                << ',' << csvCell(financeFundingModel(event));
         if (include_valuation) {
             const long double current_value =

@@ -37,6 +37,7 @@
 #include <support/allocators/secure.h>
 #include <test/util/setup_common.h>
 #include <timedata.h>
+#include <util/strencodings.h>
 #include <validation.h>
 #include <wallet/ddcoincontrol.h>
 #include <wallet/digidollarwallet.h>
@@ -50,6 +51,7 @@
 #include <univalue.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -2470,6 +2472,12 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     bool partial_history{false};
     bool malformed_finance{false};
     bool large_export{false};
+    // Cover exact zero, fractional units, grouped display values and limits
+    // through the real CSV writer, independently of its display formatter.
+    static constexpr std::array<std::pair<int64_t, int64_t>, 4> CSV_AMOUNTS{{
+        {0, 0}, {1, 1}, {1234567, 1234567890000LL},
+        {DigiDollar::MAX_DD_RPC_AMOUNT_CENTS, MAX_MONEY},
+    }};
     bool switch_period_during_request{false};
     QComboBox* period_control{nullptr};
 
@@ -2525,8 +2533,8 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
                         event.pushKV("event_id", event_id);
                         event.pushKV("kind", "transfer");
                         event.pushKV("state", "confirmed");
-                        event.pushKV("dd_income_cents", 1);
-                        event.pushKV("dgb_cost_satoshis", 2);
+                        event.pushKV("dd_income_cents", CSV_AMOUNTS.at(index % CSV_AMOUNTS.size()).first);
+                        event.pushKV("dgb_cost_satoshis", CSV_AMOUNTS.at(index % CSV_AMOUNTS.size()).second);
                         event.pushKV("created_at",
                                      static_cast<int64_t>(1000 + index));
                         event.pushKV("confirmed_at",
@@ -2888,6 +2896,23 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
     const QByteArray exported = export_file.readAll();
     QCOMPARE(exported.count('\n'),
              static_cast<int>(LARGE_EXPORT_EVENTS + 1));
+    const auto rows = exported.split('\n');
+    for (size_t index{0}; index < CSV_AMOUNTS.size(); ++index) {
+        const auto cells = rows.at(static_cast<int>(index + 1)).split(',');
+        QCOMPARE(cells.size(), 7);
+        int64_t income{-1}, cost{-1};
+        QVERIFY(ParseFixedPoint(cells.at(3).toStdString(), 2, &income));
+        // ParseFixedPoint's 10^18 bound is below DigiByte's MAX_MONEY.
+        // Validate the fixed scale, then read every satoshi as an integer.
+        auto cost_digits = cells.at(4);
+        QCOMPARE(cost_digits.count('.'), 1);
+        const int decimal = cost_digits.indexOf('.');
+        QCOMPARE(decimal, cost_digits.size() - 9);
+        cost_digits.remove(decimal, 1);
+        QVERIFY(ParseInt64(cost_digits.toStdString(), &cost));
+        QCOMPARE(income, CSV_AMOUNTS.at(index).first);
+        QCOMPARE(cost, CSV_AMOUNTS.at(index).second);
+    }
 }
 
 void PaymasterWidgetTests::paymasterClientConfirmationRequiresObservation()
