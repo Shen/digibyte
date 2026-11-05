@@ -36,6 +36,9 @@
     "src/qt/walletmodel.h",
     "src/qt/walletasync.cpp",
     "src/qt/walletasync.h",
+    "src/qt/clientmodel.cpp",
+    "src/qt/clientmodel.h",
+    "src/qt/digidollaroverviewwidget.cpp",
     "src/qt/test/wallettests.cpp",
     "src/qt/test/wallettests.h",
     "src/qt/digibyte.cpp",
@@ -53,7 +56,8 @@
     "src/wallet/bdb.cpp",
     "src/wallet/test/util.h",
     "src/wallet/test/digidollar_mint_cleanup_tests.cpp",
-    "src/wallet/test/db_tests.cpp"
+    "src/wallet/test/db_tests.cpp",
+    "build_msvc/test_digibyte-qt/test_digibyte-qt.vcxproj"
   ],
   "forbidden": [
     "src/consensus/*",
@@ -76,6 +80,10 @@
     "contrib/devtools/circular-dependencies.py"
   ],
   "dependencies": [
+    {
+      "sources": ["src/qt/clientmodel.cpp", "src/qt/clientmodel.h"],
+      "deny": ["qt/paymaster*", "paymaster/*", "wallet/*", "rpc/*"]
+    },
     {
       "sources": ["src/qt/walletmodel.cpp", "src/qt/walletmodel.h"],
       "deny": ["qt/paymaster*", "paymaster/*"]

@@ -29,11 +29,15 @@ class BoundaryTests(unittest.TestCase):
                              ('src/qt/walletasync.cpp', 'qt/paymasterasync.h'),
                              ('src/qt/walletasync.h', 'paymaster/error.h'),
                              ('src/qt/walletmodel.cpp', 'qt/paymasterasync.h'),
+                             ('src/qt/clientmodel.cpp', 'wallet/wallet.h'),
+                             ('src/qt/clientmodel.h', 'paymaster/error.h'),
+                             ('src/qt/clientmodel.cpp', 'rpc/server.h'),
                              ('src/qt/paymasterpage.cpp', 'wallet/wallet.h')]:
             with self.subTest(path=path, header=header):
                 self.assertTrue(BOUNDARIES.dependency_errors(path, f'#include "{header}"\n', POLICY))
         self.assertFalse(BOUNDARIES.dependency_errors('src/paymaster/x.cpp', '#include <primitives/transaction.h>\n', POLICY))
         self.assertFalse(BOUNDARIES.dependency_errors('src/qt/paymasterpage.cpp', '#include <interfaces/wallet.h>\n', POLICY))
+        self.assertFalse(BOUNDARIES.dependency_errors('src/qt/clientmodel.cpp', '#include <qt/walletasync.h>\n#include <interfaces/node.h>\n', POLICY))
         self.assertFalse(BOUNDARIES.dependency_errors('src/paymaster/x.cpp', '/*\n#include <wallet/wallet.h>\n*/', POLICY))
         for source in ['#define HEADER "wallet/wallet.h"\n#include HEADER',
                        '#include <C:/repo/src/wallet/wallet.h>',
