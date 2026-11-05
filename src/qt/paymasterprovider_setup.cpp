@@ -2165,6 +2165,14 @@ void ProviderSetup::renderSetupStatus(const QPointer<QLabel>& funding_label, con
 
 std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard& wizard, const SetupWizardContext& context, const SetupOfferControls& offer, const SetupSafetyControls& safety, const SetupPoolControls& pool, const SetupProgressControls& progress)
 {
+    const auto setup_open = std::make_shared<bool>(true);
+    connect(&wizard, &QDialog::finished, &wizard, [setup_open] { *setup_open = false; });
+    const auto setup_current = [guard = QPointer<PaymasterSetupWizard>{&wizard}, setup_open] {
+        return guard && *setup_open;
+    };
+    // Closing the wizard invalidates UI continuations immediately, even before
+    // its modal stack unwinds. An already dispatched Core operation still
+    // finishes, but its response cannot access controls or start the next step.
     const auto setup_model = context.setup_model;
     const auto setup_wallet_id = context.setup_wallet_id;
     const auto wallet_confirmation = context.wallet_confirmation;
@@ -2204,13 +2212,15 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
     auto liquidity_policy_params = std::make_shared<UniValue>();
     auto liquidity_preview_params = std::make_shared<UniValue>();
 
-    const auto set_progress = [progress_steps, progress_names](int step,
+    const auto set_progress = [setup_current, progress_steps, progress_names](int step,
                                                                const QString& marker,
                                                                const QString& state) {
+        if (!setup_current()) return;
         progress_steps.at(step)->setText(
             QStringLiteral("%1 %2 — %3").arg(marker, state, progress_steps.at(step)->property("setupMethod").isValid() ? progress_steps.at(step)->property("setupMethod").toString() : progress_names.at(step)));
     };
-    const auto set_wizard_running = [&wizard](bool running) {
+    const auto set_wizard_running = [&wizard, setup_current](bool running) {
+        if (!setup_current()) return;
         wizard.setCloseBlocked(running);
         if (wizard.button(QWizard::BackButton)) {
             wizard.button(QWizard::BackButton)->setEnabled(false);
@@ -2219,10 +2229,11 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
             wizard.button(QWizard::CancelButton)->setEnabled(!running);
         }
     };
-    const auto fail_setup = [setup_running, setup_retry, progress_result,
+    const auto fail_setup = [setup_current, setup_running, setup_retry, progress_result,
                              setup_step, setup_needs_quiesce, set_progress,
                              set_wizard_running](
                                     const QString& error) {
+        if (!setup_current()) return;
         *setup_running = false;
         set_progress(*setup_step, QStringLiteral("✕"), tr("Failed"));
         progress_result->setText(tr(
@@ -2240,22 +2251,23 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
     auto shared_context = std::make_shared<UniValue>();
     const QPointer<QLabel> funding_label{setup_funding};
     const QPointer<QPushButton> funding_refresh{setup_refresh};
-    const auto render_setup_status = [this, funding_label, shared_context](const UniValue& current) {
+    const auto render_setup_status = [this, setup_current, funding_label, shared_context](const UniValue& current) {
+        if (!setup_current()) return;
         renderSetupStatus(funding_label, *shared_context, current);
     };
-    const auto refresh_setup_status = [this, funding_label, funding_refresh, render_setup_status,
+    const auto refresh_setup_status = [this, setup_current, funding_label, funding_refresh, render_setup_status,
                                        setup_completed, setup_model, setup_wallet_id] {
-        if (!funding_label || !funding_refresh || !*setup_completed || m_panel.privacyEnabled() || m_panel.busy() || m_panel.rpcActive() ||
+        if (!setup_current() || !funding_label || !funding_refresh || !*setup_completed || m_panel.privacyEnabled() || m_panel.busy() || m_panel.rpcActive() ||
             !setup_model || m_panel.walletModel() != setup_model || m_panel.walletModel()->getWalletName() != setup_wallet_id) return;
         funding_refresh->setEnabled(false);
-        const auto failed = [this, funding_label, funding_refresh](const QString&) {
-            if (!funding_label || !funding_refresh || m_panel.privacyEnabled()) return;
+        const auto failed = [this, setup_current, funding_label, funding_refresh](const QString&) {
+            if (!setup_current() || !funding_label || !funding_refresh || m_panel.privacyEnabled()) return;
             funding_label->setText(tr("Current funding and readiness could not be refreshed. Check again; the previously displayed status is no longer current. Approved settings remain saved."));
             funding_refresh->setEnabled(true);
         };
         m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr,
-            [funding_label, funding_refresh, render_setup_status, failed](const UniValue& current) {
-                if (!funding_label || !funding_refresh) return;
+            [setup_current, funding_label, funding_refresh, render_setup_status, failed](const UniValue& current) {
+                if (!setup_current() || !funding_label || !funding_refresh) return;
                 try { render_setup_status(current); }
                 catch (const std::exception&) { failed({}); return; }
                 funding_refresh->setEnabled(true);
@@ -2268,7 +2280,7 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
     connect(setup_refresh, &QPushButton::clicked, progress_page, refresh_setup_status);
     auto advance_setup = std::make_shared<std::function<void()>>();
     std::weak_ptr<std::function<void()>> weak_advance_setup{advance_setup};
-    *advance_setup = [this, &wizard, progress_page, progress_result, setup_retry,
+    *advance_setup = [this, &wizard, setup_current, progress_page, progress_result, setup_retry,
                       setup_backup, setup_backup_id, setup_step, setup_running,
                       setup_completed, setup_needs_quiesce, setup_provider_id,
                       progress_steps, set_wizard_running, fail_setup, setup_step_label,
@@ -2278,6 +2290,7 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                       operation_mode, provider_enabled, autostart, reviewed_pool, setup_start_requested,
                       render_setup_status, setup_status_timer, setup_refresh] {
         using namespace DigiDollar::Paymaster;
+        if (!setup_current()) return;
         if (!setup_model || m_panel.walletModel() != setup_model || m_panel.walletModel()->getWalletName() != setup_wallet_id) {
             fail_setup(tr("The selected wallet changed or was unloaded. Reopen setup in the intended wallet."));
             return;
@@ -2285,7 +2298,8 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
         *setup_running = true;
         setup_retry->setVisible(false);
         set_wizard_running(true);
-        m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled, autostart, reviewed_pool, setup_start_requested, render_setup_status, setup_status_timer, setup_refresh](const UniValue& current) {
+        m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr, [this, &wizard, setup_current, progress_page, progress_result, setup_retry, setup_backup, setup_backup_id, setup_step, setup_running, setup_completed, setup_needs_quiesce, setup_provider_id, progress_steps, set_wizard_running, fail_setup, setup_step_label, weak_advance_setup, shared_steps, shared_context, display, policy_params, safety_params, liquidity_policy_params, liquidity_preview_params, operation_mode, provider_enabled, autostart, reviewed_pool, setup_start_requested, render_setup_status, setup_status_timer, setup_refresh](const UniValue& current) {
+                if (!setup_current()) return;
                 try {
                     if (shared_context->isNull()) {
                         SetupChoices choices;
@@ -2326,9 +2340,10 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                     m_panel.liquidity().acceptSetupOperation();
                     m_panel.overview().renderCurrentTask();
                     if (*setup_start_requested) {
-                        if (current.find_value("encrypted").isTrue()) m_panel.overview().unlockOperatorWallet([this] { m_panel.overview().requestReviewedStart(); });
+                        if (current.find_value("encrypted").isTrue()) m_panel.overview().unlockOperatorWallet([this, setup_current] { if (setup_current()) m_panel.overview().requestReviewedStart(); });
                         else m_panel.overview().requestReviewedStart();
                     }
+                    if (!setup_current()) return;
                     try { render_setup_status(current); }
                     catch (const std::exception&) { completion_text += tr("\nCurrent funding and readiness are unavailable. Check again before acting."); }
                     setup_refresh->show();
@@ -2341,13 +2356,15 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                     return;
                 }
                 const auto step = (*shared_steps)[*setup_step];
-                const auto succeed = [setup_step, weak_advance_setup] {
+                const auto succeed = [setup_current, setup_step, weak_advance_setup] {
+                    if (!setup_current()) return;
                     ++*setup_step;
                     if (const auto advance = weak_advance_setup.lock()) (*advance)();
                 };
                 if (step.method == "preparepaymasterpool") {
                     m_panel.call(step.method, step.params, false, nullptr,
-                        [this, &wizard, step, succeed, fail_setup, reviewed_pool](const UniValue& preview) {
+                        [this, &wizard, setup_current, step, succeed, fail_setup, reviewed_pool](const UniValue& preview) {
+                            if (!setup_current()) return;
                             if (!IsCompletePoolPreparationResult(preview)) { fail_setup(tr("Core returned an incomplete funding preview.")); return; }
                             try { if (!DigiDollar::Paymaster::SetupPoolNeeded(preview)) { succeed(); return; } }
                             catch (const std::exception& error) { fail_setup(QString::fromUtf8(error.what())); return; }
@@ -2357,19 +2374,22 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                                         .arg(m_panel.liquidity().formatPoolResult("preparepaymasterpool", preview))) != QMessageBox::Yes) {
                                     fail_setup(tr("The changed funding requirement was not approved. No additional funding was authorized.")); return;
                                 }
+                                if (!setup_current()) return;
                                 *reviewed_pool = preview;
                             }
                             auto options = step.params[0]; options.pushKV("execute", true); options.pushKV("plan_id", preview.find_value("plan_id"));
                             UniValue params{UniValue::VARR}; params.push_back(options);
                             m_panel.call("preparepaymasterpool", params, true, nullptr,
-                                [preview, succeed, fail_setup](const UniValue& result) {
+                                [setup_current, preview, succeed, fail_setup](const UniValue& result) {
+                                    if (!setup_current()) return;
                                     if (!result.find_value("accepted").isTrue() || !SetupMatches(preview.find_value("plan_id"), result.find_value("plan_id"))) { fail_setup(QObject::tr("Core did not confirm the exact funding approval.")); return; }
                                     succeed();
                                 }, false, fail_setup);
                         }, false, fail_setup);
                 } else {
                     m_panel.call(step.method, step.params, step.unlock, nullptr,
-                        [step, shared_context, succeed, fail_setup](const UniValue& result) {
+                        [setup_current, step, shared_context, succeed, fail_setup](const UniValue& result) {
+                            if (!setup_current()) return;
                             try {
                                 CheckSetupReply(step, result);
                                 if (step.method == "createpaymasteridentity") {
@@ -2382,7 +2402,7 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                 } }, false, fail_setup);
     };
 
-    const auto prepare_setup_execution = [this, wizard_choices, fail_setup, setup_retry, setup_step, setup_started,
+    const auto prepare_setup_execution = [this, setup_current, wizard_choices, fail_setup, setup_retry, setup_step, setup_started,
                                           setup_needs_identity,
                                            setup_needs_liquidity,
                                            policy_params,
@@ -2393,6 +2413,7 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
                                           setup_model, setup_wallet_id,
                                           wallet_confirmation,
                                           replace_unrepresentable_policy] {
+        if (!setup_current()) return;
         if (*setup_started) return;
 
         if (!wallet_confirmation->isChecked() || !setup_model ||
@@ -2433,17 +2454,17 @@ std::shared_ptr<bool> ProviderSetup::connectSetupExecution(PaymasterSetupWizard&
     };
 
     connect(setup_retry, &QPushButton::clicked, progress_page,
-            [this, progress_page, progress_result, setup_retry,
+            [this, setup_current, progress_page, progress_result, setup_retry,
              setup_running, advance_setup] {
-                if (*setup_running) return;
+                if (!setup_current() || *setup_running) return;
                 setup_retry->setEnabled(false);
                 progress_result->setText(tr("Retrying the failed setup step…"));
                 // Leave the RPC error callback before starting the next
                 // attempt. This also gives Qt a chance to paint immediate
                 // retry feedback before an unusually fast failure.
                 QTimer::singleShot(0, progress_page,
-                    [setup_retry, setup_running, advance_setup] {
-                        if (*setup_running) return;
+                    [setup_current, setup_retry, setup_running, advance_setup] {
+                        if (!setup_current() || *setup_running) return;
                         setup_retry->setEnabled(true);
                         (*advance_setup)();
                     });

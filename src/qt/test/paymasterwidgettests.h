@@ -186,6 +186,7 @@ private Q_SLOTS:
     void paymasterSendControllerCancellationAndWalletChange();
     void paymasterSendControllerAuthorizationAndLostReply();
     void paymasterSendControllerRecoveryReview();
+    void paymasterSignedRecoverySurvivesQuoteExpiry();
     void paymasterClientDatabaseReadErrorIsActionable();
     void paymasterClientControlsAreAccessible();
     void paymasterOfferTableRendersGreenTheme();

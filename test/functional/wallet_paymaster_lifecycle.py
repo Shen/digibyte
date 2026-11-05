@@ -212,6 +212,13 @@ class PaymasterLifecycleTest(DigiByteTestFramework):
         assert resolved["recovery"] is None
         assert isinstance(resolved["result_status"], str)
         assert type(resolved["result_sequence"]) is int
+        # Observation time describes the response, not the durable nested session.
+        assert type(resolved["observed_at"]) is int
+        assert resolved["observed_at"] > 0
+        assert "observed_at" not in resolved["session"]
+        session_status = client.getdigidollarsendsession({"request_id": request_id})
+        assert type(session_status["observed_at"]) is int
+        assert session_status["observed_at"] > 0
         payment_txid = completed["txid"]
         assert payment_txid in self.nodes[0].getrawmempool()
         assert_equal(

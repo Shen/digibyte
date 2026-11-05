@@ -1238,7 +1238,7 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
         m_send.view().sessionState == QStringLiteral("FAILED") ||
         m_send.view().sessionState == QStringLiteral("CONFLICTED");
     const bool recovery_not_expired =
-        m_send.view().recoveryExpiresAt <= 0 ||
+        m_send.view().recoverySigned || m_send.view().recoveryExpiresAt <= 0 ||
         m_send.view().recoveryExpiresAt > QDateTime::currentSecsSinceEpoch();
     const bool safe_recovery = m_send.view().sessionPersisted && signed_artifact &&
                                signed_state_consistent && !completed &&

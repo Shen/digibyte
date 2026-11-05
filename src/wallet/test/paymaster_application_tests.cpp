@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <index/txindex.h>
+#include <key.h>
 #include <script/standard.h>
 #include <test/util/index.h>
 #include <test/util/setup_common.h>
@@ -166,6 +167,65 @@ BOOST_FIXTURE_TEST_CASE(provider_readiness_requires_matching_wallet_and_index_ti
     BOOST_REQUIRE(stale.best_block_hash == tip->hash);
     BOOST_CHECK(!AutomaticProviderStateIsSynchronized(wallet));
     BOOST_CHECK(!ProviderTxIndexIsReady(wallet, false));
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_rpc_budget_matches_authorization_after_clock_rollback)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    TaprootBuilder builder;
+    builder.Finalize(XOnlyPubKey{key.GetPubKey()});
+    ProviderMaintenanceOutput output;
+    output.purpose = PoolPurpose::OPERATIONAL;
+    output.asset = PoolAsset::DGB;
+    output.script_pub_key = GetScriptForDestination(builder.GetOutput());
+    output.dgb_value = DGBSatoshis{1000};
+
+    ProviderReadiness readiness;
+    readiness.have_liquidity_policy = true;
+    readiness.have_maintenance_ledger = true;
+    auto& policy = readiness.liquidity_policy;
+    policy.paid_maintenance_approved = true;
+    policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{100};
+    policy.maximum_maintenance_fee_per_hour = DGBSatoshis{100};
+    policy.maximum_maintenance_fee_per_day = DGBSatoshis{200};
+    policy.updated_at = 100000;
+    ProviderMaintenanceRecord confirmed;
+    confirmed.operation_id = uint256S("01");
+    confirmed.plan_id = uint256S("02");
+    confirmed.outputs = {output};
+    confirmed.maximum_fee = DGBSatoshis{100};
+    confirmed.actual_fee = DGBSatoshis{100};
+    confirmed.state = ProviderMaintenanceState::CONFIRMED;
+    confirmed.transaction_id = uint256S("03");
+    confirmed.created_at = confirmed.updated_at = 100000;
+    readiness.maintenance_ledger.records = {confirmed};
+
+    for (const int64_t high_water : {107200, 186401}) {
+        BOOST_TEST_CONTEXT("accounting time floor " << high_water) {
+            // A policy update advanced the durable clock; wall time then
+            // moved backwards. The already confirmed spend is unchanged.
+            readiness.maintenance_ledger.accounting_time_high_water = high_water;
+            const auto status = ProviderLiquidityStatusToJSON(readiness, 100000);
+            BOOST_CHECK_EQUAL(status.find_value("maintenance_fee_spent_last_hour_satoshis").getInt<int64_t>(), 0);
+            BOOST_CHECK_EQUAL(status.find_value("maintenance_fee_spent_last_day_satoshis").getInt<int64_t>(),
+                              high_water == 107200 ? 100 : 0);
+            BOOST_CHECK_EQUAL(status.find_value("maintenance_fee_reserved_satoshis").getInt<int64_t>(), 0);
+
+            auto candidate = confirmed;
+            candidate.operation_id = uint256S("04");
+            candidate.plan_id = uint256S("05");
+            candidate.state = ProviderMaintenanceState::PLANNED;
+            candidate.actual_fee = DGBSatoshis{0};
+            candidate.transaction_id.SetNull();
+            auto authorized_ledger = readiness.maintenance_ledger;
+            std::string error;
+            BOOST_REQUIRE(ReserveProviderMaintenanceBudget(authorized_ledger, policy, candidate, 100000, error));
+            BOOST_CHECK_EQUAL(readiness.maintenance_ledger.records.size(), 1U);
+            BOOST_CHECK_EQUAL(readiness.maintenance_ledger.records.front().updated_at, 100000);
+            BOOST_CHECK_EQUAL(authorized_ledger.records.back().created_at, high_water);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(resume_terms_preserve_present_zero_and_false_values)

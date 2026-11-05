@@ -49,7 +49,7 @@ public:
 private:
     static bool IsCode(const std::string& reason)
     {
-        return reason.starts_with("PAYMASTER_") && reason.size() <= 128 &&
+        return reason.rfind("PAYMASTER_", 0) == 0 && reason.size() <= 128 &&
             std::all_of(reason.begin(), reason.end(), [](unsigned char ch) {
                 return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
             });

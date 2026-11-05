@@ -10,6 +10,27 @@
 #include <QCoreApplication>
 #include <limits>
 namespace PaymasterQt {
+namespace {
+enum class RecoveryStage { UNSIGNED, SIGNED, UNKNOWN };
+
+RecoveryStage ReadRecoveryStage(const UniValue& recovery)
+{
+    const auto& phase = recovery.find_value("phase");
+    if (!phase.isStr()) return RecoveryStage::UNKNOWN;
+    const auto& name = phase.get_str();
+    if (name == "user_signed" || name == "final_committed") return RecoveryStage::SIGNED;
+    if (name == "capacity_pending" || name == "request_ready" || name == "response_validated") return RecoveryStage::UNSIGNED;
+    return RecoveryStage::UNKNOWN;
+}
+
+bool RecoveryExpiryMatches(RecoveryStage stage, bool expired, bool elapsed)
+{
+    // Core expires only unsigned preparation. Signed artifacts retain their
+    // authority and remain observable after the original quote deadline.
+    return stage == RecoveryStage::SIGNED ? !expired : expired == elapsed;
+}
+} // namespace
+
 SendController::SendController(Clock clock)
     : m_clock(clock ? std::move(clock) : Clock{[] {
           return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -319,6 +340,7 @@ void SendController::setSnapshotForTesting(const PaymasterSessionSnapshot& snaps
     m_state.allowedActions = snapshot.allowed_actions;
     m_state.allowedActionsKnown = snapshot.allowed_actions_known;
     m_state.recoveryExpiresAt = snapshot.recovery_expires_at;
+    m_state.recoverySigned = snapshot.recovery_signed;
     m_state.sessionCreatedAt = snapshot.created_at;
     m_state.sessionPersisted = persisted;
     bindInput(snapshot.recipient, snapshot.requested_amount_cents);
@@ -371,20 +393,20 @@ SendController::RecoveryDecision SendController::recoveryReply(
     if (!m_state.recoveryAuthorizationCommitment.isEmpty() &&
         selection.authorization_commitment != m_state.recoveryAuthorizationCommitment)
         return {RecoveryEffect::CHANGED_COMMITMENT};
+    const auto stage = ReadRecoveryStage(recovery);
+    if (stage == RecoveryStage::UNKNOWN) return {RecoveryEffect::UNKNOWN_PHASE};
     const auto& expired = recovery.find_value("expired");
-    if (!expired.isBool() || selection.expires_at <= 0 || expired.get_bool() != (selection.expires_at <= now))
+    if (!expired.isBool() || selection.expires_at <= 0 ||
+        !RecoveryExpiryMatches(stage, expired.get_bool(), selection.expires_at <= now))
         return {RecoveryEffect::INVALID_EXPIRY};
     if (expired.get_bool()) return {RecoveryEffect::EXPIRED};
     const auto& accepted = recovery.find_value("authorization_accepted");
     if (!accepted.isNull() && !accepted.isBool()) return {RecoveryEffect::INVALID_ACCEPTANCE};
-    if (m_state.recoveryAuthorizationCommitment.isEmpty() && !selection.authorization_commitment.isEmpty())
+    if (stage == RecoveryStage::UNSIGNED && m_state.recoveryAuthorizationCommitment.isEmpty() && !selection.authorization_commitment.isEmpty())
         return {RecoveryEffect::REVIEW};
     if (!m_state.recoveryAuthorizationCommitment.isEmpty() && !accepted.isTrue()) return {RecoveryEffect::REJECTED};
     const auto& phase_value = recovery.find_value("phase");
     const QString phase = phase_value.isStr() ? QString::fromStdString(phase_value.get_str()) : QString{};
-    if (phase != QLatin1String("capacity_pending") && phase != QLatin1String("request_ready") &&
-        phase != QLatin1String("response_validated") && phase != QLatin1String("user_signed") && phase != QLatin1String("final_committed"))
-        return {RecoveryEffect::UNKNOWN_PHASE};
     const auto& broadcast = result.find_value("broadcast");
     const auto& broadcast_error = result.find_value("broadcast_error");
     if ((!broadcast.isNull() && !broadcast.isBool()) ||
@@ -726,6 +748,11 @@ bool SendController::decodeSnapshot(const UniValue& result,
         }
 
         if (recovery.isObject()) {
+            const auto stage = ReadRecoveryStage(recovery);
+            if (stage == RecoveryStage::UNKNOWN) {
+                error = QStringLiteral("unknown recovery phase");
+                return false;
+            }
             const UniValue& expired = recovery.find_value("expired");
             qint64 recovery_expires_at{-1};
             if (!expired.isBool() ||
@@ -737,11 +764,11 @@ bool SendController::decodeSnapshot(const UniValue& result,
             }
             const bool elapsed = recovery_expires_at <=
                 QDateTime::currentSecsSinceEpoch();
-            if (expired.get_bool() != elapsed) {
+            if (!RecoveryExpiryMatches(stage, expired.get_bool(), elapsed)) {
                 error = QStringLiteral("inconsistent recovery expiry fields");
                 return false;
             }
-            if (elapsed) {
+            if (elapsed && stage == RecoveryStage::UNSIGNED) {
                 // Keep an expired recovery snapshot visible, but never expose
                 // an action that could advance it to wallet signing.
                 snapshot.allowed_actions.removeAll(QStringLiteral("recover"));
@@ -749,6 +776,7 @@ bool SendController::decodeSnapshot(const UniValue& result,
                     QStringLiteral("cancel_to_self"));
             }
             snapshot.recovery_expires_at = recovery_expires_at;
+            snapshot.recovery_signed = stage == RecoveryStage::SIGNED;
         }
 
         // Only Core can prove that a failed unsigned session has no remaining
@@ -982,6 +1010,7 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     m_state.resultStatus = snapshot.result_status;
     m_state.resultSequence = snapshot.result_sequence;
     m_state.recoveryExpiresAt = snapshot.recovery_expires_at;
+    m_state.recoverySigned = snapshot.recovery_signed;
     m_state.sessionCreatedAt = snapshot.created_at;
     // Replace optional state atomically. Missing fields explicitly clear stale
     // values; a new session can never inherit an old attempt or artifact.
@@ -1070,6 +1099,7 @@ void SendController::resetSession()
     m_state.resultStatus.clear();
     m_state.resultSequence = -1;
     m_state.recoveryExpiresAt = -1;
+    m_state.recoverySigned = false;
     m_state.sessionCreatedAt = 0;
     m_state.terminalNoticeShown = false;
     m_state.allowedActions.clear();
@@ -1112,6 +1142,7 @@ SendController::FailureDecision SendController::failedReply(const RpcError& erro
         m_state.resultStatus.clear();
         m_state.resultSequence = -1;
         m_state.recoveryExpiresAt = -1;
+        m_state.recoverySigned = false;
         m_state.sessionCreatedAt = 0;
         m_state.terminalNoticeShown = false;
         m_state.sessionPersisted = false;

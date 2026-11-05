@@ -33,6 +33,7 @@ struct PaymasterSessionSnapshot {
     QString result_status;
     qint64 result_sequence{-1};
     qint64 recovery_expires_at{-1};
+    bool recovery_signed{false};
     qint64 created_at{0};
     QStringList allowed_actions;
     qint64 payment_cents{-1};
@@ -151,6 +152,7 @@ public:
         QString resultStatus;
         qint64 resultSequence{-1};
         qint64 recoveryExpiresAt{-1};
+        bool recoverySigned{false};
         qint64 sessionCreatedAt{0};
         QStringList allowedActions;
         QString address;

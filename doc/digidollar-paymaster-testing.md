@@ -280,6 +280,14 @@ failed-step retry, one-approval restore, capital-task, layout/theme and sender
 authorization/cancellation/lost-reply selections. Setup-boundary rows also
 remove and rebind a wallet while the wizard is open or its preview is pending;
 neither the old dialog nor its callback may authorize work for the new binding.
+The same function's four `privacy-*` rows deliver success/error replies after
+the wizard is destroyed, both before a read completes and after a mutation has
+executed. No stale control access or subsequent setup step is permitted;
+already dispatched work remains saved. For recovery expiry, select
+`paymasterSignedRecoverySurvivesQuoteExpiry`,
+`paymasterClientRecoveryExpiryIsFailClosed` and
+`paymasterSendControllerRecoveryReview`: signed phases retain permitted actions
+past the deadline while unsigned preparation stays blocked.
 
 Direct mint/send fixtures must await the model's asynchronous DGB balance cache
 with `DigiDollarTest::SyncDGBBalance`; one `pollBalanceChanged()` call is not a
@@ -347,13 +355,13 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Channel proof and bounded admission | Protocol/wire/transport/admission suites; `p2p_paymaster.py`, `p2p_paymaster_connection_capacity.py`. |
 | Nonfinancial diagnostics | Transport `diagnostic_*`; `rpc_paymaster_endpoint.py` tests TCP/SOCKS5 isolation and no authentication; Qt `paymasterDiagnosticCommands`, `paymasterDiagnosticRefreshAndPrivacy`, `paymasterNodeConnectionEditor`. Local proxy coverage is not public Tor evidence. |
 | Selection, fee/privacy limits and failover | Client comparator cycle permutations/strict-order properties; directory/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
-| Exact authorization and same-ID retry | Wallet service/store/security suites; `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion. |
+| Exact authorization and same-ID retry | Wallet service/store/security suites, including `client_saved_quote_authentication_precedes_new_authority`: corrupt persisted quote signatures cannot gain acceptance or pass the signing gate; exact retries and historical final validation remain valid. `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion. |
 | Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote classification fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` consumes a conflicting quote request and rejects an unknown recovery over authenticated v2 channels, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment without duplicate finance events. |
 | Persisted read errors and action gating | Store `client_view_*`, status-getter and result-read cases cover corrupt/future records, dangling recovery indexes, full result binding/signature checks, structured list/resolve errors, retained result messages and unchanged protected state. Security recovery-read cases reach the application operations through their normal readiness gates. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
 | Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
-| Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
+| Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`, application `maintenance_rpc_budget_matches_authorization_after_clock_rollback`, provider `maintenance_budget_usage_*`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
 | Setup parity and funding observations | `paymaster_setup_tests`; pool setup `--funding-diagnostics-only`; Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`, `paymasterPoolPreparationDiagnostics`, `paymasterPoolPreparationStoredFeeDiagnostics`: approvals, shortfalls, malformed/missing observations and read-only refresh. |
 | Backup, adoption and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
 | Cancellation of uncreated work | Identity `maintenance_cancellation*`; Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: exact preview, lost-reply signatures, rollback, checkpoint protection and retained signed work. |
@@ -390,6 +398,13 @@ Use the registered variants in `test_runner.py`; descriptor/legacy coverage
 is intentional. Do not run every test under an arbitrary wallet flag. The
 failover scenario uses four daemons/two providers; reorg scenarios must verify
 actual transaction confirmation and reversal, not only mocked status.
+
+The current-current selection includes 26 variants. In addition to the default
+scenarios, it registers the RPC legacy-policy, offer-model, reserved-capacity and
+client-protection cases; provider cancel-burst; and lifecycle no-client-change
+and announcement-refresh cases. These are independent paths, not substitutes
+for the default scenarios. Historical bridge variants remain in the separate
+compatibility selection below.
 
 ### RPC startup failures
 

@@ -27,6 +27,7 @@
 #include <util/time.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterclientview.h>
 #include <wallet/paymasteridentity.h>
@@ -5163,6 +5164,101 @@ BOOST_AUTO_TEST_CASE(pending_quote_pair_requires_exact_client_binding)
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, unchanged));
     BOOST_CHECK(unchanged.signed_quote.empty());
     BOOST_CHECK(unchanged.quote_response_claim_candidate == first_quote);
+}
+
+BOOST_AUTO_TEST_CASE(client_saved_quote_authentication_precedes_new_authority)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    std::string error;
+    auto quoted = artifacts.attempt;
+    quoted.state = AttemptState::QUOTED;
+    quoted.user_signed_psbt.clear();
+    quoted.accepted_client_manifest_id.SetNull();
+    quoted.client_manifest_accepted_at = 0;
+    quoted.quote_response_claim_candidate = quoted.signed_quote;
+    session.state = SessionState::INPUTS_RESERVED;
+    session.pending_phase = PendingPhase::NONE;
+    ClientFeeLedger empty_ledger;
+    empty_ledger.accounting_time_high_water = 101;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(quoted));
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(empty_ledger));
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
+            artifacts.user_input, session.request_id, session.session_id,
+            ReservationRole::USER_DD, false, 101}));
+    }
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto before_acceptance = database.m_records;
+
+    // A valid quote can be accepted, and the same approval is an exact replay.
+    BOOST_REQUIRE_MESSAGE(store.AcceptClientAuthorization(session.request_id,
+        quoted.attempt_id, quoted.client_manifest.manifest_id, 110, error), error);
+    const auto accepted_rows = database.m_records;
+    BOOST_REQUIRE_MESSAGE(store.AcceptClientAuthorization(session.request_id,
+        quoted.attempt_id, quoted.client_manifest.manifest_id, 110, error), error);
+    BOOST_CHECK(database.m_records == accepted_rows);
+    uint256 commitment;
+    BOOST_REQUIRE_MESSAGE(paymaster_app::GetValidatedClientAuthorizationCommitment(
+        quoted, 110, commitment, error), error);
+    BOOST_CHECK(commitment == quoted.client_manifest.manifest_id);
+
+    // Damage only the saved quote signature after normal validation. Its
+    // separately retained signed claim and exact payment manifest stay intact.
+    PaymasterQuoteResponse damaged_response;
+    SpanReader response_stream{::PROTOCOL_VERSION, quoted.signed_quote};
+    response_stream >> damaged_response;
+    BOOST_REQUIRE(response_stream.empty());
+    BOOST_REQUIRE_EQUAL(damaged_response.quote.identity_signature.size(), 64U);
+    damaged_response.quote.identity_signature.front() ^= 1;
+    BOOST_REQUIRE(!quoted.provider_identity_key.VerifySchnorr(
+        GetPaymasterQuoteSignatureHash(damaged_response.quote),
+        damaged_response.quote.identity_signature));
+    auto damaged = quoted;
+    damaged.signed_quote = SerializePaymasterTestObject(damaged_response);
+    BOOST_CHECK(damaged.quote_response_claim_candidate == quoted.signed_quote);
+    database.m_records = before_acceptance;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(damaged));
+    }
+    const auto damaged_rows = database.m_records;
+    BOOST_CHECK(!store.AcceptClientAuthorization(session.request_id,
+        damaged.attempt_id, damaged.client_manifest.manifest_id, 110, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
+    BOOST_CHECK(database.m_records == damaged_rows);
+    commitment.SetNull();
+    BOOST_CHECK(!paymaster_app::GetValidatedClientAuthorizationCommitment(
+        damaged, 110, commitment, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
+    BOOST_CHECK(commitment.IsNull());
+    BOOST_CHECK(database.m_records == damaged_rows);
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+    BOOST_CHECK(WITH_LOCK(m_wallet.cs_wallet, return m_wallet.IsLockedCoin(artifacts.user_input)));
+
+    // Authentication has no current-time cutoff: an intact exact final is
+    // still evidence after quote/retry expiry, without approving a new spend.
+    database.m_records = accepted_rows;
+    SetMockTime(artifacts.attempt.retry_until + 1);
+    auto final_attempt = artifacts.attempt;
+    final_attempt.state = AttemptState::MEMPOOL;
+    final_attempt.final_txid = CTransaction{artifacts.final_transaction}.GetHash();
+    final_attempt.final_transaction = SerializePaymasterTestObject(artifacts.final_transaction);
+    CMutableTransaction validated;
+    BOOST_REQUIRE_MESSAGE(ValidateClientFinalForExecution(final_attempt,
+        CTransaction{artifacts.final_transaction}.GetWitnessHash(), validated, error), error);
+    BOOST_CHECK(SerializePaymasterTestObject(validated) == final_attempt.final_transaction);
+    BOOST_CHECK(!store.AcceptClientAuthorization(session.request_id,
+        quoted.attempt_id, quoted.client_manifest.manifest_id, GetTime(), error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTHORIZATION_EXPIRED");
+    BOOST_CHECK(database.m_records == accepted_rows);
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
 }
 
 BOOST_AUTO_TEST_CASE(client_result_is_atomic_monotonic_and_final_artifacts_are_immutable)

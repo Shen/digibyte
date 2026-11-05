@@ -2,6 +2,12 @@
   "task_baseline": "33c680cba1",
   "official_baseline": "d7265fb05e26e1e799876bcd526225e4826c3ba8",
   "shared_changes": {
+    "test/functional/test_runner.py": {
+      "purpose": "Register the existing independent Paymaster policy, offer, capacity, client-protection, cancellation and lifecycle variants so the documented functional matrix actually runs them.",
+      "reused_api": "Existing BASE_SCRIPTS registration and each scenario's existing descriptor-wallet command-line options; no runner scheduling, selection or assertion changes.",
+      "ordinary_callers": "Ordinary DGB/DD functional registrations and runner behavior remain unchanged; the Paymaster selection expands from 19 to 26 current-current variants.",
+      "regressions": "Resolve the documented filter and exclusions to verify all seven added variants; run focused variants with isolated regtest data and rebuilt daemon/CLI where available. Complete functional and historical compatibility matrices remain operator checks."
+    },
     "src/wallet/digidollarwallet.cpp": {
       "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance.",
       "reused_api": "LockDDWallet, ExtractUnlockHeightFromOpReturn, ExtractTierFromOpReturn and MintLockWindowHasPassed; both balance APIs share the file-local IsPendingDDTransaction predicate under the existing wallet lock.",

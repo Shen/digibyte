@@ -345,33 +345,13 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
             std::max<int64_t>(0, entry.carrier_value.value - 100));
     }
 
-    int64_t reserved_fee{0};
-    int64_t planned_fee{0};
-    int64_t broadcast_fee{0};
-    int64_t spent_hour{0};
-    int64_t spent_day{0};
+    ProviderMaintenanceBudgetUsage usage;
     if (readiness.have_maintenance_ledger) {
-        for (const ProviderMaintenanceRecord& record :
-             readiness.maintenance_ledger.records) {
-            if (record.IsPreparation()) continue;
-            if (record.state == ProviderMaintenanceState::PLANNED) {
-                checked_add(reserved_fee, record.maximum_fee.value);
-                checked_add(planned_fee, record.maximum_fee.value);
-            } else if (record.state ==
-                       ProviderMaintenanceState::BROADCAST) {
-                // A live transaction remains economic exposure until it is
-                // confirmed or fails, irrespective of its wall-clock age.
-                checked_add(reserved_fee, record.actual_fee.value);
-                checked_add(broadcast_fee, record.actual_fee.value);
-            } else if (record.state ==
-                       ProviderMaintenanceState::CONFIRMED) {
-                if (record.updated_at >= now - 60 * 60) {
-                    checked_add(spent_hour, record.actual_fee.value);
-                }
-                if (record.updated_at >= now - 24 * 60 * 60) {
-                    checked_add(spent_day, record.actual_fee.value);
-                }
-            }
+        std::string error;
+        if (!SummarizeProviderMaintenanceBudget(readiness.maintenance_ledger, now, usage, error)) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                error == "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW"
+                    ? "PAYMASTER_LIQUIDITY_STATUS_OVERFLOW" : error);
         }
     }
 
@@ -389,11 +369,11 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
         admission_carriers, policy.target_admission_carriers));
     result.pushKV("operational_carriers", LiquiditySlotCountsToJSON(
         operational_carriers, policy.target_operational_carriers));
-    result.pushKV("maintenance_fee_reserved_satoshis", reserved_fee);
-    result.pushKV("maintenance_fee_planned_satoshis", planned_fee);
-    result.pushKV("maintenance_fee_broadcast_satoshis", broadcast_fee);
-    result.pushKV("maintenance_fee_spent_last_hour_satoshis", spent_hour);
-    result.pushKV("maintenance_fee_spent_last_day_satoshis", spent_day);
+    result.pushKV("maintenance_fee_reserved_satoshis", usage.reserved_fee.value);
+    result.pushKV("maintenance_fee_planned_satoshis", usage.planned_fee.value);
+    result.pushKV("maintenance_fee_broadcast_satoshis", usage.broadcast_fee.value);
+    result.pushKV("maintenance_fee_spent_last_hour_satoshis", usage.spent_last_hour.value);
+    result.pushKV("maintenance_fee_spent_last_day_satoshis", usage.spent_last_day.value);
     result.pushKV("carrier_base_cents", carrier_base);
     result.pushKV("carrier_withdrawable_excess_cents", carrier_excess);
     if (wallet && readiness.have_policy && missing > 0) {

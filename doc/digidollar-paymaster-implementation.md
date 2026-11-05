@@ -82,10 +82,19 @@ join it; material changes using the same ID fail. Sessions, reservations, exact
 commit evidence, budgets and final observations are persisted with their state
 transitions. Network/UI status alone must not release protected inputs.
 
+The persisted quote is authenticated again before acceptance or signing through
+`DecodePaymasterAuthorizationArtifacts`, shared with provider execution and
+client final validation. It checks the provider signature, canonical encoding
+and exact transaction/template bindings. Current approval and expiry checks
+remain with the caller so intact historical final evidence stays verifiable.
+
 Unsigned cancellation closes only work proven unsigned. Late responses cannot
 revive approval after closure. Signed or ambiguous work remains protected and
 exposes only Core-permitted actions. Cancel-to-self is an on-chain recovery
 transaction, not an undo guarantee: the original transaction can still win.
+Recovery quote expiry applies to unsigned preparation. `USER_SIGNED` and
+`FINAL_COMMITTED` remain observable and resumable through Core-permitted actions
+after that deadline; Qt must not request fresh approval for the saved signature.
 
 Recovery fee exposure is retained through the 240-confirmation reorganization
 safety depth. A winning original payment is accounted once. Retained exact
@@ -112,6 +121,9 @@ beyond the wall clock, as can a later clock correction. Recovering a transaction
 observing confirmation or a conflict must preserve that time floor; otherwise
 completed reserve work can fail validation and incorrectly block capital release.
 Wall-clock expiry checks remain separate from accounting timestamps.
+RPC maintenance-budget totals and new reservations share
+`SummarizeProviderMaintenanceBudget` at that same time floor. Planned and live
+broadcast exposure does not age out; confirmed spend uses rolling windows.
 
 Canonical wallet history/index checks remain prerequisites. Automatic work
 belongs to the daemon; Qt/CLI control the same persisted state. Restoration

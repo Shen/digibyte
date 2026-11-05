@@ -770,6 +770,99 @@ BOOST_AUTO_TEST_CASE(old_unconfirmed_maintenance_broadcast_remains_open_budget_e
                 ProviderMaintenanceState::PLANNED);
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_budget_usage_windows_open_work_and_preparation)
+{
+    ProviderMaintenanceLedger ledger;
+    ledger.accounting_time_high_water = 200000;
+    const auto add_record = [&](uint32_t id, ProviderMaintenanceState state,
+                                int64_t updated_at, int64_t fee) {
+        auto record = MaintenanceRecord(uint256S(strprintf("%064x", id)),
+            uint256S(strprintf("%064x", id + 100)), id, fee);
+        record.state = state;
+        record.created_at = 1000;
+        record.updated_at = updated_at;
+        if (state == ProviderMaintenanceState::BROADCAST ||
+            state == ProviderMaintenanceState::CONFIRMED) {
+            record.transaction_id = uint256S(strprintf("%064x", id + 200));
+            record.actual_fee = DGBSatoshis{fee};
+        }
+        ledger.records.push_back(record);
+    };
+    add_record(1, ProviderMaintenanceState::PLANNED, 1000, 11);
+    add_record(2, ProviderMaintenanceState::BROADCAST, 1000, 13);
+    add_record(3, ProviderMaintenanceState::CONFIRMED, 196400, 17);
+    add_record(4, ProviderMaintenanceState::CONFIRMED, 196399, 19);
+    add_record(5, ProviderMaintenanceState::CONFIRMED, 113600, 23);
+    add_record(6, ProviderMaintenanceState::CONFIRMED, 113599, 29);
+    add_record(7, ProviderMaintenanceState::RELEASED, 200000, 31);
+    add_record(8, ProviderMaintenanceState::FAILED, 200000, 37);
+    add_record(9, ProviderMaintenanceState::PLANNED, 200000, 41);
+    auto& preparation = ledger.records.back();
+    preparation.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    preparation.preparation_authorization = uint256S("301");
+    preparation.preparation_request = uint256S("302");
+
+    const uint256 before = SerializedPaymasterHash(ledger);
+    ProviderMaintenanceBudgetUsage usage;
+    std::string error;
+    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 100000, usage, error));
+    BOOST_CHECK_EQUAL(usage.accounting_time, 200000);
+    BOOST_CHECK_EQUAL(usage.planned_fee.value, 11);
+    BOOST_CHECK_EQUAL(usage.broadcast_fee.value, 13);
+    BOOST_CHECK_EQUAL(usage.reserved_fee.value, 24);
+    BOOST_CHECK_EQUAL(usage.spent_last_hour.value, 17);
+    BOOST_CHECK_EQUAL(usage.spent_last_day.value, 59);
+    BOOST_CHECK_EQUAL(usage.total_last_hour.value, 41);
+    BOOST_CHECK_EQUAL(usage.total_last_day.value, 83);
+
+    // Exact window boundaries count; advancing a second drops only the
+    // confirmed boundary entries, never the old planned/broadcast exposure.
+    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 200001, usage, error));
+    BOOST_CHECK_EQUAL(usage.reserved_fee.value, 24);
+    BOOST_CHECK_EQUAL(usage.spent_last_hour.value, 0);
+    BOOST_CHECK_EQUAL(usage.spent_last_day.value, 36);
+    BOOST_CHECK_EQUAL(usage.total_last_hour.value, 24);
+    BOOST_CHECK_EQUAL(usage.total_last_day.value, 60);
+    BOOST_CHECK_EQUAL(SerializedPaymasterHash(ledger), before);
+
+    BOOST_CHECK(!SummarizeProviderMaintenanceBudget(ledger, 0, usage, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_TIME");
+    BOOST_CHECK_EQUAL(usage.accounting_time, 0);
+    BOOST_CHECK_EQUAL(usage.reserved_fee.value, 0);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_budget_usage_rejects_overflow_without_partial_result)
+{
+    for (const bool mixed_exposure : {false, true}) {
+        BOOST_TEST_CONTEXT("mixed reserved and confirmed exposure " << mixed_exposure) {
+            ProviderMaintenanceLedger ledger;
+            ledger.accounting_time_high_water = 1000;
+            for (uint32_t id = 1; id <= 5; ++id) {
+                auto record = MaintenanceRecord(uint256S(strprintf("%064x", id)),
+                    uint256S(strprintf("%064x", id + 100)), id, MAX_MONEY);
+                record.created_at = record.updated_at = 1000;
+                if (mixed_exposure && id > 3) {
+                    record.state = ProviderMaintenanceState::CONFIRMED;
+                    record.transaction_id = uint256S(strprintf("%064x", id + 200));
+                    record.actual_fee = DGBSatoshis{MAX_MONEY};
+                }
+                ledger.records.push_back(record);
+            }
+            std::string error;
+            BOOST_REQUIRE(ValidateProviderMaintenanceLedger(ledger, error));
+            const uint256 before = SerializedPaymasterHash(ledger);
+            ProviderMaintenanceBudgetUsage usage;
+            usage.reserved_fee = DGBSatoshis{1};
+            BOOST_CHECK(!SummarizeProviderMaintenanceBudget(ledger, 1000, usage, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW");
+            BOOST_CHECK_EQUAL(usage.accounting_time, 0);
+            BOOST_CHECK_EQUAL(usage.reserved_fee.value, 0);
+            BOOST_CHECK_EQUAL(usage.spent_last_hour.value, 0);
+            BOOST_CHECK_EQUAL(SerializedPaymasterHash(ledger), before);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(provider_maintenance_records_reject_unknown_shapes)
 {
     ProviderMaintenanceLedger ledger;

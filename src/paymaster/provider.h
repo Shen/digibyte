@@ -637,6 +637,19 @@ struct ProviderMaintenanceLedger {
     }
 };
 
+/** Read-only recurring-maintenance exposure; finite preparation is separate. */
+struct ProviderMaintenanceBudgetUsage {
+    int64_t accounting_time{0};
+    DGBSatoshis reserved_fee;
+    DGBSatoshis planned_fee;
+    DGBSatoshis broadcast_fee;
+    DGBSatoshis spent_last_hour;
+    DGBSatoshis spent_last_day;
+    /** Rolling spend plus all outstanding reservations. */
+    DGBSatoshis total_last_hour;
+    DGBSatoshis total_last_day;
+};
+
 enum class CarrierWithdrawalMode : uint8_t {
     ALL_EXCESS,
     RELEASE_SLOT,
@@ -909,6 +922,12 @@ bool ProviderLiquidityTargetsSatisfyPolicy(
     const ProviderPolicy& provider_policy);
 bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                                        std::string& error);
+/** Use the durable accounting time floor; unsigned/live exposure never ages out.
+ * Leaves usage empty on invalid records or overflow and never mutates the ledger. */
+bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,
+                                        int64_t now,
+                                        ProviderMaintenanceBudgetUsage& usage,
+                                        std::string& error);
 bool ValidateProviderCarrierWithdrawalPlan(
     const ProviderCarrierWithdrawalPlan& plan,
     std::string& error);

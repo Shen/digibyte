@@ -70,9 +70,9 @@ using namespace paymaster_rpc::internal;
 namespace {
 
 // Share the durable session schema between status and recovery RPCs.
-RPCResult ClientSessionResult(std::string key)
+RPCResult ClientSessionResult(std::string key, bool include_observed_at)
 {
-    return RPCResult{RPCResult::Type::OBJ, std::move(key), "The authoritative persistent session", {
+    std::vector<RPCResult> fields{
         {RPCResult::Type::STR, "request_id", "Canonical request UUID"},
         {RPCResult::Type::STR_HEX, "session_id", "Persistent session identifier"},
         {RPCResult::Type::STR_HEX, "canonical_request_hash", "Hash of the canonical authorized request"},
@@ -100,7 +100,6 @@ RPCResult ClientSessionResult(std::string key)
         {RPCResult::Type::STR, "confirmation_state", "unconfirmed, payment_confirmed, recovery_confirmed, or conflicted"},
         {RPCResult::Type::NUM_TIME, "created_at", "Session creation time"},
         {RPCResult::Type::NUM_TIME, "updated_at", "Last persisted transition time"},
-        {RPCResult::Type::NUM_TIME, "observed_at", "Time the current action capabilities were evaluated"},
         {RPCResult::Type::STR_HEX, "txid", /*optional=*/true, "Known final transaction id"},
         {RPCResult::Type::STR_HEX, "recovery_txid", /*optional=*/true, "Known idempotent self-recovery transaction id"},
         {RPCResult::Type::ARR, "reserved_user_inputs", "Immutable user input set", {
@@ -110,7 +109,11 @@ RPCResult ClientSessionResult(std::string key)
             }},
         }},
         {RPCResult::Type::NUM, "provider_attempts", "Number of persistent provider attempts"},
-    }};
+    };
+    if (include_observed_at) {
+        fields.emplace_back(RPCResult::Type::NUM_TIME, "observed_at", "Time the current action capabilities were evaluated");
+    }
+    return RPCResult{RPCResult::Type::OBJ, std::move(key), "The authoritative persistent session", std::move(fields)};
 }
 
 } // namespace
@@ -212,7 +215,7 @@ RPCHelpMan getdigidollarsendsession()
                                                                                                                  {"session_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Persistent 256-bit session identifier"},
                                                                                                              }},
         },
-        ClientSessionResult(""),
+        ClientSessionResult("", /*include_observed_at=*/true),
         RPCExamples{HelpExampleCli("getdigidollarsendsession", "'{\"request_id\":\"550e8400-e29b-41d4-a716-446655440000\"}'")},
         PaymasterRpcAdapter([](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
@@ -408,7 +411,7 @@ RPCHelpMan resolvepaymastersession()
         },
         RPCResult{RPCResult::Type::OBJ, "", "Authoritative local recovery state", {
                                                                                       {RPCResult::Type::STR, "action", "Performed local action"},
-                                                                                      ClientSessionResult("session"),
+                                                                                      ClientSessionResult("session", /*include_observed_at=*/false),
                                                                                        {RPCResult::Type::OBJ, "attempt", /*optional=*/false, "Selected persistent attempt, or null when none exists", {
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "attempt_id", "Persistent attempt identifier"},
                                                                                                                                                                               {RPCResult::Type::STR_HEX, "provider_id", "Provider identifier"},
@@ -428,6 +431,7 @@ RPCHelpMan resolvepaymastersession()
                                                                                        {RPCResult::Type::STR, "artifact", "none, user_psbt, final_transaction, or alternative_recovery"},
                                                                                        {RPCResult::Type::BOOL, "requires_attention", "Whether durable state requires explicit user attention"},
                                                                                        {RPCResult::Type::ARR, "allowed_actions", "Core-derived actions returned for every resolve action; Qt may only remove entries", {{RPCResult::Type::STR, "", "Action name"}}},
+                                                                                       {RPCResult::Type::NUM_TIME, "observed_at", "Time the current action capabilities were evaluated"},
                                                                                        {RPCResult::Type::OBJ, "recovery", /*optional=*/false, "Persistent alternative-recovery authority and state, or null when none exists", {
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "recovery_id", "Stable recovery identifier"},
                                                                                                                                                                                                        {RPCResult::Type::STR_HEX, "recovery_provider_id", "Distinct recovery provider"},

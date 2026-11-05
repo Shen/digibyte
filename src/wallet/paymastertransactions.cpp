@@ -1377,30 +1377,9 @@ bool LoadAttemptAuthorizationArtifacts(
     using namespace DigiDollar::Paymaster;
     PaymasterQuoteRequest request;
     PaymasterQuoteResponse response;
-    try {
-        CDataStream request_stream{attempt.quote_request, SER_NETWORK,
-                                   ::PROTOCOL_VERSION};
-        request_stream >> request;
-        SpanReader response_stream{::PROTOCOL_VERSION, attempt.signed_quote};
-        response_stream >> response;
-        if (!request_stream.empty() || !response_stream.empty()) {
-            throw std::ios_base::failure("trailing authorization artifact data");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_AUTHORIZATION_ARTIFACT_ENCODING";
+    if (!DecodePaymasterAuthorizationArtifacts(attempt, request, response, trusted, error)) {
         return false;
     }
-    if (request.intent.request_id != response.request_id ||
-        request.intent.session_id != response.session_id ||
-        request.intent.provider_id != response.quote.provider_id ||
-        GetPaymentIntentHash(request.intent) != response.quote.intent_hash ||
-        response.quote.quote_id != attempt.quote_id ||
-        response.quote.template_commitment != attempt.template_commitment ||
-        response.quote.unsigned_txid != attempt.unsigned_txid) {
-        error = "PAYMASTER_AUTHORIZATION_ARTIFACT_CONFLICT";
-        return false;
-    }
-    if (!LoadTrustedTemplate(attempt, trusted, error)) return false;
     intent = std::move(request.intent);
     quote = std::move(response.quote);
     return true;

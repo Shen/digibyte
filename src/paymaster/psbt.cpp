@@ -195,15 +195,24 @@ bool ToInputRole(ReservationRole role, InputRole& result)
     return false;
 }
 
-bool DecodeProviderAuthorizationArtifacts(
+} // namespace
+
+bool DecodePaymasterAuthorizationArtifacts(
     const ProviderAttempt& attempt,
-    PaymentIntent& intent,
-    PaymasterQuote& quote,
+    PaymasterQuoteRequest& request,
+    PaymasterQuoteResponse& response,
     CollaborativePSBTTemplate& trusted,
     std::string& error)
 {
-    PaymasterQuoteRequest request;
-    PaymasterQuoteResponse response;
+    error.clear();
+    request = {};
+    PaymasterQuoteResponse empty_response;
+    response = std::move(empty_response);
+    trusted = {};
+    if (attempt.version != ProviderAttempt::CURRENT_VERSION) {
+        error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
+        return false;
+    }
     CMutableTransaction persisted_unsigned;
     PartiallySignedTransaction psbt;
     try {
@@ -236,7 +245,6 @@ bool DecodeProviderAuthorizationArtifacts(
         return false;
     }
 
-    trusted = {};
     trusted.psbt = std::move(psbt);
     trusted.input_roles.reserve(attempt.input_roles.size());
     for (const ReservationRole role : attempt.input_roles) {
@@ -248,8 +256,8 @@ bool DecodeProviderAuthorizationArtifacts(
         trusted.input_roles.push_back(input_role);
     }
 
-    intent = std::move(request.intent);
-    quote = std::move(response.quote);
+    const PaymentIntent& intent = request.intent;
+    const PaymasterQuote& quote = response.quote;
     const uint256 intent_hash{GetPaymentIntentHash(intent)};
     if (!IsSupportedDirectProtocolVersion(request.version) ||
         !IsSupportedDirectProtocolVersion(response.version) ||
@@ -302,6 +310,7 @@ bool DecodeProviderAuthorizationArtifacts(
     return true;
 }
 
+namespace {
 bool ValidateProviderManifestForExecution(
     const ProviderAttempt& attempt,
     const PaymentIntent& intent,
@@ -703,12 +712,12 @@ bool ValidateProviderAuthorizationForExecution(
         error = "PAYMASTER_PROVIDER_AUTHORIZATION_STATE";
         return false;
     }
-    PaymentIntent intent;
-    PaymasterQuote quote;
-    if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted_template, error) ||
+    PaymasterQuoteRequest request;
+    PaymasterQuoteResponse response;
+    if (!DecodePaymasterAuthorizationArtifacts(
+            attempt, request, response, trusted_template, error) ||
         !ValidateProviderManifestForExecution(
-            attempt, intent, quote, trusted_template, error)) {
+            attempt, request.intent, response.quote, trusted_template, error)) {
         return false;
     }
     return true;
@@ -760,13 +769,13 @@ bool ValidateProviderCommitForExecution(
     // commit after a crash; later states are accepted only by callers that
     // first loaded the byte-exact durable ProviderCommitRecord.
 
-    PaymentIntent intent;
-    PaymasterQuote quote;
+    PaymasterQuoteRequest request;
+    PaymasterQuoteResponse response;
     CollaborativePSBTTemplate trusted;
-    if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted, error) ||
+    if (!DecodePaymasterAuthorizationArtifacts(
+            attempt, request, response, trusted, error) ||
         !ValidateProviderManifestForExecution(
-            attempt, intent, quote, trusted, error)) {
+            attempt, request.intent, response.quote, trusted, error)) {
         return false;
     }
     if (attempt.commit_key != commit.commit_key ||
@@ -853,13 +862,13 @@ bool ValidateClientFinalForExecution(
         return false;
     }
 
-    PaymentIntent intent;
-    PaymasterQuote quote;
+    PaymasterQuoteRequest request;
+    PaymasterQuoteResponse response;
     CollaborativePSBTTemplate trusted;
-    if (!DecodeProviderAuthorizationArtifacts(
-            attempt, intent, quote, trusted, error) ||
+    if (!DecodePaymasterAuthorizationArtifacts(
+            attempt, request, response, trusted, error) ||
         !ValidateClientAuthorizationManifest(
-            attempt.client_manifest, intent, quote,
+            attempt.client_manifest, request.intent, response.quote,
             attempt.capacity_snapshot, trusted, error)) {
         return false;
     }

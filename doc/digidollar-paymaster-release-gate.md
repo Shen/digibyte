@@ -4,7 +4,38 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
-## Current review corrections and extraction candidate
+## R1–R6 follow-up verification
+
+Working-tree corrections based on `204d67b03be00a77eccb3875fe414a48291555b6`,
+checked on 2026-11-05. Changed translation units, tests and affected Qt layout
+consumers were freshly compiled with MSVC 14.43.34808, `/Od /MT /WX /std:c++20`,
+and static Qt 5.15.10. These are isolated links with reused dependencies, not
+clean product builds. Commands, patches, compile/object hashes, seeds, exit
+codes, full logs and `source-freeze.json` are retained in
+`.ai/fix-r1-r6-204d67b0/`. This follow-up uses its own R1–R6 numbering.
+
+| Executed check | Bounded result |
+|---|---|
+| R1 C++17 header | Actual `paymaster/error.h` compiles with MinGW GCC 13.2, `-std=c++17 -Wall -Wextra -Werror`; runtime prefix/fallback/length checks pass. This is not a Linux or full C++17 build. |
+| R3/R5 native regressions | Baseline exposes the rollback display error and unauthenticated saved quote. Corrected final selection passes 4 cases / 89 assertions (`r35-final`); related budget, signing, persistence, replay and lock selection passes 23 / 1,348 (`native-related-final`). Total: 27 distinct cases / 1,437 assertions. |
+| R2/R4 Qt | Seven selected functions pass, including nine setup rows, seven live-recovery rows, signed/unsigned expiry, ordinary DD send and shared wallet queue checks. A delayed privacy reply crashes the old setup implementation (`r4-red`, exit `0xc0000374`); all four new privacy rows pass with the guard. Qt schema consumers were tested before the separate RPC help correction below. |
+| R6 functional registration | Runner lists 26 current-current variants. All seven newly registered descriptor variants pass individually. The no-change-client and reserved-capacity runs first expose a `resolvepaymastersession` result-schema error; its correction retains strict checking and both pass on retry. The other five runs also pass. Full 26-variant execution remains operator work. |
+| Local boundaries and source checks | Working-tree dependencies/cycles and changed-path/shared-record checks against the existing HEAD policy pass; Python AST and `git diff --check` pass. These checks do not establish remote enforcement or final owner acceptance. |
+
+Final native executable `native-final.exe` SHA256:
+`30210de7276e496e75a2a8c8f89ea5d443fcf98440d54c1b209206c1cdcea658`.
+Qt executable `qt.exe` SHA256:
+`4d99fa17c93e688e1e4175d5c9490d0f50a025e6160e83b1f48575fe638f28d5`.
+Functional runs use `daemon-before-schema.exe` SHA256
+`5f30dd384563dacf19cb55c85e7b0595bd5220736b17a7d850ac113296f5ca14`
+for announcement refresh, legacy policy and offer models; corrected `daemon.exe`
+SHA256 `4e25a5b7a84647a4f39d198129d023bff7f1e8ce63263a281cd77ac76293925b`
+for the other four. CLI reuse and exact per-run selections are recorded with
+the artifacts. No clean build, full suite, sanitizer or release-gate pass is
+inferred from these checks; the operator commands remain in the
+[runbook](digidollar-paymaster-testing.md).
+
+## Earlier review corrections and extraction candidate
 
 Starting source: `98c717f738e765cf1dbbbb94ed95afbda118b382`.
 Code candidate checked on 2026-11-04: `f28c2dcdc041d27d9799cf9da93da5b346b685e0`.

@@ -2359,39 +2359,7 @@ bool LoadAttemptAuthorizationArtifacts(const ProviderAttempt& attempt,
                                        CollaborativePSBTTemplate& trusted,
                                        std::string& error)
 {
-    request = {};
-    ResetDefault(response);
-    trusted = {};
-    PartiallySignedTransaction psbt;
-    try {
-        CDataStream request_stream{attempt.quote_request, SER_NETWORK,
-                                   ::PROTOCOL_VERSION};
-        request_stream >> request;
-        SpanReader response_stream{::PROTOCOL_VERSION, attempt.signed_quote};
-        response_stream >> response;
-        if (!request_stream.empty() || !response_stream.empty()) {
-            throw std::ios_base::failure("trailing authorization artifact data");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_AUTHORIZATION_ARTIFACT_ENCODING";
-        return false;
-    }
-    std::string decode_error;
-    if (!DecodeRawPSBT(psbt, MakeByteSpan(attempt.unsigned_psbt), decode_error) ||
-        !psbt.tx || psbt.inputs.size() != attempt.input_roles.size()) {
-        error = "PAYMASTER_AUTHORIZATION_TEMPLATE_ENCODING";
-        return false;
-    }
-    trusted.psbt = std::move(psbt);
-    for (const ReservationRole role : attempt.input_roles) {
-        InputRole input_role;
-        if (!ToInputRole(role, input_role)) {
-            error = "PAYMASTER_TEMPLATE_INPUT_ROLE";
-            return false;
-        }
-        trusted.input_roles.push_back(input_role);
-    }
-    return true;
+    return DecodePaymasterAuthorizationArtifacts(attempt, request, response, trusted, error);
 }
 
 bool ValidateAttemptAuthorizationManifest(const ProviderAttempt& attempt,

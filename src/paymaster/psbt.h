@@ -18,6 +18,8 @@ namespace DigiDollar::Paymaster {
 
 struct PaymentIntent;
 struct PaymasterQuote;
+struct PaymasterQuoteRequest;
+struct PaymasterQuoteResponse;
 struct ValidatedCapacitySnapshot;
 struct ClientAuthorizationManifest;
 struct ProviderAuthorizationManifest;
@@ -148,6 +150,19 @@ bool ValidateProviderAuthorizationManifest(
     const PaymentIntent& intent,
     const PaymasterQuote& quote,
     const CollaborativePSBTTemplate& trusted_template,
+    std::string& error);
+
+/** Reconstruct and authenticate the exact persisted quote artifacts for either
+ * party. Canonical encoding, provider identity/signature, transaction and
+ * template bindings share one implementation at every authorization boundary.
+ * This does not grant approval or check the current time: callers separately
+ * enforce their manifest, acceptance, ownership, budget and expiry rules, so
+ * an intact historical final remains verifiable after its quote expires. */
+bool DecodePaymasterAuthorizationArtifacts(
+    const ProviderAttempt& attempt,
+    PaymasterQuoteRequest& request,
+    PaymasterQuoteResponse& response,
+    CollaborativePSBTTemplate& trusted_template,
     std::string& error);
 
 /** Decode the immutable provider-side attempt artifacts and re-run the

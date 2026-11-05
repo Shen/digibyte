@@ -1626,6 +1626,52 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
     return true;
 }
 
+bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,
+                                        int64_t now,
+                                        ProviderMaintenanceBudgetUsage& usage,
+                                        std::string& error)
+{
+    usage = {};
+    if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
+    if (now <= 0) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_TIME";
+        return false;
+    }
+    ProviderMaintenanceBudgetUsage result;
+    result.accounting_time = EffectiveAccountingTime(now, ledger.accounting_time_high_water);
+    for (const ProviderMaintenanceRecord& record : ledger.records) {
+        if (record.IsPreparation()) continue;
+        bool valid{true};
+        if (record.state == ProviderMaintenanceState::PLANNED) {
+            valid = AddAmount(result.planned_fee.value, record.maximum_fee.value) &&
+                    AddAmount(result.reserved_fee.value, record.maximum_fee.value);
+        } else if (record.state == ProviderMaintenanceState::BROADCAST) {
+            valid = AddAmount(result.broadcast_fee.value, record.actual_fee.value) &&
+                    AddAmount(result.reserved_fee.value, record.actual_fee.value);
+        } else if (record.state == ProviderMaintenanceState::CONFIRMED) {
+            if (record.updated_at >= result.accounting_time - SAFETY_HOUR_SECONDS) {
+                valid = AddAmount(result.spent_last_hour.value, record.actual_fee.value);
+            }
+            if (record.updated_at >= result.accounting_time - SAFETY_DAY_SECONDS) {
+                valid = valid && AddAmount(result.spent_last_day.value, record.actual_fee.value);
+            }
+        }
+        if (!valid) {
+            error = "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW";
+            return false;
+        }
+    }
+    result.total_last_hour = result.reserved_fee;
+    result.total_last_day = result.reserved_fee;
+    if (!AddAmount(result.total_last_hour.value, result.spent_last_hour.value) ||
+        !AddAmount(result.total_last_day.value, result.spent_last_day.value)) {
+        error = "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW";
+        return false;
+    }
+    usage = result;
+    return true;
+}
+
 bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
                                       const ProviderLiquidityPolicy& policy,
                                       ProviderMaintenanceRecord record,
@@ -1669,8 +1715,9 @@ bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
         error = "PAYMASTER_MAINTENANCE_OPERATION_CONFLICT";
         return false;
     }
-    const int64_t effective_now = EffectiveAccountingTime(
-        now, ledger.accounting_time_high_water);
+    ProviderMaintenanceBudgetUsage usage;
+    if (!SummarizeProviderMaintenanceBudget(ledger, now, usage, error)) return false;
+    const int64_t effective_now = usage.accounting_time;
     record.created_at = effective_now;
     record.updated_at = effective_now;
     ProviderMaintenanceLedger shape_check;
@@ -1681,34 +1728,10 @@ bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
     }
     int64_t hour_total{record.maximum_fee.value};
     int64_t day_total{record.maximum_fee.value};
-    for (const ProviderMaintenanceRecord& candidate : ledger.records) {
-        if (candidate.IsPreparation()) continue;
-        if (candidate.state == ProviderMaintenanceState::RELEASED ||
-            candidate.state == ProviderMaintenanceState::FAILED) continue;
-        const bool outstanding =
-            candidate.state == ProviderMaintenanceState::PLANNED ||
-            candidate.state == ProviderMaintenanceState::BROADCAST;
-        const int64_t value =
-            candidate.state == ProviderMaintenanceState::PLANNED
-                ? candidate.maximum_fee.value
-                : candidate.actual_fee.value;
-        // Planned work and a live broadcast remain worst-case exposure until
-        // they become terminal, regardless of age. Only confirmed spend ages
-        // out of the rolling hour/day windows.
-        const bool counts_hour = outstanding ||
-            (candidate.state == ProviderMaintenanceState::CONFIRMED &&
-             candidate.updated_at >= effective_now - 60 * 60);
-        const bool counts_day = outstanding ||
-            (candidate.state == ProviderMaintenanceState::CONFIRMED &&
-             candidate.updated_at >= effective_now - 24 * 60 * 60);
-        if (counts_hour && !AddAmount(hour_total, value)) {
-            error = "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW";
-            return false;
-        }
-        if (counts_day && !AddAmount(day_total, value)) {
-            error = "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW";
-            return false;
-        }
+    if (!AddAmount(hour_total, usage.total_last_hour.value) ||
+        !AddAmount(day_total, usage.total_last_day.value)) {
+        error = "PAYMASTER_MAINTENANCE_BUDGET_OVERFLOW";
+        return false;
     }
     if (hour_total > policy.maximum_maintenance_fee_per_hour.value ||
         day_total > policy.maximum_maintenance_fee_per_day.value) {

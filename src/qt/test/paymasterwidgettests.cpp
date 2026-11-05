@@ -407,6 +407,7 @@ UniValue PaymasterSessionView(const std::string& state,
     result.pushKV("artifact", artifact);
     if (artifact == "alternative_recovery") {
         UniValue recovery{UniValue::VOBJ};
+        recovery.pushKV("phase", "response_validated");
         recovery.pushKV("expires_at", recovery_expires_at);
         recovery.pushKV("expired", recovery_expired);
         result.pushKV("recovery", std::move(recovery));
@@ -4816,6 +4817,7 @@ void PaymasterWidgetTests::paymasterClientRecoveryExpiryIsFailClosed()
 
     DigiDollarSendWidget send_widget(mini_gui.platformStyle.get());
     bool inconsistent_expiry{false};
+    std::string signed_phase;
     QString warning;
     send_widget.setDialogHandlerForTesting(
         [&](QMessageBox::Icon, const QString&, const QString& message,
@@ -4837,11 +4839,17 @@ void PaymasterWidgetTests::paymasterClientRecoveryExpiryIsFailClosed()
                 return listed;
             }
             if (command == "resolvepaymastersession") {
-                return PaymasterSessionView(
+                auto result = PaymasterSessionView(
                     "FAILED", "alternative_recovery", "CONFLICTED",
                     /*include_recipient=*/true,
                     /*recovery_expires_at=*/1,
                     /*recovery_expired=*/!inconsistent_expiry);
+                if (!signed_phase.empty()) {
+                    auto recovery = result.find_value("recovery");
+                    recovery.pushKV("phase", signed_phase);
+                    result.pushKV("recovery", recovery);
+                }
+                return result;
             }
             throw std::runtime_error("unexpected Paymaster RPC");
         });
@@ -4871,6 +4879,16 @@ void PaymasterWidgetTests::paymasterClientRecoveryExpiryIsFailClosed()
     QVERIFY(warning.contains(
         QStringLiteral("inconsistent recovery expiry"),
         Qt::CaseInsensitive));
+
+    for (const auto* phase : {"user_signed", "final_committed"}) {
+        signed_phase = phase;
+        warning.clear();
+        QVERIFY(QMetaObject::invokeMethod(
+            send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterSessionState", Qt::DirectConnection));
+        QVERIFY(warning.isEmpty());
+        QCOMPARE(primary->text(), QStringLiteral("Prepare return to this wallet…"));
+        QVERIFY(primary->isEnabled());
+    }
 }
 
 void PaymasterWidgetTests::paymasterClientDelayedCallbackIgnoresWalletClose()
@@ -5490,6 +5508,10 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_
     QTest::newRow("encrypted-start") << true << true << QString{};
     QTest::newRow("wallet-change-open-wizard") << false << false << QStringLiteral("open");
     QTest::newRow("wallet-change-pending-preview") << false << false << QStringLiteral("preview");
+    QTest::newRow("privacy-pending-read-success") << false << false << QStringLiteral("privacy-read-success");
+    QTest::newRow("privacy-pending-read-error") << false << false << QStringLiteral("privacy-read-error");
+    QTest::newRow("privacy-started-mutation-success") << false << false << QStringLiteral("privacy-mutation-success");
+    QTest::newRow("privacy-started-mutation-error") << false << false << QStringLiteral("privacy-mutation-error");
 }
 
 void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep()
@@ -5864,6 +5886,84 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
 
     malformed_provider_snapshot = false;
     tab.setWalletModel(mini_gui.walletModel.get());
+
+    if (wallet_change_stage.startsWith(QLatin1String("privacy-"))) {
+        auto* panel = static_cast<DigiDollarPaymasterWidget*>(
+            tab.findChild<QWidget*>(QStringLiteral("paymasterWidget")));
+        QVERIFY(panel);
+        const bool pending_mutation = wallet_change_stage.contains(QLatin1String("mutation"));
+        const bool failed_reply = wallet_change_stage.endsWith(QLatin1String("error"));
+        QPointer<QWizard> wizard_guard;
+        DigiDollarPaymasterWidget::RpcCallback late_reply;
+        UniValue reply;
+        bool execution_pending{false};
+        bool unexpected_rpc{false};
+        int calls{0};
+        QTimer::singleShot(0, &tab, [&] {
+            auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
+            QVERIFY(wizard);
+            wizard_guard = wizard;
+            auto* confirmation = wizard->findChild<QCheckBox*>("paymasterSetupWalletConfirmation");
+            auto* approval = wizard->findChild<QCheckBox*>("paymasterSetupMaintenanceApproval");
+            auto* review = wizard->findChild<QWizardPage*>("paymasterSetupReviewPage");
+            auto* progress = wizard->findChild<QWizardPage*>("paymasterSetupProgressPage");
+            QVERIFY(confirmation && approval && review && progress);
+            confirmation->setChecked(true);
+            for (int page_guard{0}; wizard->currentPage() != review && page_guard < 10; ++page_guard) wizard->next();
+            QCOMPARE(wizard->currentPage(), review);
+            approval->setChecked(true);
+            QVERIFY(review->isComplete());
+            panel->setAsyncRpcExecutorForTesting(
+                [&](const std::string& command, const UniValue& params, DigiDollarPaymasterWidget::RpcCallback callback) {
+                    ++calls;
+                    if (pending_mutation && command == "getpaymasteroperatorinfo" && !late_reply) {
+                        callback(setup_rpc(command, params), {});
+                        return;
+                    }
+                    const std::string expected = pending_mutation ? "setpaymasterpolicy" : "getpaymasteroperatorinfo";
+                    if (late_reply || command != expected) {
+                        unexpected_rpc = true;
+                        return;
+                    }
+                    // Execute the mock operation before delaying its receipt.
+                    // Privacy must not undo or repeat this durable step.
+                    reply = setup_rpc(command, params);
+                    late_reply = std::move(callback);
+                });
+            wizard->next();
+            execution_pending = wizard->currentPage() == progress && bool(late_reply);
+            panel->setPrivacy(true);
+            QVERIFY(!wizard->isVisible());
+        });
+        guided_setup->click();
+        QVERIFY(execution_pending);
+        QVERIFY(wizard_guard.isNull());
+        QVERIFY(!unexpected_rpc);
+        QVERIFY(late_reply);
+        QCOMPARE(operating_policy_attempts, pending_mutation ? 1 : 0);
+        const auto writes_before_reply = setup_write_order;
+        const int calls_before_reply = calls;
+        auto callback = std::move(late_reply);
+        callback(failed_reply ? UniValue{} : reply,
+                 failed_reply ? QStringLiteral("injected delayed setup failure") : QString{});
+        QCoreApplication::processEvents();
+        QCOMPARE(calls, calls_before_reply);
+        QCOMPARE(setup_write_order, writes_before_reply);
+        QCOMPARE(safety_attempts, 0);
+        QCOMPARE(pool_approvals, 0);
+        // The panel must leave its busy state after discarding the dead UI
+        // continuation and permit an ordinary authoritative refresh again.
+        int refreshed{0};
+        panel->setAsyncRpcExecutorForTesting({});
+        panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+            if (command == "getpaymasteroperatorinfo") ++refreshed;
+            return setup_rpc(command, params);
+        });
+        panel->setPrivacy(false);
+        QVERIFY(refreshed > 0);
+        QCOMPARE(setup_write_order, writes_before_reply);
+        return;
+    }
 
     if (!wallet_change_stage.isEmpty()) {
         auto* panel = static_cast<DigiDollarPaymasterWidget*>(
@@ -16352,9 +16452,81 @@ void PaymasterWidgetTests::paymasterSendControllerRecoveryReview()
     recovery.pushKV("phase", "user_signed");
     reply.pushKV("recovery", recovery);
     QCOMPARE(controller.recoveryReply(reply, selection, 1000).effect, Controller::RecoveryEffect::POLL);
+    QCOMPARE(controller.recoveryReply(reply, selection, 2000).effect, Controller::RecoveryEffect::POLL);
+    QVERIFY(controller.view().recoveryActive);
     recovery.pushKV("expired", true);
     reply.pushKV("recovery", recovery);
+    QCOMPARE(controller.recoveryReply(reply, selection, 2000).effect, Controller::RecoveryEffect::INVALID_EXPIRY);
+    recovery.pushKV("phase", "response_validated");
+    reply.pushKV("recovery", recovery);
     QCOMPARE(controller.recoveryReply(reply, selection, 2000).effect, Controller::RecoveryEffect::EXPIRED);
+}
+
+void PaymasterWidgetTests::paymasterSignedRecoverySurvivesQuoteExpiry()
+{
+    using namespace DigiDollar::Paymaster;
+    using Controller = PaymasterQt::SendController;
+    const int64_t now = QDateTime::currentSecsSinceEpoch();
+    wallet::paymaster_app::ClientRecoveryResult native;
+    native.action = "refresh";
+    wallet::paymaster_app::SessionSnapshot session;
+    session.session.request_id = "00000000-0000-4000-8000-000000000001";
+    session.session.session_id = uint256S(std::string(64, '1'));
+    session.session.state = SessionState::PENDING_PROVIDER;
+    session.session.fee_mode_requested = FeeMode::PAYMASTER;
+    session.session.fee_mode_used = FeeMode::PAYMASTER;
+    session.session.created_at = now - 120;
+    native.session.session = session;
+    native.session.to_address = "RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx";
+    native.view.artifact = "alternative_recovery";
+    native.view.allowed_actions = {"refresh", "cancel_to_self"};
+    native.view.requires_attention = true;
+    AlternativeRecoveryRecord recovery;
+    recovery.capacity_request.expires_at = now - 60;
+    recovery.recovery_response.expires_at = now - 60;
+    recovery.recovery_authorization.authorization_commitment = uint256S(std::string(64, '6'));
+    recovery.accepted_recovery_authorization_commitment = recovery.recovery_authorization.authorization_commitment;
+    recovery.recovery_authorization_accepted_at = now - 90;
+    Controller controller;
+    PaymasterRecoveryConfirmationSelection selection;
+    selection.expires_at = now - 60;
+    selection.authorization_commitment = QString(64, '6');
+    for (const auto phase : {AlternativeRecoveryPhase::USER_SIGNED, AlternativeRecoveryPhase::FINAL_COMMITTED}) {
+        recovery.phase = phase;
+        recovery.expired = false; // Core retains signed authority beyond the quote deadline.
+        native.view.recovery = recovery;
+        const auto result = wallet::paymaster_rpc::internal::ToJSON(native);
+        PaymasterQt::PaymasterSessionSnapshot snapshot;
+        QString error;
+        QVERIFY2(Controller::decodeSnapshot(result, snapshot, error), qPrintable(error));
+        QVERIFY(snapshot.recovery_signed);
+        QVERIFY(snapshot.allowed_actions.contains(QStringLiteral("cancel_to_self")));
+        QVERIFY(controller.applySnapshot(snapshot));
+        QVERIFY(controller.view().recoverySigned);
+        QCOMPARE(controller.recoveryReply(result, selection, now).effect, Controller::RecoveryEffect::POLL);
+        QVERIFY(controller.view().recoveryAuthorizationCommitment.isEmpty());
+        QVERIFY(!controller.view().recoveryActive);
+        QVERIFY(!controller.confirmRecovery(selection, controller.replyToken().wallet, now));
+        recovery.expired = true; // A signed artifact cannot be locally expired.
+        native.view.recovery = recovery;
+        PaymasterQt::PaymasterSessionSnapshot invalid;
+        QVERIFY(!Controller::decodeSnapshot(wallet::paymaster_rpc::internal::ToJSON(native), invalid, error));
+    }
+    for (const auto phase : {AlternativeRecoveryPhase::CAPACITY_PENDING, AlternativeRecoveryPhase::REQUEST_READY,
+                            AlternativeRecoveryPhase::RESPONSE_VALIDATED}) {
+        recovery.phase = phase;
+        recovery.expired = true;
+        native.view.recovery = recovery;
+        const auto result = wallet::paymaster_rpc::internal::ToJSON(native);
+        PaymasterQt::PaymasterSessionSnapshot snapshot;
+        QString error;
+        QVERIFY2(Controller::decodeSnapshot(result, snapshot, error), qPrintable(error));
+        QVERIFY(!snapshot.recovery_signed);
+        QVERIFY(!snapshot.allowed_actions.contains(QStringLiteral("cancel_to_self")));
+        QVERIFY(controller.applySnapshot(snapshot));
+        QVERIFY(!controller.view().recoverySigned);
+        QCOMPARE(controller.recoveryReply(result, selection, now).effect, Controller::RecoveryEffect::EXPIRED);
+    }
 }
 
 void PaymasterWidgetTests::paymasterSendFailureDecisions()
