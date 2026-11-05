@@ -99,15 +99,15 @@
       "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
     },
     "src/Makefile.qt.include": {
-      "purpose": "Build and distribute Paymaster Qt queue/controller/view modules.",
+      "purpose": "Build Paymaster Qt adapters and place the existing wallet-independent worker bridge in the base Qt source list for ClientModel use without wallet support.",
       "reused_api": "Existing Qt library source lists and MSVC generator.",
       "ordinary_callers": "Build/source distribution only.",
-      "regressions": "Targeted Qt compiles/link/tests and clean Qt builds."
+      "regressions": "Targeted Qt compiles/link and queue/setup/export tests; clean Qt builds with and without wallet support; source distribution and existing MSVC generation retain exactly one walletasync.cpp source item."
     },
     "src/qt/walletasync.h": {
-      "purpose": "Own generic wallet RPC replies and asynchronous worker lifetime independently of Paymaster; preserve existing QThread execution and shutdown joins.",
-      "reused_api": "Existing wallet-bound queue, QObject ownership, QThread workers and RPC callbacks.",
-      "ordinary_callers": "WalletModel background work for ordinary DGB/DD and Paymaster; no domain rules in the shared bridge.",
+      "purpose": "Provide the existing generic owned worker queue to wallet and node GUI models; both drain started work before dependent resources disappear.",
+      "reused_api": "Existing QObject/QThread ownership, wallet leases and node-model lifetime; the same generic bridge serves WalletModel and ClientModel.",
+      "ordinary_callers": "Ordinary DGB/DD WalletModel work and node-only ClientModel status reads, plus Paymaster views; no domain rules in the shared bridge.",
       "regressions": "Shared queue ordering/coalescing/shutdown tests; ordinary WalletTests and DGB/DD widget suites; clean build after WalletModel layout change."
     },
     "src/qt/walletasync.cpp": {
@@ -123,13 +123,13 @@
       "regressions": "Targeted compile/link/test and clean operator test build."
     },
     "src/qt/test/wallettests.cpp": {
-      "purpose": "Exercise generic queue effect defaults, mutation barriers, start failures and typed-worker shutdown independently of Paymaster.",
+      "purpose": "Exercise generic queue ordering/shutdown and node-read ownership, including a blocked RPC during ClientModel destruction and exact structured RPC errors.",
       "reused_api": "Existing WalletTests fixture and QThread lifecycle.",
       "ordinary_callers": "Ordinary wallet test registration; no product behavior.",
       "regressions": "New async tests plus existing DGB balance/send tests; rebuild Qt moc registration."
     },
     "src/qt/test/wallettests.h": {
-      "purpose": "Exercise generic queue effect defaults, mutation barriers, start failures and typed-worker shutdown independently of Paymaster.",
+      "purpose": "Register shared asynchronous wallet and node-model lifecycle regressions in the existing WalletTests fixture.",
       "reused_api": "Existing WalletTests fixture and QThread lifecycle.",
       "ordinary_callers": "Ordinary wallet test registration; no product behavior.",
       "regressions": "New async tests plus existing DGB balance/send tests; rebuild Qt moc registration."
@@ -139,6 +139,24 @@
       "reused_api": "Existing ClCompile AdditionalOptions metadata and /bigobj mechanism already used by the native test project and common MSVC Debug configuration; sync_qt_test_project preserves per-file metadata without generator changes.",
       "ordinary_callers": "Only src/qt/test/paymasterwidgettests.cpp in the Release Qt test target; ordinary DGB/DD sources, application binaries, compiler warnings and other source-file options are unchanged.",
       "regressions": "Generate the Qt test project twice and retain one source item with the Release-only option; compile the complete modified Paymaster widget test source with existing warning/error flags, link the existing Qt test target and run the provider-result matrix plus focused Paymaster and ordinary WalletTests regressions. The operator approved this bounded project change on 2026-11-05; trusted-policy and final owner boundary acceptance remain open."
+    },
+    "src/qt/clientmodel.cpp": {
+      "purpose": "Own and drain asynchronous node status RPC reads before model destruction permits Core index/oracle/chainstate teardown.",
+      "reused_api": "Existing interfaces::Node::executeRpc, QThread, structured UniValue exceptions and generic WalletAsync::WorkQueue.",
+      "ordinary_callers": "Ordinary DD Overview status reads use a node-owned queue without requiring a wallet; existing client polling remains unchanged.",
+      "regressions": "Blocked RPC/model-destruction barrier, no late callback, structured RPC errors; ordinary DD Overview status tests; clean Qt and wallet-disabled builds."
+    },
+    "src/qt/clientmodel.h": {
+      "purpose": "Declare the owned node-read queue and explicit asynchronous status-read interface.",
+      "reused_api": "Existing ClientModel lifetime and generic Qt worker bridge; no wallet or Paymaster domain dependency.",
+      "ordinary_callers": "Every ClientModel allocation site must be rebuilt after its appended private queue member changes sizeof(ClientModel).",
+      "regressions": "Recompile ClientModel allocation consumers and exercise the node RPC shutdown regression; clean product Qt and wallet-disabled builds."
+    },
+    "src/qt/digidollaroverviewwidget.cpp": {
+      "purpose": "Route ordinary DD Overview RPC reads through the ClientModel-owned queue so no detached read survives Core teardown.",
+      "reused_api": "ClientModel::executeRpcReadAsync with the existing result/local-error/structured-RPC-error callback contract.",
+      "ordinary_callers": "Ordinary DD overview price/health polling, loading/error presentation, privacy and stale generation handling.",
+      "regressions": "Overview unavailable/malformed/structured-error tests and blocked node-RPC shutdown test; preserve read throttling and wallet switches."
     },
     "src/wallet/wallet.h": {
       "purpose": "Represent independent Paymaster lock ownership without conflating it with manual/DD locks.",

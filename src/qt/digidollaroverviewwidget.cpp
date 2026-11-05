@@ -50,7 +50,6 @@
 #include <QLocale>
 #include <QStatusTipEvent>
 #include <QFontMetrics>
-#include <QThread>
 
 namespace {
 QString FormatBalanceAmount(double amount, int decimals, const QString& unit)
@@ -83,33 +82,10 @@ enum RecentTransactionRole {
     RecentNoteRole,
 };
 
-// The node outlives its GUI models, as in WalletModel's asynchronous RPC bridge.
-// Only value results cross back to Qt; no widget is touched by this worker.
+// ClientModel owns and drains these status reads before Core shutdown.
 void ReadOverviewRpc(ClientModel* model, std::string command, std::function<void(UniValue, QString, UniValue)> callback)
 {
-    QPointer<ClientModel> guard{model};
-    auto* node = &model->node();
-    QThread* thread = QThread::create([guard, node, command = std::move(command), callback = std::move(callback)]() mutable {
-        if (!guard) return;
-        UniValue result;
-        UniValue rpc_error;
-        QString error;
-        try {
-            result = node->executeRpc(command, UniValue{UniValue::VARR}, "");
-        } catch (const UniValue& e) {
-            rpc_error = e;
-        } catch (const std::exception& e) {
-            error = QString::fromUtf8(e.what());
-        } catch (...) {
-            error = QStringLiteral("Unknown overview status error");
-        }
-        if (!guard) return;
-        QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback), result = std::move(result), error = std::move(error), rpc_error = std::move(rpc_error)]() mutable {
-            if (guard) callback(std::move(result), std::move(error), std::move(rpc_error));
-        }, Qt::QueuedConnection);
-    });
-    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
+    model->executeRpcReadAsync(std::move(command), UniValue{UniValue::VARR}, std::move(callback));
 }
 } // namespace
 

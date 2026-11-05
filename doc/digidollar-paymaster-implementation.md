@@ -210,6 +210,11 @@ invalidate late replies; shutdown joins started workers before destroying their
 dependencies. Provider components own their panel state and workflows; the send
 controller owns session transitions and emits effects for the widget to execute.
 Both reuse shared formatting and backend financial rules.
+`ClientModel` owns node-status reads through the same generic queue, also in
+wallet-disabled Qt builds. Its destructor drains started reads before Core can
+destroy indexes, oracle state or chainstate. DD Overview callbacks retain their
+structured RPC errors and generation checks.
+
 
 Pool-preparation request bindings now hash typed recovery mappings with the local
 `Pool Request v2` tag, independent of JSON formatting. This is a local preview/replay

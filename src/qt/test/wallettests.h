@@ -25,6 +25,7 @@ private Q_SLOTS:
     void sendValidationExplainsInvalidFields();
     void asyncExplicitEffectsAndStartFailure();
     void asyncTypedWorkerShutdown();
+    void nodeRpcReadsJoinBeforeModelDestruction();
 };
 
 #endif // DIGIBYTE_QT_TEST_WALLETTESTS_H

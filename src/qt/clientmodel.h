@@ -8,7 +8,9 @@
 #include <QDateTime>
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <string>
 #include <sync.h>
 #include <uint256.h>
 
@@ -17,7 +19,12 @@ class CBlockIndex;
 class OptionsModel;
 class PeerTableModel;
 class PeerTableSortProxy;
+class UniValue;
 enum class SynchronizationState;
+
+namespace WalletAsync {
+class WorkQueue;
+}
 
 namespace interfaces {
 class Handler;
@@ -58,6 +65,10 @@ public:
     ~ClientModel();
 
     interfaces::Node& node() const { return m_node; }
+    /** Queue a node status RPC. Started reads finish before the model's node
+     * dependencies may be destroyed; queued reads and late replies are discarded. */
+    void executeRpcReadAsync(std::string command, UniValue params,
+                             std::function<void(UniValue, QString, UniValue)> callback);
     OptionsModel *getOptionsModel();
     PeerTableModel *getPeerTableModel();
     PeerTableSortProxy* peerTableSortProxy();
@@ -110,6 +121,7 @@ private:
 
     //! A thread to interact with m_node asynchronously
     QThread* const m_thread;
+    std::unique_ptr<WalletAsync::WorkQueue> m_rpc_work_queue;
 
     void TipChanged(SynchronizationState sync_state, interfaces::BlockTip tip, double verification_progress, SyncType synctype) EXCLUSIVE_LOCKS_REQUIRED(!m_cached_tip_mutex);
     void subscribeToCoreSignals();

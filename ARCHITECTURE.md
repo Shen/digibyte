@@ -1611,6 +1611,9 @@ If a descriptor matches but its private key is unavailable, the output remains
 unresolved rather than entering the foreign-output cache. Unlocking can then
 recover the key through the same complete proof path.
 
+ClientModel owns asynchronous node-status reads through the generic Qt worker
+queue and drains them before its destruction permits Core resource teardown.
+The same queue is available in Qt builds without wallet support.
 The asynchronous Overview RPC bridge carries structured RPC exceptions to
 the waiting presentation instead of turning them into generic errors. It says
 statistics are unavailable, without promising that synchronization will fix it.

@@ -8,6 +8,7 @@
 #include <qt/guiutil.h>
 #include <qt/peertablemodel.h>
 #include <qt/peertablesortproxy.h>
+#include <qt/walletasync.h>
 
 #include <clientversion.h>
 #include <common/args.h>
@@ -21,10 +22,12 @@
 #include <validation.h>
 
 #include <stdint.h>
+#include <exception>
 #include <functional>
 
 #include <QDebug>
 #include <QMetaObject>
+#include <QPointer>
 #include <QThread>
 #include <QTimer>
 
@@ -35,7 +38,8 @@ ClientModel::ClientModel(interfaces::Node& node, OptionsModel *_optionsModel, QO
     QObject(parent),
     m_node(node),
     optionsModel(_optionsModel),
-    m_thread(new QThread(this))
+    m_thread(new QThread(this)),
+    m_rpc_work_queue(std::make_unique<WalletAsync::WorkQueue>())
 {
     cachedBestHeaderHeight = -1;
     cachedBestHeaderTime = -1;
@@ -68,10 +72,43 @@ ClientModel::ClientModel(interfaces::Node& node, OptionsModel *_optionsModel, QO
 
 ClientModel::~ClientModel()
 {
+    // Internal RPCs are not drained by StopRPC. Join them before the application
+    // can tear down indexes, oracle state and chainstate after deleting us.
+    m_rpc_work_queue->stop();
     unsubscribeFromCoreSignals();
 
     m_thread->quit();
     m_thread->wait();
+}
+
+void ClientModel::executeRpcReadAsync(std::string command, UniValue params,
+                                     std::function<void(UniValue, QString, UniValue)> callback)
+{
+    QPointer<ClientModel> guard{this};
+    auto* node = &m_node;
+    auto* worker = QThread::create([guard, node, command = std::move(command),
+                                    params = std::move(params), callback = std::move(callback)]() mutable {
+        UniValue result;
+        UniValue rpc_error;
+        QString error;
+        try {
+            result = node->executeRpc(command, params, "");
+        } catch (const UniValue& failure) {
+            rpc_error = failure;
+        } catch (const std::exception& failure) {
+            error = QString::fromUtf8(failure.what());
+        } catch (...) {
+            error = QStringLiteral("Unknown node status error");
+        }
+        // The owning queue joins this worker before ClientModel destruction
+        // completes. The queued Qt callback never extends node work's lifetime.
+        QMetaObject::invokeMethod(guard, [guard, callback = std::move(callback),
+                                           result = std::move(result), error = std::move(error),
+                                           rpc_error = std::move(rpc_error)]() mutable {
+            if (guard && callback) callback(std::move(result), std::move(error), std::move(rpc_error));
+        }, Qt::QueuedConnection);
+    });
+    m_rpc_work_queue->schedule(worker, {WalletAsync::TaskKind::READ, false});
 }
 
 int ClientModel::getNumConnections(unsigned int flags) const

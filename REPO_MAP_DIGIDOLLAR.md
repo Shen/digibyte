@@ -1162,6 +1162,8 @@ See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollaroverviewwidget.cpp/h
 - `DigiDollarOverviewWidget` → DD balance overview and system health display.
+  Node-status RPC reads belong to ClientModel's generic queue and finish before
+  Core teardown; the widget owns only generation-bound delivery.
   Asynchronous RPC reads preserve structured RPC exceptions, so unavailable
   network data reports unavailability in the waiting state. Malformed responses,
   including amount-parsing RPC exceptions, remain errors; both failure paths

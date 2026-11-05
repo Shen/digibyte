@@ -26,6 +26,8 @@
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
 #include <qt/walletasync.h>
+#include <rpc/protocol.h>
+#include <rpc/server.h>
 #include <script/solver.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
@@ -38,6 +40,7 @@
 #include <atomic>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include <QAbstractButton>
@@ -830,4 +833,82 @@ void WalletTests::asyncTypedWorkerShutdown()
     QVERIFY(!queued_started);
     QVERIFY(queued.isNull());
     QCoreApplication::processEvents();
+}
+
+void WalletTests::nodeRpcReadsJoinBeforeModelDestruction()
+{
+    TestChain100Setup test;
+    m_node.setContext(&test.m_node);
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    std::promise<void> entered, release, finished;
+    auto entered_future = entered.get_future();
+    auto released = release.get_future().share();
+    auto finished_future = finished.get_future();
+    std::once_flag release_flag;
+    const auto unblock = [&] { std::call_once(release_flag, [&] { release.set_value(); }); };
+    std::atomic<bool> dependencies_alive{true}, observed_alive{false};
+    const CRPCCommand command{"test", "nodeRpcReadShutdownTest",
+        [&](const JSONRPCRequest&, UniValue& result, bool) {
+            entered.set_value();
+            released.wait();
+            observed_alive = dependencies_alive.load();
+            result = UniValue{UniValue::VOBJ};
+            result.pushKV("available", false);
+            result.pushKV("amount", 0);
+            finished.set_value();
+            return true;
+        }, {}, 0};
+    tableRPC.appendCommand(command.name, &command);
+    struct RemoveCommand {
+        const CRPCCommand& command;
+        ~RemoveCommand() { tableRPC.removeCommand(command.name, &command); }
+    } remove_command{command};
+    auto model = std::make_unique<ClientModel>(m_node, nullptr);
+    bool delivered{false};
+    model->executeRpcReadAsync(command.name, UniValue{UniValue::VARR},
+        [&](UniValue, QString, UniValue) { delivered = true; });
+    const bool started = entered_future.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    if (!started) {
+        unblock();
+        model.reset();
+        QFAIL("Node status RPC did not start");
+    }
+    // QObject destruction represents the next teardown stage, when the node's
+    // dependencies may be freed. An unowned worker would observe them gone.
+    connect(model.get(), &QObject::destroyed, [&] {
+        dependencies_alive = false;
+        unblock();
+    });
+    // Release a correctly joined worker after a bounded wait. This also avoids
+    // hanging the test if destruction correctly waits for the running RPC.
+    std::thread watchdog([&] {
+        finished_future.wait_for(std::chrono::milliseconds{200});
+        unblock();
+    });
+    model.reset();
+    watchdog.join();
+    finished_future.wait();
+    QVERIFY(observed_alive.load());
+    QVERIFY(!dependencies_alive.load());
+    QCoreApplication::processEvents();
+    QVERIFY(!delivered);
+
+    // Keep structured RPC exceptions distinct from ordinary worker failures.
+    const UniValue expected = JSONRPCError(RPC_MISC_ERROR, "node status unavailable");
+    const CRPCCommand failing{"test", "nodeRpcReadErrorTest",
+        [&](const JSONRPCRequest&, UniValue&, bool) -> bool { throw expected; }, {}, 0};
+    tableRPC.appendCommand(failing.name, &failing);
+    RemoveCommand remove_failing{failing};
+    model = std::make_unique<ClientModel>(m_node, nullptr);
+    UniValue actual;
+    QString local_error;
+    model->executeRpcReadAsync(failing.name, UniValue{UniValue::VARR},
+        [&](UniValue, QString error, UniValue rpc_error) {
+            actual = std::move(rpc_error);
+            local_error = std::move(error);
+            delivered = true;
+        });
+    QTRY_VERIFY(delivered);
+    QVERIFY(local_error.isEmpty());
+    QCOMPARE(actual.write(), expected.write());
 }

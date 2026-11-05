@@ -35,7 +35,7 @@ struct TaskOptions {
     bool coalesce{false};
 };
 
-/** One queue per wallet. All scheduling and delivery happen on its Qt thread;
+/** One queue per GUI model. All scheduling and delivery happen on its Qt thread;
  * blocking work uses the existing QThread workers. Shutdown discards queued
  * work and joins started workers before their node/wallet dependencies die. */
 class WorkQueue final : public QObject {
