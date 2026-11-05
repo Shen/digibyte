@@ -2549,11 +2549,11 @@ BOOST_AUTO_TEST_CASE(
             BOOST_CHECK(result.rejected.value_or(false));
             BOOST_CHECK(!result.queued.value_or(false));
             BOOST_CHECK(!result.rejection_reason.value_or("").empty());
-            if (!reason.empty()) BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), reason);
+            BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), reason);
         } catch (const ApplicationError& failure) {
             BOOST_CHECK_MESSAGE(local_failure, failure.what());
             BOOST_CHECK(failure.kind == ErrorKind::WALLET);
-            if (!reason.empty()) BOOST_CHECK_EQUAL(failure.what(), reason);
+            BOOST_CHECK_EQUAL(failure.what(), reason);
         }
         BOOST_CHECK_EQUAL(manager.DirectMessageCount(), local_failure ? 1U : 0U);
         BOOST_CHECK(manager.IsProviderRunning(processing_wallet.GetName(), environment.identity.provider_id));
@@ -2576,23 +2576,77 @@ BOOST_AUTO_TEST_CASE(
     check_message(invalid_signature, false, "PAYMASTER_PSBT_SIGNATURE_INVALID");
 
     const auto attempt_key = std::make_pair(DBKeys::PAYMASTER_ATTEMPT, fixture.attempt.attempt_id);
-    ProviderAttempt corrupt_attempt{fixture.attempt};
-    corrupt_attempt.unsigned_psbt = {1};
-    BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
-    check_message(malformed, true, "");
-    corrupt_attempt = fixture.attempt;
-    PartiallySignedTransaction corrupt_template{trusted.psbt};
-    corrupt_template.inputs.front().sighash_type = SIGHASH_ALL;
-    corrupt_attempt.unsigned_psbt = SerializePaymasterSecurityObject(corrupt_template);
-    BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
-    check_message(submit, true, "PAYMASTER_PSBT_SIGHASH");
-    // A well-formed local PSBT with an altered recipient must not turn the
-    // unchanged, correctly user-signed payload into a peer rejection.
-    corrupt_template = trusted.psbt;
-    corrupt_template.tx->vout.front().scriptPubKey = NewTaprootScript();
-    corrupt_attempt.unsigned_psbt = SerializePaymasterSecurityObject(corrupt_template);
-    BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
-    check_message(submit, true, "PAYMASTER_PROVIDER_AUTH_BINDING_MISMATCH");
+    BOOST_TEST_CONTEXT("local authorization artifact encoding and conflicts") {
+        ProviderAttempt corrupt_attempt{fixture.attempt};
+        corrupt_attempt.unsigned_psbt = {1};
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
+        check_message(malformed, true, "PAYMASTER_PROVIDER_AUTHORIZATION_TEMPLATE_ENCODING");
+
+        // Changing only the PSBT breaks the signed artifact binding before
+        // either the sighash or provider-manifest validator is reached.
+        corrupt_attempt = fixture.attempt;
+        PartiallySignedTransaction corrupt_template{trusted.psbt};
+        corrupt_template.inputs.front().sighash_type = SIGHASH_ALL;
+        corrupt_attempt.unsigned_psbt = SerializePaymasterSecurityObject(corrupt_template);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
+        check_message(submit, true, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
+
+        // An altered local recipient must not turn the unchanged, correctly
+        // user-signed payload into a peer rejection.
+        corrupt_template = trusted.psbt;
+        corrupt_template.tx->vout.front().scriptPubKey = NewTaprootScript();
+        corrupt_attempt.unsigned_psbt = SerializePaymasterSecurityObject(corrupt_template);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, corrupt_attempt));
+        check_message(submit, true, "PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT");
+    }
+
+    BOOST_TEST_CONTEXT("coherent authorization artifacts with an invalid sighash") {
+        CollaborativePSBTTemplate invalid_template{trusted};
+        invalid_template.psbt.inputs.front().sighash_type = SIGHASH_ALL;
+        PaymasterQuoteResponse response{fixture.response};
+        response.quote.template_commitment = GetCollaborativeTemplateCommitment(
+            fixture.request.intent, response.quote, invalid_template);
+        BOOST_REQUIRE(environment.identity_key.SignSchnorr(
+            GetPaymasterQuoteSignatureHash(response.quote), response.quote.identity_signature,
+            nullptr, uint256{}));
+
+        ProviderAttempt invalid_attempt{fixture.attempt};
+        invalid_attempt.template_commitment = response.quote.template_commitment;
+        invalid_attempt.commit_key = GetPaymasterCommitKey(
+            invalid_attempt.provider_id, invalid_attempt.client_nonce, invalid_attempt.intent_hash,
+            invalid_attempt.quote_id, invalid_attempt.template_commitment);
+        invalid_attempt.signed_quote = SerializePaymasterSecurityObject(response);
+        invalid_attempt.unsigned_psbt = SerializePaymasterSecurityObject(invalid_template.psbt);
+        BOOST_REQUIRE_MESSAGE(BuildProviderAuthorizationManifest(
+            fixture.request.intent, response.quote, invalid_template,
+            GetProviderSafetyPolicyHash(environment.safety), invalid_attempt.provider_manifest, error), error);
+
+        // Rebind the submit and lookup to the re-signed local artifacts so
+        // exact binding checks pass and the forbidden sighash is classified.
+        PaymasterSubmit rebound_submit{submit};
+        rebound_submit.template_commitment = invalid_attempt.template_commitment;
+        rebound_submit.commit_key = invalid_attempt.commit_key;
+        BOOST_REQUIRE(ValidateSubmitEnvelope(rebound_submit, rebound_submit.genesis_hash, error));
+        const auto template_key = std::make_pair(DBKeys::PAYMASTER_TEMPLATE, invalid_attempt.template_commitment);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, invalid_attempt));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(template_key, invalid_attempt.attempt_id));
+        check_message(rebound_submit, true, "PAYMASTER_PSBT_SIGHASH");
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(template_key));
+    }
+
+    BOOST_TEST_CONTEXT("valid authorization artifacts with a conflicting provider manifest") {
+        ProviderAttempt invalid_attempt{fixture.attempt};
+        ++invalid_attempt.provider_manifest.maximum_network_fee.value;
+        invalid_attempt.provider_manifest.manifest_id =
+            GetProviderAuthorizationManifestId(invalid_attempt.provider_manifest);
+        PaymasterQuoteRequest decoded_request;
+        PaymasterQuoteResponse decoded_response;
+        CollaborativePSBTTemplate decoded_template;
+        BOOST_REQUIRE_MESSAGE(DecodePaymasterAuthorizationArtifacts(
+            invalid_attempt, decoded_request, decoded_response, decoded_template, error), error);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, invalid_attempt));
+        check_message(submit, true, "PAYMASTER_PROVIDER_AUTH_BINDING_MISMATCH");
+    }
     BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, fixture.attempt));
 
     const auto session_key = std::make_pair(DBKeys::PAYMASTER_SESSION, std::string{request_id});

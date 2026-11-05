@@ -185,6 +185,11 @@ checkpoint is released or reset. Read/version errors, corrupt persisted records
 or templates, missing indexed sessions, readiness/unlock/checkpoint failures and
 uncertain chain/index reads retain the message. A failed quote prevout lookup
 is permanent only when the active UTXO view proves the input absent or spent.
+For persisted authorization, exact artifact bindings are checked before deeper
+manifest validation. A PSBT changed independently of its signed quote reports
+`PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT`; coherently bound artifacts
+can instead reach the sighash or manifest checks. All are local failures and
+retain the inbound message and durable authority.
 
 `GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
 stored recovery shape is validated before interpreting nested bindings.
