@@ -1094,6 +1094,54 @@ class PaymasterProviderRPCTest(DigiByteTestFramework):
                 return authorization
             if after_authorization is not None:
                 after_authorization()
+                self.log.info("Keep the complete request binding after accepting an authorization")
+                for changed_fields in (
+                        {"maximum_paymaster_fee_cents": fee_cap_cents + 1},
+                        {"maximum_provider_attempts": 2}):
+                    changed_options = dict(options, **changed_fields)
+                    assert_raises_rpc_error(
+                        -4, "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT",
+                        send_with_transport_retry, transfer_client,
+                        transfer_recipient, amount_cents, changed_options)
+                changed_selection = dict(
+                    options, preferred_provider_id="11" * 32,
+                    preferred_offer_id="22" * 32)
+                assert_raises_rpc_error(
+                    -4, "PAYMASTER_REQUEST_ID_CONFLICT",
+                    send_with_transport_retry, transfer_client,
+                    transfer_recipient, amount_cents, changed_selection)
+
+                # The lower-level quote adapter must enforce the same order,
+                # including the original ordered input set, without applying
+                # today's tightened policy to an already accepted signature.
+                session = transfer_client.getdigidollarsendsession({
+                    "request_id": request_id,
+                })
+                quote_options = {
+                    key: value for key, value in options.items()
+                    if key in ("fee_mode", "request_id",
+                               "maximum_paymaster_fee_cents", "privacy",
+                               "selection", "maximum_provider_attempts")
+                }
+                quote_options.update(
+                    address=transfer_recipient,
+                    amount_cents=authorization["payment_cents"],
+                    requested_amount_cents=amount_cents,
+                    selected_inputs=session["reserved_user_inputs"])
+                for changed_fields in (
+                        {"maximum_paymaster_fee_cents": fee_cap_cents + 1},
+                        {"maximum_provider_attempts": 2}):
+                    assert_raises_rpc_error(
+                        -4, "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT",
+                        transfer_client.requestpaymasterquote,
+                        authorization["provider_id"],
+                        dict(quote_options, **changed_fields))
+                exact_quote = transfer_client.requestpaymasterquote(
+                    authorization["provider_id"], quote_options)
+                assert_equal(exact_quote["session_id"], authorization["session_id"])
+                assert_equal(exact_quote["authorization_commitment"],
+                             authorization["authorization_commitment"])
+                assert_equal(exact_quote["authorization_accepted"], True)
                 exact_resume = resume_client_send()
                 assert_equal(exact_resume["provider_id"],
                              authorization["provider_id"])

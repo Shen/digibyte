@@ -56,7 +56,7 @@ using namespace DigiDollar::Paymaster;
 
 
 // Preserve the existing v1 hash bytes, including the original selected inputs.
-// Both entry points must enforce the same binding on terminal retries.
+// Both entry points must enforce the same binding on every retry.
 uint256 CanonicalClientRequestHash(
     const std::string& request_id, const CScript& recipient_script,
     DDCents order_amount, DDCents fee_cap, const std::vector<COutPoint>& inputs,
@@ -78,6 +78,39 @@ uint256 CanonicalClientRequestHash(
                << GetSponsorshipCapabilityHash(*capability);
     }
     return hasher.GetSHA256();
+}
+
+uint256 CanonicalClientRequestHash(
+    const ClientPaymentOptions& input, DDCents order_amount,
+    const std::vector<COutPoint>& inputs)
+{
+    std::optional<XOnlyPubKey> identity_key;
+    std::optional<RestrictedServiceDescriptor> descriptor;
+    std::optional<SponsorshipCapability> capability;
+    if (input.identity_key || input.descriptor || input.capability) {
+        if (!input.identity_key || !input.descriptor || !input.capability || input.identity_key->size() != 32) {
+            throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_RESTRICTED_IDENTITY");
+        }
+        identity_key.emplace(MakeUCharSpan(*input.identity_key));
+        descriptor.emplace();
+        capability.emplace();
+        std::string error;
+        // Reconstruct the original binding, including expired historical
+        // Restricted artifacts. This grants no fresh sponsorship authority and
+        // must not depend on current policy, scope availability or wall time.
+        if (!identity_key->IsFullyValid() ||
+            !DeserializePaymasterBytes(*input.descriptor, "RESTRICTED_DESCRIPTOR", *descriptor, error) ||
+            !DeserializePaymasterBytes(*input.capability, "SPONSORSHIP_CAPABILITY", *capability, error)) {
+            throw ApplicationError(ErrorKind::DESERIALIZATION,
+                                   error.empty() ? "PAYMASTER_INVALID_RESTRICTED_IDENTITY" : error);
+        }
+    }
+    const CDigiDollarAddress address{input.address};
+    return CanonicalClientRequestHash(
+        input.request_id, GetScriptForDestination(address.GetDigiDollarDestination()),
+        order_amount, DDCents{input.fee_cap}, inputs, input.mode,
+        input.privacy, input.selection, input.maximum_attempts,
+        input.subtract_fee, input.send_all, identity_key, descriptor, capability);
 }
 
 DDCents PreviewMaximumServiceFee(CWallet& wallet, DDCents requested_limit,
@@ -137,6 +170,31 @@ void RecordUnavailableClientProvider(PaymasterStore& store, const PaymentSession
 
 
 namespace {
+void ValidatePreferredClientOffer(
+    const AutomaticPaymentParameters& input, PaymasterStore& store,
+    const PaymentSession& session)
+{
+    if (!input.preferred_provider || IsTerminal(session.state) || session.attempt_ids.empty()) return;
+    // The first attempt binds the initial public offer even when a later
+    // attempt already owns an accepted signature or a final transaction.
+    ProviderAttempt first_attempt;
+    if (!store.GetAttempt(session.attempt_ids.front(), first_attempt)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
+    }
+    PaymentIntent first_intent;
+    try {
+        SpanReader stream{::PROTOCOL_VERSION, first_attempt.unsigned_intent};
+        stream >> first_intent;
+        if (!stream.empty()) throw std::ios_base::failure("Trailing intent data");
+    } catch (const std::exception&) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
+    }
+    if (first_attempt.provider_id != *input.preferred_provider ||
+        first_intent.offer_id != *input.preferred_offer) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REQUEST_ID_CONFLICT");
+    }
+}
+
 void ValidateClientPaymentOptions(const ClientPaymentOptions& input)
 {
     if (!CDigiDollarAddress{input.address}.IsValidForCurrentNetwork())
@@ -491,7 +549,9 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
         if (FindDurableClientAuthorizationAttempt(
                 *wallet, store, durable_session, GetTime(), durable_attempt,
                 durable_intent, durable_quote, error)) {
-            if (durable_attempt.provider_id != provider_id ||
+            if (CanonicalClientRequestHash(input, DDCents{requested_amount}, requested_inputs) !=
+                    durable_session.canonical_request_hash ||
+                durable_attempt.provider_id != provider_id ||
                 durable_intent.request_id != request_id ||
                 durable_intent.session_id != durable_session.session_id ||
                 durable_intent.canonical_request_hash !=
@@ -1171,10 +1231,14 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
         if (FindDurableClientAuthorizationAttempt(
                 *wallet, store, durable_session, now, durable_attempt,
                 durable_intent, durable_quote, error)) {
+            ValidatePreferredClientOffer(input, store, durable_session);
             const CDigiDollarAddress dd_address{address};
             const CScript recipient_script = GetScriptForDestination(
                 dd_address.GetDigiDollarDestination());
-            if (durable_intent.request_id != request_id ||
+            const auto& original_inputs = preset_inputs ? *preset_inputs : durable_session.user_inputs;
+            if (CanonicalClientRequestHash(input, DDCents{amount}, original_inputs) !=
+                    durable_session.canonical_request_hash ||
+                durable_intent.request_id != request_id ||
                 durable_intent.session_id != durable_session.session_id ||
                 durable_intent.canonical_request_hash !=
                     durable_session.canonical_request_hash ||
@@ -1356,28 +1420,8 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
     PaymentSession persisted_session;
     const bool have_persisted_session =
         store.GetSessionByRequestId(request_id, persisted_session);
-    if (preferred_provider && have_persisted_session && !IsTerminal(persisted_session.state) &&
-        !persisted_session.attempt_ids.empty()) {
-        // The initial choice is durably bound by the first attempt. A changed
-        // preference cannot retarget an existing order, including a replay.
-        ProviderAttempt first_attempt;
-        if (!store.GetAttempt(persisted_session.attempt_ids.front(), first_attempt)) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
-        }
-        PaymentIntent first_intent;
-        try {
-            SpanReader stream{::PROTOCOL_VERSION, first_attempt.unsigned_intent};
-            stream >> first_intent;
-            if (!stream.empty()) throw std::runtime_error("Trailing intent data");
-        } catch (const std::exception&) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
-        }
-        if (first_attempt.provider_id != *preferred_provider ||
-            first_intent.offer_id != *preferred_offer) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REQUEST_ID_CONFLICT");
-        }
-    }
     if (have_persisted_session) {
+        ValidatePreferredClientOffer(input, store, persisted_session);
         if (IsTerminal(persisted_session.state)) {
             // After pruning, the current format retains the order hash but
             // not its original inputs. Require the caller's saved input set

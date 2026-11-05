@@ -17,6 +17,7 @@
 #include <string_view>
 class CConnman;
 namespace wallet::paymaster_app {
+struct ClientPaymentOptions;
 /** Resolve only the captured locator tip while it remains on the active chain.
  * Callers compare a fresh tip hash after inspecting wallet/index snapshots. */
 std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
@@ -52,6 +53,10 @@ uint256 CanonicalClientRequestHash(
     const std::optional<XOnlyPubKey>& restricted_key,
     const std::optional<DigiDollar::Paymaster::RestrictedServiceDescriptor>& descriptor,
     const std::optional<DigiDollar::Paymaster::SponsorshipCapability>& capability);
+/** Reconstruct retry identity without renewing historical sponsorship authority. */
+uint256 CanonicalClientRequestHash(
+    const ClientPaymentOptions& input, DigiDollar::Paymaster::DDCents order_amount,
+    const std::vector<COutPoint>& inputs);
 DigiDollar::Paymaster::DDCents PreviewMaximumServiceFee(CWallet& wallet, DigiDollar::Paymaster::DDCents requested_limit,
                                                       int64_t now, std::string& error);
 void RecordUnavailableClientProvider(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,

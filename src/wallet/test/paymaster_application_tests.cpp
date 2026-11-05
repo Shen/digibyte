@@ -2,21 +2,29 @@
 // Distributed under the MIT software license, see COPYING.
 
 #include <wallet/paymasterapplication_internal.h>
+#include <wallet/paymasterclient.h>
 #include <wallet/rpc/paymaster_internal.h>
+#include <base58.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <index/txindex.h>
 #include <key.h>
+#include <paymaster/directory.h>
 #include <script/standard.h>
+#include <streams.h>
 #include <test/util/index.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <version.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <algorithm>
+#include <vector>
 
 namespace wallet {
 namespace {
@@ -25,6 +33,66 @@ using namespace paymaster_app;
 using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(retry_request_binding_preserves_historical_restricted_artifacts)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    const XOnlyPubKey identity_key{key.GetPubKey()};
+    const CScript recipient = GetScriptForDestination(WitnessV1Taproot{identity_key});
+    const std::vector<COutPoint> inputs{{uint256S("01"), 0}, {uint256S("02"), 1}};
+    ClientPaymentOptions options;
+    options.request_id = "550e8400-e29b-41d4-a716-446655440001";
+    options.address = EncodeDigiDollarAddress(WitnessV1Taproot{identity_key});
+    options.fee_cap = 3;
+    options.maximum_attempts = 1;
+    options.identity_key = std::vector<unsigned char>{identity_key.begin(), identity_key.end()};
+    RestrictedServiceDescriptor descriptor;
+    descriptor.genesis_hash = Params().GenesisBlock().GetHash();
+    descriptor.provider_id = GetPaymasterId(identity_key);
+    descriptor.offer_id = uint256S("03");
+    descriptor.policy_hash = uint256S("04");
+    descriptor.sponsor_authorization_key = identity_key;
+    descriptor.expires_at = 100;
+    SponsorshipCapability capability;
+    capability.genesis_hash = descriptor.genesis_hash;
+    capability.provider_id = descriptor.provider_id;
+    capability.offer_id = descriptor.offer_id;
+    capability.policy_hash = descriptor.policy_hash;
+    capability.recipient_script = recipient;
+    capability.amount = DDCents{500};
+    capability.payment_request_nonce = uint256S("05");
+    capability.expires_at = 100;
+    const auto encode = [](const auto& value) {
+        CDataStream stream{SER_NETWORK, ::PROTOCOL_VERSION};
+        stream << value;
+        const auto bytes = MakeUCharSpan(stream);
+        return std::vector<unsigned char>{bytes.begin(), bytes.end()};
+    };
+    options.descriptor = encode(descriptor);
+    options.capability = encode(capability);
+    const uint256 original = CanonicalClientRequestHash(
+        options.request_id, recipient, DDCents{500}, DDCents{3}, inputs,
+        options.mode, options.privacy, options.selection, options.maximum_attempts,
+        false, false, identity_key, descriptor, capability);
+    // Binding reconstruction neither validates an expired descriptor as a new
+    // offer nor requires current Restricted issuance or provider policy.
+    BOOST_CHECK(CanonicalClientRequestHash(options, DDCents{500}, inputs) == original);
+    auto changed = options;
+    ++changed.fee_cap;
+    BOOST_CHECK(CanonicalClientRequestHash(changed, DDCents{500}, inputs) != original);
+    changed = options;
+    ++changed.maximum_attempts;
+    BOOST_CHECK(CanonicalClientRequestHash(changed, DDCents{500}, inputs) != original);
+    auto reversed_inputs = inputs;
+    std::reverse(reversed_inputs.begin(), reversed_inputs.end());
+    BOOST_CHECK(CanonicalClientRequestHash(options, DDCents{500}, reversed_inputs) != original);
+    ++capability.expires_at;
+    changed = options;
+    changed.capability = encode(capability);
+    BOOST_CHECK(CanonicalClientRequestHash(changed, DDCents{500}, inputs) != original);
+    BOOST_CHECK(CanonicalClientRequestHash(options, DDCents{500}, inputs) == original);
+}
 
 BOOST_FIXTURE_TEST_CASE(active_tip_resolution_rejects_empty_unknown_and_inactive_locators,
                         TestChain100Setup)
