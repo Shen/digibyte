@@ -151,3 +151,30 @@ and deny agent identities permission to bypass merge controls. These hosting
 settings cannot be installed by editing `AGENTS.md`. Repository text and CI do
 not form an operating-system sandbox or prove absence of semantic duplication.
 Retain the operator's permission boundaries and review the shared-Core record.
+
+### Owner acceptance evidence
+
+Keep the control-only patch separate from product fixes. Include all changed
+paths listed in the policy's `controls` section, including this document and
+the cycle helper; do not remove them from that protected set. Review the exact
+shared-path additions against their change records. A locally constructed
+policy-first comparison can demonstrate the proposed split, but its commits
+are fixtures, not an approved target branch or hosting evidence.
+
+Before accepting the product PR, retain the following from the authenticated
+hosting target:
+
+1. Repository, PR number, target branch, actual base SHA and candidate SHA.
+2. The separate control review and its owner-approved merge commit, with the
+   installed checker, policy, fixtures, cycle helper and workflow hashes.
+3. Effective branch protection and rulesets, including inherited rules: the
+   `trusted-boundaries` status is mandatory, policy changes require owner
+   review, and agent identities cannot bypass either requirement.
+4. A successful boundary run for those exact base/candidate SHAs, using the
+   target's checker. Retain the run URL and conclusion. Repeat after either
+   SHA changes; a local advisory pass or historical run does not substitute.
+
+Missing access, an absent policy, a rejected control diff or unknown rules
+leaves acceptance open. Do not select a newer local base solely to turn a
+rejected comparison green. Initial owner-reviewed bootstrap precedes enabling
+the required status; it does not authorize product changes in the same review.
