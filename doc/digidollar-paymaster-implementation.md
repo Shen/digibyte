@@ -181,6 +181,13 @@ is permanent only when the active UTXO view proves the input absent or spent.
 
 `GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
 stored recovery shape is validated before interpreting nested bindings.
+Recovery requests pass separate replay, preflight and commit phases. Permanent
+peer defects are consumed without faulting the automatic service or blocking
+later quote/submit work. `GetProviderCapacityProofWithStatus` distinguishes a
+missing, mismatched or expired request from damaged local indexes, response
+bytes and signatures; the latter remain for reconciliation. Ordinary quote
+classification also retains these local failures. An index lookup failure is
+not proof of a missing remote prevout unless the active UTXO view establishes it.
 `ValidateAlternativeRecoverySubmitPayload` checks peer bindings, canonical PSBT
 encoding and signatures against a previously validated local template. It does
 not replace the full chainstate validation or the checks immediately before signing.

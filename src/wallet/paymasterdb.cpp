@@ -806,10 +806,18 @@ bool WalletBatch::ReadPaymasterCapacityResponse(
     const uint256& request_hash,
     std::vector<unsigned char>& response)
 {
-    return !request_hash.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, request_hash),
-                         response) &&
-           !response.empty();
+    return ReadPaymasterCapacityResponseWithStatus(request_hash, response) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacityResponseWithStatus(
+    const uint256& request_hash, std::vector<unsigned char>& response)
+{
+    response.clear();
+    if (request_hash.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const auto status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, request_hash), response);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return !response.empty() ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::ListPaymasterCapacityResponses(
@@ -863,10 +871,18 @@ bool WalletBatch::WritePaymasterCapacityNonce(const uint256& client_nonce,
 bool WalletBatch::ReadPaymasterCapacityNonce(const uint256& client_nonce,
                                              uint256& request_hash)
 {
-    return !client_nonce.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE, client_nonce),
-                         request_hash) &&
-           !request_hash.IsNull();
+    return ReadPaymasterCapacityNonceWithStatus(client_nonce, request_hash) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacityNonceWithStatus(
+    const uint256& client_nonce, uint256& request_hash)
+{
+    request_hash.SetNull();
+    if (client_nonce.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const auto status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE, client_nonce), request_hash);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return !request_hash.IsNull() ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::ErasePaymasterCapacityNonce(const uint256& client_nonce)
@@ -888,10 +904,18 @@ bool WalletBatch::WritePaymasterCapacitySession(const uint256& session_key,
 bool WalletBatch::ReadPaymasterCapacitySession(const uint256& session_key,
                                                uint256& request_hash)
 {
-    return !session_key.IsNull() &&
-           m_batch->Read(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION, session_key),
-                         request_hash) &&
-           !request_hash.IsNull();
+    return ReadPaymasterCapacitySessionWithStatus(session_key, request_hash) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterCapacitySessionWithStatus(
+    const uint256& session_key, uint256& request_hash)
+{
+    request_hash.SetNull();
+    if (session_key.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    const auto status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION, session_key), request_hash);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return !request_hash.IsNull() ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::ErasePaymasterCapacitySession(const uint256& session_key)

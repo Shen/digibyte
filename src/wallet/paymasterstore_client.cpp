@@ -1438,31 +1438,54 @@ bool PaymasterStore::GetProviderCapacityProof(
     PaymasterCapacityProof& proof,
     std::string& error) const
 {
+    return GetProviderCapacityProofWithStatus(request, now, proof, error) == ProviderCapacityProofStatus::FOUND;
+}
+
+ProviderCapacityProofStatus PaymasterStore::GetProviderCapacityProofWithStatus(
+    const PaymasterCapacityRequest& request,
+    int64_t now,
+    PaymasterCapacityProof& proof,
+    std::string& error) const
+{
     error.clear();
     proof = {};
-    if (now <= 0 ||
-        !ValidateCapacityRequestEnvelope(request, request.genesis_hash, now,
+    if (now <= 0 || request.created_at <= 0 ||
+        !ValidateCapacityRequestEnvelope(request, request.genesis_hash, request.created_at,
                                          error)) {
         if (error.empty()) error = "PAYMASTER_INVALID_CAPACITY_REQUEST";
-        return false;
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
     const uint256 request_hash{Hash(CanonicalBytes(request))};
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    uint256 indexed_hash;
-    std::vector<unsigned char> encoded;
-    ProviderCapacityReleaseRecord release;
-    if (!batch.ReadPaymasterCapacityNonce(request.client_nonce, indexed_hash) ||
-        indexed_hash != request_hash ||
-        !batch.ReadPaymasterCapacityResponse(request_hash, encoded) ||
-        batch.ReadPaymasterCapacityRelease(request_hash, release) ||
-        !DecodeCanonicalCapacityProof(encoded, proof) ||
-        !ValidateCapacityProofEnvelope(proof, request, now, error)) {
-        proof = {};
-        if (error.empty()) error = "PAYMASTER_CAPACITY_RESERVATION_MISSING";
-        return false;
+    ProviderIdentityRecord identity;
+    if (batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_CAPACITY_IDENTITY_MISSING";
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
-    return true;
+    PaymasterCapacityRequest persisted_request;
+    PaymasterCapacityProof candidate;
+    uint256 persisted_request_hash;
+    const auto status = ReadProviderCapacityRequestForContinuationWithStatus(
+        batch, identity, request.genesis_hash, request.provider_id,
+        request.request_id, request.session_id, request.client_nonce, now,
+        persisted_request, candidate, persisted_request_hash, error);
+    if (status == ProviderCapacityProofStatus::NOT_FOUND) {
+        std::vector<unsigned char> encoded;
+        ProviderCapacityReleaseRecord release;
+        if (batch.ReadPaymasterCapacityResponseWithStatus(request_hash, encoded) != DatabaseReadStatus::NOT_FOUND ||
+            batch.ReadPaymasterCapacityReleaseWithStatus(request_hash, release) != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_CAPACITY_RESPONSE_INDEX_MISMATCH";
+            return ProviderCapacityProofStatus::READ_ERROR;
+        }
+    }
+    if (status != ProviderCapacityProofStatus::FOUND) return status;
+    if (persisted_request_hash != request_hash || CanonicalBytes(persisted_request) != CanonicalBytes(request)) {
+        error = "PAYMASTER_CAPACITY_CONTINUATION_MISMATCH";
+        return ProviderCapacityProofStatus::REQUEST_MISMATCH;
+    }
+    proof = std::move(candidate);
+    return ProviderCapacityProofStatus::FOUND;
 }
 
 bool PaymasterStore::FinalizePaymentIntent(const std::string& request_id,

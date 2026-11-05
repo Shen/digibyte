@@ -81,10 +81,10 @@
       "regressions": "Range and existing prefix-cursor tests across all wallet backends."
     },
     "src/wallet/walletdb.h": {
-      "purpose": "Declare bounded transaction-index finance reads and commit-aware reconciliation writes using the existing event format.",
-      "reused_api": "Existing WalletBatch and DatabaseCursor transactions.",
-      "ordinary_callers": "No ordinary wallet key or transaction format changes.",
-      "regressions": "Finance migration/reorg/replay/failure tests and existing wallet DB tests."
+      "purpose": "Retain bounded finance adapters and distinguish missing capacity indexes/responses from damaged local authority.",
+      "reused_api": "Existing WalletBatch and DatabaseReadStatus; boolean capacity readers remain compatibility wrappers.",
+      "ordinary_callers": "Existing wallet database callers keep their signatures; provider quote/recovery admission preserves local uncertainty.",
+      "regressions": "Capacity absence, expired and mismatched bindings, corrupt/dangling index/response data and automatic recovery/quote progress; ordinary database tests."
     },
     "src/qt/walletmodel.h": {
       "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",

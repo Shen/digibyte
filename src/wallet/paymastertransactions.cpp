@@ -384,11 +384,7 @@ bool IsPermanentCapacityContinuationError(const std::string& error)
            error == "PAYMASTER_CAPACITY_RESERVATION_MISSING" ||
            error == "PAYMASTER_CAPACITY_ADMISSION_MISSING" ||
            error == "PAYMASTER_CAPACITY_ADMISSION_EXPIRED" ||
-           error == "PAYMASTER_CAPACITY_ADMISSION_CONFLICT" ||
-           error == "PAYMASTER_CAPACITY_RESPONSE_BINDING_MISMATCH" ||
-           error == "PAYMASTER_CAPACITY_RESPONSE_ENCODING" ||
-           error == "PAYMASTER_CAPACITY_RESPONSE_INDEX_MISMATCH" ||
-           error == "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
+           error == "PAYMASTER_CAPACITY_ADMISSION_CONFLICT";
 }
 
 /** Keep one provider-addressed inbound message leased until the durable

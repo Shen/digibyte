@@ -505,6 +505,8 @@ public:
                                         bool overwrite = false);
     bool ReadPaymasterCapacityResponse(const uint256& request_hash,
                                        std::vector<unsigned char>& response);
+    DatabaseReadStatus ReadPaymasterCapacityResponseWithStatus(
+        const uint256& request_hash, std::vector<unsigned char>& response);
     bool ListPaymasterCapacityResponses(
         std::vector<std::pair<uint256, std::vector<unsigned char>>>& responses);
     bool ErasePaymasterCapacityResponse(const uint256& request_hash);
@@ -513,12 +515,16 @@ public:
                                      bool overwrite = false);
     bool ReadPaymasterCapacityNonce(const uint256& client_nonce,
                                     uint256& request_hash);
+    DatabaseReadStatus ReadPaymasterCapacityNonceWithStatus(
+        const uint256& client_nonce, uint256& request_hash);
     bool ErasePaymasterCapacityNonce(const uint256& client_nonce);
     bool WritePaymasterCapacitySession(const uint256& session_key,
                                        const uint256& request_hash,
                                        bool overwrite = false);
     bool ReadPaymasterCapacitySession(const uint256& session_key,
                                       uint256& request_hash);
+    DatabaseReadStatus ReadPaymasterCapacitySessionWithStatus(
+        const uint256& session_key, uint256& request_hash);
     bool ErasePaymasterCapacitySession(const uint256& session_key);
     bool WritePaymasterCapacityRelease(
         const DigiDollar::Paymaster::ProviderCapacityReleaseRecord& release,

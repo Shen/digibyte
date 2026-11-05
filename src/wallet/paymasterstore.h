@@ -80,6 +80,16 @@ enum class CreatePaymasterSessionResult {
     DATABASE_ERROR,
 };
 
+/** A peer may be rejected only after absence, expiry or a request conflict was
+ * established independently of unreadable or inconsistent local authority. */
+enum class ProviderCapacityProofStatus {
+    FOUND,
+    NOT_FOUND,
+    REQUEST_MISMATCH,
+    EXPIRED,
+    READ_ERROR,
+};
+
 /** Read-only, transient views; these are never serialized to the wallet DB. */
 struct PaymasterTransactionObservation {
     uint256 txid;
@@ -261,6 +271,11 @@ public:
      * this canonical request. This is the only authority an alternative
      * recovery request may use to bind the already reserved pool slot. */
     bool GetProviderCapacityProof(
+        const DigiDollar::Paymaster::PaymasterCapacityRequest& request,
+        int64_t now,
+        DigiDollar::Paymaster::PaymasterCapacityProof& proof,
+        std::string& error) const;
+    ProviderCapacityProofStatus GetProviderCapacityProofWithStatus(
         const DigiDollar::Paymaster::PaymasterCapacityRequest& request,
         int64_t now,
         DigiDollar::Paymaster::PaymasterCapacityProof& proof,

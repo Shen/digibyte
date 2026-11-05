@@ -1418,6 +1418,26 @@ bool ReadProviderCapacityRequestForContinuation(
     uint256& request_hash,
     std::string& error)
 {
+    return ReadProviderCapacityRequestForContinuationWithStatus(
+        batch, identity, expected_genesis, provider_id, request_id, session_id,
+        client_nonce, now, request, proof, request_hash, error) == ProviderCapacityProofStatus::FOUND;
+}
+
+ProviderCapacityProofStatus ReadProviderCapacityRequestForContinuationWithStatus(
+    WalletBatch& batch,
+    const ProviderIdentityRecord& identity,
+    const uint256& expected_genesis,
+    const PaymasterId& provider_id,
+    const std::string& request_id,
+    const uint256& session_id,
+    const uint256& client_nonce,
+    int64_t now,
+    PaymasterCapacityRequest& request,
+    PaymasterCapacityProof& proof,
+    uint256& request_hash,
+    std::string& error)
+{
+    error.clear();
     request = {};
     proof = {};
     request_hash.SetNull();
@@ -1426,54 +1446,96 @@ bool ReadProviderCapacityRequestForContinuation(
         !IsCanonicalRequestId(request_id) || session_id.IsNull() ||
         client_nonce.IsNull() || now <= 0) {
         error = "PAYMASTER_CAPACITY_CONTINUATION_MISMATCH";
-        return false;
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
 
-    std::vector<unsigned char> encoded;
-    if (!batch.ReadPaymasterCapacityNonce(client_nonce, request_hash) ||
-        !batch.ReadPaymasterCapacityResponse(request_hash, encoded)) {
+    PaymasterCapacityProof session_binding;
+    session_binding.provider_id = provider_id;
+    session_binding.request_id = request_id;
+    session_binding.session_id = session_id;
+    uint256 nonce_hash, session_hash;
+    const auto nonce_status = batch.ReadPaymasterCapacityNonceWithStatus(client_nonce, nonce_hash);
+    const auto session_status = batch.ReadPaymasterCapacitySessionWithStatus(
+        GetPersistedCapacitySessionKey(session_binding), session_hash);
+    if ((nonce_status != DatabaseReadStatus::FOUND && nonce_status != DatabaseReadStatus::NOT_FOUND) ||
+        (session_status != DatabaseReadStatus::FOUND && session_status != DatabaseReadStatus::NOT_FOUND)) {
+        error = "PAYMASTER_CAPACITY_DATABASE_READ";
+        return ProviderCapacityProofStatus::READ_ERROR;
+    }
+    if (nonce_status == DatabaseReadStatus::NOT_FOUND && session_status == DatabaseReadStatus::NOT_FOUND) {
         error = "PAYMASTER_CAPACITY_RESERVATION_MISSING";
-        return false;
+        return ProviderCapacityProofStatus::NOT_FOUND;
     }
-    ProviderCapacityReleaseRecord release;
-    if (batch.ReadPaymasterCapacityRelease(request_hash, release)) {
-        error = "PAYMASTER_CAPACITY_ADMISSION_EXPIRED";
-        return false;
-    }
-    if (batch.HasPaymasterCapacityRelease(request_hash)) {
-        error = "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
-        return false;
+    request_hash = nonce_status == DatabaseReadStatus::FOUND ? nonce_hash : session_hash;
+    std::vector<unsigned char> encoded;
+    if (batch.ReadPaymasterCapacityResponseWithStatus(request_hash, encoded) != DatabaseReadStatus::FOUND) {
+        // A present index promises its response. Missing target rows are local
+        // inconsistency, not proof that this remote request was never admitted.
+        error = "PAYMASTER_CAPACITY_DATABASE_READ";
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
 
     if (!DecodeCanonicalCapacityProof(encoded, proof)) {
         error = "PAYMASTER_CAPACITY_RESPONSE_ENCODING";
-        return false;
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
     request = GetPersistedCapacityRequest(proof);
     std::string validation_error;
-    uint256 indexed_hash;
     if (request_hash != GetPersistedCapacityRequestHash(proof) ||
         request_hash != Hash(CanonicalBytes(request)) ||
         request.genesis_hash != expected_genesis ||
-        proof.provider_id != provider_id || proof.request_id != request_id ||
-        proof.session_id != session_id || proof.client_nonce != client_nonce ||
-        !ValidateCapacityRequestEnvelope(request, expected_genesis, now,
+        proof.provider_id != provider_id || proof.created_at <= 0 ||
+        !ValidateCapacityRequestEnvelope(request, expected_genesis, proof.created_at,
                                          validation_error) ||
-        !ValidateCapacityProofEnvelope(proof, request, now, validation_error) ||
+        !ValidateCapacityProofEnvelope(proof, request, proof.created_at, validation_error) ||
         !identity.identity_key.IsFullyValid() ||
         GetPaymasterId(identity.identity_key) != provider_id ||
         !identity.identity_key.VerifySchnorr(
             GetCapacityProofSignatureHash(proof), proof.identity_signature)) {
         error = validation_error.empty() ? "PAYMASTER_CAPACITY_RESPONSE_BINDING_MISMATCH" : std::move(validation_error);
-        return false;
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
-    if (!batch.ReadPaymasterCapacitySession(
-            GetPersistedCapacitySessionKey(proof), indexed_hash) ||
-        indexed_hash != request_hash) {
+    uint256 proof_nonce_hash, proof_session_hash;
+    if ((nonce_status == DatabaseReadStatus::FOUND && proof.client_nonce != client_nonce) ||
+        (nonce_status == DatabaseReadStatus::NOT_FOUND &&
+         (proof.request_id != request_id || proof.session_id != session_id)) ||
+        batch.ReadPaymasterCapacityNonceWithStatus(proof.client_nonce, proof_nonce_hash) != DatabaseReadStatus::FOUND ||
+        batch.ReadPaymasterCapacitySessionWithStatus(GetPersistedCapacitySessionKey(proof), proof_session_hash) != DatabaseReadStatus::FOUND ||
+        proof_nonce_hash != request_hash || proof_session_hash != request_hash) {
         error = "PAYMASTER_CAPACITY_RESPONSE_INDEX_MISMATCH";
-        return false;
+        return ProviderCapacityProofStatus::READ_ERROR;
     }
-    return true;
+    if (proof.request_id != request_id || proof.session_id != session_id || proof.client_nonce != client_nonce) {
+        // The local signed response is intact; the peer changed its binding.
+        error = "PAYMASTER_CAPACITY_CONTINUATION_MISMATCH";
+        return ProviderCapacityProofStatus::REQUEST_MISMATCH;
+    }
+    if (nonce_status != DatabaseReadStatus::FOUND || session_status != DatabaseReadStatus::FOUND ||
+        nonce_hash != request_hash || session_hash != request_hash) {
+        error = "PAYMASTER_CAPACITY_RESPONSE_INDEX_MISMATCH";
+        return ProviderCapacityProofStatus::READ_ERROR;
+    }
+    ProviderCapacityReleaseRecord release;
+    const auto release_status = batch.ReadPaymasterCapacityReleaseWithStatus(request_hash, release);
+    if (release_status != DatabaseReadStatus::FOUND && release_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
+        return ProviderCapacityProofStatus::READ_ERROR;
+    }
+    if (release_status == DatabaseReadStatus::FOUND && release.client_nonce != client_nonce) {
+        error = "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
+        return ProviderCapacityProofStatus::READ_ERROR;
+    }
+    if (release_status == DatabaseReadStatus::FOUND || request.expires_at <= now) {
+        error = "PAYMASTER_CAPACITY_ADMISSION_EXPIRED";
+        return ProviderCapacityProofStatus::EXPIRED;
+    }
+    if (!ValidateCapacityRequestEnvelope(request, expected_genesis, now, error) ||
+        !ValidateCapacityProofEnvelope(proof, request, now, error)) {
+        // An intact artifact that is not yet valid can reflect a local clock
+        // rollback. Keep it for reconciliation instead of blaming the peer.
+        return ProviderCapacityProofStatus::READ_ERROR;
+    }
+    return ProviderCapacityProofStatus::FOUND;
 }
 
 bool CapacityProofMatchesPoolEntry(const CapacityDGBInput& input,

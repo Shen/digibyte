@@ -58,6 +58,7 @@
 #include <optional>
 #include <set>
 #include <string_view>
+#include <variant>
 
 
 
@@ -1124,7 +1125,7 @@ struct ValidatedProviderRecoveryInputs {
 std::optional<ProviderProcessingResult> ReplayProviderRecoveryRequest(
     const ProviderRequestProcessingContext& request,
     const DirectMessage& direct, const AlternativeRecoveryRequest& recovery_request,
-    PaymasterStore& store, ProviderProcessingResult& result)
+    PaymasterStore& store)
 {
     WalletContext& context = request.context;
     node::NodeContext* const node = request.node;
@@ -1141,64 +1142,63 @@ std::optional<ProviderProcessingResult> ReplayProviderRecoveryRequest(
             recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
                 ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
     }
-    if (recovery_status == DatabaseReadStatus::FOUND) {
-        if (!persisted.provider_side || persisted.expired ||
-            persisted.recovery_request_hash !=
-                GetAlternativeRecoveryRequestHash(recovery_request) ||
-            SerializeRecoveryMessage(persisted.recovery_request) !=
-                SerializeRecoveryMessage(recovery_request) ||
-            persisted.phase <
-                AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT");
-        }
-        const std::vector<unsigned char> encoded =
-            SerializeRecoveryMessage(persisted.recovery_response);
-        const bool queued =
-            context.paymaster->HasOutboundDirectMessage(
-                direct.peer_id, Hash(encoded)) ||
-            context.paymaster->QueueOutboundDirectMessage(
-                direct.peer_id, Hash(encoded), encoded.size(),
-                DirectPayload{persisted.recovery_response}, now);
-        if (queued && node->connman) {
-            node->connman->WakeMessageHandler();
-        }
-        result.queued = queued;
-        result.request_id = persisted.request_id;
-        result.session_id = persisted.session_id;
-        result.provider_id = persisted.recovery_provider_id;
-        result.recovery_id = persisted.recovery_id;
-        result.template_commitment = persisted.recovery_response.manifest
-                .template_commitment;
-        return result;
+    if (recovery_status == DatabaseReadStatus::NOT_FOUND) return std::nullopt;
+    ProviderProcessingResult result;
+    result.processed = true;
+    result.queued = false;
+    result.message_type = "recovery_request";
+    if (!persisted.provider_side ||
+        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(persisted.recovery_request) ||
+        persisted.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+        throw ApplicationError(
+            ErrorKind::WALLET,
+            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT");
     }
-
-    return std::nullopt;
+    if (persisted.expired ||
+        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(recovery_request) ||
+        SerializeRecoveryMessage(persisted.recovery_request) != SerializeRecoveryMessage(recovery_request)) {
+        return RejectProviderMessage(*context.paymaster, direct,
+            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT", "recovery_request");
+    }
+    const std::vector<unsigned char> encoded =
+        SerializeRecoveryMessage(persisted.recovery_response);
+    const bool queued =
+        context.paymaster->HasOutboundDirectMessage(
+            direct.peer_id, Hash(encoded)) ||
+        context.paymaster->QueueOutboundDirectMessage(
+            direct.peer_id, Hash(encoded), encoded.size(),
+            DirectPayload{persisted.recovery_response}, now);
+    if (queued && node->connman) {
+        node->connman->WakeMessageHandler();
+    }
+    result.queued = queued;
+    result.request_id = persisted.request_id;
+    result.session_id = persisted.session_id;
+    result.provider_id = persisted.recovery_provider_id;
+    result.recovery_id = persisted.recovery_id;
+    result.template_commitment = persisted.recovery_response.manifest
+            .template_commitment;
+    return result;
 }
 
-ValidatedProviderRecoveryInputs PreflightProviderRecoveryRequest(
+// A rejection is returned only after the remote defect has been established.
+// Unknown local storage/index/chain authority throws and retains the inbox lease.
+std::variant<ValidatedProviderRecoveryInputs, ProviderProcessingResult> PreflightProviderRecoveryRequest(
     const ProviderRequestProcessingContext& request,
-    const AlternativeRecoveryRequest& recovery_request, PaymasterStore& store)
+    const DirectMessage& direct, const AlternativeRecoveryRequest& recovery_request,
+    PaymasterStore& store)
 {
+    WalletContext& context = request.context;
     CWallet* const wallet = request.wallet;
     const ProviderReadiness& readiness = request.readiness;
     node::NodeContext* const node = request.node;
+    const bool automatic_service = request.automatic_service;
     const int64_t now = request.now;
     std::string& error = request.error;
-    const bool automatic_service = request.automatic_service;
     if (wallet->IsLocked()) {
         throw ApplicationError(
             ErrorKind::UNLOCK,
             "Provider wallet unlock is required for a recovery quote");
-    }
-    const bool continuation_ready =
-        CapacityContinuationMayProceed(readiness);
-    if (!continuation_ready ||
-        !ProviderTxIndexIsReady(*wallet, !automatic_service)) {
-        throw ApplicationError(
-            ErrorKind::WALLET,
-            !continuation_ready ? "PAYMASTER_PROVIDER_DRAIN_ONLY" : "PAYMASTER_REQUIRES_READY_TXINDEX");
     }
     HashWriter offer_hasher =
         TaggedHash("DigiByte Paymaster Offer v1");
@@ -1212,25 +1212,42 @@ ValidatedProviderRecoveryInputs PreflightProviderRecoveryRequest(
             expected_offer_id ||
         !PolicyAllowsFundingModel(readiness.policy,
                                   FundingModel::USER_PAID)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT,
-                           "PAYMASTER_RECOVERY_POLICY_MISMATCH");
+        return RejectProviderMessage(*context.paymaster, direct,
+                                     "PAYMASTER_RECOVERY_POLICY_MISMATCH", "recovery_request");
     }
 
     PaymasterCapacityProof capacity_proof;
-    if (!store.GetProviderCapacityProof(
-            recovery_request.capacity_request, now,
-            capacity_proof, error) ||
-        capacity_proof.snapshot_id !=
+    const auto capacity_status = store.GetProviderCapacityProofWithStatus(
+        recovery_request.capacity_request, now, capacity_proof, error);
+    if (capacity_status == ProviderCapacityProofStatus::READ_ERROR) {
+        throw ApplicationError(ErrorKind::WALLET,
+            error.empty() ? "PAYMASTER_CAPACITY_DATABASE_READ" : error);
+    }
+    if (capacity_status != ProviderCapacityProofStatus::FOUND) {
+        return RejectProviderMessage(*context.paymaster, direct, error, "recovery_request");
+    }
+    if (capacity_proof.snapshot_id !=
             recovery_request.capacity_snapshot_id ||
         GetCapacityResourceCommitment(capacity_proof) !=
-            recovery_request.capacity_resource_commitment ||
-        !ValidateCapacityProofAgainstChainstate(
+            recovery_request.capacity_resource_commitment) {
+        return RejectProviderMessage(*context.paymaster, direct,
+                                     "PAYMASTER_RECOVERY_CAPACITY_BINDING_MISMATCH", "recovery_request");
+    }
+    // Immutable peer mistakes above need no new financial authority. Any valid
+    // continuation still waits for the unchanged wallet/index readiness gates.
+    const bool continuation_ready = CapacityContinuationMayProceed(readiness);
+    if (!continuation_ready || !ProviderTxIndexIsReady(*wallet, !automatic_service)) {
+        throw ApplicationError(ErrorKind::WALLET,
+            !continuation_ready ? "PAYMASTER_PROVIDER_DRAIN_ONLY" : "PAYMASTER_REQUIRES_READY_TXINDEX");
+    }
+    if (!ValidateCapacityProofAgainstChainstate(
             capacity_proof,
             recovery_request.capacity_request,
             readiness.identity.identity_key, *node->chainman,
             now, error)) {
-        throw ApplicationError(
-            ErrorKind::INVALID_INPUT,
+        // The proof was loaded from local authority. A changed chain or damaged
+        // saved proof must be reconciled without acknowledging a peer rejection.
+        throw ApplicationError(ErrorKind::WALLET,
             error.empty() ? "PAYMASTER_RECOVERY_CAPACITY_BINDING_MISMATCH" : error);
     }
 
@@ -1242,27 +1259,37 @@ ValidatedProviderRecoveryInputs PreflightProviderRecoveryRequest(
         if (!g_txindex->FindTx(outpoint.hash, block_hash,
                                creating_tx) ||
             !creating_tx) {
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND");
+            bool missing_or_spent;
+            {
+                LOCK(cs_main);
+                missing_or_spent = node->chainman->ActiveChainstate()
+                                       .CoinsTip().AccessCoin(outpoint).IsSpent();
+            }
+            if (missing_or_spent) {
+                return RejectProviderMessage(*context.paymaster, direct,
+                    "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND", "recovery_request");
+            }
+            throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_RECOVERY_USER_PREVOUT_LOOKUP_FAILED");
         }
         user_inputs.push_back(
             {outpoint, creating_tx, InputRole::USER_DD});
     }
     ValidatedUserDDInputs validated_user_inputs;
+    bool valid_user_inputs;
     {
         LOCK(cs_main);
-        if (!ValidateCollaborativeUserDDInputs(
-                user_inputs,
-                node->chainman->ActiveChainstate().CoinsTip(),
-                validated_user_inputs, error)) {
-            throw ApplicationError(ErrorKind::INVALID_INPUT, error);
-        }
+        valid_user_inputs = ValidateCollaborativeUserDDInputs(
+            user_inputs, node->chainman->ActiveChainstate().CoinsTip(),
+            validated_user_inputs, error);
+    }
+    if (!valid_user_inputs) {
+        return RejectProviderMessage(*context.paymaster, direct, error, "recovery_request");
     }
     if (!ValidateAlternativeRecoveryRequestInputs(
             recovery_request, validated_user_inputs.output_keys,
             error)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, error);
+        return RejectProviderMessage(*context.paymaster, direct, error, "recovery_request");
     }
     const CAmount total_dd{
         validated_user_inputs.total_dd_amount};
@@ -1271,9 +1298,8 @@ ValidatedProviderRecoveryInputs PreflightProviderRecoveryRequest(
          recovery_request.wallet_returns) {
         if (output.amount.value >
             std::numeric_limits<CAmount>::max() - returned_dd) {
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                "PAYMASTER_RECOVERY_AMOUNT_OVERFLOW");
+            return RejectProviderMessage(*context.paymaster, direct,
+                                         "PAYMASTER_RECOVERY_AMOUNT_OVERFLOW", "recovery_request");
         }
         returned_dd += output.amount.value;
     }
@@ -1285,19 +1311,17 @@ ValidatedProviderRecoveryInputs PreflightProviderRecoveryRequest(
           recovery_request.service_fee) ||
         total_dd - returned_dd !=
             recovery_request.service_fee.value) {
-        throw ApplicationError(
-            ErrorKind::INVALID_INPUT,
-            error.empty() ? "PAYMASTER_RECOVERY_SERVICE_FEE_MISMATCH" : error);
+        return RejectProviderMessage(*context.paymaster, direct,
+            error.empty() ? "PAYMASTER_RECOVERY_SERVICE_FEE_MISMATCH" : error,
+            "recovery_request");
     }
-
-    return {std::move(capacity_proof), std::move(user_inputs)};
+    return ValidatedProviderRecoveryInputs{std::move(capacity_proof), std::move(user_inputs)};
 }
 
 ProviderProcessingResult CommitProviderRecoveryQuote(
     const ProviderRequestProcessingContext& request,
     const DirectMessage& direct, const AlternativeRecoveryRequest& recovery_request,
-    PaymasterStore& store, ValidatedProviderRecoveryInputs validated,
-    ProviderProcessingResult& result)
+    PaymasterStore& store, ValidatedProviderRecoveryInputs validated)
 {
     WalletContext& context = request.context;
     CWallet* const wallet = request.wallet;
@@ -1305,14 +1329,15 @@ ProviderProcessingResult CommitProviderRecoveryQuote(
     node::NodeContext* const node = request.node;
     const int64_t now = request.now;
     std::string& error = request.error;
+    ProviderProcessingResult result;
+    result.processed = true;
+    result.queued = false;
+    result.message_type = "recovery_request";
+    const uint256 recovery_id = GetAlternativeRecoveryId(recovery_request.request_id,
+        recovery_request.session_id, recovery_request.recovery_provider_id, recovery_request.client_nonce);
     uint256 netgroup_bucket;
-    auto& capacity_proof = validated.capacity_proof;
+    const PaymasterCapacityProof& capacity_proof = validated.capacity_proof;
     auto& user_inputs = validated.user_inputs;
-    const uint256 recovery_id = GetAlternativeRecoveryId(
-        recovery_request.request_id,
-        recovery_request.session_id,
-        recovery_request.recovery_provider_id,
-        recovery_request.client_nonce);
     ValidatedCapacitySnapshot snapshot;
     snapshot.snapshot_id = capacity_proof.snapshot_id;
     snapshot.resource_commitment =
@@ -1560,42 +1585,39 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
         !ValidateAlternativeRecoveryRequestEnvelope(
             *recovery_request, Params().GenesisBlock().GetHash(),
             now, error)) {
-        if (!AcknowledgeRejectedDirectMessage(
-                *context.paymaster, direct, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        throw ApplicationError(
-            ErrorKind::INVALID_INPUT,
-            error.empty() ? "PAYMASTER_INVALID_RECOVERY_REQUEST" : error);
+        return RejectProviderMessage(*context.paymaster, direct,
+            error.empty() ? "PAYMASTER_INVALID_RECOVERY_REQUEST" : error,
+            "recovery_request");
     }
     if (direct.canonical_netgroup.empty()) {
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
     }
     if (recovery_request->privacy_profile == PrivacyProfile::HIGH) {
-        bool onion_peer{false};
-        if (node->connman) {
-            node->connman->ForEachNode([&](CNode* peer) {
-                if (peer->GetId() == direct.peer_id &&
-                    peer->addr.IsTor()) {
-                    onion_peer = true;
-                }
-            });
+        if (!node->connman) {
+            throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_NODE_RUNTIME_UNAVAILABLE");
         }
+        bool onion_peer{false};
+        node->connman->ForEachNode([&](CNode* peer) {
+            if (peer->GetId() == direct.peer_id && peer->addr.IsTor()) {
+                onion_peer = true;
+            }
+        });
         if (!onion_peer) {
-            throw ApplicationError(
-                ErrorKind::INVALID_INPUT,
-                "PAYMASTER_RECOVERY_HIGH_PRIVACY_REQUIRES_ONION");
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_RECOVERY_HIGH_PRIVACY_REQUIRES_ONION", "recovery_request");
         }
     }
 
     PaymasterStore store{*wallet};
-    if (const auto replay = ReplayProviderRecoveryRequest(request, direct, *recovery_request, store, result)) {
+    if (const auto replay = ReplayProviderRecoveryRequest(request, direct, *recovery_request, store)) {
         return *replay;
     }
-    auto validated = PreflightProviderRecoveryRequest(request, *recovery_request, store);
+    auto preflight = PreflightProviderRecoveryRequest(request, direct, *recovery_request, store);
+    if (const auto* rejection = std::get_if<ProviderProcessingResult>(&preflight)) return *rejection;
     return CommitProviderRecoveryQuote(request, direct, *recovery_request, store,
-                                      std::move(validated), result);
+        std::get<ValidatedProviderRecoveryInputs>(std::move(preflight)));
 }
 
 ProviderProcessingResult ProcessProviderQuoteRequest(

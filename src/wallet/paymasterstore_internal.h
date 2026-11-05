@@ -197,6 +197,19 @@ bool ReadProviderCapacityRequestForContinuation(
     PaymasterCapacityProof& proof,
     uint256& request_hash,
     std::string& error);
+ProviderCapacityProofStatus ReadProviderCapacityRequestForContinuationWithStatus(
+    WalletBatch& batch,
+    const ProviderIdentityRecord& identity,
+    const uint256& expected_genesis,
+    const PaymasterId& provider_id,
+    const std::string& request_id,
+    const uint256& session_id,
+    const uint256& client_nonce,
+    int64_t now,
+    PaymasterCapacityRequest& request,
+    PaymasterCapacityProof& proof,
+    uint256& request_hash,
+    std::string& error);
 bool CapacityProofMatchesPoolEntry(const CapacityDGBInput& input,
                                    const ProviderPoolEntry& entry);
 bool CapacityProofMatchesPoolEntry(const CapacityDDCarrier& carrier,
