@@ -15,6 +15,7 @@
 #include <paymaster/psbt.h>
 #include <paymaster/reservation.h>
 #include <paymaster/txbuilder.h>
+#include <paymaster/types.h>
 #include <paymaster/wire.h>
 #include <script/descriptor.h>
 #include <script/signingprovider.h>
@@ -326,6 +327,86 @@ BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_pay
     BOOST_CHECK(!ValidatePaymasterQuoteForClient(exchanged_identity, intent, offer,
         XOnlyPubKey{impostor.GetPubKey()}, DDCents{0}, now, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH");
+
+    // Reconstruct the provider's exact fee output at the client boundary.
+    // The expected output amounts are independent of the shared calculator.
+    struct CarrierCase {
+        CAmount carrier;
+        CAmount fee;
+        CAmount output; // -1 denotes an invalid carrier successor.
+    };
+    const CarrierCase carrier_cases[]{
+        {100, 0, 0},
+        {99, 1, -1},
+        {100, 1, 101},
+        {100, 99, 199},
+        {MAX_DD_OUTPUT_CENTS - 99, 99, MAX_DD_OUTPUT_CENTS},
+        {MAX_DD_OUTPUT_CENTS - 98, 99, -1},
+        {MAX_DD_OUTPUT_CENTS - 1, 1, MAX_DD_OUTPUT_CENTS},
+        {MAX_DD_OUTPUT_CENTS, 1, -1},
+        {100, 100, 100},
+    };
+    for (const auto& row : carrier_cases) {
+        BOOST_TEST_CONTEXT("carrier=" << row.carrier << " fee=" << row.fee) {
+            auto fee_quote = quote;
+            fee_quote.service_fee = DDCents{row.fee};
+            auto fee_params = params;
+            fee_params.dd_outputs[1].amount = 900 - row.fee;
+            if (row.fee > 0 && row.fee < 100) {
+                CMutableTransaction carrier_source;
+                carrier_source.SetDigiDollarType(::DD_TX_TRANSFER);
+                carrier_source.vin.emplace_back(COutPoint{uint256::ONE, 82});
+                carrier_source.vout.emplace_back(0, provider_script);
+                carrier_source.vout.emplace_back(0, CScript{} << OP_RETURN
+                    << std::vector<unsigned char>{'D', 'D'} << CScriptNum(DD_TX_TRANSFER)
+                    << CScriptNum(row.carrier));
+                const auto carrier_tx = MakeTransactionRef(std::move(carrier_source));
+                const COutPoint carrier_input{carrier_tx->GetHash(), 0};
+                fee_quote.reserved_carrier = VerifiedDDCarrier{
+                    carrier_input, CMutableTransaction{*carrier_tx}, DDCents{row.carrier}};
+                fee_quote.carrier_return_script = provider_script;
+                const auto successor = ComputeCarrierSuccessor(
+                    DDCents{row.carrier}, DDCents{row.fee}, error);
+                BOOST_CHECK_EQUAL(successor.has_value(), row.output >= 0);
+                if (row.output < 0) {
+                    BOOST_CHECK(!BuildTrustedQuoteTemplate(m_wallet, intent, fee_quote,
+                        Params(), *m_node.chainman, reconstructed, error));
+                    BOOST_CHECK_EQUAL(error, "PAYMASTER_CARRIER_OUTPUT_MISMATCH");
+                    continue;
+                }
+                BOOST_REQUIRE(successor);
+                BOOST_CHECK_EQUAL(successor->value, row.output);
+                {
+                    LOCK(cs_main);
+                    m_node.chainman->ActiveChainstate().CoinsTip().AddCoin(
+                        carrier_input, Coin{carrier_tx->vout[0], 0, false}, true);
+                }
+                fee_params.inputs.insert(fee_params.inputs.begin() + 1,
+                    {carrier_input, carrier_tx, InputRole::PROVIDER_CARRIER});
+                fee_params.dd_outputs.push_back(
+                    {provider_script, row.output, DDOutputRole::CARRIER_SUCCESSOR});
+            } else if (row.fee >= 100) {
+                fee_quote.provider_fee_script = provider_script;
+                fee_params.dd_outputs.push_back(
+                    {provider_script, row.output, DDOutputRole::PROVIDER_FEE});
+            }
+            const auto fee_transaction = BuildUnsignedCollaborativeTransfer(
+                fee_params, Params(), *m_node.chainman);
+            BOOST_REQUIRE_MESSAGE(fee_transaction.success, fee_transaction.error);
+            fee_quote.unsigned_transaction = fee_transaction.tx;
+            fee_quote.unsigned_txid = CTransaction{fee_transaction.tx}.GetHash();
+            CollaborativePSBTTemplate fee_template;
+            BOOST_REQUIRE(CreateCollaborativePSBTTemplate(
+                fee_transaction.tx, fee_params.inputs, fee_template, error));
+            fee_quote.template_commitment = GetCollaborativeTemplateCommitment(
+                intent, fee_quote, fee_template);
+            sign_quote(fee_quote, provider_key);
+            BOOST_REQUIRE_MESSAGE(BuildTrustedQuoteTemplate(m_wallet, intent, fee_quote,
+                Params(), *m_node.chainman, reconstructed, error), error);
+            BOOST_REQUIRE(reconstructed.psbt.tx);
+            BOOST_CHECK(CTransaction{*reconstructed.psbt.tx} == CTransaction{fee_transaction.tx});
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(payment_intent_control_proofs_use_only_wallet_owned_bip86_inputs)

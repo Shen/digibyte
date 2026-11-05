@@ -15,6 +15,7 @@
 #include <index/txindex.h>
 #include <key.h>
 #include <paymaster/txbuilder.h>
+#include <paymaster/types.h>
 #include <paymaster/wire.h>
 #include <random.h>
 #include <script/script.h>
@@ -471,15 +472,18 @@ bool BuildTrustedQuoteTemplate(
     }
 
     if (quote.service_fee.value > 0 && quote.service_fee.value < 100) {
-        if (!quote.reserved_carrier || !quote.carrier_return_script ||
-            quote.reserved_carrier->value.value >
-                std::numeric_limits<CAmount>::max() - quote.service_fee.value) {
+        if (!quote.reserved_carrier || !quote.carrier_return_script) {
+            error = "PAYMASTER_CARRIER_OUTPUT_MISMATCH";
+            return false;
+        }
+        const auto successor = ComputeCarrierSuccessor(
+            quote.reserved_carrier->value, quote.service_fee, error);
+        if (!successor) {
             error = "PAYMASTER_CARRIER_OUTPUT_MISMATCH";
             return false;
         }
         params.dd_outputs.push_back(
-            {*quote.carrier_return_script,
-             quote.reserved_carrier->value.value + quote.service_fee.value,
+            {*quote.carrier_return_script, successor->value,
              DDOutputRole::CARRIER_SUCCESSOR});
     } else if (quote.service_fee.value >= 100) {
         if (!quote.provider_fee_script) {

@@ -374,7 +374,7 @@ unless another suite is named. Test names describe coverage, not executed passes
 
 | Invariant / behavior | Main test locations |
 |---|---|
-| Amounts, exact fees, manifests and signatures | `paymaster_types_tests.cpp`, `paymaster_txbuilder_tests.cpp`, `paymaster_psbt_tests.cpp`; `client_authorization_rejects_invalid_amounts_before_arithmetic` covers rehashed/serialized negative and extreme operands in both fee modes. Wallet PSBT/security suites retain exact artifact-conflict, coherent invalid-sighash and manifest-only error cases. |
+| Amounts, exact fees, manifests and signatures | `paymaster_types_tests.cpp`, `paymaster_txbuilder_tests.cpp`, `paymaster_psbt_tests.cpp`; `client_authorization_rejects_invalid_amounts_before_arithmetic` covers rehashed/serialized negative and extreme operands in both fee modes. Wallet PSBT tests compare carrier boundaries and exact independently reconstructed fee outputs against the shared amount rule. Wallet security suites retain exact artifact-conflict, coherent invalid-sighash and manifest-only error cases. |
 | Channel proof and bounded admission | Protocol/wire/transport/admission suites; `p2p_paymaster.py`, `p2p_paymaster_connection_capacity.py`. |
 | Nonfinancial diagnostics | Transport `diagnostic_*`; `rpc_paymaster_endpoint.py` tests TCP/SOCKS5 isolation and no authentication; Qt `paymasterDiagnosticCommands`, `paymasterDiagnosticRefreshAndPrivacy`, `paymasterNodeConnectionEditor`. Local proxy coverage is not public Tor evidence. |
 | Selection, fee/privacy limits and failover | Client comparator cycle permutations/strict-order properties; directory/reputation suites; `wallet_paymaster_offer_selection.py`, `wallet_paymaster_failover.py`. |
