@@ -253,6 +253,22 @@ the changed sources and start with this focused selection:
 if ($LASTEXITCODE -ne 0) { throw 'Wallet safety regressions failed' }
 ```
 
+Add the current lock-owner and recovery-request regressions after rebuilding:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_store_tests/active_reservation_cleanup_preserves_manual_lock_ownership,manual_unlock_does_not_remove_active_reservation_lock,legacy_ambiguous_lock_record_is_preserved_as_manual,unknown_lock_owners_fail_closed_without_releasing_reservations,client_attempt_artifacts_and_authorization_are_append_only_and_atomic:paymaster_wallet_security_tests/provider_capacity_lookup_distinguishes_peer_conflicts_from_local_damage,provider_recovery_capacity_absence_rejects_but_read_failures_retain_request,automatic_recovery_rejection_allows_following_quote_and_submit,provider_recovery_read_failure_retains_request_and_replay' --report_level=short
+if ($LASTEXITCODE -ne 0) { throw 'Lock ownership or recovery request regressions failed' }
+```
+
+`CWallet` and `ClientModel` have appended private state: all allocation sites and
+fixture definitions must use the new headers. Selected isolated links require
+fresh compilation of their reached allocators and are not clean product builds.
+The lock-owner cases cover manual locks installed during an active reservation,
+both live and reloaded, write/commit failure, expiry, pruning and corrupt records.
+The recovery cases distinguish missing peer capacity from damaged local state;
+automatic progress checks a valid saved quote and consumption of a stale submit.
+A complete fresh signed payment remains a functional-test obligation.
+
 These cases preserve later manual locks through repeated cancellation, pruning
 and actual wallet reload; reject unreadable reservations; and check transaction
 rollback. Readiness cases capture a real locator before invalidating its tip and
@@ -280,6 +296,13 @@ failed-step retry, one-approval restore, capital-task, layout/theme and sender
 authorization/cancellation/lost-reply selections. Setup-boundary rows also
 remove and rebind a wallet while the wizard is open or its preview is pending;
 neither the old dialog nor its callback may authorize work for the new binding.
+`WalletTests/nodeRpcReadsJoinBeforeModelDestruction` holds a real internal RPC
+across model teardown and preserves its structured error contract. Run the
+ordinary DD Overview unavailable/malformed/error selections with it.
+`paymasterFinancesAndBackupWorkflow` round-trips ungrouped CSV amounts including
+zero, fractional units, large amounts, maximum DD and `MAX_MONEY` DGB.
+The setup-boundary selection also delivers read/mutation success/error replies
+after a wallet-generation change, in addition to the privacy rows below.
 The same function's four `privacy-*` rows deliver success/error replies after
 the wizard is destroyed, both before a read completes and after a mutation has
 executed. No stale control access or subsequent setup step is permitted;

@@ -164,5 +164,11 @@
       "ordinary_callers": "CWallet allocation sites and WalletTestingSetup layout change; existing field offsets and ordinary method signatures remain unchanged.",
       "regressions": "Recompile allocators/fixture definitions reached by isolated tests; clean complete wallet/daemon/Qt/test rebuild required; ordinary coin-control and DD lock tests."
     }
+  },
+  "scope_authorization": {
+    "source": "Operator follow-up to the 988bb8e621 review, 2026-11-05: implement plan steps 1-6 and phase-based decomposition.",
+    "scope": "Targeted recovery classification, node-reader lifecycle, coin-lock ownership, backup test vectors, CSV encoding and setup execution state. Boundary control changes are separately reviewable; this record does not assert remote owner review or hosting enforcement.",
+    "hosting_acceptance": "Branch target confirmed; remote ref/protection/rules/PR-base inspection remains pending authenticated access. Public web reads did not return verifiable branch or rule data. No protection setting is assumed or bypassed.",
+    "hosting_target": "https://github.com/Shen/digibyte/tree/integration/paymaster-v9.26.7 (operator confirmed 2026-11-05)"
   }
 }

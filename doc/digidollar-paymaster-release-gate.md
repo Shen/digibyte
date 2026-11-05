@@ -4,6 +4,50 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Recovery, coin-lock ownership and Qt continuation corrections
+
+Working-tree candidate based on `988bb8e621c42b33d1da337fc2aead4c19608026`,
+checked on 2026-11-05. All changed C++ translation units and the reached
+wallet/model allocators were freshly compiled with MSVC 14.43.34808,
+`/Od /MT /WX /std:c++20`; Qt uses static 5.15.10, Windows/Fusion.
+These are selected compiles and isolated Native/Qt/daemon links with reused
+dependency libraries, not clean product builds. Commands, response files,
+source/object/executable hashes, seeds, exit codes and full logs are retained
+under `.ai/implement-988bb8e6/`; `source-freeze.json` binds the final sources.
+
+| Executed check | Bounded result |
+|---|---|
+| Native ownership and recovery selection | Final `native-test-attempt3` exits 0: 18 distinct cases / 1,511 assertions. Covers active manual locks through cleanup/expiry/reload, corrupt and legacy lock records, write/commit failure, capacity absence versus local damage and automatic quote/stale-submit progress. The five-case intermediate repeat overlaps and is not additional coverage. |
+| Qt selections | Final reruns exit 0 for ten functions, including 13 setup data rows, exact CSV amount round-trips, blocked node RPC during model destruction, generic queue shutdown, ordinary wallet send/balance and DD Overview error/polling cases. Init/cleanup are excluded from the function count. Existing stylesheet-property warnings remain; this is not a warning-free/full-suite claim. |
+| Functional backup adoption | The registered descriptor test exits 0, 31.22 seconds: independent null-plan and changed-plan rejection, adoption, old-copy fencing, restart and a new signed payment. |
+| Functional payment/reorg | Descriptor test exits 0, 28.39 seconds: authenticated conflict/recovery rejection, real payment, reorg and reconfirmation without duplicate accounting. Both functional runs use seed `2559293670`, port seed `512`, separate datadirs, freshly linked daemon and reused CLI. |
+| Local controls/source checks | Five boundary fixtures and working-tree dependency/cycle scan pass. Changed Python AST, JSON and whitespace checks pass. Existing forbidden/control paths and checker are unchanged; exact ClientModel/Overview/shared-project scope and stronger CI triggers are separately reviewable in `control-review.patch`. |
+
+The first isolated native link retained one duplicate old object; the first
+daemon link used the wrong working directory. Those harness errors were corrected
+without product changes. Initial Qt setup/ordinary-wallet runs then failed with
+heap corruption: the link map selected old `make_shared<CWallet>` and
+`make_unique<ClientModel>` COMDAT allocators alongside the new constructors.
+Recompiling the remaining explicit Qt allocation consumers and verifying the
+new map removed that mismatch; all ten final Qt selections passed. Initial
+failures and final reruns remain separate in the artifacts.
+
+Final Native/Qt/daemon SHA256 respectively:
+`eecee7ff6e04abcd54375eafefbd02a2138217e8a408bc719ea4943039cd084b`,
+`2e8a16d4a8d6e16ccd78328239767367d7d3ee01fe0712ef8ab43dd3d801ef7e`,
+`198baa40b5068cb72a2e659de80bdadb6e53cd9180bb44f31ca479574c7090b3`.
+CLI SHA256: `ca6fff5d506907f59a30a78a8d7e5ee0b6da44bf8518fb0a6c2d2e6c2c1954ae`.
+
+The operator confirmed hosting branch `Shen/digibyte:integration/paymaster-v9.26.7`.
+Authenticated GitHub access is unavailable and public web/Git reads returned no
+verifiable remote state. The pinned pre-correction policy still rejects control
+changes and the new shared paths; the proposed product-only scope check passes.
+Neither is remote owner approval or installed enforcement. The separate
+policy review/merge and required status/bypass verification remain open.
+No hosting settings were changed. Clean complete builds (including Qt without
+wallet), Linux/C++17, Tidy with the repository plugin, sanitizers, full suites and
+release/operator gates remain required under the existing test runbook.
+
 ## R1–R6 follow-up verification
 
 Working-tree corrections based on `204d67b03be00a77eccb3875fe414a48291555b6`,
