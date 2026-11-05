@@ -189,7 +189,7 @@ if [ "${RUN_TIDY}" = "true" ]; then
 
   set -eo pipefail
   cd "${BASE_BUILD_DIR}/digibyte-$HOST/src/"
-  ( run-clang-tidy-"${TIDY_LLVM_V}" -quiet -load="/tidy-build/libdigibyte-tidy.so" "${MAKEJOBS}" ) | grep -C5 "error"
+  ( run-clang-tidy-"${TIDY_LLVM_V}" -quiet -load="/tidy-build/libdigibyte-tidy.so" "${MAKEJOBS}" ) 2>&1 | tee "${BASE_SCRATCH_DIR}/clang-tidy.log"
   # Filter out files by regex here, because regex may not be
   # accepted in src/.bear-tidy-config
   # Filter out:

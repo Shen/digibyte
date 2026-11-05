@@ -2,6 +2,12 @@
   "task_baseline": "33c680cba1",
   "official_baseline": "d7265fb05e26e1e799876bcd526225e4826c3ba8",
   "shared_changes": {
+    "ci/test/06_script_b.sh": {
+      "purpose": "Preserve the actual Tidy pipeline result when a successful analysis emits no error text, and retain complete diagnostics. The operator explicitly requested review work package F after the e019ec279b review; this bounded CI change does not expand the boundary policy or establish hosting acceptance.",
+      "reused_api": "Existing RUN_TIDY stage, set -eo pipefail, BASE_SCRATCH_DIR and tee logging already used by CI; keep the repository plugin, checks and warning policy unchanged.",
+      "ordinary_callers": "The shared native_tidy profile for all Core sources, including ordinary DGB/DD and Qt code; no product or test-selection change.",
+      "regressions": "Execute the exact old/new pipeline with silent and informational success, stderr-only analyzer failure and failed log output; require success only for successful analysis/logging and preserve nonzero analyzer status. Bash syntax check locally; complete native_tidy/plugin/IWYU profile remains an operator check."
+    },
     "test/functional/test_runner.py": {
       "purpose": "Register the existing independent Paymaster policy, offer, capacity, client-protection, cancellation and lifecycle variants so the documented functional matrix actually runs them.",
       "reused_api": "Existing BASE_SCRIPTS registration and each scenario's existing descriptor-wallet command-line options; no runner scheduling, selection or assertion changes.",
