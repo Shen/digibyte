@@ -60,11 +60,19 @@ unresolved; successful targeted assertions neither confirm nor disprove it.
 Functional Python syntax and whitespace checks passed. `flake8` was unavailable;
 the workspace-only installation attempt failed, so no flake8 pass is claimed.
 
-The local Qt test compile uses `/bigobj`. The proposed normal MSVC project change
-is **not approved or applied**; the normal project rebuild prerequisite remains
-open. Its bounded patch is retained at
-`.ai/paymaster-implementation-98c717f7/r3-msvc-bigobj/project-and-record.patch`;
-the trusted policy was not expanded. Complete Windows/Linux product builds,
+On 2026-11-05 the operator approved and the implementation applied the bounded
+MSVC project change: Release-only `/bigobj` for `paymasterwidgettests.cpp`, with
+its integration need recorded in the shared change record. Two runs of the
+existing Qt project synchronizer preserve the option. MSBuild item evaluation
+confirms that Release retains its inherited flags and Debug remains unchanged.
+The prior isolated compile and Qt executable above already use `/bigobj`; their
+source/object hashes still match. Those compiles/tests were not rerun for the
+project metadata change. Evidence is retained in
+`.ai/paymaster-implementation-98c717f7/r3-msvc-bigobj/applied-verification.json`.
+
+The project path remains outside the pinned boundary policy; scope approval does
+not turn the strict check into a pass. The policy was not expanded and final
+owner boundary acceptance remains open. Complete Windows/Linux product builds,
 Linux/C++17, Tidy with the repository
 plugin, sanitizer runs and the release gates below remain operator work using
 the [runbook](digidollar-paymaster-testing.md). These isolated results do not

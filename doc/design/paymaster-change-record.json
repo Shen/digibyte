@@ -127,6 +127,12 @@
       "reused_api": "Existing WalletTests fixture and QThread lifecycle.",
       "ordinary_callers": "Ordinary wallet test registration; no product behavior.",
       "regressions": "New async tests plus existing DGB balance/send tests; rebuild Qt moc registration."
+    },
+    "build_msvc/test_digibyte-qt/test_digibyte-qt.vcxproj": {
+      "purpose": "Allow the existing Paymaster Qt regression translation unit to exceed the standard COFF section limit in MSVC Release builds while retaining the complete native provider-result matrix.",
+      "reused_api": "Existing ClCompile AdditionalOptions metadata and /bigobj mechanism already used by the native test project and common MSVC Debug configuration; sync_qt_test_project preserves per-file metadata without generator changes.",
+      "ordinary_callers": "Only src/qt/test/paymasterwidgettests.cpp in the Release Qt test target; ordinary DGB/DD sources, application binaries, compiler warnings and other source-file options are unchanged.",
+      "regressions": "Generate the Qt test project twice and retain one source item with the Release-only option; compile the complete modified Paymaster widget test source with existing warning/error flags, link the existing Qt test target and run the provider-result matrix plus focused Paymaster and ordinary WalletTests regressions. The operator approved this bounded project change on 2026-11-05; trusted-policy and final owner boundary acceptance remain open."
     }
   }
 }
