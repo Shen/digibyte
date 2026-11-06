@@ -5,11 +5,15 @@
 /** \file Role-aware PSBT manifest and mutation-rejection tests. */
 
 #include <hash.h>
+#include <key.h>
 #include <paymaster/psbt.h>
 #include <paymaster/protocol.h>
 #include <paymaster/reservation.h>
 #include <paymaster/wire.h>
+#include <script/interpreter.h>
+#include <script/standard.h>
 #include <streams.h>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -142,6 +146,76 @@ BOOST_AUTO_TEST_CASE(enforces_role_order_and_verifies_final_signatures)
     BOOST_CHECK(!ValidateCollaborativePSBT(candidate, trusted,
                                            CollaborativeSignatureStage::FULLY_SIGNED, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGNATURE_INVALID");
+}
+
+BOOST_FIXTURE_TEST_CASE(final_witness_requires_default_sighash_independently_of_psbt_metadata, BasicTestingSetup)
+{
+    CKey user_key, provider_key;
+    user_key.MakeNewKey(true);
+    provider_key.MakeNewKey(true);
+    TaprootBuilder user_taproot, provider_taproot;
+    user_taproot.Finalize(XOnlyPubKey{user_key.GetPubKey()});
+    provider_taproot.Finalize(XOnlyPubKey{provider_key.GetPubKey()});
+    const auto previous = [](CAmount value, const CScript& script, uint32_t discriminator) {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{uint256::ONE, discriminator});
+        tx.vout.emplace_back(value, script);
+        return MakeTransactionRef(tx);
+    };
+    const auto user_prev = previous(1000, GetScriptForDestination(user_taproot.GetOutput()), 1);
+    const auto provider_prev = previous(2000, GetScriptForDestination(provider_taproot.GetOutput()), 2);
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{user_prev->GetHash(), 0});
+    tx.vin.emplace_back(COutPoint{provider_prev->GetHash(), 0});
+    tx.vout.emplace_back(1500, user_prev->vout.front().scriptPubKey);
+    tx.vout.emplace_back(1000, provider_prev->vout.front().scriptPubKey);
+    const uint256 empty_merkle_root;
+    std::string error;
+    for (const auto& roles : {std::pair{InputRole::USER_DD, InputRole::PROVIDER_DGB},
+                              std::pair{InputRole::USER_DGB, InputRole::PROVIDER_CARRIER}}) {
+        CollaborativePSBTTemplate trusted;
+        BOOST_REQUIRE(CreateCollaborativePSBTTemplate(tx,
+            {{tx.vin[0].prevout, user_prev, roles.first},
+             {tx.vin[1].prevout, provider_prev, roles.second}}, trusted, error));
+        const auto txdata = PrecomputePSBTData(trusted.psbt);
+        for (unsigned int changed_input : {0U, 1U}) {
+            for (const int hash_type : {int(SIGHASH_DEFAULT), int(SIGHASH_ALL), int(SIGHASH_NONE), int(SIGHASH_SINGLE),
+                                       SIGHASH_ALL | SIGHASH_ANYONECANPAY, SIGHASH_NONE | SIGHASH_ANYONECANPAY,
+                                       SIGHASH_SINGLE | SIGHASH_ANYONECANPAY}) {
+                CMutableTransaction final{tx};
+                for (unsigned int index = 0; index < 2; ++index) {
+                    const int mode = index == changed_input ? hash_type : int(SIGHASH_DEFAULT);
+                    ScriptExecutionData execution;
+                    execution.m_annex_init = true;
+                    execution.m_annex_present = false;
+                    uint256 sighash;
+                    BOOST_REQUIRE(SignatureHashSchnorr(sighash, execution, CTransaction{tx}, index,
+                        uint8_t(mode), SigVersion::TAPROOT, txdata, MissingDataBehavior::FAIL));
+                    std::vector<unsigned char> signature(64);
+                    const CKey& key = index == 0 ? user_key : provider_key;
+                    BOOST_REQUIRE(key.SignSchnorr(sighash, signature, &empty_merkle_root, uint256{}));
+                    if (mode != SIGHASH_DEFAULT) signature.push_back(uint8_t(mode));
+                    final.vin[index].scriptWitness.stack = {signature};
+                }
+                const bool expected = hash_type == SIGHASH_DEFAULT;
+                const CTransaction transaction{final};
+                BOOST_CHECK_EQUAL(ValidateFinalCollaborativeTransaction(final, transaction.GetHash(),
+                    transaction.GetWitnessHash(), trusted, error), expected);
+                if (!expected) BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGHASH");
+                for (const bool explicit_sighash : {true, false}) {
+                    auto candidate = trusted.psbt;
+                    for (size_t index = 0; index < candidate.inputs.size(); ++index) {
+                        candidate.inputs[index].final_script_witness = final.vin[index].scriptWitness;
+                        if (!explicit_sighash) candidate.inputs[index].sighash_type.reset();
+                        BOOST_REQUIRE(PSBTInputSignedAndVerified(candidate, index, &txdata));
+                    }
+                    BOOST_CHECK_EQUAL(ValidateCollaborativePSBT(candidate, trusted,
+                        CollaborativeSignatureStage::FULLY_SIGNED, error), expected);
+                    if (!expected) BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGHASH");
+                }
+            }
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(template_commitment_binds_quote_psbt_prevouts_and_roles_without_recursion)

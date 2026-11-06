@@ -49,6 +49,10 @@ total. Sweep uses spendable, unreserved inputs and the same authorization rules.
 6. Both parties reconcile local chain/mempool observations. Lost replies use
    durable replay/status, not another payment.
 
+The shared PSBT/final validator checks the actual canonical 64-byte Taproot
+key-path witness for `SIGHASH_DEFAULT`, even when the PSBT retains an explicit
+default-sighash field. Metadata cannot override a final signature's hash mode.
+
 Protocol version is 6; unchanged legacy Direct layouts accept version 5 only
 where explicitly supported. Signed offers/negotiation use the current format.
 Wallet record versions are independent of wire versions. Compatibility does

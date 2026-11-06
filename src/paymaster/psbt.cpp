@@ -999,10 +999,13 @@ bool ValidateCollaborativePSBT(
         // Finalized PSBT inputs do not serialize PSBT_IN_SIGHASH. For BIP86
         // key-path spends, a canonical 64-byte Schnorr signature itself
         // commits to SIGHASH_DEFAULT; a 65th byte would encode another mode.
-        const bool implicit_final_default = !input.sighash_type &&
-                                            HasFinalTaprootKeyPathDefaultSighash(input, expected_prevout);
+        // Explicit PSBT metadata cannot override the hash mode encoded in a
+        // final witness, including when reconstructing a PSBT from raw bytes.
+        const bool final_default = HasFinalTaprootKeyPathDefaultSighash(input, expected_prevout);
+        const bool implicit_final_default = !input.sighash_type && final_default;
         if ((!input.sighash_type && !implicit_final_default) ||
-            (input.sighash_type && *input.sighash_type != SIGHASH_DEFAULT)) {
+            (input.sighash_type && *input.sighash_type != SIGHASH_DEFAULT) ||
+            (!input.final_script_witness.IsNull() && !final_default)) {
             error = "PAYMASTER_PSBT_SIGHASH";
             return false;
         }
