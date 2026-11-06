@@ -850,6 +850,13 @@ Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
 `src/paymaster/recovery.cpp` after reconstructing trusted local state; the full
 validator retains chainstate checks. Permanent peer rejection and retained local
 failures are described under [execution](doc/digidollar-paymaster-implementation.md#execution-and-presentation).
+`Manager::LeaseProviderSubmit` dispatches one normal or recovery submit with
+per-provider type alternation; both RPC and automatic processing use it after
+acquiring the provider work guard.
+`Manager::LeaseProviderRequest` uses the same bounded selector for eligible
+capacity/recovery/quote requests, with independent provider/type fairness cursors.
+`CaptureProviderFinanceStatus` and `CaptureProviderAutomationStatus` produce
+typed wallet observations; the RPC result adapter only encodes their snapshots.
 `ResolvePaymasterActiveTip` resolves the first captured locator hash to an active
 block and height. Provider readiness compares a fresh tip hash after wallet/index
 reads, avoiding height lookups that can become invalid during a reorganization.

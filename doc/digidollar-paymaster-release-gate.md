@@ -4,6 +4,95 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Request classification, dispatch and native observations
+
+Working-tree changes based on `095e41ca147929dd39972047e20e2dbd3211ad36`,
+checked on 2026-11-06. Expired/divergent normal submits are consumed only after
+validating local authority; exact retained finals remain recoverable after expiry.
+Request types now rotate with independent provider/type/group/session cursors.
+Finance and automation use native typed snapshots; Qt and CLI share policy defaults.
+The implementation guide owns behavior, and the test runbook owns selectors.
+
+Eighteen selected native/Qt translation units, including affected tests and
+Manager allocation/destruction consumers, were freshly compiled with MSVC
+14.43.34808 (compiler 19.43.34810), `/W3 /WX /Od /MT /std:c++20` and the existing
+project flags. Qt uses static 5.15.10. Native, Qt and daemon executables are
+isolated links with reused remaining objects/libraries, not clean product builds.
+Commands, source/header/object/binary hashes and full logs are retained under
+`.ai/implement-u1-u3-095e-20261106/`; `source-freeze.json` identifies the final
+sources and active link inputs. Earlier setup/link attempts remain separate.
+Queue traffic uses rejected or replayed markers: it proves dispatch and retained
+authority, not fresh successful payments under hostile load. The narrow
+deadline-crossing exception/reload path was additionally reviewed statically.
+
+| Executed check | Bounded result |
+|---|---|
+| Request/submit and wire selection | Exit 0: 72 cases / 3,098 assertions. Includes sustained admitted competing requests in both directions, capacity deferral, provider/type/group/session fairness, three submit expiry variants, valid divergent signatures, protected private/final provider evidence and local-corruption retention. Rejected traffic leaves DB/checkpoint unchanged. |
+| Native observations and encoding | Exit 0: 14 cases / 267 assertions. Complete application suite plus selected activity, automation, finance and error cases; one observation time, known zero/false, optional valuation, capital categories and existing RPC failure semantics. |
+| Related authority and checkpoints | Exit 0: nine cases / 890 assertions. Exact durable final/budget recovery, pre-signature firewall, retained read failure, stale-work handling and both checkpoint concurrency cases. These three native selections are disjoint: 95 cases / 4,255 assertions. |
+| Qt | Five selections exit 0: configuration workflow, two guided-default rows, save/refresh and finance/backup. Init/cleanup are not feature cases; no full-Qt pass is claimed. |
+| Descriptor provider functional | Exit 0, 85.234 seconds; random seed 1015350342, port seed 2461. Fresh isolated daemon and reused CLI; real paid/public transfers, finance/backup, exact gross/sweep, lost replies, alternative recovery, encrypted restart/unload and log privacy. Separate Regtest directories only. |
+| Local controls | Working-tree dependency/cycle check, six architecture fixtures and whitespace checks pass. Existing policy, workflow and operator changes were preserved. |
+
+Full supported product builds, Linux/C++17, Tidy17 with the repository plugin,
+sanitizers, full functional/Qt/compatibility matrices and operational release
+gates remain operator/CI work. These isolated results do not certify them.
+
+## Fair dispatch of provider submissions
+
+Working-tree correction based on `095e41ca147929dd39972047e20e2dbd3211ad36`,
+checked on 2026-11-05. Submit processing alternates normal and recovery work
+per provider, with one message per eligible call. Independent type, netgroup and
+session cursors advance on lease acquisition; another type's acknowledgement
+cannot reset their rotation. Local uncertainty still retains the message and
+financial authority. Canonical behavior and repeatable commands
+are in the implementation guide and test runbook.
+
+The manager, processing, wire/security/identity test units and the reached
+`Manager` allocation/destruction consumers (`init.cpp`, `node/context.cpp`)
+were freshly compiled with MSVC 14.43.34808, `/Od /MT /WX /std:c++20`.
+The private manager layout changed. This is an isolated link with reused
+product/harness objects, not a clean build; old test suites were excluded.
+Commands, source/object hashes, seeds and full logs are retained under
+`.ai/fix-ab-095e41ca-20261105/build-a-final/`; earlier diagnostic logs remain in
+the adjacent `build-a/` directory. Final test binary SHA256:
+`10cfa3a3b22c825d79e1d2eab0d101dac2f46f2f499a790e1a6b2fa98532e749`.
+
+| Executed check | Bounded result |
+|---|---|
+| New regressions | Exit 0: six cases / 428 assertions. Twelve eligible service cycles per traffic direction, opposite-type progress within two calls, unchanged database/checkpoint, retained same-session messages, provider isolation, fallback and lease exception/prune behavior. Interleaved acknowledgements and retained messages preserve group/session rotation in both classes. Stale markers prove dispatch/classification, not completed payments under flood. |
+| Existing queue and authority coverage | Exit 0: 71 cases / 2,649 assertions, including the complete wire suite and selected readiness, normal-submit and recovery authority/replay tests. Four new queue cases overlap; the two successful selections cover 73 distinct cases / 2,933 assertions. |
+| Negative control | The same new traffic tests linked with the pre-fix processing object fail on the normal-submit starvation assertion (Exit 201); the symmetric recovery case passes. |
+| Independent-cursor negative control | An isolated manager variant using the shared acknowledgement cursors fails eight group/session-order assertions (Exit 201); the final independent dispatch cursors pass all four ACK/retained and normal/recovery contexts. |
+| Local controls | Working-tree dependency/cycle checks, five boundary fixtures and whitespace checks pass. No policy or workflow was changed. |
+
+Two initial test-fixture failures are retained: repeated markers overloaded a
+netgroup queue, and sharing one fixture across both traffic directions crossed
+its saved quote's expiry. Final tests use one marker and one competing arrival
+per cycle in independent fixtures. No queue limit, expiry rule or assertion of
+unchanged authority was relaxed. Clean supported builds of all consumers,
+Linux/C++17, repository Tidy17/plugin, sanitizers and full functional/Qt matrices
+remain operator/CI checks; earlier binaries do not certify this layout change.
+
+### Local architecture checks
+
+On 2026-11-06 the operator removed the Paymaster-specific hosting and separate
+owner-approval requirements. The dedicated GitHub boundary workflow and the
+checker veto on control-file changes are removed. Dependency, cycle, scope and
+shared-Core record checks remain, as does the existing Paymaster Security CI.
+Earlier hosting proposals and observations remain historical artifacts under
+`.ai/fix-b-target-20261106/`; they were never installed. Historical boundary
+rejections below describe the checks at those revisions, not current hosting
+requirements. No remote settings, refs or PRs were changed.
+
+Verification on 2026-11-06: all six architecture fixtures and the working-tree
+dependency/cycle check pass. The new fixture permits check-file changes while
+retaining consensus-scope and shared-Core record failures; candidate policy
+replacement and cycle-helper execution protections still pass. JSON parsing
+and whitespace checks pass. Flake8 is unavailable locally. The five A source
+and test files are byte-identical to the tested snapshot; no native rebuild
+or runtime test was needed for this tooling/documentation change.
+
 ## Request identity, carrier arithmetic and finance paging
 
 Source candidate `bfad9a900a83a50491f278e8b55e65186bc8983a`,
@@ -40,8 +129,8 @@ runs and a debugger-only reader pass are retained and are not passing evidence.
 
 The shared CI-line correction was explicitly requested as review work package F;
 its ordinary callers and regressions are recorded in the change record. Boundary
-policy and hosting settings are unchanged. Final trusted owner acceptance,
-complete clean builds, Linux/C++17, supported Tidy17/plugin, sanitizers and full
+policy and hosting settings were unchanged at that checkpoint. Complete clean
+builds, Linux/C++17, supported Tidy17/plugin, sanitizers and full
 matrices remain operator/CI work. The short-path checkpoint runs do not certify
 arbitrary Windows path lengths or a complete transitive build provenance chain.
 
@@ -70,11 +159,8 @@ the initial daemon link duplicated the old client-view object. Both were fixed
 before the successful runs, with their failed logs retained. Neither failure
 is counted as a product runtime regression.
 
-Package D remains an owner/hosting acceptance gate. The control-only proposal
-and [required acceptance evidence](design/paymaster-integration-boundaries.md#owner-acceptance-evidence)
-are separate from the product fixes. Authenticated GitHub access and effective
-remote rules/PR SHAs have not been verified; local fixture commits are not
-owner approval. No hosting settings were changed. Clean supported builds,
+The former package D hosting requirement was removed on 2026-11-06. Its local
+proposal was not installed, and no hosting settings were changed. Clean supported builds,
 Linux/C++17, repository Tidy, sanitizers (including UBSan for the new amount
 vectors), Qt and complete matrices remain operator/CI checks in the
 [runbook](digidollar-paymaster-testing.md).
@@ -113,12 +199,8 @@ Final Native/Qt/daemon SHA256 respectively:
 `198baa40b5068cb72a2e659de80bdadb6e53cd9180bb44f31ca479574c7090b3`.
 CLI SHA256: `ca6fff5d506907f59a30a78a8d7e5ee0b6da44bf8518fb0a6c2d2e6c2c1954ae`.
 
-The operator confirmed hosting branch `Shen/digibyte:integration/paymaster-v9.26.7`.
-Authenticated GitHub access is unavailable and public web/Git reads returned no
-verifiable remote state. The pinned pre-correction policy still rejects control
-changes and the new shared paths; the proposed product-only scope check passes.
-Neither is remote owner approval or installed enforcement. The separate
-policy review/merge and required status/bypass verification remain open.
+At this checkpoint the pinned pre-correction policy rejected control changes
+and the new shared paths; the proposed product-only scope check passed.
 No hosting settings were changed. Clean complete builds (including Qt without
 wallet), Linux/C++17, Tidy with the repository plugin, sanitizers, full suites and
 release/operator gates remain required under the existing test runbook.
@@ -220,24 +302,17 @@ source/object hashes still match. Those compiles/tests were not rerun for the
 project metadata change. Evidence is retained in
 `.ai/paymaster-implementation-98c717f7/r3-msvc-bigobj/applied-verification.json`.
 
-The project path remains outside the pinned boundary policy; scope approval does
-not turn the strict check into a pass. The policy was not expanded and final
-owner boundary acceptance remains open. Complete Windows/Linux product builds,
+The project path was outside that checkpoint's pinned boundary policy; scope
+approval did not turn its strict check into a pass. The policy was not expanded.
+Complete Windows/Linux product builds,
 Linux/C++17, Tidy with the repository
 plugin, sanitizer runs and the release gates below remain operator work using
 the [runbook](digidollar-paymaster-testing.md). These isolated results do not
 establish those checks.
 
-The operator-selected hosting target is `Shen/digibyte`, branch
-`integration/paymaster-v9.26.7`. The boundary checker, policy, fixture tests and
-workflow exist locally at `98c717f7`; their extracted hashes and comparison
-runner are retained under `.ai/ap5/`. Remote owner approval, mandatory status
-checks, bypass protection and the actual PR base have **not been verified**.
-Local controls and local check results are not evidence of their installation or
-enforcement on that hosting target.
-Final boundary/integration acceptance therefore remains open, as requested by
-the operator. If a PR exists, its verified base SHA must replace the locally
-selected pre-correction base for the final hosting check. The full-fork MSVC
+The checker, policy, fixture tests and former workflow at `98c717f7`, their
+extracted hashes and comparison runner are retained under `.ai/ap5/` as
+historical local evidence. The full-fork MSVC
 `int128` adaptation remains subject to its separate platform/equivalence proof.
 
 ## Required candidate gates

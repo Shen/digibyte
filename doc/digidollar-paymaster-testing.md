@@ -287,7 +287,51 @@ The lock-owner cases cover manual locks installed during an active reservation,
 both live and reloaded, write/commit failure, expiry, pruning and corrupt records.
 The recovery cases distinguish missing peer capacity from damaged local state;
 automatic progress checks a valid saved quote and consumption of a stale submit.
+
+After changes to submit scheduling, rebuild all consumers of `paymaster/manager.h`
+and run the bounded dispatch regressions:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wire_tests/manager_provider_submit_*:paymaster_wallet_security_tests/automatic_submit_progress_under_continuous_recovery_traffic,automatic_recovery_progress_under_continuous_submit_traffic,normal_submit_classifies_peer_payload_and_local_authority,provider_recovery_pre_signature_firewall_reloads_pool_and_budget' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Submit scheduling or authority regressions failed' }
+```
+
+These cover both directions of continuous admitted competing traffic, progress
+within two eligible service cycles, retained same-session messages, independent
+providers, empty-type fallback and lease cleanup after exceptions/pruning.
+Interleaved acknowledgements and retained messages also exercise independent
+netgroup and session rotation for each submit type.
+The traffic markers are stale submissions: their rejection proves dispatch and
+unchanged database/checkpoint state, not a successful payment. The existing
+classification/firewall cases retain local read failures and replay exact saved
+recovery results; complete recovery payments remain in the functional matrix.
 A complete fresh signed payment remains a functional-test obligation.
+
+For request rotation and permanent normal-submit rejection, add:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wire_tests/manager_provider_request_*:paymaster_wallet_security_tests/normal_submit_classifies_peer_payload_and_local_authority,automatic_quote_progress_under_continuous_recovery_requests,automatic_recovery_request_progress_under_continuous_quotes,deferred_capacity_preserves_request_and_yields_next_turn' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Request dispatch or submit classification regressions failed' }
+```
+
+Request tests keep the one-message dispatch budget and the existing admission
+limits. They cover continuous competing types, retained local failures, provider
+isolation, independent group/session rotation and a deferred capacity request
+yielding the next turn. Normal-submit cases distinguish expired or divergent
+peer work from damaged local user signatures, results and final-commit authority.
+Rejected traffic markers must leave the wallet database and checkpoint unchanged.
+
+For native finance/automation snapshots and their unchanged JSON contract, run:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_application_tests/native_finance_and_automation_json_preserve_complete_observations:paymaster_wallet_identity_tests/native_finance_status_captures_capital_time_and_typed_failures,provider_activity_ignores_completed_and_expired_authority,provider_automation_capacity_pause_preserves_approval' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Native status snapshot or JSON regressions failed' }
+```
+
+These check one observation time across expiry boundaries, capital categories,
+backup failures, optional valuation, known zero/false values and event paging.
+For shared setup defaults, retain the Qt configuration workflows and guided
+setup reset cases; funding-model reset and numeric-policy reset remain distinct.
 
 These cases preserve later manual locks through repeated cancellation, pruning
 and actual wallet reload; reject unreadable reservations; and check transaction
@@ -370,9 +414,9 @@ python test/lint/lint-paymaster-boundaries.py
 if ($LASTEXITCODE -ne 0) { throw 'Dependency/cycle checks failed' }
 ```
 
-Local scans do not establish trusted-base change approval; see the
-[boundary contract](design/paymaster-integration-boundaries.md#enforcement-and-trusted-policy-bootstrap)
-for committed candidates. Required Core-change reasons stay in the
+For committed candidates, the
+[architecture checks](design/paymaster-integration-boundaries.md#architecture-checks)
+also compare changed paths against a selected base. Required Core-change reasons stay in the
 [change record](design/paymaster-change-record.json).
 
 For review, compare new work against the task base and the complete fork against

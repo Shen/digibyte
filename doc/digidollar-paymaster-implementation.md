@@ -180,6 +180,9 @@ Provider processing distinguishes permanent peer errors from local uncertainty.
 An unknown recovery ID, mismatched binding, invalid submitted PSBT/signature or
 divergent replay is acknowledged only for that message: the local result is
 `processed=true`, `rejected=true`, `queued=false`, with a stable `rejection_reason`.
+Normal submits also use that local rejection for expired unsigned quotes and
+retry windows after validating the saved authority. A retained provider signature
+or final commit still follows its exact replay firewall after expiry.
 No new signed rejection is sent and no budget, reservation, pool, final bytes or
 checkpoint is released or reset. Read/version errors, corrupt persisted records
 or templates, missing indexed sessions, readiness/unlock/checkpoint failures and
@@ -190,6 +193,24 @@ manifest validation. A PSBT changed independently of its signed quote reports
 `PAYMASTER_PROVIDER_AUTHORIZATION_ARTIFACT_CONFLICT`; coherently bound artifacts
 can instead reach the sighash or manifest checks. All are local failures and
 retain the inbound message and durable authority.
+
+Each submit-processing call dispatches at most one message. The manager
+alternates normal and recovery submits per provider when both types are queued,
+falling back immediately when one type is empty. Acquiring the dispatch lease
+advances this ephemeral type cursor even if processing later retains the
+message; no acknowledgement or financial transition is implied. The existing
+netgroup/session selector uses independent dispatch cursors within each type,
+so another type's acknowledgement cannot reset its rotation. With both types
+pending, each gets a turn within two eligible calls; readiness and local
+authorization checks still decide whether that turn can complete.
+
+Request processing shares that bounded dispatcher, with separate provider-local
+cursors for capacity, recovery and quote requests. Each call leases at most one
+eligible message; three continuously queued eligible types each receive a turn
+within three calls. Fresh capacity is excluded while readiness permits only
+continuations. A throttled capacity request remains queued and returns its
+deferral; the next call can advance a different type. Dispatch and acknowledgement
+never change reservations or authorize a payment.
 
 `GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
 stored recovery shape is validated before interpreting nested bindings.
@@ -215,6 +236,10 @@ invalidate late replies; shutdown joins started workers before destroying their
 dependencies. Provider components own their panel state and workflows; the send
 controller owns session transitions and emits effects for the widget to execute.
 Both reuse shared formatting and backend financial rules.
+Finance and automation observations are captured by typed wallet services before
+RPC serialization, using one observation time. The finance capture owns wallet
+synchronization, reconciliation and the locked accounting snapshot; its result
+distinguishes a report from a failure without using JSON as an intermediate model.
 `ClientModel` owns node-status reads through the same generic queue, also in
 wallet-disabled Qt builds. Its destructor drains started reads before Core can
 destroy indexes, oracle state or chainstate. DD Overview callbacks retain their
@@ -226,6 +251,9 @@ captured continuation chains. Every late reply checks the owner, wizard,
 wallet generation and privacy state before accessing controls or starting work;
 retry resumes the same failed step. Finance CSV uses ungrouped exact decimal
 amounts; display-only thousands grouping never enters numeric export columns.
+Qt policy defaults and resets read the same `SetupDefaultPolicy` proposal as the
+CLI. A numeric policy reset preserves the selected funding model; restoring the
+funding model is a separate action.
 
 Pool-preparation request bindings now hash typed recovery mappings with the local
 `Pool Request v2` tag, independent of JSON formatting. This is a local preview/replay
