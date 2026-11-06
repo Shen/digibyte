@@ -1371,6 +1371,73 @@ BOOST_AUTO_TEST_CASE(session_lookup_distinguishes_absence_from_read_failure)
     BOOST_CHECK(database.m_records == orphaned);
 }
 
+BOOST_AUTO_TEST_CASE(result_processing_distinguishes_session_absence_damage_and_ineligibility)
+{
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-44665544f006";
+    Manager manager{true};
+    WalletContext context;
+    context.paymaster = &manager;
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto expect_error = [&](const char* expected) {
+        const auto before = database.m_records;
+        BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::InvokePaymasterService([&]() -> UniValue {
+            paymaster_app::ProcessPaymasterResult(context, m_wallet, request_id);
+            return {};
+        }), UniValue, [&](const UniValue& failure) {
+            const auto& data = failure.find_value("data");
+            return failure.find_value("code").getInt<int>() == RPC_WALLET_ERROR &&
+                   data.find_value("paymaster_code").get_str() == expected &&
+                   data.find_value("disposition").get_str() == "reconcile" &&
+                   data.find_value("session_absent").isNull();
+        });
+        BOOST_CHECK(database.m_records == before);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+    };
+    expect_error("PAYMASTER_SESSION_NOT_FOUND");
+    PaymentSession session;
+    std::string error;
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f006"), FeeMode::PAYMASTER,
+                                           100, session, error) == CreatePaymasterSessionResult::CREATED);
+    expect_error("PAYMASTER_SESSION_RESULT_INELIGIBLE");
+    database.m_pass = false;
+    expect_error("PAYMASTER_SESSION_READ_FAILED");
+    database.m_pass = true;
+
+    const auto record_key = [&](const std::string& type) {
+        DataStream stream;
+        stream << std::make_pair(type, std::string{request_id});
+        return SerializeData{stream.begin(), stream.end()};
+    };
+    const auto session_key = record_key(DBKeys::PAYMASTER_SESSION);
+    const auto tombstone_key = record_key(DBKeys::PAYMASTER_TOMBSTONE);
+    const auto saved_session = database.m_records.at(session_key);
+    IdempotencyTombstone tombstone;
+    tombstone.request_id = request_id;
+    tombstone.session_id = session.session_id;
+    tombstone.canonical_request_hash = session.canonical_request_hash;
+    tombstone.final_state = SessionState::FAILED;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterTombstone(tombstone));
+    }
+    const auto saved_tombstone = database.m_records.at(tombstone_key);
+    for (const bool use_tombstone : {false, true}) {
+        if (use_tombstone) database.m_records.erase(session_key);
+        const auto& key = use_tombstone ? tombstone_key : session_key;
+        const uint16_t version = use_tombstone ? IdempotencyTombstone::CURRENT_VERSION : PaymentSession::CURRENT_VERSION;
+        for (const bool future : {false, true}) {
+            CDataStream value{SER_DISK, CLIENT_VERSION};
+            value << static_cast<uint16_t>(version + (future ? 1 : 0));
+            database.m_records[key] = SerializeData{value.begin(), value.end()};
+            expect_error(future ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_SESSION_READ_FAILED");
+        }
+        database.m_records[key] = use_tombstone ? saved_tombstone : saved_session;
+    }
+    // Retained completion data is present but has no live provider attempt.
+    expect_error("PAYMASTER_SESSION_RESULT_INELIGIBLE");
+}
+
 BOOST_AUTO_TEST_CASE(auto_dispatch_rejects_unreadable_session_before_funding_or_signing)
 {
     constexpr auto request_id = "550e8400-e29b-41d4-a716-44665544f003";

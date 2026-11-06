@@ -2403,8 +2403,11 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
     }
     PaymasterStore store{*wallet};
     PaymentSession session;
-    if (!store.GetSessionByRequestId(request_id, session) || session.attempt_ids.empty()) {
+    if (!FindClientSession(request_id, store, session)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
+    }
+    if (session.provider_side || session.attempt_ids.empty()) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_RESULT_INELIGIBLE");
     }
     ProviderAttempt attempt;
     if (!store.GetAttempt(session.attempt_ids.back(), attempt) ||
