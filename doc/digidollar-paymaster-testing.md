@@ -445,6 +445,7 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Exact authorization and same-ID retry | Wallet service/store/security suites, including `client_saved_quote_authentication_precedes_new_authority`: corrupt persisted quote signatures cannot gain acceptance or pass the signing gate; exact retries and historical final validation remain valid. Application tests preserve historical Restricted request bindings without renewing authority. `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion; accepted high-/low-level retries reject changed fee caps, attempt limits and preferred offers while unchanged retries survive stricter current policy. |
 | Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote classification fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` consumes a conflicting quote request and rejects an unknown recovery over authenticated v2 channels, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment without duplicate finance events. |
 | Persisted read errors and action gating | Store `client_view_*`, `session_payment_snapshot_*`, status-getter and result-read cases cover corrupt/future records, unreadable/latest-attempt terms, valid unquoted fallback, dangling recovery indexes, full result binding/signature checks, structured get/list/resolve errors, retained result messages and unchanged protected state. Security recovery-read cases reach the application operations through their normal readiness gates. |
+| Provider manual locks | `wallet_paymaster_locks.py` checks DGB and carrier readiness, transient/persistent locks, reload and locks added after capacity reservation; DGB unlock permits the same signed client payment. The ordinary DD-token RPC unlock prohibition remains enforced; transient carrier locks clear on reload and persistent ones keep blocking new signatures. Identity capacity lifecycle covers both reservation APIs; wallet PSBT role signing preserves the unsigned provider artifact and its independent reservation lock. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
 | Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
@@ -486,10 +487,10 @@ is intentional. Do not run every test under an arbitrary wallet flag. The
 failover scenario uses four daemons/two providers; reorg scenarios must verify
 actual transaction confirmation and reversal, not only mocked status.
 
-The current-current selection includes 26 variants. In addition to the default
+The current-current selection includes 27 variants. In addition to the default
 scenarios, it registers the RPC legacy-policy, offer-model, reserved-capacity and
 client-protection cases; provider cancel-burst; and lifecycle no-client-change
-and announcement-refresh cases. These are independent paths, not substitutes
+and announcement-refresh cases, plus provider manual locks. These are independent paths, not substitutes
 for the default scenarios. Historical bridge variants remain in the separate
 compatibility selection below.
 

@@ -380,6 +380,18 @@ BOOST_AUTO_TEST_CASE(admission_and_operational_pool_readiness_is_disjoint)
     BOOST_CHECK(readiness.ready);
     BOOST_CHECK_EQUAL(readiness.complete_operational_slots, 1U);
 
+    for (const auto& entry : {entries[6], entries[7]}) {
+        const auto locked = EvaluateProviderPoolReadiness(entries, policy, 100, 1, {entry.outpoint});
+        BOOST_CHECK(!locked.ready);
+        BOOST_CHECK_EQUAL(locked.complete_operational_slots, 0U);
+    }
+    auto damaged_locked = entries;
+    damaged_locked[6].state = static_cast<PoolEntryState>(255);
+    const auto damaged = EvaluateProviderPoolReadiness(damaged_locked, policy, 100, 1, {entries[6].outpoint});
+    BOOST_CHECK(!damaged.ready);
+    BOOST_REQUIRE_EQUAL(damaged.errors.size(), 1U);
+    BOOST_CHECK_EQUAL(damaged.errors.front(), "PAYMASTER_INVALID_POOL_ENTRY");
+
     auto duplicate = entries;
     duplicate.back().outpoint = duplicate.front().outpoint;
     BOOST_CHECK(!ValidateProviderPoolEntries(duplicate, error));

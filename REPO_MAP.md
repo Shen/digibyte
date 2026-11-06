@@ -1937,6 +1937,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 ### src/wallet/wallet.cpp / .h
 - `CWallet` (class) → the main wallet container: keys, transactions, address book, encryption state, signal connections
 - Public methods: `LoadWallet`, `EncryptWallet`, `Unlock`, `AddNewKey`, `CommitTransaction`, `MarkDirty`, `BlockUntilSyncedToCurrentChain`
+- `IsOrdinaryLockedCoin()` reads ordinary/manual/DD ownership independently of Paymaster reservation locks; `IsLockedCoin()` retains the union used by ordinary selection.
 - ⚠️ Holds `m_dd_wallet` (DigiDollar wallet pointer) and DD UTXO maps; full DD-specific surface is in `REPO_MAP_DIGIDOLLAR.md`.
 
 ### src/wallet/walletdb.cpp / .h

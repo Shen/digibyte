@@ -897,6 +897,7 @@ and loaded-wallet lifetime handling.
 - Produces user input-control proofs without exposing private key material.
 
 ### src/wallet/paymasterprovider.{h,cpp}
+- `GetPaymasterProviderPoolReadiness` applies shared domain readiness with ordinary/manual wallet locks excluded; new slot reservation and the provider signing boundary recheck that lock ownership.
 - `CancelPaymasterMaintenance` provides wallet-bound, reviewed cancellation of
   selected uncreated DGB/DD setup/refill operations. It rejects signing evidence
   in the wallet and journal, atomically disables refill and releases only the

@@ -3098,6 +3098,27 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     reserved_request.expires_at = 172;
     PaymasterCapacityProof reserved_proof;
     std::vector<ProviderPoolEntry> reserved;
+    for (const COutPoint& outpoint : {dgb.outpoint, carrier.outpoint}) {
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_REQUIRE(m_wallet.LockCoin(outpoint));
+        }
+        const auto before = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, {carrier, dgb}, policy, 100, 1).complete_operational_slots, 0U);
+        BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, reserved_request.client_nonce,
+            true, 100, 1, 112, reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(m_wallet, identity, reserved_request,
+            genesis, reference_block, 100, 1, canonical_netgroup, 112, reserved_proof, reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(reserved.empty());
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_REQUIRE(m_wallet.UnlockCoin(outpoint));
+        }
+    }
+    BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, {carrier, dgb}, policy, 100, 1).complete_operational_slots, 1U);
     BOOST_REQUIRE_MESSAGE(ReserveAndBuildPaymasterCapacityProof(
                               m_wallet, identity, reserved_request, genesis,
                               reference_block, 100, 1, canonical_netgroup, 112,

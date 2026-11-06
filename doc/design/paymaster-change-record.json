@@ -9,10 +9,10 @@
       "regressions": "Execute the exact old/new pipeline with silent and informational success, stderr-only analyzer failure and failed log output; require success only for successful analysis/logging and preserve nonzero analyzer status. Bash syntax check locally; complete native_tidy/plugin/IWYU profile remains an operator check."
     },
     "test/functional/test_runner.py": {
-      "purpose": "Register the existing independent Paymaster policy, offer, capacity, client-protection, cancellation and lifecycle variants so the documented functional matrix actually runs them.",
+      "purpose": "Register the independent Paymaster policy, offer, capacity, client-protection, cancellation and lifecycle variants, plus AP1's provider manual-lock regression for both operational assets, reload and first signing.",
       "reused_api": "Existing BASE_SCRIPTS registration and each scenario's existing descriptor-wallet command-line options; no runner scheduling, selection or assertion changes.",
-      "ordinary_callers": "Ordinary DGB/DD functional registrations and runner behavior remain unchanged; the Paymaster selection expands from 19 to 26 current-current variants.",
-      "regressions": "Resolve the documented filter and exclusions to verify all seven added variants; run focused variants with isolated regtest data and rebuilt daemon/CLI where available. Complete functional and historical compatibility matrices remain operator checks."
+      "ordinary_callers": "Ordinary DGB/DD functional registrations and runner behavior remain unchanged; the Paymaster selection contains 27 current-current variants, including wallet_paymaster_locks.py.",
+      "regressions": "Resolve the documented filter and exclusions; run wallet_paymaster_locks.py with isolated descriptor regtest wallets and the current daemon, alongside ordinary DGB/DD and recovery regressions. Complete functional and historical compatibility matrices remain operator checks."
     },
     "src/wallet/digidollarwallet.cpp": {
       "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance.",
@@ -27,10 +27,10 @@
       "regressions": "Existing mint-cleanup fixture plus ordinary DD spendability and Paymaster reservation-balance selections."
     },
     "src/wallet/wallet.cpp": {
-      "purpose": "Retain existing derived-cache teardown and separate ordinary/manual/DD coin locks from Paymaster reservation ownership; cleanup removes only its own lock reason.",
-      "reused_api": "Existing CWallet LockCoin/UnlockCoin/UnlockAllCoins/IsLockedCoin/ListLockedCoins and WalletBatch lockedutxo rows; Paymaster publication remains after successful DB commit.",
+      "purpose": "Retain existing derived-cache teardown and independent lock ownership. AP1 needs to veto new provider capacity/signatures for ordinary/manual locks without treating its own Paymaster reservation as an operator veto.",
+      "reused_api": "Existing CWallet lock sets and LockCoin/UnlockCoin/IsLockedCoin/ListLockedCoins. IsOrdinaryLockedCoin exposes the existing ordinary/manual/DD reason under cs_wallet; IsLockedCoin reuses it and retains the union. No new lock state or persistence format.",
       "ordinary_callers": "Ordinary DGB/DD sends, manual coin control, collateral locks, wallet load/unload and active Paymaster reservations; lock-list append semantics are preserved.",
-      "regressions": "Overlapping transient/persistent manual locks through cancel/expiry/prune/reload and write/commit failure; explicit unlock retains reservations; ordinary locked coin and DD collateral regressions; clean rebuild after CWallet size change."
+      "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply."
     },
     "src/wallet/walletdb.cpp": {
       "purpose": "Retain commit-aware derived notifications and persist independent ordinary/Paymaster coin-lock reasons atomically under the existing lockedutxo key.",
@@ -165,8 +165,8 @@
       "regressions": "Overview unavailable/malformed/structured-error tests and blocked node-RPC shutdown test; preserve read throttling and wallet switches."
     },
     "src/wallet/wallet.h": {
-      "purpose": "Represent independent Paymaster lock ownership without conflating it with manual/DD locks.",
-      "reused_api": "Existing lock API; one private set appended after all pre-existing CWallet members, plus explicit Paymaster lock/unlock methods.",
+      "purpose": "Represent independent lock ownership and expose AP1's read-only distinction between ordinary/manual/DD locks and Paymaster reservations.",
+      "reused_api": "Existing lock API and sets; IsOrdinaryLockedCoin reads the ordinary set under the existing cs_wallet contract. No additional fields, virtual methods or changed ordinary method signatures.",
       "ordinary_callers": "CWallet allocation sites and WalletTestingSetup layout change; existing field offsets and ordinary method signatures remain unchanged.",
       "regressions": "Recompile allocators/fixture definitions reached by isolated tests; clean complete wallet/daemon/Qt/test rebuild required; ordinary coin-control and DD lock tests."
     }

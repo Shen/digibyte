@@ -1877,7 +1877,8 @@ ProviderPoolReadiness EvaluateProviderPoolReadiness(
     const std::vector<ProviderPoolEntry>& entries,
     const ProviderPolicy& policy,
     int32_t tip_height,
-    int32_t minimum_confirmations)
+    int32_t minimum_confirmations,
+    const std::set<COutPoint>& unavailable_inputs)
 {
     ProviderPoolReadiness result;
     std::string error;
@@ -1894,7 +1895,8 @@ ProviderPoolReadiness EvaluateProviderPoolReadiness(
         return result;
     }
     for (const ProviderPoolEntry& entry : entries) {
-        if (entry.state != PoolEntryState::AVAILABLE || entry.confirmation_height <= 0 ||
+        if (unavailable_inputs.count(entry.outpoint) ||
+            entry.state != PoolEntryState::AVAILABLE || entry.confirmation_height <= 0 ||
             tip_height - entry.confirmation_height + 1 < minimum_confirmations) continue;
         if (entry.purpose == PoolPurpose::ADMISSION && entry.asset == PoolAsset::DGB) {
             ++result.admission_dgb;

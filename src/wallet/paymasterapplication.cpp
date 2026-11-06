@@ -572,8 +572,8 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
         result.errors.push_back(refresh_error);
     }
     if (result.have_policy && result.have_pool) {
-        result.pool = DigiDollar::Paymaster::EvaluateProviderPoolReadiness(
-            result.pool_entries, result.policy, tip_height, 1);
+        result.pool = GetPaymasterProviderPoolReadiness(
+            wallet, result.pool_entries, result.policy, tip_height, 1);
         result.pool_ready = result.pool.ready;
     }
     if (result.have_policy && result.have_safety_policy && result.have_budget_ledger) {

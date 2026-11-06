@@ -114,6 +114,10 @@ DD collateral remain distinct. A reservation adds its own coin-lock reason;
 cancel, expiry and pruning remove only that reason after a successful commit.
 An explicit manual lock set during the reservation survives cleanup, including
 wallet reload when persistent. Ordinary unlock removes only ordinary ownership.
+Provider readiness and new operational-slot selection exclude ordinary/manual
+locks. The signing boundary checks them again before creating a provider signature;
+its own Paymaster reservation lock does not veto that signature. Exact durable
+signature replay remains available without creating new authority.
 The existing `lockedutxo` key retains `'1'` for ordinary locks; `'P'` and `'B'`
 represent Paymaster and shared ownership. Legacy ambiguous `'1'` rows remain
 conservatively locked until explicitly unlocked. Invalid values fail wallet load

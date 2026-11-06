@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -946,11 +947,13 @@ bool ReleaseProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
                                       const uint256& operation_id,
                                       int64_t now,
                                       std::string& error);
+/** Validate the complete pool, excluding wallet-local unavailable inputs from capacity. */
 ProviderPoolReadiness EvaluateProviderPoolReadiness(
     const std::vector<ProviderPoolEntry>& entries,
     const ProviderPolicy& policy,
     int32_t tip_height,
-    int32_t minimum_confirmations);
+    int32_t minimum_confirmations,
+    const std::set<COutPoint>& unavailable_inputs = {});
 uint256 GetProviderPolicyHash(const ProviderPolicy& policy);
 /** Domain-separated commitment to the wallet-local, non-advertised provider
  * loss limits used when an authorization manifest was created. */

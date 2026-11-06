@@ -542,7 +542,7 @@ RPCHelpMan getpaymasterpoolinfo()
             }
             DigiDollar::Paymaster::ProviderPoolReadiness readiness;
             if (prepared && have_policy) {
-                readiness = DigiDollar::Paymaster::EvaluateProviderPoolReadiness(entries, policy, tip_height, 1);
+                readiness = GetPaymasterProviderPoolReadiness(*wallet, entries, policy, tip_height, 1);
             } else if (!prepared) {
                 readiness.errors.push_back("PAYMASTER_POOLS_NOT_PREPARED");
             } else {

@@ -209,6 +209,14 @@ bool GetPaymasterProviderPoolEntries(
     const CWallet& wallet,
     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
 
+/** Readiness uses the shared pool rules and respects ordinary/manual wallet locks. */
+DigiDollar::Paymaster::ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
+    const CWallet& wallet,
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
+    const DigiDollar::Paymaster::ProviderPolicy& policy,
+    int32_t tip_height,
+    int32_t minimum_confirmations);
+
 /** Wallet-local, fee-free release of all quiescent pool capital. The caller
  * holds the provider work guard and verifies the runtime is stopped. Neither
  * preview nor execution signs, broadcasts, abandons or erases recovery data.

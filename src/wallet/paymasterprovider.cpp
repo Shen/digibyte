@@ -2030,6 +2030,20 @@ bool GetPaymasterProviderPoolEntries(const CWallet& wallet,
     return WalletBatch{wallet.GetDatabase()}.ReadPaymasterProviderPool(entries);
 }
 
+ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
+    const CWallet& wallet, const std::vector<ProviderPoolEntry>& entries,
+    const ProviderPolicy& policy, int32_t tip_height,
+    int32_t minimum_confirmations)
+{
+    LOCK(wallet.cs_wallet);
+    std::set<COutPoint> unavailable_inputs;
+    for (const ProviderPoolEntry& entry : entries) {
+        if (wallet.IsOrdinaryLockedCoin(entry.outpoint)) unavailable_inputs.insert(entry.outpoint);
+    }
+    return EvaluateProviderPoolReadiness(entries, policy, tip_height,
+                                         minimum_confirmations, unavailable_inputs);
+}
+
 bool ReservePaymasterOperationalSlot(CWallet& wallet,
                                      const uint256& reservation_id,
                                      bool require_carrier,
@@ -2082,6 +2096,7 @@ bool ReservePaymasterOperationalSlot(CWallet& wallet,
 
     const auto confirmed_available = [&](const ProviderPoolEntry& entry) {
         return entry.purpose == PoolPurpose::OPERATIONAL &&
+               !wallet.IsOrdinaryLockedCoin(entry.outpoint) &&
                entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height > 0 &&
                tip_height - entry.confirmation_height + 1 >= minimum_confirmations;
     };
@@ -2421,7 +2436,8 @@ bool ReserveAndBuildPaymasterCapacityProof(
                              entry.confirmation_height <= tip_height &&
                              tip_height - entry.confirmation_height + 1 >= minimum_confirmations};
         if (entry.purpose != PoolPurpose::OPERATIONAL ||
-            entry.state != PoolEntryState::AVAILABLE || !confirmed) {
+            entry.state != PoolEntryState::AVAILABLE || !confirmed ||
+            wallet.IsOrdinaryLockedCoin(entry.outpoint)) {
             continue;
         }
         if (!dgb_index && entry.asset == PoolAsset::DGB &&

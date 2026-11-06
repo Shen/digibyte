@@ -148,6 +148,23 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
                                           CollaborativeSignatureStage::USER_SIGNED, error));
     psbt = std::move(roundtripped);
 
+    const COutPoint provider_input{psbt.tx->vin[1].prevout};
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.LockPaymasterCoin(provider_input);
+        BOOST_REQUIRE(m_wallet.LockCoin(provider_input));
+        BOOST_CHECK(m_wallet.IsOrdinaryLockedCoin(provider_input));
+    }
+    const auto before_locked_signing = SerializePaymasterTestArtifact(psbt);
+    BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::PROVIDER, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_INPUT_LOCKED");
+    BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == before_locked_signing);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.UnlockCoin(provider_input));
+        BOOST_CHECK(!m_wallet.IsOrdinaryLockedCoin(provider_input));
+        BOOST_CHECK(m_wallet.IsLockedCoin(provider_input));
+    }
     BOOST_REQUIRE(SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::PROVIDER, error));
     BOOST_CHECK(PSBTInputSigned(psbt.inputs[0]));
     BOOST_CHECK(PSBTInputSigned(psbt.inputs[1]));

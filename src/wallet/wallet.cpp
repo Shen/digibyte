@@ -3254,7 +3254,13 @@ bool CWallet::UnlockAllCoins()
 bool CWallet::IsLockedCoin(const COutPoint& output) const
 {
     AssertLockHeld(cs_wallet);
-    return setLockedCoins.count(output) > 0 || m_paymaster_locked_coins.count(output) > 0;
+    return IsOrdinaryLockedCoin(output) || m_paymaster_locked_coins.count(output) > 0;
+}
+
+bool CWallet::IsOrdinaryLockedCoin(const COutPoint& output) const
+{
+    AssertLockHeld(cs_wallet);
+    return setLockedCoins.count(output) > 0;
 }
 
 void CWallet::ListLockedCoins(std::vector<COutPoint>& vOutpts) const

@@ -93,6 +93,18 @@ bool SignCollaborativePSBTForParty(
         return false;
     }
 
+    // This entry point creates a new signature. Exact durable provider replay
+    // uses its saved bytes instead; our own reservation reason is not a veto.
+    if (party == SigningParty::PROVIDER) {
+        for (size_t index = 0; index < psbt.inputs.size(); ++index) {
+            if (IsInputOwnedBy(trusted_template.input_roles[index], party) &&
+                wallet.IsOrdinaryLockedCoin(psbt.tx->vin[index].prevout)) {
+                error = "PAYMASTER_PROVIDER_INPUT_LOCKED";
+                return false;
+            }
+        }
+    }
+
     PartiallySignedTransaction working{psbt};
     for (size_t index = 0; index < working.inputs.size(); ++index) {
         if (!IsInputOwnedBy(trusted_template.input_roles[index], party) &&
