@@ -1114,7 +1114,23 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         return false;
     }
     std::vector<AlternativeRecoveryRecord> expiring;
+    std::vector<AlternativeRecoveryRecord> pruning;
     for (AlternativeRecoveryRecord& recovery : recoveries) {
+        // Expired provider quotes remain replay barriers through every saved
+        // protocol deadline and the retention interval. Never prune a signed
+        // phase merely because its quote is old.
+        if (recovery.provider_side && recovery.expired &&
+            pruning.size() < MAX_PROVIDER_SESSION_PRUNES_PER_PASS &&
+            TimeDeltaExceeds(now, std::max({recovery.updated_at,
+                recovery.capacity_request.expires_at, recovery.capacity_snapshot.expires_at,
+                recovery.recovery_response.expires_at}), CAPACITY_REPLAY_RETENTION_SECONDS)) {
+            if (!ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+                CanonicalBytes(recovery.signed_result) != CanonicalBytes(PaymasterResult{})) {
+                if (error.empty()) error = "PAYMASTER_UNSIGNED_RECOVERY_PRUNE_UNSAFE";
+                return false;
+            }
+            pruning.push_back(recovery);
+        }
         if (recovery.expired ||
             recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
             continue;
@@ -1136,7 +1152,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         }
         expiring.push_back(std::move(recovery));
     }
-    if (expiring.empty()) return true;
+    if (expiring.empty() && pruning.empty()) return true;
 
     std::vector<ProviderPoolEntry> pool;
     ProviderBudgetLedger provider_ledger;
@@ -1145,7 +1161,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         [](const AlternativeRecoveryRecord& recovery) {
             return recovery.provider_side;
         });
-    if (expire_provider &&
+    if ((expire_provider || !pruning.empty()) &&
         (!batch.ReadPaymasterProviderPool(pool) ||
          !batch.ReadPaymasterProviderBudgetLedger(provider_ledger))) {
         error = "PAYMASTER_PROVIDER_NOT_READY";
@@ -1162,6 +1178,33 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         !batch.ReadPaymasterClientFeeLedger(client_fee_ledger)) {
         error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
         return false;
+    }
+
+    // A label is insufficient proof that signing authority is gone. Check
+    // independent durable evidence and released financial bindings before
+    // deleting any replay barrier; unreadable evidence also vetoes pruning.
+    for (const auto& recovery : pruning) {
+        const auto& commit_key = recovery.recovery_response.recovery_commit_key;
+        ProviderCommitRecord commit;
+        UserAuthorizationRecord authorization;
+        PaymasterResult result;
+        if (batch.ReadPaymasterProviderCommitWithStatus(commit_key, commit) != DatabaseReadStatus::NOT_FOUND ||
+            batch.ReadPaymasterUserAuthorizationWithStatus(commit_key, authorization) != DatabaseReadStatus::NOT_FOUND ||
+            batch.ReadPaymasterResultWithStatus(commit_key, result) != DatabaseReadStatus::NOT_FOUND ||
+            std::any_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
+                return entry.reservation_id == commit_key || entry.origin_commit_key == commit_key;
+            }) ||
+            std::any_of(provider_ledger.reservations.begin(), provider_ledger.reservations.end(),
+                [&](const ProviderBudgetReservation& entry) {
+                    return entry.commit_key == commit_key && entry.state != BudgetReservationState::RELEASED;
+                }) ||
+            std::any_of(provider_ledger.capacity_admissions.begin(), provider_ledger.capacity_admissions.end(),
+                [&](const ProviderCapacityAdmission& entry) {
+                    return entry.commit_key == commit_key && entry.state == CapacityAdmissionState::RESERVED;
+                })) {
+            error = "PAYMASTER_UNSIGNED_RECOVERY_PRUNE_UNSAFE";
+            return false;
+        }
     }
 
     for (const AlternativeRecoveryRecord& recovery : expiring) {
@@ -1221,6 +1264,11 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     }
 
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    for (const auto& recovery : pruning) {
+        if (!batch.ErasePaymasterAlternativeRecovery(recovery.recovery_id)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        }
+    }
     for (const AlternativeRecoveryRecord& recovery : expiring) {
         if (!batch.WritePaymasterAlternativeRecovery(recovery, true) ||
             (!recovery.provider_side &&
@@ -1280,14 +1328,18 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     AlternativeRecoveryRecord existing;
-    const bool have_existing =
-        batch.ReadPaymasterAlternativeRecovery(recovery.recovery_id,
-                                               existing);
+    const auto existing_status = batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery.recovery_id, existing);
+    if (existing_status != DatabaseReadStatus::FOUND && existing_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    const bool have_existing = existing_status == DatabaseReadStatus::FOUND;
     if (have_existing &&
         !SameAlternativeRecoveryRecord(existing, recovery)) {
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT";
         return false;
     }
+    if (!CheckProviderHistoryCapacity(batch, recovery.request_id, error, recovery.recovery_id)) return false;
     ProviderIdentityRecord identity;
     ProviderPolicy advertised_policy;
     ProviderSettings settings;

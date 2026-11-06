@@ -115,10 +115,13 @@ safety depth. A winning original payment is accounted once. Retained exact
 commit evidence can validate historical execution after rolling ledger entries
 expire, without authorizing new work or recreating budget.
 
-Provider admission is bounded at 8,192 retained sessions. Each cleanup pass
-removes at most 64 eligible expired unsigned sessions after their retry/capacity
-window plus retention interval. Signed, ambiguous and protected history is not
-discarded to admit new work.
+Normal provider sessions and alternative provider recoveries share an admission
+limit of 8,192 retained records. Exact existing retries do not consume another
+record. Each cleanup pass removes at most 64 eligible unsigned records of each
+kind after all saved retry/capacity deadlines and the 24-hour replay retention
+interval. Recovery pruning revalidates the saved shape, absence of signed/commit
+evidence and released pool/budget bindings before its atomic deletion. Signed,
+ambiguous and protected history is not discarded to admit new work.
 
 ## Wallet lifecycle
 

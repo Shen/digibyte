@@ -26,8 +26,10 @@ inline constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
 inline constexpr size_t MAX_RETAINED_PROVIDER_SESSIONS{8192};
 inline constexpr size_t MAX_PROVIDER_SESSION_PRUNES_PER_PASS{64};
 
-bool CheckProviderSessionCapacity(WalletBatch& batch, const std::string& request_id,
-                                  std::string& error);
+/** Normal sessions and alternative provider recoveries share one retained
+ * history budget. A present record permits only the caller's exact replay. */
+bool CheckProviderHistoryCapacity(WalletBatch& batch, const std::string& request_id,
+                                  std::string& error, const uint256& recovery_id = {});
 
 /** Translate typed wallet-database failures into stable Paymaster errors
  * without collapsing a present-but-unreadable authority record into absence. */

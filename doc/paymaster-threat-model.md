@@ -82,7 +82,7 @@ changes with selected regression evidence, not proof against every variant.
 | ID | Finding / result | Current handling and remaining limit |
 |---|---|---|
 | TM-001 | Rolling budget pruning invalidated evidence needed by retained signed commits. | Retained exact commit authority supports historical execution/retry without new approval or recreated budget. |
-| TM-002 | Expired unsigned provider history could grow without bound. | 8,192 retained-session admission cap; bounded eligible pruning (64/pass), protected signed/ambiguous history retained. |
+| TM-002 | Expired unsigned provider history could grow without bound. | Normal sessions and alternative provider recoveries share an 8,192-record admission cap. Eligible unsigned records are pruned after replay retention, at most 64 of each kind/pass; signed/ambiguous history remains protected. |
 | TM-003 | Stale backup could forget signed liabilities and reset spending budgets; reproduced using SQLite/regtest. | Restore guard before load callbacks and independent checkpoint; reviewed adoption only. Rolling back wallet and matching checkpoint together remains outside protection. |
 | TM-004 | Two encrypted relay legs could forward authentic messages while exposing payment metadata. | Identity/session/genesis/nonce-bound channel proof before metadata. Real encrypted two-leg test exists; full hostile TCP relay and traffic-analysis coverage remain open. |
 | TM-005 | Mutation and budget-race scenarios. | Selected defensive tests; no general claim that all races are excluded. |
