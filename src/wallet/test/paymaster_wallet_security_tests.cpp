@@ -2825,15 +2825,19 @@ BOOST_AUTO_TEST_CASE(
     }
 }
 
-BOOST_AUTO_TEST_CASE(
-    provider_recovery_pre_signature_firewall_reloads_pool_and_budget)
+namespace {
+struct ProviderRecoveryQuoteFixture {
+    ProviderSecurityEnvironment environment;
+    ProviderPoolEntry pool_entry;
+    AlternativeRecoveryRecord recovery;
+};
+
+ProviderRecoveryQuoteFixture MakeProviderRecoveryQuoteFixture(
+    int64_t now, const char* request_id, const uint256& seed,
+    const ProviderSecurityEnvironment* inherited = nullptr)
 {
-    constexpr int64_t now{1750};
-    constexpr auto request_id =
-        "550e8400-e29b-41d4-a716-446655441018";
-    const uint256 seed{uint256S("1751")};
     const uint256 genesis_hash{Params().GenesisBlock().GetHash()};
-    ProviderSecurityEnvironment environment =
+    ProviderSecurityEnvironment environment = inherited ? *inherited :
         MakeProviderEnvironment(now, /*maximum_reserved=*/2000);
     environment.policy.funding_models = FUNDING_MODEL_USER_PAID;
     environment.settings.policy_hash =
@@ -3047,6 +3051,26 @@ BOOST_AUTO_TEST_CASE(
         response.recovery_commit_key;
     recovery.provider_netgroup_bucket = environment.netgroup_bucket;
     recovery.provider_maximum_network_fee = manifest.network_fee;
+
+    return {std::move(environment), std::move(pool_entry), std::move(recovery)};
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(
+    provider_recovery_pre_signature_firewall_reloads_pool_and_budget)
+{
+    constexpr int64_t now{1750};
+    constexpr auto request_id =
+        "550e8400-e29b-41d4-a716-446655441018";
+    const uint256 seed{uint256S("1751")};
+    auto fixture = MakeProviderRecoveryQuoteFixture(now, request_id, seed);
+    auto& environment = fixture.environment;
+    auto& pool_entry = fixture.pool_entry;
+    auto& recovery = fixture.recovery;
+    const auto& request = recovery.recovery_request;
+    const auto& response = recovery.recovery_response;
+    const uint256 genesis_hash{Params().GenesisBlock().GetHash()};
+    std::string error;
 
     BOOST_REQUIRE(PersistProviderQuoteEnvironment(
         m_wallet, environment, {pool_entry}));
