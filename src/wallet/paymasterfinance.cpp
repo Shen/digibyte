@@ -899,10 +899,12 @@ ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, Provid
                 invalid_query ? ErrorDisposition::USER_DECISION : ErrorDisposition::RECONCILE};
         }
         result.provider_id = identity.provider_id;
-        if (!batch.ReadPaymasterProviderPool(pool) && batch.HasPaymasterProviderPool()) {
+        const auto pool_status = batch.ReadPaymasterProviderPoolWithStatus(pool);
+        if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) {
             return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_INVALID_PROVIDER_POOL", std::nullopt};
         }
-        if (!batch.ReadPaymasterMaintenanceLedger(maintenance) && batch.HasPaymasterMaintenanceLedger()) {
+        const auto maintenance_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
+        if (maintenance_status != DatabaseReadStatus::FOUND && maintenance_status != DatabaseReadStatus::NOT_FOUND) {
             return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_INVALID_MAINTENANCE_LEDGER", std::nullopt};
         }
         // Include the reminder in the same wallet snapshot. Creating a missing

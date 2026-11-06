@@ -22,6 +22,7 @@
 #include <wallet/walletdb.h>
 
 #include <chrono>
+#include <optional>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
@@ -30,6 +31,9 @@ struct FinanceReads {
     size_t ranges{0};
     size_t prefixes{0};
     size_t rows{0};
+    std::optional<SerializeData> unreadable_key;
+    size_t read_failures{0};
+    size_t failed_existence_checks{0};
 };
 
 class FinanceCursor final : public DatabaseCursor {
@@ -48,11 +52,37 @@ public:
 
 class FinanceBatch final : public MockableBatch {
     FinanceReads& m_reads;
+    MockableDatabase& m_database;
+
+    DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override
+    {
+        const SerializeData encoded{key.begin(), key.end()};
+        if (m_reads.unreadable_key == encoded) {
+            ++m_reads.read_failures;
+            return DatabaseReadStatus::READ_ERROR;
+        }
+        if (!m_database.m_pass) return DatabaseReadStatus::READ_ERROR;
+        const auto found = m_database.m_records.find(encoded);
+        if (found == m_database.m_records.end()) return DatabaseReadStatus::NOT_FOUND;
+        value.clear();
+        value.write(found->second);
+        return DatabaseReadStatus::FOUND;
+    }
+
+    bool HasKey(DataStream&& key) override
+    {
+        const SerializeData encoded{key.begin(), key.end()};
+        if (m_reads.unreadable_key == encoded) {
+            ++m_reads.failed_existence_checks;
+            return false;
+        }
+        return m_database.m_pass && m_database.m_records.count(encoded) != 0;
+    }
 public:
     FinanceBatch(MockableDatabase& db, FinanceReads& reads)
         : MockableBatch(db.m_records, db.m_pass, &db.m_on_write, &db.m_refuse_write,
                         db.m_txn_pass, &db.m_fail_write_at, &db.m_write_count, &db.m_fail_commit),
-          m_reads{reads} {}
+          m_reads{reads}, m_database{db} {}
     std::unique_ptr<DatabaseCursor> GetNewPrefixCursor(Span<const std::byte> prefix) override
     {
         ++m_reads.prefixes;
@@ -298,6 +328,57 @@ BOOST_AUTO_TEST_CASE(committed_finance_sources_enqueue_but_aborted_writes_do_not
     BOOST_REQUIRE(database->MakeBatch()->Write(std::string{"pmfinance"}, uint16_t{999}));
     BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+}
+
+BOOST_AUTO_TEST_CASE(warm_finance_read_errors_never_become_zero_capital)
+{
+    ProviderPoolEntry entry;
+    entry.outpoint = COutPoint{uint256::ONE, 0};
+    entry.purpose = PoolPurpose::OPERATIONAL;
+    entry.script_pub_key = identity.identity_script;
+    entry.dgb_value = DGBSatoshis{1000};
+    entry.confirmation_height = 1;
+    entry.origin_commit_key = uint256::ONE;
+    entry.updated_at = 1000;
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({entry}));
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ProviderMaintenanceLedger{}));
+    Drain();
+    ProviderFinanceQuery query;
+    query.period = ProviderFinancePeriod::ALL;
+    query.now = 2000;
+    const auto initial = CaptureProviderFinanceStatus(*provider, query);
+    const auto* snapshot = std::get_if<ProviderFinanceStatus>(&initial);
+    BOOST_REQUIRE(snapshot);
+    BOOST_CHECK_EQUAL(snapshot->pool_capital.dgb_available.value, 1000);
+    const auto before = database->m_records;
+    for (const auto& [key, code] : {
+            std::pair{DBKeys::PAYMASTER_PROVIDER_POOL, "PAYMASTER_INVALID_PROVIDER_POOL"},
+            std::pair{DBKeys::PAYMASTER_MAINTENANCE_LEDGER, "PAYMASTER_INVALID_MAINTENANCE_LEDGER"}}) {
+        DataStream encoded;
+        encoded << key;
+        database->reads = {};
+        database->reads.unreadable_key = SerializeData{encoded.begin(), encoded.end()};
+        const auto captured = CaptureProviderFinanceStatus(*provider, query);
+        const auto* failure = std::get_if<ProviderFinanceStatusFailure>(&captured);
+        BOOST_REQUIRE(failure);
+        BOOST_CHECK(failure->kind == ErrorKind::WALLET);
+        BOOST_CHECK_EQUAL(failure->code, code);
+        BOOST_CHECK_EQUAL(database->reads.read_failures, 1U);
+        BOOST_CHECK_EQUAL(database->reads.failed_existence_checks, 0U);
+        BOOST_CHECK(database->m_records == before);
+    }
+    database->reads = {};
+    const auto recovered = CaptureProviderFinanceStatus(*provider, query);
+    BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatus>(recovered));
+    BOOST_CHECK_EQUAL(std::get<ProviderFinanceStatus>(recovered).pool_capital.dgb_available.value, 1000);
+    // Genuine absence, unlike a failed read, remains a valid known zero.
+    BOOST_REQUIRE(database->MakeBatch()->Erase(DBKeys::PAYMASTER_PROVIDER_POOL));
+    BOOST_REQUIRE(database->MakeBatch()->Erase(DBKeys::PAYMASTER_MAINTENANCE_LEDGER));
+    const auto absent = CaptureProviderFinanceStatus(*provider, query);
+    BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatus>(absent));
+    BOOST_CHECK_EQUAL(std::get<ProviderFinanceStatus>(absent).pool_capital.dgb_available.value, 0);
+    BOOST_CHECK_EQUAL(std::get<ProviderFinanceStatus>(absent).pool_capital.pending_maintenance_transactions, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(finance_rpc_exposes_retryable_backlog_and_current_completion)

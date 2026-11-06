@@ -202,6 +202,8 @@ results (`wallet/paymasterresults.h`). JSON encoding belongs to
 `wallet/rpc/paymaster_results.cpp`; session snapshots are captured before encoding.
 Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
+Finance snapshots preserve pool and maintenance read statuses: an unreadable
+record is a failed observation, never an absent record or known zero capital.
 
 Client quote/payment entry points coordinate named call-local phases for saved
 authorization, offer selection, reservation, capacity, quote exchange and exact
