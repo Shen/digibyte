@@ -1,5 +1,6 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
+#include <paymaster/setup.h>
 #include <qt/paymasterprovider_internal.h>
 
 void ProviderSetup::initializeStatusTimer()
@@ -554,10 +555,17 @@ void ProviderSetup::buildSetupFundingPage(PaymasterSetupWizard& wizard, SetupOff
             });
     connect(restore_model_defaults, &QPushButton::clicked, model_page,
             [wizard_user_paid, wizard_sponsored, wizard_scope] {
-                wizard_scope->setCurrentIndex(
-                    wizard_scope->findData(QStringLiteral("public")));
-                wizard_sponsored->setChecked(false);
-                wizard_user_paid->setChecked(true);
+                const UniValue defaults = DigiDollar::Paymaster::SetupDefaultPolicy();
+                bool user_paid{false};
+                bool sponsored{false};
+                for (const UniValue& model : defaults.find_value("funding_models").getValues()) {
+                    user_paid |= model.get_str() == "user_paid";
+                    sponsored |= model.get_str() == "sponsored";
+                }
+                wizard_scope->setCurrentIndex(wizard_scope->findData(QString::fromStdString(
+                    defaults.find_value("sponsorship_scope").get_str())));
+                wizard_sponsored->setChecked(sponsored);
+                wizard_user_paid->setChecked(user_paid);
             });
 
 }
@@ -782,6 +790,7 @@ void ProviderSetup::buildSetupPolicyPage(PaymasterSetupWizard& wizard, SetupOffe
              wizard_user_paid, wizard_sponsored, wizard_scope,
              restore_model_defaults, imported_policy,
              replace_unrepresentable_policy] {
+                const UniValue defaults = DigiDollar::Paymaster::SetupDefaultPolicy();
                 *replace_unrepresentable_policy = true;
                 imported_policy->hide();
                 wizard_user_paid->setEnabled(true);
@@ -796,12 +805,15 @@ void ProviderSetup::buildSetupPolicyPage(PaymasterSetupWizard& wizard, SetupOffe
                 maximum->setEnabled(true);
                 lifetime->setEnabled(true);
                 network_fee->setEnabled(true);
-                fee->setValue(wizard_user_paid->isChecked() ? 0.50 : 0.0);
-                maximum_user_paid_service_fee->setValue(0);
-                minimum->setValue(100);
-                maximum->setValue(100000);
-                lifetime->setValue(60);
-                network_fee->setValue(20000000);
+                fee->setValue(wizard_user_paid->isChecked()
+                    ? defaults.find_value("fee_rate_bps").getInt<int>() / 100.0 : 0.0);
+                maximum_user_paid_service_fee->setValue(
+                    defaults.find_value("maximum_user_paid_service_fee_cents").getInt<int>());
+                minimum->setValue(defaults.find_value("min_amount_cents").getInt<int>());
+                maximum->setValue(defaults.find_value("max_amount_cents").getInt<int>());
+                lifetime->setValue(defaults.find_value("quote_ttl").getInt<int>());
+                network_fee->setValue(
+                    defaults.find_value("maximum_network_fee_dgb_satoshis").getInt<int>());
             });
     if (!m_panel.configuration().policyRepresentable()) {
         wizard_user_paid->setEnabled(false);

@@ -1,5 +1,6 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
+#include <paymaster/setup.h>
 #include <qt/paymasterprovider_internal.h>
 
 void ProviderConfiguration::buildWalletAccess(PageBindings& pages)
@@ -520,18 +521,28 @@ void ProviderConfiguration::restorePolicyDefaults()
 
 void ProviderConfiguration::applyRecommendedPolicyDefaults(bool mark_dirty)
 {
+    const UniValue defaults = DigiDollar::Paymaster::SetupDefaultPolicy();
+    bool user_paid{false};
+    bool sponsored{false};
+    for (const UniValue& model : defaults.find_value("funding_models").getValues()) {
+        user_paid |= model.get_str() == "user_paid";
+        sponsored |= model.get_str() == "sponsored";
+    }
     if (m_review_policy_limits) showPolicySaveStatus({});
     if (m_policy_limits_review) m_policy_limits_review->hide();
     m_loading_policy = true;
-    m_scope->setCurrentIndex(m_scope->findData(QStringLiteral("public")));
-    m_user_paid->setChecked(true);
-    m_sponsored->setChecked(false);
-    m_fee_bps->setValue(50);
-    m_maximum_user_paid_service_fee->setValue(0);
-    m_min_amount->setValue(100);
-    m_max_amount->setValue(100000);
-    m_quote_ttl->setValue(60);
-    m_network_fee->setValue(20000000);
+    m_scope->setCurrentIndex(m_scope->findData(QString::fromStdString(
+        defaults.find_value("sponsorship_scope").get_str())));
+    m_user_paid->setChecked(user_paid);
+    m_sponsored->setChecked(sponsored);
+    m_fee_bps->setValue(defaults.find_value("fee_rate_bps").getInt<int>());
+    m_maximum_user_paid_service_fee->setValue(
+        defaults.find_value("maximum_user_paid_service_fee_cents").getInt<int>());
+    m_min_amount->setValue(defaults.find_value("min_amount_cents").getInt<int>());
+    m_max_amount->setValue(defaults.find_value("max_amount_cents").getInt<int>());
+    m_quote_ttl->setValue(defaults.find_value("quote_ttl").getInt<int>());
+    m_network_fee->setValue(
+        defaults.find_value("maximum_network_fee_dgb_satoshis").getInt<int>());
     m_loading_policy = false;
     m_policy_loaded = false;
     m_policy_dirty = mark_dirty;
@@ -2352,6 +2363,7 @@ void ProviderConfiguration::buildConnection(PageBindings& pages)
 
 void ProviderConfiguration::buildConfiguration(PageBindings& pages)
 {
+    const UniValue defaults = DigiDollar::Paymaster::SetupDefaultPolicy();
     pages.configuration_scroll = new QScrollArea(m_panel.mainPages());
     pages.configuration_scroll->setObjectName("paymasterConfigurationPage");
     pages.configuration_scroll->setWidgetResizable(true);
@@ -2427,7 +2439,10 @@ void ProviderConfiguration::buildConfiguration(PageBindings& pages)
     m_user_paid = new QCheckBox(tr("User paid · client pays a DD service fee"), policy_group);
     m_user_paid->setObjectName("paymasterPolicyUserPaid");
     m_user_paid->setProperty("paymasterRole", QStringLiteral("choiceCard"));
-    m_user_paid->setChecked(true);
+    for (const UniValue& model : defaults.find_value("funding_models").getValues()) {
+        if (model.get_str() == "user_paid") m_user_paid->setChecked(true);
+        if (model.get_str() == "sponsored") m_sponsored->setChecked(true);
+    }
     auto* user_paid_help = new QLabel(tr(
         "The client pays a service fee in DigiDollar; your provider wallet supplies the DGB network fee."), policy_group);
     user_paid_help->setWordWrap(true);
@@ -2478,33 +2493,41 @@ void ProviderConfiguration::buildConfiguration(PageBindings& pages)
     m_scope->addItem(tr("Public — available to discovered clients"), QStringLiteral("public"));
     m_scope->setToolTip(tr(
         "Public sponsorship can be offered together with user-paid service."));
-    m_fee_bps = PaymasterWidgetImpl::scaledSpin(policy_group, 0, 10000, 50, 100, 2);
+    m_scope->setCurrentIndex(m_scope->findData(QString::fromStdString(
+        defaults.find_value("sponsorship_scope").get_str())));
+    m_fee_bps = PaymasterWidgetImpl::scaledSpin(
+        policy_group, 0, 10000, defaults.find_value("fee_rate_bps").getInt<int>(), 100, 2);
     m_fee_bps->setObjectName("paymasterPolicyFeeBps");
     m_fee_bps->setSingleStep(10);
     m_fee_bps->setSuffix(tr(" %"));
     m_fee_bps->setToolTip(tr(
         "Service fee for user-paid transfers. 100 basis points equal 1%. Sponsored transfers always charge zero DigiDollar service fee."));
     m_maximum_user_paid_service_fee = PaymasterWidgetImpl::scaledSpin(
-        policy_group, 0, 10000000, 0, 100, 2);
+        policy_group, 0, 10000000,
+        defaults.find_value("maximum_user_paid_service_fee_cents").getInt<int>(), 100, 2);
     m_maximum_user_paid_service_fee->setObjectName(
         "paymasterPolicyMaximumUserPaidServiceFeeCents");
     m_maximum_user_paid_service_fee->setSuffix(tr(" DD"));
     m_maximum_user_paid_service_fee->setToolTip(tr(
         "Maximum DD service fee on one user-paid transfer. Enter 0 for no cap."));
-    m_min_amount = PaymasterWidgetImpl::scaledSpin(policy_group, 100, 10000000, 100, 100, 2);
+    m_min_amount = PaymasterWidgetImpl::scaledSpin(
+        policy_group, 100, 10000000, defaults.find_value("min_amount_cents").getInt<int>(), 100, 2);
     m_min_amount->setObjectName("paymasterPolicyMinimumCents");
     m_min_amount->setSuffix(tr(" DD"));
     m_min_amount->setToolTip(tr("Smallest DigiDollar payment this provider will accept."));
-    m_max_amount = PaymasterWidgetImpl::scaledSpin(policy_group, 100, 10000000, 100000, 100, 2);
+    m_max_amount = PaymasterWidgetImpl::scaledSpin(
+        policy_group, 100, 10000000, defaults.find_value("max_amount_cents").getInt<int>(), 100, 2);
     m_max_amount->setObjectName("paymasterPolicyMaximumCents");
     m_max_amount->setSuffix(tr(" DD"));
     m_max_amount->setToolTip(tr("Largest DigiDollar payment this provider will accept."));
-    m_quote_ttl = PaymasterWidgetImpl::spin(policy_group, 1, 60, 60);
+    m_quote_ttl = PaymasterWidgetImpl::spin(
+        policy_group, 1, 60, defaults.find_value("quote_ttl").getInt<int>());
     m_quote_ttl->setObjectName("paymasterPolicyQuoteLifetime");
     m_quote_ttl->setSuffix(tr(" seconds"));
     m_quote_ttl->setToolTip(tr("How long a client may accept a quote before it expires."));
-    m_network_fee = PaymasterWidgetImpl::scaledSpin(policy_group, 1, 2000000000, 20000000,
-                               100000000, 8);
+    m_network_fee = PaymasterWidgetImpl::scaledSpin(
+        policy_group, 1, 2000000000,
+        defaults.find_value("maximum_network_fee_dgb_satoshis").getInt<int>(), 100000000, 8);
     m_network_fee->setObjectName("paymasterPolicyMaximumNetworkFee");
     m_network_fee->setSuffix(tr(" DGB"));
     m_network_fee->setToolTip(tr(
