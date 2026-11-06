@@ -29,10 +29,12 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <ios>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace std::literals;
@@ -266,6 +268,81 @@ BOOST_AUTO_TEST_CASE(paymaster_direct_replay_network_policy)
     BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::RATE_LIMITED));
     BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::INVALID));
     BOOST_CHECK(!IsBenignDirectEnqueueResult(DirectEnqueueResult::DISABLED));
+}
+
+BOOST_AUTO_TEST_CASE(paymaster_disconnect_retains_lease_for_message_readers)
+{
+    using namespace DigiDollar::Paymaster;
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    CConnman::Options options;
+    options.m_msgproc = m_node.peerman.get();
+    options.nLocalServices = ServiceFlags{NODE_NETWORK | NODE_P2P_V2};
+    options.nMaxConnections = 2;
+    options.m_max_outbound_full_relay = 1;
+    options.paymaster_outbound = 1;
+    connman.Init(options);
+
+    in_addr peer_addr;
+    peer_addr.s_addr = htonl(0x01020304);
+    const CService endpoint{peer_addr, 12024};
+    const DirectKey key{"lease-lifetime", "payment", false, uint256::ONE};
+    BOOST_REQUIRE(connman.RequestPaymasterConnection(key, endpoint, false).state == DirectState::QUEUED);
+    auto lease = connman.ClaimPaymasterTestConnection(DirectNow());
+    BOOST_REQUIRE(lease);
+    const DirectLease* const published_lease{lease.get()};
+    const std::weak_ptr<DirectLease> retained_lease{lease};
+
+    auto peer = std::make_unique<CNode>(/*id=*/1, /*sock=*/nullptr,
+        CAddress{endpoint, NODE_NETWORK}, /*nKeyedNetGroupIn=*/0,
+        /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/std::string{},
+        ConnectionType::PAYMASTER, /*inbound_onion=*/false);
+    lease->peer_id = peer->GetId();
+    peer->m_paymaster_lease = std::move(lease);
+    m_node.peerman->InitializeNode(*peer, options.nLocalServices);
+    peer->AddRef(); // Connection manager ownership.
+    peer->AddRef(); // A message-processing snapshot keeps the node alive.
+    CNode* const node{peer.release()};
+    connman.AddTestNode(*node);
+
+    // PushMessage reads the lease before checking fDisconnect. Exercise that
+    // actual reader concurrently with socket-thread cleanup; TSan can detect
+    // a reset of the shared_ptr even though the CNode itself is still alive.
+    std::atomic<bool> reader_started{false};
+    std::atomic<bool> reader_done{false};
+    std::thread reader{[&] {
+        const CNetMsgMaker msg_maker{::PROTOCOL_VERSION};
+        reader_started = true;
+        while (!reader_done) {
+            connman.PushMessage(node, msg_maker.Make(NetMsgType::PMCAPREQ));
+        }
+    }};
+    while (!reader_started) std::this_thread::yield();
+    node->fDisconnect = true;
+    connman.DisconnectTestNodes();
+    reader_done = true;
+    reader.join();
+
+    BOOST_REQUIRE(node->m_paymaster_lease);
+    BOOST_CHECK(node->m_paymaster_lease.get() == published_lease);
+    BOOST_CHECK(node->m_paymaster_lease->state == DirectState::FAILED);
+    BOOST_CHECK(connman.RequestPaymasterConnection(key, endpoint, false).state == DirectState::FAILED);
+    BOOST_CHECK_EQUAL(connman.GetOrdinaryOutboundTarget(), 1);
+    BOOST_CHECK_EQUAL(connman.GetPaymasterUsage().outgoing, 1);
+
+    const DirectKey replacement{"lease-lifetime", "next-payment", false, uint256::ONE};
+    BOOST_REQUIRE(connman.RequestPaymasterConnection(replacement, endpoint, false).state == DirectState::QUEUED);
+    BOOST_CHECK(!connman.ClaimPaymasterTestConnection(DirectNow()));
+    node->Release();
+    connman.DisconnectTestNodes();
+    BOOST_CHECK(retained_lease.expired());
+    BOOST_CHECK_EQUAL(connman.GetPaymasterUsage().outgoing, 0);
+    auto replacement_lease = connman.ClaimPaymasterTestConnection(DirectNow());
+    BOOST_REQUIRE(replacement_lease);
+    BOOST_CHECK(replacement_lease->key == replacement);
+    BOOST_CHECK_EQUAL(connman.GetPaymasterUsage().outgoing, 1);
+    connman.ReleasePaymasterConnection(replacement);
+    replacement_lease.reset();
+    BOOST_CHECK_EQUAL(connman.GetPaymasterUsage().outgoing, 0);
 }
 
 BOOST_AUTO_TEST_CASE(paymaster_direct_netgroup_bucket_survives_peer_replacement)

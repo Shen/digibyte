@@ -169,6 +169,30 @@
       "reused_api": "Existing lock API and sets; IsOrdinaryLockedCoin reads the ordinary set under the existing cs_wallet contract. No additional fields, virtual methods or changed ordinary method signatures.",
       "ordinary_callers": "CWallet allocation sites and WalletTestingSetup layout change; existing field offsets and ordinary method signatures remain unchanged.",
       "regressions": "Recompile allocators/fixture definitions reached by isolated tests; clean complete wallet/daemon/Qt/test rebuild required; ordinary coin-control and DD lock tests."
+    },
+    "src/net.cpp": {
+      "purpose": "R2: finish the Direct queue at socket close without concurrently resetting the CNode lease read by message processing. Published lease ownership lasts until CNode destruction.",
+      "reused_api": "Existing CNode reference counting/NodesSnapshot, DirectQueue::Finish and shared DirectPermits lifetime; no new connection budget or synchronization subsystem.",
+      "ordinary_callers": "Ordinary P2P connection teardown, outbound/inbound limits and node deletion remain authoritative. Only a Direct lease stays attached while existing readers hold node references.",
+      "regressions": "net_tests/paymaster_disconnect_retains_lease_for_message_readers: real DisconnectNodes and concurrent PushMessage, stable lease, failed queue outcome, no early permit reuse, ordinary outbound target preserved. Run under TSan separately."
+    },
+    "src/net.h": {
+      "purpose": "Document immutable post-publication ownership of the existing CNode Direct lease for the R2 disconnect correction.",
+      "reused_api": "Existing shared_ptr field and CNode lifetime; no added field or serialized format.",
+      "ordinary_callers": "All CNode allocation/destruction and ordinary P2P callers retain the same layout and behavior.",
+      "regressions": "Same real-disconnect/permit-lifetime regression as src/net.cpp; clean product builds and TSan remain operator checks."
+    },
+    "src/test/net_tests.cpp": {
+      "purpose": "Reproduce R2 at the real CConnman disconnect/message-reader boundary and verify connection permits survive until node readers finish.",
+      "reused_api": "Existing BasicTestingSetup, CConnmanTest friend adapter, mock sockets, DirectPermits and PushMessage.",
+      "ordinary_callers": "Existing networking tests and ordinary outbound capacity behavior; no weakened assertions or quotas.",
+      "regressions": "net_tests/paymaster_disconnect_retains_lease_for_message_readers plus ordinary net tests and TSan."
+    },
+    "src/test/util/net.h": {
+      "purpose": "Expose existing private disconnect/Direct-claim operations to the network regression through the existing CConnmanTest friend class.",
+      "reused_api": "CConnmanTest, CConnman::DisconnectNodes and DirectQueue::Claim; no production test hook.",
+      "ordinary_callers": "Other networking fixtures retain existing helpers and semantics.",
+      "regressions": "Compile net fixtures; run new disconnect/reader/permit regression and existing ordinary network tests."
     }
   },
   "scope_authorization": {

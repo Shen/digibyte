@@ -42,6 +42,13 @@ struct ConnmanTestMsg : public CConnman {
         m_nodes.clear();
     }
 
+    void DisconnectTestNodes() { DisconnectNodes(); }
+
+    std::shared_ptr<DigiDollar::Paymaster::DirectLease> ClaimPaymasterTestConnection(int64_t now)
+    {
+        return m_direct_queue.Claim(m_direct_permits, now);
+    }
+
     void Handshake(CNode& node,
                    bool successfully_connected,
                    ServiceFlags remote_services,

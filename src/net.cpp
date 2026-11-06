@@ -2070,7 +2070,9 @@ void CConnman::DisconnectNodes()
                 // close socket and cleanup
                 pnode->CloseSocketDisconnect();
                 m_direct_queue.Finish(pnode->m_paymaster_lease, DigiDollar::Paymaster::DirectState::FAILED);
-                pnode->m_paymaster_lease.reset();
+                // Message-processing snapshots may still reference this node.
+                // Its published lease stays immutable until node destruction,
+                // keeping both those readers and the permit lifetime safe.
 
                 // update connection count by network
                 if (pnode->IsManualOrFullOutboundConn()) --m_network_conn_counts[pnode->addr.GetNetwork()];

@@ -65,6 +65,12 @@ and uses its supported channel; expected capacity proofs are accepted on the
 applicable payment/recovery paths. A transport failure does not cancel a signed
 payment or imply permission to choose a new request ID.
 
+The Direct lease attached to a published `CNode` is unchanged until that node's
+destruction. Socket close finishes the queue outcome, but outstanding message
+readers retain the lease and its permit until their node references are released.
+This avoids unsynchronized shared-pointer replacement during message processing
+and prevents early reuse of connection capacity.
+
 ## Verification
 
 The [coverage map](digidollar-paymaster-testing.md#coverage-map) identifies

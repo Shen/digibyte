@@ -761,6 +761,8 @@ public:
     // next time DisconnectNodes() runs
     std::atomic_bool fDisconnect{false};
     CSemaphoreGrant grantOutbound;
+    /** Set before publication and retained until destruction. Message readers
+     * may outlive socket disconnection; only DirectLease's atomic state changes. */
     std::shared_ptr<DigiDollar::Paymaster::DirectLease> m_paymaster_lease;
     std::shared_ptr<DigiDollar::Paymaster::DirectPermits::Permit> m_paymaster_admission;
     bool m_paymaster_listener{false}; // Set before publishing the CNode.
