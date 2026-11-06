@@ -390,6 +390,11 @@ public:
                                            const uint256& session_id,
                                            const PaymasterId& provider_id,
                                            size_t maximum);
+    /** Keep client results queued and protected from pruning until durable acknowledgement. */
+    DirectMessageLease LeaseResults(const std::string& request_id,
+                                     const uint256& session_id,
+                                     const PaymasterId& provider_id,
+                                     size_t maximum);
     std::vector<DirectMessage> TakeRecoveryRequests(
         const PaymasterId& provider_id, size_t maximum);
     DirectMessageLease LeaseRecoveryRequests(const PaymasterId& provider_id,
@@ -402,6 +407,9 @@ public:
     DirectMessageLease LeaseRecoverySubmits(const PaymasterId& provider_id,
                                              size_t maximum);
     std::vector<DirectMessage> TakeRecoveryResults(
+        const std::string& request_id, const uint256& session_id,
+        const PaymasterId& provider_id, size_t maximum);
+    DirectMessageLease LeaseRecoveryResults(
         const std::string& request_id, const uint256& session_id,
         const PaymasterId& provider_id, size_t maximum);
     bool QueueOutboundDirectMessage(int64_t peer_id,

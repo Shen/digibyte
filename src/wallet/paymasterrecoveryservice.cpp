@@ -714,9 +714,10 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         submit.template_commitment =
             recovery.recovery_response.manifest.template_commitment;
         submit.user_psbt = recovery.user_signed_psbt;
-        const auto messages = context.paymaster->TakeRecoveryResults(
+        const auto result_lease = context.paymaster->LeaseRecoveryResults(
             recovery.request_id, recovery.session_id,
             recovery.recovery_provider_id, 1);
+        const auto& messages = result_lease.Messages();
         const AlternativeRecoveryResultMessage* message{nullptr};
         CTransactionRef observed_final;
         FinalTransactionPresence observed_presence{
@@ -727,9 +728,13 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             if (!message || !ValidateAlternativeRecoveryResult(*message, recovery.recovery_response, recovery.recovery_provider_identity_key, Params().GenesisBlock().GetHash(), 1, now, error) ||
                 !message->result.final_transaction ||
                 !message->result.raw_transaction_hash) {
+                const std::string rejection{error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESULT" : error};
+                if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), error)) {
+                    throw ApplicationError(ErrorKind::WALLET, error);
+                }
                 throw ApplicationError(
                     ErrorKind::INVALID_INPUT,
-                    error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESULT" : error);
+                    rejection);
             }
             observed_final = MakeTransactionRef(
                 *message->result.final_transaction);
@@ -792,6 +797,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             if (!store.CommitClientAlternativeRecoveryFinal(
                     recovery, final_recovery, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            if (!context.paymaster->AcknowledgeDirectMessagesIfPresent({messages.front().message_id})) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
             }
 
             node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),

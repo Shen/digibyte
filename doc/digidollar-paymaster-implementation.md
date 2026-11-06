@@ -88,6 +88,11 @@ client final validation. It checks the provider signature, canonical encoding
 and exact transaction/template bindings. Current approval and expiry checks
 remain with the caller so intact historical final evidence stays verifiable.
 
+Normal and alternative-recovery client results use scoped inbox leases. Local
+read, preflight or database failures retain the received artifact; acknowledgement
+follows durable acceptance. Proven invalid remote envelopes are discarded without
+releasing spending authority. A later broadcast failure uses the saved final bytes.
+
 Unsigned cancellation closes only work proven unsigned. Late responses cannot
 revive approval after closure. Signed or ambiguous work remains protected and
 exposes only Core-permitted actions. Cancel-to-self is an on-chain recovery

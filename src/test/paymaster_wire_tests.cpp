@@ -2449,6 +2449,44 @@ BOOST_AUTO_TEST_CASE(manager_inbox_preserves_capacity_for_unrelated_sessions)
     BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 3U);
 }
 
+BOOST_AUTO_TEST_CASE(manager_client_result_leases_retain_both_result_types_until_ack)
+{
+    for (const bool recovery : {false, true}) {
+        BOOST_TEST_CONTEXT("recovery result " << recovery) {
+            Manager manager{true};
+            PaymasterResultMessage normal;
+            normal.request_id = "550e8400-e29b-41d4-a716-446655440061";
+            normal.session_id = uint256S("61");
+            normal.result.provider_id = uint256S("62");
+            normal.result.updated_at = 100;
+            AlternativeRecoveryResultMessage alternative;
+            alternative.request_id = normal.request_id;
+            alternative.session_id = normal.session_id;
+            alternative.result = normal.result;
+            const uint256 message_id{uint256S("63")};
+            const DirectPayload payload = recovery ? DirectPayload{alternative} : DirectPayload{normal};
+            BOOST_REQUIRE(manager.EnqueueDirectMessage(41, message_id, 100, payload, 100));
+            {
+                auto lease = recovery ? manager.LeaseRecoveryResults(normal.request_id, normal.session_id, normal.result.provider_id, 1) :
+                    manager.LeaseResults(normal.request_id, normal.session_id, normal.result.provider_id, 1);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                manager.PruneDirectMessages(1000000);
+                BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+                const auto taken = recovery ? manager.TakeRecoveryResults(normal.request_id, normal.session_id, normal.result.provider_id, 1) :
+                    manager.TakeResults(normal.request_id, normal.session_id, normal.result.provider_id, 1);
+                BOOST_CHECK(taken.empty());
+            }
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+            const auto retry = recovery ? manager.LeaseRecoveryResults(normal.request_id, normal.session_id, normal.result.provider_id, 1) :
+                manager.LeaseResults(normal.request_id, normal.session_id, normal.result.provider_id, 1);
+            BOOST_REQUIRE_EQUAL(retry.Messages().size(), 1U);
+            BOOST_CHECK(retry.Messages().front().message_id == message_id);
+            BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({message_id}));
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(manager_quote_response_inbox_is_session_selective)
 {
     Manager manager{true};

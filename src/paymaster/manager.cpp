@@ -1210,6 +1210,26 @@ std::vector<DirectMessage> Manager::TakeResults(const std::string& request_id,
                             });
 }
 
+DirectMessageLease Manager::LeaseResults(
+    const std::string& request_id, const uint256& session_id,
+    const PaymasterId& provider_id, size_t maximum)
+{
+    std::vector<DirectMessage> result;
+    if (!request_id.empty() && !session_id.IsNull() && !provider_id.IsNull() && maximum != 0) {
+        LOCK(m_direct_mutex);
+        result = PeekMatchingFair(
+            m_direct_messages, m_last_inbound_group,
+            m_last_inbound_session_by_group, maximum,
+            [&request_id, &session_id, &provider_id](const DirectMessage& direct) {
+                const auto* message = std::get_if<PaymasterResultMessage>(&direct.payload);
+                return message != nullptr && message->request_id == request_id &&
+                       message->session_id == session_id && message->result.provider_id == provider_id;
+            });
+        AddDirectMessageLeases(m_leased_direct_ids, result);
+    }
+    return DirectMessageLease{*this, std::move(result)};
+}
+
 std::vector<DirectMessage> Manager::TakeRecoveryRequests(
     const PaymasterId& provider_id, size_t maximum)
 {
@@ -1457,6 +1477,26 @@ std::optional<ChannelProof> Manager::TakeChannelProof(int64_t peer_id, int64_t n
     auto proof = std::move(found->second.proof);
     m_channel_exchanges.erase(found);
     return proof;
+}
+
+DirectMessageLease Manager::LeaseRecoveryResults(
+    const std::string& request_id, const uint256& session_id,
+    const PaymasterId& provider_id, size_t maximum)
+{
+    std::vector<DirectMessage> result;
+    if (!request_id.empty() && !session_id.IsNull() && !provider_id.IsNull() && maximum != 0) {
+        LOCK(m_direct_mutex);
+        result = PeekMatchingFair(
+            m_direct_messages, m_last_inbound_group,
+            m_last_inbound_session_by_group, maximum,
+            [&request_id, &session_id, &provider_id](const DirectMessage& direct) {
+                const auto* message = std::get_if<AlternativeRecoveryResultMessage>(&direct.payload);
+                return message != nullptr && message->request_id == request_id &&
+                       message->session_id == session_id && message->result.provider_id == provider_id;
+            });
+        AddDirectMessageLeases(m_leased_direct_ids, result);
+    }
+    return DirectMessageLease{*this, std::move(result)};
 }
 
 bool Manager::QueueOutboundDirectMessage(int64_t peer_id,

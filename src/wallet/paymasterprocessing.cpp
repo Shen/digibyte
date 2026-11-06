@@ -2362,15 +2362,15 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         if (result_status == DatabaseReadStatus::FOUND) {
             minimum_sequence = previous.result_sequence;
         } else if (result_status != DatabaseReadStatus::NOT_FOUND) {
-            // Keep the incoming result queued until its durable predecessor
-            // can be read; TakeResults consumes the selected message.
+            // Keep the incoming result queued until its durable predecessor can be read.
             throw ApplicationError(ErrorKind::WALLET,
                 result_status == DatabaseReadStatus::UNSUPPORTED_VERSION
                     ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RESULT_DATABASE_READ");
         }
     }
-    const auto messages = observed_payment ? std::vector<DirectMessage>{} : context.paymaster->TakeResults(
-        request_id, session.session_id, attempt.provider_id, 1);
+    const auto result_lease = context.paymaster->LeaseResults(
+        request_id, session.session_id, attempt.provider_id, observed_payment ? 0 : 1);
+    const auto& messages = result_lease.Messages();
     std::optional<PaymasterResult> accepted_result;
     FinalTransactionPresence final_presence{FinalTransactionPresence::NONE};
     if (!messages.empty()) {
@@ -2379,18 +2379,27 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         if (!ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
                                      attempt.provider_id, attempt.commit_key,
                                      attempt.provider_identity_key, minimum_sequence, error)) {
-            throw ApplicationError(ErrorKind::INVALID_INPUT, error);
+            const std::string rejection{error};
+            if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            throw ApplicationError(ErrorKind::INVALID_INPUT, rejection);
         }
         if (message->result.final_transaction) {
             CollaborativePSBTTemplate trusted;
-            if (!LoadTrustedTemplate(attempt, trusted, error) ||
-                !ValidateFinalCollaborativeTransaction(
+            if (!LoadTrustedTemplate(attempt, trusted, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            if (!ValidateFinalCollaborativeTransaction(
                     *message->result.final_transaction, *message->result.txid,
                     *message->result.raw_transaction_hash, trusted, error)) {
                 const std::string validation_error{error};
                 std::string persistence_error;
                 if (!MarkFinalValidationFailureRecoverable(
                         store, session, attempt, GetTime(), persistence_error)) {
+                    throw ApplicationError(ErrorKind::WALLET, persistence_error);
+                }
+                if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), persistence_error)) {
                     throw ApplicationError(ErrorKind::WALLET, persistence_error);
                 }
                 throw ApplicationError(ErrorKind::INVALID_INPUT, validation_error);
@@ -2421,6 +2430,9 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         if (!store.StoreClientResult(message->result, Params().GenesisBlock().GetHash(),
                                      attempt.attempt_id, GetTime(), error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        if (!context.paymaster->AcknowledgeDirectMessagesIfPresent({messages.front().message_id})) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
         }
         accepted_result = message->result;
         const bool final = message->result.final_transaction.has_value();
