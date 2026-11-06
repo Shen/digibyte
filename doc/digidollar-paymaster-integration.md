@@ -32,6 +32,16 @@ the exact total; unrepresentable rounded totals fail.
 
 ## Preparation, explicit authorization, execution and resumption
 
+`paymaster` and `auto` never fall through to an ordinary direct payment. For a
+new `auto` request with suitable own DGB, Core returns
+`PAYMASTER_AUTO_DIRECT_REQUIRES_EXPLICIT_DGB` before payment signing. Use a separate
+ordinary send with only `{"fee_mode":"dgb"}` as options, removing Paymaster
+authorization and selection fields. That ordinary
+API does not provide Paymaster request-ID idempotency; reconcile a lost reply
+before retrying it. Without suitable DGB, `auto` can prepare the collaborative
+flow below. An existing collaborative `auto` session always resumes its saved
+order, including after the wallet receives DGB.
+
 1. Persist a canonical lowercase UUID `request_id` and complete order before
    calling. Retain returned `session_id` and ordered `reserved_user_inputs`.
 2. Prepare with `prepare_only=true`. This may reserve inputs, contact providers

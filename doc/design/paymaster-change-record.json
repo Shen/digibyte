@@ -9,10 +9,10 @@
       "regressions": "Execute the exact old/new pipeline with silent and informational success, stderr-only analyzer failure and failed log output; require success only for successful analysis/logging and preserve nonzero analyzer status. Bash syntax check locally; complete native_tidy/plugin/IWYU profile remains an operator check."
     },
     "test/functional/test_runner.py": {
-      "purpose": "Register the independent Paymaster policy, offer, capacity, client-protection, cancellation and lifecycle variants, plus AP1's provider manual-lock regression for both operational assets, reload and first signing.",
+      "purpose": "Register independent Paymaster policy, offer, capacity, client-protection, cancellation, lifecycle, manual-lock and AUTO direct-authorization regressions using the existing scenario runner.",
       "reused_api": "Existing BASE_SCRIPTS registration and each scenario's existing descriptor-wallet command-line options; no runner scheduling, selection or assertion changes.",
-      "ordinary_callers": "Ordinary DGB/DD functional registrations and runner behavior remain unchanged; the Paymaster selection contains 27 current-current variants, including wallet_paymaster_locks.py.",
-      "regressions": "Resolve the documented filter and exclusions; run wallet_paymaster_locks.py with isolated descriptor regtest wallets and the current daemon, alongside ordinary DGB/DD and recovery regressions. Complete functional and historical compatibility matrices remain operator checks."
+      "ordinary_callers": "Ordinary DGB/DD registrations and runner behavior remain unchanged; the Paymaster selection contains 28 current-current variants, including wallet_paymaster_auto.py and wallet_paymaster_locks.py.",
+      "regressions": "Resolve the documented filter/exclusions; isolated descriptor Regtest AUTO preparation/retry/CLI and explicit ordinary DGB sending, alongside provider locks and recovery. Complete functional/compatibility matrices remain operator checks."
     },
     "src/wallet/digidollarwallet.cpp": {
       "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance.",
@@ -193,6 +193,12 @@
       "reused_api": "CConnmanTest, CConnman::DisconnectNodes and DirectQueue::Claim; no production test hook.",
       "ordinary_callers": "Other networking fixtures retain existing helpers and semantics.",
       "regressions": "Compile net fixtures; run new disconnect/reader/permit regression and existing ordinary network tests."
+    },
+    "src/rpc/digidollar.cpp": {
+      "purpose": "R1: adapt all Paymaster-capable sends through the native client service; only explicit ordinary DGB sends may continue to direct execution. Describe the AUTO direct-authorization error in same-build help.",
+      "reused_api": "PrepareDigiDollarFeeFunding, RequestAutomaticPaymasterPayment and existing ordinary TransferDigiDollar; no new financial-rule implementation in RPC.",
+      "ordinary_callers": "Ordinary senddigidollar without Paymaster options or with fee_mode=dgb keeps its existing execution path. New AUTO with suitable DGB fails before signing and requires an explicit DGB call; existing collaborative sessions resume their saved authority.",
+      "regressions": "wallet_paymaster_auto.py: prepare/no commitment/mismatched commitment/concurrent UUID/CLI cannot pay, ordinary explicit DGB works, retries after confirmation cannot pay; existing collaborative RPC/provider/reorg regressions."
     }
   },
   "scope_authorization": {

@@ -1,6 +1,7 @@
 // Copyright (c) 2026 The DigiByte Core developers
 // Distributed under the MIT software license, see COPYING.
 #include <wallet/paymasterclient.h>
+#include <wallet/paymasterclientview.h>
 #include <wallet/paymasterservice.h>
 #include <wallet/paymasterapplication_internal.h>
 #include <paymaster/error.h>
@@ -598,7 +599,7 @@ std::optional<PaymentResult> TryResumeClientQuoteAuthorization(ClientQuoteOperat
     auto& durable_session = operation.durable_session;
     auto& have_durable_session = operation.have_durable_session;
     have_durable_session =
-        store.GetSessionByRequestId(request_id, durable_session);
+        FindClientSession(request_id, store, durable_session);
     if (have_durable_session && !IsTerminal(durable_session.state)) {
         ProviderAttempt durable_attempt;
         PaymentIntent durable_intent;
@@ -1038,7 +1039,7 @@ std::optional<PaymentResult> PrepareClientQuoteAttempt(ClientQuoteOperation& ope
         attempt.unsigned_intent = SerializePaymentIntent(intent);
         attempt.created_at = attempt.updated_at = now;
         if (!store.PreparePaymentIntent(request_id, attempt, now, error) ||
-            !store.GetSessionByRequestId(request_id, session)) {
+            !FindClientSession(request_id, store, session)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }
@@ -1153,7 +1154,7 @@ std::optional<PaymentResult> AdvanceClientQuoteCapacity(ClientQuoteOperation& op
             }
             node->connman->WakeMessageHandler();
         }
-        if (!store.GetSessionByRequestId(request_id, session)) {
+        if (!FindClientSession(request_id, store, session)) {
             throw ApplicationError(ErrorKind::WALLET,
                                "PAYMASTER_SESSION_NOT_FOUND");
         }
@@ -1351,7 +1352,7 @@ PaymentResult CaptureClientQuoteProgress(ClientQuoteOperation& operation)
     auto& intent = operation.intent;
     auto& queued = operation.queued;
     auto& connection_pending = operation.connection_pending;
-    if (!store.GetSessionByRequestId(request_id, session)) {
+    if (!FindClientSession(request_id, store, session)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
     }
     PaymentResult result = CaptureSessionPayment(session);
@@ -1425,7 +1426,7 @@ std::optional<PaymentResult> TryResumeAutomaticPaymentAuthorization(AutomaticPay
     const auto& supplied_authorization_commitment = operation.input.authorization_commitment;
     auto& preset_inputs = operation.preset_inputs;
     PaymentSession durable_session;
-    if (store.GetSessionByRequestId(request_id, durable_session) &&
+    if (FindClientSession(request_id, store, durable_session) &&
         !IsTerminal(durable_session.state)) {
         ProviderAttempt durable_attempt;
         PaymentIntent durable_intent;
@@ -1554,6 +1555,46 @@ std::optional<PaymentResult> TryResumeAutomaticPaymentAuthorization(AutomaticPay
     return std::nullopt;
 }
 
+// AUTO has no durable direct-payment manifest. Never let its preparation,
+// commitment or UUID silently fall through to a non-idempotent ordinary send.
+// Existing sessions always resume before checking the funding of a new order.
+void CheckNewAutomaticPaymentFunding(AutomaticPaymentOperation& operation)
+{
+    PaymentSession existing;
+    if (FindClientSession(operation.input.request_id, operation.store, existing)) return;
+    auto* dd_wallet = operation.wallet.GetDDWallet();
+    if (!dd_wallet) throw ApplicationError(ErrorKind::WALLET, "DigiDollar wallet not initialized");
+    const auto& input = operation.input;
+    const CAmount balance = dd_wallet->GetTotalDDBalance();
+    if (input.amount > balance) {
+        if (input.amount <= balance + dd_wallet->GetPendingDDBalance())
+            throw ApplicationError(ErrorKind::INSUFFICIENT_FUNDS,
+                "Insufficient confirmed DD balance; please wait for prior DigiDollar transfer confirmation and try again.");
+        throw ApplicationError(ErrorKind::INSUFFICIENT_FUNDS,
+            strprintf("Insufficient DD balance (have %d cents, need %d cents)", balance, input.amount));
+    }
+    if (input.mode != FeeMode::AUTO) return;
+    std::vector<COutPoint> sweep_inputs;
+    const auto* inputs = operation.preset_inputs;
+    if (input.send_all) {
+        CAmount total{0};
+        std::string error;
+        if (!dd_wallet->SelectAllSpendableDDCoins(input.amount, sweep_inputs, total, nullptr, error)) return;
+        inputs = &sweep_inputs;
+    }
+    DDTransferPlan plan;
+    std::string error;
+    const CDigiDollarAddress address{input.address};
+    if (dd_wallet->PlanFundedDigiDollarTransfer({{address, input.amount}}, plan, error, inputs)) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT,
+            "PAYMASTER_AUTO_DIRECT_REQUIRES_EXPLICIT_DGB",
+            "PAYMASTER_AUTO_DIRECT_REQUIRES_EXPLICIT_DGB: suitable DGB fee inputs are available; select fee_mode dgb explicitly to sign and broadcast a direct payment.",
+            ErrorDisposition::RETRY_BEFORE_EXECUTION);
+    }
+    if (plan.error_code != DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS)
+        throw ApplicationError(ErrorKind::WALLET, strprintf("Transfer preflight failed: %s", error));
+}
+
 void PrepareAutomaticPaymentSponsorship(AutomaticPaymentOperation& operation)
 {
     const auto& input = operation.input;
@@ -1662,7 +1703,7 @@ std::optional<PaymentResult> ResumeAutomaticPaymentSelection(AutomaticPaymentOpe
     auto& have_persisted_session = operation.have_persisted_session;
     auto& preset_inputs = operation.preset_inputs;
     have_persisted_session =
-        store.GetSessionByRequestId(request_id, persisted_session);
+        FindClientSession(request_id, store, persisted_session);
     if (have_persisted_session) {
         ValidatePreferredClientOffer(input, store, persisted_session);
         if (IsTerminal(persisted_session.state)) {
@@ -2012,7 +2053,7 @@ PaymentResult AuthorizeAutomaticPaymentQuote(AutomaticPaymentOperation& operatio
     }
     if (wallet->IsLocked()) {
         PaymentSession session;
-        if (!store.GetSessionByRequestId(request_id, session)) {
+        if (!FindClientSession(request_id, store, session)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
         }
         if (session.state == SessionState::AWAITING_USER_SIGNATURE &&
@@ -2023,7 +2064,7 @@ PaymentResult AuthorizeAutomaticPaymentQuote(AutomaticPaymentOperation& operatio
                                      error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        if (!store.GetSessionByRequestId(request_id, session)) {
+        if (!FindClientSession(request_id, store, session)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
         }
         PaymentResult paused = CaptureSessionPayment(session);
@@ -2072,6 +2113,7 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
     AutomaticPaymentOperation operation{context, wallet, input, preset_inputs};
     ValidateAutomaticPaymentPreparation(operation);
     if (auto resumed = TryResumeAutomaticPaymentAuthorization(operation)) return std::move(*resumed);
+    CheckNewAutomaticPaymentFunding(operation);
     PrepareAutomaticPaymentSponsorship(operation);
     if (auto completed = ResumeAutomaticPaymentSelection(operation)) return std::move(*completed);
     SelectAutomaticPaymentOffer(operation);

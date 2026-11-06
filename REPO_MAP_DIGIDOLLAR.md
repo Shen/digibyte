@@ -1541,6 +1541,7 @@ oracle P2P proof is `digidollar_wave20_oracle_p2p.py`.
 | `wallet_paymaster_backup.py` | Stale-provider restore quarantine, retained exact replay and client-only restore. |
 | `wallet_paymaster_backup_exit.py` | Reviewed matching-checkpoint recovery exit, permanent retirement and ordinary DD spending. |
 | `wallet_paymaster_rpc.py` | RPC authorization/scoping, offer-model and reserved-capacity variants, carrier-maintenance approvals. |
+| `wallet_paymaster_auto.py` | Own-DGB AUTO preparation/commitment/concurrent-ID/CLI rejection before signing, with explicit ordinary DGB send and post-confirmation retry coverage. |
 | `wallet_paymaster_provider.py` | Provider policy/pools, full payment and drain-recovery variants, finance, backup, logging and optional old-node relay. |
 | `wallet_paymaster_offer_selection.py` | Two-provider price selection, expiry/replacement and unselected-provider isolation. |
 | `wallet_paymaster_failover.py` | Contended capacity, same-input fallback, post-signature exclusion and unsigned closure. |

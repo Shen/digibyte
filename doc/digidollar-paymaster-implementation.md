@@ -196,7 +196,9 @@ authorization, offer selection, reservation, capacity, quote exchange and exact
 approval. The connection lease remains owned across those phases; only the store
 changes durable authority. Provider submit dispatch similarly separates intake,
 replay, signing/commit and post-commit broadcast while retaining one work guard
-and fair message lease.
+and fair message lease. AUTO funding decisions belong to the native client
+service. A new AUTO order with suitable own DGB is rejected before signing and
+requires an explicit ordinary DGB send; it has no durable direct-payment manifest.
 
 Provider processing has one native disposition: no message, processed, rejected
 or deferred. Delivery remains an optional separate observation. The RPC adapter

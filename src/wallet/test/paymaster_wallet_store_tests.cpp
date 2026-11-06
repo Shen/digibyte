@@ -1389,7 +1389,7 @@ BOOST_AUTO_TEST_CASE(auto_dispatch_rejects_unreadable_session_before_funding_or_
     const auto tx_count = m_wallet.mapWallet.size();
     const auto dispatch = [&] {
         return PrepareDigiDollarFeeFunding(request, m_wallet, dd_wallet, {},
-            CDigiDollarAddress{}, 1, options, inputs, preset);
+            1, options, preset);
     };
     const auto expect_error = [&](const char* message) {
         const auto before = database.m_records;

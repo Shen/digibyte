@@ -4,7 +4,6 @@
 
 #include <wallet/rpc/paymaster_send.h>
 
-#include <key_io.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/util.h>
@@ -15,8 +14,6 @@
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/wallet.h>
-
-#include <utility>
 
 namespace wallet {
 PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
@@ -172,9 +169,8 @@ PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request)
 
 std::optional<UniValue> PrepareDigiDollarFeeFunding(
     const JSONRPCRequest& request, CWallet& wallet, DigiDollarWallet& dd_wallet,
-    const std::string& addressStr, const CDigiDollarAddress& dd_address, CAmount amount,
-    const PaymasterSendOptions& options, std::vector<COutPoint>& selected_inputs,
-    const std::vector<COutPoint>*& preset_dd_inputs)
+    const std::string& addressStr, CAmount amount,
+    const PaymasterSendOptions& options, const std::vector<COutPoint>* preset_dd_inputs)
 {
     const auto& [fee_mode, subtract_paymaster_fee_from_amount, send_all_spendable_dd, send_options] = options;
     const auto finalize_paymaster_result =
@@ -206,118 +202,33 @@ std::optional<UniValue> PrepareDigiDollarFeeFunding(
             return result;
         };
 
-    // Once an AUTO or PAYMASTER request owns a persistent client
-    // session it must resume that exact flow before ordinary balance
-    // checks or a fresh direct-DGB preflight. Its inputs may already
-    // be reserved or spent by the final transaction, so both the
-    // spendable and total DD balances can legitimately be lower than
-    // the original request. RequestAutomaticPaymasterQuote performs
-    // the durable order/input checks and returns the idempotent state.
     if (fee_mode != DigiDollar::Paymaster::FeeMode::DGB) {
-        const std::string request_id =
-            send_options.find_value("request_id").get_str();
-        DigiDollar::Paymaster::PaymentSession persisted_session;
-        wallet::PaymasterStore store{wallet};
-        const auto status = store.GetSessionByRequestIdWithStatus(request_id, persisted_session);
+        // Preserve the persisted-read error contract before interpreting a
+        // new order. Unreadable authority cannot be treated as an absent send.
+        PaymasterStore store{wallet};
+        DigiDollar::Paymaster::PaymentSession session;
+        const auto status = store.GetSessionByRequestIdWithStatus(
+            send_options.find_value("request_id").get_str(), session);
         if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
             throw JSONRPCError(RPC_WALLET_ERROR,
                 status == DatabaseReadStatus::UNSUPPORTED_VERSION
                     ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION"
                     : "PAYMASTER_SESSION_READ_FAILED");
         }
-        if (status == DatabaseReadStatus::FOUND && !persisted_session.provider_side) {
-            return finalize_paymaster_result(
-                wallet::RequestAutomaticPaymasterQuote(
-                    request, addressStr, amount, send_options,
-                    preset_dd_inputs));
-        }
+        // The native service owns funding decisions, durable retries and all
+        // authorization gates. Only an explicit ordinary DGB send may fall
+        // through to TransferDigiDollar below this adapter.
+        return finalize_paymaster_result(RequestAutomaticPaymasterQuote(
+            request, addressStr, amount, send_options, preset_dd_inputs));
     }
-
-    // Bind send-all to the exact ordinary spendable set observed by
-    // this call. RequestAutomaticPaymasterQuote verifies the same
-    // balance again immediately before durable reservation.
-    std::vector<CAmount> send_all_amounts;
-    CAmount send_all_total{0};
-    std::string send_all_error;
-    bool send_all_snapshot_available{!send_all_spendable_dd};
-    if (send_all_spendable_dd) {
-        send_all_snapshot_available =
-            dd_wallet.SelectAllSpendableDDCoins(
-                amount, selected_inputs, send_all_total,
-                &send_all_amounts, send_all_error);
-        if (send_all_snapshot_available) {
-            preset_dd_inputs = &selected_inputs;
-        } else {
-            // A durable Paymaster session already hides its exact
-            // inputs from ordinary spendable coin selection. Leave
-            // the preset empty so RequestAutomaticPaymasterQuote can
-            // distinguish that safe retry from a genuine pre-reserve
-            // balance change and reuse only the persisted binding.
-            selected_inputs.clear();
-            send_all_amounts.clear();
-            preset_dd_inputs = nullptr;
-        }
-    }
-
-    // Direct DGB-funded sends may only use ordinary spendable inputs.
-    // Paymaster and AUTO retries deliberately use the total confirmed
-    // balance here because the exact retry may already own a durable
-    // reservation; RequestAutomaticPaymasterQuote validates that
-    // reservation against the persisted session before signing.
-    const CAmount balance = fee_mode == DigiDollar::Paymaster::FeeMode::DGB
-        ? dd_wallet.GetSpendableDDBalance()
-        : dd_wallet.GetTotalDDBalance();
+    const CAmount balance = dd_wallet.GetSpendableDDBalance();
     if (amount > balance) {
-        const CAmount pending_balance = dd_wallet.GetPendingDDBalance();
-        if (amount <= balance + pending_balance) {
+        if (amount <= balance + dd_wallet.GetPendingDDBalance()) {
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                 "Insufficient confirmed DD balance; please wait for prior DigiDollar transfer confirmation and try again.");
         }
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-            strprintf("Insufficient DD balance (have %d cents, need %d cents)",
-                     balance, amount));
-    }
-
-    if (fee_mode == DigiDollar::Paymaster::FeeMode::PAYMASTER) {
-        return finalize_paymaster_result(
-            wallet::RequestAutomaticPaymasterQuote(
-                request, addressStr, amount, send_options,
-                preset_dd_inputs));
-    }
-
-    if (fee_mode == DigiDollar::Paymaster::FeeMode::AUTO) {
-        DDTransferPlan plan;
-        std::string preflight_error;
-        const bool can_fund_direct = send_all_snapshot_available &&
-            dd_wallet.PlanFundedDigiDollarTransfer(
-                {{dd_address, amount}}, plan, preflight_error,
-                preset_dd_inputs);
-        if (!can_fund_direct) {
-            if (send_all_spendable_dd &&
-                !send_all_snapshot_available) {
-                // Either resume the already persisted exact session,
-                // or fail closed with PAYMASTER_SWEEP_BALANCE_CHANGED
-                // before a new reservation is created.
-                return finalize_paymaster_result(
-                    wallet::RequestAutomaticPaymasterQuote(
-                        request, addressStr, amount, send_options,
-                        /*preset_inputs=*/nullptr));
-            }
-            if (plan.error_code !=
-                DDTransferPlanError::INSUFFICIENT_DGB_FEE_INPUTS) {
-                throw JSONRPCError(RPC_WALLET_ERROR,
-                                   strprintf("Transfer preflight failed: %s", preflight_error));
-            }
-            return finalize_paymaster_result(
-                wallet::RequestAutomaticPaymasterQuote(
-                    request, addressStr, amount, send_options,
-                    preset_dd_inputs));
-        }
-        if (wallet.IsLocked()) {
-            throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED,
-                "DigiDollar send requires the wallet to be unlocked. "
-                "Error: Please enter the wallet passphrase with walletpassphrase first.");
-        }
+            strprintf("Insufficient DD balance (have %d cents, need %d cents)", balance, amount));
     }
     return std::nullopt;
 }

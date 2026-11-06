@@ -4769,13 +4769,14 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked();
     const QString title = paymaster_only
         ? DigiDollarSendWidget::tr("Request a Paymaster offer")
-        : automatic ? DigiDollarSendWidget::tr("Confirm automatic fee funding")
+        : automatic ? DigiDollarSendWidget::tr("Review automatic fee funding")
                     : DigiDollarSendWidget::tr("Confirm send DigiDollar");
     QString question_string;
 
     question_string.append(paymaster_only
         ? DigiDollarSendWidget::tr("Do you want Core to prepare this Paymaster transfer?")
-        : DigiDollarSendWidget::tr("Do you want to send this DigiDollar transaction?"));
+        : automatic ? DigiDollarSendWidget::tr("Do you want Core to check the fee-funding method?")
+                    : DigiDollarSendWidget::tr("Do you want to send this DigiDollar transaction?"));
     question_string.append("<br /><span style='font-size:10pt;'>");
     question_string.append(paymaster_only
         ? DigiDollarSendWidget::tr("This step requests and verifies an offer. It does not sign or broadcast a transaction.")
@@ -4829,7 +4830,7 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
     question_string.append("</b><br />");
     if (automatic) {
         const qint64 effective_fee_cap = effectiveServiceFeeCap();
-        question_string.append(DigiDollarSendWidget::tr("Automatic: use this wallet's DGB first."));
+        question_string.append(DigiDollarSendWidget::tr("Automatic checks this wallet's DGB first. If suitable DGB is available, select Own DGB to explicitly authorize a direct payment."));
         question_string.append("<br />");
         question_string.append(DigiDollarSendWidget::tr(
             "Only if suitable DGB fee inputs are insufficient will Core request a Paymaster offer."));
@@ -4873,12 +4874,12 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
     question_string.append("<hr />");
     question_string.append(paymaster_only
         ? DigiDollarSendWidget::tr("Next action: request and verify an exact Paymaster offer.")
-        : automatic ? DigiDollarSendWidget::tr("Next action: use DGB if possible, otherwise prepare an exact Paymaster offer.")
+        : automatic ? DigiDollarSendWidget::tr("Next action: check DGB funding, otherwise prepare an exact Paymaster offer.")
                     : DigiDollarSendWidget::tr("Next action: unlock the wallet if necessary, then sign and broadcast."));
 
     const QString confirm_button_text = paymaster_only
         ? DigiDollarSendWidget::tr("Find offer")
-        : automatic ? DigiDollarSendWidget::tr("Continue") : DigiDollarSendWidget::tr("Send");
+        : automatic ? DigiDollarSendWidget::tr("Check funding") : DigiDollarSendWidget::tr("Send");
     auto confirmationDialog = new DDSendConfirmationDialog(
         title,
         question_string,

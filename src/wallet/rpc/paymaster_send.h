@@ -14,7 +14,6 @@
 #include <string>
 #include <vector>
 
-class CDigiDollarAddress;
 class DigiDollarWallet;
 class JSONRPCRequest;
 
@@ -31,17 +30,14 @@ struct PaymasterSendOptions {
 
 PaymasterSendOptions ParsePaymasterSendOptions(const JSONRPCRequest& request);
 
-/** Resume a durable session before selecting inputs, then enforce the existing
- * balance and fee-funding checks. A result completes this RPC through Paymaster;
- * nullopt continues the ordinary DGB-funded transfer. The selected-input buffer
- * belongs to the caller and remains alive through that transfer.
+/** Adapt Paymaster-capable sends through the native payment service. Only an
+ * explicit ordinary DGB-funded transfer returns nullopt for direct execution.
  * Call after wallet synchronization and ordinary address/amount validation.
  */
 std::optional<UniValue> PrepareDigiDollarFeeFunding(
     const JSONRPCRequest& request, CWallet& wallet, DigiDollarWallet& dd_wallet,
-    const std::string& addressStr, const CDigiDollarAddress& dd_address, CAmount amount,
-    const PaymasterSendOptions& options, std::vector<COutPoint>& selected_inputs,
-    const std::vector<COutPoint>*& preset_dd_inputs);
+    const std::string& addressStr, CAmount amount,
+    const PaymasterSendOptions& options, const std::vector<COutPoint>* preset_dd_inputs);
 } // namespace wallet
 
 #endif // DIGIBYTE_WALLET_RPC_PAYMASTER_SEND_H

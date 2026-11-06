@@ -21,7 +21,7 @@ the payment. An offer does not give you DD or unlock protected wallet reserves.
 | Send DD choice | What it does | What you need |
 |---|---|---|
 | Own DGB | Your wallet pays the DGB network fee. | Spendable DD and suitable DGB inputs for the fee. |
-| Automatic | Core tries your DGB first, then Paymaster if suitable DGB is insufficient. | Spendable DD; any Paymaster fallback still needs exact fee approval. |
+| Automatic | Core checks your DGB first. When suitable DGB is available, choose Own DGB explicitly; otherwise Core prepares a Paymaster payment. | Spendable DD; any Paymaster fallback still needs exact fee approval. |
 | Paymaster | Request provider-funded DGB for this payment. | Spendable DD and a usable offer within your limits. |
 
 An offer shown while Automatic is selected is a possible fallback, not proof

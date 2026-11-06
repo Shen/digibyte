@@ -2209,7 +2209,7 @@ RPCHelpMan senddigidollar()
                     {"amount_unit", RPCArg::Type::STR, RPCArg::Optional::OMITTED, DD_AMOUNT_UNIT_HELP},
                     {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Optional idempotent fee-funding policy",
                         {
-                            {"fee_mode", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "dgb, paymaster, or auto (default: auto)"},
+                            {"fee_mode", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "dgb, paymaster, or auto (default: auto). New auto requests with suitable own DGB require an explicit dgb call; auto never authorizes a direct payment"},
                             {"request_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Required canonical lowercase UUID for paymaster or auto"},
                             {"maximum_paymaster_fee_cents", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Required hard service-fee cap for paymaster or auto"},
                             {"maximum_provider_attempts", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Strictly sequential provider-attempt limit (default 3; high privacy requires 1)"},
@@ -2394,8 +2394,8 @@ RPCHelpMan senddigidollar()
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar RPC: DD address validated\n");
 
             if (auto paymaster_result = wallet::PrepareDigiDollarFeeFunding(
-                    request, *pwallet, *dd_wallet, addressStr, dd_address, amount,
-                    paymaster_options, selected_inputs, preset_dd_inputs)) {
+                    request, *pwallet, *dd_wallet, addressStr, amount,
+                    paymaster_options, preset_dd_inputs)) {
                 return std::move(*paymaster_result);
             }
 

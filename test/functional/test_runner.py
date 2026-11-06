@@ -371,6 +371,7 @@ BASE_SCRIPTS = [
     'wallet_paymaster_checkpoint_rollback.py --descriptors',
     'wallet_paymaster_readiness.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors',
+    'wallet_paymaster_auto.py --descriptors',
     'wallet_paymaster_rpc.py --descriptors --legacy-client-policy-only',
     'wallet_paymaster_rpc.py --descriptors --offer-models-only',
     'wallet_paymaster_rpc.py --descriptors --reserved-capacity-only',
