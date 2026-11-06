@@ -4,6 +4,47 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Provider locks, client result durability and native disposition
+
+Working-tree corrections based on `853cbc6719659000894d230ae97212e3efbc5ac7`,
+checked on 2026-11-06. New provider capacity and signatures respect ordinary
+coin locks; exact durable replay retains its existing authority. Normal and
+alternative-recovery client results use the existing scoped lease/ACK model.
+Provider processing uses one native disposition with compatible RPC encoding.
+The implementation guide owns these behaviors and the test runbook owns coverage.
+
+Twenty-one selected production/test translation units were freshly compiled
+with MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`;
+Qt uses static 5.15.10. The rebuilt consumers include the background service
+that destroys returned processing results. Native, daemon and Qt test links
+reuse remaining objects/libraries and unchanged Qt MOC. These are isolated
+links, not clean product builds or complete transitive-header provenance.
+Commands, hashes, full logs and retained failed attempts are under
+`.ai/impl-ap12-853/`; the final product/test links use the `-v4` suffix.
+
+| Executed check | Bounded result |
+|---|---|
+| Focused native selection | Exit 0: 85 cases / 2,921 assertions. Covers both provider slot-reservation APIs, denied signing without PSBT mutation, independent lock reasons, both result lease types, begin/write/commit and final-preflight failures, typed disposition/JSON and the existing Wire/application cases. |
+| Related authority and ordinary locks | Exit 0: 11 additional cases / 1,347 assertions. Existing cleanup/unlock ownership, exact-final conflict protection, checkpoint concurrency and provider/recovery/firewall/automatic dispatch regressions. The two selections are disjoint: 96 cases / 4,268 assertions. |
+| Qt | Four selected functions exit 0: manual activity serialization, submit confirmation, ordinary wallet transactions and DGB balance breakdown. Init/cleanup are excluded; this is not a full Qt pass. |
+| New provider-lock functional | Final `locks-v8` exits 0, about 44 seconds: transient/persistent DGB and carrier locks, reload, first-signature veto, retained reservations and a completed payment. Existing DD-token RPC unlock protection remains enforced; finite funding supplies the next whole slot without reducing its fee ceiling. |
+| Existing provider functional | Exit 0, 100.344 seconds: paid/public transfers, lost results, alternate recovery and safety depth, finance/backup, encrypted restart and unload. |
+| Existing payment/reorg functional | Exit 0, 17.860 seconds: authenticated rejection, real payment, reorganization and reconfirmation without duplicate accounting. All three successful functional runs use seed 1015350342, separate Regtest directories and port seeds 2901/2861/2881 respectively. The current daemon is freshly linked; the existing CLI is reused. |
+| Local controls | Dependency/cycle checks and all six architecture fixtures pass. Python AST/registration and whitespace checks pass; 27 current-current functional variants are registered. |
+
+Initial diagnostic links included duplicate older objects, followed by a stale
+background-service consumer of the changed result layout. Those link/test
+failures are retained separately from the successful links with that consumer
+freshly compiled. Earlier new-functional attempts exercised invalid fixture
+assumptions about DD unlock, delivery, minimum change and subsequent slot
+funding; no product rule, limit or existing assertion was relaxed.
+
+Flake8 6.1.0 was unavailable; an isolated workspace installation could not
+obtain it from the available package source. AST checks are not a lint pass.
+Clean supported product builds, Linux/C++17, Tidy17 with the repository plugin,
+sanitizers and complete Qt/functional/compatibility/release matrices remain
+operator/CI work.
+
 ## Request classification, dispatch and native observations
 
 Working-tree changes based on `095e41ca147929dd39972047e20e2dbd3211ad36`,
