@@ -4,6 +4,39 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Final witnesses, recovery history and explicit transaction completion
+
+Working-tree corrections based on `83c8effe233406e4b09b36f0c5d3810e089f48eb`,
+checked on 2026-11-07. The implementation guide owns the signature, combined
+history-limit, observation and transaction-lifecycle contracts; the test runbook
+owns the new regression selectors. No wire or persisted record format changed.
+
+Twelve distinct translation units (six production, six test) were freshly
+compiled with MSVC 19.43.34810 / toolset 14.43.34808,
+`/W3 /WX /Od /MT /std:c++20`. Native, daemon and Qt links are isolated and reuse
+remaining objects/libraries; Qt uses the existing static 5.15.10 and MOC.
+They do not establish complete transitive-header provenance or clean product
+builds. Commands, hashes, full diagnostics and source snapshots are retained in
+`.ai/implement-ap1-ap4-83c8eff/` (`source-freeze-final.json`, `compiled.jsonl`,
+product provenance and `runs.jsonl`).
+
+| Executed check | Bounded result |
+|---|---|
+| New and related native regressions | Exit 0: selections of 11 cases / 9,413 assertions and 35 cases / 9,539 assertions. Six new cases cover real-key final-witness hash modes/roles/metadata, combined normal/recovery admission and exact replay at quota, bounded recovery cleanup and failure/restart protection, targeted finance read errors, and batch destruction with reused owner addresses. Database rollback and the independent checkpoint-ahead fence are asserted separately. |
+| Final native consumer/ordinary-DB selection | Exit 0: 13 cases / 38,125 assertions on `native-v2`, including the six new cases, session-index commit/abort/failure/reconstruction, native finance capture, checkpoint concurrency and ordinary prefix/range cursors on the configured BDB, SQLite and mock backends. The three native selections cover 53 distinct cases / 47,897 assertions after removing overlap; bulk quota/index assertions are not separate security scenarios. |
+| Negative control | The three selected signature, finance-read and recovery-pruning regressions all fail with prior implementation objects (Exit 201, 105 failed assertions). New test objects are unchanged; this is a narrow causal check, not historical-release interoperability. |
+| Descriptor functionals | Exit 0: AUTO (10.219 seconds), complete provider scenario (81.656 seconds) and reorg (27.484 seconds), using isolated Regtest directories, seed 1015350342 and port seeds 3381/3391/3401. Covers explicit ordinary DGB/DD sends, paid/public transfers, exact gross/sweep, lost results, alternative V5 recovery, safety depth, finance/backup, encryption/restart/unload and reconfirmation without duplicate accounting. The daemon is freshly linked; the existing CLI is reused. |
+| Qt | Five selected feature functions exit 0 with no skipped feature cases: finance/backup, manual Activity results, ordinary wallet transactions, DGB balance breakdown and node-RPC model teardown. Windows platform/Fusion; init/cleanup are excluded. No full Qt pass is claimed. Existing style-property and QSignalSpy metadata warnings remain in the logs. |
+| Local controls | Working-tree dependency/cycle checks, six boundary fixtures, shared-path/change-record checks against the unchanged HEAD policy, JSON parsing and whitespace checks pass. |
+
+An initial isolated daemon link used the wrong project working directory and
+failed before any test (LNK1181); the corrected link and all current-source test
+selections above succeeded without changing compiler warnings or validation.
+History/fault-injection fixtures do not simulate physical disk failure or a
+measured remote denial of service. Clean supported product builds, Linux/C++17,
+Tidy17 with the DigiByte plugin, sanitizers, full test/compatibility matrices and
+operational release gates remain operator/CI checks.
+
 ## AUTO authorization, disconnect lifetime and retained financial work
 
 Working-tree corrections based on `8cd998047fac1acf71c7e5dc18ff11de21861712`,

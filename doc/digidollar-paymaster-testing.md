@@ -403,6 +403,29 @@ repository root after a successful current-revision build with tests enabled. Al
 Success requires exit code zero and no failed tests. This suite still does not
 replace the functional matrix, ordinary-wallet regressions or release gates.
 
+For final-signature enforcement, combined provider-history admission and native
+observation/lifecycle failures, use a freshly built test binary:
+
+```powershell
+$reviewRegressions = @(
+    'paymaster_psbt_tests/final_witness_requires_default_sighash_independently_of_psbt_metadata',
+    'paymaster_wallet_security_tests/provider_history_quota_counts_alternative_recovery_quotes,expired_unsigned_provider_recovery_history_is_compacted_atomically,provider_recovery_pruning_is_bounded_and_preserves_signed_records',
+    'paymaster_wallet_finance_tests/warm_finance_read_errors_never_become_zero_capital,wallet_batch_destruction_discards_uncommitted_finance_notifications'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($reviewRegressions -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Final signatures, retained history or transaction completion failed' }
+```
+
+The signature case uses real keys and valid signatures for all supported hash
+modes, both metadata forms and all four roles. History cases check admission,
+exact replay at quota, expiry/pruning begin/write/commit failures, restart,
+bounded cleanup and retained signing evidence. Finance failure injection targets
+one unreadable key and its failed existence lookup while other records remain
+readable. Add existing checkpoint, session-index, finance commit/abort, wallet
+PSBT and provider/recovery functional regressions. Recompile reached consumers
+of the changed inline `WalletBatch` destructor for isolated checks; only clean
+product builds establish the complete consumer set.
+
 ## Architecture checks
 
 From the repository root:
