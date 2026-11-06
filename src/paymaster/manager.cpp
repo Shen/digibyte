@@ -393,6 +393,73 @@ std::vector<DirectMessage> PeekMatchingFair(
     return result;
 }
 
+// Request and submit dispatch share the same fair, non-authoritative selection.
+// Their cursor maps and each message type's netgroup/session history stay separate.
+template <size_t TypeCount, typename CursorMap, typename TypeOf>
+std::vector<DirectMessage> LeaseProviderMessage(
+    const PaymasterId& provider_id,
+    const std::deque<DirectMessage>& messages,
+    std::map<uint256, std::pair<uint64_t, size_t>>& leased_ids,
+    CursorMap& cursors,
+    const std::array<bool, TypeCount>& eligible,
+    TypeOf&& type_of)
+{
+    // The bounded inbox also bounds providers and groups retained by the maps,
+    // including when a provider stops or its messages expire.
+    for (auto cursor = cursors.begin(); cursor != cursors.end();) {
+        if (std::any_of(messages.begin(), messages.end(), [&](const DirectMessage& message) {
+                return type_of(message).has_value() && GetDirectProviderId(message.payload) == cursor->first;
+            })) {
+            ++cursor;
+        } else {
+            cursor = cursors.erase(cursor);
+        }
+    }
+    std::vector<DirectMessage> result;
+    if (provider_id.IsNull()) return result;
+    const auto matches = [&](const DirectMessage& message, size_t type) {
+        return type_of(message) == type && GetDirectProviderId(message.payload) == provider_id;
+    };
+    if (std::none_of(messages.begin(), messages.end(), [&](const DirectMessage& message) {
+            const auto type = type_of(message);
+            return type && eligible[*type] && GetDirectProviderId(message.payload) == provider_id;
+        })) {
+        return result;
+    }
+    auto& cursor = cursors.try_emplace(provider_id).first->second;
+    for (size_t type{0}; type < TypeCount; ++type) {
+        auto& sessions = cursor.by_type[type].last_session_by_group;
+        for (auto session = sessions.begin(); session != sessions.end();) {
+            if (std::any_of(messages.begin(), messages.end(), [&](const DirectMessage& message) {
+                    return matches(message, type) && GetDirectFairGroup(message) == session->first;
+                })) {
+                ++session;
+            } else {
+                session = sessions.erase(session);
+            }
+        }
+    }
+    for (size_t offset{1}; offset <= TypeCount; ++offset) {
+        const size_t type{(cursor.last_type + offset) % TypeCount};
+        if (!eligible[type]) continue;
+        auto& fair = cursor.by_type[type];
+        result = PeekMatchingFair(messages, fair.last_group, fair.last_session_by_group, 1,
+                                  [&](const DirectMessage& message) { return matches(message, type); });
+        if (result.empty()) continue;
+        const uint64_t group{GetDirectFairGroup(result.front())};
+        const uint256 session{GetDirectSessionKey(result.front().payload)};
+        // Allocate before acquiring the lease so failure cannot orphan a
+        // prune reference. Cursor changes grant neither acknowledgement nor authority.
+        auto& last_session = fair.last_session_by_group.try_emplace(group).first->second;
+        AddDirectMessageLeases(leased_ids, result);
+        last_session = session;
+        fair.last_group = group;
+        cursor.last_type = type;
+        break;
+    }
+    return result;
+}
+
 } // namespace
 
 int64_t Manager::PruneRateWindows(int64_t now)
@@ -1094,6 +1161,34 @@ DirectMessageLease Manager::LeaseSubmits(const PaymasterId& provider_id,
     return DirectMessageLease{*this, std::move(result)};
 }
 
+DirectMessageLease Manager::LeaseProviderSubmit(const PaymasterId& provider_id)
+{
+    LOCK(m_direct_mutex);
+    auto result = LeaseProviderMessage(provider_id, m_direct_messages, m_leased_direct_ids,
+        m_submit_dispatch_cursors, std::array<bool, 2>{true, true},
+        [](const DirectMessage& message) -> std::optional<size_t> {
+            if (std::holds_alternative<AlternativeRecoverySubmit>(message.payload)) return 0;
+            if (std::holds_alternative<PaymasterSubmit>(message.payload)) return 1;
+            return std::nullopt;
+        });
+    return DirectMessageLease{*this, std::move(result)};
+}
+
+DirectMessageLease Manager::LeaseProviderRequest(const PaymasterId& provider_id,
+                                                 bool allow_capacity)
+{
+    LOCK(m_direct_mutex);
+    auto result = LeaseProviderMessage(provider_id, m_direct_messages, m_leased_direct_ids,
+        m_request_dispatch_cursors, std::array<bool, 3>{allow_capacity, true, true},
+        [](const DirectMessage& message) -> std::optional<size_t> {
+            if (std::holds_alternative<PaymasterCapacityRequest>(message.payload)) return 0;
+            if (std::holds_alternative<AlternativeRecoveryRequest>(message.payload)) return 1;
+            if (std::holds_alternative<PaymasterQuoteRequest>(message.payload)) return 2;
+            return std::nullopt;
+        });
+    return DirectMessageLease{*this, std::move(result)};
+}
+
 std::vector<DirectMessage> Manager::TakeResults(const std::string& request_id,
                                                 const uint256& session_id,
                                                 const PaymasterId& provider_id,
@@ -1497,6 +1592,8 @@ void Manager::ClearDirectMessages()
         m_last_inbound_group.reset();
         m_last_inbound_session_by_group.clear();
         m_outbound_direct_messages.clear();
+        m_submit_dispatch_cursors.clear();
+        m_request_dispatch_cursors.clear();
         m_outbound_direct_ids.clear();
         m_recent_outbound_direct_ids.clear();
         m_outbound_direct_bytes = 0;

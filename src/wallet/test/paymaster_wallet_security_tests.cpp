@@ -5186,4 +5186,262 @@ BOOST_FIXTURE_TEST_CASE(automatic_recovery_rejection_allows_following_quote_and_
     BOOST_CHECK(CheckpointBytes() == checkpoint_before);
 }
 
+static void CheckAutomaticSubmitProgress(QuoteRequestProcessingSetup& setup, bool flood_recovery)
+{
+    auto& environment = setup.environment;
+    auto& wallet = setup.wallet;
+    auto& context = setup.context;
+    auto& manager = setup.manager;
+    const auto& seed = setup.seed;
+    environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+    BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    RunPaymasterProviderServiceCycle(context, wallet);
+    const auto initial = manager.GetProviderServiceStatus(wallet.GetName());
+    BOOST_REQUIRE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const auto checkpoint_before = setup.CheckpointBytes();
+
+    const auto make_submit = [&](bool recovery, uint16_t sequence) -> DirectPayload {
+        std::string error;
+        if (recovery) {
+            AlternativeRecoverySubmit submit;
+            submit.genesis_hash = Params().GenesisBlock().GetHash();
+            submit.request_id = "550e8400-e29b-41d4-a716-446655441201";
+            submit.session_id = SecurityTestId(seed, sequence);
+            submit.recovery_provider_id = environment.identity.provider_id;
+            submit.recovery_id = SecurityTestId(seed, sequence + 1);
+            submit.recovery_request_hash = SecurityTestId(seed, sequence + 2);
+            submit.recovery_commit_key = SecurityTestId(seed, sequence + 3);
+            submit.template_commitment = SecurityTestId(seed, sequence + 4);
+            submit.user_psbt = {1};
+            BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoverySubmitEnvelope(submit, submit.genesis_hash, error), error);
+            return submit;
+        }
+        PaymasterSubmit submit;
+        submit.genesis_hash = Params().GenesisBlock().GetHash();
+        submit.request_id = "550e8400-e29b-41d4-a716-446655441200";
+        submit.session_id = SecurityTestId(seed, sequence);
+        submit.provider_id = environment.identity.provider_id;
+        submit.quote_id = SecurityTestId(seed, sequence + 1);
+        submit.commit_key = SecurityTestId(seed, sequence + 2);
+        submit.template_commitment = SecurityTestId(seed, sequence + 3);
+        submit.user_psbt = {1};
+        BOOST_REQUIRE_MESSAGE(ValidateSubmitEnvelope(submit, submit.genesis_hash, error), error);
+        return submit;
+    };
+    const auto enqueue = [&](DirectPayload payload, int64_t peer, uint64_t group) {
+        const auto bytes = std::visit([](const auto& message) {
+            return SerializePaymasterSecurityObject(message);
+        }, payload);
+        BOOST_REQUIRE(manager.AdmitDirectTransport(peer, group, GetTime(), DirectAdmissionClass::REQUEST));
+        const auto admitted = manager.EnqueueNetworkDirectMessage(peer, Hash(bytes), bytes.size(),
+            std::move(payload), GetTime(), group, {1, 8, static_cast<unsigned char>(group)},
+            DirectAdmissionClass::REQUEST);
+        BOOST_REQUIRE_MESSAGE(admitted == DirectEnqueueResult::ACCEPTED,
+                              "network admission result=" << static_cast<int>(admitted));
+    };
+
+    uint16_t sequence{200};
+    BOOST_TEST_CONTEXT("continuous recovery traffic=" << flood_recovery) {
+        manager.ClearDirectMessages();
+        // The marker is deliberately stale: being consumed proves it
+        // reached classification, without granting payment authority.
+        enqueue(make_submit(!flood_recovery, sequence), 45, 45);
+        sequence += 5;
+        for (int pass = 0; pass < 12; ++pass) {
+            SetMockTime(GetTime() + 1);
+            enqueue(make_submit(flood_recovery, sequence), 100 + pass % 4, 1000 + pass % 2);
+            sequence += 5;
+            const auto queued = manager.DirectMessageCount();
+            RunPaymasterProviderServiceCycle(context, wallet);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), queued - 1);
+            const auto status = manager.GetProviderServiceStatus(wallet.GetName());
+            BOOST_CHECK(status.state == initial.state);
+            BOOST_CHECK_EQUAL(status.last_error, initial.last_error);
+            BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+            BOOST_CHECK(setup.CheckpointBytes() == checkpoint_before);
+            // New competing work arrived on every cycle, yet the other
+            // type was processed within two cycles in both directions.
+            if (pass >= 1) {
+                const auto remaining = flood_recovery
+                    ? manager.LeaseSubmits(environment.identity.provider_id, MAX_DIRECT_INBOX_MESSAGES)
+                    : manager.LeaseRecoverySubmits(environment.identity.provider_id, MAX_DIRECT_INBOX_MESSAGES);
+                BOOST_REQUIRE(remaining.Messages().empty());
+            }
+        }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(automatic_submit_progress_under_continuous_recovery_traffic, QuoteRequestProcessingSetup)
+{
+    CheckAutomaticSubmitProgress(*this, /*flood_recovery=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(automatic_recovery_progress_under_continuous_submit_traffic, QuoteRequestProcessingSetup)
+{
+    CheckAutomaticSubmitProgress(*this, /*flood_recovery=*/false);
+}
+
+static void CheckAutomaticRequestProgress(QuoteRequestProcessingSetup& setup, bool flood_recovery)
+{
+    auto& environment = setup.environment;
+    auto& wallet = setup.wallet;
+    auto& context = setup.context;
+    auto& manager = setup.manager;
+    const auto& seed = setup.seed;
+    environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+    BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    RunPaymasterProviderServiceCycle(context, wallet);
+    const auto initial = manager.GetProviderServiceStatus(wallet.GetName());
+    BOOST_REQUIRE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
+    const auto enqueue_recovery = [&](uint16_t sequence, int64_t peer, uint64_t group) {
+        const auto request = MakeRecoveryReadRequest(environment, SecurityTestId(seed, sequence), GetTime());
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryRequestEnvelope(request,
+            Params().GenesisBlock().GetHash(), GetTime(), error), error);
+        const auto bytes = SerializePaymasterSecurityObject(request);
+        BOOST_REQUIRE(manager.AdmitDirectTransport(peer, group, GetTime(), DirectAdmissionClass::REQUEST));
+        BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(peer, Hash(bytes), bytes.size(),
+            DirectPayload{request}, GetTime(), group, {1, 8, static_cast<unsigned char>(group)},
+            DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    };
+    if (flood_recovery) setup.EnqueueQuote(manager, setup.fixture.request);
+    else enqueue_recovery(590, 45, 45);
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const auto checkpoint_before = setup.CheckpointBytes();
+
+    for (int pass{0}; pass < 12; ++pass) {
+        SetMockTime(GetTime() + 1);
+        if (flood_recovery) {
+            enqueue_recovery(600 + pass, 100 + pass % 4, 1000 + pass % 2);
+        } else {
+            auto request = setup.ConflictingRequest();
+            request.intent.session_id = SecurityTestId(seed, 600 + pass);
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(ValidateQuoteRequestEnvelope(request,
+                Params().GenesisBlock().GetHash(), GetTime(), error), error);
+            const auto bytes = SerializePaymasterSecurityObject(request);
+            const int64_t peer = 100 + pass % 4;
+            const uint64_t group = 1000 + pass % 2;
+            BOOST_REQUIRE(manager.AdmitDirectTransport(peer, group, GetTime(), DirectAdmissionClass::REQUEST));
+            BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(peer, Hash(bytes), bytes.size(),
+                DirectPayload{request}, GetTime(), group, {1, 8, static_cast<unsigned char>(group)},
+                DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+        }
+        const auto queued = manager.DirectMessageCount();
+        RunPaymasterProviderServiceCycle(context, wallet);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), queued - 1);
+        const auto status = manager.GetProviderServiceStatus(wallet.GetName());
+        BOOST_CHECK(status.state == initial.state);
+        BOOST_CHECK_EQUAL(status.last_error, initial.last_error);
+        BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+        BOOST_CHECK(setup.CheckpointBytes() == checkpoint_before);
+        if (pass >= 1) {
+            const auto pending = flood_recovery
+                ? manager.LeaseQuoteRequests(environment.identity.provider_id, MAX_DIRECT_INBOX_MESSAGES)
+                : manager.LeaseRecoveryRequests(environment.identity.provider_id, MAX_DIRECT_INBOX_MESSAGES);
+            BOOST_REQUIRE(pending.Messages().empty());
+        }
+    }
+    if (flood_recovery) {
+        const auto replies = manager.TakeOutboundDirectMessages(44, 1, GetTime());
+        BOOST_REQUIRE_EQUAL(replies.size(), 1U);
+        const auto* quote = std::get_if<PaymasterQuoteResponse>(&replies.front().payload);
+        BOOST_REQUIRE(quote);
+        BOOST_CHECK(SerializePaymasterSecurityObject(*quote) == setup.fixture.attempt.signed_quote);
+    } else {
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 0U);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(automatic_quote_progress_under_continuous_recovery_requests, QuoteRequestProcessingSetup)
+{
+    CheckAutomaticRequestProgress(*this, /*flood_recovery=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(automatic_recovery_request_progress_under_continuous_quotes, QuoteRequestProcessingSetup)
+{
+    CheckAutomaticRequestProgress(*this, /*flood_recovery=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn, QuoteRequestProcessingSetup)
+{
+    std::string error;
+    // A separate free slot makes fresh capacity eligible. The original quote's
+    // reserved slot and authority remain untouched by the throttling fixture.
+    const int height = *m_node.chain->getHeight();
+    const uint256 tip = m_node.chain->getBlockHash(height);
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{SecurityTestId(seed, 700), 0});
+    funding.vout.emplace_back(2000, environment.identity.identity_script);
+    const CTransactionRef funding_tx = MakeTransactionRef(funding);
+    ProviderPoolEntry free_slot;
+    free_slot.outpoint = COutPoint{funding_tx->GetHash(), 0};
+    free_slot.purpose = PoolPurpose::OPERATIONAL;
+    free_slot.asset = PoolAsset::DGB;
+    free_slot.state = PoolEntryState::AVAILABLE;
+    free_slot.script_pub_key = funding.vout.front().scriptPubKey;
+    free_slot.dgb_value = DGBSatoshis{2000};
+    free_slot.confirmation_height = height;
+    free_slot.updated_at = GetTime();
+    {
+        LOCK(cs_main);
+        m_node.chainman->ActiveChainstate().CoinsTip().AddCoin(
+            free_slot.outpoint, Coin{funding.vout.front(), height, false}, false);
+    }
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(funding_tx, TxStateConfirmed{tip, height, 1}));
+        WalletBatch batch{wallet.GetDatabase()};
+        std::vector<ProviderPoolEntry> pool;
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+        pool.push_back(free_slot);
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+        ProviderBudgetLedger ledger;
+        BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(ledger));
+        const uint256 bucket = GetNetgroupBudgetBucket(ledger, {1, 8, 8});
+        const uint256 prior_key = SecurityTestId(seed, 701);
+        const uint256 prior_hash = SecurityTestId(seed, 702);
+        BOOST_REQUIRE_MESSAGE(ReserveProviderCapacityAdmission(ledger, environment.safety,
+            prior_key, prior_hash, bucket, FundingModel::SPONSORED, false,
+            GetTime() + 30, GetTime(), error), error);
+        BOOST_REQUIRE_MESSAGE(ReleaseProviderCapacityAdmission(ledger, prior_key, prior_hash, GetTime(), error), error);
+        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(ledger));
+        auto safety = environment.safety;
+        safety.maximum_quote_requests_per_netgroup_per_minute = 1;
+        BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(safety));
+    }
+    BOOST_REQUIRE(paymaster_app::GetProviderReadiness(wallet, context).ready);
+    PaymasterCapacityRequest capacity = fixture.capacity_request;
+    capacity.request_id = "550e8400-e29b-41d4-a716-446655441221";
+    capacity.session_id = SecurityTestId(seed, 703);
+    capacity.client_nonce = SecurityTestId(seed, 704);
+    capacity.created_at = GetTime();
+    capacity.expires_at = GetTime() + 30;
+    BOOST_REQUIRE_MESSAGE(ValidateCapacityRequestEnvelope(capacity, Params().GenesisBlock().GetHash(), GetTime(), error), error);
+    const auto bytes = SerializePaymasterSecurityObject(capacity);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(44, Hash(bytes), bytes.size(), DirectPayload{capacity},
+        GetTime(), 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    EnqueueQuote(manager, fixture.request);
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const auto checkpoint_before = CheckpointBytes();
+    const auto deferred = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
+    BOOST_CHECK(deferred.processed.value_or(false));
+    BOOST_CHECK(deferred.deferred.value_or(false));
+    BOOST_CHECK_EQUAL(deferred.deferral_reason.value_or(""), "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED");
+    BOOST_CHECK_EQUAL(deferred.message_type.value_or(""), "capacity");
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 2U);
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 0U);
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+    BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+    const auto continuation = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
+    BOOST_CHECK_EQUAL(continuation.message_type.value_or(""), "quote");
+    BOOST_CHECK(continuation.queued.value_or(false));
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+    const auto retained = manager.LeaseCapacityRequests(environment.identity.provider_id, 1);
+    BOOST_REQUIRE_EQUAL(retained.Messages().size(), 1U);
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+    BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

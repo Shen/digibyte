@@ -493,11 +493,11 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
     }
     std::string error;
     const int64_t now = GetTime();
-    const auto recovery_lease =
-        context.paymaster->LeaseRecoverySubmits(identity.provider_id, 1);
-    const auto& recovery_messages = recovery_lease.Messages();
-    if (!recovery_messages.empty()) {
-        const DirectMessage& direct = recovery_messages.front();
+    const auto submit_lease = context.paymaster->LeaseProviderSubmit(identity.provider_id);
+    const auto& messages = submit_lease.Messages();
+    if (!messages.empty() &&
+        std::holds_alternative<AlternativeRecoverySubmit>(messages.front().payload)) {
+        const DirectMessage& direct = messages.front();
         ProviderInboundMessageGuard message_guard{*context.paymaster,
                                                   direct};
         const auto* submit =
@@ -879,9 +879,6 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
         result.recovery = recovery;
         return result;
     }
-    const auto submit_lease =
-        context.paymaster->LeaseSubmits(identity.provider_id, 1);
-    const auto& messages = submit_lease.Messages();
     ProviderProcessingResult result;
     result.processed = !messages.empty();
     result.queued = false;
@@ -2103,7 +2100,6 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
                            "PAYMASTER_PROVIDER_SERVICE_BUSY");
     }
     ProviderProcessingResult result;
-    std::optional<ProviderProcessingResult> deferred_capacity;
     result.queued = false;
     const int64_t now = GetTime();
     std::string error;
@@ -2114,45 +2110,24 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     const ProviderRequestProcessingContext request_context{
         context, wallet, readiness, node, automatic_service, now, error};
 
-    // A reserved operational slot intentionally makes staged pool
-    // readiness false for *new* clients. The same automatic service
-    // must nevertheless continue the already capacity-bound quote
-    // request behind it. Skip fresh capacity work while liquidity is
-    // unavailable, then fall through to recovery/quote continuations.
-    if (!automatic_service || readiness.ready) {
-        const auto capacity_lease =
-            context.paymaster->LeaseCapacityRequests(
-                readiness.identity.provider_id, 1);
-        const auto& capacity_messages = capacity_lease.Messages();
-        if (!capacity_messages.empty()) {
-            result = ProcessProviderCapacityRequest(
-                request_context, capacity_messages.front());
-            if (!result.deferred.value_or(false)) return result;
-        }
-    }
-
-    if (result.deferred.value_or(false)) {
-        // Capacity throttling must not starve already admitted work.
-        deferred_capacity = result;
-        result = {};
-        result.queued = false;
-    }
-
-    const auto recovery_lease =
-        context.paymaster->LeaseRecoveryRequests(
-            readiness.identity.provider_id, 1);
-    const auto& recovery_messages = recovery_lease.Messages();
-    if (!recovery_messages.empty()) {
-        return ProcessProviderRecoveryRequest(
-            request_context, recovery_messages.front(), result);
-    }
-
-    const auto quote_lease = context.paymaster->LeaseQuoteRequests(
-        readiness.identity.provider_id, 1);
-    const auto& messages = quote_lease.Messages();
+    // A reserved slot can make fresh capacity ineligible without stranding
+    // admitted quote/recovery work. Dispatch only one eligible message per
+    // call; a deferred capacity request stays queued, but its lease advances
+    // the cursor so the next call gives another eligible type its turn.
+    const auto request_lease = context.paymaster->LeaseProviderRequest(
+        readiness.identity.provider_id, !automatic_service || readiness.ready);
+    const auto& messages = request_lease.Messages();
     result.processed = !messages.empty();
-    if (messages.empty()) return deferred_capacity ? *deferred_capacity : result;
-    return ProcessProviderQuoteRequest(request_context, messages.front(), result);
+    if (messages.empty()) return result;
+    const DirectMessage& direct = messages.front();
+    if (std::holds_alternative<PaymasterCapacityRequest>(direct.payload)) {
+        return ProcessProviderCapacityRequest(request_context, direct);
+    }
+    if (std::holds_alternative<AlternativeRecoveryRequest>(direct.payload)) {
+        return ProcessProviderRecoveryRequest(
+            request_context, direct, result);
+    }
+    return ProcessProviderQuoteRequest(request_context, direct, result);
 }
 
 PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)

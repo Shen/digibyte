@@ -1714,6 +1714,284 @@ BOOST_AUTO_TEST_CASE(manager_scoped_capacity_lease_releases_on_exception)
     BOOST_CHECK(!manager.HasDirectMessages());
 }
 
+BOOST_AUTO_TEST_CASE(manager_provider_submit_alternates_retained_same_session)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    const PaymasterId provider_id{uint256S("5750")};
+    const auto recovery = RecoveryMessages(
+        uint256S("5751"), now, "550e8400-e29b-41d4-a716-446655445750",
+        uint256S("5752"), provider_id);
+    PaymasterSubmit submit;
+    submit.provider_id = provider_id;
+    submit.request_id = recovery.submit.request_id;
+    submit.session_id = recovery.submit.session_id;
+    const uint256 submit_id{uint256S("5753")};
+    const uint256 recovery_id{uint256S("5754")};
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(
+        1, submit_id, 100, DirectPayload{submit}, now, uint64_t{10}));
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(
+        1, recovery_id, 100, DirectPayload{recovery.submit}, now, uint64_t{10}));
+
+    // The same semantic session and netgroup must not collapse the two work
+    // classes. A retained local failure receives no acknowledgement, but its
+    // next attempt cannot monopolize the other class.
+    for (int attempt{0}; attempt < 6; ++attempt) {
+        const auto lease = manager.LeaseProviderSubmit(provider_id);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        const bool select_recovery{attempt % 2 == 0};
+        BOOST_CHECK(lease.Messages().front().message_id ==
+                    (select_recovery ? recovery_id : submit_id));
+        BOOST_CHECK_EQUAL(std::holds_alternative<AlternativeRecoverySubmit>(
+                              lease.Messages().front().payload),
+                          select_recovery);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 2U);
+    }
+    BOOST_REQUIRE(manager.AcknowledgeDirectMessages({submit_id, recovery_id}));
+    BOOST_CHECK(manager.LeaseProviderSubmit(provider_id).Messages().empty());
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_submit_isolates_providers_and_falls_back)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    const PaymasterId first_provider{uint256S("5760")};
+    const PaymasterId second_provider{uint256S("5761")};
+    const auto enqueue_pair = [&](const PaymasterId& provider_id,
+                                  const uint256& submit_id,
+                                  const uint256& recovery_id,
+                                  int64_t peer_id) {
+        const auto recovery = RecoveryMessages(
+            uint256S("5762"), now, "550e8400-e29b-41d4-a716-446655445760",
+            provider_id, provider_id);
+        PaymasterSubmit submit;
+        submit.provider_id = provider_id;
+        submit.request_id = recovery.submit.request_id;
+        submit.session_id = recovery.submit.session_id;
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(
+            peer_id, submit_id, 100, DirectPayload{submit}, now));
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(
+            peer_id, recovery_id, 100, DirectPayload{recovery.submit}, now));
+    };
+    const uint256 first_submit{uint256S("5763")};
+    const uint256 first_recovery{uint256S("5764")};
+    const uint256 second_submit{uint256S("5765")};
+    const uint256 second_recovery{uint256S("5766")};
+    enqueue_pair(first_provider, first_submit, first_recovery, 1);
+    enqueue_pair(second_provider, second_submit, second_recovery, 2);
+    const auto expect = [&](const PaymasterId& provider_id, const uint256& message_id) {
+        const auto lease = manager.LeaseProviderSubmit(provider_id);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        BOOST_CHECK(lease.Messages().front().message_id == message_id);
+    };
+    expect(first_provider, first_recovery);
+    expect(second_provider, second_recovery);
+    expect(first_provider, first_submit);
+    expect(second_provider, second_submit);
+    BOOST_REQUIRE(manager.AcknowledgeDirectMessages({first_recovery, second_submit}));
+
+    // Missing preferred work must not waste a dispatch slot in either direction.
+    for (int attempt{0}; attempt < 3; ++attempt) {
+        expect(first_provider, first_submit);
+        expect(second_provider, second_recovery);
+    }
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 2U);
+    BOOST_CHECK(manager.LeaseProviderSubmit(uint256{}).Messages().empty());
+    BOOST_REQUIRE(manager.AcknowledgeDirectMessages({first_submit, second_recovery}));
+    BOOST_CHECK(!manager.HasDirectMessages());
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_submit_lease_survives_prune_and_releases_on_exception)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    const int64_t expires_at{SaturatingAddSeconds(now, MAX_DIRECT_MESSAGE_TTL_SECONDS)};
+    PaymasterSubmit submit;
+    submit.provider_id = uint256S("5770");
+    submit.request_id = "550e8400-e29b-41d4-a716-446655445770";
+    submit.session_id = uint256S("5771");
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(
+        1, uint256S("5772"), 100, DirectPayload{submit}, now));
+    const auto fail_after_lease = [&] {
+        const auto lease = manager.LeaseProviderSubmit(submit.provider_id);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        manager.PruneDirectMessages(expires_at);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+        BOOST_CHECK(manager.TakeSubmits(submit.provider_id, 1).empty());
+        throw std::runtime_error{"simulated durable-store failure"};
+    };
+    BOOST_CHECK_THROW(fail_after_lease(), std::runtime_error);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+    manager.PruneDirectMessages(expires_at);
+    BOOST_CHECK(!manager.HasDirectMessages());
+    BOOST_CHECK(manager.LeaseProviderSubmit(submit.provider_id).Messages().empty());
+
+    // Reusing the provider after the queue drains must still acquire new work.
+    submit.session_id = uint256S("5773");
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(
+        1, uint256S("5774"), 100, DirectPayload{submit}, expires_at));
+    const auto lease = manager.LeaseProviderSubmit(submit.provider_id);
+    BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+    BOOST_CHECK(lease.Messages().front().message_id == uint256S("5774"));
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_submit_keeps_type_group_and_session_fairness)
+{
+    constexpr int64_t now{100000};
+    const PaymasterId provider_id{uint256S("5780")};
+    const uint256 first_group_first{uint256S("5781")};
+    const uint256 first_group_second{uint256S("5782")};
+    const uint256 second_group{uint256S("5783")};
+    const uint256 other_first{uint256S("5784")};
+    const uint256 other_second{uint256S("5785")};
+    for (const bool acknowledge : {false, true}) {
+        for (const bool crowded_recovery : {false, true}) {
+            BOOST_TEST_CONTEXT("acknowledge=" << acknowledge << ", crowded recovery=" << crowded_recovery) {
+                Manager manager{true};
+                const auto enqueue = [&](bool recovery, uint64_t group, const uint256& id) {
+                    const std::string request_id{"550e8400-e29b-41d4-a716-446655445780"};
+                    DirectPayload payload;
+                    if (recovery) {
+                        payload = RecoveryMessages(uint256S("5786"), now,
+                                                   request_id, id, provider_id).submit;
+                    } else {
+                        PaymasterSubmit submit;
+                        submit.provider_id = provider_id;
+                        submit.request_id = request_id;
+                        submit.session_id = id;
+                        payload = std::move(submit);
+                    }
+                    BOOST_REQUIRE(manager.EnqueueDirectMessage(
+                        static_cast<int64_t>(group), id, 100, std::move(payload), now, group));
+                };
+                // Five messages stay below the provider limit; each peer and
+                // netgroup has at most two distinct semantic sessions.
+                enqueue(crowded_recovery, 1000, first_group_first);
+                enqueue(crowded_recovery, 1000, first_group_second);
+                enqueue(crowded_recovery, 1001, second_group);
+                enqueue(!crowded_recovery, 45, other_first);
+                enqueue(!crowded_recovery, 45, other_second);
+
+                // Acknowledging the other class in group 45 must not reset
+                // this class to group 1000. Without acknowledgement, both
+                // group rotation and sessions within one group still advance.
+                std::vector<uint256> expected;
+                if (crowded_recovery) {
+                    expected = {first_group_first, other_first, second_group,
+                                other_second, first_group_second};
+                } else {
+                    expected = {other_first, first_group_first, other_second, second_group};
+                    if (!acknowledge) expected.push_back(other_first);
+                    expected.push_back(first_group_second);
+                }
+                for (const auto& id : expected) {
+                    const auto lease = manager.LeaseProviderSubmit(provider_id);
+                    BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                    BOOST_CHECK(lease.Messages().front().message_id == id);
+                    if (acknowledge) BOOST_REQUIRE(manager.AcknowledgeDirectMessages({id}));
+                }
+                BOOST_CHECK_EQUAL(manager.DirectMessageCount(), acknowledge ? 0U : 5U);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_request_rotates_eligible_types_and_isolates_providers)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    const PaymasterId first{uint256S("5790")};
+    const PaymasterId second{uint256S("5791")};
+    const auto enqueue = [&](const PaymasterId& provider_id, int64_t peer, const uint256& seed) {
+        PaymasterCapacityRequest capacity;
+        capacity.provider_id = provider_id;
+        capacity.request_id = "550e8400-e29b-41d4-a716-446655445790";
+        capacity.session_id = seed;
+        PaymasterQuoteRequest quote;
+        quote.intent.provider_id = provider_id;
+        quote.intent.request_id = capacity.request_id;
+        quote.intent.session_id = (HashWriter{} << seed << 3).GetHash();
+        const auto recovery = RecoveryMessages(seed, now, capacity.request_id, seed, provider_id);
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(peer, (HashWriter{} << seed << 0).GetHash(),
+            100, DirectPayload{capacity}, now));
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(peer, (HashWriter{} << seed << 1).GetHash(),
+            100, DirectPayload{recovery.request}, now));
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(peer, (HashWriter{} << seed << 2).GetHash(),
+            100, DirectPayload{quote}, now));
+    };
+    enqueue(first, 1, uint256S("5792"));
+    enqueue(second, 2, uint256S("5793"));
+    // Retained work must advance both type cursors independently, even when
+    // capacity and recovery share a semantic session ID (within its limit).
+    for (int pass{0}; pass < 6; ++pass) {
+        for (const auto& provider : {first, second}) {
+            const auto lease = manager.LeaseProviderRequest(provider, true);
+            BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+            const auto& payload = lease.Messages().front().payload;
+            if (pass % 3 == 0) BOOST_CHECK(std::holds_alternative<PaymasterCapacityRequest>(payload));
+            else if (pass % 3 == 1) BOOST_CHECK(std::holds_alternative<AlternativeRecoveryRequest>(payload));
+            else BOOST_CHECK(std::holds_alternative<PaymasterQuoteRequest>(payload));
+            BOOST_CHECK_EQUAL(lease.Messages().front().peer_id, provider == first ? 1 : 2);
+        }
+    }
+    for (int pass{0}; pass < 4; ++pass) {
+        const auto lease = manager.LeaseProviderRequest(first, false);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        BOOST_CHECK(!std::holds_alternative<PaymasterCapacityRequest>(lease.Messages().front().payload));
+        if (pass % 2 == 0) BOOST_CHECK(std::holds_alternative<AlternativeRecoveryRequest>(lease.Messages().front().payload));
+        else BOOST_CHECK(std::holds_alternative<PaymasterQuoteRequest>(lease.Messages().front().payload));
+    }
+    const auto capacity = manager.LeaseCapacityRequests(first, 1);
+    BOOST_REQUIRE_EQUAL(capacity.Messages().size(), 1U);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 6U);
+    BOOST_CHECK(manager.LeaseProviderRequest(uint256{}, true).Messages().empty());
+    manager.ClearDirectMessages();
+    enqueue(first, 1, uint256S("5794"));
+    const auto restarted = manager.LeaseProviderRequest(first, true);
+    BOOST_REQUIRE_EQUAL(restarted.Messages().size(), 1U);
+    BOOST_CHECK(std::holds_alternative<PaymasterCapacityRequest>(restarted.Messages().front().payload));
+}
+
+BOOST_AUTO_TEST_CASE(manager_provider_request_keeps_type_group_and_session_fairness)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    const PaymasterId provider{uint256S("57a0")};
+    const auto enqueue_quote = [&](uint64_t group, const uint256& id) {
+        PaymasterQuoteRequest quote;
+        quote.intent.provider_id = provider;
+        quote.intent.request_id = "550e8400-e29b-41d4-a716-4466554457a0";
+        quote.intent.session_id = id;
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(static_cast<int64_t>(group), id,
+            100, DirectPayload{quote}, now, group));
+    };
+    const uint256 first_group_first{uint256S("57a1")};
+    const uint256 first_group_second{uint256S("57a2")};
+    const uint256 second_group{uint256S("57a3")};
+    enqueue_quote(1000, first_group_first);
+    enqueue_quote(1000, first_group_second);
+    enqueue_quote(1001, second_group);
+    const auto recovery = RecoveryMessages(uint256S("57a4"), now,
+        "550e8400-e29b-41d4-a716-4466554457a0", uint256S("57a5"), provider);
+    const uint256 recovery_id{uint256S("57a6")};
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(45, recovery_id,
+        100, DirectPayload{recovery.request}, now, uint64_t{45}));
+    const std::vector<uint256> expected{recovery_id, first_group_first,
+        recovery_id, second_group, recovery_id, first_group_second};
+    for (const auto& id : expected) {
+        const auto lease = manager.LeaseProviderRequest(provider, false);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        BOOST_CHECK(lease.Messages().front().message_id == id);
+        // Other types' acknowledgements must not reset quote group/session
+        // rotation. Retain recovery to also exercise local-failure turns.
+        if (id != recovery_id) BOOST_REQUIRE(manager.AcknowledgeDirectMessages({id}));
+    }
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+    const auto fallback = manager.LeaseProviderRequest(provider, true);
+    BOOST_REQUIRE_EQUAL(fallback.Messages().size(), 1U);
+    BOOST_CHECK(fallback.Messages().front().message_id == recovery_id);
+}
+
 BOOST_AUTO_TEST_CASE(manager_overlapping_scoped_leases_are_reference_counted)
 {
     Manager manager{true};

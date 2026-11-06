@@ -370,10 +370,22 @@ public:
                                                  size_t maximum);
     DirectMessageLease LeaseQuoteRequests(const PaymasterId& provider_id,
                                            size_t maximum);
+    /** Dispatch one eligible capacity/recovery/quote request in provider-local
+     * round-robin order. Fresh capacity can be excluded while continuations
+     * remain eligible. A lease advances independent type/group/session cursors
+     * even when local failure or admission throttling retains the message.
+     * Call under the provider work guard; type-specific leases only observe. */
+    DirectMessageLease LeaseProviderRequest(const PaymasterId& provider_id,
+                                            bool allow_capacity);
     std::vector<DirectMessage> TakeSubmits(const PaymasterId& provider_id,
                                            size_t maximum);
     DirectMessageLease LeaseSubmits(const PaymasterId& provider_id,
                                     size_t maximum);
+    /** Dispatch at most one normal or recovery submit, alternating types when
+     * both are queued. A successful lease advances type/group/session cursors
+     * even if a local failure retains the message. Call under the provider work guard;
+     * observation-only callers use the stable type-specific leases above/below. */
+    DirectMessageLease LeaseProviderSubmit(const PaymasterId& provider_id);
     std::vector<DirectMessage> TakeResults(const std::string& request_id,
                                            const uint256& session_id,
                                            const PaymasterId& provider_id,
@@ -568,6 +580,20 @@ private:
     std::map<std::string, ProviderServiceStatus> m_provider_service_status GUARDED_BY(m_provider_mutex);
     std::map<int64_t, ChannelExchange> m_channel_exchanges GUARDED_BY(m_direct_mutex);
     std::map<std::string, const ProviderStopGuard*> m_provider_stop_requests GUARDED_BY(m_provider_mutex);
+    struct DispatchFairnessCursor {
+        std::optional<uint64_t> last_group;
+        std::map<uint64_t, uint256> last_session_by_group;
+    };
+    template <size_t TypeCount>
+    struct ProviderDispatchCursor {
+        size_t last_type{TypeCount - 1};
+        std::array<DispatchFairnessCursor, TypeCount> by_type;
+    };
+    // Ephemeral dispatch cursors, bounded by queued providers/groups and pruned
+    // before selection. Separate types cannot reset each other's fair rotation.
+    // Never authorizes, acknowledges or persists a payment.
+    std::map<PaymasterId, ProviderDispatchCursor<2>> m_submit_dispatch_cursors GUARDED_BY(m_direct_mutex);
+    std::map<PaymasterId, ProviderDispatchCursor<3>> m_request_dispatch_cursors GUARDED_BY(m_direct_mutex);
 };
 
 } // namespace DigiDollar::Paymaster
