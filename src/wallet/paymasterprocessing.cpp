@@ -2437,6 +2437,29 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED" : error);
     }
     const bool observed_payment = ReconcileConfirmedClientPayment(*wallet, session, attempt);
+    const auto result_lease = context.paymaster->LeaseResults(
+        request_id, session.session_id, attempt.provider_id, observed_payment ? 0 : 1);
+    const auto& messages = result_lease.Messages();
+    const PaymasterResultMessage* message{nullptr};
+    if (!messages.empty()) {
+        message = std::get_if<PaymasterResultMessage>(&messages.front().payload);
+        if (!message) throw ApplicationError(ErrorKind::INTERNAL, "PAYMASTER_RESULT_QUEUE_CORRUPT");
+        // Authenticate against this wallet's own durable attempt before a
+        // local predecessor read can fail. Retention grants no authority: the
+        // latest sequence and full final transaction are still checked below.
+        if (!ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
+                                     attempt.provider_id, attempt.commit_key,
+                                     attempt.provider_identity_key, 1, error)) {
+            const std::string rejection{error};
+            if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            throw ApplicationError(ErrorKind::INVALID_INPUT, rejection);
+        }
+        if (!context.paymaster->RetainAuthenticatedResult(messages.front())) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
+        }
+    }
     uint64_t minimum_sequence{1};
     if (!observed_payment) {
         PaymasterResult previous;
@@ -2450,15 +2473,10 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
                     ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RESULT_DATABASE_READ");
         }
     }
-    const auto result_lease = context.paymaster->LeaseResults(
-        request_id, session.session_id, attempt.provider_id, observed_payment ? 0 : 1);
-    const auto& messages = result_lease.Messages();
     std::optional<PaymasterResult> accepted_result;
     FinalTransactionPresence final_presence{FinalTransactionPresence::NONE};
-    if (!messages.empty()) {
-        const auto* message = std::get_if<PaymasterResultMessage>(&messages.front().payload);
-        if (!message) throw ApplicationError(ErrorKind::INTERNAL, "PAYMASTER_RESULT_QUEUE_CORRUPT");
-        if (!ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
+    if (message) {
+        if (minimum_sequence > 1 && !ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
                                      attempt.provider_id, attempt.commit_key,
                                      attempt.provider_identity_key, minimum_sequence, error)) {
             const std::string rejection{error};

@@ -92,6 +92,11 @@ Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement
 follows durable acceptance. Proven invalid remote envelopes are discarded without
 releasing spending authority. A later broadcast failure uses the saved final bytes.
+After authenticating the expected provider and the wallet's own commit binding,
+the exact queue incarnation remains protected beyond the transport TTL, including
+between failed processing calls. It still consumes the existing inbox byte/count
+quotas. This retention is in memory; restart continues to rely on durable evidence
+and the existing provider replay/recovery paths.
 
 Unsigned cancellation closes only work proven unsigned. Late responses cannot
 revive approval after closure. Signed or ambiguous work remains protected and

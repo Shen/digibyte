@@ -736,6 +736,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                     ErrorKind::INVALID_INPUT,
                     rejection);
             }
+            if (!context.paymaster->RetainAuthenticatedResult(messages.front())) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
+            }
             observed_final = MakeTransactionRef(
                 *message->result.final_transaction);
             if (!PreflightFinalPaymasterTransaction(

@@ -687,16 +687,16 @@ void Manager::PruneReplays(int64_t now,
                            bool retain_equivocation_candidates)
 {
     const auto retained_by_candidate = [&](const auto& replay) {
-        return retain_equivocation_candidates &&
-               std::any_of(
+        return std::any_of(
                    m_direct_messages.begin(), m_direct_messages.end(),
-                   [&replay](const DirectMessage& message) {
+                   [&replay, retain_equivocation_candidates](const DirectMessage& message) {
                        const bool evidence_candidate =
                            std::holds_alternative<PaymasterCapacityProof>(
                                message.payload) ||
                            std::holds_alternative<PaymasterQuoteResponse>(
                                message.payload);
-                       return evidence_candidate &&
+                       return (message.retained_result ||
+                               (retain_equivocation_candidates && evidence_candidate)) &&
                               GetDirectReplayKey(message.payload) == replay.first;
                    });
     };
@@ -727,6 +727,10 @@ void Manager::PruneInboundMessages(int64_t now,
                                    bool retain_equivocation_candidates)
 {
     for (auto it = m_direct_messages.begin(); it != m_direct_messages.end();) {
+        if (it->retained_result) {
+            ++it;
+            continue;
+        }
         const auto lease = m_leased_direct_ids.find(it->message_id);
         if (lease != m_leased_direct_ids.end() &&
             lease->second.first == it->queue_sequence &&
@@ -1497,6 +1501,28 @@ DirectMessageLease Manager::LeaseRecoveryResults(
         AddDirectMessageLeases(m_leased_direct_ids, result);
     }
     return DirectMessageLease{*this, std::move(result)};
+}
+
+bool Manager::RetainAuthenticatedResult(const DirectMessage& message)
+{
+    LOCK(m_direct_mutex);
+    const auto lease = m_leased_direct_ids.find(message.message_id);
+    if (lease == m_leased_direct_ids.end() ||
+        lease->second.first != message.queue_sequence || lease->second.second == 0) {
+        return false;
+    }
+    const auto queued = std::find_if(m_direct_messages.begin(), m_direct_messages.end(),
+        [&message](const DirectMessage& candidate) {
+            return candidate.message_id == message.message_id &&
+                   candidate.queue_sequence == message.queue_sequence;
+        });
+    if (queued == m_direct_messages.end() ||
+        (!std::holds_alternative<PaymasterResultMessage>(queued->payload) &&
+         !std::holds_alternative<AlternativeRecoveryResultMessage>(queued->payload))) {
+        return false;
+    }
+    queued->retained_result = true;
+    return true;
 }
 
 bool Manager::QueueOutboundDirectMessage(int64_t peer_id,

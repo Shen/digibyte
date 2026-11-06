@@ -2487,6 +2487,93 @@ BOOST_AUTO_TEST_CASE(manager_client_result_leases_retain_both_result_types_until
     }
 }
 
+BOOST_AUTO_TEST_CASE(manager_authenticated_results_survive_failed_scope_and_delayed_pruning)
+{
+    for (const bool recovery : {false, true}) {
+        BOOST_TEST_CONTEXT("recovery result " << recovery) {
+            Manager manager{true};
+            PaymasterResultMessage normal;
+            normal.request_id = "550e8400-e29b-41d4-a716-446655440061";
+            normal.session_id = uint256S("61");
+            normal.result.provider_id = uint256S("62");
+            normal.result.result_sequence = 1;
+            normal.result.updated_at = 100;
+            const auto payload = [&](const PaymasterResultMessage& result) -> DirectPayload {
+                if (!recovery) return result;
+                AlternativeRecoveryResultMessage alternative;
+                alternative.request_id = result.request_id;
+                alternative.session_id = result.session_id;
+                alternative.result = result.result;
+                return alternative;
+            };
+            const auto lease_result = [&](Manager& target) {
+                return recovery ? target.LeaseRecoveryResults(normal.request_id, normal.session_id, normal.result.provider_id, 1) :
+                    target.LeaseResults(normal.request_id, normal.session_id, normal.result.provider_id, 1);
+            };
+            const uint256 message_id{uint256S("63")};
+            BOOST_REQUIRE(manager.EnqueueDirectMessage(41, message_id, 100, payload(normal), 100));
+            DirectMessage authenticated;
+            {
+                auto lease = lease_result(manager);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                authenticated = lease.Messages().front();
+                // Wallet validation, not matching an identifier or acquiring
+                // a lease, authorizes this retention-only promotion.
+                BOOST_REQUIRE(manager.RetainAuthenticatedResult(authenticated));
+            }
+            const int64_t later{100 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1};
+            manager.PruneDirectMessages(later);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+            BOOST_CHECK(manager.EnqueueDirectMessageResult(42, message_id, 100, payload(normal), later) ==
+                        DirectEnqueueResult::DUPLICATE);
+            // Enqueue pruning must retain both the bytes and the semantic
+            // replay identity after the original transport/replay deadlines.
+            auto conflicting = normal;
+            ++conflicting.result.updated_at;
+            const uint256 conflicting_id{uint256S("64")};
+            BOOST_CHECK(manager.EnqueueDirectMessageResult(42, conflicting_id, 100, payload(conflicting), later) ==
+                        DirectEnqueueResult::CONFLICT);
+            auto next = normal;
+            ++next.result.result_sequence;
+            BOOST_CHECK(manager.EnqueueDirectMessageResult(43, uint256S("65"), 100, payload(next), later) ==
+                        DirectEnqueueResult::FULL);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), MAX_DIRECT_INBOX_MESSAGES_PER_SESSION);
+            {
+                const auto retry = lease_result(manager);
+                BOOST_REQUIRE_EQUAL(retry.Messages().size(), 1U);
+                BOOST_CHECK(retry.Messages().front().message_id == message_id);
+                BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({message_id, conflicting_id}));
+            }
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+            // An old authenticated copy cannot promote a reused content id.
+            BOOST_REQUIRE(manager.EnqueueDirectMessage(41, message_id, 100, payload(normal), later + 1));
+            {
+                const auto replacement = lease_result(manager);
+                BOOST_REQUIRE_EQUAL(replacement.Messages().size(), 1U);
+                BOOST_CHECK(replacement.Messages().front().queue_sequence != authenticated.queue_sequence);
+                BOOST_CHECK(!manager.RetainAuthenticatedResult(authenticated));
+            }
+            manager.PruneDirectMessages(later + 1 + MAX_DIRECT_MESSAGE_TTL_SECONDS);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+
+            Manager byte_limited{true};
+            BOOST_REQUIRE(byte_limited.EnqueueDirectMessage(41, message_id, MAX_DIRECT_INBOX_BYTES_PER_SESSION, payload(normal), 100));
+            {
+                const auto lease = lease_result(byte_limited);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                BOOST_REQUIRE(byte_limited.RetainAuthenticatedResult(lease.Messages().front()));
+            }
+            byte_limited.PruneDirectMessages(later);
+            BOOST_CHECK(byte_limited.EnqueueDirectMessageResult(42, uint256S("65"), 1, payload(next), later) ==
+                        DirectEnqueueResult::FULL);
+            BOOST_REQUIRE(byte_limited.AcknowledgeDirectMessagesIfPresent({message_id}));
+            BOOST_REQUIRE(byte_limited.EnqueueDirectMessage(42, uint256S("65"), 1, payload(next), later));
+            byte_limited.ClearDirectMessages();
+            BOOST_CHECK_EQUAL(byte_limited.DirectMessageCount(), 0U);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(manager_quote_response_inbox_is_session_selective)
 {
     Manager manager{true};

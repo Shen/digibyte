@@ -158,6 +158,9 @@ struct DirectMessage {
      * releasing a newly enqueued exact replay with the same content hash. */
     uint64_t queue_sequence{0};
     DirectAdmissionClass admission{DirectAdmissionClass::REQUEST};
+    /** A wallet authenticated this result against its own durable request.
+     * Keep it within the existing inbox quotas until explicit consumption. */
+    bool retained_result{false};
 };
 
 struct OutboundDirectMessage {
@@ -390,7 +393,8 @@ public:
                                            const uint256& session_id,
                                            const PaymasterId& provider_id,
                                            size_t maximum);
-    /** Keep client results queued and protected from pruning until durable acknowledgement. */
+    /** Protect results during this processing scope. Authenticated results can
+     * be retained across failed scopes with RetainAuthenticatedResult(). */
     DirectMessageLease LeaseResults(const std::string& request_id,
                                      const uint256& session_id,
                                      const PaymasterId& provider_id,
@@ -412,6 +416,12 @@ public:
     DirectMessageLease LeaseRecoveryResults(
         const std::string& request_id, const uint256& session_id,
         const PaymasterId& provider_id, size_t maximum);
+    /** After verifying the expected provider's signed result and durable
+     * request/commit binding, retain its exact leased queue incarnation across
+     * local failures. It still consumes all normal inbox/count/byte quotas and
+     * is removed by acknowledgement, consumption or manager shutdown. This
+     * grants no financial authority and never extends unsolicited messages. */
+    bool RetainAuthenticatedResult(const DirectMessage& message);
     bool QueueOutboundDirectMessage(int64_t peer_id,
                                     const uint256& message_id,
                                     size_t serialized_size,

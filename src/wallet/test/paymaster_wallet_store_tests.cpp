@@ -8042,6 +8042,8 @@ BOOST_AUTO_TEST_CASE(client_result_read_failure_retains_incoming_message)
             BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
             BOOST_CHECK_EQUAL(manager.DirectMessageCount(), scenario == 2 ? 0U : 1U);
             if (scenario < 2) {
+                manager.PruneDirectMessages(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+                BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
                 const auto retained = manager.TakeResults(session.request_id, session.session_id, artifacts.attempt.provider_id, 1);
                 BOOST_REQUIRE_EQUAL(retained.size(), 1U);
                 BOOST_CHECK(retained.front().message_id == message_id);
@@ -8076,6 +8078,7 @@ BOOST_AUTO_TEST_CASE(client_result_local_write_failure_retains_incoming_message)
     context.args = m_node.args;
     for (int boundary = 0; boundary < 3; ++boundary) {
         BOOST_TEST_CONTEXT("local persistence boundary " << boundary) {
+            SetMockTime(110);
             database.m_records = original;
             Manager manager{true};
             context.paymaster = &manager;
@@ -8096,6 +8099,9 @@ BOOST_AUTO_TEST_CASE(client_result_local_write_failure_retains_incoming_message)
             database.ClearFailureInjection();
             BOOST_CHECK(database.m_records == original);
             BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+            SetMockTime(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+            manager.PruneDirectMessages(GetTime());
             BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
             const auto retry = paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id);
             BOOST_CHECK(retry.processed.value_or(false));
@@ -8137,6 +8143,8 @@ BOOST_AUTO_TEST_CASE(client_final_preflight_failure_retains_incoming_message)
     m_node.mempool = std::move(mempool);
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+    BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+    manager.PruneDirectMessages(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
     BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
     const auto retained = manager.TakeResults(session.request_id, session.session_id, artifacts.attempt.provider_id, 1);
     BOOST_REQUIRE_EQUAL(retained.size(), 1U);
