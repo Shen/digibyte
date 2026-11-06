@@ -75,7 +75,6 @@
     "test/lint/paymaster-boundaries.json",
     "test/lint/lint-paymaster-boundaries.py",
     "test/lint/test_paymaster_boundaries.py",
-    ".github/workflows/paymaster-boundaries.yml",
     "doc/design/paymaster-integration-boundaries.md",
     "contrib/devtools/circular-dependencies.py"
   ],

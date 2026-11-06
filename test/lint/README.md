@@ -70,8 +70,8 @@ python3 test/lint/lint-paymaster-boundaries.py
 
 The default checks tracked and untracked Paymaster sources and new include
 cycles relative to HEAD. For a committed candidate, use
-`--base <trusted-target-commit> --head <candidate-commit>`; paths, dependency
+`--base <base-commit> --head <candidate-commit>`; paths, dependency
 rules, the cycle helper and shared-Core evidence requirements come from the
-trusted target. Candidate Python is never executed. Initial policy installation
-and control changes require the separate owner review described in
-[the integration boundaries](../../doc/design/paymaster-integration-boundaries.md).
+selected base. Candidate Python is never executed. Changes to the check files
+follow the normal contribution process. See
+[the integration boundaries](../../doc/design/paymaster-integration-boundaries.md#architecture-checks).

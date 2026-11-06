@@ -72,6 +72,15 @@ class BoundaryTests(unittest.TestCase):
         relative = graph({'a/a.h': '#include "../b/b.h"', 'b/b.h': '#include "../a/a.h"'})
         self.assertEqual(set(added({}, relative)), {('a/a', 'b/b'), ('b/b', 'a/a')})
 
+    def test_check_files_follow_normal_architecture_rules(self):
+        for path in POLICY['controls']:
+            with self.subTest(path=path):
+                self.assertFalse(BOUNDARIES.change_errors([path], POLICY, {}))
+                self.assertFalse(BOUNDARIES.change_errors([path, 'src/paymaster/client.cpp'], POLICY, {}))
+                self.assertEqual(BOUNDARIES.change_errors([path, 'src/consensus/params.h'], POLICY, {}), [
+                    'src/consensus/params.h: consensus/activation/PoW/script change outside Paymaster scope'])
+                self.assertTrue(BOUNDARIES.change_errors([path, 'src/wallet/wallet.cpp'], POLICY, {}))
+
     def test_candidate_cannot_replace_policy(self):
         with tempfile.TemporaryDirectory(prefix='paymaster-boundaries-') as directory:
             root = Path(directory)
@@ -106,7 +115,6 @@ class BoundaryTests(unittest.TestCase):
             git('commit', '-m', 'attempt to weaken policy')
             errors = BOUNDARIES.check(root, base, git('rev-parse', 'HEAD'))
             self.assertTrue(any('forbidden dependency' in error for error in errors))
-            self.assertTrue(any('owner review' in error for error in errors))
             self.assertTrue(any('new cyclic dependency' in error for error in errors))
 
     def test_shared_dependencies_are_scanned(self):

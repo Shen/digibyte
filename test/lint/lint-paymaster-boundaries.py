@@ -6,8 +6,8 @@
 """Check Paymaster boundaries. Candidate files are data, never executed.
 
 Without --base: working-tree dependency checks (including untracked sources).
-With --base/--head: policy is read from the trusted base, sources/records from
-the candidate. Bootstrap and policy changes deliberately require owner review.
+With --base/--head: policy is read from the selected base, sources/records from
+the candidate. These are architecture checks, not a hosting approval process.
 """
 
 import argparse
@@ -67,11 +67,9 @@ def dependency_errors(path, source, policy):
 def change_errors(paths, policy, record):
     errors = []
     paths = set(paths)
-    control_changes = {p for p in paths if matches(p, policy["controls"])}
-    if control_changes:
-        errors.append("policy/control changes require separate owner review: " + ', '.join(sorted(control_changes)))
     # Ordinary unrelated Core work is not a Paymaster scope request.
-    scoped = control_changes or any(matches(p, policy["owned"]) for p in paths)
+    # Changes to the architecture-check files also remain Paymaster-scoped.
+    scoped = any(matches(p, policy["owned"] + policy["controls"]) for p in paths)
     if not scoped:
         return errors
     records = record.get("shared_changes", {})
@@ -169,7 +167,7 @@ def check(root, base=None, head=None):
     try:
         policy = json.loads(read_blob(root, base, POLICY))
     except (subprocess.CalledProcessError, FileNotFoundError) as error:
-        raise ValueError('Trusted base has no boundary policy; owner-reviewed bootstrap is required') from error
+        raise ValueError('Selected source has no boundary policy; choose a base containing the architecture checks') from error
     if policy.get('version') != 1:
         raise ValueError('Unsupported boundary policy version')
     errors = []

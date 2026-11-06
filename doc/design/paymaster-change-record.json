@@ -173,8 +173,7 @@
   },
   "scope_authorization": {
     "source": "Operator follow-up to the 988bb8e621 review, 2026-11-05: implement plan steps 1-6 and phase-based decomposition.",
-    "scope": "Targeted recovery classification, node-reader lifecycle, coin-lock ownership, backup test vectors, CSV encoding and setup execution state. Boundary control changes are separately reviewable; this record does not assert remote owner review or hosting enforcement.",
-    "hosting_acceptance": "Branch target confirmed; remote ref/protection/rules/PR-base inspection remains pending authenticated access. Public web reads did not return verifiable branch or rule data. No protection setting is assumed or bypassed.",
-    "hosting_target": "https://github.com/Shen/digibyte/tree/integration/paymaster-v9.26.7 (operator confirmed 2026-11-05)"
+    "scope": "Targeted recovery classification, node-reader lifecycle, coin-lock ownership, backup test vectors, CSV encoding and setup execution state.",
+    "architecture_checks": "Operator instruction on 2026-11-06: remove the Paymaster-specific GitHub protection, separate owner-approval and dedicated agent-identity requirements, including the dedicated hosting workflow and the checker veto on control-file changes. Preserve dependency, cycle, change-scope and shared-Core record checks. Changes to check files follow the normal contribution process."
   }
 }
