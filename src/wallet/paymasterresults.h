@@ -140,9 +140,32 @@ struct PaymentResult {
 /** Complete display terms without replacing present values, including false and zero. */
 void FillMissingPaymentTerms(PaymentResult& target, const PaymentResult& source);
 
-struct ProviderProcessingResult : PaymentResult {
-    std::optional<bool> rejected;
-    std::optional<bool> deferred;
+enum class ProviderProcessingDisposition {
+    NO_MESSAGE,
+    PROCESSED,
+    REJECTED,
+    DEFERRED,
+};
+
+/** One processing outcome; delivery and signed payment status are separate observations. */
+struct ProviderProcessingResult {
+    ProviderProcessingDisposition disposition{ProviderProcessingDisposition::NO_MESSAGE};
+    bool IsProcessed() const { return disposition != ProviderProcessingDisposition::NO_MESSAGE; }
+    bool IsRejected() const { return disposition == ProviderProcessingDisposition::REJECTED; }
+    bool IsDeferred() const { return disposition == ProviderProcessingDisposition::DEFERRED; }
+    std::optional<bool> queued;
+    std::optional<bool> broadcast;
+    std::optional<std::string> broadcast_error;
+    std::optional<std::string> request_id;
+    std::optional<uint256> session_id;
+    std::optional<DigiDollar::Paymaster::PaymasterId> provider_id;
+    std::optional<uint256> attempt_id;
+    std::optional<uint256> quote_id;
+    std::optional<uint256> template_commitment;
+    std::optional<uint256> capacity_snapshot_id;
+    std::optional<uint256> txid;
+    std::optional<DigiDollar::Paymaster::AttemptState> attempt_state;
+    std::optional<DigiDollar::Paymaster::PaymasterResultStatus> result_status;
     std::optional<std::string> message_type;
     std::optional<std::string> rejection_reason;
     std::optional<std::string> rejection_code;

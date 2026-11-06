@@ -185,6 +185,11 @@ results (`wallet/paymasterresults.h`). JSON encoding belongs to
 Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 
+Provider processing has one native disposition: no message, processed, rejected
+or deferred. Delivery remains an optional separate observation. The RPC adapter
+maps the disposition to the existing `processed`, `rejected` and `deferred`
+fields; a signed negative payment result is distinct from local message rejection.
+
 Provider processing distinguishes permanent peer errors from local uncertainty.
 An unknown recovery ID, mismatched binding, invalid submitted PSBT/signature or
 divergent replay is acknowledged only for that message: the local result is

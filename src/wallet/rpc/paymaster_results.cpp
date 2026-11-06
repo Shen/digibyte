@@ -785,13 +785,28 @@ UniValue ToJSON(const PaymentResult& value)
 
 UniValue ToJSON(const ProviderProcessingResult& value)
 {
-    UniValue result = ToJSON(static_cast<const PaymentResult&>(value));
-    if (value.rejected) result.pushKV("rejected", *value.rejected);
-    if (value.deferred) result.pushKV("deferred", *value.deferred);
+    PaymentResult payment;
+    payment.processed = value.IsProcessed();
+    payment.queued = value.queued;
+    payment.broadcast = value.broadcast;
+    payment.broadcast_error = value.broadcast_error;
+    payment.request_id = value.request_id;
+    payment.session_id = value.session_id;
+    payment.provider_id = value.provider_id;
+    payment.attempt_id = value.attempt_id;
+    payment.quote_id = value.quote_id;
+    payment.template_commitment = value.template_commitment;
+    payment.capacity_snapshot_id = value.capacity_snapshot_id;
+    payment.txid = value.txid;
+    payment.attempt_state = value.attempt_state;
+    payment.result_status = value.result_status;
+    UniValue result = ToJSON(payment);
+    if (value.IsRejected()) result.pushKV("rejected", true);
+    if (value.IsDeferred()) result.pushKV("deferred", true);
     if (value.message_type) result.pushKV("message_type", *value.message_type);
-    if (value.rejection_reason) result.pushKV("rejection_reason", *value.rejection_reason);
+    if (value.IsRejected() && value.rejection_reason) result.pushKV("rejection_reason", *value.rejection_reason);
     if (value.rejection_code) result.pushKV("rejection_code", *value.rejection_code);
-    if (value.deferral_reason) result.pushKV("deferral_reason", *value.deferral_reason);
+    if (value.IsDeferred() && value.deferral_reason) result.pushKV("deferral_reason", *value.deferral_reason);
     if (value.commit_key) result.pushKV("commit_key", value.commit_key->GetHex());
     if (value.client_nonce) result.pushKV("client_nonce", value.client_nonce->GetHex());
     if (value.recovery_id) result.pushKV("recovery_id", value.recovery_id->GetHex());

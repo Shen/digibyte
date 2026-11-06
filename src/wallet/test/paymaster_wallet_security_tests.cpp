@@ -1005,8 +1005,8 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
             const auto result = paymaster_app::ProcessPaymasterRequests(
                 context, wallet, paymaster_app::ExecutionMode::MANUAL);
             BOOST_CHECK(!local_failure);
-            BOOST_CHECK(result.processed.value_or(false));
-            BOOST_CHECK(result.rejected.value_or(false));
+            BOOST_CHECK(result.IsProcessed());
+            BOOST_CHECK(result.IsRejected());
             BOOST_CHECK(!result.queued.value_or(false));
             BOOST_CHECK_EQUAL(result.message_type.value_or(""), "quote");
             BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), reason);
@@ -2101,8 +2101,8 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
                                               DirectPayload{delayed}, GetTime()));
     const auto result = paymaster_app::ProcessPaymasterSubmits(
         context, restarted, paymaster_app::ExecutionMode::MANUAL);
-    BOOST_CHECK(result.processed.value_or(false));
-    BOOST_CHECK(result.rejected.value_or(false));
+    BOOST_CHECK(result.IsProcessed());
+    BOOST_CHECK(result.IsRejected());
     BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), "PAYMASTER_SUBMIT_BINDING_MISMATCH");
     BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
     BOOST_CHECK(manager.IsProviderRunning(restarted.GetName(), environment.identity.provider_id));
@@ -2553,8 +2553,8 @@ BOOST_AUTO_TEST_CASE(
             const auto result = paymaster_app::ProcessPaymasterSubmits(
                 context, processing_wallet, paymaster_app::ExecutionMode::MANUAL);
             BOOST_CHECK(!local_failure);
-            BOOST_CHECK(result.processed.value_or(false));
-            BOOST_CHECK(result.rejected.value_or(false));
+            BOOST_CHECK(result.IsProcessed());
+            BOOST_CHECK(result.IsRejected());
             BOOST_CHECK(!result.queued.value_or(false));
             BOOST_CHECK(!result.rejection_reason.value_or("").empty());
             BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), reason);
@@ -3192,13 +3192,13 @@ BOOST_AUTO_TEST_CASE(
             const auto result = paymaster_app::ProcessPaymasterSubmits(
                 context, processing_wallet, paymaster_app::ExecutionMode::MANUAL);
             BOOST_CHECK(!local_failure);
-            BOOST_CHECK(result.processed.value_or(false));
+            BOOST_CHECK(result.IsProcessed());
             if (exact_final) {
                 BOOST_CHECK(result.queued.value_or(false));
-                BOOST_CHECK(!result.rejected.value_or(false));
+                BOOST_CHECK(!result.IsRejected());
                 BOOST_CHECK(result.result_status == PaymasterResultStatus::FINAL_COMMITTED);
             } else {
-                BOOST_CHECK(result.rejected.value_or(false));
+                BOOST_CHECK(result.IsRejected());
                 BOOST_CHECK(!result.queued.value_or(false));
                 BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), reason);
             }
@@ -3312,9 +3312,9 @@ BOOST_AUTO_TEST_CASE(
     const auto outbound_before_retry = manager->OutboundDirectMessageCount();
     const auto resumed = paymaster_app::ProcessPaymasterSubmits(
         context, processing_wallet, paymaster_app::ExecutionMode::MANUAL);
-    BOOST_CHECK(resumed.processed.value_or(false));
+    BOOST_CHECK(resumed.IsProcessed());
     BOOST_CHECK(resumed.queued.value_or(false));
-    BOOST_CHECK(!resumed.rejected.value_or(false));
+    BOOST_CHECK(!resumed.IsRejected());
     BOOST_CHECK(resumed.txid == intact_final.signed_result.txid);
     BOOST_CHECK(resumed.result_status == PaymasterResultStatus::FINAL_COMMITTED);
     BOOST_CHECK_EQUAL(manager->DirectMessageCount(), 0U);
@@ -4746,8 +4746,8 @@ BOOST_FIXTURE_TEST_CASE(quote_prevout_lookup_failure_preserves_local_authority,
     }
     const auto result = paymaster_app::ProcessPaymasterRequests(
         context, wallet, paymaster_app::ExecutionMode::MANUAL);
-    BOOST_CHECK(result.processed.value_or(false));
-    BOOST_CHECK(result.rejected.value_or(false));
+    BOOST_CHECK(result.IsProcessed());
+    BOOST_CHECK(result.IsRejected());
     BOOST_CHECK(!result.queued.value_or(false));
     BOOST_CHECK_EQUAL(result.message_type.value_or(""), "quote");
     BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), "PAYMASTER_USER_PREVOUT_NOT_FOUND");
@@ -4980,8 +4980,8 @@ BOOST_FIXTURE_TEST_CASE(identical_quote_retry_reuses_signed_response,
         EnqueueQuote(transport, fixture.request);
         const auto result = paymaster_app::ProcessPaymasterRequests(
             context, wallet, paymaster_app::ExecutionMode::MANUAL);
-        BOOST_CHECK(result.processed.value_or(false));
-        BOOST_CHECK(!result.rejected.value_or(false));
+        BOOST_CHECK(result.IsProcessed());
+        BOOST_CHECK(!result.IsRejected());
         BOOST_CHECK(result.queued.value_or(false));
         BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
         const auto outbound = transport.TakeOutboundDirectMessages(44, 1, GetTime());
@@ -5149,7 +5149,7 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_repla
             const auto checkpoint_before = CheckpointBytes();
             if (scenario == 3) {
                 const auto replay = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
-                BOOST_CHECK(replay.processed.value_or(false));
+                BOOST_CHECK(replay.IsProcessed());
                 BOOST_CHECK(replay.queued.value_or(false));
                 BOOST_CHECK(transport.HasOutboundDirectMessage(44, Hash(SerializePaymasterSecurityObject(record.recovery_response))));
                 const auto lease = transport.LeaseRecoveryRequests(environment.identity.provider_id, 1);
@@ -5158,8 +5158,8 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_repla
                 // Verified absence reaches a permanent remote policy mismatch.
                 // It must not receive the retry treatment of unreadable rows.
                 const auto result = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
-                BOOST_CHECK(result.processed.value_or(false));
-                BOOST_CHECK(result.rejected.value_or(false));
+                BOOST_CHECK(result.IsProcessed());
+                BOOST_CHECK(result.IsRejected());
                 BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), "PAYMASTER_RECOVERY_POLICY_MISMATCH");
                 BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
                 BOOST_CHECK_EQUAL(transport.OutboundDirectMessageCount(), 0U);
@@ -5282,7 +5282,7 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_capacity_absence_rejects_but_read_fail
             const auto checkpoint_before = CheckpointBytes();
             if (scenario == 0) {
                 const auto result = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
-                BOOST_CHECK(result.rejected.value_or(false));
+                BOOST_CHECK(result.IsRejected());
                 BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), "PAYMASTER_CAPACITY_RESERVATION_MISSING");
                 BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
             } else {
@@ -5591,8 +5591,8 @@ BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn
     const auto before = GetMockableDatabase(wallet).m_records;
     const auto checkpoint_before = CheckpointBytes();
     const auto deferred = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
-    BOOST_CHECK(deferred.processed.value_or(false));
-    BOOST_CHECK(deferred.deferred.value_or(false));
+    BOOST_CHECK(deferred.IsProcessed());
+    BOOST_CHECK(deferred.IsDeferred());
     BOOST_CHECK_EQUAL(deferred.deferral_reason.value_or(""), "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED");
     BOOST_CHECK_EQUAL(deferred.message_type.value_or(""), "capacity");
     BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 2U);

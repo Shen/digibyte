@@ -4236,9 +4236,9 @@ BOOST_AUTO_TEST_CASE(unknown_recovery_submit_is_consumed_before_normal_work)
                 BOOST_REQUIRE(RunPaymasterBackgroundWork(context, wallet, [&] {
                     result = paymaster_app::ProcessPaymasterSubmits(context, wallet, paymaster_app::ExecutionMode::AUTOMATIC);
                 }));
-                BOOST_CHECK(result.processed.value_or(false));
+                BOOST_CHECK(result.IsProcessed());
                 BOOST_CHECK(!result.queued.value_or(false));
-                BOOST_CHECK(result.rejected.value_or(false));
+                BOOST_CHECK(result.IsRejected());
                 if (std::string(expected_type) == "recovery_submit") {
                     BOOST_CHECK_EQUAL(result.message_type.value_or(""), expected_type);
                 }

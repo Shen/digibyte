@@ -379,18 +379,45 @@ BOOST_AUTO_TEST_CASE(provider_start_and_deferred_work_keep_native_control_values
     BOOST_CHECK(!json.exists("transport"));
 
     ProviderProcessingResult deferred;
-    deferred.processed = true;
     deferred.queued = false;
-    deferred.deferred = true;
+    deferred.disposition = ProviderProcessingDisposition::DEFERRED;
     deferred.message_type = "capacity";
     deferred.deferral_reason = "PAYMASTER_PROVIDER_BUSY";
     const UniValue response = ToJSON(deferred);
-    BOOST_CHECK(deferred.deferred.value_or(false));
+    BOOST_CHECK(deferred.IsDeferred());
     BOOST_CHECK(response.find_value("deferred").get_bool());
     BOOST_CHECK(!response.find_value("queued").get_bool());
     BOOST_CHECK(!response.exists("commit"));
     BOOST_CHECK(!response.exists("recovery"));
     BOOST_CHECK(!response.exists("txid"));
+}
+
+BOOST_AUTO_TEST_CASE(provider_processing_disposition_preserves_rpc_contract)
+{
+    for (const auto disposition : {ProviderProcessingDisposition::NO_MESSAGE,
+                                  ProviderProcessingDisposition::PROCESSED,
+                                  ProviderProcessingDisposition::REJECTED,
+                                  ProviderProcessingDisposition::DEFERRED}) {
+        ProviderProcessingResult result;
+        result.disposition = disposition;
+        result.rejection_reason = "PAYMASTER_INVALID_QUOTE_REQUEST";
+        result.deferral_reason = "PAYMASTER_PROVIDER_BUSY";
+        result.result_status = PaymasterResultStatus::REJECTED;
+        for (const std::optional<bool> delivery : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+            result.queued = delivery;
+            const auto json = ToJSON(result);
+            BOOST_CHECK_EQUAL(json.find_value("processed").get_bool(), disposition != ProviderProcessingDisposition::NO_MESSAGE);
+            BOOST_CHECK_EQUAL(json.exists("rejected"), disposition == ProviderProcessingDisposition::REJECTED);
+            BOOST_CHECK_EQUAL(json.exists("deferred"), disposition == ProviderProcessingDisposition::DEFERRED);
+            BOOST_CHECK_EQUAL(json.exists("rejection_reason"), result.IsRejected());
+            BOOST_CHECK_EQUAL(json.exists("deferral_reason"), result.IsDeferred());
+            if (json.exists("rejected")) BOOST_CHECK(json.find_value("rejected").get_bool());
+            if (json.exists("deferred")) BOOST_CHECK(json.find_value("deferred").get_bool());
+            BOOST_CHECK_EQUAL(json.exists("queued"), delivery.has_value());
+            if (delivery) BOOST_CHECK_EQUAL(json.find_value("queued").get_bool(), *delivery);
+            BOOST_CHECK_EQUAL(json.find_value("result_status").get_str(), "rejected");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(application_error_rpc_retains_disposition_and_absence)

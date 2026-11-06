@@ -94,9 +94,9 @@ ProviderProcessingResult RejectProviderMessage(
         throw ApplicationError(ErrorKind::WALLET, error);
     }
     ProviderProcessingResult result;
-    result.processed = true;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
     result.queued = false;
-    result.rejected = true;
+    result.disposition = ProviderProcessingDisposition::REJECTED;
     result.rejection_reason = reason;
     result.message_type = message_type;
     return result;
@@ -731,7 +731,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                     "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT", "recovery_submit");
             }
             ProviderProcessingResult result;
-            result.processed = true;
+            result.disposition = ProviderProcessingDisposition::PROCESSED;
             result.queued = queue_result(recovery);
             result.message_type = "recovery_submit";
             result.request_id = recovery.request_id;
@@ -1011,7 +1011,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                 broadcast_error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED" : strprintf("PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED: %s", broadcast_error));
         }
         ProviderProcessingResult result;
-        result.processed = true;
+        result.disposition = ProviderProcessingDisposition::PROCESSED;
         result.queued = queue_result(recovery);
         result.message_type = "recovery_submit";
         result.request_id = recovery.request_id;
@@ -1028,7 +1028,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
         return result;
     }
     ProviderProcessingResult result;
-    result.processed = !messages.empty();
+    result.disposition = messages.empty() ? ProviderProcessingDisposition::NO_MESSAGE : ProviderProcessingDisposition::PROCESSED;
     result.queued = false;
     if (messages.empty()) return result;
     const DirectMessage& direct = messages.front();
@@ -1071,7 +1071,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
         // Consume only this message so it cannot pin the service queue.
         if (!AcknowledgeRejectedDirectMessage(*context.paymaster, direct, error))
             throw ApplicationError(ErrorKind::WALLET, error);
-        result.rejected = true;
+        result.disposition = ProviderProcessingDisposition::REJECTED;
         result.rejection_reason = "PAYMASTER_SUBMIT_BINDING_MISMATCH";
         return result;
     }
@@ -1207,7 +1207,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
     std::string& error = request.error;
     ProviderProcessingResult result;
     result.queued = false;
-    result.processed = true;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
     result.message_type = "capacity";
     ProviderInboundMessageGuard message_guard{*context.paymaster,
                                               direct};
@@ -1221,7 +1221,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
                 *context.paymaster, direct, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        result.rejected = true;
+        result.disposition = ProviderProcessingDisposition::REJECTED;
         result.rejection_reason = error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error;
         return result;
     }
@@ -1272,7 +1272,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
             error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
             message_guard.Defer();
-            result.deferred = true;
+            result.disposition = ProviderProcessingDisposition::DEFERRED;
             result.deferral_reason = error;
         } else {
             throw ApplicationError(ErrorKind::WALLET, error);
@@ -1321,7 +1321,7 @@ std::optional<ProviderProcessingResult> ReplayProviderRecoveryRequest(
     }
     if (recovery_status == DatabaseReadStatus::NOT_FOUND) return std::nullopt;
     ProviderProcessingResult result;
-    result.processed = true;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
     result.queued = false;
     result.message_type = "recovery_request";
     if (!persisted.provider_side ||
@@ -1507,7 +1507,7 @@ ProviderProcessingResult CommitProviderRecoveryQuote(
     const int64_t now = request.now;
     std::string& error = request.error;
     ProviderProcessingResult result;
-    result.processed = true;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
     result.queued = false;
     result.message_type = "recovery_request";
     const uint256 recovery_id = GetAlternativeRecoveryId(recovery_request.request_id,
@@ -1752,7 +1752,7 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
     node::NodeContext* const node = request.node;
     const int64_t now = request.now;
     std::string& error = request.error;
-    result.processed = true;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
     result.message_type = "recovery_request";
     ProviderInboundMessageGuard message_guard{*context.paymaster,
                                               direct};
@@ -1829,7 +1829,7 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
                 *context.paymaster, direct, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        result.rejected = true;
+        result.disposition = ProviderProcessingDisposition::REJECTED;
         result.rejection_reason = error;
         return result;
     }
@@ -2053,7 +2053,7 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
                     *context.paymaster, direct, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-            result.rejected = true;
+            result.disposition = ProviderProcessingDisposition::REJECTED;
             result.rejection_reason = rejection_reason;
             return result;
         }
@@ -2063,7 +2063,7 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
             // Keep the exact continuation in the fair inbox and repeat
             // all admission checks next time, within its original TTL.
             message_guard.Defer();
-            result.deferred = true;
+            result.disposition = ProviderProcessingDisposition::DEFERRED;
             result.deferral_reason = error;
             return result;
         }
@@ -2297,7 +2297,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     const auto request_lease = context.paymaster->LeaseProviderRequest(
         readiness.identity.provider_id, !automatic_service || readiness.ready);
     const auto& messages = request_lease.Messages();
-    result.processed = !messages.empty();
+    result.disposition = messages.empty() ? ProviderProcessingDisposition::NO_MESSAGE : ProviderProcessingDisposition::PROCESSED;
     if (messages.empty()) return result;
     const DirectMessage& direct = messages.front();
     if (std::holds_alternative<PaymasterCapacityRequest>(direct.payload)) {

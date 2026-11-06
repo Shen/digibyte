@@ -2133,6 +2133,7 @@ void PaymasterWidgetTests::paymasterInjectedRpcCoversLiquidityAndRuntimeWorkflow
 
 void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStates()
 {
+    using wallet::paymaster_app::ProviderProcessingDisposition;
     using wallet::paymaster_app::ProviderProcessingResult;
     using wallet::paymaster_rpc::internal::ToJSON;
     struct ActivityCase {
@@ -2157,14 +2158,13 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
     const QString reservation_hint = QString::fromLatin1("A quote may now hold a reservation.");
     const QStringList no_response_claim{queued, not_queued, reservation_hint, QString::fromLatin1("process another request")};
 
-    // Use the real result serializer for valid outcomes. Synthetic JSON below
-    // is reserved for malformed or contradictory responses at the UI boundary.
+    // Use the real serializer for native outcomes. Synthetic JSON also checks
+    // legacy optional flags and malformed responses at the UI boundary.
     {
         ProviderProcessingResult result;
-        result.processed = true;
         result.queued = false;
         result.message_type = "capacity";
-        result.deferred = true;
+        result.disposition = ProviderProcessingDisposition::DEFERRED;
         result.deferral_reason = "PAYMASTER_SAFETY_LIMIT_EXHAUSTED";
         add_native("capacity_deferred", result, false,
             QString::fromLatin1("The capacity check was deferred. It remains waiting within its original expiry."),
@@ -2183,7 +2183,7 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
 
     {
         ProviderProcessingResult result;
-        result.processed = true;
+        result.disposition = ProviderProcessingDisposition::PROCESSED;
         result.queued = true;
         result.message_type = "quote";
         add_native("quote_queued", result, false, QString::fromLatin1("Processed one quote request."),
@@ -2191,10 +2191,11 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
         result.queued = false;
         add_native("quote_not_queued", result, false, QString::fromLatin1("Processed one quote request."),
             {not_queued, reservation_hint}, {queued, delivery_unknown});
-        result.rejected = false;
-        result.deferred = false;
-        add_native("optional_flags_known_false", result, false, QString::fromLatin1("Processed one quote request."),
-            {not_queued}, {QString::fromLatin1("was deferred"), QString::fromLatin1("was discarded")});
+        UniValue known_false = ToJSON(result);
+        known_false.pushKV("rejected", false);
+        known_false.pushKV("deferred", false);
+        cases.push_back({"optional_flags_known_false", known_false, false, QString::fromLatin1("Processed one quote request."),
+            {not_queued}, {QString::fromLatin1("was deferred"), QString::fromLatin1("was discarded")}});
         result.queued.reset();
         add_native("quote_delivery_unknown", result, false, QString::fromLatin1("Processed one quote request."),
             {delivery_unknown}, {queued, not_queued});
@@ -2214,9 +2215,9 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
 
     {
         ProviderProcessingResult result;
-        result.processed = true;
+        result.disposition = ProviderProcessingDisposition::PROCESSED;
         result.queued = false;
-        result.rejected = true;
+        result.disposition = ProviderProcessingDisposition::REJECTED;
         result.message_type = "quote";
         result.rejection_reason = "PAYMASTER_INVALID_QUOTE_REQUEST";
         add_native("quote_rejected_locally", result, false, QString::fromLatin1("The quote request was discarded locally."),
@@ -2241,7 +2242,7 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
 
     {
         ProviderProcessingResult result;
-        result.processed = true;
+        result.disposition = ProviderProcessingDisposition::PROCESSED;
         result.queued = true;
         result.result_status = DigiDollar::Paymaster::PaymasterResultStatus::REJECTED;
         result.rejection_code = "PAYMASTER_TEMPLATE_INPUT_UNAVAILABLE";
@@ -2256,7 +2257,7 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
 
     {
         ProviderProcessingResult result;
-        result.processed = false;
+        result.disposition = ProviderProcessingDisposition::NO_MESSAGE;
         result.queued = false;
         add_native("request_no_message", result, false,
             QString::fromLatin1("No capacity, quote, or recovery request was processed by this operation."), {}, no_response_claim);
@@ -2265,9 +2266,9 @@ void PaymasterWidgetTests::paymasterManualActivityUsesExpectedRpcAndReadableStat
         result.queued.reset();
         add_native("no_message_delivery_absent", result, false,
             QString::fromLatin1("No capacity, quote, or recovery request was processed by this operation."), {}, no_response_claim);
-        result.processed.reset();
-        add_native("processed_absent", result, false, unexpected, {}, no_response_claim);
-        add_native("submit_processed_absent", result, true, unexpected, {}, no_response_claim);
+        const UniValue absent{UniValue::VOBJ};
+        cases.push_back({"processed_absent", absent, false, unexpected, {}, no_response_claim});
+        cases.push_back({"submit_processed_absent", absent, true, unexpected, {}, no_response_claim});
     }
 
     const std::pair<const char*, const char*> malformed[] = {

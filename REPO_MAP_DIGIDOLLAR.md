@@ -680,7 +680,9 @@ Ordinary DD consensus/history checks remain authoritative. See
 
 Wallet RPC adapters cover provider, client, discovery, processing, runtime
 and send operations. Lifecycle implementation lives in `wallet/paymasterintegration.cpp`.
-`wallet/paymasterresults.h` defines native operation results;
+`wallet/paymasterresults.h` defines native operation results and
+`ProviderProcessingDisposition` distinguishes no message, processed, rejected
+and deferred independently of optional response delivery.
 `wallet/rpc/paymaster_results.cpp` encodes their RPC representation. The shared
 Qt worker queue is `qt/walletasync.*`; `qt/paymasterasync.*` interprets domain errors.
 Exact method groups and
