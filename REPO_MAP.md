@@ -1942,6 +1942,7 @@ The Qt GUI provides the graphical interface for DigiByte Core. Key non-DigiDolla
 
 ### src/wallet/walletdb.cpp / .h
 - `WalletBatch` → typed DB record reader/writer for the wallet (record types: keymeta, ckey, hdchain, descriptor, name, purpose, ⚠️ DD positions / DD UTXOs / DD oracle keys; the DD-specific records are documented in `REPO_MAP_DIGIDOLLAR.md`)
+- `PaymasterWalletTransactionEnd()` → common commit/abort/destruction completion for derived session/finance notifications and the independent checkpoint lifetime; ordinary database transaction ordering is preserved.
 
 ### src/wallet/paymasterdb.cpp
 - Paymaster `WalletBatch` codecs and record keys. Provider mutations and their safety generation share one DB transaction; standalone codecs use an implicit transaction. See `REPO_MAP_DIGIDOLLAR.md` for the Paymaster subsystem and tests.

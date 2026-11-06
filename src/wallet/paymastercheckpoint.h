@@ -54,6 +54,8 @@ bool PaymasterCheckpointWrite(const WalletBatch* owner, DatabaseBatch& batch, Wa
 bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner);
 bool PaymasterCheckpointTracked(const WalletBatch* owner);
 void PaymasterCheckpointFailed(const WalletBatch* owner);
+/** Release only checkpoint state and its locks. WalletBatch owns the common
+ * transaction completion, including derived finance/session notifications. */
 void PaymasterCheckpointEnd(const WalletBatch* owner);
 bool PaymasterCheckpointInTransaction(const WalletBatch* owner);
 

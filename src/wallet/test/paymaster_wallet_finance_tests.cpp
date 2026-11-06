@@ -381,6 +381,27 @@ BOOST_AUTO_TEST_CASE(warm_finance_read_errors_never_become_zero_capital)
     BOOST_CHECK_EQUAL(std::get<ProviderFinanceStatus>(absent).pool_capital.pending_maintenance_transactions, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(wallet_batch_destruction_discards_uncommitted_finance_notifications)
+{
+    Drain();
+    const auto before = database->m_records;
+    // Reuse the owner address: an abandoned batch must not leave notifications
+    // that a later, unrelated successful transaction could publish.
+    std::optional<WalletBatch> batch;
+    batch.emplace(*database);
+    BOOST_REQUIRE(batch->TxnBegin());
+    BOOST_REQUIRE(batch->WritePaymasterFinanceEvents(Metadata(), {Event(1)}, error));
+    batch.reset();
+    BOOST_CHECK(database->m_records == before);
+    BOOST_CHECK(WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
+    batch.emplace(*database);
+    BOOST_REQUIRE(batch->TxnBegin());
+    BOOST_REQUIRE(batch->TxnCommit());
+    BOOST_CHECK(WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
+    BOOST_CHECK_EQUAL(Metadata().event_count, 0U);
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(*database, error));
+}
+
 BOOST_AUTO_TEST_CASE(finance_rpc_exposes_retryable_backlog_and_current_completion)
 {
     Drain();

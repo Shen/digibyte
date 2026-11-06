@@ -33,10 +33,10 @@
       "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply."
     },
     "src/wallet/walletdb.cpp": {
-      "purpose": "Retain commit-aware derived notifications and persist independent ordinary/Paymaster coin-lock reasons atomically under the existing lockedutxo key.",
-      "reused_api": "WalletBatch transactions and status-preserving reads; existing ordinary value 1 is retained, P/B encode Paymaster/shared ownership. Legacy ambiguous rows remain conservatively ordinary.",
-      "ordinary_callers": "Ordinary persistent coin locks and wallet loading; older readers still lock rows without interpreting their value. Unknown/corrupt ownership records fail closed.",
-      "regressions": "Owner merge/removal and load, legacy locks, corrupt/empty/trailing values, DB-write/commit failure, cancel/expiry/prune/reload and existing DB transaction/cursor suites."
+      "purpose": "Retain commit-aware derived notifications and independent coin-lock reasons. The requested lifecycle cleanup makes PaymasterWalletTransactionEnd explicitly coordinate session/finance completion and checkpoint release instead of hiding those notifications in PaymasterCheckpointEnd.",
+      "reused_api": "Existing PaymasterSessionIndexEnd, PaymasterFinanceTransactionEnd, PaymasterCheckpointEnd and WalletBatch commit/abort/destructor hooks; checkpoint preparation remains before the backend commit. Existing ordinary lock value 1 and P/B ownership are retained.",
+      "ordinary_callers": "All ordinary DGB/DD WalletBatch users, including coin locks and wallet loading; no class-layout, database-format or commit-order change. Ordinary writes still perform no checkpoint I/O.",
+      "regressions": "Commit, abort, failed commit and destruction with reused batch addresses; derived session-index invalidation and finance notification publication; existing owner/load and ordinary DB cursor/transaction tests, ordinary DD sending and clean operator product builds."
     },
     "src/Makefile.am": {
       "purpose": "Register Paymaster-only domain/application modules and headers in existing build libraries.",
@@ -87,10 +87,10 @@
       "regressions": "Range and existing prefix-cursor tests across all wallet backends."
     },
     "src/wallet/walletdb.h": {
-      "purpose": "Declare existing bounded finance adapters plus status-preserving capacity index/response readers and lockedutxo ownership updates.",
-      "reused_api": "Existing WalletBatch, DatabaseReadStatus and backend transactions; bool capacity readers remain compatibility wrappers.",
-      "ordinary_callers": "Ordinary lock APIs retain their meaning; no wallet transaction/key format changes; capacity absence is distinct from unreadable local authority.",
-      "regressions": "Capacity absent/mismatched/corrupt/dangling index classification and automatic recovery progress; ordinary quote uncertainty retained; lock ownership rollback/load tests and existing DB tests."
+      "purpose": "Declare existing bounded finance/capacity/lock adapters and the explicitly shared PaymasterWalletTransactionEnd hook used by WalletBatch destruction.",
+      "reused_api": "Existing WalletBatch lifecycle and backend transactions; the common completion delegates to the existing derived notification and checkpoint endpoints. Bool capacity readers remain compatibility wrappers.",
+      "ordinary_callers": "All WalletBatch consumers must use the current inline destructor. No class-layout, wallet transaction/key format or ordinary lock API changes; unreadable authority remains distinct from absence.",
+      "regressions": "Same common-completion regressions as walletdb.cpp, capacity classification and ordinary DB tests. Recompile reached destructor consumers for isolated tests; complete current-header product builds remain operator checks."
     },
     "src/qt/walletmodel.h": {
       "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",

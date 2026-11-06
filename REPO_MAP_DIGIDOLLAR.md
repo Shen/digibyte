@@ -1072,6 +1072,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
   They remain members of `WalletBatch`, sharing its original database batch,
   write accounting and explicit transaction. Finance v1 development records are
   validated and atomically migrated to v2; other record formats are unchanged.
+- `PaymasterWalletTransactionEnd` in `walletdb.cpp` coordinates derived
+  session/finance completion on commit, abort and destruction before releasing
+  checkpoint state. The checkpoint endpoint itself has no derived-cache duties.
 - ⚠️ Paymaster DB methods persist versioned provider pools, liquidity policy,
   restartable maintenance ledger, and the latest carrier-withdrawal preview so
   successor/maintenance recovery and exact plan execution survive restart.

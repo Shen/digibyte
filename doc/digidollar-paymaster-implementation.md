@@ -173,6 +173,10 @@ only locates shared states; it performs no file/database I/O. Paths come from th
 single cached network data directory and the genesis/provider filename, normalized
 before lookup, so wallet clones share the same file lock. The OS lock, flush,
 rename and checkpoint-before-database-commit ordering remain mandatory.
+`WalletBatch` routes successful commit, abort and destruction through
+`PaymasterWalletTransactionEnd`. That common completion publishes or discards
+derived session/finance notifications and then releases checkpoint state;
+`PaymasterCheckpointEnd` owns only the checkpoint lifetime.
 
 ## Derived indexes and finance storage
 

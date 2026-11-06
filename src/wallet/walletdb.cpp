@@ -2034,20 +2034,25 @@ bool WalletBatch::TxnBegin()
     return true;
 }
 
+void PaymasterWalletTransactionEnd(const WalletBatch* owner, bool committed)
+{
+    PaymasterSessionIndexEnd(owner, committed);
+    PaymasterFinanceTransactionEnd(owner, committed);
+    PaymasterCheckpointEnd(owner);
+}
+
 bool WalletBatch::TxnCommit()
 {
     const bool committed = PaymasterCheckpointPrepareCommit(this) && m_batch->TxnCommit();
     if (!committed && PaymasterCheckpointTracked(this)) m_batch->TxnAbort();
-    PaymasterSessionIndexEnd(this, committed);
-    PaymasterFinanceTransactionEnd(this, committed);
-    PaymasterCheckpointEnd(this);
+    PaymasterWalletTransactionEnd(this, committed);
     return committed;
 }
 
 bool WalletBatch::TxnAbort()
 {
     const bool aborted = m_batch->TxnAbort();
-    PaymasterCheckpointEnd(this);
+    PaymasterWalletTransactionEnd(this);
     return aborted;
 }
 

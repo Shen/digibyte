@@ -250,7 +250,9 @@ public:
 };
 
 class WalletBatch;
-void PaymasterCheckpointEnd(const WalletBatch* owner);
+/** Complete Paymaster's derived notifications and independent checkpoint
+ * lifetime together. Only a successful database commit publishes changes. */
+void PaymasterWalletTransactionEnd(const WalletBatch* owner, bool committed = false);
 
 /** Access to the wallet database.
  * Opens the database and provides read and write access to it. Each read and write is its own transaction.
@@ -303,7 +305,7 @@ public:
     }
     WalletBatch(const WalletBatch&) = delete;
     WalletBatch& operator=(const WalletBatch&) = delete;
-    ~WalletBatch() { PaymasterCheckpointEnd(this); }
+    ~WalletBatch() { PaymasterWalletTransactionEnd(this); }
 
     bool SetPaymasterCheckpointPending(bool pending);
     bool RetirePaymasterCheckpoint(const uint256& expected_revision);
