@@ -846,8 +846,12 @@ local read/version failures before inbound processing validates stored shape.
 
 Wallet services own readiness, provider lifecycle, inbound processing, offer
 preparation, client authorization, exact submission and accounting. RPC adapters
-call them directly. The provider loop calls services without fabricated RPC
-requests. Finance caching and persistence are described in the
+call them directly. Client quote/payment coordinators retain call-local phase
+state and the connection lease across saved-authority, offer, reservation,
+capacity, quote and authorization helpers. Provider submit dispatch retains its
+work guard and fair lease across separate intake, replay, signing/commit and
+post-commit broadcast helpers. The provider loop calls services without fabricated
+RPC requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
 Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
 `src/paymaster/recovery.cpp` after reconstructing trusted local state; the full

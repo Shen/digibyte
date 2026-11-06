@@ -496,51 +496,108 @@ bool TryCommitClientQuoteResponse(
 }
 } // namespace
 
-PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, const QuoteParameters& input)
-{
-    ValidateClientPaymentOptions(input);
-    CWallet* const wallet = &target;
-    std::string readiness_error;
-    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
-        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
-    const auto& provider_id = input.provider_id;
-    const auto& request_id = input.request_id;
-    const int64_t payment = input.payment, requested_amount = input.requested_amount, fee_cap = input.fee_cap;
-    const bool subtract_fee = input.subtract_fee, send_all = input.send_all;
-    if (payment < 100 || payment > MAX_DD_OUTPUT_CENTS ||
-        requested_amount < 100 || requested_amount > MAX_DD_OUTPUT_CENTS) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "Paymaster amount or fee cap is out of range");
-    }
-    if ((!subtract_fee && requested_amount != payment) ||
-        (subtract_fee && requested_amount < payment)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT,
-                           "PAYMASTER_INVALID_CLIENT_PAYMENT_ORDER");
-    }
-    const auto requested_mode = input.mode;
-    const auto privacy = input.privacy;
-    const auto selection = input.selection;
-    const int maximum_attempts = input.maximum_attempts;
-    if (!CheckPaymasterPrivacyReadiness(privacy, context, readiness_error)) {
-        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
-    }
-    const auto& requested_inputs = input.inputs;
-    const auto& address = input.address;
-    const CDigiDollarAddress dd_address{address};
-    const CScript recipient_script = GetScriptForDestination(dd_address.GetDigiDollarDestination());
-    const auto& requested_offer = input.offer_id;
-    const bool have_restricted_key = input.identity_key.has_value();
-    const bool have_restricted_descriptor = input.descriptor.has_value();
-    const bool have_restricted_capability = input.capability.has_value();
-    const bool restricted = have_restricted_key || have_restricted_descriptor ||
-                            have_restricted_capability;
+namespace {
+// Call-local phase state. Only PaymasterStore grants or changes durable authority.
+struct ClientQuoteOperation {
+    WalletContext& context;
+    CWallet& wallet;
+    const QuoteParameters& input;
+    PaymasterStore store{wallet};
+    int64_t now{0};
+    std::string error;
+    CScript recipient_script;
     std::optional<XOnlyPubKey> restricted_identity_key;
     std::optional<RestrictedServiceDescriptor> restricted_descriptor;
     std::optional<SponsorshipCapability> restricted_capability;
-    std::string error;
-    PaymasterStore store{*wallet};
-    const int64_t now = GetTime();
     PaymentSession durable_session;
-    const bool have_durable_session =
+    bool have_durable_session{false};
+    uint256 canonical_request_hash;
+    DDCents effective_fee_cap;
+    OfferCandidate candidate;
+    PaymentSession session;
+    ProviderAttempt attempt;
+    PaymentIntent intent;
+    // Keep the connection/permit alive across every preparation phase.
+    std::shared_ptr<DirectLease> reservation_lease;
+    node::NodeContext* node{nullptr};
+    bool queued{false};
+    bool connection_pending{false};
+};
+
+struct ClientQuoteRequest {
+    PaymasterQuoteRequest request;
+    std::vector<unsigned char> bytes;
+};
+
+struct AutomaticPaymentOperation {
+    WalletContext& context;
+    CWallet& wallet;
+    const AutomaticPaymentParameters& input;
+    const std::vector<COutPoint>* preset_inputs;
+    PaymasterStore store{wallet};
+    int64_t now{0};
+    std::string error;
+    std::optional<XOnlyPubKey> restricted_identity_key;
+    std::optional<RestrictedServiceDescriptor> restricted_descriptor;
+    std::optional<SponsorshipCapability> restricted_capability;
+    OfferCandidate restricted_candidate;
+    DDCents effective_fee_cap;
+    std::optional<std::pair<PaymasterId, uint256>> persisted_selection;
+    std::optional<std::vector<COutPoint>> persisted_inputs;
+    std::set<PaymasterId> attempted_providers;
+    std::optional<uint256> active_attempt_id;
+    PaymentSession persisted_session;
+    bool have_persisted_session{false};
+    std::optional<OfferCandidate> selected;
+};
+
+void ValidateClientQuotePreparation(ClientQuoteOperation& operation)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    ValidateClientPaymentOptions(input);
+    std::string readiness_error;
+    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
+        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
+    if (input.payment < 100 || input.payment > MAX_DD_OUTPUT_CENTS ||
+        input.requested_amount < 100 || input.requested_amount > MAX_DD_OUTPUT_CENTS) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "Paymaster amount or fee cap is out of range");
+    }
+    if ((!input.subtract_fee && input.requested_amount != input.payment) ||
+        (input.subtract_fee && input.requested_amount < input.payment)) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_CLIENT_PAYMENT_ORDER");
+    }
+    if (!CheckPaymasterPrivacyReadiness(input.privacy, context, readiness_error))
+        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
+    const CDigiDollarAddress address{input.address};
+    operation.recipient_script = GetScriptForDestination(address.GetDigiDollarDestination());
+    operation.now = GetTime();
+}
+
+std::optional<PaymentResult> TryResumeClientQuoteAuthorization(ClientQuoteOperation& operation)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    const auto& payment = operation.input.payment;
+    const auto& requested_amount = operation.input.requested_amount;
+    const auto& fee_cap = operation.input.fee_cap;
+    const auto& requested_inputs = operation.input.inputs;
+    const auto& requested_mode = operation.input.mode;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& send_all = operation.input.send_all;
+    const auto& requested_offer = operation.input.offer_id;
+    auto& recipient_script = operation.recipient_script;
+    auto& durable_session = operation.durable_session;
+    auto& have_durable_session = operation.have_durable_session;
+    have_durable_session =
         store.GetSessionByRequestId(request_id, durable_session);
     if (have_durable_session && !IsTerminal(durable_session.state)) {
         ProviderAttempt durable_attempt;
@@ -592,6 +649,24 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }
+    return std::nullopt;
+}
+
+void PrepareClientQuoteSponsorship(ClientQuoteOperation& operation)
+{
+    const auto& input = operation.input;
+    CWallet* const wallet = &operation.wallet;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& payment = operation.input.payment;
+    const auto& privacy = operation.input.privacy;
+    const auto& requested_offer = operation.input.offer_id;
+    const bool restricted = operation.input.identity_key || operation.input.descriptor || operation.input.capability;
+    auto& recipient_script = operation.recipient_script;
+    auto& restricted_identity_key = operation.restricted_identity_key;
+    auto& restricted_descriptor = operation.restricted_descriptor;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& node = operation.node;
     // Existing durable authorizations above retain their exact recovery
     // path. A new request must respect current feature availability.
     if (restricted && !CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error)) {
@@ -640,7 +715,38 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
         restricted_descriptor = std::move(descriptor);
         restricted_capability = std::move(capability);
     }
+}
 
+std::optional<PaymentResult> SelectClientQuoteOffer(ClientQuoteOperation& operation)
+{
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    const auto& payment = operation.input.payment;
+    const auto& requested_amount = operation.input.requested_amount;
+    const auto& fee_cap = operation.input.fee_cap;
+    const auto& requested_inputs = operation.input.inputs;
+    const auto& requested_mode = operation.input.mode;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& maximum_attempts = operation.input.maximum_attempts;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& send_all = operation.input.send_all;
+    const auto& requested_offer = operation.input.offer_id;
+    const bool restricted = operation.input.identity_key || operation.input.descriptor || operation.input.capability;
+    auto& recipient_script = operation.recipient_script;
+    auto& restricted_identity_key = operation.restricted_identity_key;
+    auto& restricted_descriptor = operation.restricted_descriptor;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& durable_session = operation.durable_session;
+    auto& have_durable_session = operation.have_durable_session;
+    auto& canonical_request_hash = operation.canonical_request_hash;
+    auto& effective_fee_cap = operation.effective_fee_cap;
+    auto& candidate = operation.candidate;
     // Resolve an exact terminal retry from local durable authority
     // before consulting the live directory. The provider resources
     // used by the completed transaction are expected to be spent, so
@@ -648,7 +754,7 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
     // the idempotent tombstone dependent on remote state. All fields
     // which define the local order are still committed below; a hash
     // mismatch remains a hard conflict in CreateOrJoinSession().
-    const uint256 canonical_request_hash = CanonicalClientRequestHash(
+    canonical_request_hash = CanonicalClientRequestHash(
         request_id, recipient_script, DDCents{subtract_fee ? requested_amount : payment},
         DDCents{fee_cap}, requested_inputs, requested_mode, privacy, selection,
         maximum_attempts, subtract_fee, send_all, restricted_identity_key,
@@ -667,7 +773,7 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
         return CaptureSessionPayment(durable_session, &store);
     }
 
-    const DDCents effective_fee_cap =
+    effective_fee_cap =
         EffectiveClientServiceFeeCap(*wallet, DDCents{fee_cap}, error);
     if (effective_fee_cap.value < 0) {
         throw ApplicationError(ErrorKind::WALLET, error);
@@ -679,7 +785,6 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
     std::map<PaymasterId, PaymasterReliabilityRecord> reputation;
     for (auto& record : records)
         reputation.emplace(record.provider_id, std::move(record));
-    OfferCandidate candidate;
     if (restricted) {
         const auto& descriptor = *restricted_descriptor;
         candidate.provider_id = descriptor.provider_id;
@@ -717,8 +822,24 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
         throw ApplicationError(ErrorKind::INVALID_INPUT,
                            "PAYMASTER_NO_EXACT_GROSS_OFFER");
     }
+    return std::nullopt;
+}
 
-    PaymentSession session;
+std::optional<PaymentResult> JoinClientQuoteSession(ClientQuoteOperation& operation)
+{
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    const auto& requested_amount = operation.input.requested_amount;
+    const auto& requested_mode = operation.input.mode;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& send_all = operation.input.send_all;
+    auto& canonical_request_hash = operation.canonical_request_hash;
+    auto& candidate = operation.candidate;
+    auto& session = operation.session;
     if (!CheckPaymasterClientServiceFee(*wallet, candidate.payment, candidate.service_fee, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
@@ -743,9 +864,32 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
     session.requested_amount = DDCents{requested_amount};
     session.subtract_paymaster_fee_from_amount = subtract_fee;
     session.send_all_spendable_dd = send_all;
+    return std::nullopt;
+}
 
-    ProviderAttempt attempt;
-    PaymentIntent intent;
+std::optional<PaymentResult> PrepareClientQuoteAttempt(ClientQuoteOperation& operation)
+{
+    const auto& input = operation.input;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    const auto& requested_inputs = operation.input.inputs;
+    const auto& requested_mode = operation.input.mode;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& maximum_attempts = operation.input.maximum_attempts;
+    const bool restricted = operation.input.identity_key || operation.input.descriptor || operation.input.capability;
+    auto& recipient_script = operation.recipient_script;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& canonical_request_hash = operation.canonical_request_hash;
+    auto& candidate = operation.candidate;
+    auto& session = operation.session;
+    auto& attempt = operation.attempt;
+    auto& intent = operation.intent;
+    auto& reservation_lease = operation.reservation_lease;
     bool resume_attempt{false};
     for (auto it = session.attempt_ids.rbegin(); it != session.attempt_ids.rend(); ++it) {
         ProviderAttempt existing;
@@ -785,7 +929,6 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             node->connman->RetryPaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
         }
     }
-    std::shared_ptr<DirectLease> reservation_lease;
     if (!resume_attempt) {
         if (!candidate.HasPreparationWindow(now)) {
             throw ApplicationError(ErrorKind::WALLET,
@@ -899,8 +1042,26 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }
+    return std::nullopt;
+}
 
-    node::NodeContext* node = wallet->chain().context();
+std::optional<PaymentResult> AdvanceClientQuoteCapacity(ClientQuoteOperation& operation)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    const auto& privacy = operation.input.privacy;
+    auto& candidate = operation.candidate;
+    auto& session = operation.session;
+    auto& attempt = operation.attempt;
+    auto& intent = operation.intent;
+    auto& node = operation.node;
+    node = wallet->chain().context();
     if (!node || !node->connman || !node->chainman) {
         throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
     }
@@ -1032,10 +1193,22 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             *node->chainman, now, error)) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, error);
     }
+    return std::nullopt;
+}
 
-    bool queued{false};
-    bool connection_pending{false};
-    bool quote_received{false};
+ClientQuoteRequest PrepareClientQuoteRequest(ClientQuoteOperation& operation)
+{
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    auto& restricted_descriptor = operation.restricted_descriptor;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& session = operation.session;
+    auto& attempt = operation.attempt;
+    auto& intent = operation.intent;
     PaymasterQuoteRequest quote_request;
     std::vector<unsigned char> request_bytes;
     if (attempt.quote_request.empty()) {
@@ -1100,7 +1273,30 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
         }
         request_bytes = SerializeQuoteRequest(quote_request);
     }
+    return {std::move(quote_request), std::move(request_bytes)};
+}
 
+void ExchangeClientQuoteRequest(ClientQuoteOperation& operation, const ClientQuoteRequest& request)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    const auto& privacy = operation.input.privacy;
+    auto& effective_fee_cap = operation.effective_fee_cap;
+    auto& candidate = operation.candidate;
+    auto& session = operation.session;
+    auto& attempt = operation.attempt;
+    auto& node = operation.node;
+    auto& queued = operation.queued;
+    auto& connection_pending = operation.connection_pending;
+    const auto& quote_request = request.request;
+    const auto& request_bytes = request.bytes;
+    bool quote_received{false};
     if (!request_bytes.empty()) {
         // Pairwise equivocation is signature/binding evidence, not an
         // authorization decision. Record it before any rejected quote
@@ -1142,6 +1338,19 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
             }
         }
     }
+}
+
+PaymentResult CaptureClientQuoteProgress(ClientQuoteOperation& operation)
+{
+    auto& store = operation.store;
+    const auto& provider_id = operation.input.provider_id;
+    const auto& request_id = operation.input.request_id;
+    auto& candidate = operation.candidate;
+    auto& session = operation.session;
+    auto& attempt = operation.attempt;
+    auto& intent = operation.intent;
+    auto& queued = operation.queued;
+    auto& connection_pending = operation.connection_pending;
     if (!store.GetSessionByRequestId(request_id, session)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
     }
@@ -1175,53 +1384,46 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& target, con
     }
     return result;
 }
-PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& target,
-    const AutomaticPaymentParameters& input, const std::vector<COutPoint>* preset_inputs)
+
+void ValidateAutomaticPaymentPreparation(AutomaticPaymentOperation& operation)
 {
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
     ValidateClientPaymentOptions(input);
-    CWallet* const wallet = &target;
     std::string readiness_error;
-    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error)) {
+    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
         throw ApplicationError(ErrorKind::GENERAL, readiness_error);
-    }
-
-    const auto& request_id = input.request_id;
-    const auto& address = input.address;
-    const int64_t amount = input.amount, fee_cap = input.fee_cap;
-    if (amount < 100 || amount > MAX_DD_OUTPUT_CENTS)
+    if (input.amount < 100 || input.amount > MAX_DD_OUTPUT_CENTS)
         throw ApplicationError(ErrorKind::INVALID_INPUT, "Paymaster amount or fee cap is out of range");
-    const auto requested_mode = input.mode;
-    const bool subtract_fee = input.subtract_fee, send_all = input.send_all;
-    const bool prepare_only = input.prepare_only;
-    const auto& supplied_authorization_commitment = input.authorization_commitment;
-    if (prepare_only && supplied_authorization_commitment) {
-        throw ApplicationError(
-            ErrorKind::INVALID_INPUT,
-            "prepare_only and authorization_commitment are mutually exclusive");
-    }
-    const auto privacy = input.privacy;
-    const auto selection = input.selection;
-    const int maximum_attempts = input.maximum_attempts;
-    if (!CheckPaymasterPrivacyReadiness(privacy, context, readiness_error)) {
+    if (input.prepare_only && input.authorization_commitment)
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "prepare_only and authorization_commitment are mutually exclusive");
+    if (!CheckPaymasterPrivacyReadiness(input.privacy, context, readiness_error))
         throw ApplicationError(ErrorKind::GENERAL, readiness_error);
-    }
-
-    const bool have_restricted_key = input.identity_key.has_value();
-    const auto& preferred_provider = input.preferred_provider;
-    const auto& preferred_offer = input.preferred_offer;
-    const bool have_restricted_descriptor = input.descriptor.has_value();
-    const bool have_restricted_capability = input.capability.has_value();
-    if (preferred_provider.has_value() != preferred_offer.has_value())
+    if (input.preferred_provider.has_value() != input.preferred_offer.has_value())
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_PREFERRED_OFFER_PAIR_REQUIRED");
-    const bool restricted = have_restricted_key || have_restricted_descriptor ||
-                            have_restricted_capability;
-    std::optional<XOnlyPubKey> restricted_identity_key;
-    std::optional<RestrictedServiceDescriptor> restricted_descriptor;
-    std::optional<SponsorshipCapability> restricted_capability;
-    OfferCandidate restricted_candidate;
-    std::string error;
-    PaymasterStore store{*wallet};
-    const int64_t now = GetTime();
+    operation.now = GetTime();
+}
+
+std::optional<PaymentResult> TryResumeAutomaticPaymentAuthorization(AutomaticPaymentOperation& operation)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    const auto& address = operation.input.address;
+    const auto& fee_cap = operation.input.fee_cap;
+    const auto& requested_mode = operation.input.mode;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& send_all = operation.input.send_all;
+    const auto& amount = operation.input.amount;
+    const auto& supplied_authorization_commitment = operation.input.authorization_commitment;
+    auto& preset_inputs = operation.preset_inputs;
     PaymentSession durable_session;
     if (store.GetSessionByRequestId(request_id, durable_session) &&
         !IsTerminal(durable_session.state)) {
@@ -1349,11 +1551,29 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }
+    return std::nullopt;
+}
+
+void PrepareAutomaticPaymentSponsorship(AutomaticPaymentOperation& operation)
+{
+    const auto& input = operation.input;
+    CWallet* const wallet = &operation.wallet;
+    auto& error = operation.error;
+    const auto& address = operation.input.address;
+    const auto& fee_cap = operation.input.fee_cap;
+    const auto& privacy = operation.input.privacy;
+    const auto& amount = operation.input.amount;
+    const bool restricted = operation.input.identity_key || operation.input.descriptor || operation.input.capability;
+    auto& restricted_identity_key = operation.restricted_identity_key;
+    auto& restricted_descriptor = operation.restricted_descriptor;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& restricted_candidate = operation.restricted_candidate;
+    auto& effective_fee_cap = operation.effective_fee_cap;
     // Do not apply the new-request gate to the durable authorization resume above.
     if (restricted && !CheckNewSponsorshipScope(SponsorshipScope::RESTRICTED, error)) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, error);
     }
-    const DDCents effective_fee_cap =
+    effective_fee_cap =
         EffectiveClientServiceFeeCap(*wallet, DDCents{fee_cap}, error);
     if (effective_fee_cap.value < 0) {
         throw ApplicationError(ErrorKind::WALLET, error);
@@ -1412,13 +1632,36 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
         restricted_descriptor = std::move(descriptor);
         restricted_capability = std::move(capability);
     }
+}
 
-    std::optional<std::pair<PaymasterId, uint256>> persisted_selection;
-    std::optional<std::vector<COutPoint>> persisted_inputs;
-    std::set<PaymasterId> attempted_providers;
-    std::optional<uint256> active_attempt_id;
-    PaymentSession persisted_session;
-    const bool have_persisted_session =
+std::optional<PaymentResult> ResumeAutomaticPaymentSelection(AutomaticPaymentOperation& operation)
+{
+    const auto& input = operation.input;
+    auto& context = operation.context;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    const auto& address = operation.input.address;
+    const auto& fee_cap = operation.input.fee_cap;
+    const auto& requested_mode = operation.input.mode;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& maximum_attempts = operation.input.maximum_attempts;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& send_all = operation.input.send_all;
+    const auto& amount = operation.input.amount;
+    auto& restricted_identity_key = operation.restricted_identity_key;
+    auto& restricted_descriptor = operation.restricted_descriptor;
+    auto& restricted_capability = operation.restricted_capability;
+    auto& persisted_selection = operation.persisted_selection;
+    auto& persisted_inputs = operation.persisted_inputs;
+    auto& attempted_providers = operation.attempted_providers;
+    auto& active_attempt_id = operation.active_attempt_id;
+    auto& persisted_session = operation.persisted_session;
+    auto& have_persisted_session = operation.have_persisted_session;
+    auto& preset_inputs = operation.preset_inputs;
+    have_persisted_session =
         store.GetSessionByRequestId(request_id, persisted_session);
     if (have_persisted_session) {
         ValidatePreferredClientOffer(input, store, persisted_session);
@@ -1501,6 +1744,33 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
             }
         }
     }
+    return std::nullopt;
+}
+
+void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
+{
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    const int64_t now = operation.now;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    const auto& privacy = operation.input.privacy;
+    const auto& selection = operation.input.selection;
+    const auto& maximum_attempts = operation.input.maximum_attempts;
+    const auto& subtract_fee = operation.input.subtract_fee;
+    const auto& amount = operation.input.amount;
+    const auto& preferred_provider = operation.input.preferred_provider;
+    const auto& preferred_offer = operation.input.preferred_offer;
+    const bool restricted = operation.input.identity_key || operation.input.descriptor || operation.input.capability;
+    auto& restricted_candidate = operation.restricted_candidate;
+    auto& effective_fee_cap = operation.effective_fee_cap;
+    auto& persisted_selection = operation.persisted_selection;
+    auto& attempted_providers = operation.attempted_providers;
+    auto& active_attempt_id = operation.active_attempt_id;
+    auto& persisted_session = operation.persisted_session;
+    auto& have_persisted_session = operation.have_persisted_session;
+    auto& selected = operation.selected;
     std::vector<PaymasterReliabilityRecord> records;
     if (!store.ListProviderReliability(records)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REPUTATION_DATABASE_READ");
@@ -1555,7 +1825,6 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
                 have_persisted_session ? ErrorDisposition::RECONCILE : ErrorDisposition::RETRY_BEFORE_EXECUTION, !have_persisted_session);
         }
     }
-    std::optional<OfferCandidate> selected;
     if (persisted_selection) {
         const auto candidate = std::find_if(candidates.begin(), candidates.end(),
                                             [&](const OfferCandidate& entry) {
@@ -1609,7 +1878,17 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
         throw ApplicationError(ErrorKind::WALLET, selection_error,
             have_persisted_session ? ErrorDisposition::RECONCILE : ErrorDisposition::RETRY_BEFORE_EXECUTION, !have_persisted_session);
     }
+}
 
+std::vector<COutPoint> SelectAutomaticPaymentInputs(AutomaticPaymentOperation& operation)
+{
+    CWallet* const wallet = &operation.wallet;
+    auto& error = operation.error;
+    const auto& send_all = operation.input.send_all;
+    const auto& amount = operation.input.amount;
+    auto& persisted_inputs = operation.persisted_inputs;
+    auto& selected = operation.selected;
+    auto& preset_inputs = operation.preset_inputs;
     DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
     if (!dd_wallet) throw ApplicationError(ErrorKind::WALLET, "DigiDollar wallet not initialized");
     std::vector<COutPoint> selected_inputs;
@@ -1657,15 +1936,18 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
                            "PAYMASTER_DD_INPUT_SELECTION_FAILED: " +
                                (error.empty() ? "Insufficient confirmed DigiDollar inputs" : error));
     }
+    return selected_inputs;
+}
 
-    QuoteParameters quote;
-    static_cast<ClientPaymentOptions&>(quote) = input;
-    quote.provider_id = selected->provider_id;
-    quote.offer_id = selected->terms.offer_id;
-    quote.payment = selected->payment.value;
-    quote.requested_amount = amount;
-    quote.inputs = std::move(selected_inputs);
-    PaymentResult quote_result = RequestPaymasterQuote(context, *wallet, quote);
+PaymentResult AuthorizeAutomaticPaymentQuote(AutomaticPaymentOperation& operation, PaymentResult quote_result)
+{
+    auto& context = operation.context;
+    CWallet* const wallet = &operation.wallet;
+    auto& store = operation.store;
+    auto& error = operation.error;
+    const auto& request_id = operation.input.request_id;
+    const auto& supplied_authorization_commitment = operation.input.authorization_commitment;
+    auto& selected = operation.selected;
     if (!quote_result.funding_model) {
         quote_result.funding_model = selected->terms.funding_model;
     }
@@ -1765,6 +2047,43 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
         return provider_result;
     }
     return authorization;
+}
+
+} // namespace
+
+PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& input)
+{
+    ClientQuoteOperation operation{context, wallet, input};
+    ValidateClientQuotePreparation(operation);
+    if (auto resumed = TryResumeClientQuoteAuthorization(operation)) return std::move(*resumed);
+    PrepareClientQuoteSponsorship(operation);
+    if (auto completed = SelectClientQuoteOffer(operation)) return std::move(*completed);
+    if (auto completed = JoinClientQuoteSession(operation)) return std::move(*completed);
+    if (auto waiting = PrepareClientQuoteAttempt(operation)) return std::move(*waiting);
+    if (auto waiting = AdvanceClientQuoteCapacity(operation)) return std::move(*waiting);
+    const auto request = PrepareClientQuoteRequest(operation);
+    ExchangeClientQuoteRequest(operation, request);
+    return CaptureClientQuoteProgress(operation);
+}
+
+PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& wallet,
+    const AutomaticPaymentParameters& input, const std::vector<COutPoint>* preset_inputs)
+{
+    AutomaticPaymentOperation operation{context, wallet, input, preset_inputs};
+    ValidateAutomaticPaymentPreparation(operation);
+    if (auto resumed = TryResumeAutomaticPaymentAuthorization(operation)) return std::move(*resumed);
+    PrepareAutomaticPaymentSponsorship(operation);
+    if (auto completed = ResumeAutomaticPaymentSelection(operation)) return std::move(*completed);
+    SelectAutomaticPaymentOffer(operation);
+    auto inputs = SelectAutomaticPaymentInputs(operation);
+    QuoteParameters quote;
+    static_cast<ClientPaymentOptions&>(quote) = input;
+    quote.provider_id = operation.selected->provider_id;
+    quote.offer_id = operation.selected->terms.offer_id;
+    quote.payment = operation.selected->payment.value;
+    quote.requested_amount = input.amount;
+    quote.inputs = std::move(inputs);
+    return AuthorizeAutomaticPaymentQuote(operation, RequestPaymasterQuote(context, wallet, quote));
 }
 
 } // namespace wallet::paymaster_app

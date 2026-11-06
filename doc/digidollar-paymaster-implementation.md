@@ -191,6 +191,13 @@ results (`wallet/paymasterresults.h`). JSON encoding belongs to
 Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 
+Client quote/payment entry points coordinate named call-local phases for saved
+authorization, offer selection, reservation, capacity, quote exchange and exact
+approval. The connection lease remains owned across those phases; only the store
+changes durable authority. Provider submit dispatch similarly separates intake,
+replay, signing/commit and post-commit broadcast while retaining one work guard
+and fair message lease.
+
 Provider processing has one native disposition: no message, processed, rejected
 or deferred. Delivery remains an optional separate observation. The RPC adapter
 maps the disposition to the existing `processed`, `rejected` and `deferred`
