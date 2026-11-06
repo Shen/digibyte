@@ -4,6 +4,59 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## AUTO authorization, disconnect lifetime and retained financial work
+
+Working-tree corrections based on `8cd998047fac1acf71c7e5dc18ff11de21861712`,
+checked on 2026-11-06. Fresh AUTO requests with suitable own DGB require an
+explicit ordinary `fee_mode=dgb` send; they cannot bypass Paymaster preparation,
+approval or retry semantics by falling through to direct signing. Collaborative
+retries retain their saved authority. Published connection leases remain owned
+until node destruction. Signed unresolved maintenance retains its fee exposure
+and reconciliation history, and authenticated client results survive local
+failure and TTL pruning until acknowledgement. Typed session lookup distinguishes
+absence, unreadable authority and present but ineligible sessions.
+
+Quote, automatic-payment and submit coordinators now delegate named phases;
+durable authority remains in the existing store and scoped work/message leases
+span the complete operation. The implementation guide owns these behaviors,
+and the test runbook owns repeatable selectors.
+
+Forty-seven distinct production/test translation units were freshly compiled
+with MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`,
+including 40 daemon/native/Qt consumers reached by `paymaster/manager.h` and
+the changed network, domain, RPC, wallet and Qt units. Qt uses static 5.15.10.
+Native, daemon and Qt links reuse remaining objects/libraries and unchanged
+MOC; they are isolated links, not clean product builds or complete transitive
+provenance. Commands, inputs, hashes, logs and failed attempts are retained in
+`.ai/implement-r1-r5-8cd/`; `source-freeze.json` identifies the final sources.
+
+| Executed check | Bounded result |
+|---|---|
+| New failure regressions | Exit 0: nine cases / 666 assertions, repeated on final `native-v3`, plus the new alternative-recovery DB-commit/TTL/exact-retry case (77 assertions). Covers real disconnect/message-reader lifetime, all recurring maintenance kinds, both result types, delayed enqueue/replay pruning, session classifications and local read/write/preflight failures. Recovery uses mined inputs, genuine signatures and ordinary mempool validation, starting from saved recovery authority. |
+| Related native regressions | Exit 0 on `native-v1`: 53 additional cases / 2,715 assertions across application, PSBT/builder, fairness, maintenance, checkpoint, provider/recovery firewalls and ordinary lock ownership. Together the disjoint selections cover 63 cases / 3,458 assertions. Final production changes after this run only move returned optional payment results and remove unused adapter includes; they were freshly compiled and linked. |
+| Qt | Four selected functions / 38 feature rows exit 0 on `qt-v2`: session action matrix, asynchronous send phases, manual submit confirmation and wallet-model destruction with pending RPC reads. Init/cleanup excluded. Action matrix and submit confirmation additionally pass on final `qt-v3`; no full Qt pass is claimed. |
+| Descriptor functionals | Five scenarios exit 0 on `daemon-v1`: AUTO authorization, reorg, provider paid/public/recovery, backup, and RPC client protection. Final `daemon-v2` additionally passes AUTO including ordinary DD sends with Paymaster disabled (11.843 seconds), and the full provider scenario (85.000 seconds). All runs use isolated Regtest directories and random seed 1015350342; final port seeds are 3251/3261. The CLI is reused. |
+| Local controls | Dependency/cycle checks, all six architecture fixtures, Python AST/registration, JSON parsing and whitespace checks pass; 28 current-current functional variants are registered. |
+
+Initial extraction/test compiles and a Qt link exposed missing declarations,
+ambiguous test types and a duplicate older object. The first new AUTO functional
+attempt shared an HTTP connection between concurrent test calls; independent
+connections corrected the fixture. Failed attempts remain separate from the
+successful runs. No product validation, limits, checkpoint or test assertions
+were weakened.
+
+No persisted maintenance format changed. An unresolved signed transaction has
+no proven irreversible-conflict release rule in the existing ledger, so its fee
+exposure is retained conservatively; records already pruned by an earlier binary
+cannot be reconstructed by this correction. Retained inbound results remain
+process-local and subject to the existing count/byte quotas.
+
+Clean supported product builds, Linux/C++17, Tidy17 with the repository plugin,
+ASan/UBSan/TSan and full Qt/functional/compatibility matrices remain operator/CI
+work. Flake8 6.1.0 is unavailable locally; AST checks are not a lint pass.
+The build/test runbook provides the commands, prerequisites and acceptance
+criteria for those separate release checks.
+
 ## Provider locks, client result durability and native disposition
 
 Working-tree corrections based on `853cbc6719659000894d230ae97212e3efbc5ac7`,

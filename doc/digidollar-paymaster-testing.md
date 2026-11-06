@@ -414,6 +414,26 @@ python test/lint/lint-paymaster-boundaries.py
 if ($LASTEXITCODE -ne 0) { throw 'Dependency/cycle checks failed' }
 ```
 
+For AUTO authorization, disconnect lifetime and delayed-result/maintenance
+recovery, rebuild the changed sources and all consumers of `paymaster/manager.h`
+before using these focused regressions:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=net_tests/paymaster_disconnect_retains_lease_for_message_readers:paymaster_provider_tests/failed_signed_maintenance_retains_budget_and_replay_history:paymaster_wallet_identity_tests/recurring_maintenance_conflict_reversal_survives_restart_atomically:paymaster_wire_tests/manager_authenticated_results_survive_failed_scope_and_delayed_pruning:paymaster_wallet_store_tests/result_processing_distinguishes_session_absence_damage_and_ineligibility,auto_dispatch_rejects_unreadable_session_before_funding_or_signing,client_result_read_failure_retains_incoming_message,client_result_local_write_failure_retains_incoming_message,client_final_preflight_failure_retains_incoming_message:paymaster_wallet_security_tests/client_recovery_result_commit_failure_survives_ttl_and_exact_retry' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster lifetime, retention or maintenance regressions failed' }
+python test/functional/test_runner.py --jobs=1 wallet_paymaster_auto.py
+if ($LASTEXITCODE -ne 0) { throw 'AUTO authorization regression failed' }
+```
+
+Use the short isolated Windows temp directory described above. The AUTO test
+uses descriptor Regtest wallets and no provider: preparation, absent/mismatched
+approval, concurrent same-ID calls and CLI calls cannot become direct payments;
+the explicit ordinary DGB send remains functional. The native cases cover both
+result types beyond TTL/enqueue pruning, all recurring maintenance kinds across
+conflict/abandon and reload, atomic commit failure, and exact lease/permit lifetime.
+The real concurrent network case is also a targeted TSan regression; an ordinary
+native pass is not sanitizer evidence.
+
 For committed candidates, the
 [architecture checks](design/paymaster-integration-boundaries.md#architecture-checks)
 also compare changed paths against a selected base. Required Core-change reasons stay in the
@@ -445,7 +465,7 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Exact authorization and same-ID retry | Wallet service/store/security suites, including `client_saved_quote_authentication_precedes_new_authority`: corrupt persisted quote signatures cannot gain acceptance or pass the signing gate; exact retries and historical final validation remain valid. Application tests preserve historical Restricted request bindings without renewing authority. `wallet_paymaster_rpc.py`, `wallet_paymaster_provider.py`: lost replies, replay, unsigned/signed cancellation, work exclusion; accepted high-/low-level retries reject changed fee caps, attempt limits and preferred offers while unchanged retries survive stricter current policy. |
 | Inbound rejection versus local uncertainty | Identity `unknown_recovery_submit_is_consumed_before_normal_work`; security submit/recovery/quote classification fixtures; recovery `submit_payload_firewall_preserves_full_chain_validation`. `wallet_paymaster_reorg.py` consumes a conflicting quote request and rejects an unknown recovery over authenticated v2 channels, verifies unchanged balances/pools/budgets, then completes and reconfirms a real payment without duplicate finance events. |
 | Persisted read errors and action gating | Store `client_view_*`, `session_payment_snapshot_*`, status-getter and result-read cases cover corrupt/future records, unreadable/latest-attempt terms, valid unquoted fallback, dangling recovery indexes, full result binding/signature checks, structured get/list/resolve errors, retained result messages and unchanged protected state. Security recovery-read cases reach the application operations through their normal readiness gates. |
-| Client result durability | Store `client_result_local_write_failure_retains_incoming_message` injects begin/write/commit failures and retries the same signed result; `client_final_preflight_failure_retains_incoming_message` retains exact final bytes on local preflight failure. Wire `manager_client_result_leases_retain_both_result_types_until_ack` covers normal/recovery leases, pruning and acknowledgement. |
+| Client result durability | Store `client_result_local_write_failure_retains_incoming_message` injects begin/write/commit failures and retries the same signed result; `client_final_preflight_failure_retains_incoming_message` retains exact final bytes on local preflight failure. Security `client_recovery_result_commit_failure_survives_ttl_and_exact_retry` starts from saved recovery authority, uses mined inputs and real signatures, fails the final DB commit, expires the scoped lease and both TTLs, then retries through ordinary mempool validation without a second fee charge. Wire `manager_authenticated_results_survive_failed_scope_and_delayed_pruning` covers both result types, enqueue/replay pruning and queue-incarnation checks. |
 | Provider manual locks | `wallet_paymaster_locks.py` checks DGB and carrier readiness, transient/persistent locks, reload and locks added after capacity reservation; DGB unlock permits the same signed client payment. The ordinary DD-token RPC unlock prohibition remains enforced; transient carrier locks clear on reload and persistent ones keep blocking new signatures. Identity capacity lifecycle covers both reservation APIs; wallet PSBT role signing preserves the unsigned provider artifact and its independent reservation lock. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
@@ -488,10 +508,10 @@ is intentional. Do not run every test under an arbitrary wallet flag. The
 failover scenario uses four daemons/two providers; reorg scenarios must verify
 actual transaction confirmation and reversal, not only mocked status.
 
-The current-current selection includes 27 variants. In addition to the default
+The current-current selection includes 28 variants. In addition to the default
 scenarios, it registers the RPC legacy-policy, offer-model, reserved-capacity and
 client-protection cases; provider cancel-burst; and lifecycle no-client-change
-and announcement-refresh cases, plus provider manual locks. These are independent paths, not substitutes
+and announcement-refresh cases, plus provider manual locks and the AUTO direct-authorization guard. These are independent paths, not substitutes
 for the default scenarios. Historical bridge variants remain in the separate
 compatibility selection below.
 
