@@ -81,6 +81,30 @@ struct ProviderReadiness {
     std::vector<std::string> errors;
 };
 
+struct ProviderActivitySnapshot {
+    uint64_t active_payments{0};
+    uint64_t capacity_requests{0};
+    uint64_t reserved_outputs{0};
+    uint64_t pending_confirmations{0};
+};
+
+enum class ProviderAutomationState { READY, OFF, BLOCKED, PAUSED, WAITING_CONFIRMATION, WORKING };
+
+struct ProviderAutomationSnapshot {
+    bool configured{false};
+    bool enabled{false};
+    bool paid_maintenance_approved{false};
+    ProviderAutomationState state{ProviderAutomationState::READY};
+    std::string reason;
+    bool pending_transaction{false};
+};
+
+ProviderActivitySnapshot CaptureProviderActivity(const ProviderReadiness& readiness, int64_t now);
+/** Observe saved approval and current operation without changing either. */
+ProviderAutomationSnapshot CaptureProviderAutomationStatus(
+    const CWallet& wallet, const WalletContext& context,
+    const ProviderReadiness& readiness, int64_t now, bool synchronized = false);
+
 struct LiquiditySlotCounts {
     size_t target_counted{0};
     size_t ready{0};

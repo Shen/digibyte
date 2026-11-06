@@ -116,12 +116,6 @@ RPCResult PoolPreparationResultSchema();
 // reconciled pool and persist restartable plans before broadcasting.
 
 
-/** Current observation only; does not change worker state or grant authority. */
-
-/** Only expected refill waits may coexist with fresh, complete payment readiness. */
-UniValue ProviderAutomationStatusToJSON(const CWallet& wallet, const WalletContext& context,
-                                        const ProviderReadiness& readiness, bool synchronized = false);
-UniValue ProviderActivityToJSON(const ProviderReadiness& readiness, int64_t now);
 UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
                                        int64_t now, CWallet* wallet = nullptr);
 

@@ -8,7 +8,17 @@
 #include <univalue.h>
 
 class CConnman;
+namespace wallet {
+struct ProviderFinanceStatus;
+namespace paymaster_app {
+struct ProviderActivitySnapshot;
+struct ProviderAutomationSnapshot;
+} // namespace paymaster_app
+} // namespace wallet
 namespace wallet::paymaster_rpc::internal {
+UniValue ToJSON(const ProviderFinanceStatus& value);
+UniValue ToJSON(const paymaster_app::ProviderActivitySnapshot& value);
+UniValue ToJSON(const paymaster_app::ProviderAutomationSnapshot& value);
 std::string ResultStatusName(DigiDollar::Paymaster::PaymasterResultStatus status);
 std::string FeeModeName(DigiDollar::Paymaster::FeeMode mode);
 std::string AlternativeRecoveryPhaseName(

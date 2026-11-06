@@ -5,14 +5,61 @@
 #ifndef DIGIBYTE_WALLET_PAYMASTERFINANCE_H
 #define DIGIBYTE_WALLET_PAYMASTERFINANCE_H
 
-#include <paymaster/provider.h>
+#include <paymaster/error.h>
+#include <paymaster/finance.h>
 #include <primitives/transaction.h>
 
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 
 namespace wallet {
 class CWallet;
+
+/** A captured accounting observation, never payment or release authority. */
+struct ProviderFinancePoolCapital {
+    DigiDollar::Paymaster::DGBSatoshis dgb_available;
+    DigiDollar::Paymaster::DGBSatoshis dgb_reserved;
+    DigiDollar::Paymaster::DGBSatoshis dgb_pending;
+    DigiDollar::Paymaster::DDCents carrier_base;
+    DigiDollar::Paymaster::DDCents carrier_earned;
+    DigiDollar::Paymaster::DDCents carrier_withdrawable;
+    uint64_t pending_maintenance_transactions{0};
+};
+
+struct ProviderFinanceValuation {
+    CAmount oracle_price_micro_usd{0};
+    int64_t time{0};
+    double estimated_result_usd{0};
+};
+
+struct ProviderFinanceStatus {
+    DigiDollar::Paymaster::ProviderFinanceQuery query;
+    DigiDollar::Paymaster::PaymasterId provider_id;
+    DigiDollar::Paymaster::ProviderFinanceReport report;
+    DigiDollar::Paymaster::ProviderBackupStatus backup;
+    bool backup_required{false};
+    std::array<DigiDollar::Paymaster::DDCents, 4> average_service_fee{};
+    ProviderFinancePoolCapital pool_capital;
+    std::optional<ProviderFinanceValuation> valuation;
+};
+
+struct ProviderFinanceStatusFailure {
+    DigiDollar::Paymaster::ErrorKind kind{DigiDollar::Paymaster::ErrorKind::WALLET};
+    std::string code;
+    // Some existing callers expose only the category/code. A present
+    // disposition retains the established structured reconciliation contract.
+    std::optional<DigiDollar::Paymaster::ErrorDisposition> disposition;
+};
+
+using ProviderFinanceStatusResult = std::variant<ProviderFinanceStatus, ProviderFinanceStatusFailure>;
+/** Wait for wallet notifications before taking the wallet-locked accounting
+ * snapshot. A zero query time captures the clock after that wait; an explicit
+ * time supports deterministic callers. All displayed values use that time. */
+ProviderFinanceStatusResult CaptureProviderFinanceStatus(
+    CWallet& wallet, DigiDollar::Paymaster::ProviderFinanceQuery query);
 
 // Durable wallet-native retirement marker, written before broadcast.
 inline constexpr const char* PAYMASTER_RETIREMENT_PROVIDER_KEY{"paymaster_retirement_provider"};

@@ -2071,4 +2071,101 @@ bool ProviderCanServeDuringRefill(
     }
 }
 
+ProviderActivitySnapshot CaptureProviderActivity(const ProviderReadiness& readiness, int64_t now)
+{
+    using namespace DigiDollar::Paymaster;
+    ProviderActivitySnapshot result;
+    result.active_payments = std::count_if(
+        readiness.budget_ledger.reservations.begin(), readiness.budget_ledger.reservations.end(),
+        [](const auto& reservation) { return reservation.state == BudgetReservationState::RESERVED; });
+    result.capacity_requests = std::count_if(
+        readiness.budget_ledger.capacity_admissions.begin(), readiness.budget_ledger.capacity_admissions.end(),
+        [now](const auto& admission) { return admission.state == CapacityAdmissionState::RESERVED && admission.expires_at > now; });
+    result.reserved_outputs = std::count_if(
+        readiness.pool_entries.begin(), readiness.pool_entries.end(),
+        [](const auto& entry) { return entry.purpose == PoolPurpose::OPERATIONAL && entry.state == PoolEntryState::RESERVED; });
+    result.pending_confirmations = std::count_if(
+        readiness.pool_entries.begin(), readiness.pool_entries.end(),
+        [](const auto& entry) {
+            return entry.state == PoolEntryState::PENDING_SUCCESSOR ||
+                   (entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height <= 0);
+        });
+    return result;
+}
+
+ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet, const WalletContext& context,
+                                        const ProviderReadiness& readiness, int64_t now, bool synchronized)
+{
+    using namespace DigiDollar::Paymaster;
+    LOCK(wallet.cs_wallet);
+    const auto& policy = readiness.liquidity_policy;
+    const bool configured = readiness.have_liquidity_policy;
+    const bool enabled = configured && policy.automatic_replenishment;
+    const bool approved = configured && policy.paid_maintenance_approved;
+    const bool running = readiness.have_identity && context.paymaster &&
+        context.paymaster->IsProviderRunning(wallet.GetName(), readiness.identity.provider_id);
+    ProviderAutomationState state{ProviderAutomationState::READY};
+    std::string reason;
+    bool pending{false}, planned{false};
+    for (const auto& record : readiness.maintenance_ledger.records) {
+        if (record.IsPreparation()) continue;
+        pending |= record.state == ProviderMaintenanceState::BROADCAST;
+        planned |= record.state == ProviderMaintenanceState::PLANNED;
+    }
+    if (!enabled) {
+        state = ProviderAutomationState::OFF;
+        reason = configured ? "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" : "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+    } else if (!approved || policy.maximum_maintenance_fee_per_transaction.value <= 0 ||
+               policy.maximum_maintenance_fee_per_hour.value <= 0 ||
+               policy.maximum_maintenance_fee_per_day.value <= 0) {
+        state = ProviderAutomationState::BLOCKED; reason = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+    } else if (!readiness.settings.enabled || !running) {
+        state = ProviderAutomationState::PAUSED; reason = "PAYMASTER_PROVIDER_STOPPED";
+    } else if (wallet.IsLocked()) {
+        state = ProviderAutomationState::PAUSED; reason = "PAYMASTER_WALLET_LOCKED";
+    } else if (readiness.settings.operation_mode != ProviderOperationMode::AUTOMATIC) {
+        state = ProviderAutomationState::PAUSED; reason = "PAYMASTER_MANUAL_PROCESSING";
+    } else {
+        const auto service = ProviderServiceStatusForObservation(
+            context.paymaster->GetProviderServiceStatus(wallet.GetName()), readiness.ready, synchronized);
+        reason = service.last_error;
+        const bool faulted = service.state == ProviderServiceState::FAULT;
+        if (faulted) {
+            state = ProviderAutomationState::BLOCKED;
+            if (reason.empty()) reason = "PAYMASTER_AUTOMATIC_SERVICE_ERROR";
+        } else if (service.state == ProviderServiceState::DRAIN_ONLY) {
+            state = ProviderAutomationState::PAUSED;
+            if (reason.empty()) reason = "PAYMASTER_PROVIDER_DRAIN_ONLY";
+        } else if (reason == "PAYMASTER_PROVIDER_SYNCING") state = ProviderAutomationState::PAUSED;
+        else if (pending) state = ProviderAutomationState::WAITING_CONFIRMATION;
+        else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = ProviderAutomationState::BLOCKED;
+        else if (planned) state = ProviderAutomationState::WORKING;
+        else if (!readiness.ready) state = ProviderAutomationState::BLOCKED;
+        const auto activity = CaptureProviderActivity(readiness, now);
+        const bool payment_in_use = activity.active_payments > 0 ||
+            activity.capacity_requests > 0 ||
+            activity.reserved_outputs > 0;
+        const int64_t minimum_operational_dgb = readiness.have_policy
+            ? readiness.policy.maximum_network_fee.value : std::numeric_limits<int64_t>::max();
+        const bool targets_accounted_for =
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB, policy.target_admission_dgb).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, policy.target_admission_carriers).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DGB, policy.target_operational_dgb, minimum_operational_dgb).missing == 0 &&
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, policy.target_operational_carriers).missing == 0;
+        if (!faulted && !pending && !planned && !readiness.ready && payment_in_use && targets_accounted_for &&
+            readiness.errors.size() == 1 && readiness.errors.front() == "PAYMASTER_OPERATIONAL_SLOT_MISSING" &&
+            (reason.empty() || reason == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING")) {
+            state = ProviderAutomationState::PAUSED;
+            reason = "PAYMASTER_PAYMENT_CAPACITY_IN_USE";
+        } else if (!faulted && reason == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") {
+            if (readiness.ready && !pending) reason.clear();
+            else if (activity.pending_confirmations > 0)
+                state = ProviderAutomationState::WAITING_CONFIRMATION;
+            else if (state == ProviderAutomationState::BLOCKED && !readiness.errors.empty()) reason = readiness.errors.front();
+        }
+        if (state == ProviderAutomationState::BLOCKED && reason.empty() && !readiness.errors.empty()) reason = readiness.errors.front();
+    }
+    return {configured, enabled, approved, state, std::move(reason), pending};
+}
+
 } // namespace wallet::paymaster_app

@@ -519,9 +519,10 @@ RPCHelpMan getpaymasterliquiditystatus()
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
-            auto result = ProviderLiquidityStatusToJSON(readiness, GetTime(), wallet.get());
-            result.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness,
-                AutomaticProviderStateIsSynchronized(*wallet)));
+            const int64_t now = GetTime();
+            auto result = ProviderLiquidityStatusToJSON(readiness, now, wallet.get());
+            result.pushKV("automation_status", ToJSON(CaptureProviderAutomationStatus(*wallet, context, readiness, now,
+                AutomaticProviderStateIsSynchronized(*wallet))));
             return result;
         }),
     };
@@ -1076,301 +1077,22 @@ RPCHelpMan getpaymasterfinancestatus()
                                    "PAYMASTER_INVALID_FINANCE_QUERY");
             }
 
-            // Finance reconciliation classifies wallet transactions against
-            // the active chain. Wait for the wallet notification queue first
-            // so a just-confirmed payment cannot be reported as pending while
-            // the rest of this RPC already observes the newer chain tip.
-            wallet->BlockUntilSyncedToCurrentChain();
-            std::string error;
             ProviderFinanceQuery query;
-            query.now = GetTime();
             query.period = period == "today" ? ProviderFinancePeriod::TODAY :
                 period == "7d" ? ProviderFinancePeriod::DAYS7 :
                 period == "30d" ? ProviderFinancePeriod::DAYS30 : ProviderFinancePeriod::ALL;
             query.include_events = include_events;
             query.limit = limit;
             query.cursor = cursor;
-            ProviderFinanceReport report;
-            ProviderIdentityRecord identity;
-            ProviderBackupStatus backup;
-            std::vector<ProviderPoolEntry> pool;
-            ProviderMaintenanceLedger maintenance;
-            {
-                LOCK(wallet->cs_wallet);
-                // Keep reconciliation and the report on one wallet snapshot:
-                // a committed source change must not enter between them.
-                if (!ReconcileProviderFinanceReport(*wallet, !cursor.empty(), error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error,
-                        error == "PAYMASTER_FINANCE_RECONCILING"
-                            ? ErrorDisposition::RETRY_BEFORE_EXECUTION : ErrorDisposition::RECONCILE);
+            auto captured = CaptureProviderFinanceStatus(*wallet, std::move(query));
+            if (const auto* failure = std::get_if<ProviderFinanceStatusFailure>(&captured)) {
+                if (failure->disposition) {
+                    throw ApplicationError(failure->kind, failure->code, *failure->disposition);
                 }
-                WalletBatch batch{wallet->GetDatabase()};
-                if (!batch.ReadPaymasterIdentity(identity) ||
-                    !batch.ReadPaymasterFinanceReport(query, report, error)) {
-                    const bool invalid_query = error == "PAYMASTER_INVALID_FINANCE_QUERY" ||
-                        error == "PAYMASTER_FINANCE_CURSOR_INVALID" || error == "PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED";
-                    throw ApplicationError(invalid_query ? ErrorKind::INVALID_INPUT : ErrorKind::WALLET,
-                        error.empty() ? "PAYMASTER_FINANCE_LEDGER_NOT_FOUND" : error,
-                        invalid_query ? ErrorDisposition::USER_DECISION : ErrorDisposition::RECONCILE);
-                }
-                if (!batch.ReadPaymasterProviderPool(pool) &&
-                    batch.HasPaymasterProviderPool()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       "PAYMASTER_INVALID_PROVIDER_POOL");
-                }
-                if (!batch.ReadPaymasterMaintenanceLedger(maintenance) &&
-                    batch.HasPaymasterMaintenanceLedger()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
-                }
+                throw JSONRPCError(failure->kind == ErrorKind::INVALID_INPUT ? RPC_INVALID_PARAMETER : RPC_WALLET_ERROR,
+                                   failure->code);
             }
-            if (!GetPaymasterProviderBackupStatus(
-                    *wallet, backup, GetTime(), error)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, error);
-            }
-
-            const auto& ledger = report.metadata;
-            const int64_t now = query.now;
-            const int64_t utc_day = (now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
-            const int64_t cutoff = period == "today" ? utc_day : period == "7d" ?
-                utc_day - 6 * PROVIDER_BUDGET_WINDOW_SECONDS : period == "30d" ?
-                utc_day - 29 * PROVIDER_BUDGET_WINDOW_SECONDS : 0;
-            const auto& totals = report.periods[size_t(query.period)];
-            const int64_t dd_income = totals.total.dd_income.value;
-            const int64_t dgb_cost = totals.total.dgb_cost.value;
-            const uint64_t transfers = totals.total.successful_transfers;
-            const uint64_t user_paid = totals.total.user_paid_transfers;
-            const uint64_t public_sponsored = totals.total.public_sponsored_transfers;
-            const uint64_t restricted_sponsored = totals.total.restricted_sponsored_transfers;
-            const int64_t user_paid_income = totals.income[0], user_paid_cost = totals.cost[0];
-            const int64_t public_sponsored_income = totals.income[1], public_sponsored_cost = totals.cost[1];
-            const int64_t restricted_sponsored_income = totals.income[2], restricted_sponsored_cost = totals.cost[2];
-            const auto add_amount = [&](int64_t& total, int64_t amount) {
-                if (amount < 0 || total > std::numeric_limits<int64_t>::max() - amount) {
-                    throw JSONRPCError(RPC_WALLET_ERROR,
-                                       "PAYMASTER_FINANCE_TOTAL_OVERFLOW");
-                }
-                total += amount;
-            };
-            int64_t dgb_available{0};
-            int64_t dgb_reserved{0};
-            int64_t dgb_pending{0};
-            int64_t carrier_base{0};
-            int64_t carrier_earned{0};
-            int64_t carrier_withdrawable{0};
-            for (const ProviderPoolEntry& entry : pool) {
-                if (!IsActiveProviderPoolState(entry.state)) continue;
-                if (entry.asset == PoolAsset::DGB) {
-                    if (entry.state == PoolEntryState::AVAILABLE) {
-                        add_amount(dgb_available, entry.dgb_value.value);
-                    } else if (entry.state == PoolEntryState::PENDING_SUCCESSOR) {
-                        add_amount(dgb_pending, entry.dgb_value.value);
-                    } else {
-                        add_amount(dgb_reserved, entry.dgb_value.value);
-                    }
-                    continue;
-                }
-                const int64_t base = std::min<int64_t>(100, entry.carrier_value.value);
-                const int64_t excess = std::max<int64_t>(0, entry.carrier_value.value - base);
-                add_amount(carrier_base, base);
-                add_amount(carrier_earned, excess);
-                if (entry.state == PoolEntryState::AVAILABLE &&
-                    entry.confirmation_height > 0) {
-                    add_amount(carrier_withdrawable, excess);
-                }
-            }
-            const int64_t pending_maintenance = std::count_if(
-                maintenance.records.begin(), maintenance.records.end(),
-                [](const ProviderMaintenanceRecord& record) {
-                    return record.state == ProviderMaintenanceState::PLANNED ||
-                           record.state == ProviderMaintenanceState::BROADCAST;
-                });
-
-            UniValue result{UniValue::VOBJ};
-            result.pushKV("provider_id", identity.provider_id.GetHex());
-            result.pushKV("period", period);
-            result.pushKV("revision", report.metadata.revision);
-            result.pushKV("service_fee_income_cents", dd_income);
-            result.pushKV("dgb_operating_cost_satoshis", dgb_cost);
-            result.pushKV("successful_transfers", transfers);
-            result.pushKV("average_service_fee_cents",
-                          transfers == 0 ? 0 : dd_income / static_cast<int64_t>(transfers));
-            result.pushKV("user_paid_transfers", user_paid);
-            result.pushKV("public_sponsored_transfers", public_sponsored);
-            result.pushKV("restricted_sponsored_transfers", restricted_sponsored);
-            const auto make_model_summary = [](uint64_t model_transfers,
-                                               int64_t model_income,
-                                               int64_t model_cost) {
-                UniValue summary{UniValue::VOBJ};
-                summary.pushKV("successful_transfers", model_transfers);
-                summary.pushKV("service_fee_income_cents", model_income);
-                summary.pushKV("dgb_operating_cost_satoshis", model_cost);
-                return summary;
-            };
-            UniValue model_breakdown{UniValue::VOBJ};
-            model_breakdown.pushKV(
-                "user_paid",
-                make_model_summary(user_paid, user_paid_income,
-                                   user_paid_cost));
-            model_breakdown.pushKV(
-                "public_sponsored",
-                make_model_summary(public_sponsored,
-                                   public_sponsored_income,
-                                   public_sponsored_cost));
-            model_breakdown.pushKV(
-                "restricted_sponsored",
-                make_model_summary(restricted_sponsored,
-                                   restricted_sponsored_income,
-                                   restricted_sponsored_cost));
-            result.pushKV("model_breakdown", std::move(model_breakdown));
-
-            // All cards use the same revision and checked materialized totals.
-            const auto make_period_summary = [&](ProviderFinancePeriod summary_period) {
-                const auto& summary_totals = report.periods[size_t(summary_period)].total;
-                const auto summary_income = summary_totals.dd_income.value;
-                const auto summary_cost = summary_totals.dgb_cost.value;
-                const auto summary_transfers = summary_totals.successful_transfers;
-                const auto summary_user_paid = summary_totals.user_paid_transfers;
-                const auto summary_public_sponsored = summary_totals.public_sponsored_transfers;
-                const auto summary_restricted_sponsored = summary_totals.restricted_sponsored_transfers;
-                UniValue summary{UniValue::VOBJ};
-                summary.pushKV("service_fee_income_cents", summary_income);
-                summary.pushKV("dgb_operating_cost_satoshis", summary_cost);
-                summary.pushKV("successful_transfers", summary_transfers);
-                summary.pushKV(
-                    "average_service_fee_cents",
-                    summary_transfers == 0
-                        ? 0
-                        : summary_income / static_cast<int64_t>(summary_transfers));
-                summary.pushKV("user_paid_transfers", summary_user_paid);
-                summary.pushKV("public_sponsored_transfers", summary_public_sponsored);
-                summary.pushKV("restricted_sponsored_transfers", summary_restricted_sponsored);
-                return summary;
-            };
-            UniValue period_summaries{UniValue::VOBJ};
-            period_summaries.pushKV("today", make_period_summary(ProviderFinancePeriod::TODAY));
-            period_summaries.pushKV("7d", make_period_summary(ProviderFinancePeriod::DAYS7));
-            period_summaries.pushKV("30d", make_period_summary(ProviderFinancePeriod::DAYS30));
-            period_summaries.pushKV("all", make_period_summary(ProviderFinancePeriod::ALL));
-            result.pushKV("period_summaries", std::move(period_summaries));
-            result.pushKV("history_partially_reconstructable",
-                          ledger.earlier_history_partial);
-            result.pushKV("history_complete_from", ledger.history_complete_from);
-            result.pushKV("backup_required", ProviderBackupRequired(backup));
-            result.pushKV("last_successful_backup_at",
-                          backup.last_successful_backup_at);
-            result.pushKV("external_backup_acknowledged_at",
-                          backup.external_backup_acknowledged_at);
-
-            const CAmount oracle_price =
-                OracleIntegration::GetCurrentOraclePriceMicroUSD();
-            if (oracle_price > 0) {
-                const long double income_usd =
-                    static_cast<long double>(dd_income) / 100.0L;
-                const long double cost_usd =
-                    static_cast<long double>(dgb_cost) *
-                    static_cast<long double>(oracle_price) /
-                    static_cast<long double>(COIN) / 1000000.0L;
-                result.pushKV("oracle_price_micro_usd", oracle_price);
-                result.pushKV("valuation_time", now);
-                result.pushKV("estimated_result_usd",
-                              static_cast<double>(income_usd - cost_usd));
-            }
-
-            UniValue pool_capital{UniValue::VOBJ};
-            pool_capital.pushKV("dgb_available_satoshis", dgb_available);
-            pool_capital.pushKV("dgb_reserved_satoshis", dgb_reserved);
-            pool_capital.pushKV("dgb_pending_satoshis", dgb_pending);
-            pool_capital.pushKV("carrier_base_cents", carrier_base);
-            pool_capital.pushKV("carrier_earned_cents", carrier_earned);
-            pool_capital.pushKV("carrier_withdrawable_cents", carrier_withdrawable);
-            pool_capital.pushKV("pending_maintenance_transactions", pending_maintenance);
-            result.pushKV("pool_capital", std::move(pool_capital));
-
-            if (include_events) {
-                // A compact daily progression lets operator UIs graph a year
-                // without exposing transaction identifiers or loading the
-                // complete event ledger. The selected-period filter is still
-                // respected; an all-history request deliberately returns only
-                // the most recent 366 daily materializations.
-                std::vector<const ProviderFinanceDailyTotals*> daily_totals;
-                for (const auto& day : report.days) {
-                    const auto& total = day.total;
-                    if (cutoff > 0 && total.day_start < cutoff) continue;
-                    daily_totals.push_back(&total);
-                }
-                std::sort(
-                    daily_totals.begin(), daily_totals.end(),
-                    [](const ProviderFinanceDailyTotals* lhs,
-                       const ProviderFinanceDailyTotals* rhs) {
-                        return lhs->day_start > rhs->day_start;
-                    });
-                if (daily_totals.size() > 366) daily_totals.resize(366);
-                UniValue days{UniValue::VARR};
-                for (const ProviderFinanceDailyTotals* total : daily_totals) {
-                    UniValue day{UniValue::VOBJ};
-                    day.pushKV("day_start", total->day_start);
-                    day.pushKV("service_fee_income_cents",
-                               total->dd_income.value);
-                    day.pushKV("dgb_operating_cost_satoshis",
-                               total->dgb_cost.value);
-                    day.pushKV("successful_transfers",
-                               total->successful_transfers);
-                    day.pushKV("maintenance_transactions",
-                               total->maintenance_transactions);
-                    days.push_back(std::move(day));
-                }
-                result.pushKV("daily_totals", std::move(days));
-
-                UniValue events{UniValue::VARR};
-                const auto kind_name = [](ProviderFinanceEventKind kind) {
-                    switch (kind) {
-                    case ProviderFinanceEventKind::TRANSFER: return "transfer";
-                    case ProviderFinanceEventKind::POOL_SETUP: return "setup";
-                    case ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT: return "replenishment";
-                    case ProviderFinanceEventKind::POOL_RETIREMENT: return "retirement";
-                    case ProviderFinanceEventKind::CARRIER_WITHDRAWAL: return "withdrawal";
-                    }
-                    return "invalid";
-                };
-                const auto state_name = [](ProviderFinanceEventState state) {
-                    switch (state) {
-                    case ProviderFinanceEventState::PENDING: return "pending";
-                    case ProviderFinanceEventState::CONFIRMED: return "confirmed";
-                    case ProviderFinanceEventState::INVALIDATED: return "invalidated";
-                    }
-                    return "invalid";
-                };
-                for (const auto& event : report.events) {
-                    UniValue item{UniValue::VOBJ};
-                    item.pushKV("event_id", event.event_id.GetHex());
-                    item.pushKV("kind", kind_name(event.kind));
-                    item.pushKV("state", state_name(event.state));
-                    item.pushKV("dd_income_cents", event.dd_income.value);
-                    item.pushKV("dgb_cost_satoshis", event.dgb_cost.value);
-                    item.pushKV("created_at", event.created_at);
-                    if (event.confirmed_at > 0) {
-                        item.pushKV("confirmed_at", event.confirmed_at);
-                    }
-                    if (event.kind == ProviderFinanceEventKind::TRANSFER) {
-                        item.pushKV("funding_model",
-                                    event.funding_model == FundingModel::USER_PAID
-                                        ? "user_paid" : "sponsored");
-                        if (event.funding_model == FundingModel::SPONSORED) {
-                            item.pushKV("sponsorship_scope",
-                                        event.sponsorship_scope == SponsorshipScope::PUBLIC
-                                            ? "public" : "restricted");
-                        }
-                    }
-                    item.pushKV("transaction_id", event.transaction_id.GetHex());
-                    events.push_back(std::move(item));
-                }
-                result.pushKV("events", std::move(events));
-                if (!report.next_cursor.empty()) {
-                    result.pushKV("next_cursor", report.next_cursor);
-                }
-            }
-            return result;
+            return ToJSON(std::get<ProviderFinanceStatus>(captured));
         }),
     };
 }
@@ -1514,7 +1236,7 @@ RPCHelpMan getpaymasterinfo()
             }
 
             UniValue pool{UniValue::VOBJ};
-            pool.pushKV("activity", ProviderActivityToJSON(readiness, GetTime()));
+            pool.pushKV("activity", ToJSON(CaptureProviderActivity(readiness, GetTime())));
             pool.pushKV("entries", static_cast<uint64_t>(readiness.pool_entries.size()));
             pool.pushKV("reserved", static_cast<uint64_t>(std::count_if(
                                         readiness.pool_entries.begin(), readiness.pool_entries.end(), [](const auto& entry) {
@@ -1685,7 +1407,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("ready", readiness.ready);
             provider.pushKV("pool_ready", readiness.pool_ready);
             UniValue pool_summary{UniValue::VOBJ};
-            pool_summary.pushKV("activity", ProviderActivityToJSON(readiness, now));
+            pool_summary.pushKV("activity", ToJSON(CaptureProviderActivity(readiness, now)));
             pool_summary.pushKV("entries", uint64_t(readiness.pool_entries.size()));
             pool_summary.pushKV("reserved", uint64_t(std::count_if(readiness.pool_entries.begin(), readiness.pool_entries.end(),
                 [](const auto& entry) { return entry.state == PoolEntryState::RESERVED || entry.state == PoolEntryState::PENDING_SUCCESSOR || entry.state == PoolEntryState::COMMITTED; })));
@@ -1697,7 +1419,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             provider.pushKV("pool", pool_summary);
             provider.pushKV("readiness_errors", ReadinessErrorsToJSON(readiness.errors));
             auto liquidity = ProviderLiquidityStatusToJSON(readiness, now, wallet.get());
-            liquidity.pushKV("automation_status", ProviderAutomationStatusToJSON(*wallet, context, readiness, synchronized));
+            liquidity.pushKV("automation_status", ToJSON(CaptureProviderAutomationStatus(*wallet, context, readiness, now, synchronized)));
             for (const auto& key : {"admission_dgb", "operational_dgb", "admission_carriers", "operational_carriers"}) {
                 auto counts = liquidity.find_value(key);
                 size_t reserved{0};

@@ -11,6 +11,8 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <paymaster/finance.h>
+#include <oracle/bundle_manager.h>
+#include <wallet/paymasteridentity.h>
 #include <util/time.h>
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/wallet.h>
@@ -24,6 +26,7 @@
 #include <mutex>
 #include <set>
 #include <tuple>
+#include <utility>
 
 namespace wallet {
 using paymaster_store::internal::PersistedReadError;
@@ -304,9 +307,9 @@ void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
     for (const auto& id : changes.events) state->Mark(FinanceWorkKind::EVENT, id, true);
 }
 
-bool RebuildProviderFinances(CWallet& wallet,
-                               size_t& changed_events,
-                               std::string& error)
+namespace {
+bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
+                                   std::string& error, int64_t now)
 {
     using namespace DigiDollar::Paymaster;
     changed_events = 0;
@@ -348,7 +351,7 @@ bool RebuildProviderFinances(CWallet& wallet,
         // enough context for exact reconstruction. Never estimate them.
         finance.genesis_hash = genesis_hash;
         finance.provider_id = identity.provider_id;
-        finance.history_complete_from = GetTime();
+        finance.history_complete_from = now;
         finance.earlier_history_partial = true;
         finance.updated_at = finance.history_complete_from;
         if (!RebuildProviderFinanceDailyTotals(finance, error)) return false;
@@ -366,7 +369,6 @@ bool RebuildProviderFinances(CWallet& wallet,
         event_positions.emplace(finance.events[i].event_id, i);
     }
     std::map<uint256, int64_t> confirmation_times;
-    const int64_t now = GetTime();
     const auto transaction_state = [&](const uint256& txid, int64_t created_at,
                                        ProviderFinanceEventState& state, int64_t& confirmed_at) {
         ObserveTransaction(wallet, txid, created_at, state, confirmed_at, confirmation_times);
@@ -593,7 +595,8 @@ bool RebuildProviderFinances(CWallet& wallet,
     return true;
 }
 
-bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error)
+bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
+                                     std::string& error, int64_t now)
 {
     LOCK(wallet.cs_wallet);
     LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster incremental finance reconciliation", BCLog::BENCH);
@@ -624,7 +627,7 @@ bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::str
             }
         }
     }
-    if (rebuild) return RebuildProviderFinances(wallet, changed_events, error);
+    if (rebuild) return RebuildProviderFinancesAtTime(wallet, changed_events, error, now);
 
     ProviderFinanceMetadata metadata;
     const auto read = batch.ReadPaymasterFinanceMetadata(metadata);
@@ -639,7 +642,6 @@ bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::str
     }
     if (selected.empty()) return true;
 
-    const int64_t now = GetTime();
     const bool was_partial = metadata.earlier_history_partial;
     std::map<uint256, ProviderFinanceEvent> updates;
     std::map<uint256, int64_t> confirmation_times;
@@ -830,11 +832,11 @@ bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::str
     return true;
 }
 
-bool ReconcileProviderFinanceReport(CWallet& wallet, bool /*continuation*/, std::string& error)
+bool ReconcileProviderFinanceReportAtTime(CWallet& wallet, std::string& error, int64_t now)
 {
     LOCK(wallet.cs_wallet);
     size_t changed{0};
-    if (!ReconcileProviderFinances(wallet, changed, error)) return false;
+    if (!ReconcileProviderFinancesAtTime(wallet, changed, error, now)) return false;
     if (const auto state = FindFinanceState(wallet.GetDatabase())) {
         std::lock_guard<std::mutex> lock{state->mutex};
         if (!state->initialized || !state->pending.empty()) {
@@ -843,6 +845,132 @@ bool ReconcileProviderFinanceReport(CWallet& wallet, bool /*continuation*/, std:
         }
     }
     return true;
+}
+
+} // namespace
+
+bool RebuildProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    return RebuildProviderFinancesAtTime(wallet, changed_events, error, GetTime());
+}
+
+bool ReconcileProviderFinances(CWallet& wallet, size_t& changed_events, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    return ReconcileProviderFinancesAtTime(wallet, changed_events, error, GetTime());
+}
+
+bool ReconcileProviderFinanceReport(CWallet& wallet, bool /*continuation*/, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    return ReconcileProviderFinanceReportAtTime(wallet, error, GetTime());
+}
+
+ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, ProviderFinanceQuery query)
+{
+    if (uint8_t(query.period) > uint8_t(ProviderFinancePeriod::ALL) || query.limit == 0 || query.limit > 10000 ||
+        query.now < 0 || query.now > std::numeric_limits<int64_t>::max() - PROVIDER_BUDGET_WINDOW_SECONDS) {
+        return ProviderFinanceStatusFailure{ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_FINANCE_QUERY", std::nullopt};
+    }
+    // Confirmation accounting must observe wallet notifications before taking
+    // the snapshot. No wallet lock may span this wait.
+    wallet.BlockUntilSyncedToCurrentChain();
+    if (query.now == 0) query.now = GetTime();
+    ProviderFinanceStatus result;
+    result.query = query;
+    std::vector<ProviderPoolEntry> pool;
+    ProviderMaintenanceLedger maintenance;
+    std::string error;
+    {
+        LOCK(wallet.cs_wallet);
+        if (!ReconcileProviderFinanceReportAtTime(wallet, error, query.now)) {
+            return ProviderFinanceStatusFailure{ErrorKind::WALLET, error,
+                error == "PAYMASTER_FINANCE_RECONCILING"
+                    ? ErrorDisposition::RETRY_BEFORE_EXECUTION : ErrorDisposition::RECONCILE};
+        }
+        WalletBatch batch{wallet.GetDatabase()};
+        ProviderIdentityRecord identity;
+        if (!batch.ReadPaymasterIdentity(identity) || !batch.ReadPaymasterFinanceReport(query, result.report, error)) {
+            const bool invalid_query = error == "PAYMASTER_INVALID_FINANCE_QUERY" ||
+                error == "PAYMASTER_FINANCE_CURSOR_INVALID" || error == "PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED";
+            return ProviderFinanceStatusFailure{invalid_query ? ErrorKind::INVALID_INPUT : ErrorKind::WALLET,
+                error.empty() ? "PAYMASTER_FINANCE_LEDGER_NOT_FOUND" : error,
+                invalid_query ? ErrorDisposition::USER_DECISION : ErrorDisposition::RECONCILE};
+        }
+        result.provider_id = identity.provider_id;
+        if (!batch.ReadPaymasterProviderPool(pool) && batch.HasPaymasterProviderPool()) {
+            return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_INVALID_PROVIDER_POOL", std::nullopt};
+        }
+        if (!batch.ReadPaymasterMaintenanceLedger(maintenance) && batch.HasPaymasterMaintenanceLedger()) {
+            return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_INVALID_MAINTENANCE_LEDGER", std::nullopt};
+        }
+        // Include the reminder in the same wallet snapshot. Creating a missing
+        // reminder retains its existing semantics and grants no authority.
+        if (!GetPaymasterProviderBackupStatus(wallet, result.backup, query.now, error)) {
+            return ProviderFinanceStatusFailure{ErrorKind::WALLET, error, std::nullopt};
+        }
+        result.backup_required = ProviderBackupRequired(result.backup);
+    }
+    const auto add_amount = [](int64_t& total, int64_t amount) {
+        if (amount < 0 || total > std::numeric_limits<int64_t>::max() - amount) return false;
+        total += amount;
+        return true;
+    };
+    auto& capital = result.pool_capital;
+    for (const auto& entry : pool) {
+        if (!IsActiveProviderPoolState(entry.state)) continue;
+        if (entry.asset == PoolAsset::DGB) {
+            auto& total = entry.state == PoolEntryState::AVAILABLE ? capital.dgb_available :
+                entry.state == PoolEntryState::PENDING_SUCCESSOR ? capital.dgb_pending : capital.dgb_reserved;
+            if (!add_amount(total.value, entry.dgb_value.value)) {
+                return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_FINANCE_TOTAL_OVERFLOW", std::nullopt};
+            }
+        } else {
+            const int64_t base = std::min<int64_t>(100, entry.carrier_value.value);
+            const int64_t excess = std::max<int64_t>(0, entry.carrier_value.value - base);
+            if (!add_amount(capital.carrier_base.value, base) ||
+                !add_amount(capital.carrier_earned.value, excess) ||
+                (entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height > 0 &&
+                 !add_amount(capital.carrier_withdrawable.value, excess))) {
+                return ProviderFinanceStatusFailure{ErrorKind::WALLET, "PAYMASTER_FINANCE_TOTAL_OVERFLOW", std::nullopt};
+            }
+        }
+    }
+    capital.pending_maintenance_transactions = std::count_if(maintenance.records.begin(), maintenance.records.end(),
+        [](const auto& record) {
+            return record.state == ProviderMaintenanceState::PLANNED || record.state == ProviderMaintenanceState::BROADCAST;
+        });
+    for (size_t i = 0; i < result.report.periods.size(); ++i) {
+        const auto& totals = result.report.periods[i].total;
+        result.average_service_fee[i] = DDCents{totals.successful_transfers == 0 ? 0 :
+            int64_t(uint64_t(totals.dd_income.value) / totals.successful_transfers)};
+    }
+    if (query.include_events) {
+        const int64_t today = (query.now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+        const int64_t cutoff = query.period == ProviderFinancePeriod::TODAY ? today :
+            query.period == ProviderFinancePeriod::DAYS7 ? today - 6 * PROVIDER_BUDGET_WINDOW_SECONDS :
+            query.period == ProviderFinancePeriod::DAYS30 ? today - 29 * PROVIDER_BUDGET_WINDOW_SECONDS : 0;
+        auto& days = result.report.days;
+        days.erase(std::remove_if(days.begin(), days.end(), [cutoff](const auto& day) {
+            return cutoff > 0 && day.total.day_start < cutoff;
+        }), days.end());
+        std::sort(days.begin(), days.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.total.day_start > rhs.total.day_start;
+        });
+        if (days.size() > 366) days.resize(366);
+    }
+    // Price is an informational valuation, separate from the wallet snapshot.
+    // Do not take the oracle lock while holding cs_wallet.
+    const CAmount oracle_price = OracleIntegration::GetCurrentOraclePriceMicroUSD();
+    if (oracle_price > 0) {
+        const auto& totals = result.report.periods[size_t(query.period)].total;
+        const long double income_usd = static_cast<long double>(totals.dd_income.value) / 100.0L;
+        const long double cost_usd = static_cast<long double>(totals.dgb_cost.value) *
+            static_cast<long double>(oracle_price) / static_cast<long double>(COIN) / 1000000.0L;
+        result.valuation = ProviderFinanceValuation{oracle_price, query.now, static_cast<double>(income_usd - cost_usd)};
+    }
+    return result;
 }
 
 bool AreProviderFinancesCurrent(const CWallet& wallet)

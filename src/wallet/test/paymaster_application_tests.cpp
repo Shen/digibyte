@@ -3,6 +3,7 @@
 
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterclient.h>
+#include <wallet/paymasterfinance.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <base58.h>
 #include <chainparams.h>
@@ -408,6 +409,72 @@ BOOST_AUTO_TEST_CASE(application_error_rpc_retains_disposition_and_absence)
         BOOST_CHECK_EQUAL(data.find_value("disposition").get_str(),
                           ErrorDispositionName(ErrorDisposition::RECONCILE));
         BOOST_CHECK(data.find_value("session_absent").get_bool());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(native_finance_and_automation_json_preserve_complete_observations)
+{
+    ProviderFinanceStatus finance;
+    finance.query.period = ProviderFinancePeriod::ALL;
+    finance.provider_id = uint256::ONE;
+    finance.report.metadata.revision = 7;
+    finance.report.metadata.history_complete_from = 100;
+    auto& total = finance.report.periods[size_t(ProviderFinancePeriod::ALL)];
+    total.total.dd_income = DDCents{15};
+    total.total.dgb_cost = DGBSatoshis{7};
+    total.total.successful_transfers = total.total.user_paid_transfers = 3;
+    total.income[0] = 15;
+    total.cost[0] = 7;
+    finance.average_service_fee[size_t(ProviderFinancePeriod::ALL)] = DDCents{5};
+    UniValue json = ToJSON(finance);
+    BOOST_CHECK_EQUAL(json.find_value("period").get_str(), "all");
+    BOOST_CHECK_EQUAL(json.find_value("revision").getInt<uint64_t>(), 7U);
+    BOOST_CHECK_EQUAL(json.find_value("service_fee_income_cents").getInt<int64_t>(), 15);
+    BOOST_CHECK_EQUAL(json.find_value("dgb_operating_cost_satoshis").getInt<int64_t>(), 7);
+    BOOST_CHECK_EQUAL(json.find_value("average_service_fee_cents").getInt<int64_t>(), 5);
+    BOOST_CHECK(json.find_value("backup_required").isFalse());
+    BOOST_CHECK_EQUAL(json.find_value("pool_capital").find_value("carrier_withdrawable_cents").getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(json.find_value("period_summaries").find_value("today").find_value("successful_transfers").getInt<uint64_t>(), 0U);
+    BOOST_CHECK_EQUAL(json.find_value("model_breakdown").find_value("public_sponsored").find_value("service_fee_income_cents").getInt<int64_t>(), 0);
+    for (const auto* field : {"oracle_price_micro_usd", "valuation_time", "estimated_result_usd", "daily_totals", "events", "next_cursor"}) {
+        BOOST_CHECK(!json.exists(field));
+    }
+    // Unknown valuation is omitted; a known zero estimate remains a number.
+    finance.valuation = ProviderFinanceValuation{1000000, 12345, 0.0};
+    finance.query.include_events = true;
+    finance.report.next_cursor = "abcd";
+    ProviderFinanceEvent event;
+    event.event_id = uint256S("02");
+    event.transaction_id = uint256S("03");
+    event.kind = ProviderFinanceEventKind::TRANSFER;
+    event.state = ProviderFinanceEventState::CONFIRMED;
+    event.funding_model = FundingModel::SPONSORED;
+    event.sponsorship_scope = SponsorshipScope::PUBLIC;
+    event.created_at = 100;
+    event.confirmed_at = 101;
+    finance.report.events.push_back(event);
+    json = ToJSON(finance);
+    BOOST_CHECK(json.find_value("estimated_result_usd").isNum());
+    BOOST_CHECK_EQUAL(json.find_value("estimated_result_usd").get_real(), 0.0);
+    BOOST_CHECK_EQUAL(json.find_value("valuation_time").getInt<int64_t>(), 12345);
+    BOOST_CHECK(json.find_value("daily_totals").isArray());
+    BOOST_CHECK_EQUAL(json.find_value("events").size(), 1U);
+    BOOST_CHECK_EQUAL(json.find_value("events")[0].find_value("funding_model").get_str(), "sponsored");
+    BOOST_CHECK_EQUAL(json.find_value("events")[0].find_value("sponsorship_scope").get_str(), "public");
+    BOOST_CHECK_EQUAL(json.find_value("next_cursor").get_str(), "abcd");
+
+    ProviderAutomationSnapshot automation;
+    json = ToJSON(automation);
+    BOOST_CHECK(json.find_value("configured").isFalse());
+    BOOST_CHECK(json.find_value("enabled").isFalse());
+    BOOST_CHECK(json.find_value("paid_maintenance_approved").isFalse());
+    BOOST_CHECK(json.find_value("pending_transaction").isFalse());
+    for (const auto& [state, name] : std::vector<std::pair<ProviderAutomationState, const char*>>{
+             {ProviderAutomationState::READY, "ready"}, {ProviderAutomationState::OFF, "off"},
+             {ProviderAutomationState::BLOCKED, "blocked"}, {ProviderAutomationState::PAUSED, "paused"},
+             {ProviderAutomationState::WAITING_CONFIRMATION, "waiting_confirmation"}, {ProviderAutomationState::WORKING, "working"}}) {
+        automation.state = state;
+        BOOST_CHECK_EQUAL(ToJSON(automation).find_value("state").get_str(), name);
     }
 }
 

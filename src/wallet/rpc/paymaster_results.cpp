@@ -14,6 +14,217 @@ namespace wallet::paymaster_rpc::internal {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_app;
 
+UniValue ToJSON(const ProviderActivitySnapshot& value)
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("active_payments", value.active_payments);
+    result.pushKV("capacity_requests", value.capacity_requests);
+    result.pushKV("reserved_outputs", value.reserved_outputs);
+    result.pushKV("pending_confirmations", value.pending_confirmations);
+    return result;
+}
+
+UniValue ToJSON(const ProviderAutomationSnapshot& value)
+{
+    const char* state{"unknown"};
+    switch (value.state) {
+    case ProviderAutomationState::READY: state = "ready"; break;
+    case ProviderAutomationState::OFF: state = "off"; break;
+    case ProviderAutomationState::BLOCKED: state = "blocked"; break;
+    case ProviderAutomationState::PAUSED: state = "paused"; break;
+    case ProviderAutomationState::WAITING_CONFIRMATION: state = "waiting_confirmation"; break;
+    case ProviderAutomationState::WORKING: state = "working"; break;
+    }
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("configured", value.configured);
+    result.pushKV("enabled", value.enabled);
+    result.pushKV("paid_maintenance_approved", value.paid_maintenance_approved);
+    result.pushKV("state", state);
+    result.pushKV("reason", value.reason);
+    result.pushKV("pending_transaction", value.pending_transaction);
+    return result;
+}
+
+UniValue ToJSON(const ProviderFinanceStatus& value)
+{
+    const char* period_name{"unknown"};
+    switch (value.query.period) {
+    case ProviderFinancePeriod::TODAY: period_name = "today"; break;
+    case ProviderFinancePeriod::DAYS7: period_name = "7d"; break;
+    case ProviderFinancePeriod::DAYS30: period_name = "30d"; break;
+    case ProviderFinancePeriod::ALL: period_name = "all"; break;
+    }
+    const auto& report = value.report;
+    const auto& ledger = report.metadata;
+    const auto& totals = report.periods[size_t(value.query.period)];
+    const int64_t dd_income = totals.total.dd_income.value;
+    const int64_t dgb_cost = totals.total.dgb_cost.value;
+    const uint64_t transfers = totals.total.successful_transfers;
+    const uint64_t user_paid = totals.total.user_paid_transfers;
+    const uint64_t public_sponsored = totals.total.public_sponsored_transfers;
+    const uint64_t restricted_sponsored = totals.total.restricted_sponsored_transfers;
+    const int64_t user_paid_income = totals.income[0], user_paid_cost = totals.cost[0];
+    const int64_t public_sponsored_income = totals.income[1], public_sponsored_cost = totals.cost[1];
+    const int64_t restricted_sponsored_income = totals.income[2], restricted_sponsored_cost = totals.cost[2];
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("provider_id", value.provider_id.GetHex());
+    result.pushKV("period", period_name);
+    result.pushKV("revision", report.metadata.revision);
+    result.pushKV("service_fee_income_cents", dd_income);
+    result.pushKV("dgb_operating_cost_satoshis", dgb_cost);
+    result.pushKV("successful_transfers", transfers);
+    result.pushKV("average_service_fee_cents",
+                  value.average_service_fee[size_t(value.query.period)].value);
+    result.pushKV("user_paid_transfers", user_paid);
+    result.pushKV("public_sponsored_transfers", public_sponsored);
+    result.pushKV("restricted_sponsored_transfers", restricted_sponsored);
+    const auto make_model_summary = [](uint64_t model_transfers,
+                                       int64_t model_income,
+                                       int64_t model_cost) {
+        UniValue summary{UniValue::VOBJ};
+        summary.pushKV("successful_transfers", model_transfers);
+        summary.pushKV("service_fee_income_cents", model_income);
+        summary.pushKV("dgb_operating_cost_satoshis", model_cost);
+        return summary;
+    };
+    UniValue model_breakdown{UniValue::VOBJ};
+    model_breakdown.pushKV(
+        "user_paid",
+        make_model_summary(user_paid, user_paid_income,
+                           user_paid_cost));
+    model_breakdown.pushKV(
+        "public_sponsored",
+        make_model_summary(public_sponsored,
+                           public_sponsored_income,
+                           public_sponsored_cost));
+    model_breakdown.pushKV(
+        "restricted_sponsored",
+        make_model_summary(restricted_sponsored,
+                           restricted_sponsored_income,
+                           restricted_sponsored_cost));
+    result.pushKV("model_breakdown", std::move(model_breakdown));
+
+    // All cards use the same revision and checked materialized totals.
+    const auto make_period_summary = [&](ProviderFinancePeriod summary_period) {
+        const auto& summary_totals = report.periods[size_t(summary_period)].total;
+        const auto summary_income = summary_totals.dd_income.value;
+        const auto summary_cost = summary_totals.dgb_cost.value;
+        const auto summary_transfers = summary_totals.successful_transfers;
+        const auto summary_user_paid = summary_totals.user_paid_transfers;
+        const auto summary_public_sponsored = summary_totals.public_sponsored_transfers;
+        const auto summary_restricted_sponsored = summary_totals.restricted_sponsored_transfers;
+        UniValue summary{UniValue::VOBJ};
+        summary.pushKV("service_fee_income_cents", summary_income);
+        summary.pushKV("dgb_operating_cost_satoshis", summary_cost);
+        summary.pushKV("successful_transfers", summary_transfers);
+        summary.pushKV(
+            "average_service_fee_cents",
+            value.average_service_fee[size_t(summary_period)].value);
+        summary.pushKV("user_paid_transfers", summary_user_paid);
+        summary.pushKV("public_sponsored_transfers", summary_public_sponsored);
+        summary.pushKV("restricted_sponsored_transfers", summary_restricted_sponsored);
+        return summary;
+    };
+    UniValue period_summaries{UniValue::VOBJ};
+    period_summaries.pushKV("today", make_period_summary(ProviderFinancePeriod::TODAY));
+    period_summaries.pushKV("7d", make_period_summary(ProviderFinancePeriod::DAYS7));
+    period_summaries.pushKV("30d", make_period_summary(ProviderFinancePeriod::DAYS30));
+    period_summaries.pushKV("all", make_period_summary(ProviderFinancePeriod::ALL));
+    result.pushKV("period_summaries", std::move(period_summaries));
+    result.pushKV("history_partially_reconstructable",
+                  ledger.earlier_history_partial);
+    result.pushKV("history_complete_from", ledger.history_complete_from);
+    result.pushKV("backup_required", value.backup_required);
+    result.pushKV("last_successful_backup_at",
+                  value.backup.last_successful_backup_at);
+    result.pushKV("external_backup_acknowledged_at",
+                  value.backup.external_backup_acknowledged_at);
+
+    if (value.valuation) {
+        result.pushKV("oracle_price_micro_usd", value.valuation->oracle_price_micro_usd);
+        result.pushKV("valuation_time", value.valuation->time);
+        result.pushKV("estimated_result_usd", value.valuation->estimated_result_usd);
+    }
+
+    UniValue pool_capital{UniValue::VOBJ};
+    pool_capital.pushKV("dgb_available_satoshis", value.pool_capital.dgb_available.value);
+    pool_capital.pushKV("dgb_reserved_satoshis", value.pool_capital.dgb_reserved.value);
+    pool_capital.pushKV("dgb_pending_satoshis", value.pool_capital.dgb_pending.value);
+    pool_capital.pushKV("carrier_base_cents", value.pool_capital.carrier_base.value);
+    pool_capital.pushKV("carrier_earned_cents", value.pool_capital.carrier_earned.value);
+    pool_capital.pushKV("carrier_withdrawable_cents", value.pool_capital.carrier_withdrawable.value);
+    pool_capital.pushKV("pending_maintenance_transactions", value.pool_capital.pending_maintenance_transactions);
+    result.pushKV("pool_capital", std::move(pool_capital));
+
+    if (value.query.include_events) {
+        UniValue days{UniValue::VARR};
+        for (const auto& entry : report.days) {
+            const auto* total = &entry.total;
+            UniValue day{UniValue::VOBJ};
+            day.pushKV("day_start", total->day_start);
+            day.pushKV("service_fee_income_cents",
+                       total->dd_income.value);
+            day.pushKV("dgb_operating_cost_satoshis",
+                       total->dgb_cost.value);
+            day.pushKV("successful_transfers",
+                       total->successful_transfers);
+            day.pushKV("maintenance_transactions",
+                       total->maintenance_transactions);
+            days.push_back(std::move(day));
+        }
+        result.pushKV("daily_totals", std::move(days));
+
+        UniValue events{UniValue::VARR};
+        const auto kind_name = [](ProviderFinanceEventKind kind) {
+            switch (kind) {
+            case ProviderFinanceEventKind::TRANSFER: return "transfer";
+            case ProviderFinanceEventKind::POOL_SETUP: return "setup";
+            case ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT: return "replenishment";
+            case ProviderFinanceEventKind::POOL_RETIREMENT: return "retirement";
+            case ProviderFinanceEventKind::CARRIER_WITHDRAWAL: return "withdrawal";
+            }
+            return "invalid";
+        };
+        const auto state_name = [](ProviderFinanceEventState state) {
+            switch (state) {
+            case ProviderFinanceEventState::PENDING: return "pending";
+            case ProviderFinanceEventState::CONFIRMED: return "confirmed";
+            case ProviderFinanceEventState::INVALIDATED: return "invalidated";
+            }
+            return "invalid";
+        };
+        for (const auto& event : report.events) {
+            UniValue item{UniValue::VOBJ};
+            item.pushKV("event_id", event.event_id.GetHex());
+            item.pushKV("kind", kind_name(event.kind));
+            item.pushKV("state", state_name(event.state));
+            item.pushKV("dd_income_cents", event.dd_income.value);
+            item.pushKV("dgb_cost_satoshis", event.dgb_cost.value);
+            item.pushKV("created_at", event.created_at);
+            if (event.confirmed_at > 0) {
+                item.pushKV("confirmed_at", event.confirmed_at);
+            }
+            if (event.kind == ProviderFinanceEventKind::TRANSFER) {
+                item.pushKV("funding_model",
+                            event.funding_model == FundingModel::USER_PAID
+                                ? "user_paid" : "sponsored");
+                if (event.funding_model == FundingModel::SPONSORED) {
+                    item.pushKV("sponsorship_scope",
+                                event.sponsorship_scope == SponsorshipScope::PUBLIC
+                                    ? "public" : "restricted");
+                }
+            }
+            item.pushKV("transaction_id", event.transaction_id.GetHex());
+            events.push_back(std::move(item));
+        }
+        result.pushKV("events", std::move(events));
+        if (!report.next_cursor.empty()) {
+            result.pushKV("next_cursor", report.next_cursor);
+        }
+    }
+    return result;
+}
+
 std::string ResultStatusName(DigiDollar::Paymaster::PaymasterResultStatus status)
 {
     using DigiDollar::Paymaster::PaymasterResultStatus;
