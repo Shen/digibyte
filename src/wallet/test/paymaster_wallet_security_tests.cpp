@@ -24,6 +24,7 @@
 #include <paymaster/psbt.h>
 #include <paymaster/wire.h>
 #include <script/descriptor.h>
+#include <script/interpreter.h>
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
@@ -2528,6 +2529,11 @@ BOOST_AUTO_TEST_CASE(
     submit.template_commitment = fixture.attempt.template_commitment;
     submit.user_psbt = SerializePaymasterSecurityObject(valid_user_psbt);
     BOOST_REQUIRE(ValidateSubmitEnvelope(submit, submit.genesis_hash, error));
+    PaymentSession original_session;
+    BOOST_REQUIRE(PaymasterStore{processing_wallet}.GetSessionByRequestId(request_id, original_session));
+    const auto attempt_key = std::make_pair(DBKeys::PAYMASTER_ATTEMPT, fixture.attempt.attempt_id);
+    const auto session_key = std::make_pair(DBKeys::PAYMASTER_SESSION, std::string{request_id});
+    const auto checkpoint_path = PaymasterCheckpointPath(submit.genesis_hash, submit.provider_id);
 
     uint16_t message_sequence{50};
     const auto check_message = [&](const PaymasterSubmit& incoming,
@@ -2541,6 +2547,8 @@ BOOST_AUTO_TEST_CASE(
         BOOST_REQUIRE(manager.EnqueueDirectMessage(43, message_id, 100,
                                                   DirectPayload{incoming}, GetTime()));
         const auto before = GetMockableDatabase(processing_wallet).m_records;
+        const auto checkpoint_before = ReadBinaryFile(checkpoint_path);
+        BOOST_REQUIRE(checkpoint_before.first);
         try {
             const auto result = paymaster_app::ProcessPaymasterSubmits(
                 context, processing_wallet, paymaster_app::ExecutionMode::MANUAL);
@@ -2558,6 +2566,7 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_EQUAL(manager.DirectMessageCount(), local_failure ? 1U : 0U);
         BOOST_CHECK(manager.IsProviderRunning(processing_wallet.GetName(), environment.identity.provider_id));
         BOOST_CHECK(GetMockableDatabase(processing_wallet).m_records == before);
+        BOOST_CHECK(ReadBinaryFile(checkpoint_path) == checkpoint_before);
         BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({message_id}));
     };
 
@@ -2575,7 +2584,152 @@ BOOST_AUTO_TEST_CASE(
     invalid_signature.user_psbt = SerializePaymasterSecurityObject(wrong_signature);
     check_message(invalid_signature, false, "PAYMASTER_PSBT_SIGNATURE_INVALID");
 
-    const auto attempt_key = std::make_pair(DBKeys::PAYMASTER_ATTEMPT, fixture.attempt.attempt_id);
+    {
+        struct RestoreMockTime {
+            const std::chrono::seconds previous{GetMockTime()};
+            ~RestoreMockTime() { SetMockTime(previous); }
+        } restore_mock_time;
+        SetMockTime(fixture.attempt.quote_expires_at + 1);
+        check_message(submit, false, "PAYMASTER_SUBMIT_QUOTE_EXPIRED");
+        SetMockTime(fixture.attempt.retry_until + 1);
+        check_message(submit, false, "PAYMASTER_SUBMIT_RETRY_EXPIRED");
+
+        // Missing is not interchangeable with an unreadable commit. The same
+        // otherwise expired peer submit must remain queued for local repair.
+        const auto commit_key = std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, fixture.attempt.commit_key);
+        ProviderCommitRecord unsupported;
+        ++unsupported.version;
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(commit_key, unsupported));
+        check_message(submit, true, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(commit_key));
+    }
+
+    BOOST_TEST_CONTEXT("valid divergent user replay versus damaged local signature") {
+        // Generate another valid signature for the same transaction with a
+        // different auxiliary nonce; mutating a byte would test invalid input.
+        PartiallySignedTransaction divergent{valid_user_psbt};
+        const PrecomputedTransactionData txdata = PrecomputePSBTData(divergent);
+        ScriptExecutionData execution;
+        execution.m_annex_init = true;
+        execution.m_annex_present = false;
+        uint256 sighash;
+        const CTransaction transaction{*divergent.tx};
+        BOOST_REQUIRE(SignatureHashSchnorr(sighash, execution, transaction, 0,
+            SIGHASH_DEFAULT, SigVersion::TAPROOT, txdata, MissingDataBehavior::FAIL));
+        const uint256 empty_merkle_root;
+        std::vector<unsigned char> signature(64);
+        BOOST_REQUIRE(fixture.user_key.SignSchnorr(sighash, signature, &empty_merkle_root, uint256S("1742")));
+        divergent.inputs.front().final_script_witness.stack.front() = std::move(signature);
+        BOOST_REQUIRE_MESSAGE(ValidateCollaborativePSBT(divergent, trusted,
+            CollaborativeSignatureStage::USER_SIGNED, error), error);
+        PaymasterSubmit divergent_submit{submit};
+        divergent_submit.user_psbt = SerializePaymasterSecurityObject(divergent);
+        BOOST_REQUIRE(divergent_submit.user_psbt != submit.user_psbt);
+
+        ProviderAttempt signed_attempt{fixture.attempt};
+        signed_attempt.state = AttemptState::USER_SIGNED;
+        signed_attempt.user_signed_psbt = submit.user_psbt;
+        PaymentSession signed_session{original_session};
+        signed_session.state = SessionState::AUTHORIZED;
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(session_key, signed_session));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, signed_attempt));
+        check_message(divergent_submit, false, "PAYMASTER_USER_PSBT_CONFLICT");
+
+        // A complete private provider signature and a durable final commit
+        // remain authority after expiry. A different valid USER replay is a
+        // peer defect only when that exact local final evidence validates.
+        BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(processing_wallet, environment.identity_key, error), error);
+        PartiallySignedTransaction full{valid_user_psbt};
+        BOOST_REQUIRE_MESSAGE(SignCollaborativePSBTForParty(processing_wallet, full, trusted,
+            SigningParty::PROVIDER, error), error);
+        CMutableTransaction final;
+        BOOST_REQUIRE(FinalizeAndExtractPSBT(full, final));
+        ProviderAttempt provider_signed{signed_attempt};
+        provider_signed.state = AttemptState::PROVIDER_SIGNED;
+        provider_signed.final_transaction = SerializePaymasterSecurityObject(final);
+        provider_signed.final_txid = CTransaction{final}.GetHash();
+        provider_signed.provider_signed_at = provider_signed.updated_at = now;
+        PaymasterResult final_result;
+        final_result.genesis_hash = submit.genesis_hash;
+        final_result.provider_id = submit.provider_id;
+        final_result.commit_key = submit.commit_key;
+        final_result.result_sequence = 1;
+        final_result.status = PaymasterResultStatus::FINAL_COMMITTED;
+        final_result.txid = provider_signed.final_txid;
+        final_result.raw_transaction_hash = CTransaction{final}.GetWitnessHash();
+        final_result.final_transaction = final;
+        final_result.updated_at = now;
+        final_result.identity_signature.resize(64);
+        BOOST_REQUIRE(environment.identity_key.SignSchnorr(GetPaymasterResultSignatureHash(final_result),
+            final_result.identity_signature, nullptr, uint256{}));
+        provider_signed.provider_signed_result = SerializePaymasterSecurityObject(final_result);
+        UserAuthorizationRecord authorization;
+        authorization.commit_key = submit.commit_key;
+        authorization.attempt_id = provider_signed.attempt_id;
+        authorization.canonical_psbt_hash = Hash(provider_signed.user_signed_psbt);
+        authorization.accepted_at = now;
+        authorization.retry_until = provider_signed.retry_until;
+        PaymentSession provider_session{signed_session};
+        provider_session.state = SessionState::PENDING_PROVIDER;
+        provider_session.pending_phase = PendingPhase::PROVIDER_SIGNED_KNOWN;
+        const auto authorization_key = std::make_pair(DBKeys::PAYMASTER_USER_AUTH, submit.commit_key);
+        const auto result_key = std::make_pair(DBKeys::PAYMASTER_RESULT, submit.commit_key);
+        const auto commit_key = std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, submit.commit_key);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(authorization_key, authorization));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(session_key, provider_session));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, provider_signed));
+        struct RestoreMockTime {
+            const std::chrono::seconds previous{GetMockTime()};
+            ~RestoreMockTime() { SetMockTime(previous); }
+        } restore_mock_time;
+        SetMockTime(provider_signed.retry_until + 1);
+        check_message(divergent_submit, false, "PAYMASTER_USER_PSBT_CONFLICT");
+        ProviderAttempt damaged_envelope{provider_signed};
+        damaged_envelope.provider_signed_result = {1};
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, damaged_envelope));
+        check_message(divergent_submit, true, "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID");
+
+        ProviderCommitRecord commit;
+        commit.commit_key = submit.commit_key;
+        commit.provider_id = submit.provider_id;
+        commit.quote_id = submit.quote_id;
+        commit.template_commitment = submit.template_commitment;
+        commit.final_txid = provider_signed.final_txid;
+        commit.raw_transaction_hash = *final_result.raw_transaction_hash;
+        commit.final_transaction = provider_signed.final_transaction;
+        commit.provider_inputs = {fixture.transaction.vin[1].prevout};
+        commit.committed_at = now;
+        commit.retry_until = provider_signed.retry_until;
+        provider_signed.state = AttemptState::FINAL_COMMITTED;
+        provider_session.final_txid = provider_signed.final_txid;
+        CMutableTransaction validated_final;
+        BOOST_REQUIRE_MESSAGE(ValidateProviderCommitForExecution(provider_signed, commit,
+            GetTime(), validated_final, error), error);
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(session_key, provider_session));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, provider_signed));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(result_key, final_result));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(commit_key, commit));
+        check_message(divergent_submit, false, "PAYMASTER_USER_PSBT_CONFLICT");
+        commit.provider_inputs.front() = COutPoint{SecurityTestId(seed, 90), 0};
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(commit_key, commit));
+        check_message(divergent_submit, true, "PAYMASTER_PROVIDER_COMMIT_INPUT_MISMATCH");
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(commit_key));
+        check_message(divergent_submit, true, "PAYMASTER_SUBMIT_PROVIDER_COMMIT_MISSING");
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(result_key));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(authorization_key));
+
+        signed_attempt.user_signed_psbt = {1};
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, signed_attempt));
+        check_message(submit, true, "PAYMASTER_PERSISTED_USER_PSBT_INVALID");
+
+        ProviderAttempt ambiguous{fixture.attempt};
+        ambiguous.state = AttemptState::AMBIGUOUS;
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, ambiguous));
+        check_message(submit, true, "PAYMASTER_SUBMIT_AUTHORIZATION_STATE");
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, fixture.attempt));
+        BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(session_key, original_session));
+    }
+
     BOOST_TEST_CONTEXT("local authorization artifact encoding and conflicts") {
         ProviderAttempt corrupt_attempt{fixture.attempt};
         corrupt_attempt.unsigned_psbt = {1};
@@ -2649,9 +2803,20 @@ BOOST_AUTO_TEST_CASE(
     }
     BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(attempt_key, fixture.attempt));
 
-    const auto session_key = std::make_pair(DBKeys::PAYMASTER_SESSION, std::string{request_id});
     BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Erase(session_key));
     check_message(foreign, true, "PAYMASTER_SUBMIT_SESSION_DATABASE_READ");
+    BOOST_REQUIRE(processing_wallet.GetDatabase().MakeBatch()->Write(session_key, original_session));
+    {
+        struct RestoreMockTime {
+            const std::chrono::seconds previous{GetMockTime()};
+            ~RestoreMockTime() { SetMockTime(previous); }
+        } restore_mock_time;
+        SetMockTime(fixture.attempt.quote_expires_at + 1);
+        size_t expired{0};
+        BOOST_REQUIRE_MESSAGE(PaymasterStore{processing_wallet}.ExpireProviderQuotes(GetTime(), expired, error), error);
+        BOOST_REQUIRE_EQUAL(expired, 1U);
+        check_message(submit, false, "PAYMASTER_SUBMIT_QUOTE_EXPIRED");
+    }
 }
 
 BOOST_AUTO_TEST_CASE(

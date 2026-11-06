@@ -66,6 +66,25 @@ namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
 
 namespace {
+// These native failures occur before accepting new user/provider authority.
+// Network processing may classify them again after a fresh durable reload;
+// RPC callers retain the existing ApplicationError category and message.
+class ProviderSubmitExpired final : public ApplicationError
+{
+public:
+    explicit ProviderSubmitExpired(const char* message)
+        : ApplicationError{ErrorKind::WALLET, message} {}
+};
+
+bool LoadProviderSubmitAuthority(const ProviderAttempt& attempt,
+    PaymentIntent& intent, PaymasterQuote& quote,
+    CollaborativePSBTTemplate& trusted, std::string& error)
+{
+    return LoadAttemptAuthorizationArtifacts(attempt, intent, quote, trusted, error) &&
+           ValidateCollaborativePSBT(trusted.psbt, trusted, CollaborativeSignatureStage::UNSIGNED, error) &&
+           ValidateProviderAuthorizationManifest(attempt.provider_manifest, intent, quote, trusted, error);
+}
+
 ProviderProcessingResult RejectProviderMessage(
     Manager& manager, const DirectMessage& message,
     const std::string& reason, const std::string& message_type)
@@ -81,6 +100,122 @@ ProviderProcessingResult RejectProviderMessage(
     result.rejection_reason = reason;
     result.message_type = message_type;
     return result;
+}
+
+// The caller has authenticated local quote/manifest artifacts and verified the
+// incoming USER signatures. Reject only established peer defects: persisted
+// signatures, commits and unknown states remain local authority to reconcile.
+std::optional<std::string> GetPermanentProviderSubmitRejection(
+    CWallet& wallet, const PaymentSession& session, const ProviderAttempt& attempt,
+    const PartiallySignedTransaction& submitted, const CollaborativePSBTTemplate& trusted,
+    int64_t now)
+{
+    std::optional<std::string> reason;
+    switch (attempt.state) {
+    case AttemptState::QUOTED:
+        if (now > attempt.retry_until) reason = "PAYMASTER_SUBMIT_RETRY_EXPIRED";
+        else if (now > attempt.quote_expires_at) reason = "PAYMASTER_SUBMIT_QUOTE_EXPIRED";
+        break;
+    case AttemptState::USER_SIGNED:
+    case AttemptState::USER_PSBT_ACCEPTED:
+        if (now > attempt.retry_until) reason = "PAYMASTER_SUBMIT_RETRY_EXPIRED";
+        break;
+    case AttemptState::QUOTE_EXPIRED:
+        reason = "PAYMASTER_SUBMIT_QUOTE_EXPIRED";
+        break;
+    case AttemptState::PROVIDER_SIGNED:
+    case AttemptState::FINAL_COMMITTED:
+    case AttemptState::BROADCAST:
+    case AttemptState::STEMPOOL:
+    case AttemptState::MEMPOOL:
+    case AttemptState::REJECTED:
+        break;
+    default:
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_AUTHORIZATION_STATE");
+    }
+
+    const auto canonical_submitted = SerializePSBT(submitted);
+    if (!attempt.user_signed_psbt.empty() && attempt.user_signed_psbt != canonical_submitted) {
+        PartiallySignedTransaction persisted;
+        std::string error;
+        if (!DecodeRawPSBT(persisted, MakeByteSpan(attempt.user_signed_psbt), error) ||
+            SerializePSBT(persisted) != attempt.user_signed_psbt ||
+            !ValidateCollaborativePSBT(persisted, trusted, CollaborativeSignatureStage::USER_SIGNED, error)) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PERSISTED_USER_PSBT_INVALID");
+        }
+        reason = "PAYMASTER_USER_PSBT_CONFLICT";
+    }
+    if (!reason) return std::nullopt;
+
+    const bool user_authority = attempt.state >= AttemptState::USER_SIGNED &&
+                                attempt.state <= AttemptState::MEMPOOL;
+    const bool provider_authority = attempt.state >= AttemptState::PROVIDER_SIGNED &&
+                                    attempt.state <= AttemptState::MEMPOOL;
+    const bool unsigned_quote = attempt.state == AttemptState::QUOTED ||
+                                attempt.state == AttemptState::QUOTE_EXPIRED;
+    if (!session.provider_side ||
+        (user_authority && attempt.user_signed_psbt.empty()) ||
+        (unsigned_quote && !attempt.user_signed_psbt.empty()) ||
+        (!provider_authority && (!attempt.final_txid.IsNull() || !attempt.final_transaction.empty() ||
+                                 attempt.provider_signed_at != 0 || !attempt.provider_signed_result.empty()))) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_AUTHORIZATION_STATE");
+    }
+
+    ProviderCommitRecord commit;
+    UserAuthorizationRecord authorization;
+    PaymasterResult result;
+    DatabaseReadStatus commit_status;
+    DatabaseReadStatus authorization_status;
+    DatabaseReadStatus result_status;
+    {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        commit_status = batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit);
+        authorization_status = batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization);
+        result_status = batch.ReadPaymasterResultWithStatus(attempt.commit_key, result);
+    }
+    const auto readable = [](DatabaseReadStatus status) {
+        return status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::NOT_FOUND;
+    };
+    if (!readable(commit_status) || !readable(authorization_status) || !readable(result_status)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
+    }
+    if ((unsigned_quote && (authorization_status != DatabaseReadStatus::NOT_FOUND ||
+                            result_status != DatabaseReadStatus::NOT_FOUND)) ||
+        (user_authority && attempt.state != AttemptState::USER_SIGNED &&
+         authorization_status != DatabaseReadStatus::FOUND) ||
+        (authorization_status == DatabaseReadStatus::FOUND &&
+         (authorization.attempt_id != attempt.attempt_id ||
+          authorization.canonical_psbt_hash != Hash(attempt.user_signed_psbt) ||
+          authorization.retry_until != attempt.retry_until))) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_AUTHORIZATION_STATE");
+    }
+    std::string error;
+    if (result_status == DatabaseReadStatus::FOUND &&
+        (!ValidatePaymasterResult(result, Params().GenesisBlock().GetHash(), attempt.provider_id,
+                                  attempt.commit_key, attempt.provider_identity_key, 1, error) ||
+         (result.final_transaction && !provider_authority))) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_PERSISTED_RESULT_INVALID");
+    }
+    if (commit_status == DatabaseReadStatus::FOUND) {
+        CMutableTransaction final;
+        if (!ValidateProviderCommitForExecution(attempt, commit,
+                std::max(now, commit.committed_at), final, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+    } else if (attempt.state == AttemptState::PROVIDER_SIGNED) {
+        PaymasterResult signed_result;
+        if (!paymaster_store::internal::DecodeProviderSignedResultEnvelope(attempt, signed_result, error) ||
+            signed_result.genesis_hash != Params().GenesisBlock().GetHash() ||
+            !ValidateFinalCollaborativeTransaction(*signed_result.final_transaction,
+                *signed_result.txid, *signed_result.raw_transaction_hash, trusted, error)) {
+            throw ApplicationError(ErrorKind::WALLET,
+                error.empty() ? "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID" : error);
+        }
+    } else if (provider_authority) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_PROVIDER_COMMIT_MISSING");
+    }
+    return reason;
 }
 } // namespace
 
@@ -150,7 +285,20 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
         !attempt.provider_signed_result.empty();
     if (!already_committed && !exact_persisted_provider_signature &&
         now > attempt.retry_until) {
-        throw ApplicationError(ErrorKind::WALLET, "Paymaster retry window expired");
+        throw ProviderSubmitExpired{"Paymaster retry window expired"};
+    }
+    if (!already_committed && attempt.state == AttemptState::QUOTE_EXPIRED) {
+        // Reconciliation can expire an unsigned quote between the network
+        // precheck and this reload. Only proven commit absence is terminal;
+        // unreadable or unexpectedly present authority must remain local.
+        LOCK(wallet->cs_wallet);
+        WalletBatch batch{wallet->GetDatabase()};
+        ProviderCommitRecord current_commit;
+        if (batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, current_commit) !=
+            DatabaseReadStatus::NOT_FOUND) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
+        }
+        throw ProviderSubmitExpired{"Paymaster attempt is not recoverable by exact provider retry"};
     }
     if (!already_committed && !exact_persisted_provider_signature) {
         PaymentIntent authorized_intent;
@@ -197,7 +345,7 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
 
     if (!already_committed && attempt.state == DigiDollar::Paymaster::AttemptState::QUOTED) {
         if (now > attempt.quote_expires_at) {
-            throw ApplicationError(ErrorKind::WALLET, "Paymaster quote expired");
+            throw ProviderSubmitExpired{"Paymaster quote expired"};
         }
         if (session.state == DigiDollar::Paymaster::SessionState::INPUTS_RESERVED ||
             session.state == DigiDollar::Paymaster::SessionState::AWAITING_WALLET_UNLOCK ||
@@ -936,13 +1084,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
     PaymentIntent authorized_intent;
     PaymasterQuote authorized_quote;
     CollaborativePSBTTemplate trusted;
-    if (!LoadAttemptAuthorizationArtifacts(attempt, authorized_intent,
-                                           authorized_quote, trusted, error) ||
-        !ValidateCollaborativePSBT(trusted.psbt, trusted,
-                                   CollaborativeSignatureStage::UNSIGNED, error) ||
-        !ValidateProviderAuthorizationManifest(attempt.provider_manifest,
-                                               authorized_intent, authorized_quote,
-                                               trusted, error)) {
+    if (!LoadProviderSubmitAuthority(attempt, authorized_intent, authorized_quote, trusted, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
     if (session.request_id != submit->request_id) {
@@ -958,6 +1100,10 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
                                    CollaborativeSignatureStage::USER_SIGNED, error)) {
         return RejectProviderMessage(*context.paymaster, direct, error, "submit");
     }
+    if (const auto reason = GetPermanentProviderSubmitRejection(
+            *wallet, session, attempt, submitted_psbt, trusted, GetTime())) {
+        return RejectProviderMessage(*context.paymaster, direct, *reason, "submit");
+    }
 
     PaymasterResult provider_result;
     bool rejected{false};
@@ -970,7 +1116,41 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
 
     PaymentResult committed;
     if (!rejected) {
-        committed = SubmitPaymasterTransaction(*wallet, std::move(submitted_psbt), mode);
+        try {
+            committed = SubmitPaymasterTransaction(*wallet, std::move(submitted_psbt), mode);
+        } catch (const ProviderSubmitExpired&) {
+            // The deadline or unsigned cleanup may have advanced after the
+            // first observation. Revalidate current local authority and peer
+            // bindings; no other application failure is converted to an ACK.
+            ProviderAttempt current;
+            {
+                LOCK(wallet->cs_wallet);
+                WalletBatch batch{wallet->GetDatabase()};
+                if (batch.ReadPaymasterAttemptWithStatus(attempt.attempt_id, current) != DatabaseReadStatus::FOUND) {
+                    throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SUBMIT_ATTEMPT_DATABASE_READ");
+                }
+            }
+            PaymentSession current_session;
+            CollaborativePSBTTemplate current_trusted;
+            PaymentIntent current_intent;
+            PaymasterQuote current_quote;
+            PartiallySignedTransaction current_submitted;
+            if (store.GetSessionBySessionIdWithStatus(current.session_id, current_session) != DatabaseReadStatus::FOUND ||
+                current.provider_id != submit->provider_id || current.session_id != submit->session_id ||
+                current.quote_id != submit->quote_id || current.commit_key != submit->commit_key ||
+                current.template_commitment != submit->template_commitment || current_session.request_id != submit->request_id ||
+                !LoadProviderSubmitAuthority(current, current_intent, current_quote, current_trusted, error) ||
+                !DecodeRawPSBT(current_submitted, MakeByteSpan(submit->user_psbt), error) ||
+                !ValidateCollaborativePSBT(current_submitted, current_trusted, CollaborativeSignatureStage::USER_SIGNED, error)) {
+                throw ApplicationError(ErrorKind::WALLET,
+                    error.empty() ? "PAYMASTER_SUBMIT_AUTHORIZATION_STATE" : error);
+            }
+            if (const auto reason = GetPermanentProviderSubmitRejection(
+                    *wallet, current_session, current, current_submitted, current_trusted, GetTime())) {
+                return RejectProviderMessage(*context.paymaster, direct, *reason, "submit");
+            }
+            throw;
+        }
         if (!store.GetProviderResult(submit->commit_key, provider_result) ||
             !store.GetAttempt(attempt.attempt_id, attempt)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RESULT_NOT_DURABLE");
