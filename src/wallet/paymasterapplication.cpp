@@ -1007,14 +1007,12 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         withdrawal_status == DatabaseReadStatus::FOUND};
     for (ProviderMaintenanceRecord& record : ledger.records) {
         if (record.state != ProviderMaintenanceState::PLANNED &&
-            record.state != ProviderMaintenanceState::BROADCAST &&
             record.state != ProviderMaintenanceState::CONFIRMED &&
-            !(record.IsPreparation() && record.state == ProviderMaintenanceState::FAILED &&
-              !record.transaction_id.IsNull())) {
+            !record.HasUnresolvedTransaction()) {
             continue;
         }
         // A conflict/abandon observation is reversible. Keep following the
-        // exact saved setup transaction; never construct a replacement here.
+        // exact saved maintenance transaction; never construct a replacement here.
         const auto matches = [&](const CWalletTx& wallet_tx) {
             if (!wallet_tx.tx) return false;
             for (const COutPoint& source : record.source_inputs) {
@@ -1306,7 +1304,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                         expected.confirmation_height;
                     pool_changed = true;
                 }
-                if (record.IsPreparation() && existing->state == PoolEntryState::INVALIDATED &&
+                if (existing->state == PoolEntryState::INVALIDATED &&
                     !wallet.IsSpent(existing->outpoint)) {
                     existing->state = expected.state;
                     existing->reservation_id = expected.reservation_id;

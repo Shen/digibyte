@@ -137,6 +137,12 @@ beyond the wall clock, as can a later clock correction. Recovering a transaction
 observing confirmation or a conflict must preserve that time floor; otherwise
 completed reserve work can fail validation and incorrectly block capital release.
 Wall-clock expiry checks remain separate from accounting timestamps.
+Conflicted or abandoned maintenance with a saved transaction ID remains open:
+its signatures can become usable again. All maintenance kinds follow that exact
+transaction and restore their own invalidated successor outputs atomically on
+its return. The known fee, or conservatively the approved maximum when unknown,
+remains in the outstanding budget and is not pruned while unresolved. No new
+signature or replacement authority is inferred from that recovery.
 RPC maintenance-budget totals and new reservations share
 `SummarizeProviderMaintenanceBudget` at that same time floor. Planned and live
 broadcast exposure does not age out; confirmed spend uses rolling windows.

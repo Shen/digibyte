@@ -782,6 +782,71 @@ BOOST_AUTO_TEST_CASE(old_unconfirmed_maintenance_broadcast_remains_open_budget_e
                 ProviderMaintenanceState::PLANNED);
 }
 
+BOOST_AUTO_TEST_CASE(failed_signed_maintenance_retains_budget_and_replay_history)
+{
+    const ProviderLiquidityPolicy policy{LiquidityPolicy()};
+    constexpr int64_t AFTER_DAY_WINDOW{1001 + 24 * 60 * 60 + 1};
+    for (const auto kind : {ProviderMaintenanceKind::REPLENISH_DGB,
+                            ProviderMaintenanceKind::REPLENISH_CARRIER,
+                            ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS}) {
+        for (const uint16_t version : {uint16_t{3}, ProviderMaintenanceRecord::CURRENT_VERSION}) {
+            for (const int64_t actual_fee : {int64_t{0}, int64_t{60}}) {
+                BOOST_TEST_CONTEXT("kind " << int(kind) << ", version " << version << ", fee " << actual_fee) {
+                    auto record = MaintenanceRecord(uint256S("371"), uint256S("a71"), 71, 80);
+                    record.version = version;
+                    record.kind = kind;
+                    if (kind != ProviderMaintenanceKind::REPLENISH_DGB) {
+                        record.outputs.front() = MaintenanceOutput(71, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER);
+                    }
+                    if (kind == ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS) {
+                        record.source_inputs = {COutPoint{uint256S("b71"), 0}};
+                        record.withdrawal_excess_script_pub_key = MaintenanceOutput(72).script_pub_key;
+                        record.withdrawal_excess_amount = DDCents{100};
+                    }
+                    record.state = ProviderMaintenanceState::FAILED;
+                    record.transaction_id = uint256S("c71");
+                    record.actual_fee = DGBSatoshis{actual_fee};
+                    record.created_at = record.updated_at = 1000;
+                    ProviderMaintenanceLedger ledger;
+                    ledger.accounting_time_high_water = 1000;
+                    ledger.records = {record};
+                    // V3/current restart reads must preserve the same exposure.
+                    CDataStream bytes{SER_DISK, 0};
+                    bytes << ledger;
+                    ProviderMaintenanceLedger restarted;
+                    bytes >> restarted;
+                    std::string error;
+                    ProviderMaintenanceBudgetUsage usage;
+                    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(restarted, AFTER_DAY_WINDOW, usage, error));
+                    const int64_t exposure = actual_fee > 0 ? actual_fee : record.maximum_fee.value;
+                    BOOST_CHECK_EQUAL(usage.reserved_fee.value, exposure);
+                    BOOST_CHECK_EQUAL(usage.broadcast_fee.value, exposure);
+                    BOOST_CHECK_EQUAL(usage.total_last_hour.value, exposure);
+                    BOOST_CHECK_EQUAL(usage.total_last_day.value, exposure);
+                    BOOST_CHECK(!ReleaseProviderMaintenanceBudget(restarted, record.operation_id, AFTER_DAY_WINDOW, error));
+                    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_ALREADY_BROADCAST");
+
+                    auto replacement = MaintenanceRecord(uint256S("372"), uint256S("a72"), 73,
+                        policy.maximum_maintenance_fee_per_hour.value - exposure + 1);
+                    const uint256 before = SerializedPaymasterHash(restarted);
+                    BOOST_CHECK(!ReserveProviderMaintenanceBudget(restarted, policy, replacement, AFTER_DAY_WINDOW, error));
+                    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED");
+                    BOOST_CHECK_EQUAL(SerializedPaymasterHash(restarted), before);
+                    --replacement.maximum_fee.value;
+                    BOOST_REQUIRE(ReserveProviderMaintenanceBudget(restarted, policy, replacement, AFTER_DAY_WINDOW, error));
+                    // Appending work prunes old terminal records, but must not
+                    // discard this signature or turn its retry into new work.
+                    BOOST_REQUIRE_EQUAL(restarted.records.size(), 2U);
+                    BOOST_CHECK(restarted.records.front().operation_id == record.operation_id);
+                    BOOST_CHECK(restarted.records.front().transaction_id == record.transaction_id);
+                    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(restarted, AFTER_DAY_WINDOW, usage, error));
+                    BOOST_CHECK_EQUAL(usage.total_last_hour.value, policy.maximum_maintenance_fee_per_hour.value);
+                }
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(maintenance_budget_usage_windows_open_work_and_preparation)
 {
     ProviderMaintenanceLedger ledger;

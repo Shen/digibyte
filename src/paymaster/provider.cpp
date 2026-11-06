@@ -110,7 +110,8 @@ void PruneProviderMaintenanceLedger(ProviderMaintenanceLedger& ledger,
                 const bool terminal =
                     record.state == ProviderMaintenanceState::CONFIRMED ||
                     record.state == ProviderMaintenanceState::RELEASED ||
-                    record.state == ProviderMaintenanceState::FAILED;
+                    (record.state == ProviderMaintenanceState::FAILED &&
+                     !record.HasUnresolvedTransaction());
                 return terminal &&
                        TimeDeltaExceeds(now, record.updated_at,
                                         SAFETY_DAY_SECONDS);
@@ -1645,9 +1646,14 @@ bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,
         if (record.state == ProviderMaintenanceState::PLANNED) {
             valid = AddAmount(result.planned_fee.value, record.maximum_fee.value) &&
                     AddAmount(result.reserved_fee.value, record.maximum_fee.value);
-        } else if (record.state == ProviderMaintenanceState::BROADCAST) {
-            valid = AddAmount(result.broadcast_fee.value, record.actual_fee.value) &&
-                    AddAmount(result.reserved_fee.value, record.actual_fee.value);
+        } else if (record.HasUnresolvedTransaction()) {
+            // Conflicts and local abandonment can reverse. Their retained
+            // signatures remain outstanding, even beyond the rolling windows.
+            // An older record without an observed fee retains its full limit.
+            const int64_t exposure = record.actual_fee.value > 0
+                ? record.actual_fee.value : record.maximum_fee.value;
+            valid = AddAmount(result.broadcast_fee.value, exposure) &&
+                    AddAmount(result.reserved_fee.value, exposure);
         } else if (record.state == ProviderMaintenanceState::CONFIRMED) {
             if (record.updated_at >= result.accounting_time - SAFETY_HOUR_SECONDS) {
                 valid = AddAmount(result.spent_last_hour.value, record.actual_fee.value);

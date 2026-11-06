@@ -3982,6 +3982,152 @@ BOOST_AUTO_TEST_CASE(pool_setup_reconciles_conflict_reversal_atomically)
     BOOST_CHECK(*wtx->tx == *tx);
 }
 
+BOOST_AUTO_TEST_CASE(recurring_maintenance_conflict_reversal_survives_restart_atomically)
+{
+    ScopedPaymasterMockTime clock{2000};
+    for (const auto kind : {ProviderMaintenanceKind::REPLENISH_DGB,
+                            ProviderMaintenanceKind::REPLENISH_CARRIER,
+                            ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS}) {
+        BOOST_TEST_CONTEXT("maintenance kind " << int(kind)) {
+            CWallet wallet{m_node.chain.get(), "maintenance-reversal", CreateMockableWalletDatabase()};
+            LOCK(wallet.cs_wallet);
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            wallet.SetupDescriptorScriptPubKeyMans();
+            wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            const auto destination = wallet.GetNewDestination(OutputType::BECH32M, "maintenance recovery");
+            const auto excess_destination = wallet.GetNewDestination(OutputType::BECH32M, "maintenance excess");
+            BOOST_REQUIRE(destination);
+            BOOST_REQUIRE(excess_destination);
+            const CScript script = GetScriptForDestination(*destination);
+            const CScript excess_script = GetScriptForDestination(*excess_destination);
+            const bool carrier = kind != ProviderMaintenanceKind::REPLENISH_DGB;
+            const bool withdrawal = kind == ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+            const TxStateConfirmed confirmed{Params().GenesisBlock().GetHash(), 1, 0};
+            CMutableTransaction parent;
+            parent.vin.emplace_back(COutPoint{uint256S("c1"), 0});
+            parent.vout.emplace_back(carrier ? 0 : MIN_ADMISSION_DGB_SATOSHIS + 1000, script);
+            const auto parent_tx = MakeTransactionRef(parent);
+            BOOST_REQUIRE(wallet.AddToWallet(parent_tx, confirmed));
+            CMutableTransaction maintenance;
+            maintenance.vin.emplace_back(COutPoint{parent_tx->GetHash(), 0});
+            maintenance.vout.emplace_back(carrier ? 0 : MIN_ADMISSION_DGB_SATOSHIS, script);
+            if (carrier) {
+                maintenance.SetDigiDollarType(::DD_TX_TRANSFER);
+                CScript metadata;
+                metadata << OP_RETURN << std::vector<unsigned char>{'D', 'D'} << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(100);
+                if (withdrawal) {
+                    maintenance.vout.emplace_back(0, excess_script);
+                    metadata << CScriptNum(100);
+                }
+                maintenance.vout.emplace_back(0, metadata);
+            }
+            const auto tx = MakeTransactionRef(maintenance);
+            auto* wtx = wallet.AddToWallet(tx, confirmed);
+            BOOST_REQUIRE(wtx);
+            ProviderMaintenanceRecord record;
+            record.kind = kind;
+            record.operation_id = uint256S("c2");
+            record.plan_id = uint256S("c3");
+            record.state = ProviderMaintenanceState::BROADCAST;
+            record.transaction_id = tx->GetHash();
+            record.maximum_fee = DGBSatoshis{2000};
+            record.actual_fee = DGBSatoshis{1000};
+            record.created_at = record.updated_at = 1000;
+            ProviderMaintenanceOutput output;
+            output.asset = carrier ? PoolAsset::DD_CARRIER : PoolAsset::DGB;
+            output.purpose = PoolPurpose::ADMISSION;
+            output.script_pub_key = script;
+            output.dgb_value = DGBSatoshis{carrier ? 0 : MIN_ADMISSION_DGB_SATOSHIS};
+            output.carrier_value = DDCents{carrier ? 100 : 0};
+            record.outputs = {output};
+            WalletBatch batch{wallet.GetDatabase()};
+            if (withdrawal) {
+                record.source_inputs = {COutPoint{parent_tx->GetHash(), 0}};
+                record.withdrawal_excess_script_pub_key = excess_script;
+                record.withdrawal_excess_amount = DDCents{100};
+                ProviderPoolEntry source;
+                source.outpoint = record.source_inputs.front();
+                source.asset = PoolAsset::DD_CARRIER;
+                source.purpose = PoolPurpose::OPERATIONAL;
+                source.script_pub_key = script;
+                source.carrier_value = DDCents{200};
+                source.confirmation_height = 1;
+                source.updated_at = 1000;
+                BOOST_REQUIRE(batch.WritePaymasterProviderPool({source}));
+            }
+            ProviderMaintenanceLedger ledger;
+            ledger.records = {record};
+            BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+            size_t recovered{0};
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(wallet, recovered, error), error);
+            std::vector<ProviderPoolEntry> pool;
+            BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+            const COutPoint successor{tx->GetHash(), 0};
+            const auto find_successor = [&](const auto& entries) {
+                return std::find_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.outpoint == successor; });
+            };
+            BOOST_REQUIRE(find_successor(pool) != pool.end());
+            BOOST_CHECK(find_successor(pool)->state == PoolEntryState::AVAILABLE);
+
+            for (const TxState& failure : {TxState{TxStateConflicted{uint256S("c4"), 1}}, TxState{TxStateInactive{true}}}) {
+                wtx->m_state = failure;
+                BOOST_REQUIRE(batch.WriteTx(*wtx));
+                BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(wallet, recovered, error), error);
+                BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+                BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::FAILED);
+                BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+                BOOST_REQUIRE(find_successor(pool) != pool.end());
+                BOOST_CHECK(find_successor(pool)->state == PoolEntryState::INVALIDATED);
+                ProviderMaintenanceBudgetUsage usage;
+                BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 2000, usage, error));
+                BOOST_CHECK_EQUAL(usage.reserved_fee.value, 1000);
+
+                CWallet restarted{m_node.chain.get(), "maintenance-reversal-restart", DuplicateMockDatabase(wallet.GetDatabase())};
+                BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+                LOCK(restarted.cs_wallet);
+                restarted.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+                auto& saved = restarted.mapWallet.at(tx->GetHash());
+                WalletBatch restarted_batch{restarted.GetDatabase()};
+                saved.m_state = TxStateInMempool{};
+                BOOST_REQUIRE(restarted_batch.WriteTx(saved));
+                BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(restarted, recovered, error), error);
+                BOOST_REQUIRE(restarted_batch.ReadPaymasterMaintenanceLedger(ledger));
+                BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::BROADCAST);
+                BOOST_REQUIRE(restarted_batch.ReadPaymasterProviderPool(pool));
+                BOOST_REQUIRE(find_successor(pool) != pool.end());
+                BOOST_CHECK(find_successor(pool)->state == PoolEntryState::PENDING_SUCCESSOR);
+                BOOST_CHECK(find_successor(pool)->reservation_id == record.operation_id);
+                BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 2000, usage, error));
+                BOOST_CHECK_EQUAL(usage.reserved_fee.value, 1000);
+
+                saved.m_state = confirmed;
+                BOOST_REQUIRE(restarted_batch.WriteTx(saved));
+                auto& database = GetMockableDatabase(restarted);
+                const auto before = database.m_records;
+                database.m_fail_commit = true;
+                BOOST_CHECK(!ReconcilePaymasterProviderMaintenance(restarted, recovered, error));
+                database.ClearFailureInjection();
+                BOOST_CHECK(database.m_records == before);
+                BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(restarted, recovered, error), error);
+                BOOST_REQUIRE(restarted_batch.ReadPaymasterMaintenanceLedger(ledger));
+                BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::CONFIRMED);
+                BOOST_CHECK(ledger.records.front().transaction_id == tx->GetHash());
+                BOOST_REQUIRE(restarted_batch.ReadPaymasterProviderPool(pool));
+                BOOST_REQUIRE(find_successor(pool) != pool.end());
+                BOOST_CHECK(find_successor(pool)->state == PoolEntryState::AVAILABLE);
+                BOOST_CHECK(find_successor(pool)->reservation_id.IsNull());
+                BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 2000, usage, error));
+                BOOST_CHECK_EQUAL(usage.reserved_fee.value, 0);
+                BOOST_CHECK_EQUAL(usage.spent_last_day.value, 1000);
+                const auto reconciled = database.m_records;
+                BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(restarted, recovered, error), error);
+                BOOST_CHECK(database.m_records == reconciled);
+            }
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(retirement_finance_recovers_wallet_commit_after_write_failure_and_restart)
 {
     ScopedPaymasterMockTime clock{2000};

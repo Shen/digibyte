@@ -609,6 +609,15 @@ struct ProviderMaintenanceRecord {
                kind == ProviderMaintenanceKind::PREPARE_CARRIER;
     }
 
+    /** A local conflict or abandonment does not revoke retained signatures.
+     * Keep following and budgeting the exact transaction until it confirms. */
+    bool HasUnresolvedTransaction() const
+    {
+        return !transaction_id.IsNull() &&
+               (state == ProviderMaintenanceState::BROADCAST ||
+                state == ProviderMaintenanceState::FAILED);
+    }
+
     SERIALIZE_METHODS(ProviderMaintenanceRecord, obj)
     {
         READWRITE(obj.version, obj.operation_id, obj.plan_id,
@@ -643,6 +652,7 @@ struct ProviderMaintenanceBudgetUsage {
     int64_t accounting_time{0};
     DGBSatoshis reserved_fee;
     DGBSatoshis planned_fee;
+    /** Includes retained signed transactions with reversible failure states. */
     DGBSatoshis broadcast_fee;
     DGBSatoshis spent_last_hour;
     DGBSatoshis spent_last_day;
