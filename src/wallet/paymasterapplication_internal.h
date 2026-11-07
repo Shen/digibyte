@@ -310,7 +310,8 @@ bool PreflightFinalPaymasterTransaction(
     const CTransactionRef& transaction,
     FinalTransactionPresence& presence,
     std::string& error,
-    ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC);
+    ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC,
+    std::optional<DigiDollar::Paymaster::ExactFinalTransactionProof>* final_proof = nullptr);
 bool MarkFinalValidationFailureRecoverable(
     PaymasterStore& store,
     const DigiDollar::Paymaster::PaymentSession& session,

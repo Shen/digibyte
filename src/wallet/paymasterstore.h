@@ -23,6 +23,10 @@
 #include <string_view>
 #include <vector>
 
+namespace DigiDollar::Paymaster {
+class ExactFinalTransactionProof;
+}
+
 namespace wallet {
 
 class CWallet;
@@ -737,14 +741,14 @@ public:
      * durable final immediately before a startup/retry broadcast. This checks
      * ordinary payment and alternative-recovery manifests, the accepted user
      * PSBT, capacity/control proofs, all final witnesses, and current
-     * chainstate. exact_final_already_known may be true only after an exact
-     * txid/wtxid/byte match in the active chain or a local transaction pool.
+     * chainstate. Historical reconstruction requires the proof returned by
+     * the canonical exact-final preflight, bound to this transaction and tip.
      * A separate mempool preflight remains mandatory immediately before
      * insertion or broadcast. */
     bool ValidateClientDurableFinalForBroadcast(
         const CTransaction& transaction,
         int64_t now,
-        bool exact_final_already_known,
+        const DigiDollar::Paymaster::ExactFinalTransactionProof* final_proof,
         std::string& error) const;
 
     /** Reconcile every session bound to an exact wallet transaction

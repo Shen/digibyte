@@ -622,6 +622,53 @@ TransactionError BroadcastExactDurableTransaction(
 
 } // namespace
 
+} // namespace wallet
+
+namespace DigiDollar::Paymaster {
+// The issuer is deliberately defined only in this translation unit. Callers
+// can carry a proof, but cannot construct one from a presence enum or txid.
+class ExactFinalPreflight final {
+public:
+    static bool Run(wallet::CWallet& wallet, const CTransactionRef& transaction,
+                    wallet::ExactFinalTxIndexMode txindex_mode,
+                    wallet::ExactFinalTransactionPreflight& result, std::string& error)
+    {
+        result = {};
+        if (!transaction) {
+            error = "PAYMASTER_FINAL_TRANSACTION_MISSING";
+            return false;
+        }
+        auto* node = wallet.chain().context();
+        if (!node || !node->chainman) {
+            error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
+            return false;
+        }
+        const auto tip_hash = [&]() {
+            LOCK(cs_main);
+            const auto* tip = node->chainman->ActiveChain().Tip();
+            return tip ? tip->GetBlockHash() : uint256{};
+        };
+        const uint256 before = tip_hash();
+        if (!wallet::PreflightExactPaymasterFinalTransactionImpl(
+                wallet, transaction, txindex_mode, result, error)) return false;
+        if (result.presence != wallet::ExactFinalTransactionPresence::NONE) {
+            // Do not hold cs_main across the preflight's possible index wait.
+            // A changed chain observation requires a fresh canonical preflight.
+            const uint256 after = tip_hash();
+            if (before.IsNull() || before != after) {
+                result = {};
+                error = "PAYMASTER_EXACT_FINAL_PROOF_STALE";
+                return false;
+            }
+            result.final_proof = ExactFinalTransactionProof{transaction, *node->chainman, after};
+        }
+        return true;
+    }
+};
+} // namespace DigiDollar::Paymaster
+
+namespace wallet {
+
 bool PreflightExactPaymasterFinalTransaction(
     CWallet& wallet,
     const CTransactionRef& transaction,
@@ -629,14 +676,15 @@ bool PreflightExactPaymasterFinalTransaction(
     ExactFinalTransactionPreflight& result,
     std::string& error)
 {
-    return PreflightExactPaymasterFinalTransactionImpl(
+    return ExactFinalPreflight::Run(
         wallet, transaction, txindex_mode, result, error);
 }
 
 PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
     std::string_view error, PaymasterFinalizationStage stage)
 {
-    if (error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" || error == "PAYMASTER_TXINDEX_NOT_READY") {
+    if (error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" || error == "PAYMASTER_TXINDEX_NOT_READY" ||
+        error == "PAYMASTER_EXACT_FINAL_PROOF_STALE") {
         return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
     }
     if (stage == PaymasterFinalizationStage::DURABLE_RESULT &&
@@ -947,9 +995,7 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
                 authority_preflight, result.error)) {
             return result;
         }
-        const bool exact_final_already_known =
-            authority_preflight.presence !=
-            ExactFinalTransactionPresence::NONE;
+        const auto* final_proof = authority_preflight.final_proof ? &*authority_preflight.final_proof : nullptr;
         node::NodeContext* node = wallet.chain().context();
         if (!node || !node->chainman ||
             alternative.recovery_response.created_at <= 0 ||
@@ -972,9 +1018,7 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
                 alternative.recovery_request,
                 alternative.recovery_provider_identity_key, parameters,
                 Params(), *node->chainman, authorization_time, recovery_now,
-                exact_final_already_known ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
-                trusted, unsigned_psbt, result.error,
-                exact_final_already_known ? &exact_final : nullptr)) {
+                final_proof, trusted, unsigned_psbt, result.error)) {
             return result;
         }
 
@@ -994,9 +1038,7 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
         if (!ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
                 submit, alternative.recovery_response, trusted, parameters,
                 Params(), *node->chainman, authorization_time, recovery_now,
-                exact_final_already_known ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
-                user_psbt, result.error,
-                exact_final_already_known ? &exact_final : nullptr)) {
+                final_proof, user_psbt, result.error)) {
             return result;
         }
 
@@ -1013,7 +1055,7 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
                 parameters, Params(), *node->chainman, authorization_time,
                 std::max(recovery_now,
                          alternative.signed_result.updated_at),
-                exact_final_already_known, result.error)) {
+                final_proof, result.error)) {
             return result;
         }
     }
@@ -1167,8 +1209,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
                 authority_preflight, recovery_error) ||
             !store.ValidateClientDurableFinalForBroadcast(
                 *transaction, now,
-                authority_preflight.presence !=
-                    ExactFinalTransactionPresence::NONE,
+                authority_preflight.final_proof ? &*authority_preflight.final_proof : nullptr,
                 recovery_error) ||
             !InsertAndBroadcastExactPaymasterTransaction(
                 wallet, transaction, already_confirmed, recovery_error)) {

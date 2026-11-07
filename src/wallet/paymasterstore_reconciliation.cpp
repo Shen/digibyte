@@ -266,10 +266,17 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
 bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
     const CTransaction& transaction,
     int64_t now,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error) const
 {
     error.clear();
+    if (final_proof) {
+        const auto* node = m_wallet.chain().context();
+        if (!node || !node->chainman || !final_proof->Matches(transaction, *node->chainman, error)) {
+            if (error.empty()) error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
+            return false;
+        }
+    }
     const uint256 txid{transaction.GetHash()};
     const uint256 wtxid{transaction.GetWitnessHash()};
     const std::vector<unsigned char> final_bytes{CanonicalBytes(transaction)};
@@ -466,17 +473,12 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
             payment_attempt->client_manifest_accepted_at;
         const int64_t observation_time{
             std::max(now, authorization_time)};
-        // This exact, fully signed spender is durable even when it has not yet
-        // reached a pool. Supplying it here permits inspection of its now-spent
-        // prevouts after restart; the immediately preceding/following mempool
-        // preflights remain authoritative for conflicts.
-        const AuthorizedCapacityResourceMode resource_mode{
-            exact_final_already_known ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT};
+        // Durable bytes alone cannot justify reconstructing spent prevouts.
+        // Only the canonical preflight's transaction-bound evidence can do so.
         if (!ValidateAuthorizedCapacityRetryAgainstChainstate(
                 capacity_proof, capacity_request,
                 payment_attempt->provider_identity_key, *node->chainman,
-                authorization_time, observation_time, resource_mode, error,
-                exact_final_already_known ? &transaction : nullptr)) {
+                authorization_time, observation_time, final_proof, error)) {
             return false;
         }
         return true;
@@ -516,9 +518,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
             recovery.recovery_response, recovery.recovery_request,
             recovery.recovery_provider_identity_key, parameters, Params(),
             *node->chainman, authorization_time, observation_time,
-            exact_final_already_known ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
-            trusted, unsigned_psbt, error,
-            exact_final_already_known ? &transaction : nullptr)) {
+            final_proof, trusted, unsigned_psbt, error)) {
         return false;
     }
 
@@ -538,9 +538,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
     if (!ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
             submit, recovery.recovery_response, trusted, parameters, Params(),
             *node->chainman, authorization_time, observation_time,
-            exact_final_already_known ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
-            user_psbt, error,
-            exact_final_already_known ? &transaction : nullptr)) {
+            final_proof, user_psbt, error)) {
         return false;
     }
 
@@ -565,7 +563,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
         result_message, recovery.recovery_response,
         recovery.recovery_provider_identity_key, 1, trusted, parameters,
         Params(), *node->chainman, authorization_time,
-        std::max(now, result.updated_at), exact_final_already_known, error);
+        std::max(now, result.updated_at), final_proof, error);
 }
 
 bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,

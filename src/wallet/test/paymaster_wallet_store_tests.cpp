@@ -7123,6 +7123,7 @@ BOOST_AUTO_TEST_CASE(transient_finalization_errors_remain_retryable)
     const FailureCase cases[]{
         {"PAYMASTER_NODE_CONTEXT_UNAVAILABLE", true, true},
         {"PAYMASTER_TXINDEX_NOT_READY", true, true},
+        {"PAYMASTER_EXACT_FINAL_PROOF_STALE", true, true},
         {"PAYMASTER_NODE_RUNTIME_UNAVAILABLE", false, true},
         {"PAYMASTER_FINAL_BLOCK_READ", false, true},
         {"PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE", false, true},
@@ -7157,12 +7158,14 @@ BOOST_AUTO_TEST_CASE(shared_final_preflight_rejects_missing_transaction)
         m_wallet, {}, ExactFinalTxIndexMode::NONBLOCKING, preflight, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_TRANSACTION_MISSING");
     BOOST_CHECK(preflight.presence == ExactFinalTransactionPresence::NONE);
+    BOOST_CHECK(!preflight.final_proof);
 
     error.clear();
     BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(
         m_wallet, {}, ExactFinalTxIndexMode::WAIT_FOR_SYNC, preflight, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_TRANSACTION_MISSING");
     BOOST_CHECK(preflight.presence == ExactFinalTransactionPresence::NONE);
+    BOOST_CHECK(!preflight.final_proof);
 }
 
 BOOST_AUTO_TEST_CASE(provider_successor_reconciliation_recycles_carrier_and_dgb_idempotently)

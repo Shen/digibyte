@@ -6,6 +6,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#if defined(HAVE_CONFIG_H)
+#include <config/digibyte-config.h>
+#endif
+
 #include <chainparams.h>
 #include <coins.h>
 #include <hash.h>
@@ -17,10 +21,20 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <test/util/txmempool.h>
+#include <txmempool.h>
 #include <validation.h>
 #include <version.h>
 
 #include <algorithm>
+#include <type_traits>
+
+#ifdef ENABLE_WALLET
+#include <wallet/db.h>
+#include <wallet/paymasterprovider.h>
+#include <wallet/test/util.h>
+#include <wallet/wallet.h>
+#endif
 
 using namespace DigiDollar::Paymaster;
 
@@ -973,6 +987,16 @@ BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_recovery_chainstate_tests, RecoveryChainstateFixture)
 
+BOOST_AUTO_TEST_CASE(exact_final_proof_requires_canonical_preflight)
+{
+    static_assert(!std::is_default_constructible<ExactFinalTransactionProof>::value);
+    static_assert(!std::is_aggregate<ExactFinalTransactionProof>::value);
+    static_assert(!std::is_constructible<ExactFinalTransactionProof,
+        CTransactionRef, const ChainstateManager&, uint256>::value);
+    BOOST_CHECK(std::is_copy_constructible<ExactFinalTransactionProof>::value);
+}
+
+#ifdef ENABLE_WALLET
 BOOST_AUTO_TEST_CASE(known_final_reconstructs_spent_prevouts_without_new_spending_authority)
 {
     for (const bool include_carrier : {false, true}) {
@@ -1030,52 +1054,87 @@ BOOST_AUTO_TEST_CASE(known_final_reconstructs_spent_prevouts_without_new_spendin
             for (const auto& input : final.vin) BOOST_REQUIRE(current.SpendCoin(input.prevout));
         }
 
-        // Model the preflight caller's exact-known-final proof after confirmation:
-        // every chainstate prevout is now genuinely spent. The result/record bytes
-        // may be received or reloaded only after the original quote has expired.
+        // Obtain evidence from the canonical preflight, rather than manufacture
+        // a resource enum. The chainstate prevouts are now genuinely spent.
+        wallet::CWallet wallet{m_node.chain.get(), "historical-proof",
+            wallet::CreateMockableWalletDatabase()};
+        {
+            LOCK2(cs_main, wallet.cs_wallet);
+            const auto* tip = m_node.chainman->ActiveChain().Tip();
+            BOOST_REQUIRE(tip);
+            wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+        }
+        const auto final_ref = MakeTransactionRef(final);
+        {
+            LOCK(m_node.mempool->cs);
+            TestMemPoolEntryHelper entry;
+            m_node.mempool->addUnchecked(entry.Fee(10000000).FromTx(final_ref));
+        }
+        wallet::ExactFinalTransactionPreflight preflight;
+        BOOST_REQUIRE_MESSAGE(wallet::PreflightExactPaymasterFinalTransaction(
+            wallet, final_ref, wallet::ExactFinalTxIndexMode::NONBLOCKING, preflight, error), error);
+        BOOST_REQUIRE(preflight.final_proof);
+        const auto* known = &*preflight.final_proof;
         AlternativeRecoveryResponse reloaded_response;
         const auto saved_response = SerializeExact(response);
         SpanReader saved{::PROTOCOL_VERSION, saved_response};
         saved >> reloaded_response;
         AlternativeRecoveryTemplate rebuilt;
         PartiallySignedTransaction unsigned_psbt, decoded_user;
-        constexpr auto known = AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN;
         BOOST_REQUIRE_MESSAGE(ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
             reloaded_response, request, parameters.recovery_provider_identity_key, parameters,
             Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt,
-            error, &exact_final), error);
+            error), error);
         BOOST_REQUIRE_MESSAGE(ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
             submit, reloaded_response, rebuilt, parameters, Params(), *m_node.chainman,
-            NOW, NOW + 100, known, decoded_user, error, &exact_final), error);
+            NOW, NOW + 100, known, decoded_user, error), error);
         BOOST_REQUIRE_MESSAGE(ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(final,
             exact_final.GetWitnessHash(), rebuilt, parameters, Params(), *m_node.chainman,
             NOW, NOW + 100, known, error), error);
         BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
             response, request, parameters.recovery_provider_identity_key, parameters,
             Params(), *m_node.chainman, NOW, NOW + 100,
-            AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, rebuilt, unsigned_psbt, error));
+            nullptr, rebuilt, unsigned_psbt, error));
         BOOST_CHECK(!BuildAlternativeRecoveryTemplateAgainstChainstate(parameters,
             Params(), *m_node.chainman, NOW, rebuilt, error));
-        BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
-            response, request, parameters.recovery_provider_identity_key, parameters,
-            Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt, error));
         for (int mutation = 0; mutation < 3; ++mutation) {
             auto changed = final;
             if (mutation == 0) changed.vin.front().scriptWitness.stack.front().front() ^= 1;
             if (mutation == 1) ++changed.vout.front().nValue;
             if (mutation == 2) ++changed.vin.front().prevout.n;
             const CTransaction foreign{changed};
-            BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
-                response, request, parameters.recovery_provider_identity_key, parameters,
-                Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt,
-                error, &foreign));
+            BOOST_CHECK(!ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
+                changed, foreign.GetWitnessHash(), rebuilt, parameters, Params(), *m_node.chainman,
+                NOW, NOW + 100, known, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_EXACT_FINAL_PROOF_MISMATCH");
+            wallet::ExactFinalTransactionPreflight foreign_preflight;
+            (void)wallet::PreflightExactPaymasterFinalTransaction(wallet, MakeTransactionRef(changed),
+                wallet::ExactFinalTxIndexMode::NONBLOCKING, foreign_preflight, error);
+            BOOST_CHECK(!foreign_preflight.final_proof);
         }
         {
             LOCK(cs_main);
             const auto& current = m_node.chainman->ActiveChainstate().CoinsTip();
             for (const auto& input : final.vin) BOOST_CHECK(current.AccessCoin(input.prevout).IsSpent());
         }
+        {
+            LOCK(cs_main);
+            auto& active = m_node.chainman->ActiveChain();
+            auto* tip = active.Tip();
+            const uint256 alternate_hash{uint256S("f003")};
+            CBlockIndex alternate;
+            alternate.pprev = tip;
+            alternate.nHeight = tip->nHeight + 1;
+            alternate.phashBlock = &alternate_hash;
+            active.SetTip(alternate);
+            BOOST_CHECK(!known->Matches(*m_node.chainman, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_EXACT_FINAL_PROOF_STALE");
+            active.SetTip(*tip);
+        }
+        WITH_LOCK(m_node.mempool->cs,
+            m_node.mempool->removeRecursive(*final_ref, MemPoolRemovalReason::CONFLICT));
     }
 }
+#endif // ENABLE_WALLET
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -13,9 +13,11 @@
 #include <paymaster/reservation.h>
 #include <paymaster/sponsorship.h>
 #include <paymaster/wire.h>
+#include <paymaster/validation.h>
 #include <primitives/transaction.h>
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -69,6 +71,7 @@ struct ExactFinalTransactionPreflight {
     int confirmed_height{-1};
     int confirmed_position{-1};
     int confirmation_depth{0};
+    std::optional<DigiDollar::Paymaster::ExactFinalTransactionProof> final_proof;
 };
 
 /** Shared final-transaction firewall used by RPC, recovery and background

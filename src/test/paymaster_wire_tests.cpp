@@ -894,7 +894,7 @@ BOOST_FIXTURE_TEST_CASE(
         ValidateAuthorizedCapacityRetryAgainstChainstate(
             proof, request, XOnlyPubKey{identity_key.GetPubKey()},
             *m_node.chainman, authorization_time, observation_time,
-            AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, error),
+            nullptr, error),
         error);
 
     // A new authorization/signature attempt after the Capacity TTL remains
@@ -918,7 +918,7 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!ValidateAuthorizedCapacityRetryAgainstChainstate(
         proof, request, XOnlyPubKey{identity_key.GetPubKey()},
         *m_node.chainman, authorization_time, observation_time,
-        AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, error));
+        nullptr, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE");
     WITH_LOCK(m_node.mempool->cs,
               m_node.mempool->removeRecursive(
@@ -933,7 +933,7 @@ BOOST_FIXTURE_TEST_CASE(
     BOOST_CHECK(!ValidateAuthorizedCapacityRetryAgainstChainstate(
         proof, request, XOnlyPubKey{identity_key.GetPubKey()},
         *m_node.chainman, authorization_time, observation_time,
-        AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, error));
+        nullptr, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_CAPACITY_DGB_CHAINSTATE");
 }
 

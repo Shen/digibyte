@@ -20,13 +20,26 @@ class CTransaction;
 
 namespace DigiDollar::Paymaster {
 
-/** Resource-spend policy for revalidating an already authorized Capacity
- * proof. A locally persisted unsigned transaction is never sufficient to use
- * EXACT_FINAL_ALREADY_KNOWN; the caller must have independently observed the
- * exact fully signed transaction in the mempool or active chain. */
-enum class AuthorizedCapacityResourceMode : uint8_t {
-    REQUIRE_UNSPENT,
-    EXACT_FINAL_ALREADY_KNOWN,
+class ExactFinalPreflight;
+
+/** Evidence issued only by the canonical exact-final preflight for a locally
+ * observed final transaction. It is bound to its complete witness, chainstate
+ * and observed tip; it grants no new signing authority and is not persisted. */
+class ExactFinalTransactionProof final {
+public:
+    const CTransaction& Transaction() const { return *m_transaction; }
+    bool Matches(const ChainstateManager& chainman, std::string& error) const;
+    bool Matches(const CTransaction& transaction, const ChainstateManager& chainman,
+                 std::string& error) const;
+
+private:
+    friend class ExactFinalPreflight;
+    ExactFinalTransactionProof(const CTransactionRef& transaction,
+                               const ChainstateManager& chainman, const uint256& tip)
+        : m_transaction{transaction}, m_chainman{&chainman}, m_tip{tip} {}
+    CTransactionRef m_transaction;
+    const ChainstateManager* m_chainman;
+    uint256 m_tip;
 };
 
 uint256 GetAdmissionControlHash(const PaymasterId& provider_id,
@@ -60,8 +73,7 @@ bool ValidateCapacityProofAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t now,
     std::string& error,
-    const CTransaction* exact_known_spender = nullptr,
-    bool exact_spender_is_known = false);
+    const ExactFinalTransactionProof* final_proof = nullptr);
 
 /** Revalidate the Capacity authority behind an exact, already signed retry.
  * Cryptographic envelopes are checked at authorization_time, while reference
@@ -76,9 +88,8 @@ bool ValidateAuthorizedCapacityRetryAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
-    std::string& error,
-    const CTransaction* exact_final_transaction = nullptr);
+    const ExactFinalTransactionProof* final_proof,
+    std::string& error);
 
 bool BuildAlternativeRecoveryTemplateAgainstChainstate(
     const AlternativeRecoveryParameters& parameters,
@@ -99,12 +110,11 @@ bool ValidateAlternativeRecoveryResponseTemplateAgainstChainstate(
     AlternativeRecoveryTemplate& trusted,
     PartiallySignedTransaction& unsigned_psbt,
     std::string& error,
-    const CTransaction* exact_known_spender = nullptr,
-    bool exact_spender_is_known = false);
+    const ExactFinalTransactionProof* final_proof = nullptr);
 
 /** Durable counterpart for an already authorized alternative-recovery
  * response. No new signature authority is created at observation_time.
- * EXACT_FINAL_ALREADY_KNOWN requires the caller's independent local exact-final
+ * Historical reconstruction requires evidence from the canonical exact-final
  * preflight. Historical prevouts are reconstructed only in a disposable view;
  * the full final witness must match the rebuilt authorized template. */
 bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
@@ -116,11 +126,10 @@ bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     AlternativeRecoveryTemplate& trusted,
     PartiallySignedTransaction& unsigned_psbt,
-    std::string& error,
-    const CTransaction* exact_final_transaction = nullptr);
+    std::string& error);
 
 bool ValidateAlternativeRecoveryPSBTAgainstChainstate(
     const PartiallySignedTransaction& candidate,
@@ -142,8 +151,7 @@ bool ValidateAlternativeRecoverySubmitAgainstChainstate(
     int64_t now,
     PartiallySignedTransaction& user_psbt,
     std::string& error,
-    const CTransaction* exact_known_spender = nullptr,
-    bool exact_spender_is_known = false);
+    const ExactFinalTransactionProof* final_proof = nullptr);
 
 /** Durable counterpart for an exact already-user-signed recovery submit. */
 bool ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
@@ -155,10 +163,9 @@ bool ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     PartiallySignedTransaction& user_psbt,
-    std::string& error,
-    const CTransaction* exact_final_transaction = nullptr);
+    std::string& error);
 
 bool ValidateFinalAlternativeRecoveryAgainstChainstate(
     const CMutableTransaction& final_transaction,
@@ -168,7 +175,7 @@ bool ValidateFinalAlternativeRecoveryAgainstChainstate(
     const CChainParams& chain_params,
     const ChainstateManager& chainman,
     int64_t now,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error);
 
 /** Full final-transaction firewall for an already authorized alternative
@@ -182,7 +189,7 @@ bool ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error);
 
 /** Complete client-side final-result firewall: authenticate and bind the
@@ -198,7 +205,7 @@ bool ValidateFinalAlternativeRecoveryResultAgainstChainstate(
     const CChainParams& chain_params,
     const ChainstateManager& chainman,
     int64_t now,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error);
 
 /** Validate a durable recovery result at the current observation time while
@@ -216,7 +223,7 @@ bool ValidateDurableAlternativeRecoveryResultAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error);
 
 } // namespace DigiDollar::Paymaster

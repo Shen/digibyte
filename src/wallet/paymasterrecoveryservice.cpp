@@ -723,6 +723,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         CTransactionRef observed_final;
         FinalTransactionPresence observed_presence{
             FinalTransactionPresence::NONE};
+        std::optional<ExactFinalTransactionProof> observed_proof;
         if (!messages.empty()) {
             message = std::get_if<AlternativeRecoveryResultMessage>(
                 &messages.front().payload);
@@ -772,14 +773,13 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             observed_final = MakeTransactionRef(
                 *message->result.final_transaction);
             if (!PreflightFinalPaymasterTransaction(
-                    wallet, observed_final, observed_presence, error)) {
-                throw ApplicationError(ErrorKind::REJECTED, error);
+                    wallet, observed_final, observed_presence, error,
+                    ExactFinalTxIndexMode::WAIT_FOR_SYNC, &observed_proof)) {
+                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                    ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
             }
         }
-        const AuthorizedCapacityResourceMode resource_mode{
-            observed_presence != FinalTransactionPresence::NONE ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT};
-        const CTransaction* const known_final{
-            observed_presence != FinalTransactionPresence::NONE ? observed_final.get() : nullptr};
+        const auto* final_proof = observed_proof ? &*observed_proof : nullptr;
         PartiallySignedTransaction user_psbt;
         if (!BuildRecoveryParametersFromRecord(
                 wallet, recovery, parameters, error) ||
@@ -788,26 +788,27 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 recovery.recovery_provider_identity_key, parameters,
                 Params(), *node->chainman, authorization_time,
                 observation_time,
-                resource_mode, trusted, unsigned_psbt, error, known_final) ||
+                final_proof, trusted, unsigned_psbt, error) ||
             !ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
                 submit, recovery.recovery_response, trusted, parameters,
                 Params(), *node->chainman, authorization_time,
                 observation_time,
-                resource_mode, user_psbt, error, known_final)) {
-            throw ApplicationError(ErrorKind::REJECTED, error);
+                final_proof, user_psbt, error)) {
+            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
         }
 
         if (message) {
             const CMutableTransaction& final_transaction =
                 *message->result.final_transaction;
             const CTransactionRef& final_ref = observed_final;
-            const FinalTransactionPresence presence{observed_presence};
             if (!ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
                     final_transaction, *message->result.raw_transaction_hash,
                     trusted, parameters, Params(), *node->chainman,
                     authorization_time, observation_time,
-                    resource_mode, error)) {
-                throw ApplicationError(ErrorKind::REJECTED, error);
+                    final_proof, error)) {
+                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                    ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
             }
             recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
             recovery.final_transaction =
@@ -848,6 +849,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             PartiallySignedTransaction broadcast_unsigned_psbt;
             FinalTransactionPresence broadcast_presence{
                 FinalTransactionPresence::NONE};
+            std::optional<ExactFinalTransactionProof> broadcast_proof;
             if (!store.GetAlternativeRecovery(
                     recovery.request_id, broadcast_recovery)) {
                 throw ApplicationError(
@@ -867,7 +869,8 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                     "PAYMASTER_RECOVERY_BROADCAST_AUTHORIZATION_INVALID");
             }
             if (!PreflightFinalPaymasterTransaction(
-                    wallet, final_ref, broadcast_presence, error)) {
+                    wallet, final_ref, broadcast_presence, error,
+                    ExactFinalTxIndexMode::WAIT_FOR_SYNC, &broadcast_proof)) {
                 if (IsTransientPaymasterFinalizationError(error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);
                 }
@@ -883,10 +886,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                     broadcast_recovery.recovery_provider_identity_key,
                     broadcast_parameters, Params(), *node->chainman,
                     authorization_time, observation_time,
-                    broadcast_presence != FinalTransactionPresence::NONE ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
+                    broadcast_proof ? &*broadcast_proof : nullptr,
                     broadcast_trusted,
-                    broadcast_unsigned_psbt, error,
-                    broadcast_presence != FinalTransactionPresence::NONE ? final_ref.get() : nullptr)) {
+                    broadcast_unsigned_psbt, error)) {
                 if (IsTransientPaymasterFinalizationError(error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);
                 }
@@ -899,7 +901,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                     final_transaction, broadcast_recovery.expected_wtxid,
                     broadcast_trusted, broadcast_parameters, Params(),
                     *node->chainman, authorization_time, observation_time,
-                    broadcast_presence != FinalTransactionPresence::NONE ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
+                    broadcast_proof ? &*broadcast_proof : nullptr,
                     error)) {
                 if (IsTransientPaymasterFinalizationError(error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);
@@ -957,8 +959,10 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         const CTransactionRef final_ref =
             MakeTransactionRef(final_transaction);
         FinalTransactionPresence presence{FinalTransactionPresence::NONE};
+        std::optional<ExactFinalTransactionProof> final_proof;
         if (!PreflightFinalPaymasterTransaction(
-                wallet, final_ref, presence, error)) {
+                wallet, final_ref, presence, error,
+                ExactFinalTxIndexMode::WAIT_FOR_SYNC, &final_proof)) {
             if (IsTransientPaymasterFinalizationError(error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
@@ -981,15 +985,13 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 recovery.recovery_provider_identity_key, parameters,
                 Params(), *node->chainman, authorization_time,
                 observation_time,
-                presence != FinalTransactionPresence::NONE ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
-                trusted,
-                unsigned_psbt, error,
-                presence != FinalTransactionPresence::NONE ? final_ref.get() : nullptr) ||
+                final_proof ? &*final_proof : nullptr,
+                trusted, unsigned_psbt, error) ||
             !ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
                 final_transaction, recovery.expected_wtxid, trusted,
                 parameters, Params(), *node->chainman,
                 authorization_time, observation_time,
-                presence != FinalTransactionPresence::NONE ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT,
+                final_proof ? &*final_proof : nullptr,
                 error)) {
             if (IsTransientPaymasterFinalizationError(error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
@@ -1186,13 +1188,14 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
                 MakeTransactionRef(decoded);
             FinalTransactionPresence presence{
                 FinalTransactionPresence::NONE};
+            std::optional<ExactFinalTransactionProof> final_proof;
             std::string validation_error;
             if (!PreflightFinalPaymasterTransaction(
                     *wallet, exact_transaction, presence,
-                    validation_error) ||
+                    validation_error, ExactFinalTxIndexMode::WAIT_FOR_SYNC, &final_proof) ||
                 !store.ValidateClientDurableFinalForBroadcast(
                     *exact_transaction, now,
-                    presence != FinalTransactionPresence::NONE,
+                    final_proof ? &*final_proof : nullptr,
                     validation_error)) {
                 throw ApplicationError(
                     ErrorKind::REJECTED,

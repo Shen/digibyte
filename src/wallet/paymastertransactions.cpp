@@ -1234,20 +1234,16 @@ bool QueuePersistedPaymasterSubmit(
         known_final = node::GetTransaction(nullptr, node->mempool.get(),
             attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
     }
-    auto resource_mode = AuthorizedCapacityResourceMode::REQUIRE_UNSPENT;
+    std::optional<ExactFinalTransactionProof> final_proof;
     if (known_final) {
         FinalTransactionPresence presence{FinalTransactionPresence::NONE};
         if (!ValidateFinalCollaborativeTransaction(
                 CMutableTransaction{*known_final}, known_final->GetHash(),
                 known_final->GetWitnessHash(), authorized_template, error) ||
             !PreflightFinalPaymasterTransaction(wallet, known_final, presence,
-                error, ExactFinalTxIndexMode::NONBLOCKING)) {
+                error, ExactFinalTxIndexMode::NONBLOCKING, &final_proof)) {
             return false;
         }
-        if (presence != FinalTransactionPresence::NONE)
-            resource_mode = AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN;
-        else
-            known_final.reset();
     }
     const int64_t observation_time =
         std::max(now, attempt.client_manifest_accepted_at);
@@ -1256,7 +1252,7 @@ bool QueuePersistedPaymasterSubmit(
             capacity_proof, capacity_request,
             attempt.provider_identity_key, *node->chainman,
             attempt.client_manifest_accepted_at, observation_time,
-            resource_mode, error, known_final.get())) {
+            final_proof ? &*final_proof : nullptr, error)) {
         if (error.empty()) error = "PAYMASTER_CAPACITY_NOT_CURRENT";
         return false;
     }
@@ -1537,8 +1533,10 @@ bool PreflightFinalPaymasterTransaction(CWallet& wallet,
                                         const CTransactionRef& transaction,
                                         FinalTransactionPresence& presence,
                                         std::string& error,
-                                        ExactFinalTxIndexMode txindex_mode)
+                                        ExactFinalTxIndexMode txindex_mode,
+                                        std::optional<ExactFinalTransactionProof>* final_proof)
 {
+    if (final_proof) final_proof->reset();
     ExactFinalTransactionPreflight preflight;
     if (!PreflightExactPaymasterFinalTransaction(
             wallet, transaction, txindex_mode,
@@ -1547,6 +1545,7 @@ bool PreflightFinalPaymasterTransaction(CWallet& wallet,
         return false;
     }
     presence = preflight.presence;
+    if (final_proof) *final_proof = preflight.final_proof;
     return true;
 }
 

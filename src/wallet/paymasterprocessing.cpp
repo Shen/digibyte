@@ -746,7 +746,7 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
             final_transaction, final_tx.GetWitnessHash(), trusted,
             parameters, Params(), *node_ctx->chainman,
             authorization_time,
-            /*exact_final_already_known=*/false, error)) {
+            /*final_proof=*/nullptr, error)) {
         throw ApplicationError(ErrorKind::REJECTED, error);
     }
     FinalTransactionPresence presence{FinalTransactionPresence::NONE};
@@ -854,6 +854,7 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
         broadcast_recovery.user_signed_psbt;
     FinalTransactionPresence broadcast_presence{
         FinalTransactionPresence::NONE};
+    std::optional<ExactFinalTransactionProof> broadcast_proof;
     if (!BuildRecoveryParametersFromRecord(
             *wallet, broadcast_recovery, broadcast_parameters,
             error) ||
@@ -876,7 +877,7 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
     }
     if (!PreflightFinalPaymasterTransaction(
             *wallet, final_ref, broadcast_presence, error,
-            service_txindex_mode)) {
+            service_txindex_mode, &broadcast_proof)) {
         throw ApplicationError(
             IsTransientPaymasterFinalizationError(error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
             error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_POST_COMMIT_PREFLIGHT_FAILED" : error);
@@ -886,7 +887,7 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
             broadcast_recovery.expected_wtxid,
             broadcast_trusted, broadcast_parameters, Params(),
             *node_ctx->chainman, authorization_time,
-            broadcast_presence != FinalTransactionPresence::NONE,
+            broadcast_proof ? &*broadcast_proof : nullptr,
             error)) {
         throw ApplicationError(
             IsTransientPaymasterFinalizationError(error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
@@ -2631,6 +2632,7 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             CollaborativePSBTTemplate broadcast_template;
             FinalTransactionPresence broadcast_presence{
                 FinalTransactionPresence::NONE};
+            std::optional<ExactFinalTransactionProof> broadcast_proof;
             if (!store.GetAttempt(attempt.attempt_id, broadcast_attempt)) {
                 throw ApplicationError(
                     ErrorKind::WALLET,
@@ -2662,7 +2664,7 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             }
             if (!PreflightFinalPaymasterTransaction(
                     *wallet, MakeTransactionRef(transaction),
-                    broadcast_presence, error)) {
+                    broadcast_presence, error, ExactFinalTxIndexMode::WAIT_FOR_SYNC, &broadcast_proof)) {
                 if (IsTransientPaymasterFinalizationError(error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);
                 }
@@ -2670,7 +2672,7 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             }
             if (!store.ValidateClientDurableFinalForBroadcast(
                     CTransaction{transaction}, GetTime(),
-                    broadcast_presence != FinalTransactionPresence::NONE,
+                    broadcast_proof ? &*broadcast_proof : nullptr,
                     error)) {
                 if (IsTransientPaymasterFinalizationError(error)) {
                     throw ApplicationError(ErrorKind::WALLET, error);

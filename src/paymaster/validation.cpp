@@ -41,11 +41,14 @@ template <typename Callback>
 bool WithCapacityChainstate(const ChainstateManager& chainman,
                             Callback&& callback,
                             std::string& error,
-                            const CTransaction* exact_known_spender = nullptr,
-                            bool exact_spender_is_known = false,
+                            const ExactFinalTransactionProof* final_proof = nullptr,
                             bool allow_historical_active_reference = false)
 {
     LOCK(cs_main);
+    if (final_proof && !final_proof->Matches(chainman, error)) return false;
+    const bool exact_spender_is_known{final_proof != nullptr};
+    const CTransaction* const exact_known_spender{
+        final_proof ? &final_proof->Transaction() : nullptr};
     const CChain& active_chain = chainman.ActiveChain();
     const int tip_height = active_chain.Height();
     const CCoinsViewCache& coins = chainman.ActiveChainstate().CoinsTip();
@@ -143,8 +146,7 @@ bool WithCapacityChainstate(const ChainstateManager& chainman,
     return callback(coins, callbacks, error);
 }
 
-// The caller must first independently observe the exact fully signed final
-// transaction in the local mempool/active chain (the ExactFinal preflight).
+// Historical reconstruction requires the canonical ExactFinal preflight proof.
 // Reconstructing its historical template is read-only validation, never a path
 // for a new signature. Keep the ordinary builder's unspent-input requirement:
 // only this disposable view supplies prevouts already spent by that exact final.
@@ -155,19 +157,15 @@ bool WithRecoveryChainstate(
     const AlternativeRecoveryTemplate& trusted,
     Callback&& callback,
     std::string& error,
-    const CTransaction* exact_known_spender = nullptr,
-    bool exact_spender_is_known = false,
+    const ExactFinalTransactionProof* final_proof = nullptr,
     bool allow_historical_active_reference = false)
 {
     return WithCapacityChainstate(
         chainman,
         [&](const CCoinsViewCache& coins, const CapacityChainstateCallbacks& callbacks,
             std::string& callback_error) {
-            if (!exact_spender_is_known) return callback(coins, callbacks, callback_error);
-            if (!exact_known_spender) {
-                callback_error = "PAYMASTER_INVALID_AUTHORIZED_CAPACITY_RESOURCE_MODE";
-                return false;
-            }
+            if (!final_proof) return callback(coins, callbacks, callback_error);
+            const CTransaction* const exact_known_spender{&final_proof->Transaction()};
             PaymasterCapacityProof proof;
             try {
                 SpanReader stream{::PROTOCOL_VERSION, parameters.capacity_snapshot.capacity_proof};
@@ -217,32 +215,48 @@ bool WithRecoveryChainstate(
                 CMutableTransaction{*exact_known_spender}, trusted.manifest.unsigned_txid,
                 exact_known_spender->GetWitnessHash(), trusted.trusted_template, callback_error);
         },
-        error, exact_known_spender, exact_spender_is_known,
+        error, final_proof,
         allow_historical_active_reference);
 }
 
 bool ValidateAuthorizedRetryContext(
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
-    const CTransaction* exact_final_transaction,
     std::string& error)
 {
     if (authorization_time <= 0 || observation_time < authorization_time) {
         error = "PAYMASTER_INVALID_AUTHORIZED_CAPACITY_TIME";
         return false;
     }
-    const bool exact_final_known{
-        resource_mode ==
-        AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN};
-    if (exact_final_known != (exact_final_transaction != nullptr)) {
-        error = "PAYMASTER_INVALID_AUTHORIZED_CAPACITY_RESOURCE_MODE";
+    return true;
+}
+
+} // namespace
+
+bool ExactFinalTransactionProof::Matches(const ChainstateManager& chainman,
+                                        std::string& error) const
+{
+    LOCK(cs_main);
+    const auto* tip = chainman.ActiveChain().Tip();
+    if (m_chainman != &chainman || !m_transaction || !tip || tip->GetBlockHash() != m_tip) {
+        error = "PAYMASTER_EXACT_FINAL_PROOF_STALE";
         return false;
     }
     return true;
 }
 
-} // namespace
+bool ExactFinalTransactionProof::Matches(const CTransaction& transaction,
+                                        const ChainstateManager& chainman,
+                                        std::string& error) const
+{
+    if (!Matches(chainman, error)) return false;
+    if (transaction.GetHash() != m_transaction->GetHash() ||
+        transaction.GetWitnessHash() != m_transaction->GetWitnessHash()) {
+        error = "PAYMASTER_EXACT_FINAL_PROOF_MISMATCH";
+        return false;
+    }
+    return true;
+}
 
 uint256 GetAdmissionControlHash(const PaymasterId& provider_id,
                                 uint64_t sequence,
@@ -362,8 +376,7 @@ bool ValidateCapacityProofAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t now,
     std::string& error,
-    const CTransaction* exact_known_spender,
-    bool exact_spender_is_known)
+    const ExactFinalTransactionProof* final_proof)
 {
     return WithCapacityChainstate(
         chainman,
@@ -373,7 +386,7 @@ bool ValidateCapacityProofAgainstChainstate(
                                          provider_identity_key, callbacks, now,
                                          callback_error);
         },
-        error, exact_known_spender, exact_spender_is_known);
+        error, final_proof);
 }
 
 bool ValidateAuthorizedCapacityRetryAgainstChainstate(
@@ -383,18 +396,13 @@ bool ValidateAuthorizedCapacityRetryAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
-    std::string& error,
-    const CTransaction* exact_final_transaction)
+    const ExactFinalTransactionProof* final_proof,
+    std::string& error)
 {
     if (!ValidateAuthorizedRetryContext(
-            authorization_time, observation_time, resource_mode,
-            exact_final_transaction, error)) {
+            authorization_time, observation_time, error)) {
         return false;
     }
-    const bool exact_final_known{
-        resource_mode ==
-        AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN};
     return WithCapacityChainstate(
         chainman,
         [&](const CCoinsViewCache&,
@@ -405,7 +413,7 @@ bool ValidateAuthorizedCapacityRetryAgainstChainstate(
                 provider_identity_key, callbacks, authorization_time,
                 callback_error);
         },
-        error, exact_final_transaction, exact_final_known,
+        error, final_proof,
         /*allow_historical_active_reference=*/true);
 }
 
@@ -440,8 +448,7 @@ bool ValidateAlternativeRecoveryResponseTemplateAgainstChainstate(
     AlternativeRecoveryTemplate& trusted,
     PartiallySignedTransaction& unsigned_psbt,
     std::string& error,
-    const CTransaction* exact_known_spender,
-    bool exact_spender_is_known)
+    const ExactFinalTransactionProof* final_proof)
 {
     return WithRecoveryChainstate(
         chainman, parameters, trusted,
@@ -453,7 +460,7 @@ bool ValidateAlternativeRecoveryResponseTemplateAgainstChainstate(
                 chain_params, coins, callbacks, now, trusted, unsigned_psbt,
                 callback_error);
         },
-        error, exact_known_spender, exact_spender_is_known);
+        error, final_proof);
 }
 
 bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
@@ -465,20 +472,15 @@ bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     AlternativeRecoveryTemplate& trusted,
     PartiallySignedTransaction& unsigned_psbt,
-    std::string& error,
-    const CTransaction* exact_final_transaction)
+    std::string& error)
 {
     if (!ValidateAuthorizedRetryContext(
-            authorization_time, observation_time, resource_mode,
-            exact_final_transaction, error)) {
+            authorization_time, observation_time, error)) {
         return false;
     }
-    const bool exact_final_known{
-        resource_mode ==
-        AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN};
     return WithRecoveryChainstate(
         chainman, parameters, trusted,
         [&](const CCoinsViewCache& coins,
@@ -489,7 +491,7 @@ bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
                 chain_params, coins, callbacks, authorization_time, trusted,
                 unsigned_psbt, callback_error);
         },
-        error, exact_final_transaction, exact_final_known,
+        error, final_proof,
         /*allow_historical_active_reference=*/true);
 }
 
@@ -525,8 +527,7 @@ bool ValidateAlternativeRecoverySubmitAgainstChainstate(
     int64_t now,
     PartiallySignedTransaction& user_psbt,
     std::string& error,
-    const CTransaction* exact_known_spender,
-    bool exact_spender_is_known)
+    const ExactFinalTransactionProof* final_proof)
 {
     return WithRecoveryChainstate(
         chainman, parameters, trusted,
@@ -537,7 +538,7 @@ bool ValidateAlternativeRecoverySubmitAgainstChainstate(
                 submit, response, trusted, parameters, chain_params, coins,
                 callbacks, now, user_psbt, callback_error);
         },
-        error, exact_known_spender, exact_spender_is_known);
+        error, final_proof);
 }
 
 bool ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
@@ -549,19 +550,14 @@ bool ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     PartiallySignedTransaction& user_psbt,
-    std::string& error,
-    const CTransaction* exact_final_transaction)
+    std::string& error)
 {
     if (!ValidateAuthorizedRetryContext(
-            authorization_time, observation_time, resource_mode,
-            exact_final_transaction, error)) {
+            authorization_time, observation_time, error)) {
         return false;
     }
-    const bool exact_final_known{
-        resource_mode ==
-        AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN};
     return WithRecoveryChainstate(
         chainman, parameters, trusted,
         [&](const CCoinsViewCache& coins,
@@ -571,7 +567,7 @@ bool ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
                 submit, response, trusted, parameters, chain_params, coins,
                 callbacks, authorization_time, user_psbt, callback_error);
         },
-        error, exact_final_transaction, exact_final_known,
+        error, final_proof,
         /*allow_historical_active_reference=*/true);
 }
 
@@ -583,10 +579,11 @@ bool ValidateFinalAlternativeRecoveryAgainstChainstate(
     const CChainParams& chain_params,
     const ChainstateManager& chainman,
     int64_t now,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error)
 {
     const CTransaction exact_final{final_transaction};
+    if (final_proof && !final_proof->Matches(exact_final, chainman, error)) return false;
     return WithRecoveryChainstate(
         chainman, parameters, trusted,
         [&](const CCoinsViewCache& coins,
@@ -595,9 +592,9 @@ bool ValidateFinalAlternativeRecoveryAgainstChainstate(
             return ValidateFinalAlternativeRecoveryTransaction(
                 final_transaction, expected_wtxid, trusted, parameters,
                 chain_params, coins, callbacks, now,
-                exact_final_already_known, callback_error);
+                final_proof != nullptr, callback_error);
         },
-        error, &exact_final, exact_final_already_known);
+        error, final_proof);
 }
 
 bool ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
@@ -609,18 +606,13 @@ bool ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    AuthorizedCapacityResourceMode resource_mode,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error)
 {
     const CTransaction exact_final{final_transaction};
-    const bool exact_final_known{
-        resource_mode ==
-        AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN};
-    const CTransaction* const known_final{
-        exact_final_known ? &exact_final : nullptr};
+    if (final_proof && !final_proof->Matches(exact_final, chainman, error)) return false;
     if (!ValidateAuthorizedRetryContext(
-            authorization_time, observation_time, resource_mode,
-            known_final, error)) {
+            authorization_time, observation_time, error)) {
         return false;
     }
     return WithRecoveryChainstate(
@@ -631,9 +623,9 @@ bool ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
             return ValidateFinalAlternativeRecoveryTransaction(
                 final_transaction, expected_wtxid, trusted, parameters,
                 chain_params, coins, callbacks, authorization_time,
-                exact_final_known, callback_error);
+                final_proof != nullptr, callback_error);
         },
-        error, known_final, exact_final_known,
+        error, final_proof,
         /*allow_historical_active_reference=*/true);
 }
 
@@ -647,7 +639,7 @@ bool ValidateFinalAlternativeRecoveryResultAgainstChainstate(
     const CChainParams& chain_params,
     const ChainstateManager& chainman,
     int64_t now,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error)
 {
     if (!ValidateAlternativeRecoveryResult(
@@ -664,7 +656,7 @@ bool ValidateFinalAlternativeRecoveryResultAgainstChainstate(
     }
     return ValidateFinalAlternativeRecoveryAgainstChainstate(
         *result.final_transaction, *result.raw_transaction_hash, trusted,
-        parameters, chain_params, chainman, now, exact_final_already_known,
+        parameters, chain_params, chainman, now, final_proof,
         error);
 }
 
@@ -679,7 +671,7 @@ bool ValidateDurableAlternativeRecoveryResultAgainstChainstate(
     const ChainstateManager& chainman,
     int64_t authorization_time,
     int64_t observation_time,
-    bool exact_final_already_known,
+    const ExactFinalTransactionProof* final_proof,
     std::string& error)
 {
     if (authorization_time <= 0 || observation_time < authorization_time ||
@@ -697,14 +689,10 @@ bool ValidateDurableAlternativeRecoveryResultAgainstChainstate(
         error = "PAYMASTER_RECOVERY_FINAL_RESULT_REQUIRED";
         return false;
     }
-    const AuthorizedCapacityResourceMode resource_mode{
-        exact_final_already_known
-            ? AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN
-            : AuthorizedCapacityResourceMode::REQUIRE_UNSPENT};
     return ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
         *result.final_transaction, *result.raw_transaction_hash, trusted,
         parameters, chain_params, chainman, authorization_time,
-        observation_time, resource_mode, error);
+        observation_time, final_proof, error);
 }
 
 } // namespace DigiDollar::Paymaster

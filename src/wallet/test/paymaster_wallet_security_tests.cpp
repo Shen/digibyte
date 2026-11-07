@@ -4145,7 +4145,7 @@ BOOST_AUTO_TEST_CASE(outdated_client_finals_are_not_recoverable)
             PaymasterStore outdated_store{outdated_wallet};
             return outdated_store.ValidateClientDurableFinalForBroadcast(
                 final, now + 2,
-                /*exact_final_already_known=*/false, variant_error);
+                /*final_proof=*/nullptr, variant_error);
         };
 
     const auto make_v2 = [](ProviderAttempt& persisted, WalletBatch&) {
@@ -4240,7 +4240,7 @@ BOOST_AUTO_TEST_CASE(outdated_client_finals_are_not_recoverable)
     }
     PaymasterStore foreign_store{foreign_wallet};
     BOOST_CHECK(!foreign_store.ValidateClientDurableFinalForBroadcast(
-        final, now + 2, /*exact_final_already_known=*/false, error));
+        final, now + 2, /*final_proof=*/nullptr, error));
     BOOST_CHECK_EQUAL(error,
                       "PAYMASTER_CLIENT_INPUT_NOT_WALLET_OWNED");
 
