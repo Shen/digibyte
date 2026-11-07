@@ -272,13 +272,13 @@ bool BuildExpectedRecovery(const AlternativeRecoveryParameters& parameters,
         int64_t successor_amount{carrier.value.value};
         if (parameters.service_fee.value > 0 &&
             parameters.service_fee.value < 100) {
-            const auto sum = CheckedAdd(successor_amount,
-                                        parameters.service_fee.value);
-            if (!sum || *sum > MAX_DD_OUTPUT_CENTS) {
+            const auto successor = ComputeCarrierSuccessor(
+                carrier.value, parameters.service_fee, error);
+            if (!successor) {
                 error = "PAYMASTER_RECOVERY_INVALID_CARRIER_SUCCESSOR";
                 return false;
             }
-            successor_amount = *sum;
+            successor_amount = successor->value;
         }
         transfer.dd_outputs.push_back(
             {*parameters.recovery_provider_dd_script, successor_amount,
