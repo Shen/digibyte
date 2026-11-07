@@ -145,10 +145,14 @@ void ObserveTransaction(CWallet& wallet, const uint256& txid, int64_t created_at
 }
 
 bool PrepareObservation(ProviderFinanceEvent& event, const ProviderFinanceEvent* previous,
-                        int64_t now, bool& changed, std::string& error)
+                        int64_t now, bool& changed, std::string& error, bool repair_cost = false)
 {
-    if (previous && !CheckProviderFinanceEventBinding(*previous, event, error)) return false;
-    changed = !previous || previous->state != event.state || previous->confirmed_at != event.confirmed_at;
+    if (previous) {
+        auto binding = *previous;
+        if (repair_cost) binding.dgb_cost = event.dgb_cost;
+        if (!CheckProviderFinanceEventBinding(binding, event, error)) return false;
+    }
+    changed = repair_cost || !previous || previous->state != event.state || previous->confirmed_at != event.confirmed_at;
     if (!changed) event.updated_at = previous->updated_at;
     else {
         if (previous && previous->updated_at == std::numeric_limits<int64_t>::max()) {
@@ -161,10 +165,41 @@ bool PrepareObservation(ProviderFinanceEvent& event, const ProviderFinanceEvent*
     return ValidateProviderFinanceEvent(event, error);
 }
 
-ProviderFinanceEvent MaintenanceEvent(CWallet& wallet, const ProviderIdentityRecord& identity,
-                                       const ProviderMaintenanceRecord& record)
+std::optional<DGBSatoshis> ObservedMaintenanceFee(CWallet& wallet, const CTransactionRef& transaction)
 {
-    ProviderFinanceEvent event;
+    if (!transaction) return std::nullopt;
+    for (const auto& input : transaction->vin) {
+        const auto previous = wallet.mapWallet.find(input.prevout.hash);
+        if (previous == wallet.mapWallet.end() || !previous->second.tx ||
+            input.prevout.n >= previous->second.tx->vout.size() ||
+            !(wallet.IsMine(previous->second.tx->vout[input.prevout.n]) & ISMINE_SPENDABLE)) return std::nullopt;
+    }
+    const auto fee = GetProviderFinanceTransactionFee(wallet, transaction);
+    return fee && fee->value > 0 ? fee : std::nullopt;
+}
+
+bool CorrectHistoricalMaintenanceCost(CWallet& wallet, ProviderFinanceEvent& event, bool& repaired)
+{
+    repaired = false;
+    if (event.kind != ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT &&
+        event.kind != ProviderFinanceEventKind::CARRIER_WITHDRAWAL) return true;
+    const auto transaction = wallet.mapWallet.find(event.transaction_id);
+    const auto fee = transaction == wallet.mapWallet.end()
+        ? std::nullopt : ObservedMaintenanceFee(wallet, transaction->second.tx);
+    // Retained event identity and exact wallet-owned prevouts survive pruning
+    // of the maintenance journal. They prove cost, never spending authority.
+    if (fee && fee->value < event.dgb_cost.value) {
+        event.dgb_cost = *fee;
+        repaired = true;
+    }
+    return true;
+}
+
+bool MaintenanceEvent(CWallet& wallet, const ProviderIdentityRecord& identity,
+                      const ProviderMaintenanceRecord& record, ProviderFinanceEvent& event,
+                      std::string& error)
+{
+    event = {};
     event.event_id = record.operation_id;
     event.genesis_hash = Params().GenesisBlock().GetHash();
     event.provider_id = identity.provider_id;
@@ -174,11 +209,38 @@ ProviderFinanceEvent MaintenanceEvent(CWallet& wallet, const ProviderIdentityRec
     event.transaction_id = record.transaction_id;
     event.dgb_cost = record.actual_fee;
     event.created_at = record.created_at;
+    const auto transaction = wallet.mapWallet.find(record.transaction_id);
+    const auto observed_fee = transaction == wallet.mapWallet.end()
+        ? std::nullopt : ObservedMaintenanceFee(wallet, transaction->second.tx);
+    if (observed_fee && observed_fee->value > 0) {
+        if (observed_fee->value > record.maximum_fee.value) {
+            error = "PAYMASTER_FINANCE_MAINTENANCE_FEE_INVALID";
+            return false;
+        }
+        event.dgb_cost = *observed_fee;
+    } else if (record.actual_fee == record.maximum_fee) {
+        // Recovery conservatively charges the full approval to the safety
+        // ledger. It is not evidence that this much was actually paid.
+        error = "PAYMASTER_FINANCE_MAINTENANCE_FEE_UNAVAILABLE";
+        return false;
+    }
     if (record.IsPreparation()) {
-        const auto transaction = wallet.mapWallet.find(record.transaction_id);
         if (transaction != wallet.mapWallet.end()) event.created_at = std::max(identity.created_at, transaction->second.GetTxTime());
     }
-    return event;
+    return true;
+}
+
+bool CanRepairMaintenanceCost(const ProviderFinanceEvent& previous,
+                              const ProviderFinanceEvent& event,
+                              const ProviderMaintenanceRecord& source)
+{
+    if (source.actual_fee != source.maximum_fee || previous.dgb_cost != source.maximum_fee ||
+        event.dgb_cost.value >= previous.dgb_cost.value || event.event_id != source.operation_id ||
+        event.transaction_id != source.transaction_id) return false;
+    auto corrected = previous;
+    corrected.dgb_cost = event.dgb_cost;
+    std::string error;
+    return CheckProviderFinanceEventBinding(corrected, event, error);
 }
 
 ProviderFinanceEvent TransferEvent(const ProviderIdentityRecord& identity,
@@ -405,6 +467,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     }
 
     std::map<uint256, ProviderFinanceEvent> updates;
+    bool repair_maintenance_costs{false};
     std::map<uint256, size_t> event_positions;
     for (size_t i = 0; i < finance.events.size(); ++i) {
         event_positions.emplace(finance.events[i].event_id, i);
@@ -414,13 +477,17 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                                        ProviderFinanceEventState& state, int64_t& confirmed_at) {
         ObserveTransaction(wallet, txid, created_at, state, confirmed_at, confirmation_times);
     };
-    const auto apply_event = [&](ProviderFinanceEvent event) {
+    const auto apply_event = [&](ProviderFinanceEvent event, const ProviderMaintenanceRecord* source = nullptr,
+                                  bool historical_cost_repair = false) {
         const auto position = event_positions.find(event.event_id);
         auto existing = position == event_positions.end()
             ? finance.events.end() : finance.events.begin() + position->second;
         bool changed{false};
+        const bool repair_cost = existing != finance.events.end() &&
+            (historical_cost_repair || (source && CanRepairMaintenanceCost(*existing, event, *source)));
         if (!PrepareObservation(event, existing == finance.events.end() ? nullptr : &*existing,
-                                now, changed, error)) return false;
+                                now, changed, error, repair_cost)) return false;
+        repair_maintenance_costs |= repair_cost;
         if (event.genesis_hash != finance.genesis_hash || event.provider_id != finance.provider_id) {
             error = "PAYMASTER_FINANCE_LEDGER_BINDING_MISMATCH";
             return false;
@@ -450,8 +517,10 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     // state here before adding any newly discoverable records below.
     for (const ProviderFinanceEvent& saved : finance.events) {
         auto event = saved;
+        bool repair_cost{false};
+        if (!CorrectHistoricalMaintenanceCost(wallet, event, repair_cost)) return false;
         transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at);
-        if (!apply_event(std::move(event))) return false;
+        if (!apply_event(std::move(event), nullptr, repair_cost)) return false;
     }
 
     // Wallet transaction metadata is persisted before broadcast, so finance
@@ -601,7 +670,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     if (maintenance_status == DatabaseReadStatus::FOUND) {
         for (const ProviderMaintenanceRecord& record : maintenance.records) {
             if (record.transaction_id.IsNull()) continue;
-            auto event = MaintenanceEvent(wallet, identity, record);
+            ProviderFinanceEvent event;
+            if (!MaintenanceEvent(wallet, identity, record, event, error)) return false;
             transaction_state(event.transaction_id, event.created_at,
                               event.state, event.confirmed_at);
             if (record.state == ProviderMaintenanceState::FAILED ||
@@ -609,7 +679,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                 event.state = ProviderFinanceEventState::INVALIDATED;
                 event.confirmed_at = 0;
             }
-            if (!apply_event(std::move(event))) return false;
+            if (!apply_event(std::move(event), &record)) return false;
         }
     } else if (maintenance_status != DatabaseReadStatus::NOT_FOUND) {
         error = PersistedReadError(
@@ -632,7 +702,14 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     std::vector<ProviderFinanceEvent> changed;
     changed.reserve(updates.size());
     for (const auto& [id, event] : updates) changed.push_back(event);
-    if (ledger_changed && !batch.WritePaymasterFinanceEvents(metadata, changed, error, false)) {
+    // Only a source-bound correction of a prior conservative fee reaches
+    // snapshot replacement. Ordinary event writes keep immutable economics.
+    if (repair_maintenance_costs &&
+        (!RebuildProviderFinanceDailyTotals(finance, error) || !batch.WritePaymasterFinanceLedger(finance))) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_DATABASE_WRITE";
+        return false;
+    }
+    if (!repair_maintenance_costs && ledger_changed && !batch.WritePaymasterFinanceEvents(metadata, changed, error, false)) {
         if (error.empty()) error = "PAYMASTER_FINANCE_DATABASE_WRITE";
         return false;
     }
@@ -709,6 +786,7 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
 
     const bool was_partial = metadata.earlier_history_partial;
     std::map<uint256, ProviderFinanceEvent> updates;
+    bool repair_maintenance_costs{false};
     std::map<uint256, int64_t> confirmation_times;
     struct CompletedWork {
         FinanceWorkKey key;
@@ -730,16 +808,28 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
             error = "PAYMASTER_INVALID_FINANCE_EVENT";
             return false;
         }
+        bool historical_cost_repair{false};
+        if (!CorrectHistoricalMaintenanceCost(wallet, event, historical_cost_repair)) return false;
         ObserveTransaction(wallet, event.transaction_id, event.created_at, event.state, event.confirmed_at, confirmation_times);
+        std::optional<ProviderMaintenanceRecord> source;
         {
             std::lock_guard<std::mutex> lock{state->mutex};
             const auto maintenance = state->maintenance.find(event.event_id);
-            if (maintenance != state->maintenance.end() &&
-                (maintenance->second.state == ProviderMaintenanceState::FAILED ||
-                 maintenance->second.state == ProviderMaintenanceState::RELEASED)) {
-                event.state = ProviderFinanceEventState::INVALIDATED;
-                event.confirmed_at = 0;
+            if (maintenance != state->maintenance.end()) {
+                source = maintenance->second;
+                if (source->state == ProviderMaintenanceState::FAILED ||
+                    source->state == ProviderMaintenanceState::RELEASED) {
+                    event.state = ProviderFinanceEventState::INVALIDATED;
+                    event.confirmed_at = 0;
+                }
             }
+        }
+        if (status == DatabaseReadStatus::FOUND &&
+            (historical_cost_repair || (source && CanRepairMaintenanceCost(previous, event, *source)))) {
+            // Reconstruct all derived totals/indexes once, rather than weaken
+            // the immutable binding enforced by ordinary incremental writes.
+            repair_maintenance_costs = true;
+            return true;
         }
         bool changed{false};
         if (!PrepareObservation(event, status == DatabaseReadStatus::FOUND ? &previous : nullptr, now, changed, error)) return false;
@@ -799,7 +889,7 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
             }
             bool have_event = status == DatabaseReadStatus::FOUND;
             if (maintenance) {
-                event = MaintenanceEvent(wallet, identity, *maintenance);
+                if (!MaintenanceEvent(wallet, identity, *maintenance, event, error)) return false;
                 have_event = true;
             } else if (have_commit) {
                 ProviderCommitRecord commit;
@@ -878,6 +968,13 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         processed += std::max(size_t{1}, events.size());
         const auto last_id = events.empty() ? uint256{} : events.back().event_id;
         for (auto& event : events) {
+            std::optional<ProviderMaintenanceRecord> maintenance;
+            {
+                std::lock_guard<std::mutex> lock{state->mutex};
+                const auto source = state->maintenance.find(event.event_id);
+                if (source != state->maintenance.end()) maintenance = source->second;
+            }
+            if (maintenance && !MaintenanceEvent(wallet, identity, *maintenance, event, error)) return false;
             if (!apply(std::move(event))) return false;
         }
         if (more) {
@@ -886,6 +983,7 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         } else completed.push_back({key, work.sequence, std::nullopt});
     }
 
+    if (repair_maintenance_costs) return RebuildProviderFinancesAtTime(wallet, changed_events, error, now);
     std::vector<ProviderFinanceEvent> changed;
     for (const auto& [id, event] : updates) changed.push_back(event);
     if (!changed.empty() || was_partial != metadata.earlier_history_partial) {

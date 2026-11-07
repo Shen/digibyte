@@ -19,6 +19,7 @@
 #include <wallet/paymasterfinancecache.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/rpc/paymaster.h>
@@ -157,6 +158,52 @@ struct FinanceTestingSetup : WalletTestingSetup {
         transaction.vin.emplace_back(COutPoint{uint256S("1234"), 0});
         transaction.vout.emplace_back(1000, CScript{} << OP_TRUE);
         return provider->AddToWallet(MakeTransactionRef(transaction), TxStateInactive{});
+    }
+
+    ProviderMaintenanceRecord Maintenance(bool journaled)
+    {
+        LOCK(provider->cs_wallet);
+        const auto destination = provider->GetNewDestination(OutputType::BECH32M, "exact maintenance fee");
+        BOOST_REQUIRE(destination);
+        const CScript script = GetScriptForDestination(*destination);
+        CMutableTransaction funding;
+        funding.vin.emplace_back(COutPoint{uint256S("f101"), 0});
+        funding.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS + 7, identity.identity_script);
+        const auto parent = MakeTransactionRef(funding);
+        BOOST_REQUIRE(provider->AddToWallet(parent, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+        CMutableTransaction maintenance;
+        maintenance.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+        maintenance.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, script);
+        const auto transaction = MakeTransactionRef(maintenance);
+        BOOST_REQUIRE(provider->AddToWallet(transaction, TxStateConfirmed{Params().GenesisBlock().GetHash(), 2, 0}));
+        ProviderMaintenanceRecord record;
+        record.operation_id = uint256S("f102");
+        record.plan_id = uint256S("f103");
+        record.maximum_fee = DGBSatoshis{100};
+        record.created_at = record.updated_at = 1000;
+        ProviderMaintenanceOutput output;
+        output.script_pub_key = script;
+        output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        record.outputs = {output};
+        if (journaled) {
+            record.transaction_id = transaction->GetHash();
+            record.state = ProviderMaintenanceState::CONFIRMED;
+            record.actual_fee = record.maximum_fee;
+        }
+        return record;
+    }
+
+    ProviderFinanceEvent EstimatedMaintenanceEvent(const ProviderMaintenanceRecord& record)
+    {
+        auto event = Event(900);
+        event.event_id = record.operation_id;
+        event.transaction_id = record.transaction_id;
+        event.kind = ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT;
+        event.dd_income = DDCents{0};
+        event.dgb_cost = record.maximum_fee;
+        event.state = ProviderFinanceEventState::CONFIRMED;
+        event.confirmed_at = event.updated_at = 1001;
+        return event;
     }
 
     std::pair<AlternativeRecoveryRecord, ProviderCommitRecord> Recovery(bool known_pool_funding = false)
@@ -693,6 +740,33 @@ BOOST_AUTO_TEST_CASE(maintenance_sources_publish_only_after_commit)
     BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_crash_recovery_separates_cost_from_budget_exposure)
+{
+    const auto record = Maintenance(/*journaled=*/false);
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    size_t recovered{0};
+    BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(*provider, recovered, error), error);
+    BOOST_CHECK_EQUAL(recovered, 1U);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, 100);
+    ProviderMaintenanceBudgetUsage exposure;
+    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, GetTime(), exposure, error));
+    BOOST_CHECK_EQUAL(exposure.total_last_day.value, 100);
+    Drain();
+    ProviderFinanceEvent event;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceEvent(record.operation_id, event) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(event.dgb_cost.value, 7);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 7);
+    const auto revision = Metadata().revision;
+    Drain();
+    BOOST_CHECK_EQUAL(Metadata().revision, revision);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, 100);
+}
+
 BOOST_AUTO_TEST_CASE(recovery_finance_commits_atomically_and_never_counts_a_recipient_payment)
 {
     Drain();
@@ -845,6 +919,81 @@ BOOST_AUTO_TEST_CASE(recovery_final_commit_failure_cannot_publish_finance_or_spe
     BOOST_REQUIRE(batch.ReadPaymasterAlternativeRecovery(recovery.recovery_id, saved));
     BOOST_CHECK(saved.phase == AlternativeRecoveryPhase::USER_SIGNED);
     BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
+}
+
+BOOST_AUTO_TEST_CASE(derived_maintenance_cost_repair_survives_reload_and_journal_pruning)
+{
+    const auto record = Maintenance(/*journaled=*/true);
+    WalletBatch batch{*database};
+    // Emulate a pre-fix persisted event after its old maintenance journal was
+    // pruned. Exact wallet prevouts still prove the seven-satoshi cost.
+    auto estimate = EstimatedMaintenanceEvent(record);
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {estimate}, error));
+    auto corrected = estimate;
+    corrected.dgb_cost = DGBSatoshis{7};
+    ++corrected.updated_at;
+    BOOST_CHECK(!batch.WritePaymasterFinanceEvents(Metadata(), {corrected}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_EVENT_CONFLICT");
+    size_t changed{0};
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 7);
+    BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
+    ProviderFinanceEvent event;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceEvent(record.operation_id, event) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(event.dgb_cost.value, 7);
+    CWallet reloaded{m_node.chain.get(), "finance-repaired-reload", DuplicateMockDatabase(*database)};
+    BOOST_REQUIRE(reloaded.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(reloaded.cs_wallet);
+        reloaded.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+    }
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(reloaded, changed, error), error);
+    ProviderFinanceMetadata metadata;
+    BOOST_REQUIRE(WalletBatch{reloaded.GetDatabase()}.ReadPaymasterFinanceMetadata(metadata) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(metadata.event_count, 1U);
+    BOOST_CHECK_EQUAL(metadata.totals.total.dgb_cost.value, 7);
+}
+
+BOOST_AUTO_TEST_CASE(maintenance_cost_repair_failed_commit_preserves_source_and_old_totals)
+{
+    const auto record = Maintenance(/*journaled=*/true);
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {EstimatedMaintenanceEvent(record)}, error));
+    const auto before = database->m_records;
+    database->m_fail_commit = true;
+    size_t changed{0};
+    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+    database->m_fail_commit = false;
+    BOOST_CHECK(database->m_records == before);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 100);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, 100);
+    // The independent checkpoint must conservatively retain its advance. A
+    // guarded copy can repair derived accounting without regaining signing.
+    BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
+    bool guarded{false};
+    BOOST_REQUIRE(MarkPaymasterProviderRestored(*database, guarded, error));
+    BOOST_REQUIRE(guarded);
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 7);
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(*provider, error));
+}
+
+BOOST_AUTO_TEST_CASE(unobserved_maintenance_limit_is_never_reported_as_actual_cost)
+{
+    auto record = Maintenance(/*journaled=*/true);
+    record.transaction_id = uint256S("f999");
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    BOOST_REQUIRE(WalletBatch{*database}.WritePaymasterMaintenanceLedger(ledger));
+    const auto before = database->m_records;
+    size_t changed{0};
+    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_MAINTENANCE_FEE_UNAVAILABLE");
+    BOOST_CHECK(database->m_records == before);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
