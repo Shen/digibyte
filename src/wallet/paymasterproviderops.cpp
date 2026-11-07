@@ -148,7 +148,7 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
                 found->asset != PoolAsset::DD_CARRIER ||
                 found->state != PoolEntryState::AVAILABLE ||
                 found->confirmation_height <= 0 ||
-                wallet->IsSpent(found->outpoint)) {
+                WITH_LOCK(wallet->cs_wallet, return wallet->IsSpent(found->outpoint))) {
                 throw ApplicationError(
                     ErrorKind::WALLET,
                     "PAYMASTER_CARRIER_SLOT_NOT_RELEASABLE");
@@ -175,7 +175,7 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
                     entry.state != PoolEntryState::AVAILABLE ||
                     entry.confirmation_height <= 0 ||
                     entry.carrier_value.value <= 100 ||
-                    wallet->IsSpent(entry.outpoint)) {
+                    WITH_LOCK(wallet->cs_wallet, return wallet->IsSpent(entry.outpoint))) {
                     continue;
                 }
                 if (plan.source_carriers.size() >= 64 ||
