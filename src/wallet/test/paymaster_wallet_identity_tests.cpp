@@ -787,6 +787,27 @@ BOOST_AUTO_TEST_CASE(unreadable_paymaster_locks_fail_closed_for_coin_selection)
     BOOST_CHECK(pool_inputs.empty());
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet,
                                          outdated_pool_entry.outpoint));
+
+    m_wallet.EnsureDDWallet();
+    auto* const dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet);
+    dd_wallet->AddDDUTXO(COutPoint{uint256S("08"), 0}, 9000);
+    const auto unavailable = dd_wallet->GetDDBalanceSummary();
+    BOOST_CHECK(!unavailable.availability_known);
+    BOOST_CHECK_EQUAL(unavailable.confirmed_total, 9000);
+    BOOST_CHECK_EQUAL(unavailable.spendable, 0);
+    BOOST_CHECK_EQUAL(unavailable.paymaster_reserved, 0);
+    {
+        LOCK(m_wallet.cs_wallet);
+        PaymasterInputReservations reservations{&m_wallet};
+        BOOST_CHECK(reservations.GetReservationStatus(outdated_pool_entry.outpoint) ==
+                    DatabaseReadStatus::UNSUPPORTED_VERSION);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterProviderPool({}));
+    }
+    const auto available = dd_wallet->GetDDBalanceSummary();
+    BOOST_CHECK(available.availability_known);
+    BOOST_CHECK_EQUAL(available.confirmed_total, 9000);
+    BOOST_CHECK_EQUAL(available.spendable, 9000);
 }
 
 BOOST_AUTO_TEST_CASE(paymaster_input_scan_reuses_pool_without_cross_scan_cache)

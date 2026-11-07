@@ -270,9 +270,11 @@ PreparationFunding CapturePreparationFunding(CWallet& wallet, const ProviderMain
         result.required_output_cents = DDCents{required_dd};
         if (const auto* dd_wallet = wallet.GetDDWallet()) {
             const auto balance = dd_wallet->GetDDBalanceSummary();
-            result.confirmed_available_cents = DDCents{balance.spendable};
             result.pending_cents = DDCents{balance.pending};
-            result.capital_shortfall_cents = DDCents{std::max<CAmount>(0, required_dd - balance.spendable)};
+            if (balance.availability_known) {
+                result.confirmed_available_cents = DDCents{balance.spendable};
+                result.capital_shortfall_cents = DDCents{std::max<CAmount>(0, required_dd - balance.spendable)};
+            }
         }
     }
     return result;

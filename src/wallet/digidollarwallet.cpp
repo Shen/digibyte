@@ -4413,11 +4413,22 @@ DigiDollarBalanceSummary DigiDollarWallet::GetDDBalanceSummary() const
         }
 
         summary.confirmed_total += dd_amount;
-        if (paymaster_inputs.IsReserved(outpoint)) {
+        const auto reservation_status = paymaster_inputs.GetReservationStatus(outpoint);
+        if (reservation_status != wallet::DatabaseReadStatus::FOUND &&
+            reservation_status != wallet::DatabaseReadStatus::NOT_FOUND) {
+            summary.availability_known = false;
+        } else if (reservation_status == wallet::DatabaseReadStatus::FOUND) {
             summary.paymaster_reserved += dd_amount;
         } else {
             summary.spendable += dd_amount;
         }
+    }
+
+    if (!summary.availability_known) {
+        // Preserve ownership/pending totals, but do not present incomplete
+        // classification as either a known zero balance or a known reserve.
+        summary.spendable = 0;
+        summary.paymaster_reserved = 0;
     }
 
     LogPrint(BCLog::DIGIDOLLAR,

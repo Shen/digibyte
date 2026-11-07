@@ -623,6 +623,7 @@ void DigiDollarOverviewWidget::setWalletModel(WalletModel* model)
     m_mintWalletError.clear();
     m_lastBalanceUpdateTime = 0;
     m_ddBalance = m_ddWalletTotal = m_ddPaymasterReserved = m_ddPending = m_dgbCollateral = 0.0;
+    m_ddAvailabilityKnown = true;
     renderBalance();
     m_recentSnapshotShown = false;
     m_recentRefreshInFlight = false;
@@ -782,6 +783,7 @@ void DigiDollarOverviewWidget::updateBalance()
             guard->m_ddWalletTotal = balances.confirmed_total / 100.0;
             guard->m_ddPaymasterReserved = balances.paymaster_reserved / 100.0;
             guard->m_ddPending = balances.pending / 100.0;
+            guard->m_ddAvailabilityKnown = balances.availability_known;
             guard->m_dgbCollateral = collateral / 100000000.0;
             guard->m_mintWalletError = mint_error;
             guard->m_balanceSnapshotShown = true;
@@ -811,7 +813,7 @@ void DigiDollarOverviewWidget::renderBalance()
     m_ddBalanceValue->setToolTip(m_balanceError.isEmpty()
         ? tr("Your confirmed, spendable DigiDollar balance")
         : tr("The balance could not be updated. The last successfully read balance is shown; another update will be attempted."));
-    updateBalanceLayout(m_ddPaymasterReserved > 0.0);
+    updateBalanceLayout(!m_ddAvailabilityKnown || m_ddPaymasterReserved > 0.0);
 
     // Update display — Available (confirmed only)
     if (m_privacy) {
@@ -824,8 +826,8 @@ void DigiDollarOverviewWidget::renderBalance()
         m_dgbCollateralValue->setText(maskValue(formatDGBAmount(0)));
         m_usdValueValue->setText(maskValue(formatUSDAmount(0)));
     } else {
-        m_ddBalanceValue->setText(formatDDAmount(m_ddBalance));
-        m_ddPaymasterReservedValue->setText(formatDDAmount(m_ddPaymasterReserved));
+        m_ddBalanceValue->setText(m_ddAvailabilityKnown ? formatDDAmount(m_ddBalance) : tr("Unavailable"));
+        m_ddPaymasterReservedValue->setText(m_ddAvailabilityKnown ? formatDDAmount(m_ddPaymasterReserved) : tr("Unavailable"));
         m_ddWalletTotalValue->setText(formatDDAmount(m_ddWalletTotal));
 
         // Pending (unconfirmed but trusted) — hide row when zero for clean UI

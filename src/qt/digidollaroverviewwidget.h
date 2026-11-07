@@ -165,6 +165,7 @@ private:
     bool m_balanceRefreshInFlight{false};
     bool m_balanceRefreshPending{false};
     bool m_balanceSnapshotShown{false};
+    bool m_ddAvailabilityKnown{true};
     QString m_balanceError;
     QString m_mintWalletError;
     uint64_t m_nodeGeneration{0};

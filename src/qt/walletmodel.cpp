@@ -1398,7 +1398,9 @@ void WalletModel::getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback)
             if (!wallet->privateKeysDisabled()) {
                 DigiDollarWallet* const dd_wallet = wallet->getDigiDollarWallet();
                 if (!dd_wallet) throw std::runtime_error("DigiDollar wallet not initialized");
-                balance = dd_wallet->GetDDBalanceSummary().spendable;
+                const auto summary = dd_wallet->GetDDBalanceSummary();
+                if (!summary.availability_known) throw std::runtime_error("DigiDollar availability unknown: Paymaster safety data could not be read");
+                balance = summary.spendable;
             }
         } catch (const std::exception& exception) {
             error = QString::fromUtf8(exception.what());
@@ -1433,6 +1435,7 @@ void WalletModel::getDigiDollarOverviewAsync(DigiDollarOverviewCallback callback
                 balances.confirmed_total = summary.confirmed_total;
                 balances.paymaster_reserved = summary.paymaster_reserved;
                 balances.pending = summary.pending;
+                balances.availability_known = summary.availability_known;
             }
             if (dd_wallet) collateral = dd_wallet->GetLockedCollateral();
             const auto* core_wallet = wallet->wallet();
@@ -1458,7 +1461,10 @@ WalletModel::DigiDollarBalanceSummary WalletModel::getDigiDollarBalanceSummary()
     try {
         if (m_wallet->privateKeysDisabled()) return result;
         DigiDollarWallet* dd_wallet = m_wallet->getDigiDollarWallet();
-        if (!dd_wallet) return result;
+        if (!dd_wallet) {
+            result.availability_known = false;
+            return result;
+        }
 
         const ::DigiDollarBalanceSummary wallet_summary =
             dd_wallet->GetDDBalanceSummary();
@@ -1466,7 +1472,9 @@ WalletModel::DigiDollarBalanceSummary WalletModel::getDigiDollarBalanceSummary()
         result.confirmed_total = wallet_summary.confirmed_total;
         result.paymaster_reserved = wallet_summary.paymaster_reserved;
         result.pending = wallet_summary.pending;
+        result.availability_known = wallet_summary.availability_known;
     } catch (const std::exception& e) {
+        result.availability_known = false;
         LogPrintf("DigiDollar Qt: getDigiDollarBalanceSummary exception - %s\n", e.what());
     }
     return result;

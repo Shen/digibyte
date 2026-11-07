@@ -44,13 +44,16 @@ class PaymasterInputReservations
 public:
     explicit PaymasterInputReservations(const CWallet* wallet);
     ~PaymasterInputReservations();
+    /** FOUND means protected, NOT_FOUND means unreserved; other statuses keep
+     * availability unknown. IsReserved retains the conservative selection API. */
+    DatabaseReadStatus GetReservationStatus(const COutPoint& outpoint);
     bool IsReserved(const COutPoint& outpoint);
 
 private:
     const CWallet* m_wallet;
     std::unique_ptr<WalletBatch> m_batch;
     bool m_pool_loaded{false};
-    bool m_pool_read_failed{false};
+    DatabaseReadStatus m_pool_status{DatabaseReadStatus::NOT_FOUND};
     std::set<COutPoint> m_pool_inputs;
 };
 

@@ -223,6 +223,7 @@ public:
         CAmount confirmed_total{0};
         CAmount paymaster_reserved{0};
         CAmount pending{0};
+        bool availability_known{true};
     };
 
     // Get confirmed DigiDollar currently spendable by ordinary wallet actions.

@@ -624,6 +624,31 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
     QVERIFY(!reserved_value->isHidden());
     QVERIFY(!total_label->isHidden());
     QVERIFY(!total_value->isHidden());
+
+    // Unknown safety data cannot classify owned funds as a known reservation
+    // or a known zero spendable balance. Keep the independently known total.
+    pool_entry.version = DigiDollar::Paymaster::ProviderPoolEntry::CURRENT_VERSION + 1;
+    QVERIFY(wallet->GetDatabase().MakeBatch()->Write(
+        wallet::DBKeys::PAYMASTER_PROVIDER_POOL,
+        std::vector<DigiDollar::Paymaster::ProviderPoolEntry>{pool_entry}));
+    const auto unavailable = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QVERIFY(!unavailable.availability_known);
+    QCOMPARE(unavailable.confirmed_total, CAmount{10000});
+    DigiDollarOverviewWidget unavailable_overview;
+    unavailable_overview.setWalletModel(mini_gui.walletModel.get());
+    unavailable_overview.show();
+    unavailable_overview.updateBalance();
+    QTRY_COMPARE(unavailable_overview.findChild<QLabel*>("ddBalanceValue")->text(), QStringLiteral("Unavailable"));
+    QCOMPARE(unavailable_overview.findChild<QLabel*>("ddPaymasterReservedValue")->text(), QStringLiteral("Unavailable"));
+    QCOMPARE(unavailable_overview.findChild<QLabel*>("ddWalletTotalValue")->text(), QStringLiteral("100.00 $DD"));
+    bool balance_returned{false};
+    QString balance_error;
+    mini_gui.walletModel->getDigiDollarBalanceAsync([&](CAmount, QString error) {
+        balance_error = std::move(error);
+        balance_returned = true;
+    });
+    QTRY_VERIFY(balance_returned);
+    QVERIFY(!balance_error.isEmpty());
 }
 
 void DigiDollarWidgetTests::watchOnlyDigiDollarBalanceHiddenInWalletModel()

@@ -144,6 +144,8 @@ struct DigiDollarBalanceSummary {
     CAmount spendable{0};
     CAmount paymaster_reserved{0};
     CAmount pending{0};
+    //! If false, spendable/reserved are unavailable; ownership totals remain valid.
+    bool availability_known{true};
 };
 
 struct DDTransferPlan {

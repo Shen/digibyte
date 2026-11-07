@@ -57,19 +57,22 @@ PaymasterInputReservations::~PaymasterInputReservations() = default;
 
 bool PaymasterInputReservations::IsReserved(const COutPoint& outpoint)
 {
-    if (!m_wallet) return false;
+    return GetReservationStatus(outpoint) != DatabaseReadStatus::NOT_FOUND;
+}
+
+DatabaseReadStatus PaymasterInputReservations::GetReservationStatus(const COutPoint& outpoint)
+{
+    if (!m_wallet) return DatabaseReadStatus::NOT_FOUND;
     AssertLockHeld(m_wallet->cs_wallet);
     if (!m_batch) m_batch = std::make_unique<WalletBatch>(m_wallet->GetDatabase());
     InputReservation reservation;
     const DatabaseReadStatus reservation_status{
         m_batch->ReadPaymasterReservationWithStatus(outpoint, reservation)};
-    if (reservation_status == DatabaseReadStatus::FOUND) return true;
-    if (reservation_status != DatabaseReadStatus::NOT_FOUND) return true;
+    if (reservation_status != DatabaseReadStatus::NOT_FOUND) return reservation_status;
     if (!m_pool_loaded) {
         std::vector<ProviderPoolEntry> pool;
-        const auto status = m_batch->ReadPaymasterProviderPoolWithStatus(pool);
-        m_pool_read_failed = status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND;
-        if (status == DatabaseReadStatus::FOUND) {
+        m_pool_status = m_batch->ReadPaymasterProviderPoolWithStatus(pool);
+        if (m_pool_status == DatabaseReadStatus::FOUND) {
             for (const auto& entry : pool) {
                 if (IsActiveProviderPoolState(entry.state)) m_pool_inputs.insert(entry.outpoint);
             }
@@ -78,7 +81,8 @@ bool PaymasterInputReservations::IsReserved(const COutPoint& outpoint)
     }
     // AVAILABLE pool entries are dedicated liquidity too. An unreadable pool
     // conservatively protects every input, exactly as the single-input check.
-    return m_pool_read_failed || m_pool_inputs.count(outpoint) != 0;
+    if (m_pool_status != DatabaseReadStatus::FOUND && m_pool_status != DatabaseReadStatus::NOT_FOUND) return m_pool_status;
+    return m_pool_inputs.count(outpoint) != 0 ? DatabaseReadStatus::FOUND : DatabaseReadStatus::NOT_FOUND;
 }
 
 bool IsPaymasterInputReserved(const CWallet& wallet, const COutPoint& outpoint)
