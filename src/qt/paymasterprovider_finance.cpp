@@ -484,7 +484,9 @@ void ProviderFinance::applyFinanceStatus(const UniValue& result,
     const qint64 pending = financeNumber(pool, "pending_maintenance_transactions");
     m_finance_pending_maintenance->setText(m_panel.maskNumericText(pending == 0
         ? tr("No reserve transaction is awaiting completion.")
-        : tr("Reserve transactions awaiting completion: %1").arg(pending)));
+        : tr("Reserve operations awaiting resolution: %1").arg(pending)));
+    m_finance_pending_maintenance->setToolTip(tr(
+        "Signed reserve transactions remain open even when they are locally failed, conflicted or abandoned. They may still confirm, and their protected funds remain unavailable."));
 
     const bool partial = result.find_value(
         "history_partially_reconstructable").isBool() &&

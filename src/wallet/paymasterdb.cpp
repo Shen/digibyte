@@ -1908,7 +1908,7 @@ bool WalletBatch::WritePaymasterFinanceEvents(const ProviderFinanceMetadata& ini
         }
         if (!exists) ++metadata.event_count;
         metadata.updated_at = std::max(metadata.updated_at, event.updated_at);
-        if (queue_reconciliation) QueuePaymasterFinanceEvent(this, m_database, event.event_id);
+        QueuePaymasterFinanceEvent(this, m_database, event, exists ? &old : nullptr, queue_reconciliation);
         changed = true;
     }
     if (changed) {
@@ -1981,6 +1981,145 @@ bool WalletBatch::WritePaymasterFinanceLedger(
     if (!WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata)) return fail();
     QueuePaymasterFinanceRebuild(this, m_database);
     if (own && !TxnCommit()) return fail();
+    return true;
+}
+
+bool WalletBatch::RepairPaymasterFinanceDerivations(
+    const uint256& genesis, const uint256& provider, ProviderFinanceLedger& ledger, std::string& error)
+{
+    error.clear();
+    ledger = {};
+    const auto invalid = [&](const char* code) { ledger = {}; error = code; return false; };
+    FinanceVersion version;
+    const auto header = m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, version);
+    if (header == DatabaseReadStatus::NOT_FOUND) return true;
+    if (header != DatabaseReadStatus::FOUND) return invalid("PAYMASTER_INVALID_FINANCE_LEDGER");
+    if (version.version == ProviderFinanceLedger::CURRENT_VERSION) {
+        if (!MigratePaymasterFinanceLedger(error)) return false;
+    } else if (version.version != ProviderFinanceMetadata::CURRENT_VERSION) {
+        return invalid("PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+    }
+    // Identity, provenance, version and source completeness remain mandatory.
+    // The totals are derived and deliberately not trusted as read prerequisites.
+    StrictFinanceRecord<ProviderFinanceMetadata> metadata;
+    if (m_batch->ReadWithStatus(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata) != DatabaseReadStatus::FOUND ||
+        metadata.version != ProviderFinanceMetadata::CURRENT_VERSION ||
+        metadata.genesis_hash != genesis || metadata.provider_id != provider || genesis.IsNull() || provider.IsNull() ||
+        metadata.history_complete_from <= 0 || metadata.updated_at < metadata.history_complete_from ||
+        metadata.revision == 0 || metadata.event_count > MAX_PROVIDER_FINANCE_EVENTS ||
+        metadata.totals.total.version != ProviderFinanceDailyTotals::CURRENT_VERSION) {
+        return invalid("PAYMASTER_INVALID_FINANCE_LEDGER");
+    }
+    ledger.genesis_hash = genesis;
+    ledger.provider_id = provider;
+    ledger.history_complete_from = metadata.history_complete_from;
+    ledger.earlier_history_partial = metadata.earlier_history_partial;
+    ledger.updated_at = metadata.updated_at;
+    ProviderFinanceTotals totals;
+    std::map<int64_t, ProviderFinanceTotals> days;
+    auto cursor = m_batch->GetNewPrefixCursor(FinancePrefix(FINANCE_EVENT));
+    if (!cursor) return invalid("PAYMASTER_FINANCE_READ_FAILED");
+    while (true) {
+        DataStream key, value;
+        const auto next = cursor->Next(key, value);
+        if (next == DatabaseCursor::Status::DONE) break;
+        if (next != DatabaseCursor::Status::MORE || ledger.events.size() >= metadata.event_count) {
+            return invalid("PAYMASTER_INVALID_FINANCE_EVENT");
+        }
+        try {
+            std::string type;
+            uint256 id;
+            ProviderFinanceEvent event;
+            key >> type >> id;
+            value >> event;
+            if (!key.empty() || !value.empty() || type != FINANCE_EVENT || event.event_id != id ||
+                event.genesis_hash != genesis || event.provider_id != provider || event.updated_at > metadata.updated_at ||
+                !ApplyProviderFinanceContribution(totals, event, 1, error)) {
+                return invalid("PAYMASTER_INVALID_FINANCE_EVENT");
+            }
+            if (event.state == ProviderFinanceEventState::CONFIRMED) {
+                const int64_t day = (event.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+                auto& daily = days[day];
+                daily.total.day_start = day;
+                if (!ApplyProviderFinanceContribution(daily, event, 1, error)) return invalid("PAYMASTER_INVALID_FINANCE_EVENT");
+            }
+            ledger.events.push_back(std::move(event));
+        } catch (const std::exception&) { return invalid("PAYMASTER_INVALID_FINANCE_EVENT"); }
+    }
+    cursor.reset();
+    if (ledger.events.size() != metadata.event_count) return invalid("PAYMASTER_INVALID_FINANCE_EVENT");
+    for (const auto& [day, daily] : days) ledger.daily_totals.push_back(daily.total);
+
+    using EncodedRecords = std::map<SerializeData, SerializeData>;
+    EncodedRecords expected;
+    const auto add = [&](const auto& key, const auto& value) {
+        DataStream encoded_key, encoded_value;
+        encoded_key << key;
+        encoded_value << value;
+        expected.emplace(SerializeData{encoded_key.begin(), encoded_key.end()},
+                         SerializeData{encoded_value.begin(), encoded_value.end()});
+    };
+    for (const auto& event : ledger.events) {
+        add(std::make_pair(FINANCE_TIME, FinanceTimeKey(event)), event.event_id);
+        add(std::make_pair(FINANCE_TX, std::make_pair(event.transaction_id, event.event_id)), event.event_id);
+    }
+    for (const auto& [day, daily] : days) add(std::make_pair(FINANCE_DAY, FinanceDayKey(day)), daily);
+    bool repair = !(metadata.totals == totals);
+    auto& remaining = expected;
+    for (const auto& prefix : {FINANCE_TIME, FINANCE_TX, FINANCE_DAY}) {
+        cursor = m_batch->GetNewPrefixCursor(FinancePrefix(prefix));
+        if (!cursor) return invalid("PAYMASTER_FINANCE_READ_FAILED");
+        while (true) {
+            DataStream key, value;
+            const auto next = cursor->Next(key, value);
+            if (next == DatabaseCursor::Status::DONE) break;
+            if (next != DatabaseCursor::Status::MORE) return invalid("PAYMASTER_FINANCE_READ_FAILED");
+            if (prefix == FINANCE_DAY && value.size() >= sizeof(uint16_t)) {
+                DataStream encoded;
+                encoded.write(value);
+                FinanceVersion daily;
+                encoded >> daily;
+                if (daily.version != ProviderFinanceDailyTotals::CURRENT_VERSION) {
+                    return invalid("PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+                }
+            }
+            const auto found = remaining.find(SerializeData{key.begin(), key.end()});
+            if (found == remaining.end() || found->second != SerializeData{value.begin(), value.end()}) repair = true;
+            if (found != remaining.end()) remaining.erase(found);
+        }
+        cursor.reset();
+    }
+    repair |= !remaining.empty();
+    if (!repair) return true;
+    if (metadata.revision == std::numeric_limits<uint64_t>::max()) return invalid("PAYMASTER_FINANCE_REVISION_EXHAUSTED");
+    metadata.totals = totals;
+    ++metadata.revision;
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return invalid("PAYMASTER_DATABASE_BEGIN");
+    const auto fail = [&](const char* code) {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return invalid(code);
+    };
+    if (!PaymasterCheckpointWrite(this, *m_batch, m_database)) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+    for (const auto& prefix : {FINANCE_TIME, FINANCE_TX, FINANCE_DAY}) {
+        if (!m_batch->ErasePrefix(FinancePrefix(prefix))) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+    }
+    // Preserve every immutable event byte. Only disposable derivations change.
+    for (const auto& event : ledger.events) {
+        if (!WritePaymasterIC(std::make_pair(FINANCE_TIME, FinanceTimeKey(event)), event.event_id) ||
+            !WritePaymasterIC(std::make_pair(FINANCE_TX, std::make_pair(event.transaction_id, event.event_id)), event.event_id)) {
+            return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+        }
+    }
+    for (const auto& [day, daily] : days) {
+        if (!WritePaymasterIC(std::make_pair(FINANCE_DAY, FinanceDayKey(day)), daily)) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+    }
+    if (!WritePaymasterIC(DBKeys::PAYMASTER_FINANCE_LEDGER, static_cast<const ProviderFinanceMetadata&>(metadata))) {
+        return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+    }
+    QueuePaymasterFinanceRebuild(this, m_database);
+    if (own && !TxnCommit()) return fail("PAYMASTER_DATABASE_COMMIT");
     return true;
 }
 
@@ -2099,7 +2238,16 @@ bool WalletBatch::ReadPaymasterFinanceTransactionEvents(const uint256& txid,
 bool WalletBatch::ReadPaymasterFinanceReport(const ProviderFinanceQuery& query,
                                             ProviderFinanceReport& report, std::string& error)
 {
+    std::optional<std::pair<int64_t, uint256>> position;
+    return ReadPaymasterFinanceReport(query, report, error, position);
+}
+
+bool WalletBatch::ReadPaymasterFinanceReport(const ProviderFinanceQuery& query,
+                                            ProviderFinanceReport& report, std::string& error,
+                                            std::optional<std::pair<int64_t, uint256>>& cursor_position)
+{
     report = {};
+    cursor_position.reset();
     error.clear();
     auto fail = [&](const char* reason) { report = {}; error = reason; return false; };
     if (query.now <= 0 || query.now > std::numeric_limits<int64_t>::max() - PROVIDER_BUDGET_WINDOW_SECONDS || query.limit == 0 || query.limit > 10000 ||
@@ -2157,6 +2305,11 @@ bool WalletBatch::ReadPaymasterFinanceReport(const ProviderFinanceQuery& query,
             if (!bytes.empty() || previous.version != page.version || previous.genesis != page.genesis ||
                 previous.provider != page.provider || previous.period != page.period) return fail("PAYMASTER_FINANCE_CURSOR_INVALID");
             if (previous.cutoff != page.cutoff || previous.revision != page.revision) return fail("PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED");
+            const uint64_t time = ~ReadBE64(previous.position.data());
+            if (time > uint64_t(std::numeric_limits<int64_t>::max())) return fail("PAYMASTER_FINANCE_CURSOR_INVALID");
+            uint256 event;
+            for (size_t i = 0; i < 32; ++i) event.begin()[i] = ~previous.position[8 + i];
+            cursor_position = std::make_pair(int64_t(time), event);
             start << previous.position << uint8_t{0}; // strict successor of the fixed-length key
         } catch (const std::exception&) { return fail("PAYMASTER_FINANCE_CURSOR_INVALID"); }
     }

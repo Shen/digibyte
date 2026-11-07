@@ -36,6 +36,11 @@ using namespace DigiDollar::Paymaster;
 namespace {
 enum class FinanceWorkKind { TRANSACTION, EVENT };
 using FinanceWorkKey = std::pair<FinanceWorkKind, uint256>;
+using FinancePosition = std::pair<int64_t, uint256>;
+FinancePosition EventPosition(const ProviderFinanceEvent& event)
+{
+    return {event.state == ProviderFinanceEventState::CONFIRMED ? event.confirmed_at : event.created_at, event.event_id};
+}
 struct FinanceWork {
     uint64_t sequence{0};
     uint256 after;
@@ -54,6 +59,10 @@ struct FinanceState {
     std::map<uint256, uint256> attempts_by_commit;
     std::map<uint256, uint256> recoveries_by_commit;
     std::map<uint256, uint256> commit_transactions;
+    std::map<uint256, std::set<uint256>> events_by_transaction;
+    std::map<FinancePosition, uint256, std::greater<FinancePosition>> events_by_time;
+    std::map<int64_t, ProviderFinanceTotals> days;
+    ProviderFinanceTotals totals;
 
     void Mark(FinanceWorkKind kind, const uint256& id, bool required = false)
     {
@@ -65,6 +74,10 @@ struct FinanceState {
         work.required |= required;
     }
 };
+struct FinanceEventChange {
+    std::optional<ProviderFinanceEvent> previous;
+    ProviderFinanceEvent current;
+};
 struct PendingFinanceChanges {
     WalletDatabase* database{nullptr};
     std::optional<ProviderMaintenanceLedger> maintenance;
@@ -73,6 +86,7 @@ struct PendingFinanceChanges {
     std::map<uint256, std::pair<PaymasterId, uint256>> recoveries;
     std::map<uint256, std::pair<PaymasterId, uint256>> commits;
     std::set<uint256> events;
+    std::map<uint256, FinanceEventChange> event_changes;
     bool rebuild{false};
 };
 // No registry or state lock spans wallet/database I/O or signal disconnection.
@@ -340,9 +354,15 @@ void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& datab
     QueueFinanceChange(owner, database, [&](auto& changes) { changes.pool = pool; });
 }
 
-void QueuePaymasterFinanceEvent(const WalletBatch* owner, WalletDatabase& database, const uint256& event_id)
+void QueuePaymasterFinanceEvent(const WalletBatch* owner, WalletDatabase& database, const ProviderFinanceEvent& event,
+                               const ProviderFinanceEvent* previous, bool reconcile)
 {
-    QueueFinanceChange(owner, database, [&](auto& changes) { changes.events.insert(event_id); });
+    QueueFinanceChange(owner, database, [&](auto& changes) {
+        const auto [position, inserted] = changes.event_changes.try_emplace(event.event_id);
+        if (inserted && previous) position->second.previous = *previous;
+        position->second.current = event;
+        if (reconcile) changes.events.insert(event.event_id);
+    });
 }
 
 void QueuePaymasterFinanceRebuild(const WalletBatch* owner, WalletDatabase& database)
@@ -407,6 +427,30 @@ void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
         state->recoveries_by_commit[commit] = recovery.second;
         if (state->commit_transactions.count(commit)) state->Mark(FinanceWorkKind::EVENT, commit);
     }
+    for (const auto& [id, change] : changes.event_changes) {
+        if (!state->initialized) break; // Full reconstruction owns invalid caches.
+        std::string error;
+        const auto contribute = [&](const ProviderFinanceEvent& event, int sign) {
+            if (!ApplyProviderFinanceContribution(state->totals, event, sign, error)) return false;
+            if (event.state != ProviderFinanceEventState::CONFIRMED) return true;
+            const int64_t day = (event.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+            auto& daily = state->days[day];
+            daily.total.day_start = day;
+            if (!ApplyProviderFinanceContribution(daily, event, sign, error)) return false;
+            auto empty = daily;
+            empty.total.day_start = 0;
+            if (empty == ProviderFinanceTotals{}) state->days.erase(day);
+            return true;
+        };
+        if (change.previous) {
+            state->events_by_time.erase(EventPosition(*change.previous));
+            if (!contribute(*change.previous, -1)) { state->initialized = false; break; }
+        }
+        const auto& event = change.current;
+        state->events_by_transaction[event.transaction_id].insert(id);
+        state->events_by_time[EventPosition(event)] = id;
+        if (!contribute(event, 1)) { state->initialized = false; break; }
+    }
     for (const auto& id : changes.events) state->Mark(FinanceWorkKind::EVENT, id, true);
 }
 
@@ -440,16 +484,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     const uint256 genesis_hash = Params().GenesisBlock().GetHash();
     ProviderFinanceLedger finance;
     bool ledger_changed{false};
-    const DatabaseReadStatus finance_status =
-        batch.ReadPaymasterFinanceLedgerWithStatus(finance);
-    if (finance_status != DatabaseReadStatus::FOUND) {
-        if (finance_status != DatabaseReadStatus::NOT_FOUND) {
-            error = PersistedReadError(
-                finance_status, "ProviderFinanceLedger", finance,
-                "PAYMASTER_FINANCE_LEDGER_NOT_FOUND",
-                "PAYMASTER_INVALID_FINANCE_LEDGER");
-            return false;
-        }
+    if (!batch.RepairPaymasterFinanceDerivations(genesis_hash, identity.provider_id, finance, error)) return false;
+    if (finance.provider_id.IsNull()) {
         // Pre-feature wallets may have durable records that no longer carry
         // enough context for exact reconstruction. Never estimate them.
         finance.genesis_hash = genesis_hash;
@@ -731,6 +767,21 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         for (const auto& commit : commits) {
             if (commit.provider_id == identity.provider_id) observed->commit_transactions.emplace(commit.commit_key, commit.final_txid);
         }
+        observed->events_by_transaction.clear();
+        observed->events_by_time.clear();
+        observed->days.clear();
+        observed->totals = {};
+        for (const auto& event : finance.events) {
+            observed->events_by_transaction[event.transaction_id].insert(event.event_id);
+            observed->events_by_time.emplace(EventPosition(event), event.event_id);
+            if (!ApplyProviderFinanceContribution(observed->totals, event, 1, error)) return false;
+            if (event.state == ProviderFinanceEventState::CONFIRMED) {
+                const int64_t day = (event.confirmed_at / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+                auto& daily = observed->days[day];
+                daily.total.day_start = day;
+                if (!ApplyProviderFinanceContribution(daily, event, 1, error)) return false;
+            }
+        }
         observed->pending.clear();
         observed->initialized = true;
     }
@@ -774,6 +825,8 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     ProviderFinanceMetadata metadata;
     const auto read = batch.ReadPaymasterFinanceMetadata(metadata);
     if (read != DatabaseReadStatus::FOUND) {
+        std::lock_guard<std::mutex> lock{state->mutex};
+        state->initialized = false;
         error = read == DatabaseReadStatus::UNSUPPORTED_VERSION
             ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_INVALID_FINANCE_LEDGER";
         return false;
@@ -962,8 +1015,30 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         bool more{false};
         if (!batch.ReadPaymasterFinanceTransactionEvents(key.second, events,
                 MAX_FINANCE_RECONCILIATION_WORK - processed, work.after, &more)) {
+            std::lock_guard<std::mutex> lock{state->mutex};
+            state->initialized = false;
             error = "PAYMASTER_FINANCE_TRANSACTION_INDEX_READ_FAILED";
             return false;
+        }
+        // Missing rows are as unsafe as malformed rows. Compare this bounded
+        // page with the event identities captured from intact source records,
+        // including events published only by successfully committed writes.
+        {
+            std::lock_guard<std::mutex> lock{state->mutex};
+            const auto found = state->events_by_transaction.find(key.second);
+            const std::set<uint256> empty;
+            const auto& expected = found == state->events_by_transaction.end() ? empty : found->second;
+            auto next = work.after.IsNull() ? expected.begin() : expected.upper_bound(work.after);
+            bool valid = true;
+            for (const auto& event : events) {
+                if (next == expected.end() || *next != event.event_id) { valid = false; break; }
+                ++next;
+            }
+            if (!valid || more != (next != expected.end())) {
+                state->initialized = false;
+                error = "PAYMASTER_FINANCE_TRANSACTION_INDEX_READ_FAILED";
+                return false;
+            }
         }
         processed += std::max(size_t{1}, events.size());
         const auto last_id = events.empty() ? uint256{} : events.back().event_id;
@@ -1041,6 +1116,44 @@ bool ReconcileProviderFinanceReport(CWallet& wallet, bool /*continuation*/, std:
     return ReconcileProviderFinanceReportAtTime(wallet, error, GetTime());
 }
 
+namespace {
+// The source-built cache verifies only the returned page and the bounded
+// calendar window. Missing index rows cannot masquerade as an empty history.
+const char* CheckFinanceReport(const FinanceState& state, const ProviderFinanceQuery& query,
+                               const ProviderFinanceReport& report, const std::optional<FinancePosition>& after)
+{
+    constexpr const char* invalid{"PAYMASTER_FINANCE_INDEX_INVALID"};
+    if (!state.initialized || report.metadata.event_count != state.events_by_time.size() ||
+        !(report.metadata.totals == state.totals)) return invalid;
+    const int64_t today = (query.now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
+    const std::array<int64_t, 4> cutoffs{today, std::max<int64_t>(0, today - 6 * PROVIDER_BUDGET_WINDOW_SECONDS),
+                                      std::max<int64_t>(0, today - 29 * PROVIDER_BUDGET_WINDOW_SECONDS), 0};
+    auto day = state.days.lower_bound(std::max<int64_t>(0, today - 365 * PROVIDER_BUDGET_WINDOW_SECONDS));
+    std::array<ProviderFinanceTotals, 4> expected_periods;
+    expected_periods[size_t(ProviderFinancePeriod::ALL)] = state.totals;
+    size_t count{0};
+    std::string error;
+    for (; day != state.days.end() && day->first < today + PROVIDER_BUDGET_WINDOW_SECONDS; ++day) {
+        if (count >= report.days.size() || !(day->second == report.days[count++])) return invalid;
+        for (size_t i = 0; i < 3; ++i) {
+            if (day->first >= cutoffs[i] && !AddProviderFinanceTotals(expected_periods[i], day->second, error)) return invalid;
+        }
+    }
+    if (count != report.days.size() || expected_periods != report.periods) return invalid;
+    if (!query.include_events) return nullptr;
+    if (after && state.events_by_time.count(*after) == 0) return "PAYMASTER_FINANCE_CURSOR_INVALID";
+    auto next = after ? state.events_by_time.upper_bound(*after) : state.events_by_time.begin();
+    const int64_t cutoff = cutoffs[size_t(query.period)];
+    for (const auto& event : report.events) {
+        if (next == state.events_by_time.end() || next->first.first < cutoff || next->first != EventPosition(event)) return invalid;
+        ++next;
+    }
+    const bool more = next != state.events_by_time.end() && next->first.first >= cutoff;
+    if (more == report.next_cursor.empty()) return invalid;
+    return nullptr;
+}
+} // namespace
+
 ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, ProviderFinanceQuery query)
 {
     if (uint8_t(query.period) > uint8_t(ProviderFinancePeriod::ALL) || query.limit == 0 || query.limit > 10000 ||
@@ -1065,7 +1178,24 @@ ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, Provid
         }
         WalletBatch batch{wallet.GetDatabase()};
         ProviderIdentityRecord identity;
-        if (!batch.ReadPaymasterIdentity(identity) || !batch.ReadPaymasterFinanceReport(query, result.report, error)) {
+        std::optional<FinancePosition> position;
+        bool valid = batch.ReadPaymasterIdentity(identity) && batch.ReadPaymasterFinanceReport(query, result.report, error, position);
+        if (valid) {
+            if (const auto state = FindFinanceState(wallet.GetDatabase())) {
+                std::lock_guard<std::mutex> lock{state->mutex};
+                if (const auto* failure = CheckFinanceReport(*state, query, result.report, position)) {
+                    error = failure;
+                    valid = false;
+                }
+            } else { error = "PAYMASTER_FINANCE_RECONCILING"; valid = false; }
+        }
+        if (!valid) {
+            if (error == "PAYMASTER_FINANCE_INDEX_INVALID") {
+                if (const auto state = FindFinanceState(wallet.GetDatabase())) {
+                    std::lock_guard<std::mutex> lock{state->mutex};
+                    state->initialized = false;
+                }
+            }
             const bool invalid_query = error == "PAYMASTER_INVALID_FINANCE_QUERY" ||
                 error == "PAYMASTER_FINANCE_CURSOR_INVALID" || error == "PAYMASTER_FINANCE_CURSOR_RESTART_REQUIRED";
             return ProviderFinanceStatusFailure{invalid_query ? ErrorKind::INVALID_INPUT : ErrorKind::WALLET,
@@ -1115,7 +1245,7 @@ ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, Provid
     }
     capital.pending_maintenance_transactions = std::count_if(maintenance.records.begin(), maintenance.records.end(),
         [](const auto& record) {
-            return record.state == ProviderMaintenanceState::PLANNED || record.state == ProviderMaintenanceState::BROADCAST;
+            return record.state == ProviderMaintenanceState::PLANNED || record.HasUnresolvedTransaction();
         });
     for (size_t i = 0; i < result.report.periods.size(); ++i) {
         const auto& totals = result.report.periods[i];

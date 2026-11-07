@@ -18,6 +18,7 @@
 #include <wallet/walletutil.h>
 
 #include <stdint.h>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -670,6 +671,11 @@ public:
         DigiDollar::Paymaster::ProviderFinanceLedger& ledger);
     DatabaseReadStatus ReadPaymasterFinanceLedgerWithStatus(
         DigiDollar::Paymaster::ProviderFinanceLedger& ledger);
+    /** Read intact immutable events and atomically repair only their derived
+     * totals/indexes. Requires the caller's wallet lock; an intact store is a
+     * no-op. Unknown source versions or incomplete event sets fail closed. */
+    bool RepairPaymasterFinanceDerivations(const uint256& genesis, const uint256& provider,
+        DigiDollar::Paymaster::ProviderFinanceLedger& ledger, std::string& error);
     bool HasPaymasterFinanceLedger();
     bool MigratePaymasterFinanceLedger(std::string& error);
     DatabaseReadStatus ReadPaymasterFinanceMetadata(
@@ -682,6 +688,9 @@ public:
         std::string& error, bool queue_reconciliation = true);
     bool ReadPaymasterFinanceReport(const DigiDollar::Paymaster::ProviderFinanceQuery& query,
         DigiDollar::Paymaster::ProviderFinanceReport& report, std::string& error);
+    bool ReadPaymasterFinanceReport(const DigiDollar::Paymaster::ProviderFinanceQuery& query,
+        DigiDollar::Paymaster::ProviderFinanceReport& report, std::string& error,
+        std::optional<std::pair<int64_t, uint256>>& cursor_position);
     bool ReadPaymasterFinanceTransactionEvents(const uint256& txid,
         std::vector<DigiDollar::Paymaster::ProviderFinanceEvent>& events,
         size_t limit = DigiDollar::Paymaster::MAX_PROVIDER_FINANCE_EVENTS,

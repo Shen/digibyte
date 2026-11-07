@@ -27,6 +27,7 @@
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/walletdb.h>
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 
@@ -994,6 +995,240 @@ BOOST_AUTO_TEST_CASE(unobserved_maintenance_limit_is_never_reported_as_actual_co
     BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_MAINTENANCE_FEE_UNAVAILABLE");
     BOOST_CHECK(database->m_records == before);
+}
+
+namespace {
+std::vector<SerializeData> FinanceKeys(const MockableDatabase& database, const std::string& type)
+{
+    DataStream prefix;
+    prefix << type;
+    std::vector<SerializeData> keys;
+    for (const auto& [key, value] : database.m_records) {
+        if (key.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), key.begin())) keys.push_back(key);
+    }
+    return keys;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(finance_rebuild_repairs_derived_records_without_rewriting_events)
+{
+    CWalletTx* transaction = Transaction();
+    BOOST_REQUIRE(transaction);
+    transaction->m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    WalletBatch batch{*database};
+    auto event = Event(1100, transaction->GetHash());
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {event}, error));
+    Drain();
+    const auto intact = database->m_records;
+    const auto event_keys = FinanceKeys(*database, "pmfinevent");
+    BOOST_REQUIRE_EQUAL(event_keys.size(), 1U);
+    const auto event_bytes = intact.at(event_keys.front());
+    for (const std::string& type : {"pmfinday", "pmfintime", "pmfintx"}) {
+        for (const bool corrupt : {false, true}) {
+            const auto revision = Metadata().revision;
+            const auto keys = FinanceKeys(*database, type);
+            BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+            if (corrupt) database->m_records.at(keys.front()) = SerializeData{std::byte{0xff}};
+            else database->m_records.erase(keys.front());
+            // Rebuild must validate sources independently of these derivations.
+            size_t changed{0};
+            BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+            BOOST_CHECK_EQUAL(Metadata().revision, revision + 1);
+            BOOST_CHECK(database->m_records.at(event_keys.front()) == event_bytes);
+            ProviderFinanceLedger restored;
+            BOOST_REQUIRE(batch.ReadPaymasterFinanceLedger(restored));
+            BOOST_CHECK_EQUAL(restored.events.size(), 1U);
+            BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 3);
+            const auto repaired = database->m_records;
+            BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+            BOOST_CHECK(database->m_records == repaired);
+        }
+    }
+    // Metadata totals are disposable too; retain the immutable identity/time
+    // fields and source completeness count while rebuilding the aggregate.
+    auto metadata = Metadata();
+    metadata.totals = {};
+    BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata));
+    size_t changed{0};
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 3);
+    BOOST_CHECK(database->m_records.at(event_keys.front()) == event_bytes);
+    const auto day_keys = FinanceKeys(*database, "pmfinday");
+    BOOST_REQUIRE_EQUAL(day_keys.size(), 1U);
+    ProviderFinanceTotals future_day;
+    DataStream decoded;
+    decoded.write(database->m_records.at(day_keys.front()));
+    decoded >> future_day;
+    ++future_day.total.version;
+    DataStream encoded;
+    encoded << future_day;
+    database->m_records.at(day_keys.front()) = SerializeData{encoded.begin(), encoded.end()};
+    const auto future = database->m_records;
+    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+    BOOST_CHECK(database->m_records == future);
+}
+
+BOOST_AUTO_TEST_CASE(finance_rebuild_refuses_damaged_or_unknown_event_sources)
+{
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {Event(1200)}, error));
+    Drain();
+    const auto intact = database->m_records;
+    const auto keys = FinanceKeys(*database, "pmfinevent");
+    BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+    for (const bool unknown_version : {false, true}) {
+        database->m_records = intact;
+        if (unknown_version) {
+            auto event = Event(1200);
+            ++event.version;
+            DataStream encoded;
+            encoded << event;
+            database->m_records.at(keys.front()) = SerializeData{encoded.begin(), encoded.end()};
+        } else database->m_records.at(keys.front()) = SerializeData{std::byte{0xff}};
+        const auto damaged = database->m_records;
+        size_t changed{0};
+        BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_FINANCE_EVENT");
+        BOOST_CHECK(database->m_records == damaged);
+    }
+    database->m_records = intact;
+    BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::PAYMASTER_FINANCE_LEDGER,
+        uint16_t(ProviderFinanceMetadata::CURRENT_VERSION + 1)));
+    const auto future = database->m_records;
+    size_t changed{0};
+    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+    BOOST_CHECK(database->m_records == future);
+}
+
+BOOST_AUTO_TEST_CASE(finance_derived_repair_failed_commit_preserves_sources_and_guard)
+{
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {Event(1300)}, error));
+    Drain();
+    const auto keys = FinanceKeys(*database, "pmfintime");
+    BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+    database->m_records.erase(keys.front());
+    const auto damaged = database->m_records;
+    database->m_fail_commit = true;
+    size_t changed{0};
+    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+    database->m_fail_commit = false;
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+    BOOST_CHECK(database->m_records == damaged);
+    BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
+    BOOST_CHECK(!WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
+}
+
+BOOST_AUTO_TEST_CASE(warm_reorg_cannot_acknowledge_missing_transaction_index_rows)
+{
+    CWalletTx* transaction = Transaction();
+    BOOST_REQUIRE(transaction);
+    transaction->m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {Event(1400, transaction->GetHash())}, error));
+    Drain();
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 3);
+    const auto keys = FinanceKeys(*database, "pmfintx");
+    BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+    database->m_records.erase(keys.front());
+    transaction->m_state = TxStateConflicted{uint256S("ff14"), 1};
+    provider->NotifyTransactionChanged(transaction->GetHash(), CT_UPDATED);
+    BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_FINANCE_TRANSACTION_INDEX_READ_FAILED");
+    BOOST_CHECK(!WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderFinanceReport(*provider, false, error), error);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 0);
+    BOOST_CHECK_EQUAL(FinanceKeys(*database, "pmfintx").size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(warm_report_index_errors_retry_through_source_repair)
+{
+    WalletBatch batch{*database};
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {Event(1450)}, error));
+    Drain();
+    const auto keys = FinanceKeys(*database, "pmfintime");
+    BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+    database->m_records.at(keys.front()) = SerializeData{std::byte{0xff}};
+    ProviderFinanceQuery query;
+    query.now = 2000;
+    query.period = ProviderFinancePeriod::ALL;
+    query.include_events = true;
+    auto captured = CaptureProviderFinanceStatus(*provider, query);
+    const auto* failure = std::get_if<ProviderFinanceStatusFailure>(&captured);
+    BOOST_REQUIRE(failure);
+    BOOST_CHECK_EQUAL(failure->code, "PAYMASTER_FINANCE_INDEX_INVALID");
+    BOOST_CHECK(!WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
+    captured = CaptureProviderFinanceStatus(*provider, query);
+    const auto* status = std::get_if<ProviderFinanceStatus>(&captured);
+    BOOST_REQUIRE(status);
+    BOOST_CHECK_EQUAL(status->report.events.size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(warm_reports_detect_missing_time_and_day_records_without_full_scans)
+{
+    CWalletTx* transaction = Transaction();
+    BOOST_REQUIRE(transaction);
+    transaction->m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    WalletBatch batch{*database};
+    const auto event = Event(1470, transaction->GetHash());
+    BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {event}, error));
+    Drain();
+    ProviderFinanceEvent confirmed;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceEvent(event.event_id, confirmed) == DatabaseReadStatus::FOUND);
+    BOOST_REQUIRE(confirmed.state == ProviderFinanceEventState::CONFIRMED);
+    ProviderFinanceQuery query;
+    // The fixture confirms in the genesis block; inspect that calendar window
+    // rather than today's chart, which legitimately excludes the old bucket.
+    query.now = confirmed.confirmed_at;
+    query.period = ProviderFinancePeriod::ALL;
+    query.include_events = true;
+    const auto intact = CaptureProviderFinanceStatus(*provider, query);
+    const auto* initial = std::get_if<ProviderFinanceStatus>(&intact);
+    BOOST_REQUIRE(initial);
+    BOOST_REQUIRE_EQUAL(initial->report.days.size(), 1U);
+    BOOST_CHECK_EQUAL(initial->report.periods[size_t(ProviderFinancePeriod::TODAY)].total.dd_income.value, 3);
+    for (const std::string& type : {"pmfintime", "pmfinday"}) {
+        BOOST_TEST_CONTEXT(type) {
+            const auto keys = FinanceKeys(*database, type);
+            BOOST_REQUIRE_EQUAL(keys.size(), 1U);
+            database->m_records.erase(keys.front());
+            database->reads = {};
+            const auto captured = CaptureProviderFinanceStatus(*provider, query);
+            const auto* failure = std::get_if<ProviderFinanceStatusFailure>(&captured);
+            BOOST_REQUIRE(failure);
+            BOOST_CHECK_EQUAL(failure->code, "PAYMASTER_FINANCE_INDEX_INVALID");
+            BOOST_CHECK_EQUAL(database->reads.prefixes, 0U);
+            BOOST_CHECK_LE(database->reads.rows, 2U);
+            const auto restored = CaptureProviderFinanceStatus(*provider, query);
+            const auto* status = std::get_if<ProviderFinanceStatus>(&restored);
+            BOOST_REQUIRE(status);
+            BOOST_CHECK_EQUAL(status->report.events.size(), 1U);
+            BOOST_CHECK_EQUAL(status->report.periods[size_t(ProviderFinancePeriod::ALL)].total.dd_income.value, 3);
+        }
+    }
+    // A structurally valid but wrong summary is not evidence of known zero.
+    auto metadata = Metadata();
+    metadata.totals = {};
+    BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata));
+    BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatusFailure>(CaptureProviderFinanceStatus(*provider, query)));
+    BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatus>(CaptureProviderFinanceStatus(*provider, query)));
+}
+
+BOOST_AUTO_TEST_CASE(failed_signed_maintenance_remains_open_in_finance_status)
+{
+    auto record = Maintenance(/*journaled=*/true);
+    record.state = ProviderMaintenanceState::FAILED;
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    BOOST_REQUIRE(WalletBatch{*database}.WritePaymasterMaintenanceLedger(ledger));
+    ProviderFinanceQuery query;
+    query.now = 2000;
+    auto captured = CaptureProviderFinanceStatus(*provider, query);
+    const auto* status = std::get_if<ProviderFinanceStatus>(&captured);
+    BOOST_REQUIRE(status);
+    BOOST_CHECK_EQUAL(status->pool_capital.pending_maintenance_transactions, 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

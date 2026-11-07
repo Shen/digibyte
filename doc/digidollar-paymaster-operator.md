@@ -395,6 +395,11 @@ migration leaves the old records intact; unknown versions are rejected. Use a
 full wallet backup; CSV remains an accounting export rather than a recovery
 artifact. Older binaries cannot read the v2 finance header.
 
+Missing or damaged derived indexes make the observation unavailable and trigger
+reconstruction from intact event records. Unknown versions or damaged event
+sources remain blocked; reconstruction never releases payment reservations.
+Failed reserve transactions with retained signatures remain open maintenance.
+
 Alternative-provider recovery has its own `recovery` event: its service income
 and network cost enter operating totals, but it does not count as a successful
 recipient transfer or change the average recipient-transfer service fee.

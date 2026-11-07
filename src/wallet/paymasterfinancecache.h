@@ -10,6 +10,7 @@ struct ProviderCommitRecord;
 struct ProviderMaintenanceLedger;
 struct ProviderPoolEntry;
 struct AlternativeRecoveryRecord;
+struct ProviderFinanceEvent;
 }
 namespace wallet {
 class WalletBatch;
@@ -30,7 +31,9 @@ void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderMaintenanceLedger&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>&);
-void QueuePaymasterFinanceEvent(const WalletBatch*, WalletDatabase&, const uint256& event_id);
+void QueuePaymasterFinanceEvent(const WalletBatch*, WalletDatabase&,
+                               const DigiDollar::Paymaster::ProviderFinanceEvent&,
+                               const DigiDollar::Paymaster::ProviderFinanceEvent* previous, bool reconcile);
 void QueuePaymasterFinanceRebuild(const WalletBatch*, WalletDatabase&);
 void PaymasterFinanceTransactionEnd(const WalletBatch*, bool committed = false);
 } // namespace wallet

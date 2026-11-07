@@ -87,10 +87,10 @@
       "regressions": "Range and existing prefix-cursor tests across all wallet backends."
     },
     "src/wallet/walletdb.h": {
-      "purpose": "Declare existing bounded finance/capacity/lock adapters and the explicitly shared PaymasterWalletTransactionEnd hook used by WalletBatch destruction.",
-      "reused_api": "Existing WalletBatch lifecycle and backend transactions; the common completion delegates to the existing derived notification and checkpoint endpoints. Bool capacity readers remain compatibility wrappers.",
-      "ordinary_callers": "All WalletBatch consumers must use the current inline destructor. No class-layout, wallet transaction/key format or ordinary lock API changes; unreadable authority remains distinct from absence.",
-      "regressions": "Same common-completion regressions as walletdb.cpp, capacity classification and ordinary DB tests. Recompile reached destructor consumers for isolated tests; complete current-header product builds remain operator checks."
+      "purpose": "Declare existing bounded finance/capacity/lock adapters and the explicitly shared PaymasterWalletTransactionEnd hook used by WalletBatch destruction. Finance repair needs an event-source reader independent of derived totals and a decoded cursor for bounded report integrity checks.",
+      "reused_api": "Existing WalletBatch lifecycle and backend transactions; the common completion delegates to the existing derived notification and checkpoint endpoints. Bool capacity readers remain compatibility wrappers. RepairPaymasterFinanceDerivations reuses WalletBatch transactions, versioned events, range cursors and checkpoint writes; the existing three-argument report entry point remains available.",
+      "ordinary_callers": "All WalletBatch consumers must use the current inline destructor. No class-layout, wallet transaction/key format or ordinary lock API changes; unreadable authority remains distinct from absence. New APIs are Paymaster-only and do not change database backends, object layout or ordinary DGB/DD records.",
+      "regressions": "Same common-completion regressions as walletdb.cpp, capacity classification and ordinary DB tests. Recompile reached destructor consumers for isolated tests; complete current-header product builds remain operator checks. Missing/corrupt day/time/transaction derivations, warm reports/reorgs, immutable event preservation, unknown versions and failed repair commit."
     },
     "src/qt/walletmodel.h": {
       "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
