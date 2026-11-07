@@ -142,6 +142,8 @@ bool CheckPaymasterPrivacyReadiness(
     DigiDollar::Paymaster::PrivacyProfile privacy,
     WalletContext& context,
     std::string& error);
+/** A persisted refresh reloads the pool under cs_wallet. Supplied entries are
+ * only an observation, never authority to overwrite newer reservations. */
 bool RefreshPoolConfirmationHeights(
     CWallet& wallet,
     std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,

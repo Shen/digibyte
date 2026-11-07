@@ -404,6 +404,9 @@ bool RefreshPoolConfirmationHeights(CWallet& wallet,
     error.clear();
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
+    // A caller's observation may predate a concurrent reservation or commit.
+    // Only mutate the current authoritative pool under this same wallet lock.
+    if (persist && !ReadOptionalProviderPool(batch, entries, error)) return false;
     ProviderMaintenanceLedger maintenance_ledger;
     std::set<COutPoint> active_maintenance_sources;
     if (batch.ReadPaymasterMaintenanceLedger(maintenance_ledger)) {
@@ -1434,6 +1437,8 @@ bool RunAutomaticDGBReplenishment(
     std::optional<ProviderMaintenanceRecord> operation;
     {
         LOCK(wallet.cs_wallet);
+        // Readiness reconciliation also writes this journal. Keep planning,
+        // budget reservation and persistence in one read-modify-write interval.
         WalletBatch batch{wallet.GetDatabase()};
         const DatabaseReadStatus ledger_status{
             batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
@@ -1457,100 +1462,101 @@ bool RunAutomaticDGBReplenishment(
                        record.state == ProviderMaintenanceState::PLANNED;
             });
         if (planned != ledger.records.end()) operation = *planned;
-    }
 
-    const int64_t admission_value = MIN_ADMISSION_DGB_SATOSHIS;
-    const int64_t operational_value = std::max<int64_t>(
-        MIN_ADMISSION_DGB_SATOSHIS,
-        provider_policy.maximum_network_fee.value);
-    if (operation) {
-        size_t planned_admission{0};
-        size_t planned_operational{0};
-        const bool outputs_match = std::all_of(
-            operation->outputs.begin(), operation->outputs.end(),
-            [&](const ProviderMaintenanceOutput& output) {
-                if (output.asset != PoolAsset::DGB ||
-                    output.carrier_value.value != 0) {
+        const int64_t admission_value = MIN_ADMISSION_DGB_SATOSHIS;
+        const int64_t operational_value = std::max<int64_t>(
+            MIN_ADMISSION_DGB_SATOSHIS,
+            provider_policy.maximum_network_fee.value);
+        if (operation) {
+            size_t planned_admission{0};
+            size_t planned_operational{0};
+            const bool outputs_match = std::all_of(
+                operation->outputs.begin(), operation->outputs.end(),
+                [&](const ProviderMaintenanceOutput& output) {
+                    if (output.asset != PoolAsset::DGB ||
+                        output.carrier_value.value != 0) {
+                        return false;
+                    }
+                    if (output.purpose == PoolPurpose::ADMISSION &&
+                        output.dgb_value.value == admission_value) {
+                        ++planned_admission;
+                        return true;
+                    }
+                    if (output.purpose == PoolPurpose::OPERATIONAL &&
+                        output.dgb_value.value == operational_value) {
+                        ++planned_operational;
+                        return true;
+                    }
+                    return false;
+                });
+            const bool plan_matches =
+                outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
+                planned_admission <= missing_admission &&
+                planned_operational <= missing_operational &&
+                operation->maximum_fee ==
+                    policy.maximum_maintenance_fee_per_transaction &&
+                operation->plan_id ==
+                    MaintenancePlanId(operation->kind, operation->outputs, policy);
+            if (!plan_matches) {
+                if (!ReleaseProviderMaintenanceBudget(
+                        ledger, operation->operation_id, GetTime(), error)) {
                     return false;
                 }
-                if (output.purpose == PoolPurpose::ADMISSION &&
-                    output.dgb_value.value == admission_value) {
-                    ++planned_admission;
-                    return true;
+                {
+                    LOCK(wallet.cs_wallet);
+                    if (!WalletBatch{wallet.GetDatabase()}
+                             .WritePaymasterMaintenanceLedger(ledger)) {
+                        error = "PAYMASTER_DATABASE_WRITE";
+                        return false;
+                    }
                 }
-                if (output.purpose == PoolPurpose::OPERATIONAL &&
-                    output.dgb_value.value == operational_value) {
-                    ++planned_operational;
-                    return true;
+                operation.reset();
+            }
+        }
+        if (!operation) {
+            ProviderMaintenanceRecord record;
+            do {
+                record.operation_id = GetRandHash();
+            } while (record.operation_id.IsNull());
+            record.kind = ProviderMaintenanceKind::REPLENISH_DGB;
+            const auto append_outputs = [&](PoolPurpose purpose, size_t count,
+                                            int64_t value, const char* label) {
+                for (size_t index{0}; index < count; ++index) {
+                    const auto destination = wallet.GetNewDestination(
+                        OutputType::BECH32M, label);
+                    if (!destination) return false;
+                    ProviderMaintenanceOutput output;
+                    output.purpose = purpose;
+                    output.asset = PoolAsset::DGB;
+                    output.script_pub_key = GetScriptForDestination(*destination);
+                    output.dgb_value = DGBSatoshis{value};
+                    record.outputs.push_back(std::move(output));
                 }
+                return true;
+            };
+            if (!append_outputs(PoolPurpose::ADMISSION, missing_admission,
+                                admission_value, "Paymaster admission maintenance") ||
+                !append_outputs(PoolPurpose::OPERATIONAL, missing_operational,
+                                operational_value, "Paymaster operational maintenance")) {
+                error = "PAYMASTER_POOL_DESTINATION_UNAVAILABLE";
                 return false;
-            });
-        const bool plan_matches =
-            outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
-            planned_admission <= missing_admission &&
-            planned_operational <= missing_operational &&
-            operation->maximum_fee ==
-                policy.maximum_maintenance_fee_per_transaction &&
-            operation->plan_id ==
-                MaintenancePlanId(operation->kind, operation->outputs, policy);
-        if (!plan_matches) {
-            if (!ReleaseProviderMaintenanceBudget(
-                    ledger, operation->operation_id, GetTime(), error)) {
+            }
+            record.plan_id = MaintenancePlanId(record.kind, record.outputs, policy);
+            record.maximum_fee = policy.maximum_maintenance_fee_per_transaction;
+            if (!ReserveProviderMaintenanceBudget(
+                    ledger, policy, record, GetTime(), error)) {
                 return false;
             }
             {
                 LOCK(wallet.cs_wallet);
-                if (!WalletBatch{wallet.GetDatabase()}
-                         .WritePaymasterMaintenanceLedger(ledger)) {
+                if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
                     error = "PAYMASTER_DATABASE_WRITE";
                     return false;
                 }
             }
-            operation.reset();
+            operation = std::move(record);
         }
-    }
-    if (!operation) {
-        ProviderMaintenanceRecord record;
-        do {
-            record.operation_id = GetRandHash();
-        } while (record.operation_id.IsNull());
-        record.kind = ProviderMaintenanceKind::REPLENISH_DGB;
-        const auto append_outputs = [&](PoolPurpose purpose, size_t count,
-                                        int64_t value, const char* label) {
-            for (size_t index{0}; index < count; ++index) {
-                const auto destination = wallet.GetNewDestination(
-                    OutputType::BECH32M, label);
-                if (!destination) return false;
-                ProviderMaintenanceOutput output;
-                output.purpose = purpose;
-                output.asset = PoolAsset::DGB;
-                output.script_pub_key = GetScriptForDestination(*destination);
-                output.dgb_value = DGBSatoshis{value};
-                record.outputs.push_back(std::move(output));
-            }
-            return true;
-        };
-        if (!append_outputs(PoolPurpose::ADMISSION, missing_admission,
-                            admission_value, "Paymaster admission maintenance") ||
-            !append_outputs(PoolPurpose::OPERATIONAL, missing_operational,
-                            operational_value, "Paymaster operational maintenance")) {
-            error = "PAYMASTER_POOL_DESTINATION_UNAVAILABLE";
-            return false;
-        }
-        record.plan_id = MaintenancePlanId(record.kind, record.outputs, policy);
-        record.maximum_fee = policy.maximum_maintenance_fee_per_transaction;
-        if (!ReserveProviderMaintenanceBudget(
-                ledger, policy, record, GetTime(), error)) {
-            return false;
-        }
-        {
-            LOCK(wallet.cs_wallet);
-            if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
-                error = "PAYMASTER_DATABASE_WRITE";
-                return false;
-            }
-        }
-        operation = std::move(record);
+
     }
 
     std::vector<CRecipient> recipients;
@@ -1748,96 +1754,97 @@ bool RunAutomaticCarrierReplenishment(
                        record.state == ProviderMaintenanceState::PLANNED;
             });
         if (planned != ledger.records.end()) operation = *planned;
-    }
 
-    if (operation) {
-        size_t planned_admission{0};
-        size_t planned_operational{0};
-        const bool outputs_match = std::all_of(
-            operation->outputs.begin(), operation->outputs.end(),
-            [&](const ProviderMaintenanceOutput& output) {
-                if (output.asset != PoolAsset::DD_CARRIER ||
-                    output.dgb_value.value != 0 ||
-                    output.carrier_value.value != 100) {
+        if (operation) {
+            size_t planned_admission{0};
+            size_t planned_operational{0};
+            const bool outputs_match = std::all_of(
+                operation->outputs.begin(), operation->outputs.end(),
+                [&](const ProviderMaintenanceOutput& output) {
+                    if (output.asset != PoolAsset::DD_CARRIER ||
+                        output.dgb_value.value != 0 ||
+                        output.carrier_value.value != 100) {
+                        return false;
+                    }
+                    if (output.purpose == PoolPurpose::ADMISSION) {
+                        ++planned_admission;
+                        return true;
+                    }
+                    if (output.purpose == PoolPurpose::OPERATIONAL) {
+                        ++planned_operational;
+                        return true;
+                    }
+                    return false;
+                });
+            const bool plan_matches =
+                outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
+                planned_admission <= missing_admission &&
+                planned_operational <= missing_operational &&
+                operation->maximum_fee ==
+                    policy.maximum_maintenance_fee_per_transaction &&
+                operation->plan_id ==
+                    MaintenancePlanId(operation->kind, operation->outputs, policy);
+            if (!plan_matches) {
+                if (!ReleaseProviderMaintenanceBudget(
+                        ledger, operation->operation_id, GetTime(), error)) {
                     return false;
                 }
-                if (output.purpose == PoolPurpose::ADMISSION) {
-                    ++planned_admission;
-                    return true;
+                {
+                    LOCK(wallet.cs_wallet);
+                    if (!WalletBatch{wallet.GetDatabase()}
+                             .WritePaymasterMaintenanceLedger(ledger)) {
+                        error = "PAYMASTER_DATABASE_WRITE";
+                        return false;
+                    }
                 }
-                if (output.purpose == PoolPurpose::OPERATIONAL) {
-                    ++planned_operational;
-                    return true;
+                operation.reset();
+            }
+        }
+
+        if (!operation) {
+            ProviderMaintenanceRecord record;
+            do {
+                record.operation_id = GetRandHash();
+            } while (record.operation_id.IsNull());
+            record.kind = ProviderMaintenanceKind::REPLENISH_CARRIER;
+            const auto append_outputs = [&](PoolPurpose purpose, size_t count,
+                                            const char* label) {
+                for (size_t index{0}; index < count; ++index) {
+                    const auto destination = wallet.GetNewDestination(
+                        OutputType::BECH32M, label);
+                    if (!destination) return false;
+                    ProviderMaintenanceOutput output;
+                    output.purpose = purpose;
+                    output.asset = PoolAsset::DD_CARRIER;
+                    output.script_pub_key = GetScriptForDestination(*destination);
+                    output.carrier_value = DDCents{100};
+                    record.outputs.push_back(std::move(output));
                 }
+                return true;
+            };
+            if (!append_outputs(PoolPurpose::ADMISSION, missing_admission,
+                                "Paymaster admission carrier maintenance") ||
+                !append_outputs(PoolPurpose::OPERATIONAL, missing_operational,
+                                "Paymaster operational carrier maintenance")) {
+                error = "PAYMASTER_POOL_DESTINATION_UNAVAILABLE";
                 return false;
-            });
-        const bool plan_matches =
-            outputs_match && (planned_admission == missing_admission || planned_operational == 0) &&
-            planned_admission <= missing_admission &&
-            planned_operational <= missing_operational &&
-            operation->maximum_fee ==
-                policy.maximum_maintenance_fee_per_transaction &&
-            operation->plan_id ==
-                MaintenancePlanId(operation->kind, operation->outputs, policy);
-        if (!plan_matches) {
-            if (!ReleaseProviderMaintenanceBudget(
-                    ledger, operation->operation_id, GetTime(), error)) {
+            }
+            record.plan_id = MaintenancePlanId(record.kind, record.outputs, policy);
+            record.maximum_fee = policy.maximum_maintenance_fee_per_transaction;
+            if (!ReserveProviderMaintenanceBudget(
+                    ledger, policy, record, GetTime(), error)) {
                 return false;
             }
             {
                 LOCK(wallet.cs_wallet);
-                if (!WalletBatch{wallet.GetDatabase()}
-                         .WritePaymasterMaintenanceLedger(ledger)) {
+                if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
                     error = "PAYMASTER_DATABASE_WRITE";
                     return false;
                 }
             }
-            operation.reset();
+            operation = std::move(record);
         }
-    }
 
-    if (!operation) {
-        ProviderMaintenanceRecord record;
-        do {
-            record.operation_id = GetRandHash();
-        } while (record.operation_id.IsNull());
-        record.kind = ProviderMaintenanceKind::REPLENISH_CARRIER;
-        const auto append_outputs = [&](PoolPurpose purpose, size_t count,
-                                        const char* label) {
-            for (size_t index{0}; index < count; ++index) {
-                const auto destination = wallet.GetNewDestination(
-                    OutputType::BECH32M, label);
-                if (!destination) return false;
-                ProviderMaintenanceOutput output;
-                output.purpose = purpose;
-                output.asset = PoolAsset::DD_CARRIER;
-                output.script_pub_key = GetScriptForDestination(*destination);
-                output.carrier_value = DDCents{100};
-                record.outputs.push_back(std::move(output));
-            }
-            return true;
-        };
-        if (!append_outputs(PoolPurpose::ADMISSION, missing_admission,
-                            "Paymaster admission carrier maintenance") ||
-            !append_outputs(PoolPurpose::OPERATIONAL, missing_operational,
-                            "Paymaster operational carrier maintenance")) {
-            error = "PAYMASTER_POOL_DESTINATION_UNAVAILABLE";
-            return false;
-        }
-        record.plan_id = MaintenancePlanId(record.kind, record.outputs, policy);
-        record.maximum_fee = policy.maximum_maintenance_fee_per_transaction;
-        if (!ReserveProviderMaintenanceBudget(
-                ledger, policy, record, GetTime(), error)) {
-            return false;
-        }
-        {
-            LOCK(wallet.cs_wallet);
-            if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
-                error = "PAYMASTER_DATABASE_WRITE";
-                return false;
-            }
-        }
-        operation = std::move(record);
     }
 
     std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;

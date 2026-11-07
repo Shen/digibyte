@@ -20,9 +20,14 @@
 #include <validationinterface.h>
 #include <version.h>
 #include <wallet/test/util.h>
+#include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <array>
+#include <atomic>
+#include <thread>
 
 #include <algorithm>
 #include <vector>
@@ -503,6 +508,100 @@ BOOST_AUTO_TEST_CASE(native_finance_and_automation_json_preserve_complete_observ
         automation.state = state;
         BOOST_CHECK_EQUAL(ToJSON(automation).find_value("state").get_str(), name);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(pool_refresh_uses_current_reservations_instead_of_caller_snapshot, WalletTestingSetup)
+{
+    LOCK(m_wallet.cs_wallet);
+    CKey key;
+    key.MakeNewKey(true);
+    const CScript script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
+    for (int i = 0; i < 3; ++i) funding.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, script);
+    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(funding),
+        TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+    std::vector<ProviderPoolEntry> current;
+    for (uint32_t i = 0; i < 2; ++i) {
+        ProviderPoolEntry entry;
+        entry.outpoint = COutPoint{funding.GetHash(), i};
+        entry.script_pub_key = script;
+        entry.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        entry.updated_at = 1000;
+        current.push_back(entry);
+    }
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(current));
+    auto stale = current;
+    // Interleave a new reservation and another pool insertion after status read.
+    current.front().state = PoolEntryState::RESERVED;
+    current.front().reservation_id = uint256S("ab");
+    auto added = current.back();
+    added.outpoint.n = 2;
+    current.push_back(added);
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(current));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(RefreshPoolConfirmationHeights(m_wallet, stale, error), error);
+    BOOST_REQUIRE_EQUAL(stale.size(), 3U);
+    BOOST_CHECK(stale.front().state == PoolEntryState::RESERVED);
+    BOOST_CHECK(stale.front().reservation_id == uint256S("ab"));
+    BOOST_CHECK_EQUAL(stale.back().confirmation_height, 1);
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(current));
+    BOOST_CHECK(current.front().state == PoolEntryState::RESERVED);
+    BOOST_CHECK(current.front().reservation_id == uint256S("ab"));
+    BOOST_REQUIRE_EQUAL(current.size(), 3U);
+    stale.front().state = PoolEntryState::AVAILABLE;
+    stale.front().reservation_id.SetNull();
+    BOOST_REQUIRE(RefreshPoolConfirmationHeights(m_wallet, stale, error, false));
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(current));
+    BOOST_CHECK(current.front().state == PoolEntryState::RESERVED);
+}
+
+BOOST_FIXTURE_TEST_CASE(concurrent_replenishment_retains_one_current_budget_plan, WalletTestingSetup)
+{
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        m_wallet.SetupDescriptorScriptPubKeyMans();
+        ProviderPolicy offer;
+        offer.funding_models = FUNDING_MODEL_SPONSORED;
+        offer.min_payment = DDCents{100};
+        offer.max_payment = DDCents{MAX_DD_OUTPUT_CENTS};
+        offer.maximum_network_fee = DGBSatoshis{20000000};
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterPolicy(offer));
+    }
+    ProviderLiquidityPolicy policy;
+    policy.paid_maintenance_approved = true;
+    policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{10000000};
+    policy.maximum_maintenance_fee_per_hour = DGBSatoshis{20000000};
+    policy.maximum_maintenance_fee_per_day = DGBSatoshis{30000000};
+    policy.updated_at = 1000;
+    std::array<bool, 2> results{};
+    std::array<std::string, 2> errors;
+    std::array<std::thread, 2> workers;
+    std::atomic<int> ready{0};
+    for (size_t i = 0; i < workers.size(); ++i) {
+        workers[i] = std::thread([&, i] {
+            ++ready;
+            while (ready.load() != 2) std::this_thread::yield();
+            results[i] = RunAutomaticDGBReplenishment(m_wallet, policy, 0, 1, errors[i]);
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (size_t i = 0; i < results.size(); ++i) {
+        BOOST_CHECK(!results[i]);
+        BOOST_CHECK_EQUAL(errors[i], "PAYMASTER_POOL_WAITING_DGB");
+    }
+    LOCK(m_wallet.cs_wallet);
+    ProviderMaintenanceLedger ledger;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::PLANNED);
+    BOOST_CHECK(ledger.records.front().transaction_id.IsNull());
+    ProviderMaintenanceBudgetUsage usage;
+    std::string error;
+    BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, GetTime(), usage, error));
+    BOOST_CHECK_EQUAL(usage.reserved_fee.value, policy.maximum_maintenance_fee_per_transaction.value);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
