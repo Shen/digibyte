@@ -524,6 +524,43 @@ git diff -w $paymasterBases.task_baseline HEAD
 git diff -w $paymasterBases.official_baseline HEAD
 ```
 
+## Review follow-up regressions
+
+Run these focused regressions with a freshly linked candidate. Use a short
+isolated `TEMP`/`TMP` as described above; all wallets/funds are test fixtures.
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/carrier_refill_fences_only_after_exact_construction,carrier_refill_preserves_multiple_outputs_and_send_history_without_broadcast,carrier_withdrawal_stale_fee_input_does_not_fence_provider,direct_submit_holds_stop_exclusion_through_processing:paymaster_application_tests/client_order_replay_uses_persisted_terms_and_existing_hash,created_sweep_resume_selects_original_unreserved_wallet_inputs:paymaster_recovery_chainstate_tests/exact_final_proof_requires_canonical_preflight,known_final_reconstructs_spent_prevouts_without_new_spending_authority' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster review follow-up regression failed' }
+```
+
+On Unix use the corresponding fresh `./src/test/test_digibyte` binary.
+For Qt, select `paymasterClientRestoresOriginalOrderFromNativeStatus` through
+the suite/function environment variables described above. It checks actual
+wallet-record/native-status/RPC-serializer data against the Qt replay parameters
+and canonical request hash. It does not mock a successful canonical guard.
+The CREATED sweep regression reaches the production input-selection helper with
+real confirmed wallet DD outputs and newly received funds. It checks exact
+original inputs, ordinary locks and another session's reservation; it is not a
+complete signed/network payment test.
+
+The checkpoint tests exercise both harmless pre-commit rejection and retained
+post-commit uncertainty. The direct-submit barrier test checks the actual work
+guard while processing is paused, not merely a wait on the wallet mutex. The
+`paymaster_wallet_security_tests/provider_final_commit_spends_budget_atomically`
+regression also replays the exact saved user PSBT through the public facade with
+stopped, absent and disabled managers after persistent stop. It checks the locked
+wallet, identical final/result bytes, accounting and complete database contents.
+The historical-proof test obtains evidence from canonical local observation;
+`addUnchecked` is its pool fixture, not evidence of ordinary pool acceptance.
+Current complete product/platform/sanitizer gates remain separate.
+
+Run `paymaster_wallet_security_tests/provider_confirmed_recovery_archives_only_after_reorg_safety_depth`
+for a mined provider recovery at 239/240 confirmations, a pre-archive reorg,
+atomic archive failure/retry, released admission capacity, exact replay, finance
+reconstruction and damaged archive records. This checks bounded active history;
+the retained signed evidence still occupies disk space.
+
 ## Coverage map
 
 Paths below are relative to `src/test/`, `src/wallet/test/`, `src/qt/test/` or

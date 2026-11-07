@@ -156,6 +156,16 @@ flow; it is not a `resolvepaymastersession` action string. That RPC accepts
 the current guards. State may change after inspection, so handle rejection of
 an action that was previously allowed.
 
+New public sessions expose `resume_order`, containing the original canonical
+recipient, amount semantics, fee cap, selection, attempt limit and ordered inputs.
+Use these validated parameters for high-level resumption, then request exact
+quote approval normally. They are replay metadata, not permission to sign.
+An unavailable legacy, unknown-version or damaged record is returned as null
+with `resume_order_error`; payment observations and signed retry/recovery remain
+available. Qt disables preparation resumption when neither these parameters nor
+its still-live immutable request are available. Integrations retaining their
+original exact arguments can continue to use the existing send RPC.
+
 Recovery approval uses its own `recovery_authorization_commitment` and exact
 recovery terms. A payment commitment cannot authorize self-recovery, and a
 recovery confirmation cannot be substituted for recipient-payment evidence.

@@ -267,6 +267,10 @@ then stops service. It does not revoke existing signatures or release protected
 funds. A bare `stoppaymaster` can be undone later by saved autostart. Complete
 node shutdown is a separate operation; stopping a provider does not stop the node.
 
+The stop barrier also covers a concurrent direct `submitpaymasterdigidollar`
+call. Previously saved exact final transactions can still be replayed after a
+stop; replay does not create another provider signature.
+
 A confirmed stopped snapshot takes precedence over missing reserves or budgets
 for a future restart. Open payments, restore/checkpoint errors and uncertain
 release results remain visible; stopped status does not certify capital release.

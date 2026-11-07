@@ -99,6 +99,11 @@ not permit spending collateral or another payment's reserved inputs.
 | Recovery / ambiguous result | Signed work may still spend the original inputs. | Use the available status/recovery actions. A recovery confirmation is not recipient-payment success. |
 
 Closing the window or restarting does not undo signed work. An unsigned local
+preparation resumes with its saved original amount and selection settings.
+If an older or damaged record lacks these settings, the wallet keeps status,
+safe cancellation and signed recovery available; it does not guess new limits
+from the compose form. A safely cancelled unsigned order can be prepared again
+as a separate payment with another exact review. An unsigned local
 cancellation may leave the provider's reservation until expiry; it does not
 charge a service fee or send the payment. After signing, cancellation is not a
 simple undo: the original and a recovery transaction may compete for confirmation.

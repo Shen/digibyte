@@ -48,6 +48,9 @@ transaction template. Signing is role-scoped and requires `SIGHASH_DEFAULT`;
 unknown/substituted fields fail closed. Without an accepted exact commitment,
 high-level calls remain preparation-only regardless of the `prepare_only` flag.
 Provider final bytes, authority, accounting and pool state commit before broadcast.
+Historical spent-prevout reconstruction requires an opaque exact-final preflight
+proof bound to the transaction/witness and current chain observation. A txid,
+presence enum or caller-supplied boolean cannot enable that reconstruction.
 Clients validate txid/wtxid, all inputs/outputs/witnesses and actual-prevout
 script execution against the trusted PSBT, with applicable mempool preflight.
 Late negative results cannot overwrite a final commit or release its authority.

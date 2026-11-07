@@ -4,6 +4,36 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Checkpoint fences, stop exclusion and exact restart
+
+Review follow-up based on `002375aa29993dd387294ce3e7e05e39f2a9f1cc`,
+checked on 2026-11-07. Contracts and migration behavior are in the implementation
+and integration guides; focused selectors are in the test runbook. This adds
+independent client-order metadata and terminal recovery archival keys, while
+preserving wire, PaymentSession and tombstone formats and request-hash bytes.
+
+Thirty-six C++ source units were freshly compiled (26 production, ten test/fuzz),
+plus regenerated Qt test MOC. MSVC 19.43.34810 / toolset 14.43.34808 uses
+`/W3 /WX /Od /MT /std:c++20`; Qt is 5.15.10. Isolated native/Qt links reuse
+remaining objects/libraries. These are not clean product builds or complete
+transitive-header provenance. Commands, source/object/binary hashes and complete
+logs are retained under `temp/paymaster-implement-002375aa/` in `compiled.jsonl`,
+`runs.jsonl`, the native/Qt provenance JSON files and `verification.json`.
+
+| Executed check | Bounded result |
+|---|---|
+| Native | 37 distinct cases / 27,890 assertions pass across the isolated native links. Covers pre-commit rejection without a checkpoint fence, retained post-commit uncertainty, immediate no-broadcast DD tracking/history, actual Stop/work exclusion, exact original orders including a pre-reservation sweep restart, opaque historical proofs, real 239/240-confirmation recovery archival/reorgs, exact replay, finance and ordinary DD/DB cursor regressions. Repeated cases count once. The final direct-facade replay case uses `native-v5`: stopped, absent and disabled managers with a locked wallet and unchanged complete DB/accounting. |
+| Qt | Six selected functions pass on `qt.exe`, zero failures/skips: native-record/RPC/Qt exact-order roundtrip and related restore, fallback, action, signed-recovery and snapshot cases. Windows platform/Fusion; 22 lifecycle/data rows include 12 init/cleanup rows. |
+| C++17 and persistence fuzz codec | All 20 modified production translation units and the extended persistence-fuzz codec pass current-source `/Zs /std:c++17`; fuzz uses `/Zc:preprocessor`. The codec also compiles in C++20. No fuzz campaign or linked C++17 product is claimed. |
+| Local controls | Working-tree dependency/cycle checks, six boundary fixtures, changed-path/shared-Core records against HEAD policy, JSON and whitespace checks pass. |
+
+Initial compile, selector and fixture failures remain in the logs; final fixtures
+preserve wallet-height, key-lock, financial and independent-checkpoint assertions.
+Archival bounds active recovery processing, not total disk history or existing
+complete commit scans. No new daemon, full suite, functional, sanitizer,
+Tidy-plugin or clean supported-platform product result is claimed. Those
+operator/CI checks and commands remain in the test runbook.
+
 ## Exact execution, authorization commits and unavailable balances
 
 Corrections based on `9bd53997af884691940a696d1c4030120419a887`,

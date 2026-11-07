@@ -81,8 +81,15 @@ SOCKS5 privacy rules; they never reserve wallet capital. See the
 
 ## Durable state and recovery
 
-The client persists a canonical request ID/order. Identical concurrent retries
-join it; material changes using the same ID fail. Sessions, reservations, exact
+The client persists a canonical request ID/order. New public orders also retain
+an independently versioned `pmclientorder` replay record with the original fee
+cap, selection, attempt limit, amount semantics and ordered inputs. Its hash and
+session/intent bindings are validated before exposing `resume_order`; it grants
+no acceptance or signing authority. Missing legacy or unreadable replay metadata
+does not hide signed payment/recovery observations. Qt never reconstructs it from
+compose defaults; existing integrations can still replay their saved exact arguments.
+Identical concurrent retries join it; material changes using the same ID fail.
+Sessions, reservations, exact
 commit evidence, budgets and final observations are persisted with their state
 transitions. Network/UI status alone must not release protected inputs.
 
@@ -126,9 +133,13 @@ after that deadline; Qt must not request fresh approval for the saved signature.
 Alternative recovery prices the aggregate original DD inputs and deducts its
 fee from wallet-owned returns. The ordinary recipient-plus-fee ceiling does
 not limit that aggregate; each return and fee output retains its ordinary DD
-limits. Both parties use the same checked, rounded fee calculation. After an
-independent exact-final preflight, already spent recovery prevouts are supplied
-only in a disposable reconstruction view. Full manifest and final-witness
+limits. Both parties use the same checked, rounded fee calculation. After the
+canonical exact-final preflight, already spent recovery prevouts are supplied
+only in a disposable reconstruction view. This requires an opaque, transient
+proof bound to the exact transaction/witness, chainstate and observed tip;
+presence enums or persisted bytes cannot manufacture it. A changed tip requires
+a fresh preflight without holding the chain lock across index waits.
+Full manifest and final-witness
 validation remains mandatory; new signing still requires unspent inputs.
 
 Recovery fee exposure is retained through the 240-confirmation reorganization
@@ -136,13 +147,20 @@ safety depth. A winning original payment is accounted once. Retained exact
 commit evidence can validate historical execution after rolling ledger entries
 expire, without authorizing new work or recreating budget.
 
-Normal provider sessions and alternative provider recoveries share an admission
-limit of 8,192 retained records. Exact existing retries do not consume another
+Normal provider sessions and active alternative provider recoveries share an admission
+limit of 8,192 records. Exact existing retries do not consume another
 record. Each cleanup pass removes at most 64 eligible unsigned records of each
 kind after all saved retry/capacity deadlines and the 24-hour replay retention
 interval. Recovery pruning revalidates the saved shape, absence of signed/commit
-evidence and released pool/budget bindings before its atomic deletion. Signed,
-ambiguous and protected history is not discarded to admit new work.
+evidence and released pool/budget bindings before its atomic deletion.
+At 240 confirmations, maintenance can atomically move at most 64 fully validated
+provider recovery finals into `pmaltarchive`, with a `pmaltlocator` consistency
+marker. Admission, drain and expiry scans visit active records only. Exact replay
+and finance reconstruction point-read the full evidence using the recovery ID
+already bound by the authoritative commit's `quote_id`; they revalidate that
+binding. The marker grants no authority, and missing/corrupt/unsupported archived
+evidence fails closed. Signed, ambiguous and protected history is not discarded
+to admit new work. Archival bounds active work, not total on-disk history.
 
 ## Wallet lifecycle
 
@@ -211,6 +229,17 @@ Canonical wallet history/index checks remain prerequisites. Automatic work
 belongs to the daemon; Qt/CLI control the same persisted state. Restoration
 sets a durable guard before load callbacks, and an independent checkpoint
 helps detect stale wallet copies. See the [threat model](paymaster-threat-model.md).
+
+Direct provider Submit RPCs hold the same work guard as the network dispatcher,
+including during validation, new signing, commit and broadcast. Stop priority
+therefore covers both entry points. Exact durable replay does not start service
+or create a new signature.
+
+Carrier refill and withdrawal construct and validate their exact signed DD
+transaction and fee under the final wallet lock before opening the independent
+checkpoint operation. The pending marker begins immediately before wallet
+commit/accounting. A rejected stale plan leaves no pending operation; failures
+after a possible commit retain the conservative fence.
 
 Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can

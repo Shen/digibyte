@@ -841,6 +841,12 @@ units share internal helpers. `paymasterdb.cpp` persists wallet records;
 [threat model](doc/paymaster-threat-model.md) for retention and restore limits.
 `GetAlternativeRecoveryByIdWithStatus` distinguishes absent recovery IDs from
 local read/version failures before inbound processing validates stored shape.
+The separate `ClientPaymentOrder` record retains original replay arguments;
+`LoadClientPaymentOrder` validates them against existing request identity before
+native status exposes them to RPC/Qt. It grants no signing authority.
+Confirmed provider recovery finals move to terminal archival storage after the
+existing safety depth; active scans exclude them and exact replay/finance read
+their full evidence by the recovery ID bound in the commit.
 
 ### src/wallet/paymasterapplication*, paymasterservice*, paymasterclient*, paymasterprocessing*, paymasterfinance*
 
@@ -920,6 +926,9 @@ and loaded-wallet lifetime handling.
 - Exact durable observations skip unchanged wallet updates after witness/state
   checks, preserving caches and notifications; changed state/metadata still
   reconciles. `RecoverDurablePaymasterCommits` has opt-in `bench` timing.
+- Canonical exact-final preflight alone issues `ExactFinalTransactionProof`
+  (`src/paymaster/validation.h`), bound to full transaction/witness, chainstate
+  and observed tip. Historical spent-prevout reconstruction requires that proof.
 - Wallet-specific provider proof construction, announcement generation,
   operational slot reservation, and policy/pool readiness integration.
 - Persists and validates wallet-local liquidity policy and maintenance-ledger
