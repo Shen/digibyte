@@ -1570,7 +1570,7 @@ PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wall
         CMutableTransaction transaction;
         if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, transfer_plan, transfer_error,
                                                &inputs, /*allow_paymaster_pool_inputs=*/true) ||
-            !dd_wallet->BuildDigiDollarTransfer(transfer_plan, transaction, transfer_error)) {
+            !dd_wallet->BuildDigiDollarTransfer(transfer_plan, transaction, transfer_error, /*allow_paymaster_pool_inputs=*/true)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
         }
         dd_tx = MakeTransactionRef(std::move(transaction));

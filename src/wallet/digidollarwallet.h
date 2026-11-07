@@ -1150,7 +1150,13 @@ public:
      * it into the wallet or broadcasting it. */
     bool BuildDigiDollarTransfer(const DDTransferPlan& plan,
                                  CMutableTransaction& transaction,
-                                 std::string& error);
+                                 std::string& error,
+                                 bool allow_paymaster_pool_inputs = false);
+    /** Recheck the exact inputs under the execution lock. A saved funding
+     * plan never grants permission to bypass a newer reservation or coin lock. */
+    bool ValidateDigiDollarTransferPlan(const DDTransferPlan& plan,
+                                       bool allow_paymaster_pool_inputs,
+                                       std::string& error) const;
     bool SelectFeeCoins(const CAmount& fee_amount, std::vector<COutPoint>& selected_utxos, CAmount& selected_total, std::vector<CAmount>* selected_amounts = nullptr, const std::vector<COutPoint>* exclude_utxos = nullptr) const;
     CAmount CalculateTransactionFee(const CMutableTransaction& tx) const;
 

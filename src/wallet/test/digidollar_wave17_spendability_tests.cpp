@@ -39,6 +39,7 @@
 
 #include <wallet/wallet.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/paymasterstore.h>
 #include <wallet/walletdb.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -497,6 +498,61 @@ BOOST_AUTO_TEST_CASE(w17_15_selected_dd_planner_is_non_mutating)
     auto utxos = dd_wallet.GetDDUTXOs();
     BOOST_REQUIRE_EQUAL(utxos.size(), 1u);
     BOOST_CHECK(utxos[0].outpoint == selected_input);
+
+    // Exact plans are only snapshots. Execution must recheck the selected
+    // inputs, even when another ordinary DD input covers the whole payment.
+    const auto other = MakeMintLikeTx();
+    AddConfirmedWalletTx(*this, m_wallet, other);
+    dd_wallet.AddDDUTXO(COutPoint{other->GetHash(), 1}, 50000);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto before_validation = database.m_records;
+    BOOST_REQUIRE_MESSAGE(dd_wallet.ValidateDigiDollarTransferPlan(plan, false, error), error);
+    BOOST_CHECK(database.m_records == before_validation);
+    auto altered = plan;
+    ++altered.estimated_fee;
+    BOOST_CHECK(!dd_wallet.ValidateDigiDollarTransferPlan(altered, false, error));
+    BOOST_CHECK_EQUAL(error, "DigiDollar transfer fee plan changed");
+    altered = plan;
+    altered.fee_utxos.push_back(plan.fee_utxos.front());
+    altered.fee_amounts.push_back(plan.fee_amounts.front());
+    BOOST_CHECK(!dd_wallet.ValidateDigiDollarTransferPlan(altered, false, error));
+
+    CMutableTransaction built;
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.LockCoin(plan.fee_utxos.front());
+    }
+    BOOST_CHECK(!dd_wallet.BuildDigiDollarTransfer(plan, built, error));
+    BOOST_CHECK(error.find("fee input is no longer available") != std::string::npos);
+    BOOST_CHECK(built.vin.empty());
+    // The pool-retirement exception never overrides manual DGB locks.
+    BOOST_CHECK(!dd_wallet.ValidateDigiDollarTransferPlan(plan, true, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.UnlockCoin(plan.fee_utxos.front());
+    }
+    BOOST_REQUIRE_MESSAGE(dd_wallet.ValidateDigiDollarTransferPlan(plan, false, error), error);
+
+    DigiDollar::Paymaster::InputReservation reservation;
+    reservation.outpoint = selected_input;
+    reservation.request_id = "550e8400-e29b-41d4-a716-446655442001";
+    reservation.session_id = RandHash();
+    reservation.created_at = 1;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterReservation(reservation));
+    }
+    BOOST_CHECK_GE(dd_wallet.GetSpendableDDBalance(), plan.total_amount);
+    const auto reserved = database.m_records;
+    BOOST_CHECK(!dd_wallet.BuildDigiDollarTransfer(plan, built, error));
+    BOOST_CHECK(built.vin.empty());
+    std::string txid;
+    const std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients{
+        {CDigiDollarAddress{plan.recipients.front().first}, plan.recipients.front().second}};
+    BOOST_CHECK(!dd_wallet.TransferDigiDollarMany(recipients, txid, error,
+        nullptr, &preset, "", false, &plan));
+    BOOST_CHECK(txid.empty());
+    BOOST_CHECK(database.m_records == reserved);
 }
 
 BOOST_AUTO_TEST_CASE(w17_15b_planner_types_insufficient_dgb_fee_inputs)

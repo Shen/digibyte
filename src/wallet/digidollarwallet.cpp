@@ -49,6 +49,24 @@ static constexpr CAmount MIN_DD_TRANSFER_FEE_RATE{35000000}; // 0.35 DGB/kB
 static constexpr CAmount MIN_DD_TRANSFER_FEE{10000000};       // 0.1 DGB
 static constexpr CAmount TRANSFER_BUILDER_PRICE_UNUSED{1};    // Transfers are price-independent.
 
+std::vector<wallet::COutput> AvailableDDTransferFeeCoins(const wallet::CWallet& wallet)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+std::vector<wallet::COutput> AvailableDDTransferFeeCoins(const wallet::CWallet& wallet)
+{
+    wallet::CCoinControl control;
+    wallet::CoinFilterParams filter;
+    filter.only_spendable = true;
+    filter.min_amount = 1;
+    filter.include_immature_coinbase = false;
+    auto coins = wallet::AvailableCoins(wallet, &control, std::nullopt, filter).All();
+    if (gArgs.GetBoolArg("-dandelion", true)) {
+        coins.erase(std::remove_if(coins.begin(), coins.end(),
+                                  [](const wallet::COutput& coin) { return coin.depth < 1; }), coins.end());
+    }
+    return coins;
+}
+
 bool IsPendingDDTransaction(const wallet::CWallet& wallet,
                             const wallet::CWalletTx& wtx,
                             CAmount dd_amount) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
@@ -1660,6 +1678,7 @@ bool DigiDollarWallet::TransferDigiDollarMany(const std::vector<std::pair<CDigiD
                 error = "Exact DigiDollar transfer plan no longer matches the request";
                 return false;
             }
+            if (!ValidateDigiDollarTransferPlan(plan, allow_paymaster_pool_inputs, error)) return false;
         } else if (!PlanFundedDigiDollarTransfer(
                        recipients, plan, error, preset_dd_inputs,
                        allow_paymaster_pool_inputs)) {
@@ -7400,9 +7419,64 @@ bool DigiDollarWallet::PlanFundedDigiDollarTransfer(
     return true;
 }
 
+bool DigiDollarWallet::ValidateDigiDollarTransferPlan(const DDTransferPlan& plan,
+                                                     bool allow_paymaster_pool_inputs,
+                                                     std::string& error) const
+{
+    auto locks = LockDDWallet();
+    error.clear();
+    if (!m_wallet || plan.fee_utxos.empty() ||
+        plan.fee_utxos.size() != plan.fee_amounts.size() || plan.estimated_fee <= 0) {
+        error = "Invalid DigiDollar transfer plan";
+        return false;
+    }
+    std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
+    for (const auto& [address, amount] : plan.recipients) recipients.emplace_back(CDigiDollarAddress{address}, amount);
+    DDTransferPlan current;
+    if (!PlanDigiDollarTransfer(recipients, current, error, &plan.dd_utxos, allow_paymaster_pool_inputs)) return false;
+    if (current.dd_amounts != plan.dd_amounts || current.selected_dd_total != plan.selected_dd_total ||
+        current.total_amount != plan.total_amount || current.dd_change != plan.dd_change) {
+        error = "DigiDollar transfer input amounts changed";
+        return false;
+    }
+    std::map<COutPoint, CAmount> available;
+    for (const auto& coin : AvailableDDTransferFeeCoins(*m_wallet)) available.emplace(coin.outpoint, coin.txout.nValue);
+    std::set<COutPoint> unique{plan.dd_utxos.begin(), plan.dd_utxos.end()};
+    CAmount total{0};
+    for (size_t index{0}; index < plan.fee_utxos.size(); ++index) {
+        const auto found = available.find(plan.fee_utxos[index]);
+        if (!unique.insert(plan.fee_utxos[index]).second || found == available.end() ||
+            found->second != plan.fee_amounts[index] || found->second > MAX_MONEY - total) {
+            error = "DigiDollar transfer fee input is no longer available";
+            return false;
+        }
+        total += found->second;
+    }
+    if (total != plan.selected_fee_total || total < plan.estimated_fee) {
+        error = "DigiDollar transfer fee funding changed";
+        return false;
+    }
+    DigiDollar::TxBuilderTransferParams params;
+    params.recipients = plan.recipients;
+    params.ddUtxos = plan.dd_utxos;
+    params.ddAmounts = plan.dd_amounts;
+    params.feeUtxos = plan.fee_utxos;
+    params.feeRate = MIN_DD_TRANSFER_FEE_RATE;
+    size_t projected_vsize{0};
+    CAmount estimated_fee{0};
+    if (!PreflightDDTransferCapacity(params, plan.selected_dd_total, plan.total_amount, error,
+                                     &projected_vsize, &estimated_fee)) return false;
+    if (projected_vsize != plan.projected_vsize || estimated_fee != plan.estimated_fee) {
+        error = "DigiDollar transfer fee plan changed";
+        return false;
+    }
+    return true;
+}
+
 bool DigiDollarWallet::BuildDigiDollarTransfer(const DDTransferPlan& plan,
                                                CMutableTransaction& transaction,
-                                               std::string& error)
+                                               std::string& error,
+                                               bool allow_paymaster_pool_inputs)
 {
     auto locks = LockDDWallet();
     error.clear();
@@ -7416,6 +7490,7 @@ bool DigiDollarWallet::BuildDigiDollarTransfer(const DDTransferPlan& plan,
         error = "Invalid DigiDollar transfer plan";
         return false;
     }
+    if (!ValidateDigiDollarTransferPlan(plan, allow_paymaster_pool_inputs, error)) return false;
 
     CTxOut first_dd_output;
     {
@@ -7492,19 +7567,11 @@ bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COu
 
     // Lock wallet and get available coins
     LOCK(m_wallet->cs_wallet);
-    wallet::CCoinControl coin_control;
     // Keep the wallet's normal safe coin policy. With Dandelion enabled, DD
     // transactions use confirmed DGB fee inputs only so rapid sends do not
     // build fee-change chains that can be promoted from the stempool out of
     // ancestor order.
-    const bool require_confirmed_fee_inputs = gArgs.GetBoolArg("-dandelion", true);
-
-    wallet::CoinFilterParams filter_params;
-    filter_params.only_spendable = true;
-    filter_params.min_amount = 1;  // Minimum 1 satoshi
-    filter_params.include_immature_coinbase = false;  // Exclude immature coinbase
-
-    available_coins = wallet::AvailableCoins(*m_wallet, &coin_control, std::nullopt, filter_params).All();
+    available_coins = AvailableDDTransferFeeCoins(*m_wallet);
 
     if (available_coins.empty()) {
         LogPrintf("DigiDollar: SelectFeeCoins - No DGB UTXOs available\n");
@@ -7522,12 +7589,6 @@ bool DigiDollarWallet::SelectFeeCoins(const CAmount& fee_amount, std::vector<COu
     // Select UTXOs until fee covered, excluding any specified UTXOs
     for (const auto& coin : available_coins) {
         if (selected_total >= fee_amount) break;
-        if (require_confirmed_fee_inputs && coin.depth < 1) {
-            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: SelectFeeCoins - skipping unconfirmed fee UTXO %s:%u while Dandelion is enabled\n",
-                     coin.outpoint.hash.ToString(), coin.outpoint.n);
-            continue;
-        }
-
         COutPoint outpoint = coin.outpoint;
         CAmount amount = coin.txout.nValue;
 
