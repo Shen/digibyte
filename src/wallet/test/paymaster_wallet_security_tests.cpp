@@ -2478,10 +2478,39 @@ BOOST_AUTO_TEST_CASE(
             fixture.capacity_request_hash));
     }
     PaymasterStore capacity_store{capacity_wallet};
+    const auto capacity_before = GetMockableDatabase(capacity_wallet).m_records;
+    BOOST_CHECK(!capacity_store.ValidateProviderPreSignatureAuthorization(
+        authorized, fixture.request.intent.genesis_hash, now + 4,
+        capacity_request, capacity_proof, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_DATABASE_READ");
+    BOOST_CHECK(GetMockableDatabase(capacity_wallet).m_records == capacity_before);
+    BOOST_CHECK(SerializePaymasterSecurityObject(capacity_request) ==
+                SerializePaymasterSecurityObject(PaymasterCapacityRequest{}));
+    BOOST_CHECK(capacity_proof.provider_id.IsNull());
+    BOOST_CHECK(capacity_proof.request_id.empty());
+    BOOST_CHECK(capacity_proof.liquidity_slots.empty());
+    BOOST_CHECK(capacity_proof.identity_signature.empty());
+
+    // Genuine absence has neither index, unlike the dangling response above.
+    {
+        LOCK(capacity_wallet.cs_wallet);
+        WalletBatch batch{capacity_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.ErasePaymasterCapacityNonce(fixture.capacity_request.client_nonce));
+        BOOST_REQUIRE(batch.ErasePaymasterCapacitySession(
+            paymaster_store::internal::GetPersistedCapacitySessionKey(fixture.capacity_proof)));
+    }
+    const auto absent_before = GetMockableDatabase(capacity_wallet).m_records;
     BOOST_CHECK(!capacity_store.ValidateProviderPreSignatureAuthorization(
         authorized, fixture.request.intent.genesis_hash, now + 4,
         capacity_request, capacity_proof, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_RESERVATION_MISSING");
+    BOOST_CHECK(GetMockableDatabase(capacity_wallet).m_records == absent_before);
+    BOOST_CHECK(SerializePaymasterSecurityObject(capacity_request) ==
+                SerializePaymasterSecurityObject(PaymasterCapacityRequest{}));
+    BOOST_CHECK(capacity_proof.provider_id.IsNull());
+    BOOST_CHECK(capacity_proof.request_id.empty());
+    BOOST_CHECK(capacity_proof.liquidity_slots.empty());
+    BOOST_CHECK(capacity_proof.identity_signature.empty());
 }
 
 BOOST_AUTO_TEST_CASE(

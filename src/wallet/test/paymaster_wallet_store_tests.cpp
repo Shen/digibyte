@@ -1310,10 +1310,22 @@ BOOST_AUTO_TEST_CASE(session_lookup_distinguishes_absence_from_read_failure)
         for (const auto& lookup : lookups) {
             PaymentSession loaded;
             if (expected_error) {
-                BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(lookup, store, loaded), UniValue,
+                BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(lookup, store, loaded), ApplicationError,
+                    [&](const ApplicationError& failure) {
+                        return failure.kind == ErrorKind::WALLET && failure.code == expected_error &&
+                               failure.what() == std::string{expected_error} &&
+                               failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+                    });
+                BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::InvokePaymasterService([&]() -> UniValue {
+                    return UniValue{paymaster_rpc::internal::FindSession(lookup, store, loaded)};
+                }), UniValue,
                     [&](const UniValue& failure) {
+                        const auto& data = failure.find_value("data");
                         return failure.find_value("code").getInt<int>() == RPC_WALLET_ERROR &&
-                               failure.find_value("message").get_str() == expected_error;
+                               failure.find_value("message").get_str() == expected_error &&
+                               data.find_value("paymaster_code").get_str() == expected_error &&
+                               data.find_value("disposition").get_str() == "reconcile" &&
+                               !data.exists("session_absent");
                     });
             } else {
                 BOOST_REQUIRE(paymaster_rpc::internal::FindSession(lookup, store, loaded));
@@ -1364,9 +1376,10 @@ BOOST_AUTO_TEST_CASE(session_lookup_distinguishes_absence_from_read_failure)
     database.m_records.erase(tombstone_key);
     BOOST_CHECK(!paymaster_rpc::internal::FindSession(by_request, store, session));
     const auto orphaned = database.m_records;
-    BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(by_session, store, session), UniValue,
-        [](const UniValue& failure) {
-            return failure.find_value("message").get_str() == "PAYMASTER_SESSION_READ_FAILED";
+    BOOST_CHECK_EXCEPTION(paymaster_rpc::internal::FindSession(by_session, store, session), ApplicationError,
+        [](const ApplicationError& failure) {
+            return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_SESSION_READ_FAILED" &&
+                   failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
         });
     BOOST_CHECK(database.m_records == orphaned);
 }
