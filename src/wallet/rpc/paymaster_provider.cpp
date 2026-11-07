@@ -796,7 +796,7 @@ RPCHelpMan preparepaymasterpool()
                                                                                                                     {"execute", RPCArg::Type::BOOL, RPCArg::Default{false}, "Persist the reviewed finite setup and automatically continue it when funding is confirmed"},
                                                                                                                     {"plan_id", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Unchanged preview plan id required for execution"},
                 {"cancel", RPCArg::Type::BOOL, RPCArg::Default{false}, "With execute and the original plan_id, cancel only steps with no saved transaction; signed transactions remain tracked"},
-                {"preview_policy", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Read-only estimate with a proposed policy; cannot be executed", {}, RPCArgOptions{.skip_type_check = true}},
+                {"preview_policy", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Read-only estimate with a proposed policy; cannot be executed", {}, RPCArgOptions{/*skip_type_check=*/true}},
                 {"maximum_fee_satoshis", RPCArg::Type::NUM, RPCArg::Default{20000000}, "Maximum fee per setup transaction; at most one DGB and one DD transaction are authorized"},
                 {"recover_dgb_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Explicitly adopt an existing wallet DGB transaction; never discover it from labels"},
                 {"recover_dgb_outputs", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "Exact outputs of the recovery transaction", {

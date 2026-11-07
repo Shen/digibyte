@@ -319,7 +319,7 @@ void ExerciseReferenceIntegrity(uint8_t session_mutation,
 } // namespace
 
 FUZZ_TARGET(paymaster_persistence_records,
-            .init = InitializePaymasterPersistence)
+            /*init=*/InitializePaymasterPersistence)
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     const uint8_t record_kind =

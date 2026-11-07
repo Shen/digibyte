@@ -2785,7 +2785,7 @@ void ParseRawEnvelope(FuzzedDataProvider& provider)
  * doc/fuzzing.md; these comments make the deterministic seeds reproducible.
  */
 FUZZ_TARGET(paymaster_stateful_security,
-            .init = initialize_paymaster_stateful)
+            /*init=*/initialize_paymaster_stateful)
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     StatefulArtifacts artifacts;

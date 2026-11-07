@@ -137,7 +137,7 @@ void ParseHardenedV4Record(uint8_t message_type,
 
 } // namespace
 
-FUZZ_TARGET(paymaster_wire_envelopes, .init = initialize_paymaster_wire)
+FUZZ_TARGET(paymaster_wire_envelopes, /*init=*/initialize_paymaster_wire)
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     const uint8_t message_type = provider.ConsumeIntegralInRange<uint8_t>(0, 7);

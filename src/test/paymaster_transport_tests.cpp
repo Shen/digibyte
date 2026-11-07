@@ -74,10 +74,13 @@ struct PaymasterChannelSetup : TestingSetup {
     {
         in_addr address;
         address.s_addr = htonl(0x01020304);
+        CNodeOptions options;
+        options.use_v2transport = true;
+        options.paymaster_listener = inbound;
         auto node = std::make_unique<CNode>(id, nullptr,
             CAddress{CService{address, 12024}, NODE_NETWORK}, id, 0, CAddress{}, "",
             inbound ? ConnectionType::INBOUND : ConnectionType::PAYMASTER, false,
-            CNodeOptions{.use_v2transport = true, .paymaster_listener = inbound});
+            std::move(options));
         for (int round = 0; round < 8; ++round) {
             BOOST_REQUIRE(Transfer(*node->m_transport, remote).empty());
             BOOST_REQUIRE(Transfer(remote, *node->m_transport).empty());
@@ -469,7 +472,7 @@ BOOST_FIXTURE_TEST_CASE(channel_authentication_rejects_two_leg_bip324_relay, Bas
         BOOST_REQUIRE(receiver.Decrypt(Span{ciphertext}.subspan(BIP324Cipher::LENGTH_LEN), {}, ignore, plaintext));
         BOOST_REQUIRE(!ignore);
         CDataStream decoded{MakeUCharSpan(plaintext), SER_NETWORK, ::PROTOCOL_VERSION};
-        std::remove_cvref_t<decltype(message)> received;
+        std::decay_t<decltype(message)> received;
         decoded >> received;
         BOOST_REQUIRE(decoded.empty());
         return received;
