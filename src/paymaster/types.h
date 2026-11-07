@@ -135,6 +135,14 @@ std::optional<DDCents> ComputePaymasterFee(
     DDCents payment, uint32_t fee_rate_bps,
     DDCents maximum_service_fee = DDCents{});
 
+/** Compute the same rounded/capped fee for self-recovery. The fee is deducted
+ * from the aggregate DD inputs, which may fund several ordinary-sized return
+ * outputs. Require at least one minimum-sized return and a representable fee;
+ * the transaction validator separately bounds every input/output and count. */
+std::optional<DDCents> ComputePaymasterRecoveryFee(
+    DDCents input_total, uint32_t fee_rate_bps,
+    DDCents maximum_service_fee = DDCents{});
+
 /** Return the exact carrier successor amount for a sub-1-DD fee. */
 std::optional<DDCents> ComputeCarrierSuccessor(
     DDCents carrier, DDCents service_fee, std::string& error);

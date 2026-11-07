@@ -14,6 +14,27 @@ using namespace DigiDollar::Paymaster;
 
 BOOST_AUTO_TEST_SUITE(paymaster_types_tests)
 
+BOOST_AUTO_TEST_CASE(recovery_fee_is_deducted_from_aggregate_inputs)
+{
+    BOOST_CHECK(!ComputePaymasterFee(DDCents{MAX_DD_OUTPUT_CENTS}, 10));
+    const auto at_limit = ComputePaymasterRecoveryFee(DDCents{MAX_DD_OUTPUT_CENTS}, 10);
+    BOOST_REQUIRE(at_limit);
+    BOOST_CHECK_EQUAL(at_limit->value, 10000);
+    const auto multiple_outputs = ComputePaymasterRecoveryFee(DDCents{12000000}, 10);
+    BOOST_REQUIRE(multiple_outputs);
+    BOOST_CHECK_EQUAL(multiple_outputs->value, 12000);
+    BOOST_CHECK_EQUAL(ComputePaymasterRecoveryFee(DDCents{12000000}, 10, DDCents{99})->value, 99);
+    BOOST_CHECK_EQUAL(ComputePaymasterRecoveryFee(DDCents{12000000}, 0)->value, 0);
+    BOOST_CHECK_EQUAL(ComputePaymasterRecoveryFee(DDCents{1001}, 10)->value,
+                      ComputePaymasterFee(DDCents{1001}, 10)->value);
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{99}, 0));
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{100}, 10));
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{12000000}, MAX_RATE_BPS));
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{std::numeric_limits<int64_t>::max()}, MAX_RATE_BPS));
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{1000}, 1));
+    BOOST_CHECK(!ComputePaymasterRecoveryFee(DDCents{1000}, 10, DDCents{-1}));
+}
+
 BOOST_AUTO_TEST_CASE(fee_rounds_up_to_whole_cent)
 {
     const auto fee = ComputePaymasterFee(DDCents{100}, 50);

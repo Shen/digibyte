@@ -14,6 +14,26 @@
 #include <limits>
 
 namespace DigiDollar::Paymaster {
+namespace {
+
+std::optional<DDCents> ComputeRoundedServiceFee(
+    DDCents basis, uint32_t fee_rate_bps, DDCents maximum_service_fee)
+{
+    if (basis.value <= 0 || fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0 ||
+        maximum_service_fee.value < 0 || maximum_service_fee.value > MAX_DD_OUTPUT_CENTS) {
+        return std::nullopt;
+    }
+    if (fee_rate_bps != 0 && basis.value > std::numeric_limits<int64_t>::max() / fee_rate_bps) {
+        return std::nullopt;
+    }
+    const int64_t numerator = basis.value * fee_rate_bps;
+    if (numerator > std::numeric_limits<int64_t>::max() - 9999) return std::nullopt;
+    int64_t rounded = (numerator + 9999) / 10000;
+    if (maximum_service_fee.value > 0) rounded = std::min(rounded, maximum_service_fee.value);
+    return DDCents{rounded};
+}
+
+} // namespace
 
 std::optional<DDCents> ComputeCarrierSuccessor(
     DDCents carrier, DDCents service_fee, std::string& error)
@@ -32,24 +52,21 @@ std::optional<DDCents> ComputePaymasterFee(DDCents payment,
                                          uint32_t fee_rate_bps,
                                          DDCents maximum_service_fee)
 {
-    if (payment.value <= 0 || payment.value > MAX_DD_OUTPUT_CENTS ||
-        fee_rate_bps > MAX_RATE_BPS || fee_rate_bps % 10 != 0 ||
-        maximum_service_fee.value < 0 ||
-        maximum_service_fee.value > MAX_DD_OUTPUT_CENTS) {
-        return std::nullopt;
-    }
+    if (payment.value <= 0 || payment.value > MAX_DD_OUTPUT_CENTS) return std::nullopt;
+    const auto fee = ComputeRoundedServiceFee(payment, fee_rate_bps, maximum_service_fee);
+    if (!fee || fee->value > MAX_DD_OUTPUT_CENTS - payment.value) return std::nullopt;
+    return fee;
+}
 
-    if (fee_rate_bps != 0 && payment.value > std::numeric_limits<int64_t>::max() / fee_rate_bps) {
+std::optional<DDCents> ComputePaymasterRecoveryFee(
+    DDCents input_total, uint32_t fee_rate_bps, DDCents maximum_service_fee)
+{
+    if (input_total.value < 100) return std::nullopt;
+    const auto fee = ComputeRoundedServiceFee(input_total, fee_rate_bps, maximum_service_fee);
+    if (!fee || fee->value > MAX_DD_OUTPUT_CENTS || fee->value > input_total.value - 100) {
         return std::nullopt;
     }
-    const int64_t numerator = payment.value * fee_rate_bps;
-    if (numerator > std::numeric_limits<int64_t>::max() - 9999) return std::nullopt;
-    int64_t rounded = (numerator + 9999) / 10000;
-    if (maximum_service_fee.value > 0) {
-        rounded = std::min(rounded, maximum_service_fee.value);
-    }
-    if (rounded > MAX_DD_OUTPUT_CENTS - payment.value) return std::nullopt;
-    return DDCents{rounded};
+    return fee;
 }
 
 std::optional<DDCents> ComputePaymasterPaymentFromGross(

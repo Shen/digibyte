@@ -18,6 +18,8 @@
 #include <test/util/setup_common.h>
 #include <version.h>
 
+#include <algorithm>
+
 using namespace DigiDollar::Paymaster;
 
 namespace {
@@ -457,6 +459,50 @@ struct RecoveryFixture : BasicTestingSetup {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_recovery_tests, RecoveryFixture)
+
+BOOST_AUTO_TEST_CASE(recovery_preserves_large_principal_with_bounded_return_outputs)
+{
+    for (const CAmount input_total : {CAmount{10000000}, CAmount{12000000}}) {
+        BOOST_TEST_CONTEXT("reserved DD principal " << input_total) {
+            auto parameters = Parameters();
+            parameters.persisted_user_dd_inputs.clear();
+            parameters.user_dd_inputs.clear();
+            const size_t count = input_total > MAX_DD_OUTPUT_CENTS ? 2 : 1;
+            const CAmount input_amount = input_total / static_cast<CAmount>(count);
+            for (size_t index = 0; index < count; ++index) {
+                const auto source = MakeDDSource(input_amount, static_cast<uint32_t>(100 + index),
+                                                BIP86Script(user_internal_key));
+                const COutPoint outpoint{source->GetHash(), 0};
+                coins.AddCoin(outpoint, Coin{source->vout.front(), 500, false}, false);
+                parameters.persisted_user_dd_inputs.push_back(outpoint);
+                parameters.user_dd_inputs.push_back({outpoint, source, InputRole::USER_DD});
+            }
+            const auto fee = ComputePaymasterRecoveryFee(DDCents{input_total}, 10);
+            BOOST_REQUIRE(fee);
+            parameters.maximum_service_fee = parameters.service_fee = *fee;
+            parameters.wallet_returns.clear();
+            parameters.wallet_verified_fresh_return_scripts.clear();
+            CAmount remaining = input_total - fee->value;
+            while (remaining > 0) {
+                CKey return_key;
+                return_key.MakeNewKey(true);
+                const CScript script = BIP86Script(return_key);
+                const CAmount chunk = std::min(remaining, MAX_DD_OUTPUT_CENTS);
+                parameters.wallet_returns.push_back({script, DDCents{chunk}});
+                parameters.wallet_verified_fresh_return_scripts.push_back(script);
+                remaining -= chunk;
+            }
+            AlternativeRecoveryTemplate recovery;
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(BuildAlternativeRecoveryTemplate(parameters, Params(),
+                coins, Chainstate(), NOW, recovery, error), error);
+            BOOST_CHECK_EQUAL(recovery.manifest.service_fee.value, input_total / 1000);
+            BOOST_CHECK_EQUAL(recovery.manifest.wallet_returns.size(), count);
+            BOOST_CHECK(ValidateAlternativeRecoveryTemplate(recovery, parameters, Params(),
+                coins, Chainstate(), NOW, error));
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(builds_and_revalidates_exact_alternative_provider_template)
 {

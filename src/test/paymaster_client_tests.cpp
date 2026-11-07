@@ -43,6 +43,38 @@ CScript TaprootScript(const CKey& key)
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_client_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(recovery_offers_price_aggregate_inputs_and_preserve_transfer_limits)
+{
+    constexpr int64_t now{210000};
+    CKey cheap_key, expensive_key, sponsored_key;
+    auto cheap = MakeAnnouncement(cheap_key, uint256S("91"), FundingModel::USER_PAID, 10, now);
+    const auto expensive = MakeAnnouncement(expensive_key, uint256S("92"), FundingModel::USER_PAID, 20, now);
+    const auto sponsored = MakeAnnouncement(sponsored_key, uint256S("93"), FundingModel::SPONSORED, 0, now);
+    // Recipient limits apply to transfers, not aggregate recovery principal.
+    BOOST_CHECK_EQUAL(cheap.offers.front().max_payment.value, 100000);
+    std::string error;
+    auto recovery = BuildRecoveryOfferCandidates({expensive, cheap, sponsored},
+        DDCents{12000000}, DDCents{30000}, {}, now, error);
+    BOOST_REQUIRE_MESSAGE(error.empty(), error);
+    BOOST_REQUIRE_EQUAL(recovery.size(), 2U);
+    BOOST_CHECK_EQUAL(recovery.front().service_fee.value, 12000);
+    BOOST_CHECK_EQUAL(recovery.front().payment.value, 11988000);
+    BOOST_CHECK_EQUAL(recovery.front().user_total.value, 12000000);
+    BOOST_CHECK(recovery.front().provider_id == GetPaymasterId(cheap.identity_key));
+    recovery = BuildRecoveryOfferCandidates({expensive, cheap}, DDCents{12000000},
+        DDCents{12000}, {}, now, error);
+    BOOST_REQUIRE_EQUAL(recovery.size(), 1U);
+    cheap.offers.front().max_payment = DDCents{MAX_DD_OUTPUT_CENTS};
+    const auto ordinary = BuildOfferCandidates({cheap}, DDCents{MAX_DD_OUTPUT_CENTS},
+        FUNDING_MODEL_USER_PAID, DDCents{30000}, {}, now, error);
+    BOOST_CHECK(ordinary.empty());
+    recovery = BuildRecoveryOfferCandidates({cheap}, DDCents{MAX_DD_OUTPUT_CENTS},
+        DDCents{30000}, {}, now, error);
+    BOOST_REQUIRE_EQUAL(recovery.size(), 1U);
+    BOOST_CHECK_EQUAL(recovery.front().service_fee.value, 10000);
+    BOOST_CHECK_EQUAL(recovery.front().payment.value, 9990000);
+}
+
 BOOST_AUTO_TEST_CASE(recommendation_order_is_strict_with_missing_measurements)
 {
     std::vector<OfferCandidate> candidates;

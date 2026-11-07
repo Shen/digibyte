@@ -197,17 +197,20 @@ bool ValidateQuoteResponseForRequest(
                                            now, error);
 }
 
-std::vector<OfferCandidate> BuildOfferCandidates(
+namespace {
+std::vector<OfferCandidate> BuildCandidates(
     const std::vector<Announcement>& announcements,
     DDCents payment,
     uint8_t allowed_funding_models,
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
-    std::string& error)
+    std::string& error,
+    bool recovery)
 {
     std::vector<OfferCandidate> result;
-    if (payment.value < 100 || payment.value > MAX_DD_OUTPUT_CENTS ||
+    const int64_t maximum_basis = recovery ? MAX_DD_OUTPUT_CENTS * MAX_PAYMENT_INTENT_INPUTS : MAX_DD_OUTPUT_CENTS;
+    if (payment.value < 100 || payment.value > maximum_basis ||
         maximum_service_fee.value < 0 || allowed_funding_models == 0 || now <= 0) {
         error = "PAYMASTER_INVALID_OFFER_REQUEST";
         return result;
@@ -226,25 +229,47 @@ std::vector<OfferCandidate> BuildOfferCandidates(
         for (const OfferTerms& terms : announcement.offers) {
             const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
             if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC ||
-                payment.value < terms.min_payment.value || payment.value > terms.max_payment.value) continue;
-            const auto fee = ComputePaymasterFee(
-                payment, terms.fee_rate_bps,
-                terms.maximum_user_paid_service_fee);
+                (!recovery && (payment.value < terms.min_payment.value || payment.value > terms.max_payment.value))) continue;
+            const auto fee = recovery
+                ? ComputePaymasterRecoveryFee(payment, terms.fee_rate_bps, terms.maximum_user_paid_service_fee)
+                : ComputePaymasterFee(payment, terms.fee_rate_bps, terms.maximum_user_paid_service_fee);
             if (!fee || fee->value > maximum_service_fee.value ||
                 fee->value > std::numeric_limits<int64_t>::max() - payment.value) continue;
             if (terms.funding_model == FundingModel::SPONSORED &&
                 (terms.fee_rate_bps != 0 || fee->value != 0)) continue;
             result.push_back(OfferCandidate{
                 provider_id, announcement.identity_key, announcement.display_name, announcement.endpoint,
-                announcement.sequence, announcement.expires_at, terms, payment, *fee,
-                DDCents{payment.value + fee->value}, summary, latency_ewma_ms});
+                announcement.sequence, announcement.expires_at, terms,
+                recovery ? DDCents{payment.value - fee->value} : payment, *fee,
+                recovery ? payment : DDCents{payment.value + fee->value}, summary, latency_ewma_ms});
         }
     }
-    std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
-        return OfferCandidateLess(lhs, rhs);
+    std::sort(result.begin(), result.end(), [recovery](const OfferCandidate& lhs, const OfferCandidate& rhs) {
+        return OfferCandidateLess(lhs, rhs, /*fixed_user_total=*/recovery);
     });
     error.clear();
     return result;
+}
+} // namespace
+
+std::vector<OfferCandidate> BuildOfferCandidates(
+    const std::vector<Announcement>& announcements, DDCents payment,
+    uint8_t allowed_funding_models, DDCents maximum_service_fee,
+    const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
+    int64_t now, std::string& error)
+{
+    return BuildCandidates(announcements, payment, allowed_funding_models,
+                           maximum_service_fee, reliability, now, error, /*recovery=*/false);
+}
+
+std::vector<OfferCandidate> BuildRecoveryOfferCandidates(
+    const std::vector<Announcement>& announcements, DDCents input_total,
+    DDCents maximum_service_fee,
+    const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
+    int64_t now, std::string& error)
+{
+    return BuildCandidates(announcements, input_total, FUNDING_MODEL_USER_PAID,
+                           maximum_service_fee, reliability, now, error, /*recovery=*/true);
 }
 
 std::vector<OfferCandidate> BuildGrossOfferCandidates(

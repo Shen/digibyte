@@ -137,9 +137,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         for (auto& record : reliability_records) {
             reliability.emplace(record.provider_id, std::move(record));
         }
-        const auto candidates = BuildOfferCandidates(
+        const auto candidates = BuildRecoveryOfferCandidates(
             context.paymaster->GetDirectory().List(now), DDCents{total_dd},
-            FUNDING_MODEL_USER_PAID, effective_maximum, reliability, now,
+            effective_maximum, reliability, now,
             error);
         if (!error.empty()) {
             throw ApplicationError(ErrorKind::INVALID_INPUT, error);

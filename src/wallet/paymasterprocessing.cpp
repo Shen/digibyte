@@ -1575,11 +1575,11 @@ std::variant<ValidatedProviderRecoveryInputs, ProviderProcessingResult> Prefligh
         }
         returned_dd += output.amount.value;
     }
-    const auto fee_plan = EvaluateServiceFee(
-        readiness.policy, FundingModel::USER_PAID,
-        DDCents{total_dd}, error);
-    if (!fee_plan ||
-        !(fee_plan->service_fee ==
+    const auto recovery_fee = ComputePaymasterRecoveryFee(
+        DDCents{total_dd}, readiness.policy.fee_rate_bps,
+        readiness.policy.maximum_user_paid_service_fee);
+    if (!recovery_fee ||
+        !(*recovery_fee ==
           recovery_request.service_fee) ||
         total_dd - returned_dd !=
             recovery_request.service_fee.value) {
