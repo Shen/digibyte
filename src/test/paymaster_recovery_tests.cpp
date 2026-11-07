@@ -12,10 +12,12 @@
 #include <key.h>
 #include <paymaster/directory.h>
 #include <paymaster/recovery.h>
+#include <paymaster/validation.h>
 #include <script/interpreter.h>
 #include <script/standard.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
+#include <validation.h>
 #include <version.h>
 
 #include <algorithm>
@@ -79,7 +81,8 @@ void SignBIP86ControlProof(const CKey& internal_key, const uint256& hash,
         hash, signature, &empty_merkle_root, uint256{}));
 }
 
-struct RecoveryFixture : BasicTestingSetup {
+template <typename Setup>
+struct RecoveryFixtureBase : Setup {
     static constexpr int64_t NOW{100000};
 
     CCoinsView base;
@@ -95,7 +98,7 @@ struct RecoveryFixture : BasicTestingSetup {
     CTransactionRef carrier;
     CMutableTransaction provider_dgb;
 
-    RecoveryFixture()
+    RecoveryFixtureBase()
     {
         identity_key.MakeNewKey(true);
         dgb_internal_key.MakeNewKey(true);
@@ -455,6 +458,9 @@ struct RecoveryFixture : BasicTestingSetup {
         return chainstate;
     }
 };
+
+using RecoveryFixture = RecoveryFixtureBase<BasicTestingSetup>;
+using RecoveryChainstateFixture = RecoveryFixtureBase<TestingSetup>;
 
 } // namespace
 
@@ -961,6 +967,115 @@ BOOST_AUTO_TEST_CASE(final_witness_and_post_expiry_authority_are_exact)
         bad_witness, bad_wtxid, recovery, parameters, Params(), coins,
         chainstate, after_expiry, /*exact_final_already_known=*/true, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PSBT_SIGNATURE_INVALID");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(paymaster_recovery_chainstate_tests, RecoveryChainstateFixture)
+
+BOOST_AUTO_TEST_CASE(known_final_reconstructs_spent_prevouts_without_new_spending_authority)
+{
+    for (const bool include_carrier : {false, true}) {
+        auto parameters = Parameters(include_carrier, include_carrier ? 1 : 100);
+        parameters.genesis_hash = parameters.capacity_request.genesis_hash = Params().GenesisBlock().GetHash();
+        PaymasterCapacityProof proof;
+        SpanReader proof_stream{::PROTOCOL_VERSION, parameters.capacity_snapshot.capacity_proof};
+        proof_stream >> proof;
+        proof.genesis_hash = parameters.genesis_hash;
+        auto& dgb = proof.liquidity_slots.front().dgb_inputs.front();
+        dgb.control_proof.reference_block = parameters.genesis_hash;
+        SignBIP86ControlProof(dgb_internal_key,
+            GetCapacityControlHash(proof, dgb.input.outpoint, dgb.control_proof.expires_at),
+            dgb.control_proof.signature);
+        if (auto& carrier_proof = proof.liquidity_slots.front().carrier) {
+            carrier_proof->control_proof.reference_block = parameters.genesis_hash;
+            SignBIP86ControlProof(carrier_internal_key,
+                GetCapacityControlHash(proof, carrier_proof->carrier.outpoint, carrier_proof->control_proof.expires_at),
+                carrier_proof->control_proof.signature);
+        }
+        BOOST_REQUIRE(identity_key.SignSchnorr(GetCapacityProofSignatureHash(proof),
+            proof.identity_signature, nullptr, uint256{}));
+        parameters.capacity_snapshot.capacity_proof = SerializeExact(proof);
+        parameters.capacity_snapshot.resource_commitment = GetCapacityResourceCommitment(proof);
+        parameters.capacity_snapshot.request_hash = Hash(SerializeExact(parameters.capacity_request));
+        {
+            LOCK(cs_main);
+            auto& current = m_node.chainman->ActiveChainstate().CoinsTip();
+            current.AddCoin(parameters.user_dd_inputs.front().outpoint, Coin{user_dd->vout.front(), 0, false}, false);
+            current.AddCoin(dgb.input.outpoint, Coin{provider_dgb.vout.front(), 0, false}, false);
+            if (include_carrier) current.AddCoin(COutPoint{carrier->GetHash(), 0}, Coin{carrier->vout.front(), 0, false}, false);
+        }
+        std::string error;
+        AlternativeRecoveryTemplate recovery;
+        BOOST_REQUIRE_MESSAGE(BuildAlternativeRecoveryTemplateAgainstChainstate(parameters,
+            Params(), *m_node.chainman, NOW, recovery, error), error);
+        const auto request = Request(parameters);
+        const auto response = Response(parameters, request, recovery);
+        const CMutableTransaction final = FullySignedTransaction(recovery);
+        const CTransaction exact_final{final};
+        const auto user_signed = UserSignedPSBT(recovery);
+        AlternativeRecoverySubmit submit;
+        submit.genesis_hash = parameters.genesis_hash;
+        submit.request_id = request.request_id;
+        submit.session_id = request.session_id;
+        submit.recovery_id = response.recovery_id;
+        submit.recovery_provider_id = response.recovery_provider_id;
+        submit.recovery_request_hash = response.recovery_request_hash;
+        submit.recovery_commit_key = response.recovery_commit_key;
+        submit.template_commitment = response.manifest.template_commitment;
+        submit.user_psbt = SerializeExact(user_signed);
+        {
+            LOCK(cs_main);
+            auto& current = m_node.chainman->ActiveChainstate().CoinsTip();
+            for (const auto& input : final.vin) BOOST_REQUIRE(current.SpendCoin(input.prevout));
+        }
+
+        // Model the preflight caller's exact-known-final proof after confirmation:
+        // every chainstate prevout is now genuinely spent. The result/record bytes
+        // may be received or reloaded only after the original quote has expired.
+        AlternativeRecoveryResponse reloaded_response;
+        const auto saved_response = SerializeExact(response);
+        SpanReader saved{::PROTOCOL_VERSION, saved_response};
+        saved >> reloaded_response;
+        AlternativeRecoveryTemplate rebuilt;
+        PartiallySignedTransaction unsigned_psbt, decoded_user;
+        constexpr auto known = AuthorizedCapacityResourceMode::EXACT_FINAL_ALREADY_KNOWN;
+        BOOST_REQUIRE_MESSAGE(ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
+            reloaded_response, request, parameters.recovery_provider_identity_key, parameters,
+            Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt,
+            error, &exact_final), error);
+        BOOST_REQUIRE_MESSAGE(ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
+            submit, reloaded_response, rebuilt, parameters, Params(), *m_node.chainman,
+            NOW, NOW + 100, known, decoded_user, error, &exact_final), error);
+        BOOST_REQUIRE_MESSAGE(ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(final,
+            exact_final.GetWitnessHash(), rebuilt, parameters, Params(), *m_node.chainman,
+            NOW, NOW + 100, known, error), error);
+        BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
+            response, request, parameters.recovery_provider_identity_key, parameters,
+            Params(), *m_node.chainman, NOW, NOW + 100,
+            AuthorizedCapacityResourceMode::REQUIRE_UNSPENT, rebuilt, unsigned_psbt, error));
+        BOOST_CHECK(!BuildAlternativeRecoveryTemplateAgainstChainstate(parameters,
+            Params(), *m_node.chainman, NOW, rebuilt, error));
+        BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
+            response, request, parameters.recovery_provider_identity_key, parameters,
+            Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt, error));
+        for (int mutation = 0; mutation < 3; ++mutation) {
+            auto changed = final;
+            if (mutation == 0) changed.vin.front().scriptWitness.stack.front().front() ^= 1;
+            if (mutation == 1) ++changed.vout.front().nValue;
+            if (mutation == 2) ++changed.vin.front().prevout.n;
+            const CTransaction foreign{changed};
+            BOOST_CHECK(!ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
+                response, request, parameters.recovery_provider_identity_key, parameters,
+                Params(), *m_node.chainman, NOW, NOW + 100, known, rebuilt, unsigned_psbt,
+                error, &foreign));
+        }
+        {
+            LOCK(cs_main);
+            const auto& current = m_node.chainman->ActiveChainstate().CoinsTip();
+            for (const auto& input : final.vin) BOOST_CHECK(current.AccessCoin(input.prevout).IsSpent());
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

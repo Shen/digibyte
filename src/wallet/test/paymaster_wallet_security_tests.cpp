@@ -5551,9 +5551,17 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_read_failure_stops_new_preparation,
     BOOST_CHECK(database.m_records == before);
 }
 
-BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_exact_retry,
-                        ClientRecoveryReadSetup)
+static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result)
 {
+    auto& m_node = setup.m_node;
+    auto& context = setup.context;
+    auto& manager = setup.manager;
+    auto& fixture = setup.fixture;
+    auto& environment = setup.environment;
+    auto& now = setup.now;
+    const auto& seed = setup.seed;
+    const auto& m_coinbase_txns = setup.m_coinbase_txns;
+    const auto& coinbaseKey = setup.coinbaseKey;
     // Reuse the real readiness/index/transport fixture. The recovery inputs
     // below are mined and its final transaction passes ordinary mempool
     // validation; no unchecked mempool insertion or synthetic known-final path.
@@ -5582,9 +5590,14 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     const CScript return_script = script_for(return_key);
     const CScript provider_script = script_for(provider_key);
     constexpr CAmount principal{10000}, collateral{500 * COIN}, network_fee{COIN / 10};
-    const CBlock funding = CreateAndProcessBlock({
-        CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1, coinbaseKey, CScript() << OP_TRUE, collateral + COIN, false),
-        CreateValidMempoolTransaction(m_coinbase_txns[1], 0, 2, coinbaseKey, provider_script, 2 * COIN, false)}, CScript() << OP_TRUE);
+    std::vector<CMutableTransaction> funding_transactions{
+        setup.CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1, coinbaseKey, CScript() << OP_TRUE, collateral + COIN, false),
+        setup.CreateValidMempoolTransaction(m_coinbase_txns[1], 0, 2, coinbaseKey, provider_script, 2 * COIN, false)};
+    if (confirmed_before_result) {
+        funding_transactions.push_back(setup.CreateValidMempoolTransaction(m_coinbase_txns[2], 0, 3,
+            coinbaseKey, environment.identity.identity_script, 2 * COIN, false));
+    }
+    const CBlock funding = setup.CreateAndProcessBlock(funding_transactions, CScript() << OP_TRUE);
     BOOST_REQUIRE(funding.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
     const int mint_height = *m_node.chain->getHeight() + 1;
     auto& mock_oracle = MockOracleManager::GetInstance();
@@ -5607,7 +5620,7 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     mint.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
         << CScriptNum(1) << CScriptNum(principal) << CScriptNum(mint_parameters.lockHeight) << CScriptNum(1)
         << std::vector<unsigned char>(mint_parameters.ownerKey.begin(), mint_parameters.ownerKey.end()));
-    const CBlock minted = CreateAndProcessBlock({mint}, CScript() << OP_TRUE);
+    const CBlock minted = setup.CreateAndProcessBlock({mint}, CScript() << OP_TRUE);
     BOOST_REQUIRE(minted.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
     IndexWaitSynced(*g_txindex);
     {
@@ -5625,15 +5638,111 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
         SecurityTestId(seed, 120), FeeMode::PAYMASTER, now, session, error) == CreatePaymasterSessionResult::CREATED);
     session.state = SessionState::PENDING_PROVIDER;
     session.user_inputs = {COutPoint{minted.vtx.at(1)->GetHash(), 1}};
+    ProviderAttempt original_attempt{fixture.attempt};
+    if (confirmed_before_result) {
+        // Native observations deliberately require a retained original attempt:
+        // a tombstone's txid alone is never a receipt. Keep the actual original
+        // USER_SIGNED authority on these mined inputs, independently of the
+        // alternative provider's capacity, signatures, and final transaction.
+        ProviderQuoteFixture original;
+        original.user_key = user_key;
+        original.user_transaction = minted.vtx.at(1);
+        ProviderPolicy original_policy{environment.policy};
+        original_policy.maximum_network_fee = DGBSatoshis{network_fee};
+        PaymentIntent& intent = original.request.intent;
+        intent.genesis_hash = Params().GenesisBlock().GetHash();
+        intent.provider_id = environment.identity.provider_id;
+        intent.request_id = session.request_id;
+        intent.session_id = session.session_id;
+        intent.canonical_request_hash = session.canonical_request_hash;
+        intent.client_nonce = SecurityTestId(seed, 140);
+        intent.user_dd_inputs = session.user_inputs;
+        intent.recipient_script = NewTaprootScript();
+        intent.recipient_amount = DDCents{1000};
+        intent.user_dd_change_script = return_script;
+        intent.offer_id = SecurityTestId(seed, 141);
+        intent.funding_model = FundingModel::SPONSORED;
+        intent.sponsorship_scope = SponsorshipScope::PUBLIC;
+        intent.policy_hash = GetProviderPolicyHash(original_policy);
+        intent.expires_at = now + 60;
+        std::vector<XOnlyPubKey> output_keys;
+        BOOST_REQUIRE_MESSAGE(SignPaymentIntentInputs(client, intent, now, output_keys, error), error);
+        ProviderQuoteBuildParameters build;
+        build.quote_id = SecurityTestId(seed, 142);
+        build.user_inputs = {{session.user_inputs.front(), original.user_transaction, InputRole::USER_DD}};
+        build.reserved_dgb_inputs = {{COutPoint{funding.vtx.at(3)->GetHash(), 0},
+            CMutableTransaction{*funding.vtx.at(3)}, DGBSatoshis{2 * COIN}}};
+        build.dgb_change_script = environment.identity.identity_script;
+        build.network_fee = DGBSatoshis{network_fee};
+        build.created_at = now;
+        build.expires_at = now + 30;
+        build.retry_until = now + 300;
+        ProviderQuoteBuildResult built;
+        {
+            LOCK(cs_main);
+            BOOST_REQUIRE_MESSAGE(BuildUnsignedProviderQuote(original.request, original_policy, build,
+                Params(), m_node.chainman->ActiveChainstate().CoinsTip(), built, error), error);
+        }
+        original.response.request_id = session.request_id;
+        original.response.session_id = session.session_id;
+        original.response.quote = built.quote;
+        auto& quote = original.response.quote;
+        quote.identity_signature.resize(64);
+        BOOST_REQUIRE(environment.identity_key.SignSchnorr(GetPaymasterQuoteSignatureHash(quote),
+            quote.identity_signature, nullptr, uint256{}));
+        auto& attempt = original.attempt;
+        attempt.session_id = session.session_id;
+        attempt.attempt_id = SecurityTestId(seed, 143);
+        attempt.provider_id = intent.provider_id;
+        attempt.provider_identity_key = environment.identity.identity_key;
+        attempt.provider_endpoint = "127.0.0.1:18444";
+        attempt.client_nonce = intent.client_nonce;
+        attempt.intent_hash = quote.intent_hash;
+        attempt.quote_id = quote.quote_id;
+        attempt.unsigned_txid = quote.unsigned_txid;
+        attempt.template_commitment = quote.template_commitment;
+        attempt.commit_key = GetPaymasterCommitKey(attempt.provider_id, attempt.client_nonce,
+            attempt.intent_hash, attempt.quote_id, attempt.template_commitment);
+        PaymentIntent unsigned_intent{intent};
+        unsigned_intent.user_input_proofs.clear();
+        attempt.unsigned_intent = SerializePaymasterSecurityObject(unsigned_intent);
+        attempt.quote_request = SerializePaymasterSecurityObject(original.request);
+        attempt.signed_quote = SerializePaymasterSecurityObject(original.response);
+        attempt.unsigned_transaction = SerializePaymasterSecurityObject(quote.unsigned_transaction);
+        attempt.unsigned_psbt = SerializePaymasterSecurityObject(built.trusted_template.psbt);
+        attempt.input_roles = {ReservationRole::USER_DD, ReservationRole::PROVIDER_DGB};
+        attempt.quote_expires_at = quote.expires_at;
+        attempt.retry_until = quote.retry_until;
+        attempt.created_at = attempt.updated_at = now;
+        PaymasterResult unused_result;
+        CMutableTransaction unused_final;
+        BOOST_REQUIRE_MESSAGE(BuildDurableClientFinalFixture(client, environment, original,
+            now, session, unused_result, unused_final, error), error);
+        attempt.state = AttemptState::USER_SIGNED;
+        attempt.final_transaction.clear();
+        attempt.final_txid.SetNull();
+        attempt.updated_at = now;
+        session.pending_phase = PendingPhase::USER_SIGNATURE_SENT;
+        session.final_txid.SetNull();
+        session.updated_at = now;
+        original_attempt = attempt;
+        // The signing helper also supports unconfirmed fixtures. Restore the
+        // real confirmations for this chain-backed variant.
+        LOCK(client.cs_wallet);
+        BOOST_REQUIRE(client.AddToWallet(funding.vtx.at(3),
+            TxStateConfirmed{funding.GetHash(), mint_height - 1, 3}));
+        BOOST_REQUIRE(client.AddToWallet(minted.vtx.at(1),
+            TxStateConfirmed{minted.GetHash(), mint_height, 1}));
+    }
     // This test begins with saved recovery authority. The original binding is
     // independent of the complete recovery manifest and actual input witnesses.
     AlternativeRecoveryParameters parameters;
     parameters.genesis_hash = Params().GenesisBlock().GetHash();
     parameters.request_id = session.request_id;
     parameters.session_id = session.session_id;
-    parameters.original_provider_id = fixture.attempt.provider_id;
-    parameters.original_commit_key = fixture.attempt.commit_key;
-    parameters.original_template_commitment = fixture.attempt.template_commitment;
+    parameters.original_provider_id = original_attempt.provider_id;
+    parameters.original_commit_key = original_attempt.commit_key;
+    parameters.original_template_commitment = original_attempt.template_commitment;
     parameters.recovery_provider_identity_key = XOnlyPubKey{provider_key.GetPubKey()};
     parameters.recovery_provider_id = GetPaymasterId(parameters.recovery_provider_identity_key);
     parameters.offer_id = SecurityTestId(seed, 121);
@@ -5759,6 +5868,7 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
         LOCK(client.cs_wallet);
         WalletBatch batch{client.GetDatabase()};
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        if (confirmed_before_result) BOOST_REQUIRE(batch.WritePaymasterAttempt(original_attempt));
         BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION, session.user_inputs.front(), session.request_id,
             session.session_id, ReservationRole::USER_DD, true, now}));
         BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(session.user_inputs.front()));
@@ -5770,6 +5880,10 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     }
     BOOST_REQUIRE_MESSAGE(store.AcceptAlternativeRecoveryAuthorization(session.request_id,
         recovery.recovery_authorization.authorization_commitment, now, error), error);
+    if (confirmed_before_result) {
+        BOOST_REQUIRE_MESSAGE(paymaster_store::internal::ValidateAttemptAuthorizationManifest(
+            original_attempt, /*provider_side=*/false, error), error);
+    }
     BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, recovery));
     auto signed_psbt = trusted.trusted_template.psbt;
     BOOST_REQUIRE_MESSAGE(SignCollaborativePSBTForParty(client, signed_psbt, trusted.trusted_template, SigningParty::USER, error), error);
@@ -5797,11 +5911,30 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     BOOST_REQUIRE(provider_key.SignSchnorr(GetPaymasterResultSignatureHash(result.result), result.result.identity_signature, nullptr, uint256{}));
     BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResult(result, response, recovery.recovery_provider_identity_key,
         parameters.genesis_hash, 1, now, error), error);
+    if (confirmed_before_result) {
+        const CBlock confirmed = setup.CreateAndProcessBlock({final_transaction}, CScript() << OP_TRUE);
+        BOOST_REQUIRE(confirmed.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
+        IndexWaitSynced(*g_txindex);
+        const int confirmed_height = *m_node.chain->getHeight();
+        {
+            LOCK(client.cs_wallet);
+            BOOST_REQUIRE(client.AddToWallet(confirmed.vtx.at(1),
+                TxStateConfirmed{confirmed.GetHash(), confirmed_height, 1}));
+            client.SetLastBlockProcessed(confirmed_height, confirmed.GetHash());
+        }
+        {
+            LOCK(cs_main);
+            for (const auto& input : final_transaction.vin) {
+                BOOST_CHECK(m_node.chainman->ActiveChainstate().CoinsTip().AccessCoin(input.prevout).IsSpent());
+            }
+        }
+        SetMockTime(now + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+    }
     const auto encoded = SerializePaymasterSecurityObject(result);
     const uint256 message_id{Hash(encoded)};
     BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{result}, now));
     const auto invoke = [&] {
-        return paymaster_app::ResolveAlternativePaymasterRecovery(context, client, store, session, fixture.attempt, {});
+        return paymaster_app::ResolveAlternativePaymasterRecovery(context, client, store, session, original_attempt, {});
     };
     auto& database = GetMockableDatabase(client);
     const auto before = database.m_records;
@@ -5877,15 +6010,91 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     BOOST_REQUIRE(store.GetSelfRecovery(session.request_id, saved));
     BOOST_CHECK(saved.final_transaction == recovery.final_transaction);
     BOOST_CHECK(saved.recovery_txid == *result.result.txid);
-    BOOST_REQUIRE(m_node.mempool->get(*result.result.txid));
+    if (confirmed_before_result) {
+        BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+        BOOST_CHECK(session.state == SessionState::CANCELED_SAFE);
+        BOOST_CHECK(session.final_txid.IsNull());
+        BOOST_CHECK(session.recovery_txid == *result.result.txid);
+        BOOST_REQUIRE(retried.session.session);
+        BOOST_CHECK(retried.session.session->observation.payment.confirmations == 0);
+        BOOST_CHECK(retried.session.session->observation.recovery.confirmations > 0);
+    } else {
+        BOOST_REQUIRE(m_node.mempool->get(*result.result.txid));
+    }
     BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
-    BOOST_REQUIRE_EQUAL(ledger.reservations.size(), 1U);
-    BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::SPENT);
+    BOOST_REQUIRE_MESSAGE(ValidateClientFeeLedger(ledger, error), error);
+    BOOST_REQUIRE_EQUAL(ledger.reservations.size(), confirmed_before_result ? 2U : 1U);
+    const auto recovery_fee = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
+        [&](const ClientFeeReservation& entry) { return entry.commit_key == response.recovery_commit_key; });
+    BOOST_REQUIRE(recovery_fee != ledger.reservations.end());
+    BOOST_CHECK(recovery_fee->state == BudgetReservationState::SPENT);
+    BOOST_CHECK_EQUAL(recovery_fee->service_fee.value, 100);
+    BOOST_CHECK_EQUAL(recovery_fee->reserved_at, recovery.recovery_authorization_accepted_at);
+    BOOST_CHECK(recovery_fee->updated_at >= recovery_fee->reserved_at);
+    if (confirmed_before_result) {
+        BOOST_REQUIRE(original_attempt.commit_key != response.recovery_commit_key);
+        const auto original_fee = std::find_if(ledger.reservations.begin(), ledger.reservations.end(),
+            [&](const ClientFeeReservation& entry) { return entry.commit_key == original_attempt.commit_key; });
+        BOOST_REQUIRE(original_fee != ledger.reservations.end());
+        // One confirmation does not release a still-recoverable original
+        // signature. Its sponsored liability remains reserved at exactly zero.
+        BOOST_CHECK(original_fee->state == BudgetReservationState::RESERVED);
+        BOOST_CHECK_EQUAL(original_fee->service_fee.value, original_attempt.client_manifest.service_fee.value);
+        BOOST_CHECK_EQUAL(original_fee->service_fee.value, 0);
+        BOOST_CHECK_EQUAL(original_fee->reserved_at, original_attempt.client_manifest_accepted_at);
+        BOOST_CHECK(original_fee->updated_at >= original_fee->reserved_at);
+    }
+    CAmount reserved_fees{0}, spent_fees{0}, released_fees{0};
+    for (const auto& entry : ledger.reservations) {
+        if (entry.state == BudgetReservationState::RESERVED) reserved_fees += entry.service_fee.value;
+        if (entry.state == BudgetReservationState::SPENT) spent_fees += entry.service_fee.value;
+        if (entry.state == BudgetReservationState::RELEASED) released_fees += entry.service_fee.value;
+    }
+    BOOST_CHECK_EQUAL(reserved_fees, 0);
+    BOOST_CHECK_EQUAL(spent_fees, 100);
+    BOOST_CHECK_EQUAL(released_fees, 0);
     const auto spent_ledger = SerializePaymasterSecurityObject(ledger);
     const auto replay = invoke();
     BOOST_CHECK(replay.broadcast.value_or(false));
     BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
     BOOST_CHECK(SerializePaymasterSecurityObject(ledger) == spent_ledger);
+    if (confirmed_before_result) {
+        wallet::CWallet reopened{m_node.chain.get(), "recovery-result-reopened",
+            DuplicateSecurityFixtureDatabase(client.GetDatabase())};
+        BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+        const auto tip_hash = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+        const int tip_height = *m_node.chain->getHeight();
+        {
+            LOCK(reopened.cs_wallet);
+            reopened.SetLastBlockProcessed(tip_height, tip_hash);
+        }
+        PaymasterStore reopened_store{reopened};
+        PaymentSession reopened_session;
+        BOOST_REQUIRE(reopened_store.GetSessionByRequestId(session.request_id, reopened_session));
+        const auto resumed = paymaster_app::ResolveAlternativePaymasterRecovery(context, reopened,
+            reopened_store, reopened_session, original_attempt, {});
+        BOOST_CHECK(resumed.broadcast.value_or(false));
+        BOOST_REQUIRE(resumed.session.session);
+        BOOST_CHECK(resumed.session.session->session.state == SessionState::CANCELED_SAFE);
+        BOOST_CHECK(resumed.session.session->session.final_txid.IsNull());
+        BOOST_CHECK(resumed.session.session->observation.payment.confirmations == 0);
+        BOOST_CHECK(resumed.session.session->observation.recovery.confirmations > 0);
+        ClientFeeLedger reloaded_ledger;
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(reloaded_ledger));
+        BOOST_CHECK(SerializePaymasterSecurityObject(reloaded_ledger) == spent_ledger);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_exact_retry,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_confirmed_before_first_result_survives_expiry_and_reload,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_replay,

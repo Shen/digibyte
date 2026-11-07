@@ -103,7 +103,10 @@ bool ValidateAlternativeRecoveryResponseTemplateAgainstChainstate(
     bool exact_spender_is_known = false);
 
 /** Durable counterpart for an already authorized alternative-recovery
- * response. No new signature authority is created at observation_time. */
+ * response. No new signature authority is created at observation_time.
+ * EXACT_FINAL_ALREADY_KNOWN requires the caller's independent local exact-final
+ * preflight. Historical prevouts are reconstructed only in a disposable view;
+ * the full final witness must match the rebuilt authorized template. */
 bool ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
     const AlternativeRecoveryResponse& response,
     const AlternativeRecoveryRequest& request,
