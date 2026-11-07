@@ -428,6 +428,40 @@ PSBT and provider/recovery functional regressions. Recompile reached consumers
 of the changed inline `WalletBatch` destructor for isolated checks; only clean
 product builds establish the complete consumer set.
 
+For maintenance-source reuse, approval freshness, recovery accounting and
+persisted reputation failures, rebuild the affected sources and run:
+
+```powershell
+$reviewCorrections = @(
+    'paymaster_setup_tests/target_capital_requires_a_known_fee_and_checks_money_range',
+    'paymaster_wallet_identity_tests/recurring_maintenance_conflict_reversal_survives_restart_atomically,capacity_proof_is_signed_from_exact_available_operational_slot,carrier_withdrawal_preview_owns_wallet_observation_lock,liquidity_approval_binds_provider_policy_atomically',
+    'paymaster_wallet_finance_tests/maintenance_crash_recovery_separates_cost_from_budget_exposure,recovery_finance_commits_atomically_and_never_counts_a_recipient_payment,older_recovery_commits_rebuild_missing_events_after_reload,recovery_final_commit_failure_cannot_publish_finance_or_spend_budget,derived_maintenance_cost_repair_survives_reload_and_journal_pruning,maintenance_cost_repair_failed_commit_preserves_source_and_old_totals,unobserved_maintenance_limit_is_never_reported_as_actual_cost',
+    'paymaster_wallet_store_tests/provider_reputation_rpc_preserves_missing_and_unreadable_history,transient_finalization_errors_remain_retryable',
+    'paymaster_wallet_psbt_tests/authentic_provider_cannot_replace_locally_reconstructed_payment',
+    'paymaster_wallet_security_tests/provider_signing_rejects_maintenance_sources_reused_before_upgrade'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($reviewCorrections -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Maintenance, approval, accounting or reputation regression failed' }
+```
+
+Run Qt cases `paymasterOverviewRefill`, `paymasterLiquiditySaveAcrossRefresh`,
+`paymasterClientTimeoutKeepsObserving`, `paymasterSendControllerClosureFreshness`,
+`paymasterFinancePaging`, `paymasterFinancesAndBackupWorkflow` and
+`paymasterGuidedRestoreHasOneApproval` with the Windows
+plugin as described above. These include unknown/expired/read-failed offers,
+overflow, changed policy during approval, high fees, revocation with failed
+observation, retained client identity with revoked actions, recovery export and
+the atomic revision/policy binding for reviewed reserve restoration.
+The changed `SendController::View` layout requires recompiling all consumers,
+including `digidollarsendwidget.cpp` and `qt/test/digidollarwidgettests.cpp`.
+The new recovery finance notification overload also requires recompiling
+`wallet/paymasterdb.cpp`. Isolated links establish only their recorded source
+set; complete supported builds and the functional matrix remain release gates.
+For the carrier-preview lock assertion, use a complete `DEBUG_LOCKORDER` build
+(Unix `./configure --enable-debug` with the normal project options), rebuilding
+all lock instrumentation together. The release configuration's no-lock caller
+test covers both preview paths but cannot detect a missing lock by itself.
+
 ## Architecture checks
 
 From the repository root:

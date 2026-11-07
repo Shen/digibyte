@@ -395,6 +395,20 @@ migration leaves the old records intact; unknown versions are rejected. Use a
 full wallet backup; CSV remains an accounting export rather than a recovery
 artifact. Older binaries cannot read the v2 finance header.
 
+Alternative-provider recovery has its own `recovery` event: its service income
+and network cost enter operating totals, but it does not count as a successful
+recipient transfer or change the average recipient-transfer service fee.
+This event uses kind value 5; older readers reject that unknown value. Keep a
+compatible binary when reopening a wallet that contains recovery events.
+
+Maintenance accounting uses the observed transaction fee. After an interrupted
+commit, the safety budget may conservatively retain the full approved fee while
+finance records only the exact fee established from the wallet transaction and
+its inputs. Historical derived costs and their indexes/totals are repaired
+atomically from that evidence; the safety budget and payment authority remain
+unchanged. Missing fee evidence makes the finance observation unavailable rather
+than turning the approved limit into a reported expense.
+
 `getpaymasterfinancestatus` reports a `revision`. Its `cursor` is an opaque hex
 value bound to provider, network, period/cutoff, revision and last position.
 Pass the returned value unchanged. If data changes between pages, the RPC

@@ -4,6 +4,38 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Maintenance, approval and finance corrections
+
+Working-tree corrections based on `c055dd7a9cdd64b248424724ebeb9c04b2fbb1bf`,
+checked on 2026-11-07. Contracts are in the implementation/operator guides;
+the test runbook owns selectors. No consensus or wire rules changed. Recovery
+finance adds event kind 5; `SendController::View` adds an observation flag.
+
+Thirty-three translation units (25 production, eight test) were freshly compiled
+with MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`.
+This includes unchanged `wallet/paymasterdb.cpp` for the recovery-notification
+overload and all five direct consumers of the changed send-controller layout.
+Isolated native/Qt links reuse remaining objects/libraries and existing Qt
+5.15.10/MOC; they are not clean product builds or complete header provenance.
+Commands, source/object/binary hashes, failures and full logs are retained under
+`temp/paymaster-packages-1-7/` (`compiled.jsonl`, `runs.jsonl`,
+`native-v5.json`, `qt-v5.json`, `verification.json`).
+
+| Executed check | Bounded result |
+|---|---|
+| Direct native corrections | Exit 0 in disjoint selections of 14 cases / 950 assertions and two cases / 17 assertions on `native-v5`. Covers maintenance conflict/restart and stale pool reuse, old-quote signing veto, preview entry points, atomic policy binding, recovery accounting/replay, exact maintenance fees and atomic historical repair, unavailable evidence, reputation read statuses and quote-template parity. |
+| Related native regressions | Exit 0: 21 additional cases / 2,028 assertions on `native-v5`, including role-limited signing, V5 durable authorization, provider/recovery pre-signature guards, financial migration/notifications/rollback, setup parity and budget retention. The native selections are disjoint: 37 cases / 2,995 assertions. |
+| Qt | Seven selected functions / 49 feature cases pass, zero skips; Windows platform/Fusion. Final six functions use `qt-v4`; reviewed reserve restoration uses `qt-v5` after a test-fixture-only revision correction. Init/cleanup are excluded. Existing style-property warnings remain in logs. |
+| C++17 syntax | 22 modified production translation units pass `/Zs /std:c++17`. `wallet/rpc/paymaster_provider.cpp` fails at the pre-existing `RPCArgOptions{.skip_type_check = true}` initializer (also present in HEAD); its C++20 compilation passes. No complete C++17 build is claimed. |
+| Preview negative control | The same ten preview assertions also pass with only pre-fix `paymasterproviderops.cpp` substituted from HEAD. This release configuration omits `DEBUG_LOCKORDER`; the control does not reproduce the lock assertion and is not causal runtime evidence for the lock fix. A complete lock-debug build remains required. |
+| Local controls | Working-tree dependency/cycle checks, six boundary fixtures, changed-path/shared-Core-record checks against HEAD policy and whitespace checks pass. |
+
+Initial include/fixture failures and isolated-link response mapping failures
+remain in the logs. No validation, test or lint policy was weakened to resolve
+them. No new daemon, functional, sanitizer, full-suite or complete supported
+product-build result is claimed. The operator build/matrix commands remain in
+the test runbook.
+
 ## Scheduler progress and local result authority
 
 Product and test sources at `33624ebae6e265ac2beae97333968aab75335e2f`, checked

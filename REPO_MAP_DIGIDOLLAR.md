@@ -616,13 +616,13 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | Source | Responsibility |
 |---|---|
 | `src/paymaster/types.*`, `protocol.*`, `wire.*` | Records, commitments and bounded serialization. |
-| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer and exact manifest checks. |
+| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer and exact manifest checks. `BuildQuoteTransferParameters` in `protocol.*` shares input/output arrangement between provider and trusted client-template construction. |
 | `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, policies, slots and budgets. |
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
 | `Manager::LeaseResults`, `LeaseRecoveryResults` | Client result leases protect received artifacts until durable acceptance and explicit acknowledgement. |
 | `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `CalculateSetupCapital` checks known fee basis and reserve amounts before multiplication. `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and bounded IP/Tor endpoint diagnostics. Diagnostic leases stop at V2/capability negotiation and cannot authorize payment traffic; `rpc_paymaster_endpoint.py` covers TCP and SOCKS5 routes. |
 
 Ordinary DD consensus/history checks remain authoritative. See
@@ -1701,6 +1701,10 @@ Wallet maintenance resumes finite approved commands separately from recurring
 refill permission. Whole-slot funding and confirmed-capacity readiness are
 covered by pool-setup, partial-capacity and readiness tests. See
 [pool setup](doc/digidollar-paymaster-pool-setup.md).
+`ProviderMaintenanceRecord::ProtectsSourceInputs` keeps unresolved signed work
+out of refresh/readiness and new native slot admission, including abandoned or
+conflicted withdrawals. `SaveLiquidityPolicy` atomically checks the optional
+reviewed provider-policy hash alongside the liquidity revision.
 `wallet/paymasterpool.cpp` supplies shared read-only DD/DGB preparation funding
 observations to pool and operator status in `wallet/rpc/paymaster_provider.cpp`. Qt uses those structured
 amounts for capital shortfalls and confirmation/fee guidance, separately from

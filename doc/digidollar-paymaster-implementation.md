@@ -145,6 +145,10 @@ and cannot be rewritten by cleanup. Finite setup and recurring refill have separ
 approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
 See [pool setup](digidollar-paymaster-pool-setup.md).
+CLI and Qt use `CalculateSetupCapital` for checked reserve amounts. Paid-refill
+approval requires a complete current provider offer; Qt binds its reviewed fee
+basis and liquidity revision atomically with `expected_provider_policy_hash`
+and `expected_revision` on `setpaymasterliquiditypolicy`.
 
 Maintenance reconciliation keeps record timestamps and the ledger accounting
 high-water mark monotonic. Saved policy revisions can advance accounting time
@@ -155,7 +159,13 @@ Wall-clock expiry checks remain separate from accounting timestamps.
 Conflicted or abandoned maintenance with a saved transaction ID remains open:
 its signatures can become usable again. All maintenance kinds follow that exact
 transaction and restore their own invalidated successor outputs atomically on
-its return. The known fee, or conservatively the approved maximum when unknown,
+its return. Source inputs retain their operation reservation while signatures
+remain unresolved, including failed withdrawals. Refresh, readiness and both
+native slot-admission paths exclude these journal-bound sources even if an older
+pool snapshot marked them available; unrelated free slots remain usable.
+Both provider signing paths repeat the same journal check under the signing
+lock, covering quotes created by an older wallet before this protection.
+The known fee, or conservatively the approved maximum when unknown,
 remains in the outstanding budget and is not pruned while unresolved. No new
 signature or replacement authority is inferred from that recovery.
 RPC maintenance-budget totals and new reservations share
@@ -193,6 +203,11 @@ indexes, checked daily contributions and versioned totals/revision metadata in t
 existing wallet database. Wallet keys, balances and signed artifacts are not
 migrated by this change. Migration, accounting and page-consistency requirements
 are defined in the [operator guide](digidollar-paymaster-operator.md#finance-storage-and-page-consistency).
+Alternative-provider recovery commits book their own income and cost atomically
+and reconstruct from validated recovery records, without incrementing recipient
+payment counts. Maintenance accounting uses exact wallet transaction fees;
+source-bound corrections rebuild derived totals atomically while ordinary event
+writes continue to enforce immutable economics.
 
 Pagination uses bounded ordered database cursors. A full reconstruction runs on
 first use after load, restore or invalidation. Thereafter wallet transaction
@@ -211,6 +226,12 @@ Financial guards remain inside those services, including restart/replay checks.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 Finance snapshots preserve pool and maintenance read statuses: an unreadable
 record is a failed observation, never an absent record or known zero capital.
+Qt revokes observed actions and reviewed approvals on read/decode failure while
+retaining request identity and financial artifacts. A fresh valid observation
+restores actions. Reputation get/clear adapters distinguish absent history from
+unreadable or unsupported persisted history; only absence returns an empty result.
+Typed finalization classification preserves the narrower pre-commit retry set
+and the additional retryable storage/observation failures for durable results.
 
 Client quote/payment entry points coordinate named call-local phases for saved
 authorization, offer selection, reservation, capacity, quote exchange and exact
