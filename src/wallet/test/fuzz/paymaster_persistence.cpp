@@ -118,6 +118,33 @@ void ExerciseRecordDecoder(const Key& key,
     assert(SerializeDatabaseValue(roundtrip) == canonical);
 }
 
+void ExerciseArchivedRecoveryDecoder(const uint256& id,
+                                     const std::vector<uint8_t>& raw)
+{
+    const auto archive_key = std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, id);
+    const auto locator_key = std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR, id);
+    for (uint8_t mutation = 0; mutation < 3; ++mutation) {
+        MockableDatabase database;
+        InstallRawRecord(database, archive_key, raw);
+        if (mutation == 0) {
+            // A locator is a consistency marker, never validation authority.
+            database.m_records[SerializeDatabaseKey(locator_key)] = SerializeDatabaseValue(uint256::ONE);
+        } else if (mutation == 1) {
+            InstallRawRecord(database, locator_key, raw);
+        } // The third case leaves the archive without its required locator.
+        const auto before = database.m_records;
+        WalletBatch batch{database};
+        AlternativeRecoveryRecord recovery;
+        const auto status = batch.ReadPaymasterAlternativeRecoveryWithStatus(id, recovery);
+        assert(status != DatabaseReadStatus::NOT_FOUND);
+        assert(database.m_records == before);
+        if (status == DatabaseReadStatus::FOUND) {
+            assert(recovery.provider_side);
+            assert(recovery.phase == AlternativeRecoveryPhase::FINAL_COMMITTED);
+        }
+    }
+}
+
 void ApplySessionReferenceMutation(MockableDatabase& database,
                                    PaymentSession session,
                                    uint8_t mutation)
@@ -370,6 +397,7 @@ FUZZ_TARGET(paymaster_persistence_records,
             });
         break;
     case 2:
+        ExerciseArchivedRecoveryDecoder(id, raw);
         ExerciseRecordDecoder<AlternativeRecoveryRecord>(
             std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, id), raw,
             [&](WalletBatch& batch, AlternativeRecoveryRecord& value) {

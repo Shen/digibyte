@@ -122,6 +122,8 @@ extern const std::string PAYMASTER_SESSION;              // "pmsession"  - payme
 extern const std::string PAYMASTER_CLIENT_ORDER;         // "pmclientorder" - exact local replay parameters
 extern const std::string PAYMASTER_RECOVERY;             // "pmrecovery" - idempotent self-recovery by request_id
 extern const std::string PAYMASTER_ALT_RECOVERY;         // "pmaltrecovery" - authenticated alternative recovery by recovery_id
+extern const std::string PAYMASTER_ALT_RECOVERY_ARCHIVE; // "pmaltarchive" - terminal provider recovery by recovery_id
+extern const std::string PAYMASTER_ALT_RECOVERY_LOCATOR; // "pmaltlocator" - archived recovery_id to commit key (derived)
 extern const std::string PAYMASTER_ALT_RECOVERY_REQUEST; // "pmaltrecoveryreq" - client request_id to recovery_id
 extern const std::string PAYMASTER_ATTEMPT;              // "pmattempt"  - provider attempts by attempt_id
 extern const std::string PAYMASTER_CAPACITY;             // "pmcapacity" - validated capacity snapshots by snapshot id
@@ -462,8 +464,14 @@ public:
     DatabaseReadStatus ReadPaymasterAlternativeRecoveryWithStatus(
         const uint256& recovery_id,
         DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery);
+    // Active records only. Exact id reads also resolve terminal archives and
+    // reject a missing/corrupt archive body or an active/archive duplicate.
     bool ListPaymasterAlternativeRecoveries(
         std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries);
+    // Move a fully validated, sufficiently confirmed provider completion out
+    // of active scans. Caller must hold an atomic wallet DB transaction.
+    bool ArchivePaymasterAlternativeRecovery(
+        const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery);
     bool ErasePaymasterAlternativeRecovery(const uint256& recovery_id);
     bool WritePaymasterAlternativeRecoveryRequest(
         const std::string& request_id, const uint256& recovery_id,

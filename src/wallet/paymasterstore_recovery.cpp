@@ -11,6 +11,7 @@
 #include <digidollar/digidollar.h>
 #include <digidollar/validation.h>
 #include <hash.h>
+#include <kernel/cs_main.h>
 #include <node/context.h>
 #include <paymaster/finance.h>
 #include <paymaster/protocol.h>
@@ -33,6 +34,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -40,6 +42,84 @@
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 using namespace paymaster_store::internal;
+
+namespace {
+bool ObserveProviderRecoveryHistoryCompletion(
+    CWallet& wallet, WalletBatch& batch, const AlternativeRecoveryRecord& recovery,
+    std::optional<ExactFinalTransactionProof>& confirmation_proof, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    confirmation_proof.reset();
+    if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED) return true;
+
+    // Keep the complete signed recovery, commit and result: they remain the
+    // authority for exact replay and accounting after the rolling ledger ages
+    // out. Archival uses the same reorg safety depth as normal session pruning;
+    // it grants no signature, budget or release permission.
+    ProviderCommitRecord commit;
+    const auto& commit_key = recovery.recovery_response.recovery_commit_key;
+    const auto commit_status = batch.ReadPaymasterProviderCommitWithStatus(commit_key, commit);
+    if (commit_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(commit_status, "ProviderCommitRecord", commit,
+            "PAYMASTER_PROVIDER_COMMIT_NOT_FOUND", "PAYMASTER_INVALID_PERSISTED_PROVIDER_COMMIT");
+        return false;
+    }
+    CMutableTransaction transaction;
+    std::vector<COutPoint> provider_inputs;
+    if (!ValidateProviderAlternativeRecoveryCommitBinding(recovery, commit, transaction, provider_inputs, error)) return false;
+    PaymasterResult result;
+    const auto result_status = batch.ReadPaymasterResultWithStatus(commit_key, result);
+    if (result_status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(result_status, "PaymasterResult", result,
+            "PAYMASTER_RESULT_NOT_FOUND", "PAYMASTER_PERSISTED_RESULT_CORRUPT");
+        return false;
+    }
+    if (CanonicalBytes(result) != CanonicalBytes(recovery.signed_result)) {
+        error = "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT";
+        return false;
+    }
+    const auto& manifest = recovery.recovery_response.manifest;
+    CollaborativePSBTTemplate trusted;
+    std::string decode_error;
+    if (!DecodeRawPSBT(trusted.psbt, MakeByteSpan(recovery.recovery_response.unsigned_psbt), decode_error) ||
+        CanonicalBytes(trusted.psbt) != recovery.recovery_response.unsigned_psbt) {
+        error = "PAYMASTER_RECOVERY_RESPONSE_PSBT_NONCANONICAL";
+        return false;
+    }
+    const auto append_roles = [&](const std::vector<COutPoint>& outpoints, InputRole role) {
+        for (const COutPoint& outpoint : outpoints) {
+            const size_t index = trusted.input_roles.size();
+            if (!trusted.psbt.tx || index >= trusted.psbt.tx->vin.size() ||
+                trusted.psbt.tx->vin[index].prevout != outpoint) return false;
+            trusted.input_roles.push_back(role);
+        }
+        return true;
+    };
+    if (!append_roles(manifest.user_dd_inputs, InputRole::USER_DD) ||
+        !append_roles(manifest.recovery_provider_carrier_inputs, InputRole::PROVIDER_CARRIER) ||
+        !append_roles(manifest.recovery_provider_dgb_inputs, InputRole::PROVIDER_DGB) ||
+        manifest.template_commitment != GetAlternativeRecoveryTemplateCommitment(manifest, trusted)) {
+        error = "PAYMASTER_RECOVERY_TEMPLATE_MISMATCH";
+        return false;
+    }
+    if (!ValidateCollaborativePSBT(trusted.psbt, trusted, CollaborativeSignatureStage::UNSIGNED, error) ||
+        !ValidateFinalCollaborativeTransaction(transaction, commit.final_txid,
+            recovery.expected_wtxid, trusted, error)) return false;
+    ExactFinalArtifact artifact;
+    ExactFinalObservation observation;
+    if (!DecodeExactFinalArtifact(recovery.final_transaction, commit.final_txid, artifact, error) ||
+        !ObserveExactWalletArtifact(wallet, artifact, observation, error)) return false;
+    if (observation.confirmation_depth < DEFAULT_REORG_SAFETY_DEPTH) return true;
+    ExactFinalTransactionPreflight preflight;
+    if (!PreflightExactPaymasterFinalTransaction(wallet, MakeTransactionRef(transaction),
+            ExactFinalTxIndexMode::NONBLOCKING, preflight, error)) return false;
+    if (preflight.presence == ExactFinalTransactionPresence::CONFIRMED &&
+        preflight.confirmation_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
+        confirmation_proof = std::move(preflight.final_proof);
+    }
+    return true;
+}
+} // namespace
 
 bool PaymasterStore::CommitSelfRecovery(const std::string& request_id,
                                         const SelfRecoveryRecord& recovery,
@@ -814,36 +894,18 @@ bool PaymasterStore::GetProviderAlternativeRecoveryByCommit(
     recovery = {};
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
-        error = "PAYMASTER_RECOVERY_DATABASE_READ";
+    const auto status = batch.ReadPaymasterAlternativeRecoveryWithStatus(commit.quote_id, recovery);
+    if (status != DatabaseReadStatus::FOUND) {
+        error = PersistedReadError(status, "AlternativeRecoveryRecord", recovery,
+            "PAYMASTER_ALTERNATIVE_RECOVERY_NOT_FOUND", "PAYMASTER_RECOVERY_DATABASE_READ");
+        recovery = {};
         return false;
     }
-    bool found{false};
-    for (const AlternativeRecoveryRecord& candidate : recoveries) {
-        if (!candidate.provider_side ||
-            candidate.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
-            candidate.recovery_response.recovery_commit_key !=
-                commit.commit_key) {
-            continue;
-        }
-        if (found) {
-            error = "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT";
-            recovery = {};
-            return false;
-        }
-        CMutableTransaction transaction;
-        std::vector<COutPoint> provider_inputs;
-        if (!ValidateProviderAlternativeRecoveryCommitBinding(
-                candidate, commit, transaction, provider_inputs, error)) {
-            recovery = {};
-            return false;
-        }
-        recovery = candidate;
-        found = true;
-    }
-    if (!found) {
-        error = "PAYMASTER_ALTERNATIVE_RECOVERY_NOT_FOUND";
+    CMutableTransaction transaction;
+    std::vector<COutPoint> provider_inputs;
+    if (!ValidateProviderAlternativeRecoveryCommitBinding(
+            recovery, commit, transaction, provider_inputs, error)) {
+        recovery = {};
         return false;
     }
     return true;
@@ -1110,7 +1172,14 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     }
     std::vector<AlternativeRecoveryRecord> expiring;
     std::vector<AlternativeRecoveryRecord> pruning;
+    std::vector<std::pair<AlternativeRecoveryRecord, ExactFinalTransactionProof>> archiving;
     for (AlternativeRecoveryRecord& recovery : recoveries) {
+        if (recovery.provider_side && recovery.phase == AlternativeRecoveryPhase::FINAL_COMMITTED &&
+            archiving.size() < MAX_PROVIDER_SESSION_PRUNES_PER_PASS) {
+            std::optional<ExactFinalTransactionProof> confirmation_proof;
+            if (!ObserveProviderRecoveryHistoryCompletion(m_wallet, batch, recovery, confirmation_proof, error)) return false;
+            if (confirmation_proof) archiving.emplace_back(recovery, std::move(*confirmation_proof));
+        }
         // Expired provider quotes remain replay barriers through every saved
         // protocol deadline and the retention interval. Never prune a signed
         // phase merely because its quote is old.
@@ -1147,7 +1216,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         }
         expiring.push_back(std::move(recovery));
     }
-    if (expiring.empty() && pruning.empty()) return true;
+    if (expiring.empty() && pruning.empty() && archiving.empty()) return true;
 
     // Expiry releases financial bindings before the later pruning pass. Prove
     // absence of independent authority here too, not only before deletion.
@@ -1261,7 +1330,26 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         }
     }
 
+    // The wallet's confirmation cache can lag a reorg notification. Canonical
+    // nonblocking preflight supplied every archival proof; keep its exact tip
+    // current at the decision immediately before the atomic wallet batch.
+    // Subsequent reorgs cannot lose evidence: archive point reads retain it.
+    {
+        LOCK(cs_main);
+        for (const auto& candidate : archiving) {
+            auto* node = m_wallet.chain().context();
+            if (!node || !node->chainman || !candidate.second.Matches(*node->chainman, error)) {
+                if (error.empty()) error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
+                return false;
+            }
+        }
+    }
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    for (const auto& candidate : archiving) {
+        if (!batch.ArchivePaymasterAlternativeRecovery(candidate.first)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        }
+    }
     for (const auto& recovery : pruning) {
         if (!batch.ErasePaymasterAlternativeRecovery(recovery.recovery_id)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");

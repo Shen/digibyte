@@ -5666,7 +5666,8 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_read_failure_stops_new_preparation,
 
 static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     AlternativeRecoveryRecord recovery, const CKey& provider_key,
-    const CTransactionRef& funding, const PaymasterResult& result, int64_t now)
+    const CTransactionRef& funding, const PaymasterResult& result, int64_t now,
+    ClientRecoveryReadSetup* chain_setup = nullptr, const TxStateConfirmed* confirmed_state = nullptr)
 {
     wallet::CWallet provider{node.chain.get(), "first-provider-recovery", CreateMockableWalletDatabase()};
     BOOST_REQUIRE(provider.LoadWallet() == DBErrors::LOAD_OK);
@@ -5782,9 +5783,253 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterProviderBudgetLedger(repaired_budget));
     BOOST_REQUIRE_EQUAL(repaired_budget.reservations.size(), 1U);
     BOOST_CHECK(repaired_budget.reservations.front().state == BudgetReservationState::SPENT);
+
+    if (!chain_setup) return;
+    // The flag-repair clone above owns the current independent checkpoint.
+    wallet::CWallet& history_wallet = reopened;
+    auto& history_database = GetMockableDatabase(history_wallet);
+    PaymasterStore history_store{history_wallet};
+    BOOST_REQUIRE(confirmed_state);
+    const auto final_transaction = MakeTransactionRef(*result.final_transaction);
+    {
+        LOCK(history_wallet.cs_wallet);
+        BOOST_REQUIRE(history_wallet.AddToWallet(final_transaction, *confirmed_state));
+        history_wallet.SetLastBlockProcessed(confirmed_state->confirmed_block_height,
+            confirmed_state->confirmed_block_hash);
+    }
+
+    // Reuse real signed recovery evidence and its actually mined final. Only
+    // the unrelated history fillers are synthetic; no signature, mempool or
+    // consensus validation is bypassed for the completed recovery itself.
+    environment.identity_key = provider_key;
+    environment.identity = identity;
+    environment.policy.maximum_network_fee = DGBSatoshis{COIN};
+    environment.settings.policy_hash = GetProviderPolicyHash(environment.policy);
+    environment.netgroup_bucket = GetNetgroupBudgetBucket(environment.ledger, {1, 2, 3});
+    std::vector<ProviderPoolEntry> retained_pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(history_wallet, environment.ledger, retained_pool));
+    ProviderQuoteFixture next_quote;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
+        "550e8400-e29b-41d4-a716-446655449999", uint256S("1931"), now,
+        next_quote, error, nullptr, {}, DGBSatoshis{500}, 5500, result.genesis_hash), error);
+    retained_pool.push_back(next_quote.pool_entry);
+    {
+        // The recovery fixture already enrolled this immutable identity.
+        LOCK(history_wallet.cs_wallet);
+        WalletBatch batch{history_database};
+        BOOST_REQUIRE(batch.TxnBegin());
+        BOOST_REQUIRE(batch.WritePaymasterPolicy(environment.policy));
+        BOOST_REQUIRE(batch.WritePaymasterSettings(environment.settings));
+        BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(environment.safety));
+        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(environment.ledger));
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(retained_pool));
+        for (const auto& record : environment.capacity_records) {
+            BOOST_REQUIRE(batch.WritePaymasterCapacityNonce(record.client_nonce, record.request_hash));
+            BOOST_REQUIRE(batch.WritePaymasterCapacitySession(record.session_key, record.request_hash));
+            BOOST_REQUIRE(batch.WritePaymasterCapacityResponse(record.request_hash, record.proof));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    {
+        LOCK(history_wallet.cs_wallet);
+        WalletBatch batch{history_database};
+        BOOST_REQUIRE(batch.TxnBegin());
+        for (size_t i = 0; i < paymaster_store::internal::MAX_RETAINED_PROVIDER_SESSIONS - 1; ++i) {
+            PaymentSession filler;
+            filler.provider_side = true;
+            filler.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            filler.session_id = SecurityTestId(uint256S("1932"), i + 1);
+            filler.canonical_request_hash = uint256::ONE;
+            filler.created_at = filler.updated_at = now;
+            BOOST_REQUIRE(batch.WritePaymasterSession(filler));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    const auto admission = [&] {
+        uint256 netgroup;
+        return history_store.CheckProviderQuoteAdmission(next_quote.request,
+            Hash(SerializePaymasterSecurityObject(next_quote.request)), {1, 2, 3},
+            false, DGBSatoshis{500}, now, netgroup, error);
+    };
+    const auto update_tip = [&] {
+        IndexWaitSynced(*g_txindex);
+        const auto height = *node.chain->getHeight();
+        const auto hash = node.chain->getBlockHash(height);
+        LOCK(history_wallet.cs_wallet);
+        history_wallet.SetLastBlockProcessed(height, hash);
+    };
+    BOOST_CHECK(!admission());
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
+    for (int depth = 1; depth < DEFAULT_REORG_SAFETY_DEPTH - 1; ++depth)
+        chain_setup->CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    update_tip();
+    BOOST_CHECK(!admission());
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
+    const auto maintain = [&] {
+        size_t expired{0};
+        return history_store.ExpireAlternativeRecoveries(now, expired, error);
+    };
+    const auto active_recoveries = [&] {
+        std::vector<AlternativeRecoveryRecord> active;
+        BOOST_REQUIRE(WalletBatch{history_database}.ListPaymasterAlternativeRecoveries(active));
+        return active.size();
+    };
+    BOOST_REQUIRE_MESSAGE(maintain(), error);
+    BOOST_CHECK_EQUAL(active_recoveries(), 1U);
+
+    // A real tip disconnect before the protection depth cannot archive the
+    // exact signed record or release history capacity.
+    auto& chainstate = node.chainman->ActiveChainstate();
+    CBlockIndex* old_tip = WITH_LOCK(cs_main, return chainstate.m_chain.Tip());
+    BlockValidationState disconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(disconnected, old_tip), disconnected.ToString());
+    SyncWithValidationInterfaceQueue();
+    update_tip();
+    BOOST_REQUIRE_MESSAGE(maintain(), error);
+    BOOST_CHECK_EQUAL(active_recoveries(), 1U);
+    BOOST_CHECK(!admission());
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
+    WITH_LOCK(cs_main, chainstate.ResetBlockFailureFlags(old_tip));
+    BlockValidationState reconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(reconnected), reconnected.ToString());
+    SyncWithValidationInterfaceQueue();
+    update_tip();
+    chain_setup->CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    update_tip();
+    // Delay this wallet's reorg observation: its cache still reports depth240
+    // while canonical chain preflight sees239. Maintenance must retain it.
+    CBlockIndex* stale_tip = WITH_LOCK(cs_main, return chainstate.m_chain.Tip());
+    BlockValidationState stale_disconnect;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(stale_disconnect, stale_tip), stale_disconnect.ToString());
+    SyncWithValidationInterfaceQueue();
+    IndexWaitSynced(*g_txindex);
+    BOOST_REQUIRE_MESSAGE(maintain(), error);
+    BOOST_CHECK_EQUAL(active_recoveries(), 1U);
+    BOOST_CHECK(!admission());
+    WITH_LOCK(cs_main, chainstate.ResetBlockFailureFlags(stale_tip));
+    BlockValidationState stale_reconnect;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(stale_reconnect), stale_reconnect.ToString());
+    SyncWithValidationInterfaceQueue();
+    update_tip();
+    const auto before_archive = history_database.m_records;
+    BOOST_CHECK(!admission()); // Read-only admission cannot perform maintenance.
+    BOOST_CHECK(history_database.m_records == before_archive);
+
+    history_database.m_pass = false;
+    BOOST_CHECK(!maintain());
+    history_database.m_pass = true;
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        BOOST_TEST_CONTEXT("terminal evidence before archive scenario " << scenario) {
+            history_database.m_records = before_archive;
+            auto raw = history_database.MakeBatch();
+            if (scenario == 0) {
+                BOOST_REQUIRE(raw->Erase(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit.commit_key)));
+            } else if (scenario == 1) {
+                auto future = recovery;
+                ++future.version;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), future));
+            } else if (scenario == 2) {
+                auto corrupt = recovery;
+                corrupt.recovery_response.identity_signature.back() ^= 1;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), corrupt));
+            } else {
+                auto future = commit;
+                ++future.version;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit.commit_key), future));
+            }
+            const auto damaged = history_database.m_records;
+            BOOST_CHECK(!maintain());
+            BOOST_CHECK(history_database.m_records == damaged);
+        }
+    }
+    history_database.m_records = before_archive;
+    history_database.FailWriteAt(0);
+    BOOST_CHECK(!maintain());
+    history_database.ClearFailureInjection();
+    BOOST_CHECK(history_database.m_records == before_archive);
+    AlignSecurityFixtureCheckpoint(history_database);
+    history_database.FailCommit();
+    BOOST_CHECK(!maintain());
+    history_database.ClearFailureInjection();
+    BOOST_CHECK(history_database.m_records == before_archive);
+    AlignSecurityFixtureCheckpoint(history_database);
+    BOOST_REQUIRE_MESSAGE(maintain(), error);
+    BOOST_CHECK_EQUAL(active_recoveries(), 0U);
+    BOOST_REQUIRE_MESSAGE(admission(), error);
+
+    // Archive movement does not change accounting or exact replay authority.
+    // Both lookups resolve the complete signed record without a history scan.
+    const auto archived_records = history_database.m_records;
+    BOOST_REQUIRE_MESSAGE(history_store.CommitProviderAlternativeRecoveryFinal(
+        recovery, commit, result, result.genesis_hash, error), error);
+    BOOST_CHECK(history_database.m_records == archived_records);
+    AlternativeRecoveryRecord retained;
+    BOOST_REQUIRE(history_store.GetAlternativeRecoveryById(recovery.recovery_id, retained));
+    BOOST_CHECK(SerializePaymasterSecurityObject(retained) == SerializePaymasterSecurityObject(recovery));
+    BOOST_REQUIRE_MESSAGE(history_store.GetProviderAlternativeRecoveryByCommit(commit, retained, error), error);
+    BOOST_CHECK(SerializePaymasterSecurityObject(retained) == SerializePaymasterSecurityObject(recovery));
+    ProviderFinanceEvent finance_before;
+    BOOST_REQUIRE(WalletBatch{history_database}.ReadPaymasterFinanceEvent(commit.commit_key, finance_before) == DatabaseReadStatus::FOUND);
+    size_t changed_events{0};
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(history_wallet, changed_events, error), error);
+    ProviderFinanceEvent finance_after;
+    BOOST_REQUIRE(WalletBatch{history_database}.ReadPaymasterFinanceEvent(commit.commit_key, finance_after) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(finance_after.kind == ProviderFinanceEventKind::RECOVERY);
+    BOOST_CHECK(finance_after.dd_income == finance_before.dd_income);
+    BOOST_CHECK(finance_after.dgb_cost == finance_before.dgb_cost);
+    BOOST_CHECK(finance_after.transaction_id == finance_before.transaction_id);
+    bool has_drain_work{true};
+    BOOST_REQUIRE_MESSAGE(history_store.HasProviderDrainWork(identity.provider_id, has_drain_work, error), error);
+    BOOST_CHECK(has_drain_work); // The new quote's live capacity continuation.
+
+    const auto intact = history_database.m_records;
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        BOOST_TEST_CONTEXT("archived recovery evidence scenario " << scenario) {
+            history_database.m_records = intact;
+            auto raw = history_database.MakeBatch();
+            if (scenario == 0) {
+                BOOST_REQUIRE(raw->Erase(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, recovery.recovery_id)));
+            } else if (scenario == 1) {
+                auto future = recovery;
+                ++future.version;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, recovery.recovery_id), future));
+            } else if (scenario == 2) {
+                auto corrupt = recovery;
+                corrupt.recovery_response.identity_signature.back() ^= 1;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, recovery.recovery_id), corrupt));
+            } else if (scenario == 3) {
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), recovery));
+            } else if (scenario == 4) {
+                BOOST_REQUIRE(raw->Erase(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR, recovery.recovery_id)));
+            } else {
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR, recovery.recovery_id), uint256::ONE));
+            }
+            const auto damaged = history_database.m_records;
+            BOOST_CHECK(!history_store.GetProviderAlternativeRecoveryByCommit(commit, retained, error));
+            BOOST_CHECK(!history_store.CommitProviderAlternativeRecoveryFinal(
+                recovery, commit, result, result.genesis_hash, error));
+            BOOST_CHECK(!RebuildProviderFinances(history_wallet, changed_events, error));
+            BOOST_CHECK(history_database.m_records == damaged);
+        }
+    }
+    history_database.m_records = intact;
+    BOOST_REQUIRE_MESSAGE(admission(), error);
+    wallet::CWallet terminal_reopened{node.chain.get(), "completed-recovery-history-reopened",
+        DuplicateSecurityFixtureDatabase(history_database)};
+    BOOST_REQUIRE(terminal_reopened.LoadWallet() == DBErrors::LOAD_OK);
+    const auto terminal_tip = WITH_LOCK(history_wallet.cs_wallet,
+        return std::make_pair(history_wallet.GetLastBlockHeight(), history_wallet.GetLastBlockHash()));
+    {
+        LOCK(terminal_reopened.cs_wallet);
+        terminal_reopened.SetLastBlockProcessed(terminal_tip.first, terminal_tip.second);
+        WalletBatch batch{terminal_reopened.GetDatabase()};
+        BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch,
+            next_quote.request.intent.request_id, error));
+    }
 }
 
-static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result)
+static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
+                                         bool exercise_provider_history = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -6158,6 +6403,12 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                 TxStateConfirmed{confirmed.GetHash(), confirmed_height, 1}));
             client.SetLastBlockProcessed(confirmed_height, confirmed.GetHash());
         }
+        if (exercise_provider_history) {
+            const TxStateConfirmed confirmed_state{confirmed.GetHash(), confirmed_height, 1};
+            ExerciseFirstProviderRecoveryCommit(m_node, recovery, provider_key, funding.vtx.at(2),
+                result.result, now, &setup, &confirmed_state);
+            return;
+        }
         {
             LOCK(cs_main);
             for (const auto& input : final_transaction.vin) {
@@ -6331,6 +6582,13 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_confirmed_before_first_result_survives_e
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(provider_confirmed_recovery_archives_only_after_reorg_safety_depth,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/true,
+        /*exercise_provider_history=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_replay,

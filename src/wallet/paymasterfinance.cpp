@@ -661,32 +661,31 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         error = "PAYMASTER_FINANCE_COMMIT_SCAN_FAILED";
         return false;
     }
-    std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
-        error = "PAYMASTER_FINANCE_RECOVERY_SCAN_FAILED";
-        return false;
-    }
-    std::map<uint256, const AlternativeRecoveryRecord*> recoveries_by_commit;
-    for (const auto& recovery : recoveries) {
-        if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
-            recovery.recovery_provider_id != identity.provider_id) continue;
-        if (!recoveries_by_commit.emplace(recovery.recovery_response.recovery_commit_key, &recovery).second) {
-            error = "PAYMASTER_FINANCE_RECOVERY_BINDING_MISMATCH";
-            return false;
-        }
-    }
+    std::map<uint256, uint256> recovery_ids_by_commit;
     for (const ProviderCommitRecord& commit : commits) {
         if (commit.provider_id != identity.provider_id) continue;
         const auto attempt = attempts_by_commit.find(commit.commit_key);
         if (attempt == attempts_by_commit.end() ||
             attempt->second.provider_manifest.manifest_id.IsNull()) {
-            const auto recovery = recoveries_by_commit.find(commit.commit_key);
-            if (recovery != recoveries_by_commit.end()) {
+            // Recovery commits canonically bind quote_id to recovery_id. This
+            // point read resolves active or archived evidence; no history scan
+            // or derived index is used as accounting authority.
+            AlternativeRecoveryRecord recovery;
+            const auto recovery_status = batch.ReadPaymasterAlternativeRecoveryWithStatus(commit.quote_id, recovery);
+            if (recovery_status == DatabaseReadStatus::FOUND) {
                 ProviderFinanceEvent event;
-                if (!RecoveryEvent(identity, *recovery->second, commit, event, error)) return false;
+                if (!RecoveryEvent(identity, recovery, commit, event, error)) return false;
+                recovery_ids_by_commit.emplace(commit.commit_key, recovery.recovery_id);
                 transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at);
                 if (!apply_event(std::move(event))) return false;
                 continue;
+            }
+            const auto existing_event = event_positions.find(commit.commit_key);
+            if (recovery_status != DatabaseReadStatus::NOT_FOUND ||
+                (existing_event != event_positions.end() &&
+                 finance.events[existing_event->second].kind == ProviderFinanceEventKind::RECOVERY)) {
+                error = "PAYMASTER_FINANCE_RECOVERY_READ_FAILED";
+                return false;
             }
             if (!finance.earlier_history_partial) {
                 finance.earlier_history_partial = true;
@@ -762,7 +761,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         observed->attempts_by_commit.clear();
         for (const auto& [commit, attempt] : attempts_by_commit) observed->attempts_by_commit.emplace(commit, attempt.attempt_id);
         observed->recoveries_by_commit.clear();
-        for (const auto& [commit, recovery] : recoveries_by_commit) observed->recoveries_by_commit.emplace(commit, recovery->recovery_id);
+        for (const auto& [commit, recovery_id] : recovery_ids_by_commit) observed->recoveries_by_commit.emplace(commit, recovery_id);
         observed->commit_transactions.clear();
         for (const auto& commit : commits) {
             if (commit.provider_id == identity.provider_id) observed->commit_transactions.emplace(commit.commit_key, commit.final_txid);

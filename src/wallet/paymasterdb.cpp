@@ -164,6 +164,8 @@ const std::string PAYMASTER_SESSION{"pmsession"};
 const std::string PAYMASTER_CLIENT_ORDER{"pmclientorder"};
 const std::string PAYMASTER_RECOVERY{"pmrecovery"};
 const std::string PAYMASTER_ALT_RECOVERY{"pmaltrecovery"};
+const std::string PAYMASTER_ALT_RECOVERY_ARCHIVE{"pmaltarchive"};
+const std::string PAYMASTER_ALT_RECOVERY_LOCATOR{"pmaltlocator"};
 const std::string PAYMASTER_ALT_RECOVERY_REQUEST{"pmaltrecoveryreq"};
 const std::string PAYMASTER_ATTEMPT{"pmattempt"};
 const std::string PAYMASTER_CAPACITY{"pmcapacity"};
@@ -444,6 +446,13 @@ bool WalletBatch::WritePaymasterAlternativeRecovery(
     bool overwrite)
 {
     using namespace DigiDollar::Paymaster;
+    AlternativeRecoveryRecord archived;
+    if (ReadPaymasterVersionedRecord(
+            std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, recovery.recovery_id),
+            archived) != DatabaseReadStatus::NOT_FOUND) return false;
+    uint256 archived_commit;
+    if (m_batch->ReadWithStatus(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR,
+            recovery.recovery_id), archived_commit) != DatabaseReadStatus::NOT_FOUND) return false;
     if (recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION ||
         !IsCanonicalRequestId(recovery.request_id) ||
         recovery.session_id.IsNull() || recovery.recovery_id.IsNull() ||
@@ -476,9 +485,29 @@ DatabaseReadStatus WalletBatch::ReadPaymasterAlternativeRecoveryWithStatus(
 {
     using namespace DigiDollar::Paymaster;
     if (recovery_id.IsNull()) return DatabaseReadStatus::READ_ERROR;
-    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
+    const DatabaseReadStatus active_status = ReadPaymasterVersionedRecord(
         std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery_id), recovery);
+    AlternativeRecoveryRecord archived;
+    const DatabaseReadStatus archive_status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE, recovery_id), archived);
+    uint256 archived_commit;
+    const auto locator_status = m_batch->ReadWithStatus(
+        std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR, recovery_id), archived_commit);
+    if (locator_status != DatabaseReadStatus::FOUND && locator_status != DatabaseReadStatus::NOT_FOUND)
+        return locator_status;
+    if ((archive_status == DatabaseReadStatus::NOT_FOUND) != (locator_status == DatabaseReadStatus::NOT_FOUND))
+        return DatabaseReadStatus::READ_ERROR;
+    if (active_status != DatabaseReadStatus::NOT_FOUND &&
+        archive_status != DatabaseReadStatus::NOT_FOUND) return DatabaseReadStatus::READ_ERROR;
+    const DatabaseReadStatus status = active_status == DatabaseReadStatus::NOT_FOUND
+        ? archive_status : active_status;
+    if (active_status == DatabaseReadStatus::NOT_FOUND) recovery = std::move(archived);
     if (status != DatabaseReadStatus::FOUND) return status;
+    if (active_status == DatabaseReadStatus::NOT_FOUND) {
+        if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
+            archived_commit.IsNull() || archived_commit != recovery.recovery_response.recovery_commit_key)
+            return DatabaseReadStatus::READ_ERROR;
+    }
     if (recovery.recovery_id != recovery_id ||
         !IsCanonicalRequestId(recovery.request_id) ||
         recovery.session_id.IsNull() || recovery.original_provider_id.IsNull() ||
@@ -542,6 +571,9 @@ bool WalletBatch::ListPaymasterAlternativeRecoveries(
                     DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES) {
                 return false;
             }
+            AlternativeRecoveryRecord checked;
+            if (ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, checked) != DatabaseReadStatus::FOUND)
+                return false;
             recoveries.push_back(std::move(recovery));
         } catch (const std::ios_base::failure&) {
             return false;
@@ -556,6 +588,32 @@ bool WalletBatch::ErasePaymasterAlternativeRecovery(
     return !recovery_id.IsNull() &&
            ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY,
                                   recovery_id));
+}
+
+bool WalletBatch::ArchivePaymasterAlternativeRecovery(
+    const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery)
+{
+    using namespace DigiDollar::Paymaster;
+    AlternativeRecoveryRecord current;
+    AlternativeRecoveryRecord archived;
+    const auto canonical_bytes = [](const AlternativeRecoveryRecord& value) {
+        CDataStream stream{SER_DISK, CLIENT_VERSION};
+        stream << value;
+        return SerializeData{stream.begin(), stream.end()};
+    };
+    const auto& commit_key = recovery.recovery_response.recovery_commit_key;
+    if (!PaymasterCheckpointInTransaction(this) || !recovery.provider_side ||
+        recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
+        commit_key.IsNull() ||
+        ReadPaymasterAlternativeRecoveryWithStatus(recovery.recovery_id, current) != DatabaseReadStatus::FOUND ||
+        canonical_bytes(current) != canonical_bytes(recovery) ||
+        ReadPaymasterVersionedRecord(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE,
+            recovery.recovery_id), archived) != DatabaseReadStatus::NOT_FOUND) return false;
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_ARCHIVE,
+               recovery.recovery_id), recovery, false) &&
+           WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_LOCATOR,
+               recovery.recovery_id), commit_key, false) &&
+           ErasePaymasterAlternativeRecovery(recovery.recovery_id);
 }
 
 bool WalletBatch::WritePaymasterAlternativeRecoveryRequest(

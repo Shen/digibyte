@@ -26,8 +26,9 @@ inline constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
 inline constexpr size_t MAX_RETAINED_PROVIDER_SESSIONS{8192};
 inline constexpr size_t MAX_PROVIDER_SESSION_PRUNES_PER_PASS{64};
 
-/** Normal sessions and alternative provider recoveries share one retained
- * history budget. A present record permits only the caller's exact replay. */
+/** Normal sessions and active alternative provider recoveries share one
+ * history budget. Confirmed recovery evidence is archived by maintenance at
+ * the reorg safety depth and remains available through exact point reads. */
 bool CheckProviderHistoryCapacity(WalletBatch& batch, const std::string& request_id,
                                   std::string& error, const uint256& recovery_id = {});
 
