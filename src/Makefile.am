@@ -402,6 +402,7 @@ DIGIBYTE_CORE_H = \
   wallet/paymastercheckpoint.h \
   wallet/paymasterfinance.h \
   wallet/paymasterfinancecache.h \
+  wallet/paymastermaintenancecache.h \
   wallet/paymasterapplication.h \
   wallet/paymasterresults.h \
   wallet/paymasterclientview.h \

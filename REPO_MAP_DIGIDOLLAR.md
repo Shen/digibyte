@@ -853,6 +853,8 @@ work guard and fair lease across separate intake, replay, signing/commit and
 post-commit broadcast helpers. The provider loop calls services without fabricated
 RPC requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
+`paymasterapplication.cpp` owns bounded maintenance-history observation;
+`paymastermaintenancecache.h` exposes only wallet-lifetime cache teardown.
 Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
 `src/paymaster/recovery.cpp` after reconstructing trusted local state; the full
 validator retains chainstate checks. Permanent peer rejection and retained local

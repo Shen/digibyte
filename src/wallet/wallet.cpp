@@ -79,6 +79,7 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterfinancecache.h>
+#include <wallet/paymastermaintenancecache.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
@@ -116,6 +117,7 @@ CWallet::~CWallet()
 {
     ForgetPaymasterSessionIndex(GetDatabase());
     ForgetPaymasterFinanceCache(GetDatabase());
+    ForgetPaymasterMaintenanceCache(GetDatabase());
     // Should not have slots connected at this point.
     assert(NotifyUnload.empty());
 }

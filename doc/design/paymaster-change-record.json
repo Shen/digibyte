@@ -27,10 +27,10 @@
       "regressions": "Existing mint-cleanup fixture plus ordinary DD spendability and Paymaster reservation-balance selections."
     },
     "src/wallet/wallet.cpp": {
-      "purpose": "Retain existing derived-cache teardown and independent lock ownership. AP1 needs to veto new provider capacity/signatures for ordinary/manual locks without treating its own Paymaster reservation as an operator veto.",
-      "reused_api": "Existing CWallet lock sets and LockCoin/UnlockCoin/IsLockedCoin/ListLockedCoins. IsOrdinaryLockedCoin exposes the existing ordinary/manual/DD reason under cs_wallet; IsLockedCoin reuses it and retains the union. No new lock state or persistence format.",
+      "purpose": "Retain existing derived-cache teardown and independent lock ownership. AP1 needs to veto new provider capacity/signatures for ordinary/manual locks without treating its own Paymaster reservation as an operator veto. Bounded maintenance-history reconciliation also needs wallet-lifetime teardown of its derived observation cache.",
+      "reused_api": "Existing CWallet lock sets and LockCoin/UnlockCoin/IsLockedCoin/ListLockedCoins. IsOrdinaryLockedCoin exposes the existing ordinary/manual/DD reason under cs_wallet; IsLockedCoin reuses it and retains the union. No new lock state or persistence format. Reuses the existing destructor cache-forget pattern and NotifyTransactionChanged; CWallet layout is unchanged.",
       "ordinary_callers": "Ordinary DGB/DD sends, manual coin control, collateral locks, wallet load/unload and active Paymaster reservations; lock-list append semantics are preserved.",
-      "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply."
+      "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply. Bounded maintenance continuation, transaction notification and unnotified insertion, wallet destruction and independent cache rebuild."
     },
     "src/wallet/walletdb.cpp": {
       "purpose": "Retain commit-aware derived notifications and independent coin-lock reasons. The requested lifecycle cleanup makes PaymasterWalletTransactionEnd explicitly coordinate session/finance completion and checkpoint release instead of hiding those notifications in PaymasterCheckpointEnd.",
@@ -39,7 +39,7 @@
       "regressions": "Commit, abort, failed commit and destruction with reused batch addresses; derived session-index invalidation and finance notification publication; existing owner/load and ordinary DB cursor/transaction tests, ordinary DD sending and clean operator product builds."
     },
     "src/Makefile.am": {
-      "purpose": "Register Paymaster-only domain/application modules and headers in existing build libraries.",
+      "purpose": "Register Paymaster-only domain/application modules and headers in existing build libraries. Register the maintenance-cache lifecycle header for source distribution.",
       "reused_api": "Existing wallet header/source lists and MSVC generation.",
       "ordinary_callers": "Build and source distribution only.",
       "regressions": "Targeted MSVC compiles and operator clean Windows/Linux builds."

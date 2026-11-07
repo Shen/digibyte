@@ -177,6 +177,8 @@ bool SaveCarrierWithdrawalPreview(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
     std::string& error);
+/** Reconcile known transaction IDs directly and scan unknown history in bounded
+ * continuations. PAYMASTER_MAINTENANCE_RECONCILING grants no release authority. */
 bool ReconcileProviderMaintenance(CWallet& wallet,
                                   size_t& recovered,
                                   std::string& error);

@@ -42,6 +42,7 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymastermaintenancecache.h>
 #include <wallet/spend.h>
 
 #include <util/overflow.h>
@@ -50,9 +51,12 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <boost/signals2/connection.hpp>
 #include <exception>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -943,6 +947,149 @@ bool SaveCarrierWithdrawalPreview(
     return true;
 }
 
+namespace {
+constexpr size_t MAINTENANCE_HISTORY_WORK{256};
+constexpr size_t MAINTENANCE_DIRTY_LIMIT{4096};
+
+bool MatchesMaintenanceTransaction(const DigiDollar::Paymaster::ProviderMaintenanceRecord& record,
+                                   const CWalletTx& wallet_tx)
+{
+    if (!wallet_tx.tx) return false;
+    for (const auto& source : record.source_inputs) {
+        if (std::none_of(wallet_tx.tx->vin.begin(), wallet_tx.tx->vin.end(),
+                         [&](const CTxIn& input) { return input.prevout == source; })) return false;
+    }
+    for (const auto& output : record.outputs) {
+        if (!FindMaintenanceOutputIndex(*wallet_tx.tx, output)) return false;
+    }
+    return record.kind != DigiDollar::Paymaster::ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ||
+           FindExactDigiDollarOutputIndex(*wallet_tx.tx, record.withdrawal_excess_script_pub_key,
+                                          record.withdrawal_excess_amount).has_value();
+}
+
+struct MaintenanceHistory {
+    std::mutex mutex;
+    boost::signals2::scoped_connection notifications;
+    uint256 binding;
+    std::optional<uint256> position;
+    size_t buckets{0};
+    size_t wallet_size{0};
+    bool complete{false};
+    bool reset{false};
+    std::set<uint256> dirty;
+    // Two exact candidates already prove ambiguity. Retaining more cannot
+    // authorize recovery, and would let repeated deposits grow this cache.
+    std::map<uint256, std::set<uint256>> candidates;
+};
+std::mutex maintenance_history_mutex;
+std::map<WalletDatabase*, std::shared_ptr<MaintenanceHistory>> maintenance_histories;
+
+std::shared_ptr<MaintenanceHistory> GetMaintenanceHistory(CWallet& wallet)
+{
+    {
+        std::lock_guard<std::mutex> lock{maintenance_history_mutex};
+        const auto existing = maintenance_histories.find(&wallet.GetDatabase());
+        if (existing != maintenance_histories.end()) return existing->second;
+    }
+    auto state = std::make_shared<MaintenanceHistory>();
+    state->wallet_size = wallet.mapWallet.size();
+    const std::weak_ptr<MaintenanceHistory> weak{state};
+    state->notifications = wallet.NotifyTransactionChanged.connect([weak](const uint256& txid, ChangeType change) {
+        if (auto history = weak.lock()) {
+            std::lock_guard<std::mutex> lock{history->mutex};
+            if (change == CT_NEW) {
+                if (history->wallet_size == std::numeric_limits<size_t>::max()) history->reset = true;
+                else ++history->wallet_size;
+            } else if (change == CT_DELETED) {
+                if (history->wallet_size == 0) history->reset = true;
+                else --history->wallet_size;
+            }
+            if (history->dirty.size() >= MAINTENANCE_DIRTY_LIMIT) {
+                history->reset = true;
+                history->dirty.clear();
+            }
+            history->dirty.insert(txid);
+        }
+    });
+    std::lock_guard<std::mutex> lock{maintenance_history_mutex};
+    return maintenance_histories.emplace(&wallet.GetDatabase(), state).first->second;
+}
+
+bool ReadMaintenanceCandidates(CWallet& wallet,
+                               const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger,
+                               std::map<uint256, std::set<uint256>>& candidates)
+{
+    using namespace DigiDollar::Paymaster;
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<const ProviderMaintenanceRecord*> records;
+    HashWriter hash = TaggedHash("DigiByte Paymaster Maintenance History v1");
+    for (const auto& record : ledger.records) {
+        if (record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull()) continue;
+        records.push_back(&record);
+        hash << record.operation_id << static_cast<uint8_t>(record.kind) << record.outputs << record.source_inputs
+             << record.withdrawal_excess_script_pub_key << record.withdrawal_excess_amount;
+    }
+    if (records.empty()) return true;
+    const auto state = GetMaintenanceHistory(wallet);
+    std::lock_guard<std::mutex> lock{state->mutex};
+    const uint256 binding = hash.GetSHA256();
+    const auto restart = [&] {
+        state->binding = binding;
+        state->position.reset();
+        state->buckets = wallet.mapWallet.bucket_count();
+        state->wallet_size = wallet.mapWallet.size();
+        state->complete = false;
+        state->reset = false;
+        state->candidates.clear();
+        state->dirty.clear();
+    };
+    // A failed WriteTx can leave an in-memory insertion without a wallet
+    // notification. Detect it independently before trusting a negative lookup.
+    if (state->binding != binding || state->reset || state->buckets != wallet.mapWallet.bucket_count() ||
+        state->wallet_size != wallet.mapWallet.size()) restart();
+    // An unordered-map rehash or deletion must never leave a saved iterator.
+    // Newly inserted/updated transactions are independently queued by the
+    // wallet notification, including insertions before the scan position.
+    auto next = wallet.mapWallet.begin();
+    if (state->position && !state->complete) {
+        next = wallet.mapWallet.find(*state->position);
+        if (next == wallet.mapWallet.end()) restart();
+        else ++next;
+        if (!state->position) next = wallet.mapWallet.begin();
+    }
+    const auto observe = [&](const uint256& txid) {
+        const auto transaction = wallet.mapWallet.find(txid);
+        for (const auto* record : records) {
+            auto& found = state->candidates[record->operation_id];
+            if (transaction != wallet.mapWallet.end() && MatchesMaintenanceTransaction(*record, transaction->second)) {
+                if (found.size() < 2) found.insert(txid);
+            } else {
+                const bool ambiguous = found.size() == 2;
+                if (found.erase(txid) && ambiguous) state->reset = true;
+            }
+        }
+    };
+    size_t work{0};
+    while (!state->complete && work < MAINTENANCE_HISTORY_WORK) {
+        if (next == wallet.mapWallet.end()) { state->complete = true; break; }
+        const uint256 txid = next->first;
+        ++next;
+        state->position = txid;
+        observe(txid);
+        ++work;
+    }
+    while (!state->dirty.empty() && work < MAINTENANCE_HISTORY_WORK) {
+        const uint256 txid = *state->dirty.begin();
+        state->dirty.erase(state->dirty.begin());
+        observe(txid);
+        ++work;
+    }
+    if (!state->complete || !state->dirty.empty() || state->reset) return false;
+    candidates = state->candidates;
+    return true;
+}
+} // namespace
+
 bool ReconcileProviderMaintenance(CWallet& wallet,
                                   size_t& recovered,
                                   std::string& error)
@@ -992,6 +1139,8 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     }
     const bool have_withdrawal_plan{
         withdrawal_status == DatabaseReadStatus::FOUND};
+    std::map<uint256, std::set<uint256>> history_candidates;
+    const bool history_ready = ReadMaintenanceCandidates(wallet, ledger, history_candidates);
     for (ProviderMaintenanceRecord& record : ledger.records) {
         if (record.state != ProviderMaintenanceState::PLANNED &&
             record.state != ProviderMaintenanceState::CONFIRMED &&
@@ -1000,40 +1149,20 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         }
         // A conflict/abandon observation is reversible. Keep following the
         // exact saved maintenance transaction; never construct a replacement here.
-        const auto matches = [&](const CWalletTx& wallet_tx) {
-            if (!wallet_tx.tx) return false;
-            for (const COutPoint& source : record.source_inputs) {
-                if (std::none_of(
-                        wallet_tx.tx->vin.begin(), wallet_tx.tx->vin.end(),
-                        [&](const CTxIn& input) {
-                            return input.prevout == source;
-                        })) {
-                    return false;
-                }
-            }
-            for (const ProviderMaintenanceOutput& output : record.outputs) {
-                if (!FindMaintenanceOutputIndex(*wallet_tx.tx, output)) return false;
-            }
-            if (record.kind ==
-                    ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS &&
-                !FindExactDigiDollarOutputIndex(
-                    *wallet_tx.tx,
-                    record.withdrawal_excess_script_pub_key,
-                    record.withdrawal_excess_amount)) {
-                return false;
-            }
-            return true;
-        };
         auto transaction = wallet.mapWallet.end();
         if (!record.transaction_id.IsNull()) {
             transaction = wallet.mapWallet.find(record.transaction_id);
-            if (transaction != wallet.mapWallet.end() && !matches(transaction->second)) {
+            if (transaction != wallet.mapWallet.end() && !MatchesMaintenanceTransaction(record, transaction->second)) {
                 error = "PAYMASTER_MAINTENANCE_TRANSACTION_CONFLICT";
                 return false;
             }
         } else {
-            for (auto candidate = wallet.mapWallet.begin(); candidate != wallet.mapWallet.end(); ++candidate) {
-                if (!matches(candidate->second)) continue;
+            if (!history_ready) continue;
+            for (const uint256& txid : history_candidates[record.operation_id]) {
+                auto candidate = wallet.mapWallet.find(txid);
+                // The derived lookup only selects candidates. Revalidate the
+                // entire journal binding before recording any transaction.
+                if (candidate == wallet.mapWallet.end() || !MatchesMaintenanceTransaction(record, candidate->second)) continue;
                 if (transaction != wallet.mapWallet.end()) {
                     error = "PAYMASTER_MAINTENANCE_TRANSACTION_AMBIGUOUS";
                     return false;
@@ -1314,7 +1443,10 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         error = validation_error;
         return false;
     }
-    if (!ledger_changed && !pool_changed) return true;
+    if (!ledger_changed && !pool_changed) {
+        if (!history_ready) error = "PAYMASTER_MAINTENANCE_RECONCILING";
+        return history_ready;
+    }
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
@@ -1329,7 +1461,8 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         error = "PAYMASTER_DATABASE_COMMIT";
         return false;
     }
-    return true;
+    if (!history_ready) error = "PAYMASTER_MAINTENANCE_RECONCILING";
+    return history_ready;
 }
 
 bool ReleaseSatisfiedProviderReplenishment(CWallet& wallet, bool dgb_satisfied,
@@ -1421,6 +1554,14 @@ bool RunAutomaticDGBReplenishment(
     using namespace DigiDollar::Paymaster;
     error.clear();
     if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
+    // A bounded history pass may still be locating a transaction from a lost
+    // reply. Do not sign another transaction for that plan while it is unknown.
+    size_t recovered{0};
+    if (!ReconcileProviderMaintenance(wallet, recovered, error)) return false;
+    if (recovered != 0) {
+        error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+        return false; // Re-observe slot deficits before planning any new work.
+    }
     if (missing_admission == 0 && missing_operational == 0) return true;
     if (!policy.automatic_replenishment || !policy.paid_maintenance_approved) {
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
@@ -1718,6 +1859,14 @@ bool RunAutomaticCarrierReplenishment(
     using namespace DigiDollar::Paymaster;
     error.clear();
     if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
+    // A bounded history pass may still be locating a transaction from a lost
+    // reply. Do not sign another transaction for that plan while it is unknown.
+    size_t recovered{0};
+    if (!ReconcileProviderMaintenance(wallet, recovered, error)) return false;
+    if (recovered != 0) {
+        error = "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
+        return false; // Re-observe slot deficits before planning any new work.
+    }
     if (missing_admission == 0 && missing_operational == 0) return true;
     if (!policy.automatic_replenishment || !policy.paid_maintenance_approved) {
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
@@ -2154,3 +2303,18 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
 }
 
 } // namespace wallet::paymaster_app
+
+namespace wallet {
+void ForgetPaymasterMaintenanceCache(WalletDatabase& database)
+{
+    std::shared_ptr<paymaster_app::MaintenanceHistory> state;
+    {
+        std::lock_guard<std::mutex> lock{paymaster_app::maintenance_history_mutex};
+        const auto existing = paymaster_app::maintenance_histories.find(&database);
+        if (existing == paymaster_app::maintenance_histories.end()) return;
+        state = std::move(existing->second);
+        paymaster_app::maintenance_histories.erase(existing);
+    }
+    // Disconnect outside the registry lock, like the other derived wallet caches.
+}
+} // namespace wallet

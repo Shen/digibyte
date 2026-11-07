@@ -25,11 +25,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <thread>
-
-#include <algorithm>
 #include <vector>
 
 namespace wallet {
@@ -555,6 +554,126 @@ BOOST_FIXTURE_TEST_CASE(pool_refresh_uses_current_reservations_instead_of_caller
     BOOST_REQUIRE(RefreshPoolConfirmationHeights(m_wallet, stale, error, false));
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(current));
     BOOST_CHECK(current.front().state == PoolEntryState::RESERVED);
+}
+
+BOOST_FIXTURE_TEST_CASE(maintenance_history_is_bounded_and_observes_later_wallet_transactions, WalletTestingSetup)
+{
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+    CKey key;
+    key.MakeNewKey(true);
+    const CScript script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    ProviderMaintenanceOutput output;
+    output.script_pub_key = script;
+    output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    ProviderMaintenanceRecord record;
+    record.operation_id = uint256S("11");
+    record.plan_id = uint256S("12");
+    record.outputs = {output};
+    record.maximum_fee = DGBSatoshis{100};
+    record.created_at = record.updated_at = 1000;
+    ProviderMaintenanceLedger ledger;
+    ledger.records.push_back(record);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    for (uint32_t i = 0; i < 600; ++i) {
+        CMutableTransaction unrelated;
+        unrelated.vin.emplace_back(COutPoint{uint256::ONE, i});
+        unrelated.vout.emplace_back(1, CScript{} << OP_TRUE);
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(unrelated), TxStateInactive{}));
+    }
+    size_t recovered{0};
+    std::string error;
+    ProviderLiquidityPolicy policy;
+    BOOST_CHECK(!RunAutomaticDGBReplenishment(m_wallet, policy, 0, 1, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECONCILING");
+    BOOST_CHECK_EQUAL(recovered, 0U);
+    BOOST_CHECK(!RunAutomaticCarrierReplenishment(m_wallet, policy, 0, 1, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECONCILING");
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    // A completed negative lookup is cheap until the wallet changes.
+    BOOST_REQUIRE(ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(recovered, 0U);
+    // A rehash invalidates traversal order; restart instead of skipping history.
+    m_wallet.mapWallet.rehash(m_wallet.mapWallet.bucket_count() * 2);
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECONCILING");
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    // AddToWallet can retain an in-memory insertion when WriteTx fails before
+    // NotifyTransactionChanged. A matching bucket count cannot hide that change.
+    CMutableTransaction unnotified;
+    unnotified.vin.emplace_back(COutPoint{uint256S("14"), 0});
+    unnotified.vout.emplace_back(1, CScript{} << OP_TRUE);
+    m_wallet.mapWallet.try_emplace(unnotified.GetHash(), MakeTransactionRef(unnotified), TxStateInactive{});
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECONCILING");
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    CMutableTransaction completed;
+    completed.vin.emplace_back(COutPoint{uint256S("13"), 0});
+    completed.vout.emplace_back(output.dgb_value.value, script);
+    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(completed), TxStateInactive{}));
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_CHECK_EQUAL(recovered, 1U);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().transaction_id == completed.GetHash());
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::BROADCAST);
+    BOOST_REQUIRE(ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(recovered, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(maintenance_history_never_recovers_an_ambiguous_match, WalletTestingSetup)
+{
+    LOCK(m_wallet.cs_wallet);
+    CKey key;
+    key.MakeNewKey(true);
+    const CScript script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    ProviderMaintenanceOutput output;
+    output.script_pub_key = script;
+    output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    ProviderMaintenanceRecord record;
+    record.operation_id = uint256S("21");
+    record.plan_id = uint256S("22");
+    record.outputs = {output};
+    record.maximum_fee = DGBSatoshis{100};
+    record.created_at = record.updated_at = 1000;
+    ProviderMaintenanceLedger ledger;
+    ledger.records.push_back(record);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    for (uint32_t i = 0; i < 3; ++i) {
+        CMutableTransaction candidate;
+        candidate.vin.emplace_back(COutPoint{uint256::ONE, i});
+        candidate.vout.emplace_back(output.dgb_value.value, script);
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(candidate), TxStateInactive{}));
+    }
+    size_t recovered{0};
+    std::string error;
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_TRANSACTION_AMBIGUOUS");
+    BOOST_CHECK_EQUAL(recovered, 0U);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().transaction_id.IsNull());
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::PLANNED);
+    // Only two candidates are retained. Removing one must rescan for the
+    // omitted third candidate before any remaining match can become authority.
+    for (size_t remaining = 2; remaining > 0; --remaining) {
+        const uint256 deleted = m_wallet.mapWallet.begin()->first;
+        m_wallet.mapWallet.erase(deleted);
+        m_wallet.NotifyTransactionChanged(deleted, CT_DELETED);
+        BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECONCILING");
+        if (remaining == 2) {
+            BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_TRANSACTION_AMBIGUOUS");
+        } else {
+            BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+            BOOST_CHECK_EQUAL(recovered, 1U);
+            BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+            BOOST_CHECK(ledger.records.front().transaction_id == m_wallet.mapWallet.begin()->first);
+        }
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(concurrent_replenishment_retains_one_current_budget_plan, WalletTestingSetup)
