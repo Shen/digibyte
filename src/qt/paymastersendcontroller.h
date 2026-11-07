@@ -28,6 +28,7 @@ struct PaymasterSessionSnapshot {
     QString recipient;
     QString privacy_profile;
     UniValue restored_options{UniValue::VOBJ};
+    UniValue resume_params;
     QString transaction_id;
     QString recovery_transaction_id;
     QString result_status;
@@ -141,6 +142,7 @@ public:
         UniValue activeRecoveryParams;
         Elapsed activeRecoveryStarted;
         UniValue sendTemplate;
+        UniValue restoredSendParams;
         UniValue restoredOptions{UniValue::VOBJ};
         QString requestId;
         QString sessionId;

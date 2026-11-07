@@ -3,12 +3,14 @@
 #include <qt/paymastersendcontroller.h>
 #include <qt/paymasterconfirmation.h>
 #include <paymaster/types.h>
+#include <paymaster/protocol.h>
 #include <QDateTime>
 #include <exception>
 #include <chrono>
 #include <algorithm>
 #include <QCoreApplication>
 #include <limits>
+#include <set>
 namespace PaymasterQt {
 namespace {
 enum class RecoveryStage { UNSIGNED, SIGNED, UNKNOWN };
@@ -28,6 +30,62 @@ bool RecoveryExpiryMatches(RecoveryStage stage, bool expired, bool elapsed)
     // Core expires only unsigned preparation. Signed artifacts retain their
     // authority and remain observable after the original quote deadline.
     return stage == RecoveryStage::SIGNED ? !expired : expired == elapsed;
+}
+
+UniValue DecodeResumeOrder(const UniValue& session)
+{
+    const auto& order = session.find_value("resume_order");
+    if (!session.find_value("resume_order_available").isTrue() || !order.isObject()) return {};
+    const auto text = [](const UniValue& object, const char* key) {
+        const auto& value = object.find_value(key);
+        return value.isStr() ? value.get_str() : std::string{};
+    };
+    for (const char* key : {"request_id", "session_id", "canonical_request_hash"}) {
+        if (text(order, key).empty() || text(order, key) != text(session, key)) return {};
+    }
+    if (!IsCanonicalNonNullPaymasterHash(QString::fromStdString(text(order, "canonical_request_hash")))) return {};
+    const std::string recipient = text(order, "to_address");
+    if (recipient.empty() || recipient.size() > 160 ||
+        (!text(session, "to_address").empty() && recipient != text(session, "to_address"))) return {};
+    qint64 amount{-1}, fee{-1}, attempts{-1}, original_amount{-1};
+    if (!ReadInt64(order, "requested_amount_cents", amount) || amount < 100 ||
+        amount > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+        !ReadInt64(session, "requested_amount_cents", original_amount) || amount != original_amount ||
+        !ReadInt64(order, "maximum_paymaster_fee_cents", fee) || fee < 0 || fee > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
+        !ReadInt64(order, "maximum_provider_attempts", attempts) || attempts < 1 || attempts > 16) return {};
+    const std::string mode = text(order, "fee_mode"), privacy = text(order, "privacy"), selection = text(order, "selection");
+    if ((mode != "paymaster" && mode != "auto") || mode != text(session, "requested_fee_mode") ||
+        (privacy != "standard" && privacy != "high") || (privacy == "high" && attempts != 1) ||
+        (selection != "lowest_total_cost" && selection != "privacy_weighted")) return {};
+    for (const char* key : {"subtract_paymaster_fee_from_amount", "send_all_spendable_dd"}) {
+        if (!order.find_value(key).isBool() || !session.find_value(key).isBool() ||
+            order.find_value(key).get_bool() != session.find_value(key).get_bool()) return {};
+    }
+    const bool sweep = order.find_value("send_all_spendable_dd").isTrue();
+    if (sweep && !order.find_value("subtract_paymaster_fee_from_amount").isTrue()) return {};
+    const auto& inputs = order.find_value("selected_inputs");
+    if (!inputs.isArray() || inputs.empty() || inputs.size() > DigiDollar::Paymaster::MAX_PAYMENT_INTENT_INPUTS) return {};
+    std::set<std::string> unique_inputs;
+    for (const auto& input : inputs.getValues()) {
+        qint64 vout{-1};
+        const std::string txid = text(input, "txid");
+        if (!IsCanonicalNonNullPaymasterHash(QString::fromStdString(txid)) ||
+            !ReadInt64(input, "vout", vout) || vout < 0 || vout > std::numeric_limits<uint32_t>::max() ||
+            !unique_inputs.insert(txid + ":" + std::to_string(vout)).second) return {};
+    }
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("request_id", text(order, "request_id"));
+    for (const char* key : {"fee_mode", "maximum_paymaster_fee_cents", "maximum_provider_attempts", "privacy", "selection",
+                            "subtract_paymaster_fee_from_amount", "send_all_spendable_dd"}) options.pushKV(key, order.find_value(key));
+    UniValue params{UniValue::VARR};
+    params.push_back(recipient);
+    params.push_back(amount);
+    params.push_back("");
+    params.push_back(0);
+    params.push_back(sweep ? UniValue{} : inputs);
+    params.push_back("cents");
+    params.push_back(std::move(options));
+    return params;
 }
 } // namespace
 
@@ -551,6 +609,9 @@ bool SendController::decodeSnapshot(const UniValue& result,
     snapshot.broadcast_state = read_string(session, "broadcast_state");
     snapshot.confirmation_state = read_string(session, "confirmation_state");
     snapshot.recipient = read_string(session, "to_address");
+    snapshot.resume_params = DecodeResumeOrder(session);
+    if (snapshot.recipient.isEmpty() && snapshot.resume_params.isArray())
+        snapshot.recipient = QString::fromStdString(snapshot.resume_params[0].get_str());
     if (!wrapped && snapshot.recipient.isEmpty()) {
         snapshot.recipient = read_string(result, "to_address");
     }
@@ -674,6 +735,11 @@ bool SendController::decodeSnapshot(const UniValue& result,
     }
     if (snapshot.privacy_profile.isEmpty()) {
         snapshot.privacy_profile = read_string(result, "privacy_profile");
+    }
+    if (snapshot.resume_params.isArray()) {
+        const QString restored_privacy = QString::fromStdString(snapshot.resume_params[6].find_value("privacy").get_str());
+        if (snapshot.privacy_profile.isEmpty()) snapshot.privacy_profile = restored_privacy;
+        else if (snapshot.privacy_profile != restored_privacy) snapshot.resume_params = UniValue{};
     }
     if (!snapshot.privacy_profile.isEmpty() &&
         snapshot.privacy_profile != QStringLiteral("standard") &&
@@ -1037,6 +1103,13 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     m_state.attemptState = snapshot.attempt_state;
     m_state.allowedActions = snapshot.allowed_actions;
     m_state.allowedActionsKnown = snapshot.allowed_actions_known;
+    m_state.restoredSendParams = snapshot.resume_params;
+    if (!m_state.sendTemplate.isArray() && !m_state.restoredSendParams.isArray()) {
+        // Legacy or unreadable replay metadata does not invalidate payment or
+        // recovery observations. It only prohibits guessed new preparation.
+        m_state.allowedActions.removeAll(QStringLiteral("resume"));
+        m_state.allowedActions.removeAll(QStringLiteral("fallback"));
+    }
     if (snapshot.state != QStringLiteral("MEMPOOL") &&
         snapshot.state != QStringLiteral("CONFIRMED") &&
         snapshot.state != QStringLiteral("CANCELED_SAFE") &&
@@ -1116,6 +1189,7 @@ void SendController::resetSession()
     ++m_state.sendGeneration;
     m_state.preparationCancelRequested = false;
     m_state.sendTemplate = UniValue{};
+    m_state.restoredSendParams = UniValue{};
     m_state.requestId.clear();
     m_state.sessionId.clear();
     m_state.sessionState.clear();

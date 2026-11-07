@@ -2848,16 +2848,18 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     // Keep the exact original order through review, unlock, retries and
     // provider fallback. Re-reading editable controls here can change the
     // canonical request after Core has already reserved its inputs.
-    if (m_send.view().sendTemplate.isArray() && m_send.view().sendTemplate.size() == 7 &&
-        m_send.view().sendTemplate[6].find_value("request_id").isStr() &&
-        m_send.view().sendTemplate[6].find_value("request_id").get_str() == m_send.view().requestId.toStdString()) {
+    const UniValue& original = m_send.view().sendTemplate.isArray()
+        ? m_send.view().sendTemplate : m_send.view().restoredSendParams;
+    if (original.isArray() && original.size() == 7 &&
+        original[6].find_value("request_id").isStr() &&
+        original[6].find_value("request_id").get_str() == m_send.view().requestId.toStdString()) {
         UniValue params{UniValue::VARR};
         for (size_t i = 0; i < 6; ++i)
-            params.push_back(m_send.view().sendTemplate[i]);
+            params.push_back(original[i]);
         UniValue options{UniValue::VOBJ};
-        for (const auto& key : m_send.view().sendTemplate[6].getKeys()) {
+        for (const auto& key : original[6].getKeys()) {
             if (key != "prepare_only" && key != "authorization_commitment" && key != "retry_transport") {
-                options.pushKV(key, m_send.view().sendTemplate[6].find_value(key));
+                options.pushKV(key, original[6].find_value(key));
             }
         }
         if (m_send.view().authorizationCommitment.isEmpty())
@@ -2867,6 +2869,7 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
         params.push_back(std::move(options));
         return params;
     }
+    if (m_send.view().sessionPersisted) return UniValue{};
     const auto input = m_form.paymentInput();
     UniValue params{UniValue::VARR};
     params.push_back(address.toStdString());
@@ -2903,18 +2906,6 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
         "subtract_paymaster_fee_from_amount",
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
     options.pushKV("send_all_spendable_dd", m_sendAllSpendableDD);
-    if (m_send.view().sessionPersisted) {
-        // A restored Paymaster session must never inherit Own DGB from the
-        // freshly opened compose form. Core still validates the exact order.
-        options.pushKV("fee_mode", "paymaster");
-        for (const auto& key : m_send.view().restoredOptions.getKeys()) {
-            options.pushKV(key, m_send.view().restoredOptions.find_value(key));
-        }
-        if (!m_send.view().sessionPrivacy.isEmpty()) {
-            options.pushKV("privacy", m_send.view().sessionPrivacy.toStdString());
-            if (m_send.view().sessionPrivacy == QLatin1String("high")) options.pushKV("maximum_provider_attempts", 1);
-        }
-    }
     if (m_send.view().authorizationCommitment.isEmpty()) {
         options.pushKV("prepare_only", true);
     } else {
@@ -3023,11 +3014,17 @@ void PaymasterSendWidget::executePaymasterTransfer(
     }
     // Reserve the operation before a wallet-unlock dialog can re-enter the
     // event loop. No Paymaster button or poll may start a second operation.
+    const UniValue send_params = buildPaymasterSendParams(address, amount_cents);
+    if (!send_params.isArray() || send_params.size() != 7) {
+        reportPaymasterOperationNotStarted(DigiDollarSendWidget::tr(
+            "The complete original order is unavailable. Keep this transfer and use its status, safe cancellation or recovery actions; current payment settings cannot reconstruct it."));
+        return;
+    }
     setPaymasterBusy(true);
     m_paymasterSessionFrame->show();
     m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Contacting Paymaster Network…"));
     QPointer<PaymasterSendWidget> guard{this};
-    const auto token = m_send.startPreparation(buildPaymasterSendParams(address, amount_cents));
+    const auto token = m_send.startPreparation(send_params);
     updatePaymasterFocusMode();
     UniValue initial_params{UniValue::VARR};
     for (size_t i = 0; i < 6; ++i)
@@ -3354,6 +3351,11 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
     if (!m_send.applySnapshot(snapshot, decode_error)) {
         updatePaymasterFocusMode();
         return false;
+    }
+    if (snapshot.allowed_actions.contains(QStringLiteral("resume")) &&
+        !m_send.view().sendTemplate.isArray() && !m_send.view().restoredSendParams.isArray()) {
+        setPaymasterNotice(DigiDollarSendWidget::tr(
+            "The original payment settings are unavailable. Check this transfer's status and use only the cancellation or recovery actions currently offered; current payment settings cannot restore this order."));
     }
     m_paymasterSessionFrame->show();
 

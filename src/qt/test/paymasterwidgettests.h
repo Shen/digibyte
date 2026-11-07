@@ -127,6 +127,7 @@ private Q_SLOTS:
     void paymasterClientSessionActionMatrix_data();
     void paymasterClientSessionActionMatrix();
     void paymasterClientSessionRpcActionsAreBound();
+    void paymasterClientRestoresOriginalOrderFromNativeStatus();
     void paymasterClientFallbackContinues_data();
     void paymasterClientFallbackContinues();
     void paymasterClientSessionDiscoveryFailures_data();

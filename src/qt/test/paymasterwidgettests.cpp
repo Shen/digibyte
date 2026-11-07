@@ -41,6 +41,8 @@
 #include <validation.h>
 #include <wallet/ddcoincontrol.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/paymasterapplication_internal.h>
+#include <wallet/paymasterclient.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
@@ -360,6 +362,10 @@ UniValue PaymasterSessionView(const std::string& state,
     UniValue session{UniValue::VOBJ};
     session.pushKV("request_id", "00000000-0000-4000-8000-000000000001");
     session.pushKV("session_id", std::string(64, '1'));
+    session.pushKV("canonical_request_hash", std::string(64, 'c'));
+    session.pushKV("requested_fee_mode", "paymaster");
+    session.pushKV("subtract_paymaster_fee_from_amount", false);
+    session.pushKV("send_all_spendable_dd", false);
     session.pushKV("session_state", state);
     session.pushKV("payment_confirmed", state == "CONFIRMED");
     session.pushKV("status", state == "CONFIRMED" ? "success" :
@@ -390,6 +396,21 @@ UniValue PaymasterSessionView(const std::string& state,
         session.pushKV("payment_cents", 325);
         session.pushKV("service_fee_cents", 2);
         session.pushKV("user_total_cents", 327);
+        UniValue order{UniValue::VOBJ};
+        for (const char* name : {"request_id", "session_id", "canonical_request_hash", "to_address", "requested_amount_cents",
+                                "subtract_paymaster_fee_from_amount", "send_all_spendable_dd"}) order.pushKV(name, session.find_value(name));
+        order.pushKV("fee_mode", "paymaster");
+        order.pushKV("privacy", "standard");
+        order.pushKV("selection", "lowest_total_cost");
+        order.pushKV("maximum_paymaster_fee_cents", 100);
+        order.pushKV("maximum_provider_attempts", 3);
+        UniValue input{UniValue::VOBJ}, inputs{UniValue::VARR};
+        input.pushKV("txid", std::string(64, 'f'));
+        input.pushKV("vout", 0);
+        inputs.push_back(input);
+        order.pushKV("selected_inputs", inputs);
+        session.pushKV("resume_order_available", true);
+        session.pushKV("resume_order", order);
     }
     session.pushKV("expires_at", int64_t{2000000000});
     if (state == "MEMPOOL" || state == "CONFIRMED") {
@@ -4504,6 +4525,77 @@ void PaymasterWidgetTests::paymasterClientSessionActionMatrix()
     QVERIFY(amount->isReadOnly());
 }
 
+void PaymasterWidgetTests::paymasterClientRestoresOriginalOrderFromNativeStatus()
+{
+    using namespace DigiDollar::Paymaster;
+    using namespace wallet::paymaster_app;
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-original-client-order");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    ClientPaymentOptions original;
+    original.request_id = "550e8400-e29b-41d4-a716-446655440031";
+    original.address = "RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx";
+    original.fee_cap = 57;
+    original.maximum_attempts = 1;
+    original.selection = SelectionMode::PRIVACY_WEIGHTED;
+    original.mode = FeeMode::AUTO;
+    const std::vector<COutPoint> inputs{{uint256::ONE, 2}, {uint256S("02"), 9}};
+    auto order = BuildClientPaymentOrder(original, DDCents{325}, inputs);
+    QVERIFY(order.has_value());
+    wallet::PaymasterStore store{*wallet};
+    PaymentSession session;
+    std::string native_error;
+    QVERIFY2(store.CreateOrJoinSession(original.request_id, order->canonical_request_hash,
+        original.mode, GetTime(), session, native_error, &*order) == wallet::CreatePaymasterSessionResult::CREATED,
+        native_error.c_str());
+
+    // A newly constructed frontend has different Compose defaults. Feed the
+    // actual native persisted view through the actual RPC serializer/decoder.
+    // No mocked send handler is allowed to skip Core's request-hash comparison.
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    QVERIFY(client);
+    QVERIFY(client->m_send.restoreRequest(QString::fromStdString(original.request_id)));
+    wallet::PaymasterStore reopened{*wallet};
+    const UniValue view = wallet::paymaster_rpc::internal::ToJSON(CaptureClientSession(reopened, session, "refresh"));
+    QString error;
+    QVERIFY2(client->updatePaymasterSessionView(view, &error), qPrintable(error));
+    QVERIFY(client->m_send.view().restoredSendParams.isArray());
+    const auto replay = client->buildPaymasterSendParams(QString::fromStdString(original.address), 325);
+    QVERIFY(replay.isArray());
+    const auto& options = replay[6];
+    QCOMPARE(options.find_value("maximum_paymaster_fee_cents").getInt<int>(), 57);
+    QCOMPARE(options.find_value("maximum_provider_attempts").getInt<int>(), 1);
+    QCOMPARE(options.find_value("selection").get_str(), std::string{"privacy_weighted"});
+    QCOMPARE(options.find_value("fee_mode").get_str(), std::string{"auto"});
+    QVERIFY(options.find_value("prepare_only").isTrue());
+    QVERIFY(options.find_value("authorization_commitment").isNull());
+    QCOMPARE(replay[4][0].find_value("vout").getInt<int>(), 2);
+    QCOMPARE(replay[4][1].find_value("vout").getInt<int>(), 9);
+    auto restored = original;
+    restored.fee_cap = options.find_value("maximum_paymaster_fee_cents").getInt<int64_t>();
+    restored.maximum_attempts = options.find_value("maximum_provider_attempts").getInt<int>();
+    const auto replay_hash = CanonicalClientRequestHash(restored, DDCents{replay[1].getInt<int64_t>()}, inputs);
+    QVERIFY(replay_hash == session.canonical_request_hash);
+    QVERIFY(reopened.CreateOrJoinSession(restored.request_id, replay_hash, restored.mode,
+        GetTime(), session, native_error) == wallet::CreatePaymasterSessionResult::JOINED);
+    QVERIFY(session.attempt_ids.empty()); // Status/replay metadata grants no acceptance or signature.
+    QVERIFY(session.user_inputs.empty());
+
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.ErasePaymasterClientOrder(original.request_id));
+    const UniValue legacy = wallet::paymaster_rpc::internal::ToJSON(CaptureClientSession(reopened, session, "refresh"));
+    QVERIFY2(client->updatePaymasterSessionView(legacy, &error), qPrintable(error));
+    QVERIFY(!client->m_send.allows(QStringLiteral("resume")));
+    QVERIFY(client->m_send.allows(QStringLiteral("abandon_unsigned")));
+    QVERIFY(client->buildPaymasterSendParams(QString::fromStdString(original.address), 325).isNull());
+    client->m_send.walletChanged();
+    QVERIFY(client->m_send.view().restoredSendParams.isNull());
+}
+
 void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
 {
     TestChain100Setup test;
@@ -7718,6 +7810,13 @@ void PaymasterWidgetTests::paymasterClientFallbackContinues()
             session.pushKV("privacy_profile", "high");
             session.pushKV("subtract_paymaster_fee_from_amount", true);
             session.pushKV("send_all_spendable_dd", true);
+            auto order = session.find_value("resume_order");
+            order.pushKV("fee_mode", "auto");
+            order.pushKV("privacy", "high");
+            order.pushKV("maximum_provider_attempts", 1);
+            order.pushKV("subtract_paymaster_fee_from_amount", true);
+            order.pushKV("send_all_spendable_dd", true);
+            session.pushKV("resume_order", order);
             result.pushKV("session", session);
             auto attempt = result.find_value("attempt");
             attempt.pushKV("privacy_profile", "high");
