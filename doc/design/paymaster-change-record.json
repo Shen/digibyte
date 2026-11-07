@@ -171,10 +171,10 @@
       "regressions": "Recompile allocators/fixture definitions reached by isolated tests; clean complete wallet/daemon/Qt/test rebuild required; ordinary coin-control and DD lock tests."
     },
     "src/net.cpp": {
-      "purpose": "R2: finish the Direct queue at socket close without concurrently resetting the CNode lease read by message processing. Published lease ownership lasts until CNode destruction.",
-      "reused_api": "Existing CNode reference counting/NodesSnapshot, DirectQueue::Finish and shared DirectPermits lifetime; no new connection budget or synchronization subsystem.",
-      "ordinary_callers": "Ordinary P2P connection teardown, outbound/inbound limits and node deletion remain authoritative. Only a Direct lease stays attached while existing readers hold node references.",
-      "regressions": "net_tests/paymaster_disconnect_retains_lease_for_message_readers: real DisconnectNodes and concurrent PushMessage, stable lease, failed queue outcome, no early permit reuse, ordinary outbound target preserved. Run under TSan separately."
+      "purpose": "R2: finish the Direct queue at socket close without concurrently resetting the CNode lease read by message processing. Published lease ownership lasts until CNode destruction. C++17: replace the five designated aggregate blocks in the shared Direct/P2P transport adapter without changing defaults, flags or reconnect policy.",
+      "reused_api": "Existing CNode reference counting/NodesSnapshot, DirectQueue::Finish and shared DirectPermits lifetime; no new connection budget or synchronization subsystem. Reuse CNodeOptions default members and move ownership, NodeEvictionCandidate fields, and the existing Info/ReconnectionInfo aggregate field order.",
+      "ordinary_callers": "Ordinary P2P connection teardown, outbound/inbound limits and node deletion remain authoritative. Only a Direct lease stays attached while existing readers hold node references. Ordinary inbound/outbound options, eviction candidate values, V1 session metadata and V1 reconnect entries retain their values and ownership.",
+      "regressions": "net_tests/paymaster_disconnect_retains_lease_for_message_readers: real DisconnectNodes and concurrent PushMessage, stable lease, failed queue outcome, no early permit reuse, ordinary outbound target preserved. Run under TSan separately. Compile net.cpp and unchanged net_tests.cpp in C++17/C++20; net_tests/paymaster_*,cnode_listen_port,cnode_simple_test,v2transport_test and paymaster_transport_tests/channel_authentication_rejects_two_leg_bip324_relay,channel_handler_withholds_all_requests_until_authenticated."
     },
     "src/net.h": {
       "purpose": "Document immutable post-publication ownership of the existing CNode Direct lease for the R2 disconnect correction.",
