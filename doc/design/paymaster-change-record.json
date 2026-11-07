@@ -15,10 +15,10 @@
       "regressions": "Resolve the documented filter/exclusions; isolated descriptor Regtest AUTO preparation/retry/CLI and explicit ordinary DGB sending, alongside provider locks and recovery. Complete functional/compatibility matrices remain operator checks."
     },
     "src/wallet/digidollarwallet.cpp": {
-      "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance.",
-      "reused_api": "LockDDWallet, ExtractUnlockHeightFromOpReturn, ExtractTierFromOpReturn and MintLockWindowHasPassed; both balance APIs share the file-local IsPendingDDTransaction predicate under the existing wallet lock.",
-      "ordinary_callers": "Ordinary DD balance/send RPCs and Qt balance views; GetPendingDDBalance preserves its existing classification and error behavior. Paymaster CapturePreparationFunding reads summary.pending.",
-      "regressions": "Both APIs agree at heights 759/760, after height rollback, with/without mempool membership, unknown height, missing metadata and the long lock tier; ordinary DD spendability and Paymaster reservation-balance tests."
+      "purpose": "Apply the existing pending-mint expiry classification to GetDDBalanceSummary, including Paymaster carrier-pool funding views, without adding Paymaster database dependencies to GetPendingDDBalance. A/F: revalidate exact funded DD plans at execution and retain unknown availability separately from ownership.",
+      "reused_api": "LockDDWallet, ExtractUnlockHeightFromOpReturn, ExtractTierFromOpReturn and MintLockWindowHasPassed; both balance APIs share the file-local IsPendingDDTransaction predicate under the existing wallet lock. ValidateDigiDollarTransferPlan reuses PlanDigiDollarTransfer, AvailableCoins and PreflightDDTransferCapacity; SelectFeeCoins shares the same read-only fee-coin filter. GetDDBalanceSummary reuses status-bearing reservation reads.",
+      "ordinary_callers": "Ordinary DD balance/send RPCs and Qt balance views; GetPendingDDBalance preserves its existing classification and error behavior. Paymaster CapturePreparationFunding reads summary.pending. Ordinary DD sends, finite setup, automatic carrier refill and explicit retirement; existing DD token/collateral locks and minimum-fee rules retain their meanings.",
+      "regressions": "Both APIs agree at heights 759/760, after height rollback, with/without mempool membership, unknown height, missing metadata and the long lock tier; ordinary DD spendability and Paymaster reservation-balance tests. Stale DD reservation with sufficient unrelated balance, manual DGB lock, duplicate inputs, altered fee estimate, read-only validation, ordinary spendability/mint cleanup and pool-retirement operator functional tests."
     },
     "src/wallet/test/digidollar_mint_cleanup_tests.cpp": {
       "purpose": "Extend the existing pending-mint regression to enforce the same classification in the ordinary DD and Paymaster-aware balance APIs.",
@@ -27,10 +27,10 @@
       "regressions": "Existing mint-cleanup fixture plus ordinary DD spendability and Paymaster reservation-balance selections."
     },
     "src/wallet/wallet.cpp": {
-      "purpose": "Retain existing derived-cache teardown and independent lock ownership. AP1 needs to veto new provider capacity/signatures for ordinary/manual locks without treating its own Paymaster reservation as an operator veto. Bounded maintenance-history reconciliation also needs wallet-lifetime teardown of its derived observation cache.",
-      "reused_api": "Existing CWallet lock sets and LockCoin/UnlockCoin/IsLockedCoin/ListLockedCoins. IsOrdinaryLockedCoin exposes the existing ordinary/manual/DD reason under cs_wallet; IsLockedCoin reuses it and retains the union. No new lock state or persistence format. Reuses the existing destructor cache-forget pattern and NotifyTransactionChanged; CWallet layout is unchanged.",
-      "ordinary_callers": "Ordinary DGB/DD sends, manual coin control, collateral locks, wallet load/unload and active Paymaster reservations; lock-list append semantics are preserved.",
-      "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply. Bounded maintenance continuation, transaction notification and unnotified insertion, wallet destruction and independent cache rebuild."
+      "purpose": "Retain existing derived-cache teardown and independent lock ownership. AP1 needs to veto new provider capacity/signatures for ordinary/manual locks without treating its own Paymaster reservation as an operator veto. Bounded maintenance-history reconciliation also needs wallet-lifetime teardown of its derived observation cache. E: serialize backend backup copy and completion marker with material configuration changes for GUI and RPC callers.",
+      "reused_api": "Existing CWallet lock sets and LockCoin/UnlockCoin/IsLockedCoin/ListLockedCoins. IsOrdinaryLockedCoin exposes the existing ordinary/manual/DD reason under cs_wallet; IsLockedCoin reuses it and retains the union. No new lock state or persistence format. Reuses the existing destructor cache-forget pattern and NotifyTransactionChanged; CWallet layout is unchanged. Existing recursive cs_wallet, WalletDatabase::Backup and MarkPaymasterProviderBackupCompleted; no new lock, database or wallet layout.",
+      "ordinary_callers": "Ordinary DGB/DD sends, manual coin control, collateral locks, wallet load/unload and active Paymaster reservations; lock-list append semantics are preserved. Ordinary DGB/DD backupwallet RPC and direct GUI backup calls; no-provider backup remains successful.",
+      "regressions": "Provider DGB/carrier locks before selection and signing, transient/persistent locks and reload, unchanged PSBT on denied signing, explicit unlock retaining Paymaster ownership, existing cleanup/coin-control/DD collateral and exact durable replay tests. The AP1 accessor changes no CWallet size; historical layout-change rebuild requirements still apply. Bounded maintenance continuation, transaction notification and unnotified insertion, wallet destruction and independent cache rebuild. Provider backup serialization, same-second reminder changes, existing backup metadata and ordinary wallet database tests; full backup/adoption functionals remain operator checks."
     },
     "src/wallet/walletdb.cpp": {
       "purpose": "Retain commit-aware derived notifications and independent coin-lock reasons. The requested lifecycle cleanup makes PaymasterWalletTransactionEnd explicitly coordinate session/finance completion and checkpoint release instead of hiding those notifications in PaymasterCheckpointEnd.",
@@ -87,22 +87,22 @@
       "regressions": "Range and existing prefix-cursor tests across all wallet backends."
     },
     "src/wallet/walletdb.h": {
-      "purpose": "Declare existing bounded finance/capacity/lock adapters and the explicitly shared PaymasterWalletTransactionEnd hook used by WalletBatch destruction. Finance repair needs an event-source reader independent of derived totals and a decoded cursor for bounded report integrity checks.",
-      "reused_api": "Existing WalletBatch lifecycle and backend transactions; the common completion delegates to the existing derived notification and checkpoint endpoints. Bool capacity readers remain compatibility wrappers. RepairPaymasterFinanceDerivations reuses WalletBatch transactions, versioned events, range cursors and checkpoint writes; the existing three-argument report entry point remains available.",
-      "ordinary_callers": "All WalletBatch consumers must use the current inline destructor. No class-layout, wallet transaction/key format or ordinary lock API changes; unreadable authority remains distinct from absence. New APIs are Paymaster-only and do not change database backends, object layout or ordinary DGB/DD records.",
-      "regressions": "Same common-completion regressions as walletdb.cpp, capacity classification and ordinary DB tests. Recompile reached destructor consumers for isolated tests; complete current-header product builds remain operator checks. Missing/corrupt day/time/transaction derivations, warm reports/reorgs, immutable event preservation, unknown versions and failed repair commit."
+      "purpose": "Declare existing bounded finance/capacity/lock adapters and the explicitly shared PaymasterWalletTransactionEnd hook used by WalletBatch destruction. Finance repair needs an event-source reader independent of derived totals and a decoded cursor for bounded report integrity checks. D: expose an announcement-sequence read that distinguishes absence from corrupt/invalid data.",
+      "reused_api": "Existing WalletBatch lifecycle and backend transactions; the common completion delegates to the existing derived notification and checkpoint endpoints. Bool capacity readers remain compatibility wrappers. RepairPaymasterFinanceDerivations reuses WalletBatch transactions, versioned events, range cursors and checkpoint writes; the existing three-argument report entry point remains available. Existing DatabaseReadStatus and WalletBatch ReadWithStatus; the bool reader remains a compatibility wrapper.",
+      "ordinary_callers": "All WalletBatch consumers must use the current inline destructor. No class-layout, wallet transaction/key format or ordinary lock API changes; unreadable authority remains distinct from absence. New APIs are Paymaster-only and do not change database backends, object layout or ordinary DGB/DD records. WalletBatch callers and Paymaster announcement construction; no backend, layout or record-format change.",
+      "regressions": "Same common-completion regressions as walletdb.cpp, capacity classification and ordinary DB tests. Recompile reached destructor consumers for isolated tests; complete current-header product builds remain operator checks. Missing/corrupt day/time/transaction derivations, warm reports/reorgs, immutable event preservation, unknown versions and failed repair commit. Missing, valid, truncated and zero sequence records; announcement and ordinary database regressions."
     },
     "src/qt/walletmodel.h": {
-      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
-      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
-      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers.",
-      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
+      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling. F: preserve unknown DD availability in the existing balance summary and async overview callback.",
+      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes. Existing balance value/callback types and worker error channel.",
+      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers. Ordinary DD overview/send balance consumers; private-key-disabled wallets retain their display behavior.",
+      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites. Unavailable reservation data, known owned totals, ordinary DD send/overview, watch-only and wallet-switch tests; rebuild direct value consumers."
     },
     "src/qt/walletmodel.cpp": {
-      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling.",
-      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes.",
-      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers.",
-      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites."
+      "purpose": "Explicitly own the generic wallet work queue and preserve structured RPC results; classify task effects explicitly rather than by command spelling. F: send-balance reads report an error for unknown availability; overview retains independently known ownership totals.",
+      "reused_api": "Existing WalletModel RPC callback bridge, wallet leases and QObject/QThread lifetimes. Existing DigiDollar balance snapshot, availability_known and async callback error channel.",
+      "ordinary_callers": "Existing ordinary RPC callback APIs are retained. DGB balance and DD overview/history/receive workers share explicit read limits and FIFO mutation barriers. Ordinary DD send and overview, with existing worker lifetime and wallet binding.",
+      "regressions": "Shared queue ordering/coalescing/shutdown, signing/unlock and wallet-switch checks; rebuild all WalletModel allocation sites after private layout change; ordinary DGB/DD suites. Qt conditional reservation breakdown extended with unsupported pool version and async error; watch-only/send/wallet-switch regressions."
     },
     "src/Makefile.qt.include": {
       "purpose": "Build Paymaster Qt adapters and place the existing wallet-independent worker bridge in the base Qt source list for ClientModel use without wallet support.",
@@ -159,10 +159,10 @@
       "regressions": "Recompile ClientModel allocation consumers and exercise the node RPC shutdown regression; clean product Qt and wallet-disabled builds."
     },
     "src/qt/digidollaroverviewwidget.cpp": {
-      "purpose": "Route ordinary DD Overview RPC reads through the ClientModel-owned queue so no detached read survives Core teardown.",
-      "reused_api": "ClientModel::executeRpcReadAsync with the existing result/local-error/structured-RPC-error callback contract.",
-      "ordinary_callers": "Ordinary DD overview price/health polling, loading/error presentation, privacy and stale generation handling.",
-      "regressions": "Overview unavailable/malformed/structured-error tests and blocked node-RPC shutdown test; preserve read throttling and wallet switches."
+      "purpose": "Route ordinary DD Overview RPC reads through the ClientModel-owned queue so no detached read survives Core teardown. F: display unavailable DD availability/reservations while retaining known wallet/pending totals.",
+      "reused_api": "ClientModel::executeRpcReadAsync with the existing result/local-error/structured-RPC-error callback contract. Existing single snapshot, layout, privacy masking and translated Unavailable state.",
+      "ordinary_callers": "Ordinary DD overview price/health polling, loading/error presentation, privacy and stale generation handling. Ordinary DD overview and wallet valuation, including Paymaster-disabled wallets.",
+      "regressions": "Overview unavailable/malformed/structured-error tests and blocked node-RPC shutdown test; preserve read throttling and wallet switches. Conditional balance breakdown, unavailable snapshots, privacy and wallet-binding regressions."
     },
     "src/wallet/wallet.h": {
       "purpose": "Represent independent lock ownership and expose AP1's read-only distinction between ordinary/manual/DD locks and Paymaster reservations.",
@@ -199,6 +199,36 @@
       "reused_api": "PrepareDigiDollarFeeFunding, RequestAutomaticPaymasterPayment and existing ordinary TransferDigiDollar; no new financial-rule implementation in RPC.",
       "ordinary_callers": "Ordinary senddigidollar without Paymaster options or with fee_mode=dgb keeps its existing execution path. New AUTO with suitable DGB fails before signing and requires an explicit DGB call; existing collaborative sessions resume their saved authority.",
       "regressions": "wallet_paymaster_auto.py: prepare/no commitment/mismatched commitment/concurrent UUID/CLI cannot pay, ordinary explicit DGB works, retries after confirmation cannot pay; existing collaborative RPC/provider/reorg regressions."
+    },
+    "src/wallet/digidollarwallet.h": {
+      "purpose": "A/F: declare shared exact-plan execution validation and availability status required by the requested corrections.",
+      "reused_api": "Existing DDTransferPlan and DigiDollarBalanceSummary; no persisted format change.",
+      "ordinary_callers": "Ordinary DD transfers, Qt balances, pool setup/refill and retirement.",
+      "regressions": "Fresh direct consumers, stale-plan tests, unknown classification and ordinary DD regressions; clean product builds remain required."
+    },
+    "src/qt/digidollaroverviewwidget.h": {
+      "purpose": "F: retain availability status alongside the existing overview snapshot.",
+      "reused_api": "Existing balance snapshot and render lifecycle.",
+      "ordinary_callers": "All DD overview allocations, including ordinary tabs and tests.",
+      "regressions": "Recompile overview, tab and direct test allocations; conditional balance/unknown/privacy tests."
+    },
+    "src/wallet/test/digidollar_wave17_spendability_tests.cpp": {
+      "purpose": "A: reproduce stale exact DD plans at execution with sufficient unrelated funds.",
+      "reused_api": "Existing confirmed DD/descriptor fee-coin fixture and public transfer planner/builder APIs.",
+      "ordinary_callers": "Ordinary DD selection and execution; explicit pool exception cannot bypass DGB locks.",
+      "regressions": "Positive read-only validation plus reserved-DD, manual-DGB-lock, duplicate-input and fee-plan-change vetoes before any transaction/database mutation."
+    },
+    "src/qt/test/digidollarwidgettests.cpp": {
+      "purpose": "F: verify unknown DD availability through current WalletModel callbacks and overview rendering.",
+      "reused_api": "Existing live descriptor-wallet conditional balance-breakdown fixture.",
+      "ordinary_callers": "Ordinary DD overview/send balance presentation and known ownership totals.",
+      "regressions": "Unsupported pool version yields unavailable labels, preserved total and async balance error; ordinary display and wallet-binding regressions."
+    },
+    "test/lint/paymaster-boundaries.json": {
+      "purpose": "Operator-approved A/F scope adds four shared DD header/test integration paths. The follow-up C++17 implementation explicitly covers the already registered wallet Paymaster persistence fuzzer; classify that exact file as Paymaster-owned alongside the other approved fuzz adapters.",
+      "reused_api": "Existing owned/shared path lists and per-file change records; dependency rules, forbidden paths, cycle detection and fixture assertions are unchanged.",
+      "ordinary_callers": "Architecture checks for shared ordinary DD wallet and Qt integration; no product behavior.",
+      "regressions": "Working-tree dependency/cycle checks, six positive/negative boundary fixtures and complete changed-path/shared-record validation against the approved policy."
     }
   },
   "scope_authorization": {
