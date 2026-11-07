@@ -4,6 +4,34 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Pool atomicity, recovery and derived-history integrity
+
+Working-tree corrections based on `343cf789e8204762d9b768b9b79dccb8959a1896`,
+checked on 2026-11-07. The implementation/operator guides own behavior and the
+test runbook owns selectors. No consensus, wire or persisted record format
+changed. Shared-Core additions are recorded in the change record.
+
+Eighteen translation units (11 production, seven test) were freshly compiled
+with MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`.
+Qt 5.15.10 MOC was regenerated and compiled for the new test slots. Isolated
+native/Qt links reuse remaining objects/libraries; they establish neither a clean
+product build nor complete transitive-header provenance. Commands, hashes,
+full logs and failed attempts are retained under `temp/paymaster-af-20261107/`
+(`compiled.jsonl`, `runs.jsonl`, `native-v3.json`, `qt.json`, `verification.json`).
+
+| Executed check | Bounded result |
+|---|---|
+| Native | 64 distinct cases / 23,304 assertions pass after removing overlap: 16 new cases plus related fee/selection, recovery authorization, whole-slot refill, conflict/restart, notification/rollback, 100,000-event warm finance and ordinary database cursor regressions. Bulk comparator/fixture assertions are not separate security scenarios. |
+| Qt | Six selected functions / nine feature cases pass, zero failed or skipped feature cases, Windows platform/Fusion. Includes structured uncertain recovery errors, explicit Own DGB selection, unresolved maintenance, and existing live send/recovery/timeout paths. Init/cleanup are excluded; existing style-property warnings remain in the logs. |
+| Pool negative control | The unchanged new stale-snapshot test fails with prior application/wallet objects matching HEAD (Exit 201): the newly appended pool entry is lost. Current objects pass. This is a narrow causal check, not a historical complete-build result. |
+| C++17 and local controls | All 11 modified production translation units pass `/Zs /std:c++17`. Working-tree dependency/cycle checks, six boundary fixtures, changed-path/shared-Core checks against HEAD policy, JSON parsing and whitespace checks pass. |
+
+Initial compile and fixture failures remain in the logs. Fixture corrections
+retain confirmation, budget and bounded-scan assertions; no validation, lint or
+compiler policy was weakened. No new daemon, functional, sanitizer, complete
+suite or supported clean-product build is claimed. Those operator/CI checks
+and their copyable commands remain in the test runbook.
+
 ## Maintenance, approval and finance corrections
 
 Working-tree corrections based on `c055dd7a9cdd64b248424724ebeb9c04b2fbb1bf`,

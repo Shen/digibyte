@@ -113,6 +113,14 @@ Recovery quote expiry applies to unsigned preparation. `USER_SIGNED` and
 `FINAL_COMMITTED` remain observable and resumable through Core-permitted actions
 after that deadline; Qt must not request fresh approval for the saved signature.
 
+Alternative recovery prices the aggregate original DD inputs and deducts its
+fee from wallet-owned returns. The ordinary recipient-plus-fee ceiling does
+not limit that aggregate; each return and fee output retains its ordinary DD
+limits. Both parties use the same checked, rounded fee calculation. After an
+independent exact-final preflight, already spent recovery prevouts are supplied
+only in a disposable reconstruction view. Full manifest and final-witness
+validation remains mandatory; new signing still requires unspent inputs.
+
 Recovery fee exposure is retained through the 240-confirmation reorganization
 safety depth. A winning original payment is accounted once. Retained exact
 commit evidence can validate historical execution after rolling ledger entries
@@ -156,6 +164,14 @@ beyond the wall clock, as can a later clock correction. Recovering a transaction
 observing confirmation or a conflict must preserve that time floor; otherwise
 completed reserve work can fail validation and incorrectly block capital release.
 Wall-clock expiry checks remain separate from accounting timestamps.
+Pool refresh and refill planning read and update their current authoritative
+records within one wallet-lock interval. A caller's status snapshot cannot
+replace newer reservations. Unknown maintenance transaction IDs use a derived
+wallet-history cache with at most 256 transaction observations per call. New
+wallet transactions, rehashes and unnotified insertions invalidate or update
+that observation. Until the scan finishes, `PAYMASTER_MAINTENANCE_RECONCILING`
+prevents new refill signatures and unsigned release; known transaction IDs
+continue to reconcile. Cache matches are checked against the complete journal.
 Conflicted or abandoned maintenance with a saved transaction ID remains open:
 its signatures can become usable again. All maintenance kinds follow that exact
 transaction and restore their own invalidated successor outputs atomically on
@@ -216,6 +232,12 @@ pass handles at most 256 jobs, including bounded transaction-index pages. Failed
 commits retain pending work. Reports return `PAYMASTER_FINANCE_RECONCILING` while
 work remains; a reader retries the query and never treats stale totals as current.
 Cursor filters and revisions still require a navigation restart after changes.
+Full reconstruction validates immutable event sources independently of derived
+aggregates and atomically repairs time, transaction and day indexes and totals.
+Unknown record versions and damaged sources remain unavailable. Warm reports
+and transaction reconciliation compare bounded pages against committed source
+observations; missing index rows invalidate the cache and require reconstruction.
+Failed maintenance with a saved transaction ID remains visible as open work.
 
 ## Execution and presentation
 
@@ -241,6 +263,10 @@ replay, signing/commit and post-commit broadcast while retaining one work guard
 and fair message lease. AUTO funding decisions belong to the native client
 service. A new AUTO order with suitable own DGB is rejected before signing and
 requires an explicit ordinary DGB send; it has no durable direct-payment manifest.
+Qt presents that rejection only after read-only confirmation that the request
+has no session, then lets the user explicitly select Own DGB and review again.
+An uncertain recovery reply clears live approvals and continuations and keeps
+polling the same request read-only; it never automatically repeats recovery.
 
 Provider processing has one native disposition: no message, processed, rejected
 or deferred. Delivery remains an optional separate observation. The RPC adapter
