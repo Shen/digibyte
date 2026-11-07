@@ -91,6 +91,64 @@ uint256 CanonicalClientRequestHash(
         input.subtract_fee, input.send_all, identity_key, descriptor, capability);
 }
 
+std::optional<ClientPaymentOrder> BuildClientPaymentOrder(
+    const ClientPaymentOptions& input, DDCents amount,
+    const std::vector<COutPoint>& inputs)
+{
+    if (input.identity_key || input.descriptor || input.capability) return std::nullopt;
+    ClientPaymentOrder order;
+    order.genesis_hash = Params().GenesisBlock().GetHash();
+    order.request_id = input.request_id;
+    order.canonical_request_hash = CanonicalClientRequestHash(input, amount, inputs);
+    const CDigiDollarAddress address{input.address};
+    order.recipient_script = GetScriptForDestination(address.GetDigiDollarDestination());
+    order.requested_amount = amount;
+    order.maximum_service_fee = DDCents{input.fee_cap};
+    order.user_inputs = inputs;
+    order.fee_mode = input.mode;
+    order.privacy = input.privacy;
+    order.selection = input.selection;
+    order.maximum_attempts = input.maximum_attempts;
+    order.subtract_fee = input.subtract_fee;
+    order.send_all = input.send_all;
+    return order;
+}
+
+std::optional<bool> SelectCreatedClientSweepInputs(
+    CWallet& wallet, DigiDollarWallet& dd_wallet, const PaymasterStore& store,
+    const PaymentSession& session, DDCents amount, std::vector<COutPoint>& inputs,
+    CAmount& total, std::vector<CAmount>* amounts, std::string& error)
+{
+    if (session.provider_side || session.state != SessionState::CREATED ||
+        !session.user_inputs.empty() || !session.attempt_ids.empty() ||
+        !session.send_all_spendable_dd) return std::nullopt;
+    LOCK(wallet.cs_wallet);
+    auto order = LoadClientPaymentOrder(store, session, error);
+    if (!order) {
+        // Legacy callers can still supply the exact original order. Optional
+        // metadata failure must not replace the existing request hash guard.
+        error.clear();
+        return std::nullopt;
+    }
+    const auto fail = [&](const std::string& reason) {
+        inputs.clear();
+        total = 0;
+        if (amounts) amounts->clear();
+        error = reason;
+        return false;
+    };
+    if (order->requested_amount != amount) return fail("PAYMASTER_REQUEST_ID_CONFLICT");
+    for (const auto& input : order->user_inputs) {
+        if (wallet.IsLockedCoin(input)) return fail("PAYMASTER_INPUT_LOCKED");
+    }
+    // A saved order constrains selection, never reservation authority. Ordinary
+    // DD selection rechecks ownership, confirmation, spentness and reservations.
+    if (!dd_wallet.SelectDDCoins(amount.value, order->user_inputs, inputs, total,
+                                 amounts, &error)) return false;
+    if (total != amount.value) return fail("PAYMASTER_SWEEP_BALANCE_CHANGED");
+    return true;
+}
+
 DDCents PreviewMaximumServiceFee(CWallet& wallet, DDCents requested_limit,
                                 int64_t now, std::string& error)
 {
@@ -821,8 +879,10 @@ std::optional<PaymentResult> JoinClientQuoteSession(ClientQuoteOperation& operat
     if (!CheckPaymasterClientServiceFee(*wallet, candidate.payment, candidate.service_fee, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
+    const auto order = BuildClientPaymentOrder(operation.input, DDCents{requested_amount}, operation.input.inputs);
     const auto create_result = store.CreateOrJoinSession(
-        request_id, canonical_request_hash, requested_mode, now, session, error);
+        request_id, canonical_request_hash, requested_mode, now, session, error,
+        order ? &*order : nullptr);
     if (create_result == CreatePaymasterSessionResult::CONFLICT ||
         create_result == CreatePaymasterSessionResult::DATABASE_ERROR) {
         throw ApplicationError(ErrorKind::WALLET, error);
@@ -1924,7 +1984,16 @@ std::vector<COutPoint> SelectAutomaticPaymentInputs(AutomaticPaymentOperation& o
         selected_inputs = *persisted_inputs;
         inputs_ok = !selected_inputs.empty();
     } else if (send_all) {
-        if (dd_wallet->GetSpendableDDBalance() != amount) {
+        // The session and original order commit atomically before reservations.
+        // A crash in that gap must not sweep newly received funds on resume.
+        const auto restored = operation.have_persisted_session && !preset_inputs
+            ? SelectCreatedClientSweepInputs(*wallet, *dd_wallet, operation.store,
+                operation.persisted_session, DDCents{amount}, selected_inputs,
+                selected_total, &selected_amounts, error)
+            : std::nullopt;
+        if (restored.has_value()) {
+            inputs_ok = *restored;
+        } else if (dd_wallet->GetSpendableDDBalance() != amount) {
             error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
         } else if (preset_inputs) {
             inputs_ok = dd_wallet->SelectDDCoins(

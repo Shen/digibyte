@@ -38,6 +38,11 @@ struct AutomaticPaymentParameters : ClientPaymentOptions {
     std::optional<DigiDollar::Paymaster::PaymasterId> preferred_provider;
     std::optional<uint256> preferred_offer;
 };
+/** Build replay metadata for supported public orders; Restricted historical
+ * callers retain their existing exact-argument replay and recovery paths. */
+std::optional<DigiDollar::Paymaster::ClientPaymentOrder> BuildClientPaymentOrder(
+    const ClientPaymentOptions& input, DigiDollar::Paymaster::DDCents amount,
+    const std::vector<COutPoint>& inputs);
 PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& wallet,
     const AutomaticPaymentParameters& parameters, const std::vector<COutPoint>* preset_inputs = nullptr);
 PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& parameters);

@@ -68,6 +68,40 @@ enum class ReservationRole : uint8_t {
     PROVIDER_DGB,
 };
 
+/** Original public client order, retained separately from spending authority.
+ * It permits an exact replay after restart, never acceptance or signing.
+ * Missing legacy records must not be reconstructed from frontend defaults. */
+struct ClientPaymentOrder {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    uint256 genesis_hash;
+    std::string request_id;
+    uint256 session_id;
+    uint256 canonical_request_hash;
+    CScript recipient_script;
+    DDCents requested_amount;
+    DDCents maximum_service_fee;
+    std::vector<COutPoint> user_inputs;
+    FeeMode fee_mode{FeeMode::PAYMASTER};
+    PrivacyProfile privacy{PrivacyProfile::STANDARD};
+    SelectionMode selection{SelectionMode::LOWEST_TOTAL_COST};
+    uint8_t maximum_attempts{3};
+    bool subtract_fee{false};
+    bool send_all{false};
+
+    SERIALIZE_METHODS(ClientPaymentOrder, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.request_id, obj.session_id,
+                  obj.canonical_request_hash, obj.recipient_script,
+                  obj.requested_amount, obj.maximum_service_fee, obj.user_inputs,
+                  Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy),
+                  Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection),
+                  obj.maximum_attempts, obj.subtract_fee, obj.send_all);
+    }
+};
+
 struct PaymentSession {
     static constexpr uint16_t CURRENT_VERSION{4};
 

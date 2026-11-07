@@ -132,7 +132,12 @@ public:
         DigiDollar::Paymaster::FeeMode requested_mode,
         int64_t now,
         DigiDollar::Paymaster::PaymentSession& session,
-        std::string& error);
+        std::string& error,
+        const DigiDollar::Paymaster::ClientPaymentOrder* order = nullptr);
+
+    DatabaseReadStatus GetClientPaymentOrderWithStatus(
+        const std::string& request_id,
+        DigiDollar::Paymaster::ClientPaymentOrder& order) const;
 
     /** Bind the wallet-local amount semantics before any USER_DD input is
      * reserved. Exact retries are idempotent; any material change fails

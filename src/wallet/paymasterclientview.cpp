@@ -71,6 +71,39 @@ bool FindClientSession(const ClientSessionLookup& lookup, PaymasterStore& store,
         ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_SESSION_READ_FAILED");
 }
 
+std::optional<ClientPaymentOrder> LoadClientPaymentOrder(
+    const PaymasterStore& store, const PaymentSession& session, std::string& error)
+{
+    error.clear();
+    if (session.provider_side) return std::nullopt;
+    ClientPaymentOrder order;
+    const auto status = store.GetClientPaymentOrderWithStatus(session.request_id, order);
+    if (status != DatabaseReadStatus::FOUND) {
+        error = status == DatabaseReadStatus::NOT_FOUND ? "PAYMASTER_CLIENT_ORDER_UNAVAILABLE" :
+            status == DatabaseReadStatus::UNSUPPORTED_VERSION ? "PAYMASTER_CLIENT_ORDER_VERSION_UNSUPPORTED" :
+            "PAYMASTER_CLIENT_ORDER_DATABASE_READ";
+        return std::nullopt;
+    }
+    std::optional<PaymentIntent> intent;
+    if (!session.attempt_ids.empty()) {
+        ProviderAttempt attempt;
+        if (!store.GetAttempt(session.attempt_ids.back(), attempt) ||
+            attempt.attempt_id != session.attempt_ids.back() || attempt.session_id != session.session_id) {
+            error = "PAYMASTER_CLIENT_ORDER_ATTEMPT_MISMATCH";
+            return std::nullopt;
+        }
+        intent.emplace();
+        if (!DeserializePaymasterBytes(attempt.unsigned_intent, "CLIENT_ORDER_INTENT", *intent, error) ||
+            SerializePaymentIntent(*intent) != attempt.unsigned_intent) {
+            error = "PAYMASTER_CLIENT_ORDER_INTENT_INVALID";
+            return std::nullopt;
+        }
+    }
+    if (!ValidateClientPaymentOrder(order, session, intent ? &*intent : nullptr,
+            Params().GenesisBlock().GetHash(), error)) return std::nullopt;
+    return order;
+}
+
 bool IsUnsignedAttempt(const ProviderAttempt& attempt)
 {
     return (attempt.state == AttemptState::CANDIDATE ||

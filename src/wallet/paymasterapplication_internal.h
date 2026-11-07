@@ -17,6 +17,7 @@
 #include <optional>
 #include <string_view>
 class CConnman;
+class DigiDollarWallet;
 namespace wallet::paymaster_app {
 struct ClientPaymentOptions;
 /** Resolve only the captured locator tip while it remains on the active chain.
@@ -24,6 +25,18 @@ struct ClientPaymentOptions;
 std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
     interfaces::Chain& chain, const CBlockLocator& locator);
 SessionSnapshot CaptureSessionSnapshot(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
+/** Optional replay metadata failure must not suppress payment observations or
+ * access to already signed retry/recovery artifacts. */
+std::optional<DigiDollar::Paymaster::ClientPaymentOrder> LoadClientPaymentOrder(
+    const PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
+    std::string& error);
+/** Recover only unreserved CREATED sweep input constraints. No value means no
+ * validated replay metadata; a value reports ordinary wallet selection success. */
+std::optional<bool> SelectCreatedClientSweepInputs(
+    CWallet& wallet, DigiDollarWallet& dd_wallet, const PaymasterStore& store,
+    const DigiDollar::Paymaster::PaymentSession& session,
+    DigiDollar::Paymaster::DDCents amount, std::vector<COutPoint>& inputs,
+    CAmount& total, std::vector<CAmount>* amounts, std::string& error);
 PaymentResult CaptureSessionPayment(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
 /** Validate persisted client display terms without renewing expired authority. */
 bool LoadClientIntentDisplayBinding(

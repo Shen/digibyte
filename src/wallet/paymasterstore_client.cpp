@@ -12,6 +12,7 @@
 #include <digidollar/validation.h>
 #include <hash.h>
 #include <node/context.h>
+#include <paymaster/client.h>
 #include <paymaster/protocol.h>
 #include <paymaster/psbt.h>
 #include <paymaster/validation.h>
@@ -44,7 +45,8 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
     DigiDollar::Paymaster::FeeMode requested_mode,
     int64_t now,
     DigiDollar::Paymaster::PaymentSession& session,
-    std::string& error)
+    std::string& error,
+    const DigiDollar::Paymaster::ClientPaymentOrder* order)
 {
     using namespace DigiDollar::Paymaster;
     error.clear();
@@ -59,6 +61,22 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
         if (session.canonical_request_hash != canonical_request_hash || session.fee_mode_requested != requested_mode) {
             error = "PAYMASTER_REQUEST_ID_CONFLICT";
             return CreatePaymasterSessionResult::CONFLICT;
+        }
+        // Legacy exact-argument callers can add replay metadata only after the
+        // original request hash and amount binding have both been established.
+        // Never replace corrupt or unknown metadata, and never depend on it for
+        // observing or replaying an already authorized financial artifact.
+        if (order && session.requested_amount.value > 0 && !IsTerminal(session.state)) {
+            ClientPaymentOrder bound = *order;
+            bound.session_id = session.session_id;
+            if (!ValidateClientPaymentOrder(bound, session, nullptr, Params().GenesisBlock().GetHash(), error))
+                return CreatePaymasterSessionResult::CONFLICT;
+            ClientPaymentOrder saved;
+            if (batch.ReadPaymasterClientOrderWithStatus(request_id, saved) == DatabaseReadStatus::NOT_FOUND &&
+                !batch.WritePaymasterClientOrder(bound)) {
+                error = "PAYMASTER_CLIENT_ORDER_DATABASE_WRITE";
+                return CreatePaymasterSessionResult::DATABASE_ERROR;
+            }
         }
         return CreatePaymasterSessionResult::JOINED;
     }
@@ -111,13 +129,24 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
     session.fee_mode_used = requested_mode;
     session.created_at = now;
     session.updated_at = now;
+    std::optional<ClientPaymentOrder> bound_order;
+    if (order) {
+        bound_order = *order;
+        bound_order->session_id = session.session_id;
+        session.requested_amount = order->requested_amount;
+        session.subtract_paymaster_fee_from_amount = order->subtract_fee;
+        session.send_all_spendable_dd = order->send_all;
+        if (!ValidateClientPaymentOrder(*bound_order, session, nullptr, Params().GenesisBlock().GetHash(), error))
+            return CreatePaymasterSessionResult::CONFLICT;
+    }
 
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return CreatePaymasterSessionResult::DATABASE_ERROR;
     }
     if (!batch.WritePaymasterSession(session, false) ||
-        !batch.WritePaymasterSessionId(session.session_id, request_id, false)) {
+        !batch.WritePaymasterSessionId(session.session_id, request_id, false) ||
+        (bound_order && !batch.WritePaymasterClientOrder(*bound_order))) {
         Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         return CreatePaymasterSessionResult::DATABASE_ERROR;
     }
@@ -126,6 +155,13 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
         return CreatePaymasterSessionResult::DATABASE_ERROR;
     }
     return CreatePaymasterSessionResult::CREATED;
+}
+
+DatabaseReadStatus PaymasterStore::GetClientPaymentOrderWithStatus(
+    const std::string& request_id, ClientPaymentOrder& order) const
+{
+    LOCK(m_wallet.cs_wallet);
+    return WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterClientOrderWithStatus(request_id, order);
 }
 
 bool PaymasterStore::BindClientPaymentOrder(

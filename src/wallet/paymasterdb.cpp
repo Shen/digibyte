@@ -161,6 +161,7 @@ bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
 
 namespace DBKeys {
 const std::string PAYMASTER_SESSION{"pmsession"};
+const std::string PAYMASTER_CLIENT_ORDER{"pmclientorder"};
 const std::string PAYMASTER_RECOVERY{"pmrecovery"};
 const std::string PAYMASTER_ALT_RECOVERY{"pmaltrecovery"};
 const std::string PAYMASTER_ALT_RECOVERY_REQUEST{"pmaltrecoveryreq"};
@@ -263,6 +264,34 @@ DatabaseReadStatus WalletBatch::ReadPaymasterVersionedRecord(const K& key,
         return DatabaseReadStatus::UNSUPPORTED_VERSION;
     }
     return status;
+}
+
+bool WalletBatch::WritePaymasterClientOrder(const DigiDollar::Paymaster::ClientPaymentOrder& order, bool overwrite)
+{
+    using namespace DigiDollar::Paymaster;
+    if (order.version != ClientPaymentOrder::CURRENT_VERSION ||
+        !IsCanonicalRequestId(order.request_id) || order.session_id.IsNull() ||
+        order.genesis_hash.IsNull() || order.canonical_request_hash.IsNull()) return false;
+    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, order.request_id), order, overwrite);
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterClientOrderWithStatus(
+    const std::string& request_id, DigiDollar::Paymaster::ClientPaymentOrder& order)
+{
+    using namespace DigiDollar::Paymaster;
+    if (!IsCanonicalRequestId(request_id)) return DatabaseReadStatus::READ_ERROR;
+    const auto status = ReadPaymasterVersionedRecord(
+        std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, request_id), order);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (order.request_id != request_id || order.session_id.IsNull() ||
+        order.genesis_hash.IsNull() || order.canonical_request_hash.IsNull()) return DatabaseReadStatus::READ_ERROR;
+    return DatabaseReadStatus::FOUND;
+}
+
+bool WalletBatch::ErasePaymasterClientOrder(const std::string& request_id)
+{
+    return DigiDollar::Paymaster::IsCanonicalRequestId(request_id) &&
+        ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, request_id));
 }
 
 bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSession& session, bool overwrite)

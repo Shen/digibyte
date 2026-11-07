@@ -323,7 +323,7 @@ FUZZ_TARGET(paymaster_persistence_records,
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     const uint8_t record_kind =
-        provider.ConsumeIntegralInRange<uint8_t>(0, 34);
+        provider.ConsumeIntegralInRange<uint8_t>(0, 35);
     const uint8_t session_mutation =
         provider.ConsumeIntegralInRange<uint8_t>(0, 6);
     const uint8_t template_mutation =
@@ -751,6 +751,16 @@ FUZZ_TARGET(paymaster_persistence_records,
             },
             [](WalletBatch& batch, const PaymasterOutcomeMarker& value) {
                 return batch.WritePaymasterOutcomeMarker(value);
+            });
+        break;
+    case 35:
+        ExerciseRecordDecoder<ClientPaymentOrder>(
+            std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, std::string{request_id}), raw,
+            [&](WalletBatch& batch, ClientPaymentOrder& value) {
+                return batch.ReadPaymasterClientOrderWithStatus(request_id, value);
+            },
+            [](WalletBatch& batch, const ClientPaymentOrder& value) {
+                return batch.WritePaymasterClientOrder(value);
             });
         break;
     }

@@ -7,6 +7,7 @@
 #include <paymaster/validation.h>
 #include <streams.h>
 #include <key_io.h>
+#include <base58.h>
 #include <util/strencodings.h>
 #include <version.h>
 
@@ -569,6 +570,40 @@ void AddSessionPaymentStatus(UniValue& result, const SessionSnapshot& snapshot)
     result.pushKV("broadcast_state", broadcast_state);
 }
 
+UniValue ToJSON(const ClientPaymentOrder& order)
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("request_id", order.request_id);
+    result.pushKV("session_id", order.session_id.GetHex());
+    result.pushKV("canonical_request_hash", order.canonical_request_hash.GetHex());
+    CTxDestination recipient;
+    if (ExtractDestination(order.recipient_script, recipient)) result.pushKV("to_address", EncodeDigiDollarAddress(recipient));
+    result.pushKV("requested_amount_cents", order.requested_amount.value);
+    result.pushKV("maximum_paymaster_fee_cents", order.maximum_service_fee.value);
+    result.pushKV("maximum_provider_attempts", order.maximum_attempts);
+    result.pushKV("fee_mode", FeeModeName(order.fee_mode));
+    result.pushKV("privacy", order.privacy == PrivacyProfile::HIGH ? "high" : "standard");
+    result.pushKV("selection", order.selection == SelectionMode::PRIVACY_WEIGHTED ? "privacy_weighted" : "lowest_total_cost");
+    result.pushKV("subtract_paymaster_fee_from_amount", order.subtract_fee);
+    result.pushKV("send_all_spendable_dd", order.send_all);
+    UniValue inputs{UniValue::VARR};
+    for (const auto& input : order.user_inputs) {
+        UniValue entry{UniValue::VOBJ};
+        entry.pushKV("txid", input.hash.GetHex());
+        entry.pushKV("vout", input.n);
+        inputs.push_back(std::move(entry));
+    }
+    result.pushKV("selected_inputs", std::move(inputs));
+    return result;
+}
+
+void AddResumeOrder(UniValue& result, const SessionSnapshot& snapshot)
+{
+    result.pushKV("resume_order_available", snapshot.resume_order.has_value());
+    if (snapshot.resume_order) result.pushKV("resume_order", ToJSON(*snapshot.resume_order));
+    if (!snapshot.resume_order_error.empty()) result.pushKV("resume_order_error", snapshot.resume_order_error);
+}
+
 UniValue ToJSON(const SessionSnapshot& snapshot)
 {
     const auto& session = snapshot.session;
@@ -735,7 +770,10 @@ void AddSessionPaymentStatus(UniValue& result, const PaymentSession& session, co
 }
 UniValue SessionToJSON(const PaymentSession& session, const PaymasterStore* store)
 {
-    return ToJSON(CaptureSessionPayment(session, store));
+    const auto captured = CaptureSessionPayment(session, store);
+    UniValue result = ToJSON(captured);
+    if (captured.session) AddResumeOrder(result, *captured.session);
+    return result;
 }
 UniValue ToJSON(const PaymentResult& value)
 {
@@ -829,6 +867,7 @@ UniValue ToJSON(const ClientRecoveryResult& value)
     UniValue result{UniValue::VOBJ};
     result.pushKV("action", value.action);
     UniValue session_result = ToJSON(value.session);
+    if (value.session.session) AddResumeOrder(session_result, *value.session.session);
     result.pushKV("session", std::move(session_result));
     if (view.attempt) {
         result.pushKV("attempt", AttemptToJSON(*view.attempt));

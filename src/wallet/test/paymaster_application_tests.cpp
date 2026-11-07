@@ -4,10 +4,12 @@
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterclient.h>
 #include <wallet/paymasterfinance.h>
+#include <wallet/digidollarwallet.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <base58.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
+#include <hash.h>
 #include <index/txindex.h>
 #include <key.h>
 #include <paymaster/directory.h>
@@ -38,6 +40,225 @@ using namespace paymaster_app;
 using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(client_order_replay_uses_persisted_terms_and_existing_hash, WalletTestingSetup)
+{
+    {
+        LOCK(m_wallet.cs_wallet);
+        const auto* tip = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+        BOOST_REQUIRE(tip);
+        m_wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    }
+    CKey key;
+    key.MakeNewKey(true);
+    ClientPaymentOptions original;
+    original.request_id = "550e8400-e29b-41d4-a716-446655440021";
+    original.address = EncodeDigiDollarAddress(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    original.fee_cap = 57;
+    original.maximum_attempts = 1;
+    original.selection = SelectionMode::PRIVACY_WEIGHTED;
+    const std::vector<COutPoint> inputs{{uint256S("01"), 3}, {uint256S("02"), 7}};
+    auto order = BuildClientPaymentOrder(original, DDCents{325}, inputs);
+    BOOST_REQUIRE(order);
+    // Preserve the old exact tag, field order and widths across extraction.
+    HashWriter before = TaggedHash("DigiByte Paymaster RPC Request v1");
+    before << original.request_id << order->recipient_script << DDCents{325} << DDCents{57} << inputs
+           << static_cast<uint8_t>(original.mode) << static_cast<uint8_t>(original.privacy)
+           << static_cast<uint8_t>(original.selection) << original.maximum_attempts;
+    BOOST_CHECK(before.GetSHA256() == order->canonical_request_hash);
+
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    BOOST_CHECK(store.CreateOrJoinSession(original.request_id, order->canonical_request_hash,
+        original.mode, GetTime(), session, error, &*order) == CreatePaymasterSessionResult::CREATED);
+    BOOST_CHECK(session.user_inputs.empty()); // Replay metadata reserves/signs nothing.
+    BOOST_CHECK(session.attempt_ids.empty());
+    BOOST_CHECK(session.state == SessionState::CREATED);
+
+    // Use fresh native accessors and the actual database codec/serializer,
+    // never a mock that accepts arbitrary send options.
+    PaymasterStore reopened{m_wallet};
+    PaymentSession restored_session;
+    BOOST_REQUIRE(reopened.GetSessionByRequestId(original.request_id, restored_session));
+    auto snapshot = CaptureSessionSnapshot(restored_session, &reopened);
+    BOOST_REQUIRE_MESSAGE(snapshot.resume_order, snapshot.resume_order_error);
+    const auto valid_order = *snapshot.resume_order;
+    const auto encoded = SessionToJSON(restored_session, &reopened);
+    BOOST_REQUIRE(encoded.find_value("resume_order_available").isTrue());
+    const auto& replay = encoded.find_value("resume_order");
+    ClientPaymentOptions restored;
+    restored.request_id = replay.find_value("request_id").get_str();
+    restored.address = replay.find_value("to_address").get_str();
+    restored.fee_cap = replay.find_value("maximum_paymaster_fee_cents").getInt<int64_t>();
+    restored.maximum_attempts = replay.find_value("maximum_provider_attempts").getInt<int>();
+    restored.selection = replay.find_value("selection").get_str() == "privacy_weighted"
+        ? SelectionMode::PRIVACY_WEIGHTED : SelectionMode::LOWEST_TOTAL_COST;
+    BOOST_CHECK_EQUAL(restored.fee_cap, 57);
+    BOOST_CHECK_EQUAL(restored.maximum_attempts, 1);
+    BOOST_CHECK(restored.selection == SelectionMode::PRIVACY_WEIGHTED);
+    BOOST_CHECK_EQUAL(replay.find_value("selected_inputs")[0].find_value("vout").getInt<int>(), 3);
+    BOOST_CHECK_EQUAL(replay.find_value("selected_inputs")[1].find_value("vout").getInt<int>(), 7);
+    const auto replay_hash = CanonicalClientRequestHash(restored, DDCents{325}, inputs);
+    BOOST_CHECK(replay_hash == restored_session.canonical_request_hash);
+    BOOST_CHECK(reopened.CreateOrJoinSession(restored.request_id, replay_hash, restored.mode,
+        GetTime(), restored_session, error) == CreatePaymasterSessionResult::JOINED);
+    for (int field = 0; field < 3; ++field) {
+        auto changed = restored;
+        if (field == 0) changed.fee_cap = 100;
+        if (field == 1) changed.maximum_attempts = 3;
+        if (field == 2) changed.selection = SelectionMode::LOWEST_TOTAL_COST;
+        BOOST_CHECK(reopened.CreateOrJoinSession(restored.request_id,
+            CanonicalClientRequestHash(changed, DDCents{325}, inputs), changed.mode,
+            GetTime(), restored_session, error) == CreatePaymasterSessionResult::CONFLICT);
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_REQUEST_ID_CONFLICT");
+    }
+
+    PaymentIntent intent;
+    intent.genesis_hash = Params().GenesisBlock().GetHash();
+    intent.request_id = session.request_id;
+    intent.session_id = session.session_id;
+    intent.canonical_request_hash = session.canonical_request_hash;
+    intent.recipient_script = order->recipient_script;
+    intent.user_dd_inputs = inputs;
+    intent.requested_fee_mode = original.mode;
+    intent.privacy_profile = original.privacy;
+    intent.selection_mode = original.selection;
+    BOOST_CHECK(ValidateClientPaymentOrder(*snapshot.resume_order, session, &intent,
+        Params().GenesisBlock().GetHash(), error));
+    intent.selection_mode = SelectionMode::LOWEST_TOTAL_COST;
+    BOOST_CHECK(!ValidateClientPaymentOrder(*snapshot.resume_order, session, &intent,
+        Params().GenesisBlock().GetHash(), error));
+
+    const auto record_key = std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, original.request_id);
+    auto corrupt = *snapshot.resume_order;
+    corrupt.maximum_service_fee = DDCents{100}; // Keep hash; invent different replay terms.
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(record_key, corrupt));
+    snapshot = CaptureSessionSnapshot(session, &reopened);
+    BOOST_CHECK(!snapshot.resume_order);
+    BOOST_CHECK_EQUAL(snapshot.resume_order_error, "PAYMASTER_CLIENT_ORDER_BINDING_MISMATCH");
+    BOOST_CHECK(ToJSON(snapshot).find_value("session_state").get_str() == "CREATED");
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(record_key, uint16_t{65535}));
+    snapshot = CaptureSessionSnapshot(session, &reopened);
+    BOOST_CHECK(!snapshot.resume_order);
+    BOOST_CHECK_EQUAL(snapshot.resume_order_error, "PAYMASTER_CLIENT_ORDER_VERSION_UNSUPPORTED");
+    BOOST_CHECK(snapshot.observation_requested); // Optional metadata never hides status.
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Erase(record_key));
+    snapshot = CaptureSessionSnapshot(session, &reopened);
+    BOOST_CHECK(!snapshot.resume_order);
+    BOOST_CHECK_EQUAL(snapshot.resume_order_error, "PAYMASTER_CLIENT_ORDER_UNAVAILABLE");
+    BOOST_CHECK(reopened.CreateOrJoinSession(restored.request_id, replay_hash, restored.mode,
+        GetTime(), restored_session, error) == CreatePaymasterSessionResult::JOINED);
+
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterClientOrder(valid_order));
+    session.state = SessionState::FAILED;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterSession(session));
+    BOOST_REQUIRE_MESSAGE(reopened.PruneFinalSession(original.request_id, error), error);
+    ClientPaymentOrder pruned_order;
+    BOOST_CHECK(reopened.GetClientPaymentOrderWithStatus(original.request_id, pruned_order) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(reopened.GetSessionByRequestId(original.request_id, restored_session));
+    BOOST_CHECK(restored_session.canonical_request_hash == replay_hash); // Tombstone identity survives detail pruning.
+
+    auto invented = valid_order;
+    invented.request_id = "550e8400-e29b-41d4-a716-446655440022";
+    BOOST_CHECK(store.CreateOrJoinSession(invented.request_id, invented.canonical_request_hash,
+        original.mode, GetTime(), restored_session, error, &invented) == CreatePaymasterSessionResult::CONFLICT);
+    BOOST_CHECK(!store.GetSessionByRequestId(invented.request_id, restored_session));
+}
+
+BOOST_FIXTURE_TEST_CASE(created_sweep_resume_selects_original_unreserved_wallet_inputs, WalletTestingSetup)
+{
+    DigiDollarWallet dd_wallet{&m_wallet};
+    CKey key;
+    key.MakeNewKey(true);
+    const CScript script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    const auto add_confirmed_input = [&](const uint256& nonce, CAmount amount) {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{nonce, 0});
+        tx.vout.emplace_back(0, script);
+        const auto transaction = MakeTransactionRef(std::move(tx));
+        {
+            LOCK(m_wallet.cs_wallet);
+            const auto* tip = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+            BOOST_REQUIRE(tip);
+            m_wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+            m_wallet.AddToWallet(transaction, TxStateConfirmed{tip->GetBlockHash(), tip->nHeight, 0});
+        }
+        const COutPoint input{transaction->GetHash(), 0};
+        dd_wallet.AddDDUTXO(input, amount);
+        return input;
+    };
+    const auto first = add_confirmed_input(uint256S("21"), 1600);
+    const auto second = add_confirmed_input(uint256S("22"), 1400);
+    // Deliberately preserve the request's order rather than outpoint sorting.
+    const std::vector<COutPoint> original_inputs{second, first};
+    ClientPaymentOptions original;
+    original.request_id = "550e8400-e29b-41d4-a716-446655440023";
+    original.address = EncodeDigiDollarAddress(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    original.subtract_fee = true;
+    original.send_all = true;
+    auto order = BuildClientPaymentOrder(original, DDCents{3000}, original_inputs);
+    BOOST_REQUIRE(order);
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    BOOST_REQUIRE(store.CreateOrJoinSession(original.request_id, order->canonical_request_hash,
+        original.mode, GetTime(), session, error, &*order) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE(session.user_inputs.empty()); // Crash before ReserveInputs.
+    const auto new_input = add_confirmed_input(uint256S("23"), 2000);
+    BOOST_REQUIRE_EQUAL(dd_wallet.GetSpendableDDBalance(), 5000);
+    std::vector<COutPoint> selected;
+    std::vector<CAmount> amounts;
+    CAmount total{0};
+    // This is the same ordinary-wallet selection helper used by automatic
+    // resume. It is a planner regression, not a signed/network payment fixture.
+    auto result = SelectCreatedClientSweepInputs(m_wallet, dd_wallet, store, session,
+        DDCents{3000}, selected, total, &amounts, error);
+    BOOST_REQUIRE(result.has_value());
+    BOOST_REQUIRE_MESSAGE(*result, error);
+    BOOST_CHECK(selected == original_inputs);
+    BOOST_CHECK_EQUAL(total, 3000);
+    BOOST_CHECK((amounts == std::vector<CAmount>{1400, 1600}));
+    BOOST_CHECK(std::find(selected.begin(), selected.end(), new_input) == selected.end());
+    BOOST_CHECK(CanonicalClientRequestHash(original, DDCents{3000}, selected) == session.canonical_request_hash);
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, first));
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, second));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.LockCoin(first));
+    }
+    result = SelectCreatedClientSweepInputs(m_wallet, dd_wallet, store, session,
+        DDCents{3000}, selected, total, &amounts, error);
+    BOOST_REQUIRE(result.has_value());
+    BOOST_CHECK(!*result);
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INPUT_LOCKED");
+    BOOST_CHECK(selected.empty());
+    BOOST_CHECK_EQUAL(total, 0);
+    BOOST_CHECK(amounts.empty());
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.UnlockCoin(first));
+    }
+    PaymentSession other;
+    BOOST_REQUIRE(store.CreateOrJoinSession("550e8400-e29b-41d4-a716-446655440024",
+        uint256S("24"), FeeMode::PAYMASTER, GetTime(), other, error) == CreatePaymasterSessionResult::CREATED);
+    BOOST_REQUIRE(store.ReserveInputs(other.request_id, {{first, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, GetTime(), error));
+    result = SelectCreatedClientSweepInputs(m_wallet, dd_wallet, store, session,
+        DDCents{3000}, selected, total, &amounts, error);
+    BOOST_REQUIRE(result.has_value());
+    BOOST_CHECK(!*result); // Metadata cannot borrow another session's reservation.
+    BOOST_CHECK(selected.empty());
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, first));
+    BOOST_REQUIRE(store.GetSessionByRequestId(original.request_id, session));
+    BOOST_CHECK(session.user_inputs.empty());
+    BOOST_CHECK(session.attempt_ids.empty());
+    BOOST_CHECK(session.state == SessionState::CREATED);
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ErasePaymasterClientOrder(original.request_id));
+    BOOST_CHECK(!SelectCreatedClientSweepInputs(m_wallet, dd_wallet, store, session,
+        DDCents{3000}, selected, total, &amounts, error).has_value());
+    BOOST_CHECK(error.empty()); // Missing metadata keeps legacy exact replay available.
+}
 
 BOOST_AUTO_TEST_CASE(retry_request_binding_preserves_historical_restricted_artifacts)
 {

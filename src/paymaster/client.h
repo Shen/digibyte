@@ -20,6 +20,9 @@
 
 namespace DigiDollar::Paymaster {
 
+struct ClientPaymentOrder;
+struct PaymentSession;
+
 /** Stable v1 request identity, including historical Restricted bindings. */
 uint256 CanonicalClientRequestHash(
     const std::string& request_id, const CScript& recipient_script,
@@ -29,6 +32,12 @@ uint256 CanonicalClientRequestHash(
     const std::optional<XOnlyPubKey>& restricted_key,
     const std::optional<RestrictedServiceDescriptor>& descriptor,
     const std::optional<SponsorshipCapability>& capability);
+
+/** Replay metadata describes existing authority; it grants no acceptance,
+ * signature, refreshed deadline or provider selection. */
+bool ValidateClientPaymentOrder(const ClientPaymentOrder& order,
+    const PaymentSession& session, const PaymentIntent* intent,
+    const uint256& expected_genesis, std::string& error);
 
 struct OfferCandidate {
     PaymasterId provider_id;

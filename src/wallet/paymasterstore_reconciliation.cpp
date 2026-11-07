@@ -1273,7 +1273,8 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
-    if (!batch.ErasePaymasterSession(request_id)) {
+    if (!batch.ErasePaymasterClientOrder(request_id) ||
+        !batch.ErasePaymasterSession(request_id)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     if (prune_unsigned && !batch.ErasePaymasterSessionId(session.session_id)) {

@@ -119,6 +119,7 @@ extern const std::string DD_CRYPTED_OWNER_KEY;           // "ddcownerkey" - encr
 extern const std::string ORACLE_KEY;                     // "oraclekey"  - Oracle private keys by oracle_id
 extern const std::string ORACLE_CRYPTED_KEY;             // "oracleckey" - encrypted Oracle private keys by oracle_id
 extern const std::string PAYMASTER_SESSION;              // "pmsession"  - payment sessions by request_id
+extern const std::string PAYMASTER_CLIENT_ORDER;         // "pmclientorder" - exact local replay parameters
 extern const std::string PAYMASTER_RECOVERY;             // "pmrecovery" - idempotent self-recovery by request_id
 extern const std::string PAYMASTER_ALT_RECOVERY;         // "pmaltrecovery" - authenticated alternative recovery by recovery_id
 extern const std::string PAYMASTER_ALT_RECOVERY_REQUEST; // "pmaltrecoveryreq" - client request_id to recovery_id
@@ -442,6 +443,10 @@ public:
     bool HasPaymasterSession(const std::string& request_id);
     bool ListPaymasterSessions(std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
     bool ErasePaymasterSession(const std::string& request_id);
+    bool WritePaymasterClientOrder(const DigiDollar::Paymaster::ClientPaymentOrder& order, bool overwrite = false);
+    DatabaseReadStatus ReadPaymasterClientOrderWithStatus(
+        const std::string& request_id, DigiDollar::Paymaster::ClientPaymentOrder& order);
+    bool ErasePaymasterClientOrder(const std::string& request_id);
     bool WritePaymasterRecovery(const DigiDollar::Paymaster::SelfRecoveryRecord& recovery, bool overwrite = false);
     DatabaseReadStatus ReadPaymasterRecoveryWithStatus(
         const std::string& request_id,

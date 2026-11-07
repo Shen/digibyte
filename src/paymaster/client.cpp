@@ -10,6 +10,7 @@
 
 #include <paymaster/client.h>
 #include <hash.h>
+#include <paymaster/reservation.h>
 
 #include <algorithm>
 #include <limits>
@@ -49,6 +50,55 @@ uint256 CanonicalClientRequestHash(
                << GetSponsorshipCapabilityHash(*capability);
     }
     return hasher.GetSHA256();
+}
+
+bool ValidateClientPaymentOrder(const ClientPaymentOrder& order,
+    const PaymentSession& session, const PaymentIntent* intent,
+    const uint256& expected_genesis, std::string& error)
+{
+    error.clear();
+    if (order.version != ClientPaymentOrder::CURRENT_VERSION || session.provider_side ||
+        order.genesis_hash != expected_genesis ||
+        order.request_id != session.request_id || !IsCanonicalRequestId(order.request_id) ||
+        order.session_id.IsNull() || order.session_id != session.session_id ||
+        order.canonical_request_hash.IsNull() || order.canonical_request_hash != session.canonical_request_hash ||
+        order.fee_mode != session.fee_mode_requested ||
+        (order.fee_mode != FeeMode::PAYMASTER && order.fee_mode != FeeMode::AUTO) ||
+        (order.privacy != PrivacyProfile::STANDARD && order.privacy != PrivacyProfile::HIGH) ||
+        (order.selection != SelectionMode::LOWEST_TOTAL_COST && order.selection != SelectionMode::PRIVACY_WEIGHTED) ||
+        order.maximum_attempts < 1 || order.maximum_attempts > 16 ||
+        (order.privacy == PrivacyProfile::HIGH && order.maximum_attempts != 1) ||
+        order.requested_amount.value < 100 || order.requested_amount.value > MAX_DD_OUTPUT_CENTS ||
+        order.maximum_service_fee.value < 0 || order.maximum_service_fee.value > MAX_DD_OUTPUT_CENTS ||
+        order.requested_amount != session.requested_amount ||
+        order.subtract_fee != session.subtract_paymaster_fee_from_amount ||
+        order.send_all != session.send_all_spendable_dd || (order.send_all && !order.subtract_fee) ||
+        !IsP2TR(order.recipient_script) || order.user_inputs.empty() ||
+        order.user_inputs.size() > MAX_PAYMENT_INTENT_INPUTS ||
+        std::any_of(order.user_inputs.begin(), order.user_inputs.end(), [](const COutPoint& input) { return input.IsNull(); }) ||
+        std::set<COutPoint>(order.user_inputs.begin(), order.user_inputs.end()).size() != order.user_inputs.size() ||
+        (!session.user_inputs.empty() && order.user_inputs != session.user_inputs)) {
+        error = "PAYMASTER_CLIENT_ORDER_INVALID";
+        return false;
+    }
+    // The existing hash implementation remains the sole definition of material
+    // request identity. Replay metadata must prove it describes that same order.
+    if (CanonicalClientRequestHash(order.request_id, order.recipient_script,
+            order.requested_amount, order.maximum_service_fee, order.user_inputs,
+            order.fee_mode, order.privacy, order.selection, order.maximum_attempts,
+            order.subtract_fee, order.send_all, std::nullopt, std::nullopt, std::nullopt) != session.canonical_request_hash ||
+        (intent && (intent->version != PaymentIntent::CURRENT_VERSION || intent->genesis_hash != expected_genesis ||
+            intent->session_id != session.session_id ||
+            intent->request_id != session.request_id ||
+            intent->canonical_request_hash != session.canonical_request_hash ||
+            intent->recipient_script != order.recipient_script ||
+            intent->user_dd_inputs != order.user_inputs ||
+            intent->requested_fee_mode != order.fee_mode ||
+            intent->privacy_profile != order.privacy || intent->selection_mode != order.selection))) {
+        error = "PAYMASTER_CLIENT_ORDER_BINDING_MISMATCH";
+        return false;
+    }
+    return true;
 }
 
 bool OfferCandidateLess(const OfferCandidate& lhs, const OfferCandidate& rhs,

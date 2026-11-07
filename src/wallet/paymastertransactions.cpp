@@ -71,6 +71,7 @@ SessionSnapshot CaptureSessionSnapshot(const PaymentSession& session, const Paym
 {
     SessionSnapshot result;
     result.session = session;
+    if (store) result.resume_order = LoadClientPaymentOrder(*store, session, result.resume_order_error);
     result.observation_requested = store != nullptr;
     auto& observation = result.observation;
     if (store && !store->GetSessionObservation(session, observation, result.observation_error)) {
@@ -94,6 +95,12 @@ PaymentResult CaptureSessionPayment(const PaymentSession& session, const Paymast
     result.requested_fee_mode = session.fee_mode_requested;
     result.fee_mode_used = session.fee_mode_used;
     result.session_state = session.state;
+    if (result.session->resume_order) {
+        const auto& order = *result.session->resume_order;
+        CTxDestination recipient;
+        if (ExtractDestination(order.recipient_script, recipient)) result.to_address = EncodeDigiDollarAddress(recipient);
+        result.privacy_profile = order.privacy;
+    }
     if (session.requested_amount.value > 0) {
         result.requested_amount_cents = session.requested_amount;
         result.subtract_paymaster_fee_from_amount = session.subtract_paymaster_fee_from_amount;

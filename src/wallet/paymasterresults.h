@@ -86,6 +86,8 @@ struct BackupAcknowledgementResult {
 /** Captured under the wallet's authoritative read path; serialization never re-reads it. */
 struct SessionSnapshot {
     DigiDollar::Paymaster::PaymentSession session;
+    std::optional<DigiDollar::Paymaster::ClientPaymentOrder> resume_order;
+    std::string resume_order_error;
     PaymasterSessionObservation observation;
     bool observation_requested{false};
     std::string observation_error;
