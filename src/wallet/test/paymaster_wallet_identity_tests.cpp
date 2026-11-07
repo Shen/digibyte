@@ -48,6 +48,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <utility>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
@@ -1856,6 +1857,111 @@ BOOST_AUTO_TEST_CASE(provider_stop_waits_for_work_without_bypassing_exclusion)
         BOOST_CHECK(provider_wallet.mapWallet.empty());
         BOOST_CHECK(!manager.IsProviderRunning(provider_wallet.GetName(), identity.provider_id));
     }
+}
+
+BOOST_AUTO_TEST_CASE(direct_submit_holds_stop_exclusion_through_processing)
+{
+    class SubmitBarrierDatabase final : public MockableDatabase {
+    public:
+        std::function<void()> on_batch;
+        std::unique_ptr<DatabaseBatch> MakeBatch(bool flush = true) override
+        {
+            if (on_batch) on_batch();
+            return MockableDatabase::MakeBatch(flush);
+        }
+    };
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    auto database = std::make_unique<SubmitBarrierDatabase>();
+    auto& observed = *database;
+    CWallet wallet{m_node.chain.get(), "direct-submit-stop", std::move(database)};
+    ProviderIdentityRecord identity;
+    std::string error;
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+        wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
+            m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+        BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Direct submit stop", 1000, identity, error));
+        ProviderSettings settings;
+        settings.enabled = settings.autostart = true;
+        settings.policy_hash = uint256::ONE;
+        settings.updated_at = 1001;
+        BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(settings));
+    }
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    CMutableTransaction transaction;
+    transaction.vin.emplace_back(COutPoint{uint256::ONE, 0});
+    transaction.vout.emplace_back(0, identity.identity_script);
+    PartiallySignedTransaction psbt{transaction};
+    {
+        paymaster_app::ProviderWorkGuard owner{manager, wallet.GetName(), identity.provider_id, false};
+        BOOST_REQUIRE(owner.Acquired());
+        const auto before = observed.m_records;
+        BOOST_CHECK_EXCEPTION(paymaster_app::SubmitPaymasterTransaction(context, wallet, psbt,
+            paymaster_app::ExecutionMode::MANUAL), ApplicationError,
+            [](const ApplicationError& failure) { return failure.code == "PAYMASTER_PROVIDER_SERVICE_BUSY"; });
+        BOOST_CHECK(observed.m_records == before);
+    }
+    std::promise<void> entered, release;
+    auto entered_future = entered.get_future();
+    auto release_future = release.get_future();
+    std::atomic<int> batches{0};
+    observed.on_batch = [&] {
+        // Identity lookup precedes the guard. Pause the first processing read,
+        // after that guard has been acquired and before any authority changes.
+        if (++batches == 2) {
+            entered.set_value();
+            release_future.wait();
+        }
+    };
+    auto submitted = std::async(std::launch::async, [&] {
+        try {
+            paymaster_app::SubmitPaymasterTransaction(context, wallet, psbt, paymaster_app::ExecutionMode::MANUAL);
+        } catch (const ApplicationError& failure) {
+            return std::make_pair(failure.code, std::string{failure.what()});
+        }
+        return std::pair<std::string, std::string>{};
+    });
+    const bool reached = entered_future.wait_for(std::chrono::seconds{5}) == std::future_status::ready;
+    // Probe the independent manager slot: waiting on cs_wallet alone must
+    // never make an unguarded submit look serialized with stop.
+    const bool competing_work = manager.TryBeginProviderWork(wallet.GetName(), identity.provider_id, false);
+    if (competing_work) manager.EndProviderWork(wallet.GetName());
+    auto stopped = std::async(std::launch::async, [&] {
+        return paymaster_app::StopPaymaster(context, wallet, true, true);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    bool stop_priority{false};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!manager.RequestProviderStart(wallet.GetName(), identity.provider_id)) {
+            stop_priority = true;
+            break;
+        }
+        UninterruptibleSleep(std::chrono::milliseconds{1});
+    }
+    const bool waited = stopped.wait_for(std::chrono::milliseconds{100}) == std::future_status::timeout;
+    // Always release the worker before assertions or future destruction.
+    release.set_value();
+    const auto failure = submitted.get();
+    stopped.get();
+    observed.on_batch = {};
+    BOOST_CHECK(reached);
+    BOOST_CHECK(!competing_work);
+    BOOST_CHECK(stop_priority);
+    BOOST_CHECK(waited);
+    BOOST_CHECK_EQUAL(failure.first, "PAYMASTER_APPLICATION_ERROR");
+    BOOST_CHECK_EQUAL(failure.second, "No persistent Paymaster template matches this PSBT");
+    ProviderSettings settings;
+    BOOST_REQUIRE(GetPaymasterProviderSettings(wallet, settings));
+    BOOST_CHECK(!settings.enabled && !settings.autostart);
+    BOOST_CHECK(wallet.mapWallet.empty());
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(wallet, error), error);
 }
 
 BOOST_AUTO_TEST_CASE(maintenance_cancellation_is_selected_atomic_and_signature_safe)
@@ -4831,7 +4937,7 @@ BOOST_AUTO_TEST_CASE(automatic_submit_defers_before_wallet_or_index_wait)
     }
     const auto before = GetMockableDatabase(m_wallet).m_records;
     BOOST_CHECK_EXCEPTION(
-        paymaster_app::SubmitPaymasterTransaction(m_wallet, PartiallySignedTransaction{}, paymaster_app::ExecutionMode::AUTOMATIC),
+        paymaster_app::SubmitPaymasterTransaction(context, m_wallet, PartiallySignedTransaction{}, paymaster_app::ExecutionMode::AUTOMATIC),
         ApplicationError, [](const ApplicationError& error) {
             return error.kind == ErrorKind::WALLET && error.code == "PAYMASTER_PROVIDER_SYNCING";
         });

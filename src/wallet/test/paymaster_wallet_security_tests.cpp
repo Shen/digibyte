@@ -42,6 +42,7 @@
 #include <validationinterface.h>
 #include <wallet/context.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymasterfinance.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
@@ -2614,14 +2615,29 @@ BOOST_AUTO_TEST_CASE(provider_signing_rejects_maintenance_sources_reused_before_
     // quote fails locally and does not create a provider signature or commit.
     BOOST_CHECK(CheckPaymasterMaintenanceInputsAvailable(m_wallet,
         {COutPoint{SecurityTestId(seed, 23), 0}}, error));
+    // Direct submits participate in named provider work just like the daemon.
+    // Reopen the fixture's durable authority under an eligible runtime name.
+    wallet::CWallet direct_wallet{m_node.chain.get(), "maintenance-source-submit",
+        DuplicateMockDatabase(m_wallet.GetDatabase())};
+    BOOST_REQUIRE(direct_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(direct_wallet.cs_wallet);
+        direct_wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
+            m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+    }
+    Manager direct_manager{true};
+    WalletContext direct_context;
+    direct_context.paymaster = &direct_manager;
+    const auto direct_before = GetMockableDatabase(direct_wallet).m_records;
     for (int retry = 0; retry < 2; ++retry) {
         BOOST_CHECK_EXCEPTION(paymaster_app::SubmitPaymasterTransaction(
-            m_wallet, user_psbt, paymaster_app::ExecutionMode::MANUAL), ApplicationError,
+            direct_context, direct_wallet, user_psbt, paymaster_app::ExecutionMode::MANUAL), ApplicationError,
             [](const ApplicationError& failure) {
                 return failure.kind == ErrorKind::WALLET &&
                     std::string{failure.what()} == "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
             });
         BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+        BOOST_CHECK(GetMockableDatabase(direct_wallet).m_records == direct_before);
         BOOST_CHECK(ReadBinaryFile(PaymasterCheckpointPath(
             fixture.request.intent.genesis_hash, environment.identity.provider_id)) == checkpoint);
     }
@@ -4836,6 +4852,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     ProviderAttempt restarted_attempt;
     BOOST_REQUIRE(restarted_store.GetAttempt(
         provider_signed.attempt_id, restarted_attempt));
+
     ProviderSafetyPolicy changed_policy{environment.safety};
     changed_policy.maximum_active_quotes_per_recipient--;
     changed_policy.updated_at = commit.committed_at + 1;
@@ -4983,6 +5000,86 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
         BOOST_CHECK(SerializePaymasterSecurityObject(spent) == spent_bytes);
         WITH_LOCK(m_node.mempool->cs, m_node.mempool->removeRecursive(*final_ref, MemPoolRemovalReason::CONFLICT));
+    }
+
+    // The public submit facade must replay existing authority while stopped,
+    // including with transport disabled. The locked wallet cannot create a
+    // replacement signature; exact replay must preserve every accounting row.
+    wallet::CWallet facade_wallet{m_node.chain.get(), "stopped-submit-replay",
+        DuplicateSecurityFixtureDatabase(restarted_wallet.GetDatabase())};
+    BOOST_REQUIRE(facade_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    PaymasterStore facade_store{facade_wallet};
+    {
+        LOCK(facade_wallet.cs_wallet);
+        const int height = *m_node.chain->getHeight();
+        facade_wallet.SetLastBlockProcessed(height, m_node.chain->getBlockHash(height));
+    }
+    // Finish the existing broadcast-status result while keys are available;
+    // the three calls below may only reuse that exact durable envelope.
+    BOOST_REQUIRE(facade_wallet.Unlock(restart_passphrase));
+    const auto normalized_replay = paymaster_app::RecoverProviderCommit(
+        facade_wallet, facade_store, commit, std::max(GetTime(), commit.committed_at));
+    BOOST_REQUIRE_MESSAGE(normalized_replay.error.empty(), normalized_replay.error);
+    facade_wallet.Lock();
+    BOOST_REQUIRE(facade_wallet.IsLocked());
+    ProviderBudgetLedger facade_ledger;
+    std::vector<ProviderPoolEntry> facade_pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(facade_wallet, facade_ledger, facade_pool));
+    PartiallySignedTransaction replay_user_psbt;
+    BOOST_REQUIRE(DecodeRawPSBT(replay_user_psbt,
+        MakeByteSpan(provider_signed.user_signed_psbt), error));
+    WalletContext replay_context;
+    replay_context.chain = m_node.chain.get();
+    replay_context.args = m_node.args;
+    Manager stopped_manager{true};
+    replay_context.paymaster = &stopped_manager;
+    BOOST_REQUIRE(stopped_manager.StartProvider(facade_wallet.GetName(), commit.provider_id));
+    paymaster_app::StopPaymaster(replay_context, facade_wallet,
+        /*persistent=*/true, /*pause_setup=*/false);
+    BOOST_CHECK(!stopped_manager.IsProviderRunning(facade_wallet.GetName(), commit.provider_id));
+    const auto before_facade_replay = GetMockableDatabase(facade_wallet).m_records;
+    ProviderFinanceEvent finance_before_replay;
+    BOOST_REQUIRE(WalletBatch{facade_wallet.GetDatabase()}.ReadPaymasterFinanceEvent(
+        commit.commit_key, finance_before_replay) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(finance_before_replay.dgb_cost.value, network_fee);
+    BOOST_CHECK_EQUAL(finance_before_replay.dd_income.value, fixture.response.quote.service_fee.value);
+    Manager disabled_manager{false};
+    for (Manager* manager : {&stopped_manager, static_cast<Manager*>(nullptr), &disabled_manager}) {
+        BOOST_TEST_CONTEXT("public exact replay manager=" <<
+            (manager == &stopped_manager ? "stopped" : manager ? "disabled" : "absent")) {
+            replay_context.paymaster = manager;
+            const auto replay = paymaster_app::SubmitPaymasterTransaction(
+                replay_context, facade_wallet, replay_user_psbt, paymaster_app::ExecutionMode::MANUAL);
+            BOOST_REQUIRE(replay.final_transaction);
+            BOOST_CHECK(*replay.final_transaction == commit.final_transaction);
+            BOOST_REQUIRE(replay.txid);
+            BOOST_CHECK(*replay.txid == commit.final_txid);
+            BOOST_CHECK(replay.broadcast.value_or(false));
+            BOOST_CHECK(!replay.psbt);
+            BOOST_CHECK(facade_wallet.IsLocked());
+            ProviderCommitRecord replayed_commit;
+            BOOST_REQUIRE(facade_store.GetProviderCommit(commit.commit_key, replayed_commit));
+            BOOST_CHECK(SerializePaymasterSecurityObject(replayed_commit) == SerializePaymasterSecurityObject(commit));
+            ProviderAttempt replayed_attempt;
+            BOOST_REQUIRE(facade_store.GetAttempt(provider_signed.attempt_id, replayed_attempt));
+            BOOST_CHECK(replayed_attempt.provider_signed_at == provider_signed.provider_signed_at);
+            BOOST_CHECK(replayed_attempt.provider_signed_result == provider_signed.provider_signed_result);
+            BOOST_CHECK(replayed_attempt.user_signed_psbt == provider_signed.user_signed_psbt);
+            PaymasterResult replayed_result;
+            BOOST_REQUIRE(facade_store.GetProviderResult(commit.commit_key, replayed_result));
+            BOOST_CHECK(SerializePaymasterSecurityObject(replayed_result) == SerializePaymasterSecurityObject(normalized_replay.provider_result));
+            ProviderBudgetLedger replayed_ledger;
+            std::vector<ProviderPoolEntry> replayed_pool;
+            BOOST_REQUIRE(ReadProviderSecurityState(facade_wallet, replayed_ledger, replayed_pool));
+            BOOST_CHECK(SerializePaymasterSecurityObject(replayed_ledger) == SerializePaymasterSecurityObject(facade_ledger));
+            BOOST_CHECK(SerializePaymasterSecurityObject(replayed_pool) == SerializePaymasterSecurityObject(facade_pool));
+            ProviderFinanceEvent replayed_finance;
+            BOOST_REQUIRE(WalletBatch{facade_wallet.GetDatabase()}.ReadPaymasterFinanceEvent(
+                commit.commit_key, replayed_finance) == DatabaseReadStatus::FOUND);
+            BOOST_CHECK(SerializePaymasterSecurityObject(replayed_finance) == SerializePaymasterSecurityObject(finance_before_replay));
+            BOOST_CHECK(GetMockableDatabase(facade_wallet).m_records == before_facade_replay);
+            BOOST_CHECK(!stopped_manager.IsProviderRunning(facade_wallet.GetName(), commit.provider_id));
+        }
     }
 
     {

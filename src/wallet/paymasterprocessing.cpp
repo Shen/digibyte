@@ -218,9 +218,8 @@ std::optional<std::string> GetPermanentProviderSubmitRejection(
     }
     return reason;
 }
-} // namespace
-
-PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransaction user_psbt, ExecutionMode mode)
+PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySignedTransaction user_psbt,
+                                                ExecutionMode mode, const ProviderWorkGuard* work_guard)
 {
     CWallet* const wallet = &target;
     using namespace DigiDollar::Paymaster;
@@ -284,6 +283,13 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
         attempt.provider_signed_at > 0 &&
         attempt.provider_signed_at <= attempt.retry_until &&
         !attempt.provider_signed_result.empty();
+    // A disabled transport manager may still replay immutable signed bytes.
+    // Every transition that could create new authority belongs to the same
+    // exclusion window as persistent stop, policy changes and maintenance.
+    if (!already_committed && !exact_persisted_provider_signature &&
+        (!work_guard || !work_guard->Acquired())) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DISABLED");
+    }
     if (!already_committed && !exact_persisted_provider_signature &&
         now > attempt.retry_until) {
         throw ProviderSubmitExpired{"Paymaster retry window expired"};
@@ -608,6 +614,29 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
     return result;
 }
 
+} // namespace
+
+PaymentResult SubmitPaymasterTransaction(WalletContext& context, CWallet& wallet,
+                                        PartiallySignedTransaction psbt, ExecutionMode mode)
+{
+    // Preserve the scheduler's nonblocking sync gate before wallet/index work.
+    if (mode == ExecutionMode::AUTOMATIC && !AutomaticProviderStateIsSynchronized(wallet)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_SYNCING");
+    }
+    ProviderIdentityRecord identity;
+    std::optional<ProviderWorkGuard> work_guard;
+    if (context.paymaster && context.paymaster->Enabled() && GetPaymasterIdentity(wallet, identity)) {
+        work_guard.emplace(*context.paymaster, wallet.GetName(), identity.provider_id,
+                           /*require_running=*/false);
+        if (!work_guard->Acquired()) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_SERVICE_BUSY",
+                                   ErrorDisposition::RETRY_BEFORE_EXECUTION);
+        }
+    }
+    return SubmitPaymasterTransactionWithGuard(wallet, std::move(psbt), mode,
+                                               work_guard ? &*work_guard : nullptr);
+}
+
 namespace {
 struct ProviderSubmitProcessingContext {
     WalletContext& context;
@@ -615,6 +644,7 @@ struct ProviderSubmitProcessingContext {
     ExecutionMode mode;
     ExactFinalTxIndexMode service_txindex_mode;
     int64_t now;
+    const ProviderWorkGuard& work_guard;
 };
 
 bool QueueProviderRecoveryResult(const ProviderSubmitProcessingContext& processing,
@@ -1154,7 +1184,8 @@ ProviderProcessingResult ProcessProviderPaymentSubmit(
     PaymentResult committed;
     if (!rejected) {
         try {
-            committed = SubmitPaymasterTransaction(*wallet, std::move(submitted_psbt), mode);
+            committed = SubmitPaymasterTransactionWithGuard(*wallet, std::move(submitted_psbt), mode,
+                                                             &processing.work_guard);
         } catch (const ProviderSubmitExpired&) {
             // The deadline or unsigned cleanup may have advanced after the
             // first observation. Revalidate current local authority and peer
@@ -1272,7 +1303,7 @@ ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet
     // Keep the provider work guard and fair inbox lease alive across every
     // validation, signature, commit and acknowledgement in the selected phase.
     const ProviderSubmitProcessingContext processing{
-        context, wallet, mode, service_txindex_mode, now};
+        context, wallet, mode, service_txindex_mode, now, work_guard};
     if (std::holds_alternative<AlternativeRecoverySubmit>(messages.front().payload)) {
         return ProcessProviderRecoverySubmit(processing, messages.front());
     }

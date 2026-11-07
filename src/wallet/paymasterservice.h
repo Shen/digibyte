@@ -18,7 +18,9 @@ namespace paymaster_app {
 enum class ExecutionMode { MANUAL, AUTOMATIC };
 ProviderStartResult StartPaymaster(WalletContext& context, CWallet& wallet, bool wait_for_readiness, ExecutionMode mode);
 ProviderStopResult StopPaymaster(WalletContext& context, CWallet& wallet, bool persistent, bool pause_setup);
-PaymentResult SubmitPaymasterTransaction(CWallet& wallet, PartiallySignedTransaction psbt, ExecutionMode mode);
+/** Serialize direct submission with provider stop, policy and maintenance work.
+ * Exact durable replay remains available without starting the provider. */
+PaymentResult SubmitPaymasterTransaction(WalletContext& context, CWallet& wallet, PartiallySignedTransaction psbt, ExecutionMode mode);
 ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet& wallet, ExecutionMode mode);
 ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& wallet, ExecutionMode mode);
 PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& wallet, const std::string& request_id);

@@ -603,6 +603,7 @@ RPCHelpMan submitpaymasterdigidollar()
                                                                            }},
         RPCExamples{HelpExampleCli("submitpaymasterdigidollar", "\"cHNidP8...\"")},
         PaymasterRpcAdapter([](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            WalletContext& context = EnsureWalletContext(request.context);
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
             PartiallySignedTransaction psbt;
@@ -610,7 +611,7 @@ RPCHelpMan submitpaymasterdigidollar()
             if (!DecodeBase64PSBT(psbt, request.params[0].get_str(), error) || !psbt.tx) {
                 throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Paymaster PSBT decode failed: %s", error));
             }
-            return ToJSON(SubmitPaymasterTransaction(*wallet, std::move(psbt), ExecutionMode::MANUAL));
+            return ToJSON(SubmitPaymasterTransaction(context, *wallet, std::move(psbt), ExecutionMode::MANUAL));
         }),
     };
 }
