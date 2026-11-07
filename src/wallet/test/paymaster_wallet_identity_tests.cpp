@@ -1419,6 +1419,25 @@ BOOST_AUTO_TEST_CASE(native_finance_status_captures_capital_time_and_typed_failu
     }
 }
 
+BOOST_AUTO_TEST_CASE(announcement_sequence_corruption_is_never_absence)
+{
+    LOCK(m_wallet.cs_wallet);
+    auto& database = GetMockableDatabase(m_wallet);
+    WalletBatch batch{database};
+    uint64_t sequence{0};
+    BOOST_CHECK(batch.ReadPaymasterAnnouncementSequenceWithStatus(sequence) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(batch.WritePaymasterAnnouncementSequence(17));
+    BOOST_CHECK(batch.ReadPaymasterAnnouncementSequenceWithStatus(sequence) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(sequence, 17U);
+    BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_ANNOUNCE_SEQ, uint8_t{0}));
+    const auto unreadable = database.m_records;
+    BOOST_CHECK(batch.ReadPaymasterAnnouncementSequenceWithStatus(sequence) == DatabaseReadStatus::READ_ERROR);
+    BOOST_CHECK(!batch.ReadPaymasterAnnouncementSequence(sequence));
+    BOOST_CHECK(database.m_records == unreadable);
+    BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_ANNOUNCE_SEQ, uint64_t{0}));
+    BOOST_CHECK(batch.ReadPaymasterAnnouncementSequenceWithStatus(sequence) == DatabaseReadStatus::READ_ERROR);
+}
+
 BOOST_AUTO_TEST_CASE(provider_finance_and_backup_metadata_follow_the_identity)
 {
     {

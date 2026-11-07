@@ -63,7 +63,13 @@ bool Abort(WalletBatch& batch, std::string& error, const char* code);
 bool CommitWithPaymasterAuthorizationProtection(CWallet& wallet, WalletBatch& batch,
                                                 bool authorization_may_exist,
                                                 std::string& error);
-
+/** A negative result/release needs proven absence of independent provider
+ * signature evidence, including unknown and unreadable records. */
+bool RequireNoProviderSignatureEvidence(WalletBatch& batch, const uint256& commit_key,
+                                       std::string& error);
+/** Unsigned cancellation/expiry additionally require absent user authority. */
+bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_key,
+                                    std::string& error);
 bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,

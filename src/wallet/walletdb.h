@@ -719,6 +719,7 @@ public:
     bool ErasePaymasterCarrierWithdrawalPlan();
     bool WritePaymasterAnnouncementSequence(uint64_t sequence, bool overwrite = true);
     bool ReadPaymasterAnnouncementSequence(uint64_t& sequence);
+    DatabaseReadStatus ReadPaymasterAnnouncementSequenceWithStatus(uint64_t& sequence);
     bool WritePaymasterResult(const DigiDollar::Paymaster::PaymasterResult& result,
                               bool overwrite = true);
     bool ReadPaymasterResult(const uint256& commit_key,

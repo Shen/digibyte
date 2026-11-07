@@ -1505,6 +1505,13 @@ bool PaymasterStore::CancelProviderQuote(const uint256& attempt_id,
         error = "PAYMASTER_ATTEMPT_NOT_FOUND";
         return false;
     }
+    if (attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED &&
+        attempt.state != AttemptState::QUOTE_EXPIRED && attempt.state != AttemptState::REJECTED) {
+        error = "PAYMASTER_QUOTE_AUTHORIZATION_MAY_EXIST";
+        return false;
+    }
+    if (!attempt.commit_key.IsNull() &&
+        !RequireNoAuthorizationEvidence(batch, attempt.commit_key, error)) return false;
     ProviderSafetyPolicy safety_policy;
     ProviderBudgetLedger budget_ledger;
     const bool have_safety_policy = batch.ReadPaymasterProviderSafetyPolicy(safety_policy);
@@ -1538,11 +1545,6 @@ bool PaymasterStore::CancelProviderQuote(const uint256& attempt_id,
             return false;
         }
         return true;
-    }
-    if (attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED &&
-        attempt.state != AttemptState::QUOTE_EXPIRED) {
-        error = "PAYMASTER_QUOTE_AUTHORIZATION_MAY_EXIST";
-        return false;
     }
     std::string request_id;
     PaymentSession session;
@@ -2598,7 +2600,12 @@ bool PaymasterStore::RejectUnavailableProviderSubmit(
     }
 
     PaymasterResult existing;
-    if (batch.ReadPaymasterResult(result.commit_key, existing)) {
+    const auto result_status = batch.ReadPaymasterResultWithStatus(result.commit_key, existing);
+    if (result_status != DatabaseReadStatus::FOUND && result_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    if (result_status == DatabaseReadStatus::FOUND) {
         if (attempt.state == AttemptState::REJECTED &&
             result.result_sequence == existing.result_sequence &&
             GetPaymasterResultSignatureHash(result) == GetPaymasterResultSignatureHash(existing) &&
@@ -2608,11 +2615,20 @@ bool PaymasterStore::RejectUnavailableProviderSubmit(
         error = "PAYMASTER_RESULT_SEQUENCE_REGRESSION";
         return false;
     }
-    ProviderCommitRecord commit;
-    if (batch.ReadPaymasterProviderCommit(attempt.commit_key, commit) ||
-        (attempt.state != AttemptState::QUOTED &&
-         attempt.state != AttemptState::USER_SIGNED &&
-         attempt.state != AttemptState::USER_PSBT_ACCEPTED)) {
+    if (!RequireNoProviderSignatureEvidence(batch, attempt.commit_key, error)) return false;
+    UserAuthorizationRecord authorization;
+    const auto authorization_status = batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization);
+    if (authorization_status != DatabaseReadStatus::NOT_FOUND &&
+        (authorization_status != DatabaseReadStatus::FOUND || attempt.user_signed_psbt.empty() ||
+         authorization.attempt_id != attempt.attempt_id ||
+         authorization.canonical_psbt_hash != Hash(attempt.user_signed_psbt) ||
+         authorization.retry_until != attempt.retry_until)) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    if (attempt.state != AttemptState::QUOTED &&
+        attempt.state != AttemptState::USER_SIGNED &&
+        attempt.state != AttemptState::USER_PSBT_ACCEPTED) {
         error = "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST";
         return false;
     }

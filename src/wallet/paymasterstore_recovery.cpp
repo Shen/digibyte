@@ -1149,6 +1149,14 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     }
     if (expiring.empty() && pruning.empty()) return true;
 
+    // Expiry releases financial bindings before the later pruning pass. Prove
+    // absence of independent authority here too, not only before deletion.
+    for (const auto& recovery : expiring) {
+        if (recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED) continue;
+        const auto& key = recovery.recovery_response.recovery_commit_key;
+        if (!RequireNoAuthorizationEvidence(batch, key, error)) return false;
+    }
+
     std::vector<ProviderPoolEntry> pool;
     ProviderBudgetLedger provider_ledger;
     const bool expire_provider = std::any_of(
@@ -1180,12 +1188,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     // deleting any replay barrier; unreadable evidence also vetoes pruning.
     for (const auto& recovery : pruning) {
         const auto& commit_key = recovery.recovery_response.recovery_commit_key;
-        ProviderCommitRecord commit;
-        UserAuthorizationRecord authorization;
-        PaymasterResult result;
-        if (batch.ReadPaymasterProviderCommitWithStatus(commit_key, commit) != DatabaseReadStatus::NOT_FOUND ||
-            batch.ReadPaymasterUserAuthorizationWithStatus(commit_key, authorization) != DatabaseReadStatus::NOT_FOUND ||
-            batch.ReadPaymasterResultWithStatus(commit_key, result) != DatabaseReadStatus::NOT_FOUND ||
+        if (!RequireNoAuthorizationEvidence(batch, commit_key, error) ||
             std::any_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
                 return entry.reservation_id == commit_key || entry.origin_commit_key == commit_key;
             }) ||

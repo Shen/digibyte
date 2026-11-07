@@ -2938,6 +2938,18 @@ BOOST_AUTO_TEST_CASE(unsigned_quote_cancellation_atomically_releases_provider_po
     }
 
     ProviderAttempt canceled;
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto unsigned_rows = database.m_records;
+    for (const auto* record_type : {&DBKeys::PAYMASTER_PROVIDER_COMMIT,
+                                   &DBKeys::PAYMASTER_RESULT,
+                                   &DBKeys::PAYMASTER_USER_AUTH}) {
+        BOOST_REQUIRE(database.MakeBatch()->Write(
+            std::make_pair(*record_type, quoted.commit_key), uint16_t{65535}));
+        const auto unknown = database.m_records;
+        BOOST_CHECK(!store.CancelProviderQuote(quoted.attempt_id, 103, canceled, error));
+        BOOST_CHECK(database.m_records == unknown);
+        database.m_records = unsigned_rows;
+    }
     BOOST_REQUIRE(store.CancelProviderQuote(quoted.attempt_id, 103, canceled, error));
     BOOST_CHECK(canceled.state == AttemptState::REJECTED);
     BOOST_CHECK(store.CancelProviderQuote(quoted.attempt_id, 104, canceled, error));
@@ -3617,6 +3629,23 @@ BOOST_AUTO_TEST_CASE(unavailable_submit_rejection_and_pool_release_are_atomic)
                                            rejection.identity_signature, nullptr, uint256{}));
 
     ProviderAttempt rejected;
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto quoted = database.m_records;
+    for (const auto* record_type : {&DBKeys::PAYMASTER_PROVIDER_COMMIT,
+                                   &DBKeys::PAYMASTER_RESULT,
+                                   &DBKeys::PAYMASTER_USER_AUTH}) {
+        for (const bool future_version : {false, true}) {
+            auto raw = database.MakeBatch();
+            const auto key = std::make_pair(*record_type, attempt.commit_key);
+            BOOST_REQUIRE(future_version ? raw->Write(key, uint16_t{65535}) : raw->Write(key, uint8_t{0}));
+            const auto unknown = database.m_records;
+            BOOST_CHECK(!store.RejectUnavailableProviderSubmit(
+                attempt.attempt_id, rejection, rejection.genesis_hash, rejected, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
+            BOOST_CHECK(database.m_records == unknown);
+            database.m_records = quoted;
+        }
+    }
     BOOST_REQUIRE(store.RejectUnavailableProviderSubmit(
         attempt.attempt_id, rejection, rejection.genesis_hash, rejected, error));
     BOOST_CHECK(rejected.state == AttemptState::REJECTED);

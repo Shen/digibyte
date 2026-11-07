@@ -2644,7 +2644,11 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
         uint64_t previous{0};
-        batch.ReadPaymasterAnnouncementSequence(previous);
+        const auto status = batch.ReadPaymasterAnnouncementSequenceWithStatus(previous);
+        if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_ANNOUNCEMENT_SEQUENCE_DATABASE_READ";
+            return false;
+        }
         if (previous == std::numeric_limits<uint64_t>::max()) {
             error = "PAYMASTER_ANNOUNCEMENT_SEQUENCE_EXHAUSTED";
             return false;

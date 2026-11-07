@@ -175,6 +175,40 @@ bool CommitWithPaymasterAuthorizationProtection(CWallet& wallet, WalletBatch& ba
     return true;
 }
 
+bool RequireNoProviderSignatureEvidence(WalletBatch& batch, const uint256& commit_key,
+                                       std::string& error)
+{
+    ProviderCommitRecord commit;
+    PaymasterResult result;
+    const auto commit_status = batch.ReadPaymasterProviderCommitWithStatus(commit_key, commit);
+    const auto result_status = batch.ReadPaymasterResultWithStatus(commit_key, result);
+    const auto readable = [](DatabaseReadStatus status) {
+        return status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::NOT_FOUND;
+    };
+    if (!readable(commit_status) || !readable(result_status)) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    if (commit_status != DatabaseReadStatus::NOT_FOUND || result_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST";
+        return false;
+    }
+    return true;
+}
+
+bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_key,
+                                    std::string& error)
+{
+    if (!RequireNoProviderSignatureEvidence(batch, commit_key, error)) return false;
+    UserAuthorizationRecord authorization;
+    const auto status = batch.ReadPaymasterUserAuthorizationWithStatus(commit_key, authorization);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    error = status == DatabaseReadStatus::FOUND
+        ? "PAYMASTER_QUOTE_AUTHORIZATION_MAY_EXIST"
+        : "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+    return false;
+}
+
 std::optional<uint32_t> FindUniqueOutputByScript(const CTransaction& transaction,
                                                  const CScript& script)
 {

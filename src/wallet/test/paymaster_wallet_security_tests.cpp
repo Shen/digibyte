@@ -3289,6 +3289,22 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_recovery_history_is_compacted_ato
     const auto quoted = database.m_records;
     size_t expired{0};
     const int64_t expiry = recovery.capacity_request.expires_at + 1;
+    // The first expiry pass releases pool/budget obligations. Independent
+    // unreadable authority must veto that release, not just later pruning.
+    for (const auto* record_type : {&DBKeys::PAYMASTER_PROVIDER_COMMIT,
+                                   &DBKeys::PAYMASTER_RESULT,
+                                   &DBKeys::PAYMASTER_USER_AUTH}) {
+        for (const bool future_version : {false, true}) {
+            auto raw = database.MakeBatch();
+            const auto key = std::make_pair(*record_type, recovery.recovery_response.recovery_commit_key);
+            BOOST_REQUIRE(future_version ? raw->Write(key, uint16_t{65535}) : raw->Write(key, uint8_t{0}));
+            const auto unknown = database.m_records;
+            BOOST_CHECK(!store.ExpireAlternativeRecoveries(expiry, expired, error));
+            BOOST_CHECK_EQUAL(expired, 0U);
+            BOOST_CHECK(database.m_records == unknown);
+            database.m_records = quoted;
+        }
+    }
     for (int failure = 0; failure < 3; ++failure) {
         if (failure == 0) database.m_txn_pass = false;
         if (failure == 1) database.FailWriteAt(0);

@@ -2461,7 +2461,13 @@ bool WalletBatch::WritePaymasterAnnouncementSequence(uint64_t sequence, bool ove
 
 bool WalletBatch::ReadPaymasterAnnouncementSequence(uint64_t& sequence)
 {
-    return m_batch->Read(DBKeys::PAYMASTER_ANNOUNCE_SEQ, sequence) && sequence != 0;
+    return ReadPaymasterAnnouncementSequenceWithStatus(sequence) == DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterAnnouncementSequenceWithStatus(uint64_t& sequence)
+{
+    const auto status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_ANNOUNCE_SEQ, sequence);
+    return status == DatabaseReadStatus::FOUND && sequence == 0 ? DatabaseReadStatus::READ_ERROR : status;
 }
 
 bool WalletBatch::WritePaymasterResult(const DigiDollar::Paymaster::PaymasterResult& result,
