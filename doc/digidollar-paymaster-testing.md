@@ -34,10 +34,13 @@ directories plus checkpoint filenames/replacements can exceed legacy path
 limits even when compilation succeeded; retain the checkpoint checks.
 
 Paymaster-specific C++17 controls include provider RPC option initialization,
-the transport tests and all four Paymaster fuzz registrations. Preserve their
-option/initializer values when replacing designated initializers. MSVC fuzz
-syntax checks need the conforming preprocessor (`/Zc:preprocessor`) in both
-language modes. The MSVC project defaults to C++20; Autotools defaults to
+the transport tests, all four Paymaster fuzz registrations and the shared
+`net.cpp` Direct/P2P adapter. Preserve option defaults, eviction fields, transport
+metadata and reconnect ownership when replacing designated initializers. For
+that adapter run `net_tests/paymaster_*,cnode_listen_port,cnode_simple_test,v2transport_test`
+and `paymaster_transport_tests/channel_authentication_rejects_two_leg_bip324_relay,channel_handler_withholds_all_requests_until_authenticated`.
+MSVC fuzz syntax checks need the conforming preprocessor (`/Zc:preprocessor`)
+in both language modes. The MSVC project defaults to C++20; Autotools defaults to
 C++17, where supported compilers also accept existing Core extensions. Passing
 these targeted controls does not establish repository-wide strict C++17 support.
 

@@ -538,6 +538,10 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
     if (!addr_bind.IsValid()) {
         addr_bind = GetBindAddress(*sock);
     }
+    CNodeOptions node_options;
+    node_options.i2p_sam_session = std::move(i2p_transient_session);
+    node_options.recv_flood_size = nReceiveFloodSize;
+    node_options.use_v2transport = use_v2transport;
     CNode* pnode = new CNode(id,
                              std::move(sock),
                              addrConnect,
@@ -547,11 +551,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
                              pszDest ? pszDest : "",
                              conn_type,
                              /*inbound_onion=*/false,
-                             CNodeOptions{
-                                 .i2p_sam_session = std::move(i2p_transient_session),
-                                 .recv_flood_size = nReceiveFloodSize,
-                                 .use_v2transport = use_v2transport,
-                             });
+                             std::move(node_options));
     pnode->AddRef();
 
     // We're making a new connection, harvest entropy from the time (and our peer count)
@@ -712,7 +712,7 @@ V1Transport::V1Transport(const NodeId node_id, int nTypeIn, int nVersionIn) noex
 
 Transport::Info V1Transport::GetInfo() const noexcept
 {
-    return {.transport_type = TransportProtocolType::V1, .session_id = {}};
+    return {/*transport_type=*/TransportProtocolType::V1, /*session_id=*/{}};
 }
 
 int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
@@ -1685,22 +1685,21 @@ bool CConnman::AttemptToEvictConnection()
         for (const CNode* node : m_nodes) {
             if (node->fDisconnect || node->IsPaymasterDirectConn())
                 continue;
-            NodeEvictionCandidate candidate{
-                .id = node->GetId(),
-                .m_connected = node->m_connected,
-                .m_min_ping_time = node->m_min_ping_time,
-                .m_last_block_time = node->m_last_block_time,
-                .m_last_tx_time = node->m_last_tx_time,
-                .fRelevantServices = node->m_has_all_wanted_services,
-                .m_relay_txs = node->m_relays_txs.load(),
-                .fBloomFilter = node->m_bloom_filter_loaded.load(),
-                .nKeyedNetGroup = node->nKeyedNetGroup,
-                .prefer_evict = node->m_prefer_evict,
-                .m_is_local = node->addr.IsLocal(),
-                .m_network = node->ConnectedThroughNetwork(),
-                .m_noban = node->HasPermission(NetPermissionFlags::NoBan),
-                .m_conn_type = node->m_conn_type,
-            };
+            NodeEvictionCandidate candidate{};
+            candidate.id = node->GetId();
+            candidate.m_connected = node->m_connected;
+            candidate.m_min_ping_time = node->m_min_ping_time;
+            candidate.m_last_block_time = node->m_last_block_time;
+            candidate.m_last_tx_time = node->m_last_tx_time;
+            candidate.fRelevantServices = node->m_has_all_wanted_services;
+            candidate.m_relay_txs = node->m_relays_txs.load();
+            candidate.fBloomFilter = node->m_bloom_filter_loaded.load();
+            candidate.nKeyedNetGroup = node->nKeyedNetGroup;
+            candidate.prefer_evict = node->m_prefer_evict;
+            candidate.m_is_local = node->addr.IsLocal();
+            candidate.m_network = node->ConnectedThroughNetwork();
+            candidate.m_noban = node->HasPermission(NetPermissionFlags::NoBan);
+            candidate.m_conn_type = node->m_conn_type;
             vEvictionCandidates.push_back(candidate);
         }
     }
@@ -1861,6 +1860,12 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     // detected, so use it whenever we signal NODE_P2P_V2.
     const bool use_v2transport(nodeServices & NODE_P2P_V2);
 
+    CNodeOptions node_options;
+    node_options.permission_flags = permission_flags;
+    node_options.prefer_evict = discouraged;
+    node_options.recv_flood_size = nReceiveFloodSize;
+    node_options.use_v2transport = use_v2transport;
+    node_options.paymaster_listener = paymaster;
     CNode* pnode = new CNode(id,
                              std::move(sock),
                              addr,
@@ -1870,13 +1875,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                              /*addrNameIn=*/"",
                              ConnectionType::INBOUND,
                              inbound_onion,
-                             CNodeOptions{
-                                 .permission_flags = permission_flags,
-                                 .prefer_evict = discouraged,
-                                 .recv_flood_size = nReceiveFloodSize,
-                                 .use_v2transport = use_v2transport,
-                                 .paymaster_listener = paymaster,
-                             });
+                             std::move(node_options));
     pnode->m_paymaster_admission = std::move(admission);
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, nodeServices);
@@ -2056,11 +2055,11 @@ void CConnman::DisconnectNodes()
                 // and we don't want to hold up the socket handler thread for that long.
                 if (!pnode->IsPaymasterConn() && pnode->m_transport->ShouldReconnectV1()) {
                     reconnections_to_add.push_back({
-                        .addr_connect = pnode->addr,
-                        .grant = std::move(pnode->grantOutbound),
-                        .destination = pnode->m_dest,
-                        .conn_type = pnode->m_conn_type,
-                        .use_v2transport = false});
+                        /*addr_connect=*/pnode->addr,
+                        /*grant=*/std::move(pnode->grantOutbound),
+                        /*destination=*/pnode->m_dest,
+                        /*conn_type=*/pnode->m_conn_type,
+                        /*use_v2transport=*/false});
                     LogPrint(BCLog::NET, "retrying with v1 transport protocol for peer=%d\n", pnode->GetId());
                 }
 
