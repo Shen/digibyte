@@ -467,7 +467,7 @@ void PaymasterSendWidget::setupFeeSection()
                DigiDollarSendWidget::tr("Recommended · estimated ~0.1 DGB · no additional $DD fee."));
     add_choice(m_autoFeeCard, m_autoFeeRadio, QStringLiteral("feeFundingAuto"),
                DigiDollarSendWidget::tr("Automatic"),
-               DigiDollarSendWidget::tr("Use own DGB first; find a Paymaster only when suitable DGB is insufficient."));
+               DigiDollarSendWidget::tr("Check DGB funding. Suitable own DGB requires selecting Own DGB explicitly; otherwise prepare a Paymaster offer."));
     add_choice(m_paymasterFeeCard, m_paymasterFeeRadio, QStringLiteral("feeFundingPaymaster"),
                DigiDollarSendWidget::tr("Paymaster"),
                DigiDollarSendWidget::tr("A provider supplies DGB; the additional $DD service fee may be zero."), true);
@@ -479,7 +479,7 @@ void PaymasterSendWidget::setupFeeSection()
     m_feeModeCombo = new NoWheelComboBox(this);
     m_feeModeCombo->setObjectName("paymasterFeeMode");
     m_feeModeCombo->addItem(DigiDollarSendWidget::tr("Own DGB"), QStringLiteral("dgb"));
-    m_feeModeCombo->addItem(DigiDollarSendWidget::tr("Automatic (DGB first, Paymaster if needed)"), QStringLiteral("auto"));
+    m_feeModeCombo->addItem(DigiDollarSendWidget::tr("Automatic (check funding)"), QStringLiteral("auto"));
     m_feeModeCombo->addItem(DigiDollarSendWidget::tr("Paymaster Network"), QStringLiteral("paymaster"));
     m_feeModeCombo->hide();
 
@@ -1983,7 +1983,8 @@ QString PaymasterSendWidget::paymentAmountProblem() const
 {
     // Compose-only, using the cached wallet balance and the selected public
     // offer. Core still checks the actual inputs and authenticates the quote.
-    // Automatic with own DGB must retain its direct-payment path.
+    // Automatic may check suitable DGB without requiring a provider offer.
+    // A direct payment still requires an explicit Own DGB selection.
     if (!m_send.view().requestId.isEmpty() || !m_form.m_balanceKnown ||
         !preparesPaymasterPayment()) return {};
     if (hasMatchingPaymasterOffer()) {
@@ -3096,6 +3097,22 @@ void PaymasterSendWidget::handlePaymasterFailure(const WalletModel::RpcError& fa
                   code_match.captured().toStdString());
     }
     const auto decision = m_send.failedReply(failure);
+    if (PaymasterQt::StableCode(failure) == QLatin1String("PAYMASTER_AUTO_DIRECT_REQUIRES_EXPLICIT_DGB") &&
+        PaymasterQt::Disposition(failure) == QLatin1String("retry_before_execution") &&
+        !m_send.view().sessionPersisted) {
+        // AUTO checks funding but never authorizes an ordinary direct send.
+        // Confirm absence through Core before returning to the editable form;
+        // leave the funding-mode selection and payment approval to the user.
+        setPaymasterBusy(false);
+        const QString instruction = DigiDollarSendWidget::tr(
+            "Suitable DGB fee inputs are available. Choose Own DGB explicitly, then review and approve the direct payment. Automatic has not signed or sent this payment.");
+        if (m_send.view().requestId.isEmpty()) {
+            setPaymasterNotice(instruction, DigiDollarStatus::Kind::INFO);
+        } else {
+            closeUnusablePaymasterOffer(instruction, /*allow_cancel=*/false);
+        }
+        return;
+    }
     if (decision.discard_uncreated_request) {
         m_paymasterStateValue->setText(DigiDollarSendWidget::tr(
             "No Paymaster transfer was created. Any unsigned input reservation was released. You can prepare the payment again."));
@@ -3657,8 +3674,8 @@ void PaymasterSendWidget::pollPaymasterSession()
         return;
     case Effect::RECOVER:
         setPaymasterBusy(true);
-        executePaymasterRpcAsync("resolvepaymastersession", m_send.view().activeRecoveryParams,
-            [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, QString error) {
+        executePaymasterRpcAsyncDetailed("resolvepaymastersession", m_send.view().activeRecoveryParams,
+            [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, PaymasterQt::RpcError error) {
                 if (guard) guard->handleAlternativePaymasterRecoveryResult(result, error);
             });
         return;
@@ -4277,7 +4294,7 @@ void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
                 guard->setPaymasterBusy(false);
                 return;
             }
-            guard->handleAlternativePaymasterRecoveryResult(result, error.message);
+            guard->handleAlternativePaymasterRecoveryResult(result, error);
         }, allow_unlock);
 }
 
@@ -4442,16 +4459,21 @@ void PaymasterSendWidget::blockAlternativePaymasterRecovery(
 }
 
 void PaymasterSendWidget::handleAlternativePaymasterRecoveryResult(
-    const UniValue& result, const QString& error)
+    const UniValue& result, const PaymasterQt::RpcError& error)
 {
-    if (!error.isEmpty()) {
-        m_send.stopRecovery();
+    if (error.failed) {
+        // A local failure can follow a durable signature, final commit or
+        // successful broadcast. Revoke live approvals/continuations and only
+        // observe this request; the failed reply cannot authorize a replay.
+        m_send.observationFailed();
         stopPaymasterPolling();
-        m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Paymaster recovery failed: %1").arg(error));
-        // Keep the backend's stable error text unchanged so RPC and Qt expose
-        // the same recovery/security failure.
-        m_form.showWarning(DigiDollarSendWidget::tr("Paymaster recovery"), error);
+        const QString code = PaymasterQt::StableCode(error);
+        m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Recovery status unavailable: %1")
+            .arg(code.isEmpty() ? error.message : code));
+        setPaymasterNotice(DigiDollarSendWidget::tr(
+            "The recovery outcome is still unclear. It may already be signed or submitted. Status checks continue automatically for this transfer; no additional recovery signature or submission is requested. Reserved funds remain protected."));
         setPaymasterBusy(false);
+        schedulePaymasterPoll(/*state_changed=*/false);
         return;
     }
 
@@ -4646,14 +4668,14 @@ void PaymasterSendWidget::updateFeeDisplay()
         m_feeValue->setText(DigiDollarSendWidget::tr("~0.1 DGB, or at most %1").arg(maximum_fee));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Fee funding:"));
         m_feeModeExplanation->setText(DigiDollarSendWidget::tr(
-            "Selected: Automatic. Core first tries to pay approximately 0.1 DGB from this wallet. It looks for "
-            "a Paymaster only if suitable DGB fee inputs are insufficient; wallet-lock and "
-            "other errors never cause an automatic fallback."));
+            "Selected: Automatic. Core checks this wallet's DGB without authorizing a direct payment. "
+            "Suitable own DGB requires selecting Own DGB explicitly. A Paymaster offer is prepared "
+            "only if suitable DGB fee inputs are insufficient."));
         if (subtract_fee) {
             m_feeSummary->setText(DigiDollarSendWidget::tr(
                 "<table cellspacing=\"3\">"
                 "<tr><td><b>Exact total $DD outflow</b></td><td>%1</td></tr>"
-                "<tr><td><b>With own DGB</b></td><td>Recipient receives %1; no $DD fee</td></tr>"
+                "<tr><td><b>With own DGB</b></td><td>Select Own DGB explicitly; recipient receives %1</td></tr>"
                 "<tr><td><b>With Paymaster fallback</b></td><td>Recipient receives %2</td></tr>"
                 "<tr><td><b>Paymaster service fee</b></td><td>%3</td></tr>"
                 "<tr><td><b>Spendable $DD remaining</b></td><td>%4</td></tr>"
@@ -4667,7 +4689,7 @@ void PaymasterSendWidget::updateFeeDisplay()
             m_feeSummary->setText(DigiDollarSendWidget::tr(
                 "<table cellspacing=\"3\">"
                 "<tr><td><b>Recipient receives</b></td><td>%1</td></tr>"
-                "<tr><td><b>Network fee</b></td><td>Own DGB first; Paymaster only if needed</td></tr>"
+                "<tr><td><b>Network fee</b></td><td>Check funding; select Own DGB explicitly when suitable</td></tr>"
                 "<tr><td><b>Additional $DD fee</b></td><td>None with own DGB; otherwise up to %2</td></tr>"
                 "<tr><td><b>Maximum wallet outflow</b></td><td>%3</td></tr>"
                 "</table>").arg(recipient_amount, maximum_fee, maximum_outflow));
@@ -5226,8 +5248,8 @@ void PaymasterSendWidget::send(const QString& address, CAmount amount_cents)
 
         // In explicit Paymaster mode, Send payment authorizes preparation
         // only. The exact provider/fee approval
-        // remains mandatory. Automatic with own DGB can spend directly and
-        // retains its ordinary transaction confirmation before the first RPC.
+        // remains mandatory. Automatic with own DGB first reviews a funding
+        // check; suitable own DGB then requires explicit Own DGB selection.
         // Privacy mode still requires exposing the payment fields for review.
         const uint64_t wallet_generation = m_send.view().walletGeneration;
         if (new_request && (!preparesPaymasterPayment() || m_privacy) && !showConfirmationDialog(address, amount)) {

@@ -197,7 +197,7 @@ private:
     void blockAlternativePaymasterRecovery(
         const QString& reason, const QString& detail);
     void handleAlternativePaymasterRecoveryResult(
-        const UniValue& result, const QString& error);
+        const UniValue& result, const PaymasterQt::RpcError& error);
     Q_SLOT void cancelPaymasterQuote();
     QString formatCents(qint64 cents) const;
     QString friendlyFundingModel(const QString& model) const;
