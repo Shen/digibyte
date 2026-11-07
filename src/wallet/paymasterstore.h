@@ -683,6 +683,13 @@ public:
     bool GetProviderReliability(
         const DigiDollar::Paymaster::PaymasterId& provider_id,
         DigiDollar::Paymaster::PaymasterReliabilityRecord& record) const;
+    /** Preserve missing history separately from unreadable aggregates or
+     * permanent provider-block records. Blocks remain authoritative when the
+     * aggregate history was explicitly cleared. */
+    DatabaseReadStatus GetProviderReliabilityWithStatus(
+        const DigiDollar::Paymaster::PaymasterId& provider_id,
+        DigiDollar::Paymaster::PaymasterReliabilityRecord& record,
+        std::string& error) const;
     bool ListProviderReliability(
         std::vector<DigiDollar::Paymaster::PaymasterReliabilityRecord>& records) const;
     bool ClearProviderReliability(

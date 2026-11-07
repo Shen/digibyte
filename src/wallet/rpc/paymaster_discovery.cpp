@@ -441,7 +441,12 @@ RPCHelpMan getpaymasterreputation()
             if (!request.params[0].isNull()) {
                 DigiDollar::Paymaster::PaymasterReliabilityRecord record;
                 const auto provider_id = ParseHashV(request.params[0], "provider_id");
-                if (store.GetProviderReliability(provider_id, record)) records.push_back(std::move(record));
+                std::string error;
+                const auto status = store.GetProviderReliabilityWithStatus(provider_id, record, error);
+                if (status == DatabaseReadStatus::FOUND) records.push_back(std::move(record));
+                else if (status != DatabaseReadStatus::NOT_FOUND) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                }
             } else if (!store.ListProviderReliability(records)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_REPUTATION_DATABASE_READ");
             }
@@ -476,7 +481,12 @@ RPCHelpMan clearpaymasterreputation()
             if (!request.params[0].isNull()) {
                 DigiDollar::Paymaster::PaymasterReliabilityRecord record;
                 const auto provider_id = ParseHashV(request.params[0], "provider_id");
-                if (store.GetProviderReliability(provider_id, record)) records.push_back(std::move(record));
+                std::string error;
+                const auto status = store.GetProviderReliabilityWithStatus(provider_id, record, error);
+                if (status == DatabaseReadStatus::FOUND) records.push_back(std::move(record));
+                else if (status != DatabaseReadStatus::NOT_FOUND) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, error);
+                }
             } else if (!store.ListProviderReliability(records)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_REPUTATION_DATABASE_READ");
             }

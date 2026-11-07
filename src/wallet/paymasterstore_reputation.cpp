@@ -140,21 +140,45 @@ bool PaymasterStore::RecordProviderOutcome(const uint256& attempt_id,
 bool PaymasterStore::GetProviderReliability(const PaymasterId& provider_id,
                                             PaymasterReliabilityRecord& record) const
 {
+    std::string error;
+    return GetProviderReliabilityWithStatus(provider_id, record, error) ==
+           DatabaseReadStatus::FOUND;
+}
+
+DatabaseReadStatus PaymasterStore::GetProviderReliabilityWithStatus(
+    const PaymasterId& provider_id,
+    PaymasterReliabilityRecord& record,
+    std::string& error) const
+{
+    error.clear();
+    record = {};
+    if (provider_id.IsNull()) {
+        error = "PAYMASTER_INVALID_PROVIDER_ID";
+        return DatabaseReadStatus::READ_ERROR;
+    }
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     const DatabaseReadStatus record_status{
         batch.ReadPaymasterReliabilityWithStatus(provider_id, record)};
     if (record_status != DatabaseReadStatus::FOUND &&
         record_status != DatabaseReadStatus::NOT_FOUND) {
-        return false;
+        error = PersistedReadError(
+            record_status, "PaymasterReliabilityRecord", record,
+            "PAYMASTER_RELIABILITY_NOT_FOUND",
+            "PAYMASTER_INVALID_RELIABILITY_RECORD");
+        return record_status;
     }
     const bool have_record{record_status == DatabaseReadStatus::FOUND};
     PaymasterProviderBlock block;
     const DatabaseReadStatus block_status =
         batch.ReadPaymasterProviderBlock(provider_id, block);
-    if (block_status == DatabaseReadStatus::READ_ERROR) return false;
+    if (block_status != DatabaseReadStatus::FOUND &&
+        block_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_PROVIDER_BLOCK_DATABASE_READ";
+        return block_status;
+    }
     const bool blocked = block_status == DatabaseReadStatus::FOUND;
-    if (!have_record && !blocked) return false;
+    if (!have_record && !blocked) return DatabaseReadStatus::NOT_FOUND;
     if (!have_record) {
         record = PaymasterReliabilityRecord{};
         record.provider_id = provider_id;
@@ -164,7 +188,11 @@ bool PaymasterStore::GetProviderReliability(const PaymasterId& provider_id,
         record.last_observation_at = std::max(record.last_observation_at, block.blocked_at);
         record.cooldown_until = std::numeric_limits<int64_t>::max();
     }
-    return ValidateReliabilityRecord(record);
+    if (!ValidateReliabilityRecord(record)) {
+        error = "PAYMASTER_INVALID_RELIABILITY_RECORD";
+        return DatabaseReadStatus::READ_ERROR;
+    }
+    return DatabaseReadStatus::FOUND;
 }
 
 bool PaymasterStore::ListProviderReliability(

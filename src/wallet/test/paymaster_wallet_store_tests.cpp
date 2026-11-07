@@ -3817,6 +3817,104 @@ BOOST_AUTO_TEST_CASE(provider_outcome_is_recorded_once_without_payment_details)
                 before_outdated_reliability);
 }
 
+BOOST_AUTO_TEST_CASE(provider_reputation_rpc_preserves_missing_and_unreadable_history)
+{
+    PaymasterStore store{m_wallet};
+    const PaymasterId provider_id{uint256S("7d01")};
+    PaymasterReliabilityRecord record;
+    std::string error;
+    WalletContext context;
+    context.wallets.emplace_back(&m_wallet, [](wallet::CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    request.params = UniValue{UniValue::VARR};
+    request.params.push_back(provider_id.GetHex());
+
+    BOOST_CHECK(store.GetProviderReliabilityWithStatus(provider_id, record, error) ==
+                DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(getpaymasterreputation().HandleRequest(request).empty());
+    BOOST_CHECK_EQUAL(clearpaymasterreputation().HandleRequest(request)
+                          .find_value("cleared").getInt<int64_t>(), 0);
+
+    record.provider_id = provider_id;
+    record.last_observation_at = 100;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterReliability(record));
+    }
+    BOOST_CHECK(store.GetProviderReliabilityWithStatus(provider_id, record, error) ==
+                DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(getpaymasterreputation().HandleRequest(request).size(), 1U);
+
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto check_failure = [&](DatabaseReadStatus expected) {
+        const auto before = database.m_records;
+        BOOST_CHECK(store.GetProviderReliabilityWithStatus(provider_id, record, error) == expected);
+        BOOST_CHECK(!error.empty());
+        BOOST_CHECK(!store.GetProviderReliability(provider_id, record));
+        for (const bool selected_provider : {true, false}) {
+            JSONRPCRequest lookup{request};
+            if (!selected_provider) lookup.params = UniValue{UniValue::VARR};
+            const auto is_wallet_error = [](const UniValue& failure) {
+                return failure.find_value("code").getInt<int>() == RPC_WALLET_ERROR;
+            };
+            BOOST_CHECK_EXCEPTION(getpaymasterreputation().HandleRequest(lookup), UniValue, is_wallet_error);
+            BOOST_CHECK_EXCEPTION(clearpaymasterreputation().HandleRequest(lookup), UniValue, is_wallet_error);
+        }
+        BOOST_CHECK(database.m_records == before);
+    };
+
+    database.m_pass = false;
+    check_failure(DatabaseReadStatus::READ_ERROR);
+    database.m_pass = true;
+
+    record = {};
+    record.provider_id = provider_id;
+    record.version = 0;
+    {
+        auto raw = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id), record));
+    }
+    check_failure(DatabaseReadStatus::UNSUPPORTED_VERSION);
+    record.version = PaymasterReliabilityRecord::CURRENT_VERSION;
+    record.last_observation_at = -1;
+    {
+        auto raw = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_RELIABILITY, provider_id), record));
+    }
+    check_failure(DatabaseReadStatus::READ_ERROR);
+    record.last_observation_at = 100;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterReliability(record));
+    }
+
+    PaymasterProviderBlock block;
+    block.provider_id = provider_id;
+    block.evidence_id = uint256S("7d02");
+    block.blocked_at = 101;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterProviderBlock(block));
+    }
+    BOOST_CHECK_EQUAL(clearpaymasterreputation().HandleRequest(request)
+                          .find_value("cleared").getInt<int64_t>(), 1);
+    BOOST_CHECK(store.GetProviderReliabilityWithStatus(provider_id, record, error) ==
+                DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(record.cooldown_until, std::numeric_limits<int64_t>::max());
+    BOOST_CHECK(!EnsureProviderNotEquivocationBlocked(store, provider_id, error));
+
+    block.version = 0;
+    {
+        auto raw = m_wallet.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_PROVIDER_BLOCK, provider_id), block));
+    }
+    check_failure(DatabaseReadStatus::READ_ERROR);
+    BOOST_CHECK(!EnsureProviderNotEquivocationBlocked(store, provider_id, error));
+}
+
 BOOST_AUTO_TEST_CASE(provider_block_lookup_is_tristate_and_rpc_gate_fails_closed)
 {
     PaymasterStore store{m_wallet};
