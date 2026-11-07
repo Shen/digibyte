@@ -373,6 +373,11 @@ Acknowledging a reminder does not create a backup. Restoration is guarded before
 autostart; independent checkpoints detect stale wallet copies. Only supported
 matching/quiescent states can be adopted after review. Do not operate cloned
 stores as independent instances of one identity.
+Wallet backup and completion bookkeeping serialize with material configuration
+changes. A later change restores the reminder, including changes in the same
+timestamp second. If safety data cannot be read, the DD overview retains known
+wallet totals and shows availability/reservations as unavailable; sending waits
+for a readable balance.
 
 For retirement, follow the [capital-release procedure](paymaster-capital-release.md).
 It owns the stop/work-exclusion rules, exact plan approval, optional cancellation

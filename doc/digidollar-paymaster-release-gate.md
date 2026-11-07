@@ -4,6 +4,37 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Exact execution, authorization commits and unavailable balances
+
+Working-tree corrections based on `9bd53997af884691940a696d1c4030120419a887`,
+checked on 2026-11-07. Thirty translation units were freshly compiled
+(18 production, 12 test), including direct consumers of changed balance and
+reservation layouts. MSVC 19.43.34810 / toolset 14.43.34808 uses
+`/W3 /WX /Od /MT /std:c++20`; Qt is 5.15.10. Isolated links reuse remaining
+objects/libraries and existing MOC, so they are not clean product builds or
+complete transitive-header provenance.
+
+| Executed check | Bounded result |
+|---|---|
+| Native | 37 distinct cases / 2,756 assertions pass on `temp/paymaster-commit-20261107/native.exe`: eight direct regressions, 27 related DD/store/recovery/backup cases and two transport cases. Covers exact stale-input vetoes, unknown authority before release, first provider recovery flag-write/commit rollback, reload, exact replay repair and existing ordinary DD accounting. |
+| Qt | Six functions pass on `temp/paymaster-commit-20261107/qt.exe`, zero failed/skipped feature cases: unknown availability with retained owned total, watch-only, send/overview wallet binding, privacy and ordinary DGB balance. Windows platform/Fusion; init/cleanup are excluded. |
+| C++17 | All 16 modified production translation units, the transport test and four Paymaster fuzz registrations pass `/Zs /std:c++17`. Fuzz checks use `/Zc:preprocessor` in both language modes. The additional provider-RPC/fuzz aggregate changes also compile in C++20; existing designated initializers elsewhere in Core remain outside this correction. No complete Linux/C++17 product build is claimed. |
+| Intermediate commits | Forty targeted C++20 syntax checks pass against the exact source and changed-header snapshots of the ten-step series, including reached ordinary callers. This does not establish clean full builds of each commit. |
+| Recovery negative control | Recompile only the original HEAD recovery translation unit against the current remaining objects. The unchanged new test fails with Exit 201 and ten assertions at missing flag/atomic rollback/reload/replay checks. Current code passes; this is a causal single-unit control, not a historical full build. |
+| Architecture/local controls | Working-tree dependency/cycle checks, six positive/negative fixtures, approved-policy changed-path/shared-record checks, JSON and whitespace checks pass. The operator explicitly approved four additional shared header/test paths; dependency/forbidden-path rules and fixtures remain unchanged. |
+
+Commands, hashes, complete logs and failed attempts are retained under
+`temp/paymaster-af-fixes-20261107/` (`compiled.jsonl`, `runs.jsonl`,
+`native-v4.json`, `qt-v2.json`, `negative-recovery.json`, `verification.json`).
+The additional C++17 adapter compiles, final relinks and repeated native/Qt
+checks are under `temp/paymaster-commit-20261107/` (`compiled.jsonl`,
+`runs.jsonl`, `native.json`, `qt.json`, `verification.json`).
+Initial compile errors and Windows test teardown failures with 263-character
+checkpoint paths remain in the logs. Final runs use a short workspace-local
+temporary directory and retain every checkpoint assertion.
+No full-product, functional, sanitizer or complete-suite result is claimed;
+the operator/CI commands and prerequisites remain in the test runbook.
+
 ## Pool atomicity, recovery and derived-history integrity
 
 Working-tree corrections based on `343cf789e8204762d9b768b9b79dccb8959a1896`,

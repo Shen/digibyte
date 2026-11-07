@@ -86,6 +86,16 @@ join it; material changes using the same ID fail. Sessions, reservations, exact
 commit evidence, budgets and final observations are persisted with their state
 transitions. Network/UI status alone must not release protected inputs.
 
+Authorization-bearing transitions share
+`CommitWithPaymasterAuthorizationProtection`: the mandatory
+`WALLET_FLAG_PAYMASTER_AUTHORIZATION` downgrade fence is written in the same
+`WalletBatch` transaction, then published to memory only after commit. This
+includes the first alternative-provider recovery signature and exact final
+replay repair. Existing checkpoint preparation/commit ordering remains intact.
+Unsigned cancellation and recovery expiry/pruning require readable, absent
+independent authority records before releasing financial bindings; unknown
+versions and read failures cannot substitute for absence.
+
 The persisted quote is authenticated again before acceptance or signing through
 `DecodePaymasterAuthorizationArtifacts`, shared with provider execution and
 client final validation. It checks the provider signature, canonical encoding
@@ -153,6 +163,15 @@ and cannot be rewritten by cleanup. Finite setup and recurring refill have separ
 approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
 See [pool setup](digidollar-paymaster-pool-setup.md).
+Funded DD plans are revalidated through `ValidateDigiDollarTransferPlan` under
+the execution wallet lock before building/signing. It reuses DD selection,
+ordinary fee-coin availability and capacity/fee preflight for the exact saved
+inputs; a different free input cannot make a stale selection spendable. The
+explicit retirement exception applies to DD pool inputs, never manual DGB locks.
+`GetDDBalanceSummary().availability_known` distinguishes unavailable safety
+classification from known zero spendable/reserved amounts. Owned confirmed and
+pending totals remain independent; Qt and setup funding views preserve that
+distinction.
 CLI and Qt use `CalculateSetupCapital` for checked reserve amounts. Paid-refill
 approval requires a complete current provider offer; Qt binds its reviewed fee
 basis and liquidity revision atomically with `expected_provider_policy_hash`

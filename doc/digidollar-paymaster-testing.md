@@ -29,6 +29,18 @@ binary to current source. A quota fixture's many assertions are not thousands
 of independent security cases. Run narrow regressions first; broad builds,
 sanitizers and complete matrices are release/operator jobs.
 
+On Windows, use a short `TEMP`/`TMP` directory for targeted runs. Deep test
+directories plus checkpoint filenames/replacements can exceed legacy path
+limits even when compilation succeeded; retain the checkpoint checks.
+
+Paymaster-specific C++17 controls include provider RPC option initialization,
+the transport tests and all four Paymaster fuzz registrations. Preserve their
+option/initializer values when replacing designated initializers. MSVC fuzz
+syntax checks need the conforming preprocessor (`/Zc:preprocessor`) in both
+language modes. The MSVC project defaults to C++20; Autotools defaults to
+C++17, where supported compilers also accept existing Core extensions. Passing
+these targeted controls does not establish repository-wide strict C++17 support.
+
 ## Build entry points
 
 Linux/WSL: follow [Unix build instructions](build-unix.md) and the repository's
@@ -533,11 +545,13 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Provider finalization and index progress | Security `provider_final_commit_spends_budget_atomically` freezes the validation queue and advances the tip after commit. Exact commit recovery must complete before queue release, preserve the spent budget and permit accounting-neutral replay; the test releases the queue on the blocking negative path so teardown can finish. `wallet_paymaster_provider.py` also advances the tip during an automatic submit. |
 | Provider manual locks | `wallet_paymaster_locks.py` checks DGB and carrier readiness, transient/persistent locks, reload and locks added after capacity reservation; DGB unlock permits the same signed client payment. The ordinary DD-token RPC unlock prohibition remains enforced; transient carrier locks clear on reload and persistent ones keep blocking new signatures. Identity capacity lifecycle covers both reservation APIs; wallet PSBT role signing preserves the unsigned provider artifact and its independent reservation lock. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
+| Exact DD execution and unavailable classification | Spendability `w17_15_selected_dd_planner_is_non_mutating` checks stale reserved DD with a sufficient unrelated balance, locked DGB fee inputs, fee-plan changes and duplicate inputs. Identity `unreadable_paymaster_locks_fail_closed_for_coin_selection` and Qt `overviewPaymasterReservationUsesConditionalBalanceBreakdown` retain owned totals while marking availability unknown. |
+| Atomic authorization side effects | Store client final/ambiguous-state atomicity and security `provider_final_commit_spends_budget_atomically`, `client_recovery_result_commit_failure_survives_ttl_and_exact_retry` cover the shared downgrade fence, first alternative-provider signature, flag-write/commit rollback, reload and exact replay repair. Cancellation, unavailable-submit rejection and unsigned recovery expiry tests inject malformed/future commit, result and authorization records before any release. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
 | Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
 | Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`, application `maintenance_rpc_budget_matches_authorization_after_clock_rollback`, provider `maintenance_budget_usage_*`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
 | Setup parity and funding observations | `paymaster_setup_tests`; pool setup `--funding-diagnostics-only`; Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`, `paymasterPoolPreparationDiagnostics`, `paymasterPoolPreparationStoredFeeDiagnostics`: approvals, shortfalls, malformed/missing observations and read-only refresh. |
-| Backup, adoption and stale copies | `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
+| Backup, adoption and stale copies | Identity `provider_backup_serializes_copy_completion_and_configuration`, `provider_finance_and_backup_metadata_follow_the_identity`; `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |
 | Cancellation of uncreated work | Identity `maintenance_cancellation*`; Qt `paymasterMaintenanceCancellation`, `paymasterSavedTaskTitles`: exact preview, lost-reply signatures, rollback, checkpoint protection and retained signed work. |
 | Excess reserve release | Identity `rebalance_saved_targets_*`; Qt `paymasterGuidedCapitalTasks`, `paymasterReserveReduction`: missing/underfilled assets, saved revisions, DGB-only scope and exact receipts. |
 | Stop and retirement | Wire `manager_provider_stop_*`; identity `provider_stop_waits_for_work_without_bypassing_exclusion`, `capital_release_cancels_only_reviewed_uncreated_funding`; Qt `paymasterStoppedOverview`, `paymasterStopAndRelease`, `paymasterRetirementLateResults`: priority, atomic release and uncertain replies. |
