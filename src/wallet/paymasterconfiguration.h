@@ -16,7 +16,7 @@ DigiDollar::Paymaster::ClientSafetyPolicy SaveClientSafetyPolicy(CWallet& wallet
 ProviderEnabledResult EnableProvider(WalletContext& context, CWallet& wallet_ref, bool requested_enabled);
 RestrictedDescriptorResult CreateRestrictedDescriptor(WalletContext& context, CWallet& wallet_ref, const XOnlyPubKey& sponsor_key, const std::string& service_name, int64_t ttl);
 ProviderRuntimeResult SaveProviderRuntime(WalletContext& context, CWallet& wallet_ref, std::optional<DigiDollar::Paymaster::ProviderOperationMode> requested_mode, std::optional<bool> requested_autostart);
-DigiDollar::Paymaster::ProviderLiquidityPolicy SaveLiquidityPolicy(WalletContext& context, CWallet& wallet_ref, DigiDollar::Paymaster::ProviderLiquidityPolicy policy, std::optional<int64_t> expected_revision);
+DigiDollar::Paymaster::ProviderLiquidityPolicy SaveLiquidityPolicy(WalletContext& context, CWallet& wallet_ref, DigiDollar::Paymaster::ProviderLiquidityPolicy policy, std::optional<int64_t> expected_revision, std::optional<uint256> expected_provider_policy_hash = std::nullopt);
 MaintenanceCancellationResult CancelProviderMaintenance(WalletContext& context, CWallet& wallet_ref, const std::vector<uint256>& operations, bool execute, const uint256& plan);
 CapitalReleaseResult ReleaseProviderCapital(WalletContext& context, CWallet& wallet_ref, bool execute, const uint256& plan, bool recovery, bool cancel_uncreated);
 BackupAdoptionResult AdoptProviderBackup(WalletContext& context, CWallet& wallet_ref, bool execute, const uint256& plan, bool independent_checkpoint);

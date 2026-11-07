@@ -23,6 +23,15 @@ UniValue SetupDefaultSafety(int64_t advertised_fee, bool user_paid, bool sponsor
  * Admission uses three independent proofs; payment reserves scale with capacity. */
 UniValue SetupLiquidityPreset(bool user_paid, int capacity);
 UniValue SetupDefaultLiquidity(bool user_paid);
+struct SetupCapital {
+    int64_t dgb_satoshis{0};
+    int64_t carrier_cents{0};
+};
+/** Minimum reserve capital at a known provider fee ceiling. Invalid counts,
+ * an unknown/nonpositive ceiling and totals outside MoneyRange have no value. */
+std::optional<SetupCapital> CalculateSetupCapital(int64_t maximum_network_fee_satoshis,
+    int64_t admission_dgb, int64_t operational_dgb,
+    int64_t admission_carriers, int64_t operational_carriers);
 /** Review capacity presets without changing saved settings or approval flags. */
 UniValue SetupSelectLiquidity(std::istream& input, std::ostream& output, const UniValue& current, bool user_paid);
 UniValue SetupNodePrerequisites(const UniValue& snapshot);

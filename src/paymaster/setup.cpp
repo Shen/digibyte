@@ -7,6 +7,7 @@
 #include <ostream>
 #include <paymaster/types.h>
 #include <paymaster/provider.h>
+#include <paymaster/directory.h>
 #include <util/strencodings.h>
 #include <paymaster/setup.h>
 #include <set>
@@ -81,6 +82,19 @@ UniValue SetupLiquidityPreset(bool user_paid, int capacity)
 UniValue SetupDefaultLiquidity(bool user_paid)
 {
     return SetupLiquidityPreset(user_paid, 1);
+}
+std::optional<SetupCapital> CalculateSetupCapital(int64_t maximum_network_fee_satoshis,
+    int64_t admission_dgb, int64_t operational_dgb,
+    int64_t admission_carriers, int64_t operational_carriers)
+{
+    if (maximum_network_fee_satoshis <= 0 || !MoneyRange(maximum_network_fee_satoshis) ||
+        admission_dgb < 0 || admission_dgb > 16 || operational_dgb < 1 || operational_dgb > 16 ||
+        admission_carriers < 0 || admission_carriers > 16 || operational_carriers < 0 || operational_carriers > 16) return std::nullopt;
+    const int64_t admission = MIN_ADMISSION_DGB_SATOSHIS * admission_dgb;
+    const int64_t payment = std::max(MIN_ADMISSION_DGB_SATOSHIS, maximum_network_fee_satoshis);
+    if (payment > (MAX_MONEY - admission) / operational_dgb) return std::nullopt;
+    return SetupCapital{admission + payment * operational_dgb,
+                        100 * (admission_carriers + operational_carriers)};
 }
 UniValue SetupSelectLiquidity(std::istream& input, std::ostream& output, const UniValue& current, bool user_paid)
 {

@@ -772,6 +772,9 @@ public:
     QString liquidityApprovalText(
         const LiquidityPolicyValues& values) const;
 
+    /** A complete current offer and saved liquidity revision for new refill authority. */
+    UniValue refillApprovalBasis() const;
+
     void saveLiquidityPolicy();
 
     void liquidityPolicySaved(const UniValue& policy, bool reduced_targets = false);

@@ -10397,6 +10397,9 @@ UniValue GuidedOperatorSnapshot()
         "policy":{"funding_models":["user_paid"],"sponsorship_scope":"public","fee_rate_bps":50,"min_amount_cents":100,
         "max_amount_cents":100000,"quote_ttl":60,"maximum_network_fee_dgb_satoshis":20000000}})")) throw std::runtime_error("Invalid operator fixture");
     info.pushKV("provider_id", std::string(64, 'a'));
+    auto offer = info.find_value("policy");
+    offer.pushKV("policy_hash", std::string(64, 'b'));
+    info.pushKV("policy", offer);
     UniValue safety;
     if (!safety.read(R"({"configured":true,"policy":{
         "user_paid":{"maximum_network_fee_per_transaction_satoshis":20000000,"maximum_reserved_network_fee_satoshis":50000000,
@@ -11944,7 +11947,8 @@ void PaymasterWidgetTests::paymasterOverviewRefill_data()
     QTest::addColumn<QString>("theme");
     for (const char* name : {"enable", "disable", "approve", "decline", "lost_saved", "lost_unsaved",
                              "wallet_change", "draft_preserved", "blocked", "settings_copy", "stale_revision",
-                             "new_policy", "approval_privacy", "approval_wallet"})
+                             "new_policy", "approval_privacy", "approval_wallet", "unknown_offer", "unknown_fee",
+                             "operator_read_error", "disable_unknown", "expired_offer", "overflow", "offer_changed", "high_fee"})
         QTest::newRow(name) << QString::fromLatin1(name) << QStringLiteral("dark");
     QTest::newRow("approve_light") << QStringLiteral("approve") << QStringLiteral("light");
 }
@@ -11962,11 +11966,18 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
     auto provider = snapshot.find_value("provider");
     auto liquidity = provider.find_value("liquidity");
     auto policy = liquidity.find_value("policy");
-    const bool initially_on = scenario == "disable" || scenario == "blocked";
+    const bool initially_on = scenario == "disable" || scenario == "disable_unknown" || scenario == "blocked";
     policy.pushKV("automatic_replenishment", initially_on);
-    const bool needs_review = scenario == "approve" || scenario == "decline" || scenario.startsWith("approval_") || scenario == "new_policy";
+    const bool needs_review = scenario == "approve" || scenario == "decline" || scenario.startsWith("approval_") || scenario == "new_policy" || scenario == "offer_changed" || scenario == "high_fee";
     policy.pushKV("paid_maintenance_approved", !needs_review);
-    policy.pushKV("updated_at", 100);
+    policy.pushKV("updated_at", scenario == "new_policy" ? 0 : 100);
+    if (scenario == "overflow") policy.pushKV("target_operational_dgb", 16);
+    auto offer = provider.find_value("policy");
+    if (scenario == "unknown_offer") offer.pushKV("policy_hash", UniValue{});
+    if (scenario == "unknown_fee") offer.pushKV("maximum_network_fee_dgb_satoshis", UniValue{});
+    if (scenario == "overflow") offer.pushKV("maximum_network_fee_dgb_satoshis", MAX_MONEY);
+    if (scenario == "high_fee") offer.pushKV("maximum_network_fee_dgb_satoshis", 50000000);
+    provider.pushKV("policy", offer);
     if (scenario == "new_policy") liquidity.pushKV("policy_configured", false);
     liquidity.pushKV("policy", policy);
     UniValue observation;
@@ -11975,10 +11986,14 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
     provider.pushKV("liquidity", liquidity);
     snapshot.pushKV("provider", provider);
     int writes{0}, approvals{0};
+    bool operator_unavailable{false};
     UniValue sent;
     panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
         if (command == "setpaymasterliquiditypolicy") {
             ++writes; sent = params;
+            if (scenario == "offer_changed") {
+                throw ProviderApplicationError("PAYMASTER_PROVIDER_POLICY_CHANGED");
+            }
             if (scenario == "wallet_change") panel->setWalletModel(nullptr);
             if (scenario == "lost_unsaved" || scenario == "stale_revision") throw ProviderApplicationError("PAYMASTER_LIQUIDITY_POLICY_CHANGED");
             policy = params[0]; policy.pushKV("updated_at", 101);
@@ -11989,7 +12004,10 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
             return policy;
         }
         if (command == "getpaymasterliquiditystatus") return liquidity;
-        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasteroperatorinfo") {
+            if (operator_unavailable) throw std::runtime_error("injected provider read failure");
+            return snapshot;
+        }
         if (command == "getpaymasterinfo") return provider;
         throw std::runtime_error("optional fixture data unavailable");
     });
@@ -12003,6 +12021,26 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
     auto* target = panel->findChild<QSpinBox*>("paymasterOperationalDgbSlots");
     QVERIFY(control && copy && status && target);
     QCOMPARE(control->isChecked(), initially_on);
+    if (scenario == "operator_read_error" || scenario == "disable_unknown") {
+        // Establish the configured-provider page access through the real
+        // successful observation path before failing its next read. The
+        // narrow setters above intentionally do not complete onboarding.
+        panel->refreshStatus();
+        QVERIFY(control->isEnabled() && copy->isEnabled());
+        operator_unavailable = true;
+        panel->refreshStatus();
+    }
+    if (scenario == "disable_unknown") QVERIFY(control->isEnabled() && copy->isEnabled());
+    if (scenario == "expired_offer") panel->expireOperatorStatusForTesting();
+    if (scenario == "unknown_offer" || scenario == "unknown_fee" || scenario == "operator_read_error" || scenario == "expired_offer" || scenario == "overflow") {
+        if (scenario != "overflow" && scenario != "expired_offer") QVERIFY(!control->isEnabled() && !copy->isEnabled());
+        // Programmatic dispatch must fail closed too, even when no user click is possible.
+        control->setChecked(true);
+        QCOMPARE(writes, 0);
+        QVERIFY(!control->isChecked() && !copy->isChecked());
+        QVERIFY(!panel->findChild<QDialog*>("paymasterRefillApproval"));
+        return;
+    }
     if (scenario == "blocked") {
         QVERIFY(control->isChecked() && copy->isChecked());
         QVERIFY(status->text().contains("prerequisite") && status->text().contains("budget"));
@@ -12016,12 +12054,22 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
         if (!dialog || !dialog->isVisible()) return;
         ++approvals; approval.stop();
         QTimer::singleShot(1000, dialog, &QDialog::reject);
+        if (scenario == "high_fee") {
+            bool correct_capital{false};
+            for (auto* label : dialog->findChildren<QLabel*>()) correct_capital |= label->text().contains("0.80000000 DGB");
+            QVERIFY(correct_capital);
+        }
         QCOMPARE(dialog->palette().color(QPalette::Window).name(),
                  theme == "dark" ? QStringLiteral("#0b2419") : QStringLiteral("#eef9f2"));
         const auto screenshot = qEnvironmentVariable("DIGIBYTE_PAYMASTER_REFILL_SCREENSHOT");
         if (!screenshot.isEmpty()) QVERIFY(dialog->grab().save(screenshot + "-" + theme + ".png"));
         if (scenario == "approval_privacy") { panel->setPrivacy(true); return; }
         if (scenario == "approval_wallet") { panel->setWalletModel(nullptr); return; }
+        if (scenario == "offer_changed") {
+            offer.pushKV("policy_hash", std::string(64, 'c'));
+            provider.pushKV("policy", offer);
+            snapshot.pushKV("provider", provider);
+        }
         dialog->done(scenario == "decline" ? QDialog::Rejected : QDialog::Accepted);
     });
     approval.start(5);
@@ -12037,7 +12085,8 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
         return;
     }
     QTRY_COMPARE(writes, 1);
-    QCOMPARE(sent.size(), size_t{2});
+    QCOMPARE(sent.size(), initially_on ? size_t{2} : size_t{3});
+    if (!initially_on) QCOMPARE(sent[2].get_str(), std::string(64, 'b'));
     QCOMPARE(sent[1].getInt<int64_t>(), scenario == "new_policy" ? int64_t{0} : int64_t{100});
     QCOMPARE(sent[0].find_value("target_operational_dgb").getInt<int>(), 1);
     QCOMPARE(sent[0].find_value("automatic_replenishment").get_bool(), !initially_on);
@@ -12047,7 +12096,7 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
         QVERIFY(!control->isEnabled());
         return;
     }
-    const bool persisted = scenario != "lost_unsaved" && scenario != "stale_revision";
+    const bool persisted = scenario != "lost_unsaved" && scenario != "stale_revision" && scenario != "offer_changed";
     QTRY_COMPARE(control->isChecked(), persisted ? !initially_on : initially_on);
     QCOMPARE(copy->isChecked(), control->isChecked());
     QCOMPARE(writes, 1);
@@ -12792,6 +12841,7 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
         provider.pushKV("ready", false);
         auto liquidity = provider.find_value("liquidity");
         auto policy = liquidity.find_value("policy");
+        policy.pushKV("updated_at", 100);
         policy.pushKV("target_operational_carriers", 0);
         liquidity.pushKV("policy", policy);
         liquidity.pushKV("targets_satisfy_provider_policy", false);
@@ -12804,10 +12854,12 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
     snapshot.pushKV("provider", provider);
     const auto saved_policy = provider.find_value("liquidity").find_value("policy");
     int previews{0}, executions{0}, confirmations{0}, writes{0}, starts{0}, enables{0};
+    UniValue write_params;
     panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
         if (command == "getpaymasteroperatorinfo") return snapshot;
         if (command == "setpaymasterliquiditypolicy") {
             ++writes;
+            write_params = params;
             UniValue expected = saved_policy;
             expected.pushKV("target_operational_carriers", 1);
             for (const auto& key : params[0].getKeys()) {
@@ -12816,12 +12868,14 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
             }
             if (outcome == "write_failed") throw std::runtime_error("Write failed");
             auto liquidity = provider.find_value("liquidity");
-            liquidity.pushKV("policy", params[0]);
+            auto persisted = params[0];
+            persisted.pushKV("updated_at", 101);
+            liquidity.pushKV("policy", persisted);
             liquidity.pushKV("targets_satisfy_provider_policy", true);
             provider.pushKV("liquidity", liquidity);
             snapshot.pushKV("provider", provider);
             if (outcome == "lost_reply") throw std::runtime_error("Reply lost after durable write");
-            return params[0];
+            return persisted;
         }
         if (command == "setpaymasterenabled") {
             ++enables;
@@ -12920,6 +12974,11 @@ void PaymasterWidgetTests::paymasterGuidedRestoreHasOneApproval()
     QTRY_COMPARE(confirmations, 1);
     QCOMPARE(previews, outcome == "retry" ? 3 : repair && approved && outcome != "changed_settings" && outcome != "write_failed" ? 2 : 1);
     QCOMPARE(writes, repair && approved && outcome != "changed_settings" ? 1 : 0);
+    if (writes) {
+        QCOMPARE(write_params.size(), size_t{3});
+        QCOMPARE(write_params[1].getInt<int64_t>(), saved_policy.find_value("updated_at").getInt<int64_t>());
+        QCOMPARE(write_params[2].get_str(), std::string(64, 'b'));
+    }
     QCOMPARE(executions, completes ? 1 : 0);
     QCOMPARE(starts, repair && completes ? 1 : 0);
     QCOMPARE(enables, repair && completes ? 1 : 0);
@@ -14765,6 +14824,8 @@ void PaymasterWidgetTests::paymasterLiquiditySaveAcrossRefresh()
     QCOMPARE(command, std::string{"setpaymasterliquiditypolicy"});
     QCOMPARE(writes, 1);
     QVERIFY(params[0].find_value("automatic_replenishment").isTrue());
+    QCOMPARE(params.size(), scenario == "unapproved" ? size_t{2} : size_t{3});
+    if (scenario != "unapproved") QCOMPARE(params[2].get_str(), std::string(64, 'b'));
     QCOMPARE(params[0].find_value("paid_maintenance_approved").get_bool(), scenario != "unapproved");
     QCOMPARE(params[0].find_value("maximum_maintenance_fee_per_transaction_satoshis").getInt<int64_t>(), int64_t{30000000});
     QCOMPARE(params[0].find_value("maximum_maintenance_fee_per_hour_satoshis").getInt<int64_t>(), int64_t{70000000});

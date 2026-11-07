@@ -456,14 +456,13 @@ public:
         m_preset->setCurrentIndex(m_preset->findData(matched ? operational : 0));
         m_manual->setVisible(!matched);
         const int capacity = paid ? std::min(operational, m_targets[3]->value()) : operational;
-        const qint64 admission_capital = 10000000LL * m_targets[0]->value();
-        const qint64 payment_value = std::max<qint64>(10000000, m_payment_fee());
-        const bool capital_fits = payment_value <= (MAX_MONEY - admission_capital) / operational;
-        const QString dgb_capital = capital_fits ? compactDgb(admission_capital + payment_value * operational) : tr("exceeds the supported amount range");
+        const auto capital = DigiDollar::Paymaster::CalculateSetupCapital(m_payment_fee(),
+            m_targets[0]->value(), operational, m_targets[2]->value(), m_targets[3]->value());
+        const QString dgb_capital = capital ? compactDgb(capital->dgb_satoshis) : tr("unavailable or outside the supported amount range");
         QString summary = tr("Refill target: keep reserves for %1 payment(s).\nMinimum target capital: %2 DGB + %3 DD, before fees. Existing usable reserves count toward this target.")
                               .arg(capacity)
                               .arg(dgb_capital)
-                              .arg(PaymasterFormatDD(100LL * (m_targets[2]->value() + m_targets[3]->value())));
+                              .arg(capital ? PaymasterFormatDD(capital->carrier_cents) : tr("unavailable"));
         summary += QLatin1Char('\n') + tr("Payments require confirmed reserves and sufficient budgets.");
         if (paid && (m_targets[2]->value() < 3 || m_targets[3]->value() < 1))
             summary += QLatin1Char('\n') + tr("User-paid service needs at least three DD capacity checks and one DD payment reserve.");

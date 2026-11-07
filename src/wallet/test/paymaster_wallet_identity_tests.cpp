@@ -32,6 +32,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterintegration.h>
 #include <wallet/paymasterservice.h>
+#include <wallet/paymasterconfiguration.h>
 #include <wallet/paymasterproviderops.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
@@ -2965,6 +2966,44 @@ BOOST_AUTO_TEST_CASE(carrier_withdrawal_preview_owns_wallet_observation_lock)
         [](const ApplicationError& failure) {
             return std::string{failure.what()}.rfind("PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED", 0) == 0;
         });
+}
+
+BOOST_AUTO_TEST_CASE(liquidity_approval_binds_provider_policy_atomically)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    CWallet provider_wallet{m_node.chain.get(), "maintenance-approval-test", CreateMockableWalletDatabase()};
+    {
+        LOCK(provider_wallet.cs_wallet);
+        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider_wallet.SetupDescriptorScriptPubKeyMans();
+    }
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "liquidity approval", 1000, identity, error));
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_SPONSORED;
+    policy.fee_rate_bps = 0;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{1000000};
+    policy.maximum_network_fee = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+    BOOST_REQUIRE_MESSAGE(SetPaymasterProviderPolicy(provider_wallet, policy, 1001, error), error);
+    ProviderLiquidityPolicy liquidity;
+    liquidity.target_admission_dgb = 3;
+    liquidity.target_operational_dgb = 1;
+    liquidity.updated_at = 1002;
+    BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(provider_wallet, liquidity, 1002, error));
+    WalletContext context;
+    Manager manager{true};
+    context.paymaster = &manager;
+    const auto before = GetMockableDatabase(provider_wallet).m_records;
+    BOOST_CHECK_EXCEPTION(paymaster_app::SaveLiquidityPolicy(context, provider_wallet, liquidity, 1002, uint256S("bad")),
+        ApplicationError, [](const ApplicationError& failure) { return failure.code == "PAYMASTER_PROVIDER_POLICY_CHANGED"; });
+    BOOST_CHECK(GetMockableDatabase(provider_wallet).m_records == before);
+    const auto saved = paymaster_app::SaveLiquidityPolicy(context, provider_wallet, liquidity, 1002, GetProviderPolicyHash(policy));
+    BOOST_CHECK_EQUAL(saved.updated_at, 2000);
+    BOOST_CHECK_EXCEPTION(paymaster_app::SaveLiquidityPolicy(context, provider_wallet, liquidity, 1002, GetProviderPolicyHash(policy)),
+        ApplicationError, [](const ApplicationError& failure) { return failure.code == "PAYMASTER_LIQUIDITY_POLICY_CHANGED"; });
 }
 
 BOOST_AUTO_TEST_CASE(provider_safety_policy_time_never_regresses_below_accounting_high_water)

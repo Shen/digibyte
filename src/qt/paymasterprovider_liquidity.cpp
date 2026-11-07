@@ -465,20 +465,31 @@ void ProviderLiquidity::markLiquidityPolicyDirty()
     m_panel.overview().updateProviderButtons();
 }
 
+UniValue ProviderLiquidity::refillApprovalBasis() const
+{
+    if (!m_panel.hasCompleteMutationSnapshots()) return {};
+    const auto& snapshot = m_panel.overview().operatorSnapshot();
+    const auto& provider = snapshot.find_value("provider");
+    const auto& offer = provider.find_value("policy");
+    qint64 fee{0}, revision{0};
+    if (!IsHex256Field(provider, "provider_id") || !IsCompleteProviderPolicy(offer) ||
+        !IsHex256Field(offer, "policy_hash") ||
+        !GetInt64Field(offer, "maximum_network_fee_dgb_satoshis", fee) || fee <= 0 || !MoneyRange(fee) ||
+        !GetInt64Field(m_saved_liquidity_policy, "updated_at", revision) || revision < 0 ||
+        !DigiDollar::Paymaster::SetupMatches(m_saved_liquidity_policy,
+            provider.find_value("liquidity").find_value("policy"))) return {};
+    return snapshot;
+}
+
 QString ProviderLiquidity::liquidityApprovalText(
     const LiquidityPolicyValues& values) const
 {
-    const qint64 admission_value =
-        DigiDollar::Paymaster::MIN_ADMISSION_DGB_SATOSHIS;
-    const qint64 operational_value = std::max<qint64>(
-        admission_value, m_panel.overview().confirmedPaymentFee());
-    const qint64 admission_capital = admission_value * values.admission_dgb;
-    const QString bound_dgb = operational_value <= (MAX_MONEY - admission_capital) / values.operational_dgb
-        ? PaymasterWidgetImpl::dgbAmount(admission_capital + operational_value * values.operational_dgb)
-        : tr("exceeds the supported amount range");
-    const qint64 bound_carriers =
-        100LL * (values.admission_carriers +
-                 values.operational_carriers);
+    const auto basis = refillApprovalBasis();
+    qint64 fee{0};
+    const auto capital = GetInt64Field(basis.find_value("provider").find_value("policy"), "maximum_network_fee_dgb_satoshis", fee)
+        ? DigiDollar::Paymaster::CalculateSetupCapital(fee, values.admission_dgb, values.operational_dgb,
+            values.admission_carriers, values.operational_carriers) : std::nullopt;
+    const QString bound_dgb = capital ? PaymasterWidgetImpl::dgbAmount(capital->dgb_satoshis) : tr("unavailable or outside the supported amount range");
     return tr("Automatic refill: %1.\n\n").arg(values.automatic_replenishment ? tr("on") : tr("off")) + tr(
         "Save these reserve settings and approve the listed paid-refill limits?\n\n"
         "Targets: %1 admission DGB, %2 operational DGB, %3 admission carriers and %4 operational carriers.\n"
@@ -493,7 +504,7 @@ QString ProviderLiquidity::liquidityApprovalText(
         .arg(values.admission_carriers)
         .arg(values.operational_carriers)
         .arg(bound_dgb)
-        .arg(PaymasterFormatDD(bound_carriers))
+        .arg(capital ? PaymasterFormatDD(capital->carrier_cents) : tr("unavailable"))
         .arg(PaymasterWidgetImpl::dgbAmount(values.fee_per_transaction))
         .arg(PaymasterWidgetImpl::dgbAmount(values.fee_per_hour))
         .arg(PaymasterWidgetImpl::dgbAmount(values.fee_per_day));
@@ -525,7 +536,16 @@ void ProviderLiquidity::saveLiquidityPolicy()
         return;
     }
     const auto generation = m_panel.walletGeneration();
+    UniValue approval_basis;
     if (values.paid_maintenance_approved) {
+        approval_basis = refillApprovalBasis();
+        qint64 fee{0};
+        if (!GetInt64Field(approval_basis.find_value("provider").find_value("policy"), "maximum_network_fee_dgb_satoshis", fee) ||
+            !DigiDollar::Paymaster::CalculateSetupCapital(fee, values.admission_dgb, values.operational_dgb,
+                values.admission_carriers, values.operational_carriers)) {
+            m_liquidity_policy_status->setText(tr("Refill approval requires a complete current provider offer and reserve capital within the supported amount range. Refresh the provider status before reviewing this change."));
+            return;
+        }
         // Keep the reviewed edit and wallet stable across the dialog's
         // nested event loop. Background reads must not block the save.
         m_panel.setRpcBusyState(true);
@@ -545,6 +565,10 @@ void ProviderLiquidity::saveLiquidityPolicy()
     params.push_back(requested_policy);
     const auto revision = m_liquidity_policy_dirty ? m_liquidity_edit_revision : m_saved_liquidity_policy.find_value("updated_at");
     if (revision.isNum()) params.push_back(revision);
+    if (!approval_basis.isNull()) {
+        if (!revision.isNum()) params.push_back(UniValue{});
+        params.push_back(approval_basis.find_value("provider").find_value("policy").find_value("policy_hash"));
+    }
     m_panel.call("setpaymasterliquiditypolicy", std::move(params), false,
          nullptr, [this, requested_policy, reduced_targets](const UniValue& result) {
              if (!IsExactLiquidityPolicyAcknowledgement(requested_policy, result)) {
@@ -1056,6 +1080,17 @@ void ProviderLiquidity::saveQuickRefill(bool enabled)
         !m_saved_liquidity_policy.find_value("updated_at").isNum()) { updateQuickAutomation(); return; }
     const auto generation = m_panel.walletGeneration();
     const auto saved = m_saved_liquidity_policy;
+    const UniValue approval_basis = enabled ? refillApprovalBasis() : UniValue{};
+    qint64 advertised_fee{0};
+    const auto capital = enabled && GetInt64Field(approval_basis.find_value("provider").find_value("policy"), "maximum_network_fee_dgb_satoshis", advertised_fee)
+        ? DigiDollar::Paymaster::CalculateSetupCapital(advertised_fee,
+            poolNumber(saved, "target_admission_dgb"), poolNumber(saved, "target_operational_dgb"),
+            poolNumber(saved, "target_admission_carriers"), poolNumber(saved, "target_operational_carriers")) : std::nullopt;
+    if (enabled && !capital) {
+        m_refill_message = tr("Refill approval requires a complete current provider offer and reserve capital within the supported amount range. Refresh the provider status before enabling refill.");
+        updateQuickAutomation();
+        return;
+    }
     UniValue requested{UniValue::VOBJ};
     for (const auto& key : saved.getKeys()) if (key != "updated_at") requested.pushKV(key, saved.find_value(key));
     requested.pushKV("automatic_replenishment", enabled);
@@ -1072,14 +1107,8 @@ void ProviderLiquidity::saveQuickRefill(bool enabled)
         auto* explanation = new QLabel(tr("Use these reserve targets: %1 DGB capacity checks, %2 DGB payment reserves, %3 DD capacity checks and %4 DD payment reserves. A running provider may immediately bind the missing wallet funds and pay fees within these limits. No other unsaved settings are included.")
             .arg(poolNumber(saved, "target_admission_dgb")).arg(poolNumber(saved, "target_operational_dgb"))
             .arg(poolNumber(saved, "target_admission_carriers")).arg(poolNumber(saved, "target_operational_carriers")), &review);
-        const auto& offer = m_panel.overview().operatorSnapshot().find_value("provider").find_value("policy");
-        const qint64 slot_value = std::max<qint64>(DigiDollar::Paymaster::MIN_ADMISSION_DGB_SATOSHIS,
-                                                   poolNumber(offer, "maximum_network_fee_dgb_satoshis"));
-        const qint64 target_dgb = DigiDollar::Paymaster::MIN_ADMISSION_DGB_SATOSHIS * poolNumber(saved, "target_admission_dgb") +
-                                  slot_value * poolNumber(saved, "target_operational_dgb");
-        const qint64 target_dd = 100 * (poolNumber(saved, "target_admission_carriers") + poolNumber(saved, "target_operational_carriers"));
         explanation->setText(explanation->text() + tr("\n\nTarget capital: at least %1 DGB and %2 DD, before network fees. Existing usable reserves count toward these targets; only missing capacity is refilled.")
-            .arg(PaymasterWidgetImpl::dgbAmount(target_dgb), PaymasterFormatDD(target_dd)));
+            .arg(PaymasterWidgetImpl::dgbAmount(capital->dgb_satoshis), PaymasterFormatDD(capital->carrier_cents)));
         explanation->setWordWrap(true);
         explanation->setMaximumWidth(620);
         form->addRow(explanation);
@@ -1136,6 +1165,7 @@ void ProviderLiquidity::saveQuickRefill(bool enabled)
     UniValue params{UniValue::VARR};
     params.push_back(requested);
     params.push_back(saved.find_value("updated_at"));
+    if (enabled) params.push_back(approval_basis.find_value("provider").find_value("policy").find_value("policy_hash"));
     const auto finish = [this, requested, saved](const UniValue& result) {
         m_refill_save_pending = false;
         const bool confirmed = IsExactLiquidityPolicyAcknowledgement(requested, result);
@@ -1500,17 +1530,23 @@ void ProviderLiquidity::applyReviewedReserveRepair(const UniValue& context, cons
     };
     m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr,
         [this, context, proposed, check_context, continue_repair](const UniValue& current) {
+            const auto& provider = current.find_value("provider");
+            const auto& saved = provider.find_value("liquidity").find_value("policy");
+            qint64 revision{0};
             try {
                 check_context(current);
-                const auto& saved = current.find_value("provider").find_value("liquidity").find_value("policy");
                 if (SetupMatches(proposed, saved)) { continue_repair(); return; }
-                if (!SetupMatches(context.find_value("provider").find_value("liquidity").find_value("policy"), saved))
+                if (!SetupMatches(context.find_value("provider").find_value("liquidity").find_value("policy"), saved) ||
+                    !GetInt64Field(saved, "updated_at", revision) || revision < 0 ||
+                    !IsHex256Field(provider.find_value("policy"), "policy_hash"))
                     throw std::runtime_error("PAYMASTER_SETUP_STATE_CHANGED");
             } catch (const std::exception&) {
                 failGuidedTask(tr("The provider settings changed during review. Start a new restoration to review the current requirements. No reserve targets were changed."));
                 return;
             }
             UniValue params{UniValue::VARR}; params.push_back(proposed);
+            params.push_back(revision);
+            params.push_back(provider.find_value("policy").find_value("policy_hash"));
             m_panel.call("setpaymasterliquiditypolicy", params, false, nullptr,
                 [continue_repair](const UniValue&) { continue_repair(); }, false,
                 [continue_repair](const QString& error) { continue_repair(error); });
@@ -2607,10 +2643,13 @@ void ProviderLiquidity::updateQuickAutomation()
 {
     const bool known = IsCompleteLiquidityPolicy(m_saved_liquidity_policy) &&
         m_saved_liquidity_policy.find_value("updated_at").isNum();
+    // Revoking saved automation remains possible with a failed observation.
+    // Enabling it needs the current offer used for the capital approval.
+    const bool can_change = known && (m_saved_liquidity_policy.find_value("automatic_replenishment").isTrue() || !refillApprovalBasis().isNull());
     for (auto* control : m_refill_switches) {
         const QSignalBlocker blocker(control);
         control->setChecked(known && m_saved_liquidity_policy.find_value("automatic_replenishment").isTrue());
-        control->setEnabled(known && !m_panel.busy() && !m_panel.privacyEnabled() && !m_refill_save_pending && m_panel.hasRpcTransport());
+        control->setEnabled(can_change && !m_panel.busy() && !m_panel.privacyEnabled() && !m_refill_save_pending && m_panel.hasRpcTransport());
     }
     const QString text = m_panel.privacyEnabled() ? tr("Hidden by privacy mode") : m_refill_save_pending
         ? tr("Saving reserve automation; checking the wallet setting…")

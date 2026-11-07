@@ -39,6 +39,28 @@ SetupChoices Choices()
 }
 } // namespace
 BOOST_AUTO_TEST_SUITE(paymaster_setup_tests)
+BOOST_AUTO_TEST_CASE(target_capital_requires_a_known_fee_and_checks_money_range)
+{
+    const auto capital = CalculateSetupCapital(50000000, 3, 1, 3, 1);
+    BOOST_REQUIRE(capital);
+    BOOST_CHECK_EQUAL(capital->dgb_satoshis, 80000000);
+    BOOST_CHECK_EQUAL(capital->carrier_cents, 400);
+    const auto minimum = CalculateSetupCapital(1, 3, 1, 3, 1);
+    BOOST_REQUIRE(minimum);
+    BOOST_CHECK_EQUAL(minimum->dgb_satoshis, 40000000);
+    const auto limit = CalculateSetupCapital(MAX_MONEY - 30000000, 3, 1, 0, 0);
+    BOOST_REQUIRE(limit);
+    BOOST_CHECK_EQUAL(limit->dgb_satoshis, MAX_MONEY);
+    BOOST_CHECK(!CalculateSetupCapital(MAX_MONEY - 29999999, 3, 1, 0, 0));
+    BOOST_CHECK(!CalculateSetupCapital(MAX_MONEY, 3, 16, 3, 16));
+    for (const int64_t fee : {int64_t{-1}, int64_t{0}, MAX_MONEY + 1})
+        BOOST_CHECK(!CalculateSetupCapital(fee, 3, 1, 3, 1));
+    BOOST_CHECK(!CalculateSetupCapital(50000000, -1, 1, 3, 1));
+    BOOST_CHECK(!CalculateSetupCapital(50000000, 3, 0, 3, 1));
+    BOOST_CHECK(!CalculateSetupCapital(50000000, 3, 17, 3, 1));
+    BOOST_CHECK(!CalculateSetupCapital(50000000, 3, 1, 17, 1));
+}
+
 BOOST_AUTO_TEST_CASE(offer_fee_conflicts_are_model_specific_and_read_only)
 {
     auto policy = SetupDefaultPolicy();

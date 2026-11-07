@@ -571,15 +571,12 @@ public:
             std::cout << "Customer-paid service needs at least 3 DD capacity-check reserves and 1 DD payment reserve. Sponsored-only pool preparation requires zero for both DD counts. Review the targets.\n";
             OperatorFields(choices.liquidity, true);
         }
-        const auto admission_capital = choices.liquidity.find_value("target_admission_dgb").getInt<int64_t>() * 10000000;
-        const auto operational_count = choices.liquidity.find_value("target_operational_dgb").getInt<int64_t>();
-        const auto operational_value = std::max<int64_t>(10000000, choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>());
-        if (operational_count > (MAX_MONEY - admission_capital) / operational_value) throw std::runtime_error("Reserve capital exceeds the DGB money range; review the capacity and offer ceiling");
-        const auto dgb_capital = admission_capital + operational_count * operational_value;
-        const auto dd_capital = (choices.liquidity.find_value("target_admission_carriers").getInt<int64_t>() +
-            choices.liquidity.find_value("target_operational_carriers").getInt<int64_t>()) * 100;
-        std::cout << "Minimum target capital: " << SetupFormatNumber(dgb_capital, 8) << " DGB + "
-                  << SetupFormatNumber(dd_capital, 2) << " DD, before network fees. Existing usable reserves count toward this target.\n"
+        const auto capital = CalculateSetupCapital(choices.policy.find_value("maximum_network_fee_dgb_satoshis").getInt<int64_t>(),
+            choices.liquidity.find_value("target_admission_dgb").getInt<int64_t>(), choices.liquidity.find_value("target_operational_dgb").getInt<int64_t>(),
+            choices.liquidity.find_value("target_admission_carriers").getInt<int64_t>(), choices.liquidity.find_value("target_operational_carriers").getInt<int64_t>());
+        if (!capital) throw std::runtime_error("Reserve capital exceeds the DGB money range; review the capacity and offer ceiling");
+        std::cout << "Minimum target capital: " << SetupFormatNumber(capital->dgb_satoshis, 8) << " DGB + "
+                  << SetupFormatNumber(capital->carrier_cents, 2) << " DD, before network fees. Existing usable reserves count toward this target.\n"
                   << "The funding preview determines the missing capital. Customer-payment budgets, recurring refill fees and the finite setup fee approval are separate.\n";
         choices.liquidity.pushKV("automatic_replenishment", OperatorSetting("Maintain reserves automatically? (recommended for 24/7)",
             choices.liquidity.find_value("automatic_replenishment").get_bool(),

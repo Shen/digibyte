@@ -282,7 +282,7 @@ ProviderRuntimeResult SaveProviderRuntime(WalletContext& context, CWallet& walle
     return {mode, autostart, running};
 }
 
-DigiDollar::Paymaster::ProviderLiquidityPolicy SaveLiquidityPolicy(WalletContext& context, CWallet& wallet_ref, DigiDollar::Paymaster::ProviderLiquidityPolicy policy, std::optional<int64_t> expected_revision)
+DigiDollar::Paymaster::ProviderLiquidityPolicy SaveLiquidityPolicy(WalletContext& context, CWallet& wallet_ref, DigiDollar::Paymaster::ProviderLiquidityPolicy policy, std::optional<int64_t> expected_revision, std::optional<uint256> expected_provider_policy_hash)
 {
     auto* wallet = &wallet_ref;
     ProviderIdentityRecord identity;
@@ -308,6 +308,13 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SaveLiquidityPolicy(WalletContext
         const int64_t expected = *expected_revision;
         if (expected < 0 || expected != (have_saved ? saved_policy.updated_at : 0)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_LIQUIDITY_POLICY_CHANGED");
+        }
+    }
+    if (expected_provider_policy_hash) {
+        ProviderPolicy advertised;
+        if (!GetPaymasterProviderPolicy(*wallet, advertised) ||
+            GetProviderPolicyHash(advertised) != *expected_provider_policy_hash) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_POLICY_CHANGED");
         }
     }
     int64_t policy_time = GetTime();

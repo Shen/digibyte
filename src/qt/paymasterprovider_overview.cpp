@@ -1053,12 +1053,11 @@ bool ProviderOverview::confirmedUserPaid() const
 
 qint64 ProviderOverview::confirmedPaymentFee() const
 {
+    if (!snapshotCurrent() || !providerInfoAvailable()) return 0;
     qint64 value{0};
     const auto& policy = m_operator_snapshot.find_value("provider").find_value("policy");
     if (GetInt64Field(policy, "maximum_network_fee_dgb_satoshis", value) && value > 0 && MoneyRange(value)) return value;
-    // Before an offer has been saved, show the setup proposal. Never use
-    // an unrelated, unsaved offer draft to describe a reserve approval.
-    return DigiDollar::Paymaster::SetupDefaultPolicy().find_value("maximum_network_fee_dgb_satoshis").getInt<qint64>();
+    return 0; // An unavailable observation is not a setup proposal.
 }
 
 QString ProviderOverview::slotStatusText(const QString& name,

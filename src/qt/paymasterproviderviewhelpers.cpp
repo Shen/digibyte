@@ -790,7 +790,7 @@ bool IsCompleteFinanceStatus(const UniValue& result,
         if (!event.isObject() || !IsHex256Field(event, "event_id") ||
             !IsHex256Field(event, "transaction_id") ||
             !IsEnumString(kind, {"transfer", "setup", "replenishment",
-                                 "retirement", "withdrawal"}) ||
+                                 "retirement", "withdrawal", "recovery"}) ||
             !IsEnumString(state,
                           {"pending", "confirmed", "invalidated"}) ||
             (!funding_model.isNull() &&

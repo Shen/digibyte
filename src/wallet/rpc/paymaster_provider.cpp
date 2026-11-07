@@ -460,6 +460,7 @@ RPCHelpMan setpaymasterliquiditypolicy()
                 {"maximum_maintenance_fee_per_day_satoshis", RPCArg::Type::NUM, RPCArg::Optional::NO, "Rolling-day maintenance fee ceiling, in satoshis"},
             }},
             {"expected_updated_at", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Reject a stale edit atomically; zero requires no saved policy"},
+            {"expected_provider_policy_hash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Reject atomically if the provider offer changed since reviewing reserve capital"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Saved policy",
                   ProviderLiquidityPolicyResults()},
@@ -499,7 +500,11 @@ RPCHelpMan setpaymasterliquiditypolicy()
                 value.find_value("maximum_maintenance_fee_per_day_satoshis").getInt<int64_t>()};
             std::optional<int64_t> expected_revision;
             if (!request.params[1].isNull()) expected_revision = request.params[1].getInt<int64_t>();
-            return ToJSON(SaveLiquidityPolicy(context, *wallet, policy, expected_revision));
+            std::optional<uint256> expected_provider_policy_hash;
+            if (!request.params[2].isNull()) {
+                expected_provider_policy_hash = ParseHashV(request.params[2], "expected_provider_policy_hash");
+            }
+            return ToJSON(SaveLiquidityPolicy(context, *wallet, policy, expected_revision, expected_provider_policy_hash));
         }),
     };
 }
