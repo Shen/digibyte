@@ -6,7 +6,7 @@ implemented behavior alone does not establish release acceptance.
 
 ## Exact execution, authorization commits and unavailable balances
 
-Working-tree corrections based on `9bd53997af884691940a696d1c4030120419a887`,
+Corrections based on `9bd53997af884691940a696d1c4030120419a887`,
 checked on 2026-11-07. Thirty translation units were freshly compiled
 (18 production, 12 test), including direct consumers of changed balance and
 reservation layouts. MSVC 19.43.34810 / toolset 14.43.34808 uses
@@ -22,6 +22,19 @@ complete transitive-header provenance.
 | Intermediate commits | Forty targeted C++20 syntax checks pass against the exact source and changed-header snapshots of the ten-step series, including reached ordinary callers. This does not establish clean full builds of each commit. |
 | Recovery negative control | Recompile only the original HEAD recovery translation unit against the current remaining objects. The unchanged new test fails with Exit 201 and ten assertions at missing flag/atomic rollback/reload/replay checks. Current code passes; this is a causal single-unit control, not a historical full build. |
 | Architecture/local controls | Working-tree dependency/cycle checks, six positive/negative fixtures, approved-policy changed-path/shared-record checks, JSON and whitespace checks pass. The operator explicitly approved four additional shared header/test paths; dependency/forbidden-path rules and fixtures remain unchanged. |
+
+The transport follow-up `4edb3a7f42`, checked on 2026-11-07, replaces five
+designated aggregate blocks in `net.cpp` using the operator-approved scope
+recorded in `6e8efb8908`. The actual `net.cpp` and unchanged `net_tests.cpp`
+each compile in C++17 and C++20 with the MSVC toolchain above. An isolated link
+of their C++17 objects with reused remaining objects/libraries passes 12 selected
+cases / 144,663 assertions on `temp/paymaster-cxx17-transport-20261107/native-v3.exe`
+with `--random=487619`: seven Paymaster network cases, ordinary node/listen-port
+checks, BIP324 transport and two channel authentication cases. A token scan finds
+no C++20 candidates in 148 Paymaster-owned C++ files or the shared adapter.
+Exact commands, source/object/binary hashes and logs are retained in that
+directory's `applied-verification.json` and adjacent artifacts. These targeted
+results do not replace clean product builds, Linux/C++17 or the release gates below.
 
 Commands, hashes, complete logs and failed attempts are retained under
 `temp/paymaster-af-fixes-20261107/` (`compiled.jsonl`, `runs.jsonl`,
