@@ -81,9 +81,13 @@ bool PreflightExactPaymasterFinalTransaction(
     ExactFinalTransactionPreflight& result,
     std::string& error);
 
-/** Return true only for local infrastructure failures that do not prove the
- * exact durable final transaction is invalid or conflicting. Callers must
- * leave the durable authorization retryable for these failures. */
+/** Classify infrastructure failures at the legacy string boundary. Durable
+ * results retain additional retryable storage/observation failures; callers
+ * must preserve their exact authorization rather than create a replacement. */
+enum class PaymasterFinalizationStage { BEFORE_PROVIDER_COMMIT, DURABLE_RESULT };
+enum class PaymasterFinalizationFailure { LOCAL_UNAVAILABLE, REJECTED };
+PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
+    std::string_view error, PaymasterFinalizationStage stage = PaymasterFinalizationStage::DURABLE_RESULT);
 bool IsTransientPaymasterFinalizationError(std::string_view error);
 
 /** Insert and broadcast one exact, fully-authorized Paymaster transaction.

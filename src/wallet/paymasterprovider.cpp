@@ -633,14 +633,25 @@ bool PreflightExactPaymasterFinalTransaction(
         wallet, transaction, txindex_mode, result, error);
 }
 
+PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
+    std::string_view error, PaymasterFinalizationStage stage)
+{
+    if (error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" || error == "PAYMASTER_TXINDEX_NOT_READY") {
+        return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+    }
+    if (stage == PaymasterFinalizationStage::DURABLE_RESULT &&
+        (error == "PAYMASTER_NODE_RUNTIME_UNAVAILABLE" ||
+         error == "PAYMASTER_FINAL_BLOCK_READ" ||
+         error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE" ||
+         error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND")) {
+        return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+    }
+    return PaymasterFinalizationFailure::REJECTED;
+}
+
 bool IsTransientPaymasterFinalizationError(std::string_view error)
 {
-    return error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" ||
-           error == "PAYMASTER_NODE_RUNTIME_UNAVAILABLE" ||
-           error == "PAYMASTER_TXINDEX_NOT_READY" ||
-           error == "PAYMASTER_FINAL_BLOCK_READ" ||
-           error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE" ||
-           error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND";
+    return ClassifyPaymasterFinalizationFailure(error) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
 }
 
 bool InsertAndBroadcastExactPaymasterTransaction(

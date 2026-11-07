@@ -6988,26 +6988,38 @@ BOOST_AUTO_TEST_CASE(budgetless_exact_commit_is_never_executable)
 
 BOOST_AUTO_TEST_CASE(transient_finalization_errors_remain_retryable)
 {
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_NODE_CONTEXT_UNAVAILABLE"));
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_NODE_RUNTIME_UNAVAILABLE"));
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_TXINDEX_NOT_READY"));
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_FINAL_BLOCK_READ"));
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE"));
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(
-        "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND"));
-
-    BOOST_CHECK(!IsTransientPaymasterFinalizationError(
-        "PAYMASTER_FINAL_TRANSACTION_CONFLICT"));
-    BOOST_CHECK(!IsTransientPaymasterFinalizationError(
-        "PAYMASTER_FINAL_WITNESS_CONFLICT"));
-    BOOST_CHECK(!IsTransientPaymasterFinalizationError(
-        "PAYMASTER_FINAL_MEMPOOL_REJECTED: bad-txns-inputs-missingorspent"));
-    BOOST_CHECK(!IsTransientPaymasterFinalizationError(""));
+    struct FailureCase {
+        const char* error;
+        bool before_commit;
+        bool durable_result;
+    };
+    const FailureCase cases[]{
+        {"PAYMASTER_NODE_CONTEXT_UNAVAILABLE", true, true},
+        {"PAYMASTER_TXINDEX_NOT_READY", true, true},
+        {"PAYMASTER_NODE_RUNTIME_UNAVAILABLE", false, true},
+        {"PAYMASTER_FINAL_BLOCK_READ", false, true},
+        {"PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE", false, true},
+        {"PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND", false, true},
+        {"PAYMASTER_FINAL_TRANSACTION_CONFLICT", false, false},
+        {"PAYMASTER_FINAL_WITNESS_CONFLICT", false, false},
+        {"PAYMASTER_FINAL_MEMPOOL_REJECTED: bad-txns-inputs-missingorspent", false, false},
+        {"PAYMASTER_FINAL_TRANSACTION_MISSING", false, false},
+        {"PAYMASTER_FUTURE_UNKNOWN_FAILURE", false, false},
+        {"", false, false},
+    };
+    for (const auto& row : cases) {
+        BOOST_TEST_CONTEXT("finalization error=" << row.error) {
+            BOOST_CHECK(ClassifyPaymasterFinalizationFailure(
+                row.error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) ==
+                (row.before_commit ? PaymasterFinalizationFailure::LOCAL_UNAVAILABLE
+                                   : PaymasterFinalizationFailure::REJECTED));
+            BOOST_CHECK(ClassifyPaymasterFinalizationFailure(
+                row.error, PaymasterFinalizationStage::DURABLE_RESULT) ==
+                (row.durable_result ? PaymasterFinalizationFailure::LOCAL_UNAVAILABLE
+                                    : PaymasterFinalizationFailure::REJECTED));
+            BOOST_CHECK_EQUAL(IsTransientPaymasterFinalizationError(row.error), row.durable_result);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(shared_final_preflight_rejects_missing_transaction)

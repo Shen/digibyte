@@ -446,9 +446,8 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
         if (!PreflightFinalPaymasterTransaction(
                 *wallet, MakeTransactionRef(final_transaction),
                 signed_presence, error, txindex_mode)) {
-            const bool transient =
-                error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" ||
-                error == "PAYMASTER_TXINDEX_NOT_READY";
+            const bool transient = ClassifyPaymasterFinalizationFailure(
+                error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
             throw ApplicationError(
                 transient ? ErrorKind::WALLET : ErrorKind::REJECTED,
                 error);
@@ -544,9 +543,8 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
         if (!PreflightFinalPaymasterTransaction(
                 *wallet, MakeTransactionRef(validated_final),
                 final_presence, error, txindex_mode)) {
-            const bool transient =
-                error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" ||
-                error == "PAYMASTER_TXINDEX_NOT_READY";
+            const bool transient = ClassifyPaymasterFinalizationFailure(
+                error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
             throw ApplicationError(
                 transient ? ErrorKind::WALLET : ErrorKind::REJECTED,
                 error);
