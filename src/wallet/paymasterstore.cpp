@@ -160,6 +160,21 @@ bool Abort(WalletBatch& batch, std::string& error, const char* code)
     return false;
 }
 
+bool CommitWithPaymasterAuthorizationProtection(CWallet& wallet, WalletBatch& batch,
+                                                bool authorization_may_exist, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const uint64_t flags = wallet.GetWalletFlags() | WALLET_FLAG_PAYMASTER_AUTHORIZATION;
+    const bool changed = authorization_may_exist && flags != wallet.GetWalletFlags();
+    if (changed && !batch.WriteWalletFlags(flags)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    if (!batch.TxnCommit()) {
+        error = "PAYMASTER_DATABASE_COMMIT";
+        return false;
+    }
+    if (changed && !wallet.LoadWalletFlags(flags)) assert(false);
+    return true;
+}
+
 std::optional<uint32_t> FindUniqueOutputByScript(const CTransaction& transaction,
                                                  const CScript& script)
 {

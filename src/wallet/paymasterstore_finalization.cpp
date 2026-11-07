@@ -1078,11 +1078,7 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
     }
 
     const bool authorization_risk = final_result || attempt_has_user_authorization;
-    const uint64_t current_wallet_flags = m_wallet.GetWalletFlags();
-    const uint64_t protected_wallet_flags =
-        current_wallet_flags | WALLET_FLAG_PAYMASTER_AUTHORIZATION;
-    const bool protect_wallet = authorization_risk &&
-                                protected_wallet_flags != current_wallet_flags;
+    const bool protect_wallet = authorization_risk && !m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION);
     std::vector<InputReservation> reservations;
     bool write_reservations{false};
     if (authorization_risk && !session.provider_side) {
@@ -1142,19 +1138,7 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
             }
         }
     }
-    if (protect_wallet &&
-        !batch.WriteWalletFlags(protected_wallet_flags)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    // The durable flag was part of the transaction above. Publish that exact
-    // committed value to memory without issuing a second fallible DB write.
-    if (protect_wallet && !m_wallet.LoadWalletFlags(protected_wallet_flags)) {
-        assert(false);
-    }
+    if (!CommitWithPaymasterAuthorizationProtection(m_wallet, batch, authorization_risk, error)) return false;
     record_rejection();
     return true;
 }
@@ -1248,10 +1232,7 @@ bool PaymasterStore::MarkClientFinalValidationFailureRecoverable(
         reservations.push_back(std::move(reservation));
     }
 
-    const uint64_t current_wallet_flags = m_wallet.GetWalletFlags();
-    const uint64_t protected_wallet_flags =
-        current_wallet_flags | WALLET_FLAG_PAYMASTER_AUTHORIZATION;
-    const bool protect_wallet = protected_wallet_flags != current_wallet_flags;
+    const bool protect_wallet = !m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION);
     const bool write_attempt = attempt.state != AttemptState::AMBIGUOUS;
     const bool write_session =
         session.state != SessionState::PENDING_PROVIDER ||
@@ -1284,17 +1265,7 @@ bool PaymasterStore::MarkClientFinalValidationFailureRecoverable(
             }
         }
     }
-    if (protect_wallet && !batch.WriteWalletFlags(protected_wallet_flags)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    if (protect_wallet && !m_wallet.LoadWalletFlags(protected_wallet_flags)) {
-        assert(false);
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
 }
 
 bool PaymasterStore::RecordClientFinalConflict(const std::string& request_id,

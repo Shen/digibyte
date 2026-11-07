@@ -458,20 +458,12 @@ bool PaymasterStore::TransitionSession(const std::string& request_id, SessionSta
     }
 
     const bool authorization_risk = HasAuthorizationRisk(state);
-    const uint64_t current_wallet_flags = m_wallet.GetWalletFlags();
-    const uint64_t protected_wallet_flags =
-        current_wallet_flags | WALLET_FLAG_PAYMASTER_AUTHORIZATION;
-    const bool protect_wallet = authorization_risk &&
-                                protected_wallet_flags != current_wallet_flags;
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
     session.state = state;
     session.pending_phase = phase;
     session.updated_at = now;
     if (!final_txid.IsNull()) session.final_txid = final_txid;
     if (!batch.WritePaymasterSession(session)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    if (protect_wallet && !batch.WriteWalletFlags(protected_wallet_flags)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
     if (authorization_risk && !session.provider_side) {
         for (const auto& outpoint : session.user_inputs) {
             InputReservation reservation;
@@ -484,16 +476,7 @@ bool PaymasterStore::TransitionSession(const std::string& request_id, SessionSta
             }
         }
     }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    // The durable flag was committed with the session. Publish exactly that
-    // value to memory without issuing a second, fallible database write.
-    if (protect_wallet && !m_wallet.LoadWalletFlags(protected_wallet_flags)) {
-        assert(false);
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, authorization_risk, error);
 }
 
 bool PaymasterStore::AddAttempt(const std::string& request_id, ProviderAttempt attempt, std::string& error)

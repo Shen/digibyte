@@ -57,6 +57,13 @@ std::string PersistedReadError(DatabaseReadStatus status,
 
 std::string ProviderPoolReadError(const std::vector<ProviderPoolEntry>& entries);
 bool Abort(WalletBatch& batch, std::string& error, const char* code);
+/** Commit an existing wallet transaction together with the mandatory downgrade
+ * fence when spending authority may exist. Publish flags only after success.
+ * Callers retain cs_wallet across their complete transition. */
+bool CommitWithPaymasterAuthorizationProtection(CWallet& wallet, WalletBatch& batch,
+                                                bool authorization_may_exist,
+                                                std::string& error);
+
 bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,

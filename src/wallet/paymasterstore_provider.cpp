@@ -1041,11 +1041,6 @@ bool PaymasterStore::UpdateAttempt(const std::string& request_id, const Provider
 
     const bool authorization_risk = AttemptHasReached(update.state, AttemptState::USER_SIGNED);
     const bool wallet_authorization_risk = session.provider_side ? AttemptHasReached(update.state, AttemptState::PROVIDER_SIGNED) : authorization_risk;
-    const uint64_t current_wallet_flags = m_wallet.GetWalletFlags();
-    const uint64_t protected_wallet_flags =
-        current_wallet_flags | WALLET_FLAG_PAYMASTER_AUTHORIZATION;
-    const bool protect_wallet = wallet_authorization_risk &&
-                                protected_wallet_flags != current_wallet_flags;
     if (authorization_risk && session.state != SessionState::AUTHORIZED &&
         !HasAuthorizationRisk(session.state)) {
         error = "PAYMASTER_INVALID_SESSION_TRANSITION";
@@ -1100,21 +1095,9 @@ bool PaymasterStore::UpdateAttempt(const std::string& request_id, const Provider
             }
         }
     }
-    if (protect_wallet && !batch.WriteWalletFlags(protected_wallet_flags)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
     session.updated_at = std::max(session.updated_at, update.updated_at);
     if (!batch.WritePaymasterSession(session)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    // The durable flag was committed with the attempt. Publish exactly that
-    // value to memory without issuing a second, fallible database write.
-    if (protect_wallet && !m_wallet.LoadWalletFlags(protected_wallet_flags)) {
-        assert(false);
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, wallet_authorization_risk, error);
 }
 
 bool PaymasterStore::AcceptClientAuthorization(
