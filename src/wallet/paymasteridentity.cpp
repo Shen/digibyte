@@ -259,13 +259,13 @@ bool MarkPaymasterProviderBackupCompleted(const CWallet& wallet,
                                           int64_t now,
                                           std::string& error)
 {
+    LOCK(wallet.cs_wallet);
     ProviderBackupStatus status;
     if (!GetPaymasterProviderBackupStatus(wallet, status, now, error)) {
         // A wallet without a provider identity has no Paymaster reminder to
         // update; its ordinary backup remains successful.
         return error == "PAYMASTER_IDENTITY_NOT_FOUND";
     }
-    LOCK(wallet.cs_wallet);
     status.last_successful_backup_at = std::max(
         status.last_successful_backup_at, now);
     if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterBackupStatus(status)) {
@@ -280,9 +280,9 @@ bool AcknowledgePaymasterProviderExternalBackup(CWallet& wallet,
                                                 int64_t now,
                                                 std::string& error)
 {
+    LOCK(wallet.cs_wallet);
     ProviderBackupStatus status;
     if (!GetPaymasterProviderBackupStatus(wallet, status, now, error)) return false;
-    LOCK(wallet.cs_wallet);
     status.external_backup_acknowledged_at = std::max(
         status.external_backup_acknowledged_at, now);
     if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterBackupStatus(status)) {

@@ -64,6 +64,17 @@ public:
     }
 };
 
+class ObservedBackupDatabase : public MockableDatabase
+{
+public:
+    std::function<void()> on_backup;
+    bool Backup(const std::string& destination) const override
+    {
+        if (on_backup) on_backup();
+        return MockableDatabase::Backup(destination);
+    }
+};
+
 class ScopedPaymasterMockTime
 {
 public:
@@ -1417,6 +1428,54 @@ BOOST_AUTO_TEST_CASE(native_finance_status_captures_capital_time_and_typed_failu
             BOOST_CHECK(saved[i].reservation_id == pool[i].reservation_id);
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(provider_backup_serializes_copy_completion_and_configuration)
+{
+    auto database = std::make_unique<ObservedBackupDatabase>();
+    auto& observed = *database;
+    CWallet wallet{m_node.chain.get(), "paymaster-backup-serialization", std::move(database)};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetupDescriptorScriptPubKeyMans();
+    }
+    const int64_t now = GetTime();
+    std::string error;
+    ProviderIdentityRecord identity;
+    BOOST_REQUIRE_MESSAGE(CreatePaymasterIdentity(wallet, "Backup Provider", now, identity, error), error);
+    MockableData copied;
+    observed.on_backup = [&] {
+        // The GUI calls CWallet directly. Its backend copy must hold the same
+        // wallet lock as the completion marker, even without the RPC wrapper.
+        const bool configuration_can_interleave = std::async(std::launch::async, [&] {
+            TRY_LOCK(wallet.cs_wallet, configuration_lock);
+            return configuration_lock.owns_lock();
+        }).get();
+        BOOST_CHECK(!configuration_can_interleave);
+        copied = observed.m_records;
+    };
+    BOOST_REQUIRE(wallet.BackupWallet("unused-mock-destination"));
+    ProviderBackupStatus status;
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(wallet, status, now, error));
+    BOOST_CHECK(!ProviderBackupRequired(status));
+    MockableDatabase backup{copied};
+    BOOST_REQUIRE(WalletBatch{backup}.ReadPaymasterBackupStatus(status));
+    BOOST_CHECK(ProviderBackupRequired(status));
+
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
+    policy.fee_rate_bps = 50;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{100000};
+    policy.maximum_network_fee = DGBSatoshis{1000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(wallet, policy, now, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(wallet, status, now, error));
+    BOOST_CHECK(ProviderBackupRequired(status));
+    BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(wallet, status.reminder_updated_at, error));
+    BOOST_REQUIRE(GetPaymasterProviderBackupStatus(wallet, status, now, error));
+    BOOST_CHECK(!ProviderBackupRequired(status));
 }
 
 BOOST_AUTO_TEST_CASE(announcement_sequence_corruption_is_never_absence)

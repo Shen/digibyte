@@ -3985,6 +3985,9 @@ void CWallet::postInitProcess()
 
 bool CWallet::BackupWallet(const std::string& strDest) const
 {
+    // The completion marker must describe the configuration actually copied,
+    // including callers through the GUI interface rather than the locked RPC.
+    LOCK(cs_wallet);
     if (!GetDatabase().Backup(strDest)) return false;
     std::string backup_status_error;
     if (!MarkPaymasterProviderBackupCompleted(
