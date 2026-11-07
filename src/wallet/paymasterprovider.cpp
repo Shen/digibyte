@@ -2041,6 +2041,40 @@ bool GetPaymasterProviderPoolEntries(const CWallet& wallet,
     return WalletBatch{wallet.GetDatabase()}.ReadPaymasterProviderPool(entries);
 }
 
+static bool ReadProtectedMaintenanceInputs(
+    const CWallet& wallet, std::set<COutPoint>& sources, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    ProviderMaintenanceLedger maintenance;
+    WalletBatch batch{wallet.GetDatabase()};
+    const auto status = batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+        return false;
+    }
+    for (const auto& record : maintenance.records) {
+        if (!record.ProtectsSourceInputs()) continue;
+        sources.insert(record.source_inputs.begin(), record.source_inputs.end());
+    }
+    return true;
+}
+
+bool CheckPaymasterMaintenanceInputsAvailable(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs,
+    std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    std::set<COutPoint> protected_inputs;
+    if (!ReadProtectedMaintenanceInputs(wallet, protected_inputs, error)) return false;
+    for (const auto& input : inputs) {
+        if (protected_inputs.count(input) != 0) {
+            error = "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
+            return false;
+        }
+    }
+    return true;
+}
+
 ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
     const CWallet& wallet, const std::vector<ProviderPoolEntry>& entries,
     const ProviderPolicy& policy, int32_t tip_height,
@@ -2048,6 +2082,12 @@ ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
 {
     LOCK(wallet.cs_wallet);
     std::set<COutPoint> unavailable_inputs;
+    std::string error;
+    if (!ReadProtectedMaintenanceInputs(wallet, unavailable_inputs, error)) {
+        ProviderPoolReadiness result;
+        result.errors.push_back(error);
+        return result;
+    }
     for (const ProviderPoolEntry& entry : entries) {
         if (wallet.IsOrdinaryLockedCoin(entry.outpoint)) unavailable_inputs.insert(entry.outpoint);
     }
@@ -2105,8 +2145,11 @@ bool ReservePaymasterOperationalSlot(CWallet& wallet,
         return false;
     }
 
+    std::set<COutPoint> maintenance_sources;
+    if (!ReadProtectedMaintenanceInputs(wallet, maintenance_sources, error)) return false;
     const auto confirmed_available = [&](const ProviderPoolEntry& entry) {
         return entry.purpose == PoolPurpose::OPERATIONAL &&
+               maintenance_sources.count(entry.outpoint) == 0 &&
                !wallet.IsOrdinaryLockedCoin(entry.outpoint) &&
                entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height > 0 &&
                tip_height - entry.confirmation_height + 1 >= minimum_confirmations;
@@ -2407,6 +2450,9 @@ bool ReserveAndBuildPaymasterCapacityProof(
         return false;
     }
 
+    std::set<COutPoint> maintenance_sources;
+    if (!ReadProtectedMaintenanceInputs(wallet, maintenance_sources, error)) return false;
+
     const uint256 admission_key = GetProviderRequestSlotKey(
         request.provider_id, request.request_id, request.session_id);
     const uint256 netgroup_bucket = GetNetgroupBudgetBucket(
@@ -2448,6 +2494,7 @@ bool ReserveAndBuildPaymasterCapacityProof(
                              tip_height - entry.confirmation_height + 1 >= minimum_confirmations};
         if (entry.purpose != PoolPurpose::OPERATIONAL ||
             entry.state != PoolEntryState::AVAILABLE || !confirmed ||
+            maintenance_sources.count(entry.outpoint) != 0 ||
             wallet.IsOrdinaryLockedCoin(entry.outpoint)) {
             continue;
         }

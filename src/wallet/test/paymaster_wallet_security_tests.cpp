@@ -2518,6 +2518,132 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(capacity_proof.identity_signature.empty());
 }
 
+BOOST_AUTO_TEST_CASE(provider_signing_rejects_maintenance_sources_reused_before_upgrade)
+{
+    const int64_t now{GetTime()};
+    const uint256 seed{uint256S("1739")};
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655441039";
+    auto environment = MakeProviderEnvironment(now, 2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment, request_id, seed,
+        now, fixture, error, nullptr, {}, DGBSatoshis{500}, 5500,
+        Params().GenesisBlock().GetHash()), error);
+    BOOST_REQUIRE(PersistProviderQuoteEnvironment(m_wallet, environment, {fixture.pool_entry}));
+    BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(m_wallet, environment.identity_key, error), error);
+    BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(m_wallet, fixture.user_key, error), error);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(CMutableTransaction{
+            fixture.response.quote.reserved_dgb_inputs.front().creating_tx}), TxStateInMempool{}));
+        m_wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
+            m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+    }
+    PaymasterStore store{m_wallet};
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, now, error), error);
+
+    CollaborativePSBTTemplate trusted;
+    BOOST_REQUIRE(DecodeRawPSBT(trusted.psbt, MakeByteSpan(fixture.attempt.unsigned_psbt), error));
+    trusted.input_roles = {InputRole::USER_DD, InputRole::PROVIDER_DGB};
+    PartiallySignedTransaction user_psbt{trusted.psbt};
+    BOOST_REQUIRE_MESSAGE(SignCollaborativePSBTForParty(m_wallet, user_psbt, trusted,
+        SigningParty::USER, error), error);
+    BOOST_REQUIRE_MESSAGE(ValidateCollaborativePSBT(user_psbt, trusted,
+        CollaborativeSignatureStage::USER_SIGNED, error), error);
+    BOOST_REQUIRE_MESSAGE(store.TransitionSession(request_id, SessionState::AUTHORIZED,
+        PendingPhase::NONE, {}, now, error), error);
+    auto authorized = fixture.attempt;
+    authorized.state = AttemptState::USER_SIGNED;
+    authorized.user_signed_psbt = SerializePaymasterSecurityObject(user_psbt);
+    BOOST_REQUIRE_MESSAGE(store.UpdateAttempt(request_id, authorized, error), error);
+    BOOST_REQUIRE_MESSAGE(store.AcceptUserAuthorization(request_id, authorized.attempt_id,
+        Hash(authorized.user_signed_psbt), now, error), error);
+    BOOST_REQUIRE(store.GetAttempt(authorized.attempt_id, authorized));
+    BOOST_REQUIRE(authorized.state == AttemptState::USER_PSBT_ACCEPTED);
+
+    // Reproduce an old wallet that already assigned a retained withdrawal
+    // source to this quote. Pool and budget authority alone remain valid, and
+    // the chain still contains every input when the upgraded wallet retries.
+    {
+        LOCK(::cs_main);
+        auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();
+        for (size_t index = 0; index < trusted.psbt.inputs.size(); ++index) {
+            CTxOut prevout;
+            BOOST_REQUIRE(trusted.psbt.GetInputUTXO(prevout, index));
+            coins.AddCoin(fixture.transaction.vin[index].prevout,
+                Coin{std::move(prevout), /*height=*/0, /*coinbase=*/false},
+                /*possible_overwrite=*/false);
+        }
+    }
+    PaymasterCapacityRequest capacity_request;
+    PaymasterCapacityProof capacity_proof;
+    BOOST_REQUIRE_MESSAGE(store.ValidateProviderPreSignatureAuthorization(authorized,
+        fixture.request.intent.genesis_hash, now, capacity_request, capacity_proof, error), error);
+    BOOST_REQUIRE_MESSAGE(ValidateCapacityProofAgainstChainstate(capacity_proof, capacity_request,
+        environment.identity.identity_key, *m_node.chainman, now, error), error);
+
+    ProviderMaintenanceRecord maintenance;
+    maintenance.kind = ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+    maintenance.operation_id = SecurityTestId(seed, 20);
+    maintenance.plan_id = SecurityTestId(seed, 21);
+    maintenance.state = ProviderMaintenanceState::FAILED;
+    maintenance.transaction_id = SecurityTestId(seed, 22);
+    maintenance.source_inputs = {fixture.pool_entry.outpoint};
+    maintenance.withdrawal_excess_script_pub_key = NewTaprootScript();
+    maintenance.withdrawal_excess_amount = DDCents{100};
+    maintenance.maximum_fee = DGBSatoshis{2000};
+    maintenance.actual_fee = DGBSatoshis{1000};
+    maintenance.created_at = maintenance.updated_at = now;
+    ProviderMaintenanceOutput successor;
+    successor.asset = PoolAsset::DD_CARRIER;
+    successor.script_pub_key = NewTaprootScript();
+    successor.carrier_value = DDCents{100};
+    maintenance.outputs = {successor};
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {maintenance};
+    BOOST_REQUIRE_MESSAGE(ValidateProviderMaintenanceLedger(ledger, error), error);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    const auto checkpoint = ReadBinaryFile(PaymasterCheckpointPath(
+        fixture.request.intent.genesis_hash, environment.identity.provider_id));
+    BOOST_REQUIRE(checkpoint.first);
+
+    // An independent slot stays usable, while an exact retry of the old
+    // quote fails locally and does not create a provider signature or commit.
+    BOOST_CHECK(CheckPaymasterMaintenanceInputsAvailable(m_wallet,
+        {COutPoint{SecurityTestId(seed, 23), 0}}, error));
+    for (int retry = 0; retry < 2; ++retry) {
+        BOOST_CHECK_EXCEPTION(paymaster_app::SubmitPaymasterTransaction(
+            m_wallet, user_psbt, paymaster_app::ExecutionMode::MANUAL), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET &&
+                    std::string{failure.what()} == "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
+            });
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+        BOOST_CHECK(ReadBinaryFile(PaymasterCheckpointPath(
+            fixture.request.intent.genesis_hash, environment.identity.provider_id)) == checkpoint);
+    }
+    ProviderCommitRecord commit;
+    BOOST_CHECK(!store.GetProviderCommit(authorized.commit_key, commit));
+    ProviderAttempt saved;
+    BOOST_REQUIRE(store.GetAttempt(authorized.attempt_id, saved));
+    BOOST_CHECK(saved.state == AttemptState::USER_PSBT_ACCEPTED);
+    BOOST_CHECK(saved.final_transaction.empty());
+    BOOST_CHECK(saved.provider_signed_result.empty());
+
+    // Unreadable or future journal authority also vetoes signing, including
+    // otherwise independent inputs. The check never repairs that authority.
+    ++ledger.version;
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger));
+    const auto unreadable_before = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!CheckPaymasterMaintenanceInputsAvailable(m_wallet,
+        {COutPoint{SecurityTestId(seed, 23), 0}}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == unreadable_before);
+}
+
 BOOST_AUTO_TEST_CASE(
     normal_submit_classifies_peer_payload_and_local_authority)
 {

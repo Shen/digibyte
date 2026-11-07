@@ -420,10 +420,19 @@ PaymentResult SubmitPaymasterTransaction(CWallet& target, PartiallySignedTransac
                 *wallet, attempt.provider_manifest, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        if (!SignCollaborativePSBTForParty(*wallet, full_psbt,
-                                           signing_template,
-                                           DigiDollar::Paymaster::SigningParty::PROVIDER, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
+        {
+            LOCK(wallet->cs_wallet);
+            auto provider_inputs = attempt.provider_manifest.provider_carrier_inputs;
+            provider_inputs.insert(provider_inputs.end(),
+                attempt.provider_manifest.provider_dgb_inputs.begin(),
+                attempt.provider_manifest.provider_dgb_inputs.end());
+            // An older wallet may already have reused a source in this quote.
+            // The retained maintenance journal must veto a new signature too.
+            if (!CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
+                !SignCollaborativePSBTForParty(*wallet, full_psbt,
+                    signing_template, DigiDollar::Paymaster::SigningParty::PROVIDER, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
         }
         CMutableTransaction final_transaction;
         if (!FinalizeAndExtractPSBT(full_psbt, final_transaction)) {
@@ -686,10 +695,16 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
     }
     const AlternativeRecoveryManifest& manifest =
         recovery.recovery_response.manifest;
-    if (!SignCollaborativePSBTForParty(
-            *wallet, user_psbt, trusted.trusted_template,
-            SigningParty::PROVIDER, error)) {
-        throw ApplicationError(ErrorKind::WALLET, error);
+    {
+        LOCK(wallet->cs_wallet);
+        auto provider_inputs = manifest.recovery_provider_carrier_inputs;
+        provider_inputs.insert(provider_inputs.end(),
+            manifest.recovery_provider_dgb_inputs.begin(), manifest.recovery_provider_dgb_inputs.end());
+        if (!CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
+            !SignCollaborativePSBTForParty(*wallet, user_psbt, trusted.trusted_template,
+                SigningParty::PROVIDER, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
     }
     CMutableTransaction final_transaction;
     if (!FinalizeAndExtractPSBT(user_psbt, final_transaction)) {

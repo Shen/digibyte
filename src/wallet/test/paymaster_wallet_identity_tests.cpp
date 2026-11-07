@@ -3173,6 +3173,46 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     reserved_request.expires_at = 172;
     PaymasterCapacityProof reserved_proof;
     std::vector<ProviderPoolEntry> reserved;
+    {
+        // A readable old pool can still say AVAILABLE after an abandoned
+        // withdrawal. The signed maintenance journal independently vetoes
+        // both ordinary slot reservation and a newly signed capacity proof.
+        const auto replacement = m_wallet.GetNewDestination(OutputType::BECH32M, "retained maintenance");
+        BOOST_REQUIRE(replacement);
+        ProviderMaintenanceRecord maintenance;
+        maintenance.kind = ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+        maintenance.operation_id = uint256S("a51");
+        maintenance.plan_id = uint256S("a52");
+        maintenance.state = ProviderMaintenanceState::FAILED;
+        maintenance.transaction_id = uint256S("a53");
+        maintenance.source_inputs = {carrier.outpoint};
+        maintenance.withdrawal_excess_script_pub_key = identity.identity_script;
+        maintenance.withdrawal_excess_amount = DDCents{100};
+        maintenance.maximum_fee = DGBSatoshis{2000};
+        maintenance.actual_fee = DGBSatoshis{1000};
+        maintenance.created_at = maintenance.updated_at = 111;
+        ProviderMaintenanceOutput output;
+        output.asset = PoolAsset::DD_CARRIER;
+        output.purpose = PoolPurpose::OPERATIONAL;
+        output.script_pub_key = GetScriptForDestination(*replacement);
+        output.carrier_value = DDCents{100};
+        maintenance.outputs = {output};
+        ProviderMaintenanceLedger ledger;
+        ledger.records = {maintenance};
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE_MESSAGE(batch.WritePaymasterMaintenanceLedger(ledger), error);
+        const auto before = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, reserved_request.client_nonce,
+            true, 100, 1, 112, reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(m_wallet, identity, reserved_request,
+            genesis, reference_block, 100, 1, canonical_netgroup, 112, reserved_proof, reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(reserved.empty());
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+        BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ProviderMaintenanceLedger{}));
+    }
     for (const COutPoint& outpoint : {dgb.outpoint, carrier.outpoint}) {
         {
             LOCK(m_wallet.cs_wallet);
@@ -4154,6 +4194,36 @@ BOOST_AUTO_TEST_CASE(recurring_maintenance_conflict_reversal_survives_restart_at
                 BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
                 BOOST_REQUIRE(find_successor(pool) != pool.end());
                 BOOST_CHECK(find_successor(pool)->state == PoolEntryState::INVALIDATED);
+                if (withdrawal) {
+                    const auto source = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) {
+                        return entry.outpoint == record.source_inputs.front();
+                    });
+                    BOOST_REQUIRE(source != pool.end());
+                    BOOST_CHECK(source->state == PoolEntryState::COMMITTED);
+                    BOOST_CHECK(source->reservation_id == record.operation_id);
+                    // Models a pre-fix wallet whose source was incorrectly
+                    // released. Admission must still honor the signed journal.
+                    auto stale_pool = pool;
+                    auto stale_source = std::find_if(stale_pool.begin(), stale_pool.end(), [&](const auto& entry) {
+                        return entry.outpoint == record.source_inputs.front();
+                    });
+                    stale_source->state = PoolEntryState::AVAILABLE;
+                    stale_source->reservation_id.SetNull();
+                    ProviderPoolEntry free_dgb;
+                    free_dgb.outpoint = COutPoint{uint256S("cf"), 0};
+                    free_dgb.asset = PoolAsset::DGB;
+                    free_dgb.purpose = PoolPurpose::OPERATIONAL;
+                    free_dgb.script_pub_key = script;
+                    free_dgb.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+                    free_dgb.confirmation_height = 1;
+                    free_dgb.updated_at = 1000;
+                    stale_pool.push_back(free_dgb);
+                    ProviderPolicy paid;
+                    paid.funding_models = FUNDING_MODEL_USER_PAID;
+                    paid.fee_rate_bps = 50;
+                    paid.maximum_network_fee = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+                    BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(wallet, stale_pool, paid, 100, 1).complete_operational_slots, 0U);
+                }
                 ProviderMaintenanceBudgetUsage usage;
                 BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, 2000, usage, error));
                 BOOST_CHECK_EQUAL(usage.reserved_fee.value, 1000);

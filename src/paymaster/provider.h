@@ -618,6 +618,12 @@ struct ProviderMaintenanceRecord {
                 state == ProviderMaintenanceState::FAILED);
     }
 
+    /** A local failure cannot revoke a saved transaction's signatures. */
+    bool ProtectsSourceInputs() const
+    {
+        return state == ProviderMaintenanceState::PLANNED || HasUnresolvedTransaction();
+    }
+
     SERIALIZE_METHODS(ProviderMaintenanceRecord, obj)
     {
         READWRITE(obj.version, obj.operation_id, obj.plan_id,

@@ -90,6 +90,12 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
     std::string_view error, PaymasterFinalizationStage stage = PaymasterFinalizationStage::DURABLE_RESULT);
 bool IsTransientPaymasterFinalizationError(std::string_view error);
 
+/** A new provider signature must not reuse inputs retained by unresolved
+ * maintenance. Exact durable signature replay does not call this guard. */
+bool CheckPaymasterMaintenanceInputsAvailable(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs,
+    std::string& error);
+
 /** Insert and broadcast one exact, fully-authorized Paymaster transaction.
  * Existing wallet, mempool, stempool, and confirmed entries with the same
  * txid must have identical witness bytes. The mempool/stempool comparison is

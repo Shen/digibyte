@@ -417,26 +417,10 @@ bool RefreshPoolConfirmationHeights(CWallet& wallet,
         }
         for (const ProviderMaintenanceRecord& record :
              maintenance_ledger.records) {
-            if (record.state != ProviderMaintenanceState::PLANNED &&
-                record.state != ProviderMaintenanceState::BROADCAST) {
+            if (!record.ProtectsSourceInputs()) {
                 continue;
             }
-            active_maintenance_sources.insert(
-                record.source_inputs.begin(), record.source_inputs.end());
-            if (record.source_inputs.empty() &&
-                record.kind ==
-                    ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS) {
-                // V1 withdrawal records did not serialize source_inputs. The
-                // pool reservation remains an unambiguous binding; exclude
-                // outputs of the maintenance transaction itself.
-                for (const ProviderPoolEntry& entry : entries) {
-                    if (entry.reservation_id == record.operation_id &&
-                        (record.transaction_id.IsNull() ||
-                         entry.outpoint.hash != record.transaction_id)) {
-                        active_maintenance_sources.insert(entry.outpoint);
-                    }
-                }
-            }
+            active_maintenance_sources.insert(record.source_inputs.begin(), record.source_inputs.end());
         }
     } else if (batch.HasPaymasterMaintenanceLedger()) {
         error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
@@ -1159,15 +1143,13 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                 if (source == pool.end()) {
                     continue;
                 }
-                // A source may already be SPENT after a previously confirmed
-                // maintenance transaction, or INVALIDATED by an older generic
-                // refresh. Once the exact maintenance transaction is known to
-                // have failed, chainstate is authoritative: restore an
-                // unspent source, otherwise keep it unavailable. Never steal a
-                // reservation that is already bound to another operation.
+                // Abandonment or a conflict can reverse. Retain the source for
+                // the exact signed transaction, including records released by
+                // older versions. Never steal another operation's reservation.
                 if (!source->reservation_id.IsNull() &&
                     source->reservation_id != record.operation_id) {
-                    continue;
+                    error = "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
+                    return false;
                 }
                 const bool recoverable_state =
                     source->state == PoolEntryState::AVAILABLE ||
@@ -1179,13 +1161,11 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                     error = "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
                     return false;
                 }
-                const PoolEntryState restored_state = wallet.IsSpent(source_input)
-                    ? PoolEntryState::INVALIDATED
-                    : PoolEntryState::AVAILABLE;
+                const PoolEntryState restored_state = PoolEntryState::COMMITTED;
                 if (source->state != restored_state ||
-                    !source->reservation_id.IsNull()) {
+                    source->reservation_id != record.operation_id) {
                     source->state = restored_state;
-                    source->reservation_id.SetNull();
+                    source->reservation_id = record.operation_id;
                     source->updated_at = now;
                     pool_changed = true;
                 }
