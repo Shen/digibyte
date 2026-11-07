@@ -397,7 +397,8 @@ bool PaymasterStore::CommitProviderFinalTransaction(
             return false;
         }
         if (have_existing_result && !budget_changed && !pool_changed &&
-            !finance_changed) return true;
+            !finance_changed &&
+            m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION)) return true;
 
         // Repair a crash window where the commit became durable before the
         // initial result, budget, pool, or finance update completed.
@@ -415,11 +416,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
              !batch.WritePaymasterFinanceEvents(finance_ledger, {finance_event}, error))) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
-        if (!batch.TxnCommit()) {
-            error = "PAYMASTER_DATABASE_COMMIT";
-            return false;
-        }
-        return true;
+        return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
     }
 
     SponsorshipAuthorizationRecord sponsorship;
@@ -536,11 +533,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
     session.final_txid = commit.final_txid;
     session.updated_at = std::max(session.updated_at, commit.committed_at);
     if (!batch.WritePaymasterSession(session)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
 }
 
 bool PaymasterStore::GetProviderCommit(
@@ -1532,10 +1525,7 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
     if (!batch.WritePaymasterAttempt(attempt) || !batch.WritePaymasterSession(session) ||
         (write_ledger && !batch.WritePaymasterClientFeeLedger(ledger)))
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
+    if (!CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error)) return false;
     completed = true;
     std::string outcome_error;
     if (!RecordProviderOutcome(attempt_id, ReliabilityOutcome::SUCCESS, now, 0, outcome_error)) {

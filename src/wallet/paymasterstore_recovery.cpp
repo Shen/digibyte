@@ -126,11 +126,7 @@ bool PaymasterStore::CommitSelfRecovery(const std::string& request_id,
     if (!batch.WritePaymasterSession(session)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
 }
 
 bool PaymasterStore::GetSelfRecovery(const std::string& request_id,
@@ -563,7 +559,8 @@ bool PaymasterStore::UpdateAlternativeRecovery(
         }
     }
 
-    if (client_fee_changed || capacity_snapshot_changed) {
+    const bool client_authorization = !recovery.provider_side && recovery.phase >= AlternativeRecoveryPhase::USER_SIGNED;
+    if (client_fee_changed || capacity_snapshot_changed || client_authorization) {
         if (!batch.TxnBegin()) {
             error = "PAYMASTER_DATABASE_BEGIN";
             return false;
@@ -588,10 +585,7 @@ bool PaymasterStore::UpdateAlternativeRecovery(
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             }
         }
-        if (!batch.TxnCommit()) {
-            error = "PAYMASTER_DATABASE_COMMIT";
-            return false;
-        }
+        if (!CommitWithPaymasterAuthorizationProtection(m_wallet, batch, client_authorization, error)) return false;
     } else if (!batch.WritePaymasterAlternativeRecovery(recovery, true)) {
         error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -1691,7 +1685,11 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
             SameResult(existing_result, result) &&
             SameAlternativeRecoveryRecord(current, recovery) &&
             ValidateRetainedProviderRecoveryBudget(batch, current, budget_ledger, error)) {
-            return !finance_changed || batch.WritePaymasterFinanceEvents(finance, {finance_event}, error);
+            if (!finance_changed && m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION)) return true;
+            if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+            if (finance_changed && !batch.WritePaymasterFinanceEvents(finance, {finance_event}, error))
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
         }
         if (!error.empty()) return false;
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT";
@@ -1751,11 +1749,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
         (finance_changed && !batch.WritePaymasterFinanceEvents(finance, {finance_event}, error))) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
 }
 
 bool PaymasterStore::CommitClientAlternativeRecoveryFinal(
@@ -1857,11 +1851,7 @@ bool PaymasterStore::CommitClientAlternativeRecoveryFinal(
     if (!batch.WritePaymasterSession(session)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    return true;
+    return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
 }
 
 bool PaymasterStore::RecordClientAlternativeRecoveryConflict(

@@ -5551,6 +5551,126 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_read_failure_stops_new_preparation,
     BOOST_CHECK(database.m_records == before);
 }
 
+static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
+    AlternativeRecoveryRecord recovery, const CKey& provider_key,
+    const CTransactionRef& funding, const PaymasterResult& result, int64_t now)
+{
+    wallet::CWallet provider{node.chain.get(), "first-provider-recovery", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(provider.LoadWallet() == DBErrors::LOAD_OK);
+    std::string error;
+    BOOST_REQUIRE(AddTaprootSigningKey(provider, provider_key, error));
+    {
+        LOCK(provider.cs_wallet);
+        BOOST_REQUIRE(provider.AddToWallet(funding, TxStateInactive{}));
+    }
+    auto environment = MakeProviderEnvironment(now, 2 * COIN);
+    auto& limits = environment.safety.user_paid;
+    limits = SecurityLimits(2 * COIN);
+    limits.maximum_network_fee_per_transaction = DGBSatoshis{COIN};
+    limits.maximum_network_fee_per_hour = DGBSatoshis{2 * COIN};
+    limits.maximum_network_fee_per_day = DGBSatoshis{2 * COIN};
+    const auto& manifest = recovery.recovery_response.manifest;
+    recovery.provider_side = true;
+    recovery.accepted_recovery_authorization_commitment.SetNull();
+    recovery.recovery_authorization_accepted_at = 0;
+    recovery.provider_safety_policy_hash = GetProviderSafetyPolicyHash(environment.safety);
+    recovery.provider_budget_reservation_id = result.commit_key;
+    recovery.provider_netgroup_bucket = environment.netgroup_bucket;
+    recovery.provider_maximum_network_fee = manifest.network_fee;
+    BOOST_REQUIRE_MESSAGE(ReserveProviderBudget(environment.ledger, environment.safety,
+        FundingModel::USER_PAID, SponsorshipScope::PUBLIC, result.commit_key,
+        manifest.network_fee, GetRecipientBudgetBucket(environment.ledger, manifest.wallet_returns.front().script_pub_key),
+        now, error, environment.netgroup_bucket), error);
+    ProviderIdentityRecord identity;
+    identity.provider_id = recovery.recovery_provider_id;
+    identity.identity_key = recovery.recovery_provider_identity_key;
+    identity.identity_script = manifest.recovery_provider_dgb_change_scripts.front();
+    identity.display_name = "First Recovery Provider";
+    identity.created_at = now - 1;
+    ProviderPoolEntry input;
+    input.outpoint = manifest.recovery_provider_dgb_inputs.front();
+    input.asset = PoolAsset::DGB;
+    input.state = PoolEntryState::RESERVED;
+    input.script_pub_key = funding->vout[input.outpoint.n].scriptPubKey;
+    input.dgb_value = DGBSatoshis{funding->vout[input.outpoint.n].nValue};
+    input.confirmation_height = 1;
+    input.reservation_id = result.commit_key;
+    input.updated_at = now;
+    {
+        LOCK(provider.cs_wallet);
+        WalletBatch batch{provider.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterIdentity(identity));
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(recovery));
+        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(environment.ledger));
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool({input}));
+    }
+    recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
+    recovery.final_transaction = SerializePaymasterSecurityObject(*result.final_transaction);
+    recovery.expected_wtxid = CTransaction{*result.final_transaction}.GetWitnessHash();
+    recovery.signed_result = result;
+    ProviderCommitRecord commit;
+    commit.commit_key = result.commit_key;
+    commit.provider_id = identity.provider_id;
+    commit.quote_id = recovery.recovery_id;
+    commit.template_commitment = manifest.template_commitment;
+    commit.final_txid = *result.txid;
+    commit.raw_transaction_hash = Hash(recovery.final_transaction);
+    commit.final_transaction = recovery.final_transaction;
+    commit.provider_inputs = {input.outpoint};
+    commit.committed_at = now;
+    PaymasterStore store{provider};
+    auto& database = GetMockableDatabase(provider);
+    const auto before = database.m_records;
+    BOOST_REQUIRE(!provider.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    DataStream encoded_flags;
+    encoded_flags << DBKeys::FLAGS;
+    database.m_refuse_write = [&](Span<const std::byte> key) {
+        return key.size() == encoded_flags.size() && std::equal(key.begin(), key.end(), encoded_flags.begin());
+    };
+    BOOST_CHECK(!store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,
+        result.genesis_hash, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
+    database.m_refuse_write = {};
+    BOOST_CHECK(database.m_records == before);
+    BOOST_CHECK(!provider.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    database.FailCommit();
+    BOOST_CHECK(!store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,
+        result.genesis_hash, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before);
+    BOOST_CHECK(!provider.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    AlignSecurityFixtureCheckpoint(database);
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,
+        result.genesis_hash, error), error);
+    BOOST_CHECK(provider.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    uint64_t flags{0};
+    BOOST_REQUIRE(database.MakeBatch()->Read(DBKeys::FLAGS, flags));
+    BOOST_CHECK((flags & WALLET_FLAG_PAYMASTER_AUTHORIZATION) != 0);
+    const auto committed = database.m_records;
+    database.FailWriteAt(0);
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,
+        result.genesis_hash, error), error);
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == committed);
+    wallet::CWallet reopened{node.chain.get(), "first-provider-recovery-reopened",
+        DuplicateSecurityFixtureDatabase(database)};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_CHECK(reopened.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    // Exact recovery replay also repairs the missing flag in a wallet image
+    // produced by the old alternative-recovery path, without spending twice.
+    const uint64_t legacy_flags = flags & ~WALLET_FLAG_PAYMASTER_AUTHORIZATION;
+    BOOST_REQUIRE(reopened.GetDatabase().MakeBatch()->Write(DBKeys::FLAGS, legacy_flags));
+    BOOST_REQUIRE(reopened.LoadWalletFlags(legacy_flags));
+    BOOST_REQUIRE_MESSAGE(PaymasterStore{reopened}.CommitProviderAlternativeRecoveryFinal(
+        recovery, commit, result, result.genesis_hash, error), error);
+    BOOST_CHECK(reopened.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    ProviderBudgetLedger repaired_budget;
+    BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterProviderBudgetLedger(repaired_budget));
+    BOOST_REQUIRE_EQUAL(repaired_budget.reservations.size(), 1U);
+    BOOST_CHECK(repaired_budget.reservations.front().state == BudgetReservationState::SPENT);
+}
+
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result)
 {
     auto& m_node = setup.m_node;
@@ -5911,6 +6031,9 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     BOOST_REQUIRE(provider_key.SignSchnorr(GetPaymasterResultSignatureHash(result.result), result.result.identity_signature, nullptr, uint256{}));
     BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResult(result, response, recovery.recovery_provider_identity_key,
         parameters.genesis_hash, 1, now, error), error);
+    if (!confirmed_before_result) {
+        ExerciseFirstProviderRecoveryCommit(m_node, recovery, provider_key, funding.vtx.at(2), result.result, now);
+    }
     if (confirmed_before_result) {
         const CBlock confirmed = setup.CreateAndProcessBlock({final_transaction}, CScript() << OP_TRUE);
         BOOST_REQUIRE(confirmed.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
