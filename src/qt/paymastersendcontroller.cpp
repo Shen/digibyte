@@ -105,7 +105,8 @@ SendController::Effect SendController::advance(const PollEvent& event) const
 
 int SendController::nextPoll(bool state_changed)
 {
-    if (m_state.requestId.isEmpty() || m_state.unsignedClosed || IsTerminalPaymasterState(m_state.sessionState)) {
+    if (m_state.requestId.isEmpty() || (m_state.observationAvailable &&
+        (m_state.unsignedClosed || IsTerminalPaymasterState(m_state.sessionState)))) {
         stop();
         return 0;
     }
@@ -154,6 +155,7 @@ bool SendController::observeAbsence(const RpcError& error)
 
 bool SendController::clearAfterClosure()
 {
+    if (!m_state.requestId.isEmpty() && !m_state.observationAvailable && !m_absence_verified) return false;
     if (!m_state.requestId.isEmpty() && !m_state.unsignedClosed && !m_completion_verified && !m_absence_verified) return false;
     resetSession();
     return true;
@@ -162,6 +164,7 @@ bool SendController::clearAfterClosure()
 SendController::Completion SendController::completion(const UniValue& result)
 {
     invalidateClosure();
+    if (!m_state.observationAvailable) return {CompletionKind::NONE};
     const auto& embedded = result.find_value("session");
     const auto& session = embedded.isObject() ? embedded : result;
     const auto& status = session.find_value("status");
@@ -179,8 +182,10 @@ SendController::Completion SendController::completion(const UniValue& result)
         qint64 amount{0};
         if (!payment_success || !ReadInt64(session, "payment_cents", amount) || amount <= 0 ||
             amount > DigiDollar::Paymaster::MAX_DD_OUTPUT_CENTS ||
-            (m_state.sessionState == QLatin1String("CONFIRMED") && m_state.confirmationState != QLatin1String("payment_confirmed")))
+            (m_state.sessionState == QLatin1String("CONFIRMED") && m_state.confirmationState != QLatin1String("payment_confirmed"))) {
+            observationFailed();
             return {CompletionKind::PAYMENT_UNVERIFIED};
+        }
         m_completion_verified = true;
         if (m_state.terminalNoticeShown) return {CompletionKind::ALREADY_SHOWN};
         return {CompletionKind::PAYMENT, amount};
@@ -188,12 +193,17 @@ SendController::Completion SendController::completion(const UniValue& result)
     const auto& recovery = session.find_value("payment_view").find_value("recovery");
     qint64 depth{0};
     if (!recovery.isObject() || !recovery.find_value("details_available").isTrue() ||
-        !recovery.find_value("observation_available").isTrue() || !ReadInt64(recovery, "confirmations", depth) || depth <= 0)
+        !recovery.find_value("observation_available").isTrue() || !ReadInt64(recovery, "confirmations", depth) || depth <= 0) {
+        observationFailed();
         return {CompletionKind::RECOVERY_UNVERIFIED};
+    }
     const auto& encoded = recovery.find_value("txid");
     const QString txid = encoded.isStr() ? QString::fromStdString(encoded.get_str()) : QString{};
     if (m_state.confirmationState != QLatin1String("recovery_confirmed") || !IsCanonicalNonNullPaymasterHash(m_state.recoveryTransactionId) ||
-        !IsCanonicalNonNullPaymasterHash(txid) || txid != m_state.recoveryTransactionId) return {CompletionKind::RECOVERY_MISMATCH};
+        !IsCanonicalNonNullPaymasterHash(txid) || txid != m_state.recoveryTransactionId) {
+        observationFailed();
+        return {CompletionKind::RECOVERY_MISMATCH};
+    }
     m_completion_verified = true;
     if (m_state.terminalNoticeShown) return {CompletionKind::ALREADY_SHOWN};
     return {CompletionKind::RECOVERY};
@@ -329,6 +339,7 @@ bool SendController::confirmRecovery(const PaymasterRecoveryConfirmationSelectio
 
 void SendController::setSnapshotForTesting(const PaymasterSessionSnapshot& snapshot, bool persisted)
 {
+    m_state.observationAvailable = true;
     m_state.requestId = snapshot.request_id;
     m_state.sessionId = snapshot.session_id;
     m_state.sessionState = snapshot.state;
@@ -351,7 +362,7 @@ SendController::PreparedDecision SendController::preparedReply(const UniValue& r
     const auto& encoded = result.find_value("authorization_commitment");
     const QString commitment = encoded.isStr() ? QString::fromStdString(encoded.get_str()) : QString{};
     const auto block = [&](PreparedEffect effect, bool invalidate_review) {
-        stop();
+        observationFailed();
         if (invalidate_review) {
             m_state.authorizationCommitment.clear();
             m_state.confirmationGuard.Reset();
@@ -367,7 +378,11 @@ SendController::PreparedDecision SendController::preparedReply(const UniValue& r
         return block(PreparedEffect::INVALID_AUTHORIZATION_FLAG, false);
     if (authorization.isTrue()) {
         stop();
-        return {commitment.isEmpty() ? PreparedEffect::MISSING_COMMITMENT : PreparedEffect::REVIEW, commitment};
+        if (commitment.isEmpty()) {
+            observationFailed();
+            return {PreparedEffect::MISSING_COMMITMENT, commitment};
+        }
+        return {PreparedEffect::REVIEW, commitment};
     }
     if (m_state.sessionState == QLatin1String("AWAITING_WALLET_UNLOCK")) {
         stop();
@@ -968,6 +983,7 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
 {
     if (!m_state.requestId.isEmpty() && !snapshot.request_id.isEmpty() &&
         snapshot.request_id != m_state.requestId) {
+        observationFailed();
         if (decode_error) {
             *decode_error = QCoreApplication::translate("DigiDollarSendWidget", "response belongs to a different request");
         }
@@ -975,6 +991,7 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     }
     if (!m_state.sessionId.isEmpty() && !snapshot.session_id.isEmpty() &&
         snapshot.session_id != m_state.sessionId) {
+        observationFailed();
         if (decode_error) {
             *decode_error = QCoreApplication::translate("DigiDollarSendWidget", "response belongs to a different session");
         }
@@ -982,6 +999,7 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     }
     if (!m_state.address.isEmpty() && !snapshot.recipient.isEmpty() &&
         snapshot.recipient != m_state.address) {
+        observationFailed();
         if (decode_error) {
             *decode_error = QCoreApplication::translate("DigiDollarSendWidget", "response recipient does not match the active transfer");
         }
@@ -991,6 +1009,7 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     // A new authoritative observation supersedes earlier completion or absence
     // evidence, including a reorg and a late persisted mutation result.
     invalidateClosure();
+    m_state.observationAvailable = true;
     const QString previous_state = m_state.sessionState;
     if (previous_state != snapshot.state) m_state.terminalNoticeShown = false;
     if (!snapshot.request_id.isEmpty()) m_state.requestId = snapshot.request_id;
@@ -1045,6 +1064,19 @@ bool SendController::applySnapshot(const PaymasterSessionSnapshot& snapshot, QSt
     }
 
     return true;
+}
+
+void SendController::observationFailed()
+{
+    invalidateClosure();
+    m_state.observationAvailable = false;
+    m_state.allowedActions.clear();
+    m_state.allowedActionsKnown = false;
+    m_state.offerReadyForReview = false;
+    clearReview();
+    clearRecoveryReview();
+    m_state.recoveryActive = false;
+    stop();
 }
 
 void SendController::stop()
@@ -1104,6 +1136,7 @@ void SendController::resetSession()
     m_state.terminalNoticeShown = false;
     m_state.allowedActions.clear();
     m_state.allowedActionsKnown = false;
+    m_state.observationAvailable = false;
     m_state.sessionPersisted = false;
     m_state.address.clear();
     m_state.authorizationCommitment.clear();
@@ -1123,6 +1156,7 @@ SendController::FailureDecision SendController::failedReply(const RpcError& erro
     const bool unsigned_preparation = canCancelPreparation() ||
         (m_state.artifact == QLatin1String("none") && allows(QStringLiteral("abandon_unsigned")));
     const auto decision = failure(error, m_state.sessionPersisted, unsigned_preparation);
+    if (error.failed) observationFailed();
     if (decision.invalidate_review) {
         clearReview();
     }

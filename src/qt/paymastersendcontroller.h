@@ -97,6 +97,9 @@ public:
     ReplyToken startPreparation(UniValue params);
     bool receivePreparation(const ReplyToken& token, bool succeeded);
     bool applySnapshot(const PaymasterSessionSnapshot& snapshot, QString* error = nullptr);
+    /** Revoke capabilities and live approvals after an unreadable observation,
+     * retaining the durable request identity and known financial artifacts. */
+    void observationFailed();
     bool canContinue(bool wallet_available) const;
     bool activeSendExpired() const;
     void historyWaiting(bool waiting);
@@ -172,6 +175,7 @@ public:
         bool recoveryActive{false};
         int pollIntervalMs{1500};
         bool allowedActionsKnown{false};
+        bool observationAvailable{false};
         bool terminalNoticeShown{false};
         PaymasterConfirmationGuard confirmationGuard;
         PaymasterRecoveryConfirmationGuard recoveryConfirmationGuard;

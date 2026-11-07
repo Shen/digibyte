@@ -16289,7 +16289,34 @@ void PaymasterWidgetTests::paymasterClientTimeoutKeepsObserving()
     QVERIFY(client->m_paymasterNotice->text().contains("temporarily unavailable"));
     QCOMPARE(client->m_send.m_state.artifact, QStringLiteral("user_psbt"));
     QVERIFY(!client->m_send.m_state.requestId.isEmpty());
+    const auto request_id = client->m_send.view().requestId;
+    const auto session_id = client->m_send.view().sessionId;
+    QVERIFY(!client->m_send.view().allowedActionsKnown);
+    QVERIFY(client->m_send.view().allowedActions.isEmpty());
+    QCOMPARE(client->m_paymasterPrimaryAction, PaymasterSendWidget::PaymasterPrimaryAction::REFRESH);
+    QVERIFY(client->m_paymasterPrimaryButton->isEnabled());
     unavailable = false;
+    client->pollPaymasterSession();
+    QVERIFY(client->m_send.view().allowedActionsKnown);
+    QVERIFY(client->m_paymasterPrimaryButton->text().contains("Prepare return"));
+    // Decode errors and a response for another request revoke the same
+    // capabilities without discarding the signed session being observed.
+    for (bool mismatched : {false, true}) {
+        auto malformed = snapshot;
+        auto malformed_session = malformed.find_value("session");
+        malformed_session.pushKV(mismatched ? "request_id" : "session_state",
+                                 mismatched ? "00000000-0000-4000-8000-000000000002" : "UNKNOWN_STATE");
+        malformed.pushKV("session", malformed_session);
+        QVERIFY(!client->updatePaymasterSessionView(malformed));
+        QCOMPARE(client->m_send.view().requestId, request_id);
+        QCOMPARE(client->m_send.view().sessionId, session_id);
+        QCOMPARE(client->m_send.view().artifact, QStringLiteral("user_psbt"));
+        QVERIFY(!client->m_send.view().allowedActionsKnown);
+        QVERIFY(client->m_send.view().allowedActions.isEmpty());
+        QCOMPARE(client->m_paymasterPrimaryAction, PaymasterSendWidget::PaymasterPrimaryAction::REFRESH);
+        QVERIFY(client->updatePaymasterSessionView(snapshot));
+        QVERIFY(client->m_send.view().allowedActionsKnown);
+    }
     snapshot = PaymasterSessionView("FAILED", "user_psbt", "USER_SIGNED");
     client->pollPaymasterSession();
     QVERIFY(client->m_paymasterPollTimer->isActive());
@@ -16449,6 +16476,18 @@ void PaymasterWidgetTests::paymasterSendControllerClosureFreshness()
     paid.pushKV("payment_confirmed", true);
     paid.pushKV("payment_cents", 100);
     QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
+    PaymasterQt::RpcError unavailable;
+    unavailable.failed = true;
+    controller.failedReply(unavailable);
+    QCOMPARE(controller.view().requestId, snapshot.request_id);
+    QCOMPARE(controller.view().sessionId, snapshot.session_id);
+    QCOMPARE(controller.view().transactionId, snapshot.transaction_id);
+    QVERIFY(!controller.view().observationAvailable);
+    QVERIFY(!controller.clearAfterClosure());
+    QVERIFY(controller.nextPoll(false) > 0);
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::NONE);
+    QVERIFY(controller.applySnapshot(snapshot));
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
     controller.markNoticeShown();
     // A repeated valid observation still proves closure without another UI notice.
     QVERIFY(controller.applySnapshot(snapshot));
@@ -16467,6 +16506,8 @@ void PaymasterWidgetTests::paymasterSendControllerClosureFreshness()
     malformed.pushKV("payment_confirmed", false);
     QCOMPARE(controller.completion(malformed).kind, Controller::CompletionKind::PAYMENT_UNVERIFIED);
     QVERIFY(!controller.clearAfterClosure());
+    QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::NONE);
+    QVERIFY(controller.applySnapshot(snapshot));
     QCOMPARE(controller.completion(paid).kind, Controller::CompletionKind::PAYMENT);
     QVERIFY(controller.clearAfterClosure());
 

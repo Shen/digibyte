@@ -1165,11 +1165,11 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
     const bool focus = !m_send.view().requestId.isEmpty();
     // A closed session permits composing another transfer, independently of
     // whether retained artifacts can still prove its outcome.
-    const bool completed = m_send.view().unsignedClosed ||
+    const bool completed = m_send.view().observationAvailable && (m_send.view().unsignedClosed ||
         m_send.view().sessionState == QStringLiteral("CONFIRMED") ||
         m_send.view().sessionState == QStringLiteral("CANCELED_SAFE") ||
         m_send.view().confirmationState == QStringLiteral("payment_confirmed") ||
-        m_send.view().confirmationState == QStringLiteral("recovery_confirmed");
+        m_send.view().confirmationState == QStringLiteral("recovery_confirmed"));
     const auto core_allows = [this](const QString& action) {
         return m_send.view().allowedActionsKnown &&
             m_send.view().allowedActions.contains(action);
@@ -1775,6 +1775,8 @@ void PaymasterSendWidget::discoverPersistedPaymasterSessions(bool user_requested
             guard->m_sessionDiscoveryPending = false;
             guard->m_sessionDiscoveryProgress->hide();
             const auto failed = [&](const QString& detail, bool reservation_conflict = false) {
+                guard->m_send.observationFailed();
+                guard->updatePaymasterFocusMode();
                 guard->m_loadPersistedPaymasterSessionButton->setText(DigiDollarSendWidget::tr("Retry loading transfers"));
                 guard->m_persistedSessionsStatus->setText(DigiDollarSendWidget::tr("Saved transfers could not be read completely. New Paymaster payments remain paused."));
                 const QString guidance = reservation_conflict
@@ -2935,11 +2937,14 @@ void PaymasterSendWidget::executePaymasterRpcAsyncDetailed(
     std::string command, UniValue params, WalletModel::DetailedRpcCallback callback, bool needs_unlock)
 {
     const uint64_t wallet_generation = m_send.view().walletGeneration;
+    const bool observing_session = command == "resolvepaymastersession" || command == "getdigidollarsendsession" || command == "listdigidollarsendsessions";
     QPointer<PaymasterSendWidget> guard{this};
     WalletModel::DetailedRpcCallback bound =
-        [guard, wallet_generation, callback = std::move(callback)](UniValue result, WalletModel::RpcError error) mutable {
-            if (guard && guard->m_send.view().walletGeneration == wallet_generation)
+        [guard, wallet_generation, observing_session, callback = std::move(callback)](UniValue result, WalletModel::RpcError error) mutable {
+            if (guard && guard->m_send.view().walletGeneration == wallet_generation) {
+                if (observing_session && error.failed) guard->m_send.observationFailed();
                 callback(std::move(result), std::move(error));
+            }
         };
     if (needs_unlock && (m_paymasterAsyncRpcExecutorForTesting || m_paymasterRpcExecutorForTesting) && m_walletModel) {
         auto unlock = PaymasterQt::RequestUnlock(*m_walletModel);
@@ -3033,6 +3038,7 @@ void PaymasterSendWidget::executePaymasterTransfer(
                              [guard, address, amount_cents, token](UniValue result, WalletModel::RpcError error) {
                                  if (guard && guard->m_send.receivePreparation(token, !error.failed)) {
                                      if (PaymasterQt::StableCode(error) == QLatin1String("PAYMASTER_WALLET_UNLOCK_CANCELLED") && !guard->m_send.view().preparationCancelRequested) {
+                                         guard->m_send.observationFailed();
                                          guard->m_paymasterStateValue->setText(DigiDollarSendWidget::tr("AWAITING_WALLET_UNLOCK"));
                                          guard->setPaymasterBusy(false);
                                          return;
@@ -3060,6 +3066,7 @@ void PaymasterSendWidget::handlePaymasterResult(const UniValue& result, const Wa
         // but never review, unlock, sign or advance its late offer. A fresh Core
         // read must resolve even a failed/lost first reply before closing.
         if (!failure.failed) updatePaymasterSessionView(result);
+        else m_send.observationFailed();
         setPaymasterBusy(false);
         finishPaymasterPreparationCancellation();
         return;
@@ -3151,6 +3158,7 @@ bool PaymasterSendWidget::applyPaymasterReplySnapshot(
 {
     const bool direct_success = direct == PaymasterQt::SendController::CompletionKind::PAYMENT;
     if (direct == PaymasterQt::SendController::CompletionKind::PAYMENT_UNVERIFIED) {
+        m_send.observationFailed();
         stopPaymasterPolling();
         m_paymasterStateValue->setText(
             DigiDollarSendWidget::tr("Transfer status blocked: malformed direct completion"));
@@ -3320,11 +3328,16 @@ bool PaymasterSendWidget::updatePaymasterSessionView(
     PaymasterSessionSnapshot snapshot;
     QString error;
     if (!PaymasterQt::SendController::decodeSnapshot(result, snapshot, error)) {
+        m_send.observationFailed();
+        updatePaymasterFocusMode();
         if (decode_error) *decode_error = error;
         return false;
     }
     const QString previous_state = m_send.view().sessionState;
-    if (!m_send.applySnapshot(snapshot, decode_error)) return false;
+    if (!m_send.applySnapshot(snapshot, decode_error)) {
+        updatePaymasterFocusMode();
+        return false;
+    }
     m_paymasterSessionFrame->show();
 
     QString status = snapshot.pending_phase.isEmpty()
@@ -4420,6 +4433,7 @@ bool PaymasterSendWidget::confirmPaymasterRecoveryBeforeSigning(
 void PaymasterSendWidget::blockAlternativePaymasterRecovery(
     const QString& reason, const QString& detail)
 {
+    m_send.observationFailed();
     stopPaymasterPolling();
     m_send.stopRecovery();
     m_paymasterStateValue->setText(reason);
