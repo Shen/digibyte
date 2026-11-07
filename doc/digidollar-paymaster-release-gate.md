@@ -4,6 +4,33 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Scheduler progress and local result authority
+
+Product and test sources at `33624ebae6e265ac2beae97333968aab75335e2f`, checked
+on 2026-11-07. The implementation guide owns the nonblocking finalization
+and authenticated-local-authority contracts; the test runbook owns selectors.
+No wire, persisted record format or shared class layout changed.
+
+Five translation units (three production, two test) were freshly compiled with
+MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`, and linked
+into an isolated native test executable. Remaining objects/libraries are reused;
+this is not a clean product build or complete transitive-header provenance.
+Commands, source/object/binary hashes, full logs and failed attempts are retained
+under `temp/implement-ap1-ap3-2100dd9/`, including `native-v2-provenance.json`,
+`compiled.jsonl` and `runs.jsonl`.
+
+| Executed check | Bounded result |
+|---|---|
+| Direct regressions | Exit 0: six cases / 771 assertions. Covers index lag after durable commit, unchanged spent budget/exact replay, readable corrupt predecessor and recovery authority, retained messages across TTL pruning and repair, forged remote rejection, and precise native/RPC error contracts. |
+| Related regressions | Exit 0: 33 additional cases / 2,286 assertions across PSBT, application results, local finalization failures, confirmed-payment observation, manual-lock ownership, automatic sync deferral, retained inbox messages and ordinary database tests. The selections are disjoint: 39 cases / 3,057 assertions. |
+| Negative control | All three selected scheduler/predecessor/recovery regressions fail with the original `2100dd9e77` production objects and unchanged new test objects (Exit 201). The scheduler test releases its frozen queue after the bounded failure so teardown terminates. |
+| C++17 syntax | The three modified production translation units pass MSVC `/Zs /std:c++17`. This is not a linked C++17 product or Linux/compiler-matrix result. |
+| Local controls | Working-tree dependency/cycle checks, six boundary fixtures and whitespace checks pass. |
+
+Initial fixture failures are retained separately from the final successful run.
+No new daemon, Qt, functional, sanitizer or complete-suite result is claimed.
+Clean supported builds and the remaining release matrix are still operator/CI work.
+
 ## Final witnesses, recovery history and explicit transaction completion
 
 Working-tree corrections based on `83c8effe233406e4b09b36f0c5d3810e089f48eb`,
