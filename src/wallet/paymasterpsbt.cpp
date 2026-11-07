@@ -427,7 +427,7 @@ bool BuildTrustedQuoteTemplate(
 {
     using namespace DigiDollar::Paymaster;
     trusted_template = {};
-    CollaborativeTransferParams params;
+    std::vector<CollaborativeInput> user_inputs;
     CAmount user_dd_total{0};
     {
         LOCK(wallet.cs_wallet);
@@ -443,15 +443,10 @@ bool BuildTrustedQuoteTemplate(
                 return false;
             }
             user_dd_total += amount;
-            params.inputs.push_back({outpoint, wallet_tx->tx, InputRole::USER_DD});
+            user_inputs.push_back({outpoint, wallet_tx->tx, InputRole::USER_DD});
         }
     }
 
-    if (quote.reserved_carrier) {
-        params.inputs.push_back({quote.reserved_carrier->outpoint,
-                                 MakeTransactionRef(quote.reserved_carrier->creating_tx),
-                                 InputRole::PROVIDER_CARRIER});
-    }
     CAmount dgb_total{0};
     for (const VerifiedDGBInput& input : quote.reserved_dgb_inputs) {
         if (input.value.value <= 0 || input.value.value > std::numeric_limits<CAmount>::max() - dgb_total) {
@@ -459,69 +454,16 @@ bool BuildTrustedQuoteTemplate(
             return false;
         }
         dgb_total += input.value.value;
-        params.inputs.push_back({input.outpoint, MakeTransactionRef(input.creating_tx),
-                                 InputRole::PROVIDER_DGB});
     }
 
-    if (intent.recipient_amount.value > user_dd_total || quote.service_fee.value < 0 ||
-        quote.service_fee.value > user_dd_total - intent.recipient_amount.value) {
-        error = "PAYMASTER_USER_DD_CONSERVATION";
-        return false;
-    }
-    const CAmount user_change = user_dd_total - intent.recipient_amount.value - quote.service_fee.value;
-    params.dd_outputs.push_back(
-        {intent.recipient_script, intent.recipient_amount.value, DDOutputRole::RECIPIENT});
-    if (user_change > 0) {
-        if (intent.user_dd_change_script.empty()) {
-            error = "PAYMASTER_USER_CHANGE_MISMATCH";
-            return false;
-        }
-        params.dd_outputs.push_back(
-            {intent.user_dd_change_script, user_change, DDOutputRole::USER_CHANGE});
-    } else if (!intent.user_dd_change_script.empty()) {
-        error = "PAYMASTER_USER_CHANGE_MISMATCH";
-        return false;
-    }
-
-    if (quote.service_fee.value > 0 && quote.service_fee.value < 100) {
-        if (!quote.reserved_carrier || !quote.carrier_return_script) {
+    CollaborativeTransferParams params;
+    if (!BuildQuoteTransferParameters(
+            intent, quote, user_inputs, user_dd_total, dgb_total, params, error)) {
+        if (error == "PAYMASTER_INVALID_CARRIER_SUCCESSOR") {
             error = "PAYMASTER_CARRIER_OUTPUT_MISMATCH";
-            return false;
         }
-        const auto successor = ComputeCarrierSuccessor(
-            quote.reserved_carrier->value, quote.service_fee, error);
-        if (!successor) {
-            error = "PAYMASTER_CARRIER_OUTPUT_MISMATCH";
-            return false;
-        }
-        params.dd_outputs.push_back(
-            {*quote.carrier_return_script, successor->value,
-             DDOutputRole::CARRIER_SUCCESSOR});
-    } else if (quote.service_fee.value >= 100) {
-        if (!quote.provider_fee_script) {
-            error = "PAYMASTER_PROVIDER_FEE_OUTPUT_MISMATCH";
-            return false;
-        }
-        params.dd_outputs.push_back(
-            {*quote.provider_fee_script, quote.service_fee.value, DDOutputRole::PROVIDER_FEE});
-    }
-
-    if (quote.network_fee.value <= 0 || quote.network_fee.value > dgb_total) {
-        error = "PAYMASTER_DGB_CONSERVATION";
         return false;
     }
-    const CAmount dgb_change = dgb_total - quote.network_fee.value;
-    if (dgb_change > 0) {
-        if (!quote.dgb_change_script) {
-            error = "PAYMASTER_DGB_CHANGE_MISMATCH";
-            return false;
-        }
-        params.dgb_outputs.emplace_back(dgb_change, *quote.dgb_change_script);
-    } else if (quote.dgb_change_script) {
-        error = "PAYMASTER_DGB_CHANGE_MISMATCH";
-        return false;
-    }
-    params.fee_rate = 1;
 
     const auto built = BuildUnsignedCollaborativeTransfer(params, chain_params, chainman);
     if (!built.success) {

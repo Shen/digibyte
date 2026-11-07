@@ -450,6 +450,88 @@ bool PreflightProviderQuoteRequest(
     return true;
 }
 
+bool BuildQuoteTransferParameters(
+    const PaymentIntent& intent,
+    const PaymasterQuote& quote,
+    const std::vector<CollaborativeInput>& user_inputs,
+    CAmount user_dd_total,
+    CAmount provider_dgb_total,
+    CollaborativeTransferParams& transfer,
+    std::string& error)
+{
+    transfer = {};
+    CollaborativeTransferParams candidate;
+    candidate.inputs = user_inputs;
+    if (quote.reserved_carrier) {
+        candidate.inputs.push_back({quote.reserved_carrier->outpoint,
+                                    MakeTransactionRef(quote.reserved_carrier->creating_tx),
+                                    InputRole::PROVIDER_CARRIER});
+    }
+    for (const VerifiedDGBInput& input : quote.reserved_dgb_inputs) {
+        candidate.inputs.push_back({input.outpoint, MakeTransactionRef(input.creating_tx),
+                                    InputRole::PROVIDER_DGB});
+    }
+
+    if (intent.recipient_amount.value > user_dd_total || quote.service_fee.value < 0 ||
+        quote.service_fee.value > user_dd_total - intent.recipient_amount.value) {
+        error = "PAYMASTER_USER_DD_CONSERVATION";
+        return false;
+    }
+    const CAmount user_change = user_dd_total - intent.recipient_amount.value - quote.service_fee.value;
+    candidate.dd_outputs.push_back(
+        {intent.recipient_script, intent.recipient_amount.value, DDOutputRole::RECIPIENT});
+    if (user_change > 0) {
+        if (intent.user_dd_change_script.empty()) {
+            error = "PAYMASTER_USER_CHANGE_MISMATCH";
+            return false;
+        }
+        candidate.dd_outputs.push_back(
+            {intent.user_dd_change_script, user_change, DDOutputRole::USER_CHANGE});
+    } else if (!intent.user_dd_change_script.empty()) {
+        error = "PAYMASTER_USER_CHANGE_MISMATCH";
+        return false;
+    }
+
+    if (quote.service_fee.value > 0 && quote.service_fee.value < 100) {
+        if (!quote.reserved_carrier || !quote.carrier_return_script) {
+            error = "PAYMASTER_CARRIER_OUTPUT_MISMATCH";
+            return false;
+        }
+        const auto successor = ComputeCarrierSuccessor(
+            quote.reserved_carrier->value, quote.service_fee, error);
+        if (!successor) return false;
+        candidate.dd_outputs.push_back(
+            {*quote.carrier_return_script, successor->value, DDOutputRole::CARRIER_SUCCESSOR});
+    } else if (quote.service_fee.value >= 100) {
+        if (!quote.provider_fee_script) {
+            error = "PAYMASTER_PROVIDER_FEE_OUTPUT_MISMATCH";
+            return false;
+        }
+        candidate.dd_outputs.push_back(
+            {*quote.provider_fee_script, quote.service_fee.value, DDOutputRole::PROVIDER_FEE});
+    }
+
+    if (quote.network_fee.value <= 0 || quote.network_fee.value > provider_dgb_total) {
+        error = "PAYMASTER_DGB_CONSERVATION";
+        return false;
+    }
+    const CAmount dgb_change = provider_dgb_total - quote.network_fee.value;
+    if (dgb_change > 0) {
+        if (!quote.dgb_change_script) {
+            error = "PAYMASTER_DGB_CHANGE_MISMATCH";
+            return false;
+        }
+        candidate.dgb_outputs.emplace_back(dgb_change, *quote.dgb_change_script);
+    } else if (quote.dgb_change_script) {
+        error = "PAYMASTER_DGB_CHANGE_MISMATCH";
+        return false;
+    }
+    candidate.fee_rate = 1;
+    transfer = std::move(candidate);
+    error.clear();
+    return true;
+}
+
 bool BuildUnsignedProviderQuote(
     const PaymasterQuoteRequest& request,
     const ProviderPolicy& policy,
@@ -517,61 +599,6 @@ bool BuildUnsignedProviderQuote(
         return false;
     }
 
-    CollaborativeTransferParams transfer;
-    transfer.inputs = parameters.user_inputs;
-    if (parameters.reserved_carrier) {
-        transfer.inputs.push_back({parameters.reserved_carrier->outpoint,
-                                   MakeTransactionRef(parameters.reserved_carrier->creating_tx),
-                                   InputRole::PROVIDER_CARRIER});
-    }
-    for (const VerifiedDGBInput& input : parameters.reserved_dgb_inputs) {
-        transfer.inputs.push_back({input.outpoint, MakeTransactionRef(input.creating_tx),
-                                   InputRole::PROVIDER_DGB});
-    }
-    transfer.dd_outputs.push_back(
-        {intent.recipient_script, intent.recipient_amount.value, DDOutputRole::RECIPIENT});
-    const CAmount user_change = preflight.user_change;
-    if (user_change > 0) {
-        if (intent.user_dd_change_script.empty()) {
-            error = "PAYMASTER_USER_CHANGE_MISMATCH";
-            return false;
-        }
-        transfer.dd_outputs.push_back(
-            {intent.user_dd_change_script, user_change, DDOutputRole::USER_CHANGE});
-    } else if (!intent.user_dd_change_script.empty()) {
-        error = "PAYMASTER_USER_CHANGE_MISMATCH";
-        return false;
-    }
-    if (carrier_fee) {
-        const auto successor = ComputeCarrierSuccessor(parameters.reserved_carrier->value,
-                                                       fee_plan.service_fee, error);
-        if (!successor) return false;
-        transfer.dd_outputs.push_back(
-            {*parameters.carrier_return_script, successor->value,
-             DDOutputRole::CARRIER_SUCCESSOR});
-    } else if (provider_fee) {
-        transfer.dd_outputs.push_back(
-            {*parameters.provider_fee_script, fee_plan.service_fee.value,
-             DDOutputRole::PROVIDER_FEE});
-    }
-    const CAmount dgb_change = dgb_total - parameters.network_fee.value;
-    if (dgb_change > 0) {
-        if (!parameters.dgb_change_script) {
-            error = "PAYMASTER_DGB_CHANGE_MISMATCH";
-            return false;
-        }
-        transfer.dgb_outputs.emplace_back(dgb_change, *parameters.dgb_change_script);
-    } else if (parameters.dgb_change_script) {
-        error = "PAYMASTER_DGB_CHANGE_MISMATCH";
-        return false;
-    }
-    transfer.fee_rate = 1;
-    const auto built = BuildUnsignedCollaborativeTransfer(transfer, chain_params, coins);
-    if (!built.success) {
-        error = built.error;
-        return false;
-    }
-
     PaymasterQuote quote;
     quote.genesis_hash = intent.genesis_hash;
     quote.provider_id = intent.provider_id;
@@ -593,6 +620,18 @@ bool BuildUnsignedProviderQuote(
     quote.created_at = parameters.created_at;
     quote.expires_at = parameters.expires_at;
     quote.retry_until = parameters.retry_until;
+
+    CollaborativeTransferParams transfer;
+    if (!BuildQuoteTransferParameters(
+            intent, quote, parameters.user_inputs,
+            preflight.user_inputs.total_dd_amount, dgb_total, transfer, error)) {
+        return false;
+    }
+    const auto built = BuildUnsignedCollaborativeTransfer(transfer, chain_params, coins);
+    if (!built.success) {
+        error = built.error;
+        return false;
+    }
     quote.unsigned_transaction = built.tx;
     quote.unsigned_txid = CTransaction{built.tx}.GetHash();
 

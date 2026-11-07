@@ -210,6 +210,20 @@ bool PreflightProviderQuoteRequest(
     ProviderQuotePreflightResult& result,
     std::string& error);
 
+/** Assemble the canonical input/output roles from resolved quote resources.
+ * Totals are DD cents and DGB satoshis, respectively. This pure arrangement
+ * grants no authority: each caller separately validates its intent, policy,
+ * quote, ownership and resolved inputs, then runs the chainstate-backed
+ * collaborative builder and verifies the resulting transaction/template. */
+bool BuildQuoteTransferParameters(
+    const PaymentIntent& intent,
+    const PaymasterQuote& quote,
+    const std::vector<CollaborativeInput>& user_inputs,
+    CAmount user_dd_total,
+    CAmount provider_dgb_total,
+    CollaborativeTransferParams& transfer,
+    std::string& error);
+
 /** Deterministically construct the unsigned quote and exact PSBT template
  * from fully resolved inputs. No wallet key is accepted or used here; the
  * caller signs quote.identity_signature only after durable reservation. */

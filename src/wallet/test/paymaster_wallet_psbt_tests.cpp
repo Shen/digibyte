@@ -351,6 +351,8 @@ BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_pay
         CAmount carrier;
         CAmount fee;
         CAmount output; // -1 denotes an invalid carrier successor.
+        FundingModel funding_model{FundingModel::USER_PAID};
+        CAmount recipient{100};
     };
     const CarrierCase carrier_cases[]{
         {100, 0, 0},
@@ -362,13 +364,63 @@ BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_pay
         {MAX_DD_OUTPUT_CENTS - 1, 1, MAX_DD_OUTPUT_CENTS},
         {MAX_DD_OUTPUT_CENTS, 1, -1},
         {100, 100, 100},
+        {100, 0, 0, FundingModel::SPONSORED},
+        {100, 0, 0, FundingModel::SPONSORED, 1000},
+        {100, 0, 0, FundingModel::USER_PAID, 900},
+        {100, 1, 101, FundingModel::USER_PAID, 999},
     };
     for (const auto& row : carrier_cases) {
-        BOOST_TEST_CONTEXT("carrier=" << row.carrier << " fee=" << row.fee) {
+        BOOST_TEST_CONTEXT("carrier=" << row.carrier << " fee=" << row.fee << " recipient=" << row.recipient
+                                     << " model=" << static_cast<int>(row.funding_model)) {
+            auto fee_intent = intent;
+            fee_intent.recipient_amount = DDCents{row.recipient};
+            fee_intent.funding_model = row.funding_model;
+            const CAmount user_change = 1000 - row.recipient - row.fee;
+            if (user_change == 0) fee_intent.user_dd_change_script.clear();
+            ProviderPolicy fee_policy;
+            fee_policy.funding_models = row.funding_model == FundingModel::USER_PAID
+                ? FUNDING_MODEL_USER_PAID : FUNDING_MODEL_SPONSORED;
+            fee_policy.min_payment = DDCents{100};
+            fee_policy.max_payment = DDCents{1000000};
+            fee_policy.fee_rate_bps = row.fee > 0 ? MAX_RATE_BPS : 0;
+            fee_policy.maximum_user_paid_service_fee = DDCents{row.fee};
+            fee_policy.maximum_network_fee = DGBSatoshis{COIN / 10};
+            fee_intent.policy_hash = GetProviderPolicyHash(fee_policy);
+            fee_intent.user_input_proofs = {{fee_intent.user_dd_inputs.front(), std::vector<unsigned char>(64)}};
+            const uint256 empty_merkle_root;
+            BOOST_REQUIRE(user_key.SignSchnorr(
+                GetUserInputControlHash(fee_intent, fee_intent.user_dd_inputs.front()),
+                fee_intent.user_input_proofs.front().signature, &empty_merkle_root, uint256{}));
             auto fee_quote = quote;
+            fee_quote.policy_hash = fee_intent.policy_hash;
+            fee_quote.intent_hash = GetPaymentIntentHash(fee_intent);
+            fee_quote.funding_model = row.funding_model;
+            fee_quote.fee_rate_bps = fee_policy.fee_rate_bps;
             fee_quote.service_fee = DDCents{row.fee};
+            const auto build_provider = [&](ProviderQuoteBuildResult& result) {
+                PaymasterQuoteRequest fee_request;
+                fee_request.intent = fee_intent;
+                ProviderQuoteBuildParameters provider_parameters;
+                provider_parameters.quote_id = fee_quote.quote_id;
+                provider_parameters.user_inputs = {params.inputs.front()};
+                provider_parameters.reserved_carrier = fee_quote.reserved_carrier;
+                provider_parameters.reserved_dgb_inputs = fee_quote.reserved_dgb_inputs;
+                provider_parameters.carrier_return_script = fee_quote.carrier_return_script;
+                provider_parameters.provider_fee_script = fee_quote.provider_fee_script;
+                provider_parameters.dgb_change_script = fee_quote.dgb_change_script;
+                provider_parameters.network_fee = fee_quote.network_fee;
+                provider_parameters.created_at = fee_quote.created_at;
+                provider_parameters.expires_at = fee_quote.expires_at;
+                provider_parameters.retry_until = fee_quote.retry_until;
+                LOCK(cs_main);
+                return BuildUnsignedProviderQuote(
+                    fee_request, fee_policy, provider_parameters, Params(),
+                    m_node.chainman->ActiveChainstate().CoinsTip(), result, error);
+            };
             auto fee_params = params;
-            fee_params.dd_outputs[1].amount = 900 - row.fee;
+            fee_params.dd_outputs[0].amount = row.recipient;
+            if (user_change == 0) fee_params.dd_outputs.erase(fee_params.dd_outputs.begin() + 1);
+            else fee_params.dd_outputs[1].amount = user_change;
             if (row.fee > 0 && row.fee < 100) {
                 CMutableTransaction carrier_source;
                 carrier_source.SetDigiDollarType(::DD_TX_TRANSFER);
@@ -386,7 +438,11 @@ BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_pay
                     DDCents{row.carrier}, DDCents{row.fee}, error);
                 BOOST_CHECK_EQUAL(successor.has_value(), row.output >= 0);
                 if (row.output < 0) {
-                    BOOST_CHECK(!BuildTrustedQuoteTemplate(m_wallet, intent, fee_quote,
+                    ProviderQuoteBuildResult rejected;
+                    BOOST_CHECK(!build_provider(rejected));
+                    BOOST_CHECK_EQUAL(error, row.carrier < 100
+                        ? "PAYMASTER_INVALID_QUOTE_FEE_SLOT" : "PAYMASTER_INVALID_CARRIER_SUCCESSOR");
+                    BOOST_CHECK(!BuildTrustedQuoteTemplate(m_wallet, fee_intent, fee_quote,
                         Params(), *m_node.chainman, reconstructed, error));
                     BOOST_CHECK_EQUAL(error, "PAYMASTER_CARRIER_OUTPUT_MISMATCH");
                     continue;
@@ -416,12 +472,26 @@ BOOST_AUTO_TEST_CASE(authentic_provider_cannot_replace_locally_reconstructed_pay
             BOOST_REQUIRE(CreateCollaborativePSBTTemplate(
                 fee_transaction.tx, fee_params.inputs, fee_template, error));
             fee_quote.template_commitment = GetCollaborativeTemplateCommitment(
-                intent, fee_quote, fee_template);
+                fee_intent, fee_quote, fee_template);
+
+            // Compare both production boundaries with the hand-arranged
+            // expected transaction above, including role and PSBT bytes.
+            ProviderQuoteBuildResult provider_built;
+            BOOST_REQUIRE_MESSAGE(build_provider(provider_built), error);
+            BOOST_CHECK(SerializePaymasterTestArtifact(provider_built.quote.unsigned_transaction) ==
+                        SerializePaymasterTestArtifact(fee_transaction.tx));
+            BOOST_CHECK(SerializePaymasterTestArtifact(provider_built.trusted_template.psbt) ==
+                        SerializePaymasterTestArtifact(fee_template.psbt));
+            BOOST_CHECK(provider_built.trusted_template.input_roles == fee_template.input_roles);
+            BOOST_CHECK(provider_built.quote.template_commitment == fee_quote.template_commitment);
             sign_quote(fee_quote, provider_key);
-            BOOST_REQUIRE_MESSAGE(BuildTrustedQuoteTemplate(m_wallet, intent, fee_quote,
+            BOOST_REQUIRE_MESSAGE(BuildTrustedQuoteTemplate(m_wallet, fee_intent, fee_quote,
                 Params(), *m_node.chainman, reconstructed, error), error);
             BOOST_REQUIRE(reconstructed.psbt.tx);
             BOOST_CHECK(CTransaction{*reconstructed.psbt.tx} == CTransaction{fee_transaction.tx});
+            BOOST_CHECK(SerializePaymasterTestArtifact(reconstructed.psbt) ==
+                        SerializePaymasterTestArtifact(fee_template.psbt));
+            BOOST_CHECK(reconstructed.input_roles == fee_template.input_roles);
         }
     }
 }
