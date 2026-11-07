@@ -34,10 +34,12 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <test/util/index.h>
+#include <test/util/mining.h>
 #include <txmempool.h>
 #include <util/readwritefile.h>
 #include <util/time.h>
 #include <validation.h>
+#include <validationinterface.h>
 #include <wallet/context.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymastercheckpoint.h>
@@ -62,8 +64,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <initializer_list>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -4787,6 +4792,57 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     WITH_LOCK(m_node.mempool->cs,
               m_node.mempool->removeRecursive(
                   *final_ref, MemPoolRemovalReason::CONFLICT));
+    // Freeze the validation scheduler, then advance the active chain after
+    // the durable commit. Recovery must finish without draining that queue.
+    // Run recovery on a separate worker so the old blocking implementation
+    // fails the bounded assertion but can still be released and joined.
+    {
+        auto lagging_database = std::make_unique<MockableDatabase>(signature_boundary_records);
+        wallet::CWallet lagging_wallet{m_node.chain.get(), "post-commit-index-lag", std::move(lagging_database)};
+        BOOST_REQUIRE(lagging_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        AlignSecurityFixtureCheckpoint(lagging_wallet.GetDatabase());
+        PaymasterStore lagging_store{lagging_wallet};
+        BOOST_REQUIRE_MESSAGE(lagging_store.CommitProviderFinalTransaction(request_id,
+            provider_signed.attempt_id, commit, result, result.genesis_hash, error), error);
+        ProviderBudgetLedger spent;
+        BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
+        const auto spent_bytes = SerializePaymasterSecurityObject(spent);
+        BOOST_REQUIRE_EQUAL(*m_node.chain->getHeight(), 0);
+        const auto block = CreateBlockChain(1, Params()).front();
+        std::promise<void> queue_entered, release_queue;
+        auto entered = queue_entered.get_future();
+        const auto release = release_queue.get_future().share();
+        CallFunctionInValidationInterfaceQueue([&queue_entered, release] {
+            queue_entered.set_value();
+            release.wait();
+        });
+        entered.wait();
+        auto work = std::async(std::launch::async, [&] {
+            bool new_block{false};
+            if (!m_node.chainman->ProcessNewBlock(block, true, true, &new_block) || !new_block) {
+                throw std::runtime_error("Failed to advance tip during provider commit recovery");
+            }
+            return paymaster_app::RecoverProviderCommit(lagging_wallet, lagging_store, commit, commit.committed_at);
+        });
+        const auto ready = work.wait_for(std::chrono::seconds{5});
+        release_queue.set_value();
+        const auto recovered = work.get();
+        SyncWithValidationInterfaceQueue();
+        BOOST_CHECK(ready == std::future_status::ready);
+        BOOST_CHECK_MESSAGE(recovered.broadcast, recovered.error);
+        BOOST_REQUIRE(m_node.mempool->get(final_ref->GetHash()));
+        ProviderCommitRecord saved;
+        BOOST_REQUIRE(lagging_store.GetProviderCommit(commit.commit_key, saved));
+        BOOST_CHECK(SerializePaymasterSecurityObject(saved) == SerializePaymasterSecurityObject(commit));
+        BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
+        BOOST_CHECK(SerializePaymasterSecurityObject(spent) == spent_bytes);
+        const auto replay = paymaster_app::RecoverProviderCommit(lagging_wallet, lagging_store, commit, commit.committed_at + 1);
+        BOOST_CHECK_MESSAGE(replay.broadcast, replay.error);
+        BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
+        BOOST_CHECK(SerializePaymasterSecurityObject(spent) == spent_bytes);
+        WITH_LOCK(m_node.mempool->cs, m_node.mempool->removeRecursive(*final_ref, MemPoolRemovalReason::CONFLICT));
+    }
+
     {
         LOCK(::cs_main);
         auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();

@@ -1753,7 +1753,12 @@ bool InsertAndBroadcastProviderCommit(CWallet& wallet,
     const CTransactionRef transaction = MakeTransactionRef(decoded);
     if (exact_transaction) *exact_transaction = transaction;
     FinalTransactionPresence presence{FinalTransactionPresence::NONE};
-    if (!PreflightFinalPaymasterTransaction(wallet, transaction, presence, error)) {
+    // Automatic submits reach this helper on the validation scheduler. A new
+    // tip may have arrived since the pre-commit check, so never wait for that
+    // same scheduler to drain the transaction-index notifications here.
+    if (!PreflightFinalPaymasterTransaction(
+            wallet, transaction, presence, error,
+            ExactFinalTxIndexMode::NONBLOCKING)) {
         return false;
     }
     return InsertAndBroadcastPaymasterTransaction(

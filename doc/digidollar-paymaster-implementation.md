@@ -272,6 +272,10 @@ not proof of a missing remote prevout unless the active UTXO view establishes it
 encoding and signatures against a previously validated local template. It does
 not replace the full chainstate validation or the checks immediately before signing.
 
+Automatic provider execution and durable-commit broadcast preflights never wait
+for transaction-index notifications on the shared validation scheduler. A tip
+change after the pre-commit check must not make the scheduler wait on itself.
+
 The generic `qt/walletasync.*` queue admits two concurrent pure reads. A mutation
 waits for earlier reads and blocks subsequent work until completion. Callers
 declare effects explicitly; unclassified work is a non-coalescible mutation.
