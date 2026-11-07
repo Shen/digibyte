@@ -8145,6 +8145,69 @@ BOOST_AUTO_TEST_CASE(client_result_read_failure_retains_incoming_message)
     BOOST_CHECK(SerializePaymasterTestObject(persisted) == SerializePaymasterTestObject(message.result));
 }
 
+BOOST_AUTO_TEST_CASE(client_result_corrupt_predecessor_retains_incoming_message)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto absent_rows = database.m_records;
+    PaymasterResultMessage message;
+    message.request_id = session.request_id;
+    message.session_id = session.session_id;
+    message.result = MakeClientViewResult(artifacts);
+    const auto encoded = SerializePaymasterTestObject(message);
+    const uint256 message_id{Hash(encoded)};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        BOOST_TEST_CONTEXT("readable corrupt predecessor " << scenario) {
+            database.m_records = absent_rows;
+            PaymasterResult previous{message.result};
+            if (scenario == 0) previous.result_sequence = 5; // Old signature, higher sequence.
+            if (scenario == 1) previous.identity_signature.back() ^= 1;
+            if (scenario == 2) previous.genesis_hash = uint256S("bad1");
+            if (scenario == 3) previous.provider_id = uint256S("bad2");
+            {
+                LOCK(m_wallet.cs_wallet);
+                BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(
+                    std::make_pair(DBKeys::PAYMASTER_RESULT, artifacts.attempt.commit_key), previous));
+            }
+            PaymasterResult readable;
+            BOOST_REQUIRE(store.GetProviderResultWithStatus(artifacts.attempt.commit_key, readable) == DatabaseReadStatus::FOUND);
+            const auto before = database.m_records;
+            Manager manager{true};
+            context.paymaster = &manager;
+            BOOST_REQUIRE(manager.EnqueueDirectMessage(41, message_id, encoded.size(), DirectPayload{message}, 110));
+            BOOST_CHECK_EXCEPTION(paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_RESULT_DATABASE_READ" &&
+                           failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+                });
+            BOOST_CHECK(database.m_records == before);
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+            manager.PruneDirectMessages(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+            BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+
+            // Repair only the local predecessor. The original retained inbox
+            // entry must be accepted without retransmission or new authority.
+            database.m_records = absent_rows;
+            const auto accepted = paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id);
+            BOOST_CHECK(accepted.processed.value_or(false));
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+            PaymasterResult persisted;
+            BOOST_REQUIRE(store.GetProviderResult(artifacts.attempt.commit_key, persisted));
+            BOOST_CHECK(SerializePaymasterTestObject(persisted) == SerializePaymasterTestObject(message.result));
+            const auto accepted_rows = database.m_records;
+            BOOST_CHECK(!paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id).processed.value_or(false));
+            BOOST_CHECK(database.m_records == accepted_rows);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(client_result_local_write_failure_retains_incoming_message)
 {
     ScopedRecoveryMockTime time{110};

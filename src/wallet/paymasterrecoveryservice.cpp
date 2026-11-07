@@ -37,6 +37,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 #include <util/chaintype.h>
 #include <util/overflow.h>
@@ -725,6 +726,35 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         if (!messages.empty()) {
             message = std::get_if<AlternativeRecoveryResultMessage>(
                 &messages.front().payload);
+            // The accepted manifest can authenticate a result for retention
+            // even when another local recovery artifact is damaged. This
+            // grants no execution authority; the complete record and final
+            // transaction still have to pass the checks below.
+            const auto& authorization = recovery.recovery_authorization;
+            std::string retention_error;
+            if (message &&
+                authorization.version == RecoveryAuthorizationManifest::CURRENT_VERSION &&
+                authorization.authorization_commitment == recovery.accepted_recovery_authorization_commitment &&
+                authorization.authorization_commitment == GetRecoveryAuthorizationCommitment(authorization) &&
+                authorization.request_id == recovery.request_id &&
+                authorization.session_id == recovery.session_id &&
+                authorization.recovery_provider_id == recovery.recovery_provider_id &&
+                message->recovery_id == authorization.recovery_id &&
+                message->recovery_request_hash == authorization.recovery_request_hash &&
+                ValidateAlternativeRecoveryResultEnvelope(*message, Params().GenesisBlock().GetHash(), now, retention_error) &&
+                ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
+                    authorization.recovery_provider_id, authorization.recovery_commit_key,
+                    recovery.recovery_provider_identity_key, 1, retention_error) &&
+                !context.paymaster->RetainAuthenticatedResult(messages.front())) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
+            }
+            // Local corruption must not turn a valid remote result into an
+            // acknowledged binding failure. Validate at historical creation
+            // times so an already signed recovery survives quote expiry.
+            if (!paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+                recovery.capacity_request.genesis_hash != Params().GenesisBlock().GetHash()) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RECOVERY_DATABASE_READ");
+            }
             if (!message || !ValidateAlternativeRecoveryResult(*message, recovery.recovery_response, recovery.recovery_provider_identity_key, Params().GenesisBlock().GetHash(), 1, now, error) ||
                 !message->result.final_transaction ||
                 !message->result.raw_transaction_hash) {

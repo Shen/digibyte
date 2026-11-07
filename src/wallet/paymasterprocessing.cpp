@@ -2468,6 +2468,13 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         PaymasterResult previous;
         const DatabaseReadStatus result_status = store.GetProviderResultWithStatus(attempt.commit_key, previous);
         if (result_status == DatabaseReadStatus::FOUND) {
+            // Readable local bytes are not sequence authority until their
+            // signature and wallet-local binding have been authenticated.
+            if (!ValidatePaymasterResult(previous, Params().GenesisBlock().GetHash(),
+                                         attempt.provider_id, attempt.commit_key,
+                                         attempt.provider_identity_key, 1, error)) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RESULT_DATABASE_READ");
+            }
             minimum_sequence = previous.result_sequence;
         } else if (result_status != DatabaseReadStatus::NOT_FOUND) {
             // Keep the incoming result queued until its durable predecessor can be read.

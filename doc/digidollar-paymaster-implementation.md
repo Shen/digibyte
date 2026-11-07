@@ -96,6 +96,9 @@ Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement
 follows durable acceptance. Proven invalid remote envelopes are discarded without
 releasing spending authority. A later broadcast failure uses the saved final bytes.
+Persisted predecessor results and recovery authority are authenticated before
+they can justify rejecting an incoming result. An intact accepted recovery
+manifest can authenticate retention while another local recovery artifact is damaged.
 After authenticating the expected provider and the wallet's own commit binding,
 the exact queue incarnation remains protected beyond the transport TTL, including
 between failed processing calls. It still consumes the existing inbox byte/count

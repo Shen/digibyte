@@ -5679,6 +5679,49 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
     };
     auto& database = GetMockableDatabase(client);
     const auto before = database.m_records;
+    const AlternativeRecoveryRecord authorized_recovery{recovery};
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        BOOST_TEST_CONTEXT("readable corrupt recovery authority " << scenario) {
+            AlternativeRecoveryRecord damaged{authorized_recovery};
+            if (scenario == 0) damaged.recovery_response.recovery_commit_key = SecurityTestId(seed, 127);
+            if (scenario == 1) damaged.recovery_request.original_commit_key = SecurityTestId(seed, 128);
+            if (scenario == 2) damaged.recovery_response.identity_signature.back() ^= 1;
+            {
+                LOCK(client.cs_wallet);
+                BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.WritePaymasterAlternativeRecovery(damaged));
+            }
+            AlternativeRecoveryRecord readable;
+            BOOST_REQUIRE(store.GetAlternativeRecoveryWithStatus(session.request_id, readable) == DatabaseReadStatus::FOUND);
+            const auto damaged_rows = database.m_records;
+            BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_RECOVERY_DATABASE_READ" &&
+                           failure.disposition == ErrorDisposition::RECONCILE && !failure.session_absent;
+                });
+            BOOST_CHECK(database.m_records == damaged_rows);
+            BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+            manager.PruneDirectMessages(now + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+            BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+            database.m_records = before;
+        }
+    }
+    // Intact local authority still permits rejection of a forged remote
+    // signature. It never receives authenticated-result TTL protection.
+    {
+        Manager invalid_manager{true};
+        context.paymaster = &invalid_manager;
+        auto invalid_result = result;
+        invalid_result.result.identity_signature.back() ^= 1;
+        const auto invalid_bytes = SerializePaymasterSecurityObject(invalid_result);
+        BOOST_REQUIRE(invalid_manager.EnqueueDirectMessage(45, Hash(invalid_bytes), invalid_bytes.size(), DirectPayload{invalid_result}, now));
+        BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::INVALID_INPUT && failure.code == "PAYMASTER_INVALID_RESULT_SIGNATURE";
+            });
+        BOOST_CHECK_EQUAL(invalid_manager.DirectMessageCount(), 0U);
+        BOOST_CHECK(database.m_records == before);
+        context.paymaster = &manager;
+    }
     database.FailCommit();
     BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
         [](const ApplicationError& failure) { return failure.code == "PAYMASTER_DATABASE_COMMIT"; });
