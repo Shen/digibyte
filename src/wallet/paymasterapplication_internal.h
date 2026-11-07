@@ -9,6 +9,7 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/walletdb.h>
 #include <paymaster/validation.h>
+#include <paymaster/client.h>
 #include <interfaces/chain.h>
 #include <streams.h>
 #include <version.h>
@@ -45,14 +46,7 @@ bool DeserializePaymasterBytes(const std::vector<unsigned char>& bytes, const ch
     return true;
 }
 
-uint256 CanonicalClientRequestHash(
-    const std::string& request_id, const CScript& recipient_script,
-    DigiDollar::Paymaster::DDCents order_amount, DigiDollar::Paymaster::DDCents fee_cap, const std::vector<COutPoint>& inputs,
-    DigiDollar::Paymaster::FeeMode mode, DigiDollar::Paymaster::PrivacyProfile privacy, DigiDollar::Paymaster::SelectionMode selection,
-    int maximum_attempts, bool subtract_fee, bool send_all,
-    const std::optional<XOnlyPubKey>& restricted_key,
-    const std::optional<DigiDollar::Paymaster::RestrictedServiceDescriptor>& descriptor,
-    const std::optional<DigiDollar::Paymaster::SponsorshipCapability>& capability);
+using DigiDollar::Paymaster::CanonicalClientRequestHash;
 /** Reconstruct retry identity without renewing historical sponsorship authority. */
 uint256 CanonicalClientRequestHash(
     const ClientPaymentOptions& input, DigiDollar::Paymaster::DDCents order_amount,

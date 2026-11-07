@@ -20,6 +20,16 @@
 
 namespace DigiDollar::Paymaster {
 
+/** Stable v1 request identity, including historical Restricted bindings. */
+uint256 CanonicalClientRequestHash(
+    const std::string& request_id, const CScript& recipient_script,
+    DDCents order_amount, DDCents fee_cap, const std::vector<COutPoint>& inputs,
+    FeeMode mode, PrivacyProfile privacy, SelectionMode selection,
+    int maximum_attempts, bool subtract_fee, bool send_all,
+    const std::optional<XOnlyPubKey>& restricted_key,
+    const std::optional<RestrictedServiceDescriptor>& descriptor,
+    const std::optional<SponsorshipCapability>& capability);
+
 struct OfferCandidate {
     PaymasterId provider_id;
     XOnlyPubKey identity_key;

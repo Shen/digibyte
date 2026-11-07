@@ -9,6 +9,7 @@
  */
 
 #include <paymaster/client.h>
+#include <hash.h>
 
 #include <algorithm>
 #include <limits>
@@ -26,6 +27,29 @@ bool IsP2TR(const CScript& script)
 }
 
 } // namespace
+
+uint256 CanonicalClientRequestHash(
+    const std::string& request_id, const CScript& recipient_script,
+    DDCents order_amount, DDCents fee_cap, const std::vector<COutPoint>& inputs,
+    FeeMode mode, PrivacyProfile privacy, SelectionMode selection,
+    int maximum_attempts, bool subtract_fee, bool send_all,
+    const std::optional<XOnlyPubKey>& restricted_key,
+    const std::optional<RestrictedServiceDescriptor>& descriptor,
+    const std::optional<SponsorshipCapability>& capability)
+{
+    HashWriter hasher = TaggedHash("DigiByte Paymaster RPC Request v1");
+    hasher << request_id << recipient_script << order_amount << fee_cap << inputs
+           << static_cast<uint8_t>(mode) << static_cast<uint8_t>(privacy)
+           << static_cast<uint8_t>(selection) << maximum_attempts;
+    if (subtract_fee || send_all) {
+        hasher << std::string{"gross-amount-v1"} << order_amount << subtract_fee << send_all;
+    }
+    if (restricted_key) {
+        hasher << *restricted_key << GetRestrictedDescriptorSignatureHash(*descriptor)
+               << GetSponsorshipCapabilityHash(*capability);
+    }
+    return hasher.GetSHA256();
+}
 
 bool OfferCandidateLess(const OfferCandidate& lhs, const OfferCandidate& rhs,
                         bool fixed_user_total)
