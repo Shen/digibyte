@@ -78,6 +78,7 @@ QString ProviderFinance::financeEventKind(const QString& kind)
     if (kind == QLatin1String("replenishment")) return tr("Liquidity replenishment");
     if (kind == QLatin1String("retirement")) return tr("Liquidity retirement");
     if (kind == QLatin1String("withdrawal")) return tr("Carrier withdrawal");
+    if (kind == QLatin1String("recovery")) return tr("Payment recovery");
     return tr("Unknown booking");
 }
 
@@ -91,6 +92,7 @@ QString ProviderFinance::financeEventState(const QString& state)
 
 QString ProviderFinance::financeFundingModel(const UniValue& event)
 {
+    if (event.find_value("kind").isStr() && event.find_value("kind").get_str() == "recovery") return tr("Recovery");
     const UniValue& model = event.find_value("funding_model");
     if (!model.isStr()) return tr("Maintenance");
     const QString funding = QString::fromStdString(model.get_str());
@@ -977,7 +979,7 @@ void ProviderFinance::buildFinance(PageBindings& pages)
     auto* breakdown_grid = new QGridLayout;
     breakdown_layout->addLayout(breakdown_grid);
     grid_headers(breakdown_grid, {tr("Source"), tr("Payments"), tr("Income (DD)"), tr("Costs (DGB)")});
-    const std::array<QString, 5> source_titles{tr("Customer-paid payments"), tr("Public sponsorship"), tr("Restricted sponsorship"), tr("Reserve maintenance"), tr("Total")};
+    const std::array<QString, 5> source_titles{tr("Customer-paid payments"), tr("Public sponsorship"), tr("Restricted sponsorship"), tr("Recovery and reserve maintenance"), tr("Total")};
     const std::array<QString, 5> source_keys{QStringLiteral("user_paid"), QStringLiteral("public_sponsored"), QStringLiteral("restricted_sponsored"), QStringLiteral("maintenance"), QStringLiteral("total")};
     const std::array<QString, 3> source_columns{QStringLiteral("transfers"), QStringLiteral("income"), QStringLiteral("costs")};
     const std::array<QString, 3> source_column_titles{tr("Payments"), tr("Income (DD)"), tr("Costs (DGB)")};
@@ -990,7 +992,7 @@ void ProviderFinance::buildFinance(PageBindings& pages)
             breakdown_grid->addWidget(value, row + 1, column + 1);
         }
     }
-    breakdown_layout->addWidget(financeLabel(tr("Reserve maintenance includes setup, refill, withdrawal and release fees. Capital held in reserves is not an expense."), breakdown, "mutedText"));
+    breakdown_layout->addWidget(financeLabel(tr("Recovery and reserve maintenance costs include returns to the sending wallet, setup, refill, withdrawal and release fees. Capital held in reserves is not an expense."), breakdown, "mutedText"));
     finance_layout->addWidget(breakdown);
 
     auto* comparison = finance_group(tr("Reporting periods compared"));

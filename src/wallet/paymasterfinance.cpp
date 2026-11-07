@@ -52,6 +52,7 @@ struct FinanceState {
     std::map<uint256, ProviderMaintenanceRecord> maintenance;
     std::set<uint256> setup_transactions;
     std::map<uint256, uint256> attempts_by_commit;
+    std::map<uint256, uint256> recoveries_by_commit;
     std::map<uint256, uint256> commit_transactions;
 
     void Mark(FinanceWorkKind kind, const uint256& id, bool required = false)
@@ -69,6 +70,7 @@ struct PendingFinanceChanges {
     std::optional<ProviderMaintenanceLedger> maintenance;
     std::optional<std::vector<ProviderPoolEntry>> pool;
     std::map<uint256, std::pair<PaymasterId, uint256>> attempts;
+    std::map<uint256, std::pair<PaymasterId, uint256>> recoveries;
     std::map<uint256, std::pair<PaymasterId, uint256>> commits;
     std::set<uint256> events;
     bool rebuild{false};
@@ -197,6 +199,31 @@ ProviderFinanceEvent TransferEvent(const ProviderIdentityRecord& identity,
     return event;
 }
 
+bool RecoveryEvent(const ProviderIdentityRecord& identity, const AlternativeRecoveryRecord& recovery,
+                    const ProviderCommitRecord& commit, ProviderFinanceEvent& event, std::string& error)
+{
+    CMutableTransaction transaction;
+    std::vector<COutPoint> provider_inputs;
+    if (identity.provider_id != recovery.recovery_provider_id ||
+        identity.identity_key != recovery.recovery_provider_identity_key ||
+        recovery.capacity_request.genesis_hash != Params().GenesisBlock().GetHash() ||
+        !paymaster_store::internal::ValidateProviderAlternativeRecoveryCommitBinding(
+            recovery, commit, transaction, provider_inputs, error)) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_RECOVERY_BINDING_MISMATCH";
+        return false;
+    }
+    event = {};
+    event.event_id = commit.commit_key;
+    event.genesis_hash = Params().GenesisBlock().GetHash();
+    event.provider_id = identity.provider_id;
+    event.kind = ProviderFinanceEventKind::RECOVERY;
+    event.transaction_id = commit.final_txid;
+    event.dd_income = recovery.recovery_response.manifest.service_fee;
+    event.dgb_cost = recovery.recovery_response.manifest.network_fee;
+    event.created_at = event.updated_at = commit.committed_at;
+    return ValidateProviderFinanceEvent(event, error);
+}
+
 uint256 NativeFinanceEventId(const PaymasterId& provider, ProviderFinanceEventKind kind, const uint256& txid)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Finance Event v1");
@@ -229,6 +256,15 @@ void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& datab
 {
     QueueFinanceChange(owner, database, [&](auto& changes) {
         changes.commits[commit.commit_key] = {commit.provider_id, commit.final_txid};
+    });
+}
+
+void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& database, const AlternativeRecoveryRecord& recovery)
+{
+    if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED) return;
+    QueueFinanceChange(owner, database, [&](auto& changes) {
+        changes.recoveries[recovery.recovery_response.recovery_commit_key] =
+            {recovery.recovery_provider_id, recovery.recovery_id};
     });
 }
 
@@ -303,6 +339,11 @@ void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
         if (transaction.first != state->provider) continue;
         state->commit_transactions[commit] = transaction.second;
         state->Mark(FinanceWorkKind::EVENT, commit);
+    }
+    for (const auto& [commit, recovery] : changes.recoveries) {
+        if (recovery.first != state->provider) continue;
+        state->recoveries_by_commit[commit] = recovery.second;
+        if (state->commit_transactions.count(commit)) state->Mark(FinanceWorkKind::EVENT, commit);
     }
     for (const auto& id : changes.events) state->Mark(FinanceWorkKind::EVENT, id, true);
 }
@@ -515,11 +556,33 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         error = "PAYMASTER_FINANCE_COMMIT_SCAN_FAILED";
         return false;
     }
+    std::vector<AlternativeRecoveryRecord> recoveries;
+    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
+        error = "PAYMASTER_FINANCE_RECOVERY_SCAN_FAILED";
+        return false;
+    }
+    std::map<uint256, const AlternativeRecoveryRecord*> recoveries_by_commit;
+    for (const auto& recovery : recoveries) {
+        if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
+            recovery.recovery_provider_id != identity.provider_id) continue;
+        if (!recoveries_by_commit.emplace(recovery.recovery_response.recovery_commit_key, &recovery).second) {
+            error = "PAYMASTER_FINANCE_RECOVERY_BINDING_MISMATCH";
+            return false;
+        }
+    }
     for (const ProviderCommitRecord& commit : commits) {
         if (commit.provider_id != identity.provider_id) continue;
         const auto attempt = attempts_by_commit.find(commit.commit_key);
         if (attempt == attempts_by_commit.end() ||
             attempt->second.provider_manifest.manifest_id.IsNull()) {
+            const auto recovery = recoveries_by_commit.find(commit.commit_key);
+            if (recovery != recoveries_by_commit.end()) {
+                ProviderFinanceEvent event;
+                if (!RecoveryEvent(identity, *recovery->second, commit, event, error)) return false;
+                transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at);
+                if (!apply_event(std::move(event))) return false;
+                continue;
+            }
             if (!finance.earlier_history_partial) {
                 finance.earlier_history_partial = true;
                 ledger_changed = true;
@@ -585,6 +648,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         }
         observed->attempts_by_commit.clear();
         for (const auto& [commit, attempt] : attempts_by_commit) observed->attempts_by_commit.emplace(commit, attempt.attempt_id);
+        observed->recoveries_by_commit.clear();
+        for (const auto& [commit, recovery] : recoveries_by_commit) observed->recoveries_by_commit.emplace(commit, recovery->recovery_id);
         observed->commit_transactions.clear();
         for (const auto& commit : commits) {
             if (commit.provider_id == identity.provider_id) observed->commit_transactions.emplace(commit.commit_key, commit.final_txid);
@@ -721,6 +786,7 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
             std::optional<ProviderMaintenanceRecord> maintenance;
             bool have_commit{false};
             uint256 attempt_id;
+            uint256 recovery_id;
             {
                 std::lock_guard<std::mutex> lock{state->mutex};
                 const auto found = state->maintenance.find(key.second);
@@ -728,6 +794,8 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                 have_commit = state->commit_transactions.count(key.second) != 0;
                 const auto attempt = state->attempts_by_commit.find(key.second);
                 if (attempt != state->attempts_by_commit.end()) attempt_id = attempt->second;
+                const auto recovery = state->recoveries_by_commit.find(key.second);
+                if (recovery != state->recoveries_by_commit.end()) recovery_id = recovery->second;
             }
             bool have_event = status == DatabaseReadStatus::FOUND;
             if (maintenance) {
@@ -749,6 +817,14 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                 }
                 if (attempt_status == DatabaseReadStatus::FOUND && !attempt.provider_manifest.manifest_id.IsNull()) {
                     event = TransferEvent(identity, attempt, commit);
+                    have_event = true;
+                } else if (!recovery_id.IsNull()) {
+                    AlternativeRecoveryRecord recovery;
+                    if (batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery) != DatabaseReadStatus::FOUND ||
+                        !RecoveryEvent(identity, recovery, commit, event, error)) {
+                        if (error.empty()) error = "PAYMASTER_FINANCE_RECOVERY_READ_FAILED";
+                        return false;
+                    }
                     have_event = true;
                 } else metadata.earlier_history_partial = true;
             }
@@ -944,9 +1020,12 @@ ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, Provid
             return record.state == ProviderMaintenanceState::PLANNED || record.state == ProviderMaintenanceState::BROADCAST;
         });
     for (size_t i = 0; i < result.report.periods.size(); ++i) {
-        const auto& totals = result.report.periods[i].total;
-        result.average_service_fee[i] = DDCents{totals.successful_transfers == 0 ? 0 :
-            int64_t(uint64_t(totals.dd_income.value) / totals.successful_transfers)};
+        const auto& totals = result.report.periods[i];
+        // Recovery income belongs to operating totals, never to recipient
+        // payment counts or their average service fee.
+        const int64_t transfer_income = totals.income[0] + totals.income[1] + totals.income[2];
+        result.average_service_fee[i] = DDCents{totals.total.successful_transfers == 0 ? 0 :
+            int64_t(uint64_t(transfer_income) / totals.total.successful_transfers)};
     }
     if (query.include_events) {
         const int64_t today = (query.now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
@@ -1076,11 +1155,9 @@ namespace paymaster_store::internal {
 /** Prepare the accounting side of a provider commit. The exact service fee
  * and network fee are bound in the provider authorization manifest, so this
  * event can share the same database transaction as the durable commit. */
-bool PrepareProviderTransferFinanceEvent(
+static bool PrepareProviderFinanceEvent(
     WalletBatch& batch,
     const ProviderIdentityRecord& identity,
-    const ProviderAttempt& attempt,
-    const ProviderCommitRecord& commit,
     const uint256& expected_genesis,
     ProviderFinanceMetadata& ledger,
     ProviderFinanceEvent& event,
@@ -1098,10 +1175,10 @@ bool PrepareProviderTransferFinanceEvent(
     if (!have_ledger) {
         ledger.genesis_hash = expected_genesis;
         ledger.provider_id = identity.provider_id;
-        ledger.history_complete_from = commit.committed_at;
+        ledger.history_complete_from = event.created_at;
         ledger.earlier_history_partial =
-            identity.created_at < commit.committed_at;
-        ledger.updated_at = commit.committed_at;
+            identity.created_at < event.created_at;
+        ledger.updated_at = event.created_at;
         changed = true;
     }
     if (ledger.genesis_hash != expected_genesis ||
@@ -1110,12 +1187,6 @@ bool PrepareProviderTransferFinanceEvent(
         return false;
     }
 
-    const ProviderAuthorizationManifest& manifest = attempt.provider_manifest;
-    if (manifest.manifest_id.IsNull()) {
-        error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
-        return false;
-    }
-    event = TransferEvent(identity, attempt, commit);
     event.genesis_hash = expected_genesis;
 
     ProviderFinanceEvent existing;
@@ -1131,6 +1202,30 @@ bool PrepareProviderTransferFinanceEvent(
         return false;
     }
     return ValidateProviderFinanceEvent(event, error);
+}
+
+bool PrepareProviderTransferFinanceEvent(
+    WalletBatch& batch, const ProviderIdentityRecord& identity,
+    const ProviderAttempt& attempt, const ProviderCommitRecord& commit,
+    const uint256& expected_genesis, ProviderFinanceMetadata& ledger,
+    ProviderFinanceEvent& event, bool& changed, std::string& error)
+{
+    if (attempt.provider_manifest.manifest_id.IsNull()) {
+        error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
+        return false;
+    }
+    event = TransferEvent(identity, attempt, commit);
+    return PrepareProviderFinanceEvent(batch, identity, expected_genesis, ledger, event, changed, error);
+}
+
+bool PrepareProviderRecoveryFinanceEvent(
+    WalletBatch& batch, const ProviderIdentityRecord& identity,
+    const AlternativeRecoveryRecord& recovery, const ProviderCommitRecord& commit,
+    ProviderFinanceMetadata& ledger, ProviderFinanceEvent& event,
+    bool& changed, std::string& error)
+{
+    if (!RecoveryEvent(identity, recovery, commit, event, error)) return false;
+    return PrepareProviderFinanceEvent(batch, identity, Params().GenesisBlock().GetHash(), ledger, event, changed, error);
 }
 
 } // namespace paymaster_store::internal

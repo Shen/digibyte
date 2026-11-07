@@ -9,6 +9,7 @@ struct ProviderAttempt;
 struct ProviderCommitRecord;
 struct ProviderMaintenanceLedger;
 struct ProviderPoolEntry;
+struct AlternativeRecoveryRecord;
 }
 namespace wallet {
 class WalletBatch;
@@ -23,6 +24,8 @@ void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderAttempt&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderCommitRecord&);
+void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
+                                 const DigiDollar::Paymaster::AlternativeRecoveryRecord&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderMaintenanceLedger&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,

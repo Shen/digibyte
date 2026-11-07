@@ -990,7 +990,7 @@ RPCHelpMan getpaymasterfinancestatus()
             {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
             {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
             {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
-            {RPCResult::Type::NUM, "average_service_fee_cents", "Average DD income per confirmed transfer"},
+            {RPCResult::Type::NUM, "average_service_fee_cents", "Average service fee per confirmed recipient transfer"},
             {RPCResult::Type::NUM, "user_paid_transfers", "Confirmed user-paid transfers"},
             {RPCResult::Type::NUM, "public_sponsored_transfers", "Confirmed public sponsored transfers"},
             {RPCResult::Type::NUM, "restricted_sponsored_transfers", "Confirmed restricted sponsored transfers"},
@@ -1006,7 +1006,7 @@ RPCHelpMan getpaymasterfinancestatus()
                     {RPCResult::Type::NUM, "service_fee_income_cents", "Confirmed DD service-fee income"},
                     {RPCResult::Type::NUM, "dgb_operating_cost_satoshis", "Confirmed DGB operating costs"},
                     {RPCResult::Type::NUM, "successful_transfers", "Confirmed Paymaster transfers"},
-                    {RPCResult::Type::NUM, "average_service_fee_cents", "Average DD income per confirmed transfer"},
+                    {RPCResult::Type::NUM, "average_service_fee_cents", "Average service fee per confirmed recipient transfer"},
                     {RPCResult::Type::NUM, "user_paid_transfers", "Confirmed user-paid transfers"},
                     {RPCResult::Type::NUM, "public_sponsored_transfers", "Confirmed public sponsored transfers"},
                     {RPCResult::Type::NUM, "restricted_sponsored_transfers", "Confirmed restricted sponsored transfers"},
@@ -1041,7 +1041,7 @@ RPCHelpMan getpaymasterfinancestatus()
             {RPCResult::Type::ARR, "events", /*optional=*/true, "Accounting events", {
                 {RPCResult::Type::OBJ, "", "Finance event", {
                     {RPCResult::Type::STR_HEX, "event_id", "Stable idempotency key"},
-                    {RPCResult::Type::STR, "kind", "transfer, setup, replenishment, retirement, or withdrawal"},
+                    {RPCResult::Type::STR, "kind", "transfer, recovery, setup, replenishment, retirement, or withdrawal"},
                     {RPCResult::Type::STR, "state", "pending, confirmed, or invalidated"},
                     {RPCResult::Type::NUM, "dd_income_cents", "Native DD income"},
                     {RPCResult::Type::NUM, "dgb_cost_satoshis", "Native DGB cost"},

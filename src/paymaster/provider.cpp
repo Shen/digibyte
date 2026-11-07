@@ -1224,6 +1224,7 @@ bool ValidateProviderFinanceEvent(const ProviderFinanceEvent& event,
 {
     error.clear();
     const bool transfer = event.kind == ProviderFinanceEventKind::TRANSFER;
+    const bool recovery = event.kind == ProviderFinanceEventKind::RECOVERY;
     if (event.version != ProviderFinanceEvent::CURRENT_VERSION ||
         event.event_id.IsNull() || event.genesis_hash.IsNull() ||
         event.provider_id.IsNull() || event.transaction_id.IsNull() ||
@@ -1236,7 +1237,9 @@ bool ValidateProviderFinanceEvent(const ProviderFinanceEvent& event,
           event.confirmed_at > event.updated_at)) ||
         (event.state != ProviderFinanceEventState::CONFIRMED &&
          event.confirmed_at != 0) ||
-        (!transfer && event.dd_income.value != 0) ||
+        (!transfer && !recovery && event.dd_income.value != 0) ||
+        (recovery && (event.funding_model != FundingModel::USER_PAID ||
+                      event.sponsorship_scope != SponsorshipScope::PUBLIC)) ||
         (transfer && event.funding_model == FundingModel::SPONSORED &&
          event.dd_income.value != 0)) {
         error = "PAYMASTER_INVALID_FINANCE_EVENT";
@@ -1293,7 +1296,7 @@ bool RebuildProviderFinanceDailyTotals(ProviderFinanceLedger& ledger,
             } else {
                 if (!increment(total.restricted_sponsored_transfers)) return false;
             }
-        } else {
+        } else if (event.kind != ProviderFinanceEventKind::RECOVERY) {
             if (!increment(total.maintenance_transactions)) return false;
         }
     }

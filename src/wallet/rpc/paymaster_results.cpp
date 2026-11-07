@@ -182,6 +182,7 @@ UniValue ToJSON(const ProviderFinanceStatus& value)
             case ProviderFinanceEventKind::LIQUIDITY_REPLENISHMENT: return "replenishment";
             case ProviderFinanceEventKind::POOL_RETIREMENT: return "retirement";
             case ProviderFinanceEventKind::CARRIER_WITHDRAWAL: return "withdrawal";
+            case ProviderFinanceEventKind::RECOVERY: return "recovery";
             }
             return "invalid";
         };

@@ -65,7 +65,7 @@ bool ApplyProviderFinanceContribution(ProviderFinanceTotals& totals,
         if (model == 2) delta.total.restricted_sponsored_transfers = 1;
         delta.income[model] = event.dd_income.value;
         delta.cost[model] = event.dgb_cost.value;
-    } else {
+    } else if (event.kind != ProviderFinanceEventKind::RECOVERY) {
         delta.total.maintenance_transactions = 1;
     }
     return AdjustFinanceTotals(totals, delta, sign, error);

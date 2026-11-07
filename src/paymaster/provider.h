@@ -343,6 +343,7 @@ enum class ProviderFinanceEventKind : uint8_t {
     LIQUIDITY_REPLENISHMENT,
     POOL_RETIREMENT,
     CARRIER_WITHDRAWAL,
+    RECOVERY,
 };
 
 enum class ProviderFinanceEventState : uint8_t {
@@ -374,7 +375,7 @@ struct ProviderFinanceEvent {
         READWRITE(
             obj.version, obj.event_id, obj.genesis_hash, obj.provider_id,
             Using<EnumByteFormatter<static_cast<uint8_t>(
-                ProviderFinanceEventKind::CARRIER_WITHDRAWAL)>>(obj.kind),
+                ProviderFinanceEventKind::RECOVERY)>>(obj.kind),
             Using<EnumByteFormatter<static_cast<uint8_t>(
                 ProviderFinanceEventState::INVALIDATED)>>(obj.state),
             Using<EnumByteFormatter<static_cast<uint8_t>(

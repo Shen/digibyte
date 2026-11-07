@@ -73,6 +73,14 @@ bool PrepareProviderTransferFinanceEvent(WalletBatch& batch,
                                          ProviderFinanceEvent& event,
                                          bool& changed,
                                          std::string& error);
+bool PrepareProviderRecoveryFinanceEvent(WalletBatch& batch,
+                                         const ProviderIdentityRecord& identity,
+                                         const AlternativeRecoveryRecord& recovery,
+                                         const ProviderCommitRecord& commit,
+                                         ProviderFinanceMetadata& ledger,
+                                         ProviderFinanceEvent& event,
+                                         bool& changed,
+                                         std::string& error);
 bool HasAuthorizationRisk(SessionState state);
 bool AttemptHasReached(AttemptState state, AttemptState threshold);
 bool HasTimelyDurableProviderSignature(const ProviderAttempt& attempt);

@@ -12,6 +12,7 @@
 #include <digidollar/validation.h>
 #include <hash.h>
 #include <node/context.h>
+#include <paymaster/finance.h>
 #include <paymaster/protocol.h>
 #include <paymaster/psbt.h>
 #include <paymaster/validation.h>
@@ -1679,13 +1680,18 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
         commit.commit_key, existing_commit);
     const bool have_result = batch.ReadPaymasterResult(
         commit.commit_key, existing_result);
+    ProviderFinanceMetadata finance;
+    ProviderFinanceEvent finance_event;
+    bool finance_changed{false};
+    if (!PrepareProviderRecoveryFinanceEvent(batch, identity, recovery, commit,
+                                            finance, finance_event, finance_changed, error)) return false;
     if (current.phase == AlternativeRecoveryPhase::FINAL_COMMITTED ||
         have_commit || have_result) {
         if (have_commit && have_result && SameCommit(existing_commit, commit) &&
             SameResult(existing_result, result) &&
             SameAlternativeRecoveryRecord(current, recovery) &&
             ValidateRetainedProviderRecoveryBudget(batch, current, budget_ledger, error)) {
-            return true;
+            return !finance_changed || batch.WritePaymasterFinanceEvents(finance, {finance_event}, error);
         }
         if (!error.empty()) return false;
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT";
@@ -1741,7 +1747,8 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
         !batch.WritePaymasterProviderCommit(commit, false) ||
         !batch.WritePaymasterResult(result, false) ||
         !batch.WritePaymasterProviderPool(pool) ||
-        !batch.WritePaymasterProviderBudgetLedger(budget_ledger)) {
+        !batch.WritePaymasterProviderBudgetLedger(budget_ledger) ||
+        (finance_changed && !batch.WritePaymasterFinanceEvents(finance, {finance_event}, error))) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     }
     if (!batch.TxnCommit()) {

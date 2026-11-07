@@ -2541,6 +2541,10 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
                         event.pushKV("confirmed_at",
                                      static_cast<int64_t>(1001 + index));
                         event.pushKV("funding_model", "user_paid");
+                        if (index == 1) {
+                            event.pushKV("kind", "recovery");
+                            event.pushKV("funding_model", UniValue{});
+                        }
                         event.pushKV("transaction_id",
                                      std::string(64, 'c'));
                         page_events.push_back(std::move(event));
@@ -2913,6 +2917,10 @@ void PaymasterWidgetTests::paymasterFinancesAndBackupWorkflow()
         QVERIFY(ParseInt64(cost_digits.toStdString(), &cost));
         QCOMPARE(income, CSV_AMOUNTS.at(index).first);
         QCOMPARE(cost, CSV_AMOUNTS.at(index).second);
+        if (index == 1) {
+            QCOMPARE(cells.at(1), QByteArray{"\"Payment recovery\""});
+            QCOMPARE(cells.at(5), QByteArray{"\"Recovery\""});
+        }
     }
 }
 
@@ -2947,6 +2955,10 @@ void PaymasterWidgetTests::paymasterFinancePaging()
             UniValue event = result.find_value("events")[0];
             event.pushKV("event_id", QStringLiteral("%1").arg(id, 64, 16, QLatin1Char('0')).toStdString());
             event.pushKV("dd_income_cents", id);
+            if (id == 2) {
+                event.pushKV("kind", "recovery");
+                event.pushKV("funding_model", UniValue{});
+            }
             events.push_back(std::move(event));
         };
         add_event(event_ids.at(index));
@@ -2970,6 +2982,8 @@ void PaymasterWidgetTests::paymasterFinancePaging()
     QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.01"));
     next->click();
     QCOMPARE(bookings->item(0, 3)->text(), QStringLiteral("0.02"));
+    QCOMPARE(bookings->item(0, 1)->text(), QStringLiteral("Payment recovery"));
+    QCOMPARE(bookings->item(0, 5)->text(), QStringLiteral("Recovery"));
     QVERIFY(page_status->text().contains(QStringLiteral("Page 2")));
 
     fault = PageFault::DUPLICATE_IN_PAGE;
