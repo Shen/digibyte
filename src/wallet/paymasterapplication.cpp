@@ -2047,51 +2047,42 @@ bool RunAutomaticCarrierReplenishment(
     if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
 
     LOCK(wallet.cs_wallet);
-    PaymasterCheckpointOperation checkpoint{wallet};
-    if (!checkpoint.Begin(error)) return false;
-    std::string txid_string;
     std::string transfer_error;
-    if (!dd_wallet->TransferDigiDollarMany(
-            recipients, txid_string, transfer_error,
-            /*dd_change_out=*/nullptr,
-            /*preset_dd_inputs=*/nullptr,
-            "Paymaster automatic carrier replenishment",
-            /*allow_paymaster_pool_inputs=*/false,
-            /*exact_plan=*/&plan)) {
+    CMutableTransaction built;
+    // A stale selection or unavailable key can still fail without publishing
+    // spending authority. Finish exact validation/signing before fencing the
+    // wallet-native commit and its separately persisted maintenance accounting.
+    if (!dd_wallet->BuildDigiDollarTransfer(plan, built, transfer_error)) {
         error = "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + transfer_error;
         return false;
     }
-    const uint256 txid = uint256S(txid_string);
-    CTransactionRef transaction;
-    {
-        LOCK(wallet.cs_wallet);
-        const auto found = wallet.mapWallet.find(txid);
-        if (found != wallet.mapWallet.end()) transaction = found->second.tx;
-    }
-    if (!transaction) {
-        error = "PAYMASTER_MAINTENANCE_TRANSACTION_NOT_IN_WALLET";
-        return false;
-    }
-    CAmount actual_fee{0};
-    {
-        LOCK(wallet.cs_wallet);
-        const CAmount debit = wallet.GetDebit(*transaction, ISMINE_ALL);
-        const CAmount value_out = transaction->GetValueOut();
-        if (debit < value_out) {
-            error = "PAYMASTER_MAINTENANCE_FEE_INVALID";
-            return false;
-        }
-        actual_fee = debit - value_out;
-    }
+    const CTransactionRef transaction = MakeTransactionRef(std::move(built));
+    const auto fee = GetProviderFinanceTransactionFee(wallet, transaction);
     // The DD planner returns a conservative signed-size fee ceiling.  The
     // finalized transaction may pay less when its exact witness/change shape
     // is smaller, but it must never exceed the previewed ceiling or the
     // operator's absolute maintenance limit.
-    if (actual_fee <= 0 || actual_fee > plan.estimated_fee ||
-        actual_fee > operation->maximum_fee.value) {
+    if (!fee || fee->value <= 0 || fee->value > plan.estimated_fee ||
+        fee->value > operation->maximum_fee.value) {
         error = "PAYMASTER_MAINTENANCE_FEE_CHANGED";
         return false;
     }
+    const CAmount actual_fee = fee->value;
+    PaymasterCheckpointOperation checkpoint{wallet};
+    if (!checkpoint.Begin(error)) return false;
+    if (!wallet.CommitTransaction(transaction,
+            {{"comment", "Paymaster automatic carrier replenishment"}}, {}, &transfer_error)) {
+        error = "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + transfer_error;
+        return false;
+    }
+    const uint256 txid = transaction->GetHash();
+    if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
+        error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED";
+        return false;
+    }
+    if (!dd_wallet->RecordPaymasterSendHistory(txid, operation->outputs.front().script_pub_key,
+            plan.total_amount, error, "Paymaster automatic carrier replenishment",
+            /*multiple_recipients=*/recipients.size() > 1)) return false;
 
     {
         LOCK(wallet.cs_wallet);

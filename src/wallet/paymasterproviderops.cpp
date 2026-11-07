@@ -684,60 +684,46 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
     }
 
     LOCK(wallet->cs_wallet);
-    PaymasterCheckpointOperation checkpoint{*wallet};
-    if (!checkpoint.Begin(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
-    std::string txid_string;
-    if (!dd_wallet->TransferDigiDollarMany(
-            recipients, txid_string, transfer_error,
-            /*dd_change_out=*/nullptr,
-            &plan.source_carriers,
-            "Paymaster carrier excess withdrawal",
-            /*allow_paymaster_pool_inputs=*/true,
-            /*exact_plan=*/&transfer_plan)) {
-        // The exact sources stay reserved. A retry first reconciles
-        // any transaction that may have crossed the commit boundary.
+    CMutableTransaction built;
+    // Revalidate the exact inputs and finish private signing before the
+    // irreversible wallet commit needs its independent checkpoint fence.
+    if (!dd_wallet->BuildDigiDollarTransfer(transfer_plan, built, transfer_error,
+            /*allow_paymaster_pool_inputs=*/true)) {
         throw ApplicationError(
             ErrorKind::WALLET,
             "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " +
                 transfer_error);
     }
-    const uint256 txid = uint256S(txid_string);
-    CTransactionRef transaction;
-    {
-        LOCK(wallet->cs_wallet);
-        const auto found = wallet->mapWallet.find(txid);
-        if (found != wallet->mapWallet.end()) {
-            transaction = found->second.tx;
-        }
-    }
-    if (!transaction) {
-        throw ApplicationError(
-            ErrorKind::WALLET,
-            "PAYMASTER_MAINTENANCE_TRANSACTION_NOT_IN_WALLET");
-    }
-    CAmount actual_fee{0};
-    {
-        LOCK(wallet->cs_wallet);
-        const CAmount debit =
-            wallet->GetDebit(*transaction, ISMINE_ALL);
-        const CAmount value_out = transaction->GetValueOut();
-        if (debit < value_out) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_MAINTENANCE_FEE_INVALID");
-        }
-        actual_fee = debit - value_out;
-    }
+    const CTransactionRef transaction = MakeTransactionRef(std::move(built));
+    const auto fee = GetProviderFinanceTransactionFee(*wallet, transaction);
     // Treat the reviewed estimate as a maximum.  Exact signing can
     // reduce the serialized size and therefore the actual fee; an
     // increase beyond the preview remains a hard failure.
-    if (actual_fee <= 0 ||
-        actual_fee > transfer_plan.estimated_fee ||
-        actual_fee >
+    if (!fee || fee->value <= 0 ||
+        fee->value > transfer_plan.estimated_fee ||
+        fee->value >
             liquidity_policy.maximum_maintenance_fee_per_transaction.value) {
         throw ApplicationError(
             ErrorKind::WALLET,
             "PAYMASTER_MAINTENANCE_FEE_CHANGED");
+    }
+    const CAmount actual_fee = fee->value;
+    PaymasterCheckpointOperation checkpoint{*wallet};
+    if (!checkpoint.Begin(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
+    if (!wallet->CommitTransaction(transaction,
+            {{"comment", "Paymaster carrier excess withdrawal"}}, {}, &transfer_error)) {
+        // The exact sources remain protected after an uncertain commit.
+        throw ApplicationError(ErrorKind::WALLET,
+            "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + transfer_error);
+    }
+    const uint256 txid = transaction->GetHash();
+    if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED");
+    }
+    if (!dd_wallet->RecordPaymasterSendHistory(txid, plan.excess_script_pub_key,
+            transfer_plan.total_amount, transfer_error, "Paymaster carrier excess withdrawal",
+            /*multiple_recipients=*/recipients.size() > 1)) {
+        throw ApplicationError(ErrorKind::WALLET, transfer_error);
     }
     {
         LOCK(wallet->cs_wallet);

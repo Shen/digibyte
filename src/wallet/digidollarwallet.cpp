@@ -2384,6 +2384,17 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
                                                    CAmount total_outflow,
                                                    std::string& error)
 {
+    return RecordPaymasterSendHistory(txid, recipient_script, total_outflow, error,
+                                      /*comment=*/{}, /*multiple_recipients=*/false);
+}
+
+bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
+                                                   const CScript& recipient_script,
+                                                   CAmount total_outflow,
+                                                   std::string& error,
+                                                   const std::string& comment,
+                                                   bool multiple_recipients)
+{
     auto locks = LockDDWallet();
     error.clear();
     if (!m_wallet) {
@@ -2402,9 +2413,12 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
     outgoing.confirmations = 0;
     outgoing.incoming = false;
     outgoing.category = "send";
+    outgoing.comment = comment;
 
     CTxDestination destination;
-    if (ExtractDestination(recipient_script, destination)) {
+    if (multiple_recipients) {
+        outgoing.address = "multiple";
+    } else if (ExtractDestination(recipient_script, destination)) {
         outgoing.address = DigiDollar::EncodeDigiDollarAddress(destination, Params());
     }
 
@@ -2416,7 +2430,7 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
     for (const DDTransaction& existing : transaction_history) {
         if (existing.txid == outgoing.txid) {
             outgoing.timestamp = existing.timestamp;
-            if (!existing.comment.empty()) outgoing.comment = existing.comment;
+            if (outgoing.comment.empty() && !existing.comment.empty()) outgoing.comment = existing.comment;
             break;
         }
     }
@@ -2428,7 +2442,8 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
                    existing.category == "send" &&
                    !existing.incoming &&
                    existing.amount == outgoing.amount &&
-                   existing.address == outgoing.address;
+                   existing.address == outgoing.address &&
+                   existing.comment == outgoing.comment;
         });
     if (exact_send != transaction_history.end()) return true;
 

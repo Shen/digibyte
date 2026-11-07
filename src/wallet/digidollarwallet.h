@@ -879,6 +879,14 @@ public:
                                     const CScript& recipient_script,
                                     CAmount total_outflow,
                                     std::string& error);
+    /** Preserve ordinary send presentation when a native maintenance operation
+     * commits an exact transaction without TransferDigiDollarMany(). */
+    bool RecordPaymasterSendHistory(const uint256& txid,
+                                    const CScript& recipient_script,
+                                    CAmount total_outflow,
+                                    std::string& error,
+                                    const std::string& comment,
+                                    bool multiple_recipients);
 
     /**
      * Validate DD address format
