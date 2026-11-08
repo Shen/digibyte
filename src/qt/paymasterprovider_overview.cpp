@@ -3264,28 +3264,36 @@ void PaymasterWidgetImpl::finishRpcCall(uint64_t wallet_generation,
     ++m_rpc_handler_depth;
     m_active_rpc_handler_token = handler_token;
 
-    if (m_rpc_failure.failed) {
-        const QString visible_error = privacySafeBackendError(error);
-        if (output) output->setPlainText(visible_error);
-        if (error_handler) {
-            error_handler(visible_error);
-        } else if (show_error) {
-            showPlainTextWarning(
-                this, tr("Paymaster operation failed"), visible_error);
+    bool handler_failed{false};
+    try {
+        if (m_rpc_failure.failed) {
+            const QString visible_error = privacySafeBackendError(error);
+            if (output) output->setPlainText(visible_error);
+            if (error_handler) {
+                error_handler(visible_error);
+            } else if (show_error) {
+                showPlainTextWarning(
+                    this, tr("Paymaster operation failed"), visible_error);
+            } else {
+                m_status->setText(
+                    tr("Provider status unavailable: %1")
+                        .arg(visible_error));
+            }
         } else {
-            m_status->setText(
-                tr("Provider status unavailable: %1")
-                    .arg(visible_error));
+            if (output) {
+                output->setPlainText(QString::fromStdString(result.write(2)));
+            }
+            if (handler) {
+                handler(result);
+            } else {
+                refreshStatus();
+            }
         }
-    } else {
-        if (output) {
-            output->setPlainText(QString::fromStdString(result.write(2)));
-        }
-        if (handler) {
-            handler(result);
-        } else {
-            refreshStatus();
-        }
+    } catch (...) {
+        // Completion handlers parse backend data and can enter nested event
+        // loops. Always unwind this RPC chain, even if decoding or a review
+        // throws. A partial continuation must require fresh operator intent.
+        handler_failed = true;
     }
 
     // A wallet switch clears the handler and pending-call state. Do not
@@ -3294,6 +3302,15 @@ void PaymasterWidgetImpl::finishRpcCall(uint64_t wallet_generation,
     m_rpc_failure = std::move(previous_failure);
     m_active_rpc_handler_token = previous_token;
     --m_rpc_handler_depth;
+    if (handler_failed) {
+        m_pending_handler_calls.clear();
+        m_pending_operator_review = {};
+        m_overview.invalidateProviderObservation();
+        m_liquidity.invalidateOverviewSnapshot();
+        m_liquidity.invalidatePoolPreviews();
+        m_recovery.invalidateCarrierWithdrawalPreviews();
+        m_status->setText(tr("The Paymaster response could not be processed. Refresh the status before continuing."));
+    }
     redactVisiblePrivacyText();
 
     if (m_rpc_handler_depth == 0 && !m_pending_handler_calls.empty()) {

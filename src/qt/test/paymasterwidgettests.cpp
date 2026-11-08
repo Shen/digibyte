@@ -28,6 +28,7 @@
 #include <qt/paymastersendwidget.h>
 #include <qt/paymastersendcontroller.h>
 #include <qt/paymasterwidget.h>
+#include <qt/paymasterprovider_internal.h>
 #include <qt/paymasteroperation.h>
 #include <paymaster/manager.h>
 #include <qt/platformstyle.h>
@@ -14658,6 +14659,48 @@ void PaymasterWidgetTests::paymasterProviderCommandLocksPages()
     assert_locked();
     reply(PaymasterOverviewFinance());
     QVERIFY(tabs->isEnabled());
+
+    auto* impl = static_cast<PaymasterWidgetImpl*>(panel.get());
+    for (const bool error_handler : {false, true}) {
+        const auto throwing_handler = [&] {
+            impl->call("must_not_run_after_exception", {}, false);
+            throw std::runtime_error("injected completion failure");
+        };
+        impl->call("completion_exception", {}, false, nullptr,
+            [&](const UniValue&) { throwing_handler(); }, false,
+            [&](const QString&) { throwing_handler(); });
+        QVERIFY(impl->busy() && impl->rpcActive());
+        reply(UniValue{}, error_handler ? QStringLiteral("injected backend error") : QString{});
+        QVERIFY(!impl->busy() && !impl->rpcActive());
+        QCOMPARE(impl->rpcHandlerDepth(), 0);
+        QVERIFY(!impl->hasCompleteMutationSnapshots());
+        QVERIFY(!pending);
+        QVERIFY(!commands.contains(QStringLiteral("must_not_run_after_exception")));
+        QVERIFY(connection->isEnabled());
+        // A later explicit refresh still works and is issued exactly once.
+        panel->refreshStatus();
+        reply(GuidedOperatorSnapshot());
+        reply(PaymasterOverviewFinance());
+        QVERIFY(!impl->busy() && !impl->rpcActive());
+    }
+
+    impl->call("wallet_change_exception", {}, false, nullptr,
+        [&](const UniValue&) {
+            panel->setWalletModel(nullptr);
+            throw std::runtime_error("injected wallet change");
+        });
+    reply(UniValue{});
+    QCOMPARE(impl->rpcHandlerDepth(), 0);
+    QVERIFY(!impl->busy() && !impl->rpcActive());
+
+    QPointer<DigiDollarPaymasterWidget> guard{panel.get()};
+    impl->call("destruction_exception", {}, false, nullptr,
+        [&](const UniValue&) {
+            panel.reset();
+            throw std::runtime_error("injected destruction");
+        });
+    reply(UniValue{});
+    QVERIFY(!guard);
 }
 
 void PaymasterWidgetTests::paymasterPreparationFeeRecovery()

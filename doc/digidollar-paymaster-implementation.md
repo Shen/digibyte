@@ -539,6 +539,11 @@ invalidate late replies; shutdown joins started workers before destroying their
 dependencies. Provider components own their panel state and workflows; the send
 controller owns session transitions and emits effects for the widget to execute.
 Both reuse shared formatting and backend financial rules.
+Provider RPC completion also contains exceptions from result/error handlers.
+It restores the handler depth and active-call state, invalidates mutation
+observations/previews and discards unfinished follow-up calls and reviews.
+A wallet change or widget destruction prevents cleanup against a new owner;
+continuing an interrupted operation requires a fresh observation and intent.
 Finance and automation observations are captured by typed wallet services before
 RPC serialization, using one observation time. The finance capture owns wallet
 synchronization, reconciliation and the locked accounting snapshot; its result
