@@ -4,6 +4,52 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Setup revocation, exact retries, broadcast and confirmation observation
+
+R1–R5 corrections based on `a7dd1342d395a53975c2209ab550e25791a00e4b`,
+checked in the dirty worktree on 2026-11-08. Current contracts and the journal
+V2 downgrade restriction are in the [implementation guide](digidollar-paymaster-implementation.md)
+and [pool setup guide](digidollar-paymaster-pool-setup.md). Valid request-ID wire
+bytes remain unchanged; decoding now rejects oversized lengths before allocation.
+
+All 15 changed C++ production/test units, two unchanged Qt allocation/model
+consumers and regenerated test MOC were freshly compiled with MSVC 19.43.34810 /
+toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`; Qt is static 5.15.10.
+Native/Qt executables are isolated links with retained dependencies, not clean
+products or complete transitive-header provenance. Commands, unique logs,
+source/object/header/binary hashes and `source-freeze.json` are retained under
+`.ai/implement-r1-r5-20261108/`; component compile/related-test evidence is under
+`.ai/r1-provider-20261108/`, `.ai/r2-client-20261108/` and `.ai/r4-qt-20261108/`.
+
+| Executed check | Bounded result |
+|---|---|
+| Combined native | 32 selected cases / 3,613 assertions pass, exit 0 (`test-1794128888993195800`). Covers setup revocation after pruning/reopen, finite history admission, atomic authority/journal writes, legacy/future records, original-input retries and early conflicts, disabled broadcasting without new funding effects, protected unsubmitted transactions, exact refill accounting/submissions, bounded decoding and three ordinary DB cursor cases. Unselected cases are skipped and excluded. |
+| Combined Qt | Four functions / 16 distinct feature/data rows pass, zero failures/skips: real wallet-tip signals, fresh closure before New Transfer, modal completion lifetime/reorg and existing offer clearing. Two additional self-recovery repetitions also pass; init/cleanup and repetitions are excluded from distinct coverage. Windows/Fusion, logs `qt-1794129200711068600`, `qt-1794129286543213000`, `qt-1794129312214377200` and `qt-1794129350824304300`. |
+| C++17 | The nine modified production units pass targeted `/Zs /std:c++17` checks with the same warning policy. This does not establish a linked C++17 or Linux product. |
+| Local controls | Dependency/cycle checks, six boundary fixtures, changed-path/shared-Core record checks against unchanged HEAD policy, JSON and `git diff --check` pass. No boundary or checkpoint rule was relaxed. |
+
+For the five code commits, 18 targeted syntax checks pass against the exact
+indexed source and changed-header snapshots: ten production checks in C++17
+and eight test checks in C++20, retaining `/W3 /WX`. Each committed prefix also
+passes the boundary checker pinned to `a7dd1342d3`. Intermediate snapshots,
+commands and results are under `commits/` in the artifact directory above;
+`candidate-verification.json` binds them to the final linear series. These are
+syntax checks, not complete intermediate product builds.
+
+The native SHA256 is
+`4565776fe34e125e6a97709b87e26dca1109332370be5abec08290cbf4206f02`;
+Qt is `61bca39b6731b3310f6a0db7d842ba18e678e444dcca72cb09738595e8ea5cc0`.
+Initial compile/link and fixture failures remain separate from final passes.
+Retained inline serialization objects initially won COMDAT selection in the
+partial link; current objects now precede retained objects. A Qt wait predicate
+started another worker after success; its synchronization was corrected and a
+freshness assertion added. Financial, checkpoint and signal assertions remain.
+Synthetic refill fixtures capture exact submission through a forwarding test
+chain; mocked acceptance does not establish real mempool validity. No full
+product build, daemon functional run, complete suite, sanitizer or fuzz campaign
+was executed. Operator commands, prerequisites, runtime and success criteria
+remain in the [test runbook](digidollar-paymaster-testing.md).
+
 ## Unsigned authority, signing deadlines and executable service
 
 Corrections A–G based on `d698e6328bbde2f8b30ac9f6a941832c1d6dfdce`,

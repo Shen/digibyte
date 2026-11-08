@@ -10,7 +10,22 @@ fees; DD carrier slots support nonzero service fees below the minimum DD output.
 Free sponsorship does not need a DD carrier for a service fee. Usable slots
 require confirmed, free inputs valid for the request.
 
+Funding requires wallet transaction broadcasting. With `-walletbroadcast=0`,
+new automatic refill stops with `PAYMASTER_WALLET_BROADCAST_DISABLED` before
+creating a plan or signature. Existing signed work stays protected. Automatic
+maintenance distinguishes a saved transaction awaiting broadcast from one in a
+local relay pool awaiting confirmation; confirmed independent slots can still
+serve payments. Restore broadcasting in the intended wallet configuration before
+resuming funding; do not replace an existing signed transaction with another plan.
+
 ## Finite approved setup
+
+Setup approval has a permanent generation separate from bounded maintenance
+history. Canceling a plan remains effective after history cleanup and restart;
+new funding needs a fresh preview and acceptance. Retained accepted signed plans
+can still replay their exact saved work. The V2 maintenance journal upgrades
+atomically with this authority record and is rejected by older binaries. Refresh
+an unaccepted preview made by an older version before executing it.
 
 `preparepaymasterpool` previews a finite plan. Example options:
 

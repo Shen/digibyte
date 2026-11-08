@@ -63,6 +63,9 @@ Protocol version is 6; unchanged legacy Direct layouts accept version 5 only
 where explicitly supported. Signed offers/negotiation use the current format.
 Wallet record versions are independent of wire versions. Compatibility does
 not permit substituting unauthenticated transport for required channel proofs.
+Request IDs use the shared 36-byte UUID decoding limit in Direct, intent,
+recovery and persisted authority records. Oversized lengths fail before string
+allocation; valid V5/V6 and record serialization bytes are unchanged.
 Announcements last up to 600 seconds; quote default/maximum is 60 seconds.
 An announcement may become unavailable before expiry. Expiry does not prove
 already signed spending authority harmless.
@@ -211,6 +214,18 @@ conservatively locked until explicitly unlocked. Invalid values fail wallet load
 and cannot be rewritten by cleanup. Finite setup and recurring refill have separate
 approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
+`ProviderSetupAuthorization` retains a monotone setup generation and revocation
+independently of prunable maintenance history. Journal V2 requires that intact
+record; authentic V1 journals remain readable and upgrade atomically on write.
+Older binaries reject V2. New setup previews bind the generation; retained
+accepted plans can replay exact work, while canceled or pruned plans cannot
+become fresh spending authority. Finite and recurring admission share bounded
+terminal-history pruning without dropping unresolved signatures.
+Finite funding and automatic refill require wallet broadcasting before creating
+a new funding signature. Automatic refill also checks before reserving a new
+plan. Saved older unsubmitted automatic maintenance transactions remain protected
+and are reported as awaiting broadcast,
+separately from transactions observed in a relay pool awaiting confirmation.
 See [pool setup](digidollar-paymaster-pool-setup.md).
 Funded DD plans are revalidated through `ValidateDigiDollarTransferPlan` under
 the execution wallet lock before building/signing. It reuses DD selection,

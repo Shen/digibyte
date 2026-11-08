@@ -98,6 +98,12 @@ not permit spending collateral or another payment's reserved inputs.
 | Confirmed recipient payment | The local node has validated confirmation of the intended payment. | Use its transaction/history record; a later reorg can change confirmation state. |
 | Recovery / ambiguous result | Signed work may still spend the original inputs. | Use the available status/recovery actions. A recovery confirmation is not recipient-payment success. |
 
+While the completed transfer remains selected, wallet transaction/confirmation
+changes trigger a fresh observation, including reorgs without a balance change.
+An unavailable observation removes the cached completion permission.
+**Start a new transfer** checks the current Core result before clearing the old
+session; this status read does not sign or submit a payment or recovery.
+
 Closing the window or restarting does not undo signed work. An unsigned local
 preparation resumes with its saved original amount and selection settings.
 If an older or damaged record lacks these settings, the wallet keeps status,

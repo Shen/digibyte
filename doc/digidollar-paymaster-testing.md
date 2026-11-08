@@ -550,7 +550,7 @@ Run these focused regressions with a freshly linked candidate. Use a short
 isolated `TEMP`/`TMP` as described above; all wallets/funds are test fixtures.
 
 ```powershell
-& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/carrier_refill_fences_only_after_exact_construction,carrier_refill_preserves_multiple_outputs_and_send_history_without_broadcast,carrier_withdrawal_stale_fee_input_does_not_fence_provider,direct_submit_holds_stop_exclusion_through_processing:paymaster_application_tests/client_order_replay_uses_persisted_terms_and_existing_hash,created_sweep_resume_selects_original_unreserved_wallet_inputs:paymaster_recovery_chainstate_tests/exact_final_proof_requires_canonical_preflight,known_final_reconstructs_spent_prevouts_without_new_spending_authority' --report_level=detailed
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/carrier_refill_fences_only_after_exact_construction,carrier_refill_preserves_multiple_outputs_and_send_history_with_submission,carrier_withdrawal_stale_fee_input_does_not_fence_provider,direct_submit_holds_stop_exclusion_through_processing:paymaster_application_tests/client_order_replay_uses_persisted_terms_and_existing_hash,created_payment_resume_selects_original_unreserved_wallet_inputs:paymaster_recovery_chainstate_tests/exact_final_proof_requires_canonical_preflight,known_final_reconstructs_spent_prevouts_without_new_spending_authority' --report_level=detailed
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster review follow-up regression failed' }
 ```
 
@@ -559,10 +559,30 @@ For Qt, select `paymasterClientRestoresOriginalOrderFromNativeStatus` through
 the suite/function environment variables described above. It checks actual
 wallet-record/native-status/RPC-serializer data against the Qt replay parameters
 and canonical request hash. It does not mock a successful canonical guard.
-The CREATED sweep regression reaches the production input-selection helper with
+The CREATED payment regression reaches the production input-selection helper with
 real confirmed wallet DD outputs and newly received funds. It checks exact
-original inputs, ordinary locks and another session's reservation; it is not a
+original inputs for ordinary payments and sweeps, ordinary locks and another session's reservation; it is not a
 complete signed/network payment test.
+
+For setup generation, early replay, disabled broadcasting and bounded strings,
+run this additional focused selection on the freshly built native executable:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/finite_setup_*,setup_generation_and_journal_versions_fail_closed:paymaster_application_tests/client_replay_conflicts_precede_preparation_and_preserve_reservations,created_payment_resume_selects_original_unreserved_wallet_inputs:paymaster_wallet_security_tests/automatic_pool_funding_requires_broadcast_before_side_effects,saved_maintenance_is_not_a_broadcast_observation:paymaster_wire_tests/request_id_lengths_are_bounded_before_allocation,capacity_request_encoding_retains_v5_v6_layout' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster authority/replay/broadcast/parser regression failed' }
+```
+
+The setup cases exercise revocation after pruning/reopen/clock rollback, bounded
+finite admission, atomic failure and missing/future records. Synthetic refill
+accounting fixtures use `PaymasterBroadcastChain` to capture exact submissions
+while forwarding other chain operations; mocked relay acceptance does not prove
+real mempool validity. Their slot, budget, history and checkpoint assertions remain.
+For Qt select `paymasterClientTerminalObservationFollowsWalletSignals`,
+`paymasterClientNewTransferRechecksClosure` and
+`paymasterClientCompletionNoticeLifetime`. These cover actual wallet tip-hash
+signals without balance changes, coalescing, fresh closure and modal lifetime/reorg
+boundaries. Use the Windows platform for tests displaying themed native dialogs;
+the minimal plugin is not evidence for those dialog paths.
 
 The checkpoint tests exercise both harmless pre-commit rejection and retained
 post-commit uncertainty. The direct-submit barrier test checks the actual work

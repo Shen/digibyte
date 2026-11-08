@@ -72,7 +72,11 @@ Example JSON-RPC preparation parameters (replace recipient and UUID):
 ```
 
 Identical concurrent retries join the durable order; material changes using
-its ID fail. After detailed session pruning, replay needs the original ordered
+its ID fail before selection, fallback, cancellation or other preparation effects.
+An existing order retains its original ordered inputs even while `CREATED`,
+before hard reservations exist. New incoming funds do not replace that selection;
+Core rechecks the original inputs against current ownership, locks and availability.
+After detailed session pruning, replay needs the original ordered
 inputs or fails with `PAYMASTER_SESSION_DETAILS_UNAVAILABLE`. Identity status
 reads remain possible. Sweeps forbid explicit selected inputs; inspect pruned
 sweeps through status rather than reconstructing a send.

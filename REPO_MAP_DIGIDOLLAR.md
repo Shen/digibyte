@@ -882,12 +882,20 @@ Typed provider configuration and pool operations retain lifecycle/work guards in
 wallet services. Finite preparation and scheduled provider cycles invoke the same
 backend functions. The RPC integration header re-exports native lifecycle
 interfaces for existing callers; it owns no implementation.
+`PrepareProviderMaintenanceAdmission` shares bounded terminal-history pruning;
+`ProviderSetupAuthorization`, `ReadPoolSetupAuthorization` and
+`CommitPoolPreparation` retain checkpointed generation/revocation independently.
+`CheckPaymasterPoolFundingBroadcast` guards finite/automatic funding;
+`ProviderMaintenanceBroadcastPending` is a read-only relay-pool observation.
 
 ### src/wallet/paymasterclientview*, paymasterrecoveryservice*
 
 Typed current session capabilities, status-aware lookups and shared recovery
 orchestration. RPC/GUI callers cannot substitute displayed state for the backend's
 execution-time checks. Structured errors originate in `src/paymaster/error.h`.
+`LoadClientPaymentReplay` in `paymasterclient.cpp` binds the original order before
+preparation effects; `SelectCreatedClientPaymentInputs` rechecks its original
+inputs for both ordinary payments and sweeps.
 
 ### src/wallet/paymastersessionindex.h / paymasterdb.cpp
 
@@ -1244,6 +1252,12 @@ See the [operator guide](doc/digidollar-paymaster-operator.md).
 Payment fee mode, eligible/excluded offers, exact authorization, durable
 session status and safe unsigned cancellation. Countdown is announcement
 expiry, not capacity reservation. See the [client contract](doc/digidollar-paymaster-integration.md).
+`queuePaymasterSessionObservation` coalesces terminal wallet-confirmation signals;
+`observePaymasterSession` shares the fresh Core read used before clearing a
+completed session. Revision and wallet/request guards reject overtaken replies.
+`queuePaymasterSessionObservation` coalesces terminal wallet-confirmation signals;
+`observePaymasterSession` shares the fresh Core read used before clearing a
+completed session. Revision and wallet/request guards reject overtaken replies.
 
 ### src/qt/walletmodel.cpp/h
 - `executeRpcAsync()` provides the queued wallet-RPC bridge used by Paymaster UI
