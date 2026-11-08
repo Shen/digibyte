@@ -286,6 +286,7 @@ bool WalletBatch::ErasePaymasterIC(const K& key)
         if (own) TxnAbort();
         return false;
     }
+    QueuePaymasterFinanceErase(this, m_database, key);
     if (!own || TxnCommit()) return true;
     TxnAbort();
     return false;

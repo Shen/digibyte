@@ -415,6 +415,11 @@ notifications and committed Paymaster source changes enqueue affected IDs; each
 pass handles at most 256 jobs, including bounded transaction-index pages. Failed
 commits retain pending work. Reports return `PAYMASTER_FINANCE_RECONCILING` while
 work remains; a reader retries the query and never treats stale totals as current.
+Committed pruning removes the erased attempt/commit bindings from the warm
+finance cache. Aborted erases publish nothing. Immutable finance events and their
+queued observation work survive pruning, so subsequent reports and reorg updates
+do not require a deleted commit. Cold reconstruction follows the same retained
+event contract.
 Cursor filters and revisions still require a navigation restart after changes.
 Full reconstruction validates immutable event sources independently of derived
 aggregates and atomically repairs time, transaction and day indexes and totals.

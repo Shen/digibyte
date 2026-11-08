@@ -619,6 +619,38 @@ BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_histo
         batch, identity, attempt, commit, Params().GenesisBlock().GetHash(),
         metadata, prepared, changed, error), error);
     BOOST_CHECK(!changed);
+
+    // Warm the source bindings, leave an EVENT pending, and then prune the
+    // authoritative session through the real store transition. The immutable
+    // accounting event must continue to work after its commit/attempt vanish.
+    session.provider_side = true;
+    session.state = SessionState::CONFIRMED;
+    session.final_txid = commit.final_txid;
+    WITH_LOCK(provider->cs_wallet, provider->SetLastBlockProcessed(300, Params().GenesisBlock().GetHash()));
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.WritePaymasterSessionId(session.session_id, session.request_id));
+    BOOST_REQUIRE(batch.WritePaymasterTemplate(attempt.template_commitment, attempt.attempt_id));
+    BOOST_REQUIRE(batch.WritePaymasterUnsignedTx(attempt.unsigned_txid, attempt.attempt_id));
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit, true));
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.ErasePaymasterProviderCommit(commit.commit_key));
+    BOOST_REQUIRE(batch.ErasePaymasterAttempt(attempt.attempt_id));
+    BOOST_REQUIRE(batch.TxnAbort());
+    Drain(); // Aborted erases must not discard still-live source bindings.
+    BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit, true));
+    PaymasterStore store{*provider};
+    BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(session.request_id, error), error);
+    BOOST_CHECK(!batch.ReadPaymasterProviderCommit(commit.commit_key, commit));
+    BOOST_CHECK(!batch.ReadPaymasterAttempt(attempt.attempt_id, attempt));
+    Drain();
+    BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 100);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 500);
+    ForgetPaymasterFinanceCache(*database);
+    Drain();
+    BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 100);
 }
 
 BOOST_AUTO_TEST_CASE(transfer_finance_rejects_changed_manifest_economics_at_every_ingress)

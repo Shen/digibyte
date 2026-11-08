@@ -86,6 +86,8 @@ struct PendingFinanceChanges {
     std::map<uint256, std::pair<PaymasterId, uint256>> attempts;
     std::map<uint256, std::pair<PaymasterId, uint256>> recoveries;
     std::map<uint256, std::pair<PaymasterId, uint256>> commits;
+    std::set<uint256> erased_commits;
+    std::set<uint256> erased_attempts;
     std::set<uint256> events;
     std::map<uint256, FinanceEventChange> event_changes;
     bool rebuild{false};
@@ -380,6 +382,24 @@ void QueuePaymasterFinanceRebuild(const WalletBatch* owner, WalletDatabase& data
     QueueFinanceChange(owner, database, [](auto& changes) { changes.rebuild = true; });
 }
 
+void QueuePaymasterFinanceErase(const WalletBatch* owner, WalletDatabase& database,
+                               const std::pair<std::string, uint256>& key)
+{
+    if (key.first != DBKeys::PAYMASTER_PROVIDER_COMMIT && key.first != DBKeys::PAYMASTER_ATTEMPT) return;
+    QueueFinanceChange(owner, database, [&](auto& changes) {
+        if (key.first == DBKeys::PAYMASTER_PROVIDER_COMMIT) {
+            changes.commits.erase(key.second);
+            changes.erased_commits.insert(key.second);
+        } else {
+            for (auto it = changes.attempts.begin(); it != changes.attempts.end();) {
+                if (it->second.second == key.second) it = changes.attempts.erase(it);
+                else ++it;
+            }
+            changes.erased_attempts.insert(key.second);
+        }
+    });
+}
+
 void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
 {
     PendingFinanceChanges changes;
@@ -397,6 +417,16 @@ void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
     }
     std::lock_guard<std::mutex> lock{state->mutex};
     if (changes.rebuild) state->initialized = false;
+    for (const auto& commit : changes.erased_commits) {
+        state->commit_transactions.erase(commit);
+        state->attempts_by_commit.erase(commit);
+        // Keep queued observation work: the immutable finance event survives
+        // pruning and still follows confirmation/reorg notifications.
+    }
+    for (auto it = state->attempts_by_commit.begin(); it != state->attempts_by_commit.end();) {
+        if (changes.erased_attempts.count(it->second)) it = state->attempts_by_commit.erase(it);
+        else ++it;
+    }
     if (changes.maintenance) {
         std::map<uint256, ProviderMaintenanceRecord> next;
         for (const auto& record : changes.maintenance->records) {
