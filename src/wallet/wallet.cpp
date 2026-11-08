@@ -2522,27 +2522,11 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
     // manifest/final-witness firewall on every retry. Never let the generic
     // wallet rebroadcaster bypass that validation. A database read failure is
     // fail-closed for this maintenance pass.
-    std::vector<DigiDollar::Paymaster::ProviderCommitRecord>
-        durable_paymaster_commits;
-    if (!PaymasterStore{*this}.ListProviderCommits(durable_paymaster_commits)) {
-        WalletLogPrintf(
-            "%s: skipping generic rebroadcast because durable Paymaster "
-            "commit state could not be read\n",
-            __func__);
-        return;
-    }
-    std::set<uint256> durable_paymaster_txids;
-    for (const DigiDollar::Paymaster::ProviderCommitRecord& commit :
-         durable_paymaster_commits) {
-        if (!commit.final_txid.IsNull()) {
-            durable_paymaster_txids.insert(commit.final_txid);
-        }
-    }
-
     int submitted_tx_count = 0;
 
     { // cs_wallet scope
         LOCK(cs_wallet);
+        WalletBatch paymaster_records{GetDatabase()};
 
         // First filter for the transactions we want to rebroadcast.
         // We use a set with WalletTxOrderComparator so that rebroadcasting occurs in insertion order
@@ -2551,10 +2535,13 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
             // Only rebroadcast unconfirmed txs
             if (!wtx.isUnconfirmed()) continue;
 
-            if (durable_paymaster_txids.count(txid) != 0 ||
-                wtx.mapValue.count("paymaster_durable_commit") != 0) {
-                continue;
+            if (wtx.mapValue.count("paymaster_durable_commit") != 0) continue;
+            std::vector<DigiDollar::Paymaster::ProviderCommitRecord> commits;
+            if (!ListPaymasterProviderCommitsForTransaction(paymaster_records, GetDatabase(), txid, commits)) {
+                WalletLogPrintf("%s: skipping generic rebroadcast because Paymaster commit state could not be read\n", __func__);
+                return;
             }
+            if (!commits.empty()) continue;
 
             // Attempt to rebroadcast all txes more than 5 minutes older than
             // the last block, or all txs if forcing.

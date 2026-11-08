@@ -17,7 +17,7 @@ class WalletDatabase;
 
 /** Disposable scheduling progress, never financial authority. Independent
  * scans must not advance one another. Wallet unload discards all progress. */
-enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS };
+enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS, POOL_SUCCESSORS };
 struct PaymasterScanPosition {
     std::string request;
     uint256 record;
@@ -43,6 +43,10 @@ constexpr size_t PAYMASTER_BACKGROUND_SESSION_BYTES{64 * 8192};
 bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
                                 const uint256& txid,
                                 std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
+/** Derived candidate selection for generic rebroadcast exclusion. Each hit is
+ * freshly read; a miss is never signing, payment or release authority. */
+bool ListPaymasterProviderCommitsForTransaction(WalletBatch& batch, WalletDatabase& database,
+    const uint256& txid, std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits);
 void PrimePaymasterSessionIndex(WalletDatabase& database,
                                 const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
 void ForgetPaymasterSessionIndex(WalletDatabase& database);

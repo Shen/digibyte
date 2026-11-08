@@ -507,7 +507,7 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
         size_t recovered_successors{0};
         std::string reconciliation_error;
         if (!store.ReconcileProviderPoolSuccessors(
-                recovered_successors, reconciliation_error)) {
+                recovered_successors, reconciliation_error, /*bounded=*/true)) {
             result.errors.push_back(
                 reconciliation_error.empty()
                     ? "PAYMASTER_POOL_RECONCILIATION_FAILED"

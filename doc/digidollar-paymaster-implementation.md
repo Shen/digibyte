@@ -211,6 +211,11 @@ already bound by the authoritative commit's `quote_id`; they revalidate that
 binding. The marker grants no authority, and missing/corrupt/unsupported archived
 evidence fails closed. Signed, ambiguous and protected history is not discarded
 to admit new work. Archival bounds active work, not total on-disk history.
+Periodic pool-successor repair pages live provider sessions and point-reads only
+their commits. Generic wallet rebroadcast excludes Paymaster finals through a
+derived transaction-to-commit lookup, reconstructed once and updated after
+commit. Warm candidate checks do not decode the recovery archive; read failures
+skip the rebroadcast pass. Startup reconstruction remains complete.
 
 Capacity-response cleanup uses count- and byte-bounded database range pages and
 a disposable wallet-database-scoped continuation. Failed pages restart without

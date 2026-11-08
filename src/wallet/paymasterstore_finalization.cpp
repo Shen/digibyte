@@ -599,8 +599,13 @@ bool PaymasterStore::ListProviderCommits(std::vector<ProviderCommitRecord>& comm
     return true;
 }
 
+bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered, std::string& error)
+{
+    return ReconcileProviderPoolSuccessors(recovered, error, false);
+}
+
 bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
-                                                     std::string& error)
+                                                     std::string& error, bool bounded)
 {
     recovered = 0;
     error.clear();
@@ -617,8 +622,11 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
 
     std::vector<ProviderCommitRecord> commits;
     std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterProviderCommits(commits) ||
-        !batch.ListPaymasterSessions(sessions)) {
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::POOL_SUCCESSORS};
+    std::string next;
+    if (!(bounded ? batch.ListPaymasterSessionsPage(page.after.request, PAYMASTER_BACKGROUND_SESSION_ROWS,
+                        PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)
+                  : batch.ListPaymasterSessions(sessions))) {
         error = "PAYMASTER_POOL_RECONCILIATION_READ_FAILED";
         return false;
     }
@@ -639,6 +647,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
 
     std::map<uint256, ProviderAttempt> attempts_by_commit;
     for (const PaymentSession& session : sessions) {
+        if (!session.provider_side) continue;
         for (const uint256& attempt_id : session.attempt_ids) {
             ProviderAttempt attempt;
             const DatabaseReadStatus attempt_status =
@@ -656,7 +665,15 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
                     GetProviderAuthorizationManifestId(attempt.provider_manifest)) {
                 continue;
             }
-            attempts_by_commit.emplace(attempt.commit_key, std::move(attempt));
+            ProviderCommitRecord commit;
+            const auto commit_status = batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit);
+            if (commit_status == DatabaseReadStatus::NOT_FOUND) continue;
+            if (commit_status != DatabaseReadStatus::FOUND) {
+                error = "PAYMASTER_POOL_RECONCILIATION_READ_FAILED";
+                return false;
+            }
+            if (attempts_by_commit.emplace(attempt.commit_key, std::move(attempt)).second)
+                commits.push_back(std::move(commit));
         }
     }
 
@@ -715,7 +732,10 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
             ++recovered;
         }
     }
-    if (!changed) return true;
+    if (!changed) {
+        if (bounded) page.Complete(next);
+        return true;
+    }
     if (!batch.TxnBegin()) {
         error = "PAYMASTER_DATABASE_BEGIN";
         return false;
@@ -727,6 +747,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
         error = "PAYMASTER_DATABASE_COMMIT";
         return false;
     }
+    if (bounded) page.Complete(next);
     return true;
 }
 

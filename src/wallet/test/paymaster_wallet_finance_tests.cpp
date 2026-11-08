@@ -24,6 +24,7 @@
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -651,6 +652,83 @@ BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_histo
     Drain();
     BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
     BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 100);
+}
+
+BOOST_AUTO_TEST_CASE(provider_commit_candidates_and_successor_work_stay_bounded_after_archive_growth)
+{
+    LOCK(provider->cs_wallet);
+    WalletBatch batch{*database};
+    ProviderCommitRecord commit;
+    commit.provider_id = identity.provider_id;
+    commit.quote_id = commit.template_commitment = commit.raw_transaction_hash = uint256S("f900");
+    commit.final_transaction = {1}; // Selection metadata grants no execution authority.
+    commit.provider_inputs = {{uint256S("f901"), 0}};
+    BOOST_REQUIRE(batch.TxnBegin());
+    for (size_t i = 1; i <= 1000; ++i) {
+        commit.commit_key = uint256S(strprintf("%064x", i));
+        commit.final_txid = uint256S(strprintf("%064x", i + 10000));
+        BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit));
+    }
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+    for (size_t i = 1; i <= 150; ++i) {
+        PaymentSession session;
+        session.request_id = strprintf("550e8400-e29b-41d4-a716-%012d", i);
+        session.session_id = uint256S(strprintf("%064x", i));
+        session.provider_side = true;
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    }
+    BOOST_REQUIRE(batch.TxnCommit());
+    ForgetPaymasterSessionIndex(*database);
+    const uint256 ordinary{uint256S("ffff")};
+    std::vector<ProviderCommitRecord> candidates;
+    database->reads = {};
+    BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, ordinary, candidates));
+    BOOST_CHECK(candidates.empty());
+    BOOST_CHECK_EQUAL(database->reads.rows, 1000U); // One cold reconstruction.
+    const auto prefixes = database->reads.prefixes;
+    for (int i = 0; i < 100; ++i) {
+        BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+        BOOST_REQUIRE_EQUAL(candidates.size(), 1U);
+        BOOST_CHECK(candidates.front().commit_key == commit.commit_key);
+        BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, ordinary, candidates));
+        BOOST_CHECK(candidates.empty());
+    }
+    BOOST_CHECK_EQUAL(database->reads.prefixes, prefixes);
+    BOOST_CHECK_EQUAL(database->reads.rows, 1000U);
+    PrimePaymasterSessionIndex(*database, {});
+    BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+    BOOST_CHECK_EQUAL(database->reads.prefixes, prefixes);
+
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.ErasePaymasterProviderCommit(commit.commit_key));
+    BOOST_REQUIRE(batch.TxnAbort());
+    BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+    BOOST_REQUIRE_EQUAL(candidates.size(), 1U);
+    BOOST_REQUIRE(batch.ErasePaymasterProviderCommit(commit.commit_key));
+    BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+    BOOST_CHECK(candidates.empty());
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit));
+    BOOST_REQUIRE(ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+    BOOST_REQUIRE_EQUAL(candidates.size(), 1U);
+    DataStream key;
+    key << std::make_pair(std::string{"pmcommit"}, commit.commit_key);
+    database->reads.unreadable_key = SerializeData{key.begin(), key.end()};
+    BOOST_CHECK(!ListPaymasterProviderCommitsForTransaction(batch, *database, commit.final_txid, candidates));
+    BOOST_CHECK(candidates.empty());
+    database->reads.unreadable_key.reset();
+
+    PaymasterStore store{*provider};
+    size_t recovered{0};
+    size_t visited{0};
+    for (int i = 0; i < 3; ++i) {
+        database->reads = {};
+        BOOST_REQUIRE_MESSAGE(store.ReconcileProviderPoolSuccessors(recovered, error, true), error);
+        BOOST_CHECK_LE(database->reads.rows, PAYMASTER_BACKGROUND_SESSION_ROWS + 1);
+        BOOST_CHECK_EQUAL(recovered, 0U);
+        visited += database->reads.rows;
+    }
+    BOOST_CHECK_GE(visited, 150U);
+    BOOST_CHECK(GetPaymasterScanPosition(*database, PaymasterScan::POOL_SUCCESSORS).request.empty());
 }
 
 BOOST_AUTO_TEST_CASE(transfer_finance_rejects_changed_manifest_economics_at_every_ingress)

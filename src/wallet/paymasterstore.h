@@ -535,8 +535,8 @@ public:
     /** Idempotently reconstruct wallet-owned pool successors for durable
      * provider commits created by older builds before successor persistence
      * was atomic. */
-    bool ReconcileProviderPoolSuccessors(size_t& recovered,
-                                         std::string& error);
+    bool ReconcileProviderPoolSuccessors(size_t& recovered, std::string& error);
+    bool ReconcileProviderPoolSuccessors(size_t& recovered, std::string& error, bool bounded);
     /** List provider-side attempts whose complete provider signature and
      * private signed-result envelope are durable but whose atomic commit was
      * interrupted. Malformed individual entries are skipped fail-closed so

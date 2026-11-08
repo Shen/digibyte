@@ -926,13 +926,14 @@ authorization proofs. Qt follows forward cursors through empty filtered pages.
 
 ### src/wallet/paymastersessionindex.h / paymasterdb.cpp
 
-Derived final/recovery transaction-to-session lookup. Rebuild once, point-read
+Derived final/recovery transaction-to-session and provider transaction-to-commit
+lookups. Rebuild once, point-read
 matching authoritative records, publish index deltas after successful commits,
 invalidate on abort, and forget on wallet destruction. It grants no authority.
 The same wallet-database cache lifecycle owns the disposable capacity-cleanup
 continuation; `ListPaymasterCapacityResponsesPage` bounds scanned rows and bytes.
 Independent `PaymasterScanPage` continuations bound background expiry,
-reconciliation and periodic rebroadcast. Record pages reuse canonical point
+reconciliation, pool-successor repair and periodic rebroadcast. Record pages reuse canonical point
 readers; final broadcast validation reuses this index and validates exact authority.
 
 ### src/wallet/load.{h,cpp}
