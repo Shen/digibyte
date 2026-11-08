@@ -79,6 +79,12 @@ remains a strict order for every input permutation.
 
 ## Endpoint diagnostics
 
+`IsSupportedPaymasterEndpoint` defines the common IPv4/IPv6/Tor, nonzero-port
+and routability contract for announcements, offers, restricted descriptors,
+readiness, diagnostics and Direct connection admission. Regtest explicitly
+permits loopback. Unsupported networks are rejected before connection work;
+ordinary P2P keeps its existing network support and budgets.
+
 Endpoint diagnostics are separate from authenticated payment channels.
 `checkpaymasterendpoint` uses a locally selected `DirectPurpose::DIAGNOSTIC` key,
 which cannot alias a payment/recovery lease. It records V2 and capability
@@ -147,6 +153,10 @@ Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement
 follows durable acceptance. Proven invalid remote envelopes are discarded without
 releasing spending authority. A later broadcast failure uses the saved final bytes.
+Unsigned recovery quotes also use scoped leases: local request damage, index,
+template or persistence failures retain the reply; acknowledgement follows its
+durable acceptance. Their ordinary quote/inbox expiry still applies. The extended
+authenticated retention described below applies to complete signed results.
 Persisted predecessor results and recovery authority are authenticated before
 they can justify rejecting an incoming result. An intact accepted recovery
 manifest can authenticate retention while another local recovery artifact is damaged.
@@ -196,6 +206,16 @@ binding. The marker grants no authority, and missing/corrupt/unsupported archive
 evidence fails closed. Signed, ambiguous and protected history is not discarded
 to admit new work. Archival bounds active work, not total on-disk history.
 
+Capacity-response cleanup uses count- and byte-bounded database range pages and
+a disposable wallet-database-scoped continuation. Failed pages restart without
+publishing progress. After authenticating the proof and its nonce/session indexes,
+cleanup can remove replay-cache rows after capacity expiry plus the 24-hour
+retry window and 60-second quote clock allowance, including rows whose normal
+owner was pruned or recovery owner archived. It never releases pool inputs or
+fee reservations on that basis. Actual unsigned nonce-reservation release remains
+a separate operation vetoed by either owner family and validated against current
+pool and budget records. Drain work point-reads only live reserved admissions.
+
 ## Wallet lifecycle
 
 Protected DGB/DD reserves are excluded from ordinary coin selection and shown
@@ -232,6 +252,16 @@ the execution wallet lock before building/signing. It reuses DD selection,
 ordinary fee-coin availability and capacity/fee preflight for the exact saved
 inputs; a different free input cannot make a stale selection spendable. The
 explicit retirement exception applies to DD pool inputs, never manual DGB locks.
+Finite setup, recurring refill, carrier withdrawal and retirement execute through
+`ExecuteProviderMaintenanceTransactions`. Its typed authority reloads current
+approval and exact outputs under `cs_wallet`; every explicit DD and DGB source
+must pass the same ordinary-lock veto before a new signature. Retirement builds
+both legs and checks fees before opening the checkpoint. The common operation
+owns commit, DD tracking/history and journal/budget/pool accounting; a possible
+partial commit retains its fence. Ordinary explicit coin-control semantics are
+unchanged. Payment, recovery and provider control proofs reuse
+`SignPaymasterBip86Control` for ownership, BIP86 tweak and digest signing; callers
+retain their domain-separated hashes and protocol bindings.
 `GetDDBalanceSummary().availability_known` distinguishes unavailable safety
 classification from known zero spendable/reserved amounts. Owned confirmed and
 pending totals remain independent; Qt and setup funding views preserve that
@@ -318,6 +348,12 @@ and reconstruct from validated recovery records, without incrementing recipient
 payment counts. Maintenance accounting uses exact wallet transaction fees;
 source-bound corrections rebuild derived totals atomically while ordinary event
 writes continue to enforce immutable economics.
+Normal transfer event preparation, reconstruction and incremental updates use
+`ValidateProviderCommitArtifacts` before reading manifest economics. It validates
+the exact signed quote, manifest, template, provider inputs and all final witnesses,
+including genesis and provider identity. Historical expiry or a conflicted chain
+observation does not revoke this evidence. Execution adds its own lifecycle/time
+gates; a historical finance observation grants no signing or broadcast authority.
 
 Pagination uses bounded ordered database cursors. A full reconstruction runs on
 first use after load, restore or invalidation. Thereafter wallet transaction
@@ -435,6 +471,12 @@ Finance and automation observations are captured by typed wallet services before
 RPC serialization, using one observation time. The finance capture owns wallet
 synchronization, reconciliation and the locked accounting snapshot; its result
 distinguishes a report from a failure without using JSON as an intermediate model.
+`CaptureProviderLifecycleStatus` supplies both provider status RPCs, start results,
+daemon start waiting and automation observations. It combines enabled settings,
+autostart, volatile one-shot intent, runtime state, wallet lock and persisted worker
+status. Disabled providers report stopped; an enabled pending one-shot start can
+report waiting without changing autostart. Capturing status performs no work or
+authority mutation; each caller retains its existing reconciliation behavior.
 `ClientModel` owns node-status reads through the same generic queue, also in
 wallet-disabled Qt builds. Its destructor drains started reads before Core can
 destroy indexes, oracle state or chainstate. DD Overview callbacks retain their

@@ -549,6 +549,30 @@ git diff -w $paymasterBases.official_baseline HEAD
 Run these focused regressions with a freshly linked candidate. Use a short
 isolated `TEMP`/`TMP` as described above; all wallets/funds are test fixtures.
 
+For maintenance execution, capacity replay cleanup and shared status/finance
+boundaries, use these bounded selections (each returns exit zero with no failures):
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/carrier_withdrawal_respects_new_manual_source_lock,dgb_rebalance_respects_new_manual_source_lock,retirement_execution_rechecks_saved_configuration_without_transport_guard,carrier_withdrawal_stale_fee_input_does_not_fence_provider,carrier_refill_fences_only_after_exact_construction,partial_dgb_refill_funds_whole_slots_and_preserves_recovery,partial_carrier_refill_preserves_whole_slots_and_admission_priority,accepted_legacy_finite_setup_executes_across_journal_migration,finite_setup_*:paymaster_wallet_psbt_tests/shared_bip86_control_signer_binds_prevout_script_and_digest:paymaster_wallet_finance_tests/transfer_finance_*' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster maintenance/finance regression failed' }
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_store_tests/provider_capacity_pages_bound_scanned_rows_and_bytes:paymaster_wallet_security_tests/provider_capacity_cache_compaction_outlives_pruned_normal_owner,provider_capacity_replay_cleanup_is_bounded_and_restarts_after_failure,expired_unsigned_provider_recovery_history_is_compacted_atomically,provider_recovery_pruning_is_bounded_and_preserves_signed_records,provider_confirmed_recovery_archives_only_after_reorg_safety_depth,client_recovery_quote_intake_retains_local_failures_and_retries_before_signing' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster capacity/recovery regression failed' }
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_types_tests/direct_endpoints_require_supported_network_and_explicit_port:paymaster_client_tests/candidate_builders_exclude_unsupported_endpoints:paymaster_directory_tests/rejects_unsupported_and_portless_advertised_endpoints:paymaster_sponsorship_tests/restricted_descriptor_cannot_restore_an_unsupported_route:paymaster_transport_tests/unsupported_endpoints_never_enter_connection_queue:paymaster_protocol_tests/recovery_response_*:paymaster_application_tests/provider_lifecycle_observation_matches_runtime_intent_without_authorizing_work' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster endpoint/lease/status regression failed' }
+```
+
+The capacity cases retain pool, fee and owner evidence across compaction,
+restart and failed writes/commits; only the archive case proves the real
+240-confirmation transition. The recovery intake case reaches the actual wallet
+service with a valid chain-backed response and preserves unsigned authority on
+local errors. Finance fixtures include authentic quote and final witnesses and
+exercise missing and existing prior events at all three event ingress paths.
+The lifecycle matrix observes locked/unlocked, disabled, one-shot/autostart,
+manual/running and persisted worker states without changing authority.
+Run `wallet_paymaster_operator.py` from the functional selection below to compare
+both actual RPCs through one-shot waiting, persistent pause, lock and reload.
+These focused cases do not replace clean builds or the functional matrix.
+
 ```powershell
 & ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/carrier_refill_fences_only_after_exact_construction,carrier_refill_preserves_multiple_outputs_and_send_history_with_submission,carrier_withdrawal_stale_fee_input_does_not_fence_provider,direct_submit_holds_stop_exclusion_through_processing:paymaster_application_tests/client_order_replay_uses_persisted_terms_and_existing_hash,created_payment_resume_selects_original_unreserved_wallet_inputs:paymaster_recovery_chainstate_tests/exact_final_proof_requires_canonical_preflight,known_final_reconstructs_spent_prevouts_without_new_spending_authority' --report_level=detailed
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster review follow-up regression failed' }

@@ -4,6 +4,51 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Maintenance, replay caches and shared observations
+
+AP1–AP6 corrections based on `4b271d56805fe65f058e3707e8aa5dff7ebf1997`,
+checked in the dirty worktree on 2026-11-08. Current contracts are in the
+[implementation guide](digidollar-paymaster-implementation.md); focused and
+operator commands are in the [test runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+No consensus, wire or persisted record version changed.
+
+All 34 changed C++ production/test units were freshly compiled with MSVC
+19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`, and passed
+C++17 `/Zs` syntax checks. The combined native executable is an isolated partial
+link with retained dependencies, not a clean product or complete transitive-header
+provenance. Commands, full logs, source/object/header hashes and final test
+selections are under `.ai/implement-ap1-6-4b271d56/`; component build manifests
+are referenced by its `verification.json`.
+
+| Executed check | Bounded result |
+|---|---|
+| Endpoints, response leases, lifecycle and finance | 10 cases / 614 assertions pass (`test-1794134576576380400`). IPv4/IPv6/Tor and explicit loopback, I2P/port rejection before queue/connection work, retained response retry, read-only lifecycle matrix and authenticated transfer economics at all three finance entry points. |
+| Capacity and recovery intake | 7 cases / 9,737 assertions pass (`test-1794134590144289000`). Count/byte pages, orphaned normal/unsigned/signed/archived recovery caches, restart, delete/write/commit failures, exact archived-final replay and actual wallet quote intake retaining local failures without signing. Chain/quota fixtures dominate the assertion count. |
+| Maintenance and role/control signing | 20 cases / 1,085 assertions pass (`test-1794134650366831200`). Both source locks, post-admission DD/fee locks, saved policy/revision, finite/recurring approvals, actual legacy setup execution/migration, missing V2 authority, whole-slot refill, DD history and partial-commit fences; seven wallet PSBT cases retain role and exact control-proof checks. |
+| Ordinary adapters | Six cases / 978 assertions pass (`test-1794134709424361600`, `test-1794134744058190800`). Existing wallet DB range/prefix cursors, ordinary node construction and Direct reader/permit teardown. The first command matched three network cases; the corrected `db_tests` selection separately executed all three DB cases. |
+| Local controls | Dependency/cycle checks, six boundary fixtures, changed-path/shared-Core records against unchanged HEAD policy, JSON, functional Python syntax and `git diff --check` pass. No policy exception or validation/checkpoint relaxation. |
+
+The eight code commits additionally passed 40 exact-index syntax checks
+using staged source and changed-header snapshots: C++17 production and
+C++20 test units with `/W3 /WX`. Each committed prefix passes the boundary
+checker against unchanged `4b271d5680` policy. Commands, hashes and logs
+are under `.ai/commit-ap1-6-20261108/`. These are syntax checks, not clean
+intermediate product builds.
+
+The final native SHA256 is
+`66e109e8ba5164c19bea435a1bee5d21e4c77d487a33446db10e19dff1a6c514`.
+The 43 distinct passing cases / 12,414 assertions above exclude earlier failed
+fixture runs and skipped cases. Earlier failures and the pre-legacy binary are
+retained separately; named wallets, bounded inbox identity, physical tombstone
+reads, erase-aware failure injection and loaded archive-wallet state corrected
+fixture assumptions while preserving their financial assertions.
+
+The actual RPC cross-check in `wallet_paymaster_operator.py` was extended and
+syntax-checked, but no current daemon functional, GUI, clean Windows/Linux
+product build, complete suite, sanitizer or fuzz campaign was run. Existing
+release requirements remain operator checks, including ordinary DGB/DD flows,
+real transport/load, backup/restore and cross-platform coverage.
+
 ## Setup revocation, exact retries, broadcast and confirmation observation
 
 R1–R5 corrections based on `a7dd1342d395a53975c2209ab550e25791a00e4b`,

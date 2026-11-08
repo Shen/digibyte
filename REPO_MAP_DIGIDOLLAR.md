@@ -872,6 +872,10 @@ acquiring the provider work guard.
 capacity/recovery/quote requests, with independent provider/type fairness cursors.
 `CaptureProviderFinanceStatus` and `CaptureProviderAutomationStatus` produce
 typed wallet observations; the RPC result adapter only encodes their snapshots.
+`CaptureProviderLifecycleStatus` shares runtime/start-intent observations across
+both status RPCs, start, daemon waiting and automation. Historical transfer
+economics are authenticated by `ValidateProviderCommitArtifacts` in
+`src/paymaster/psbt.cpp` before every finance event construction.
 `ResolvePaymasterActiveTip` resolves the first captured locator hash to an active
 block and height. Provider readiness compares a fresh tip hash after wallet/index
 reads, avoiding height lookups that can become invalid during a reorganization.
@@ -887,12 +891,17 @@ interfaces for existing callers; it owns no implementation.
 `CommitPoolPreparation` retain checkpointed generation/revocation independently.
 `CheckPaymasterPoolFundingBroadcast` guards finite/automatic funding;
 `ProviderMaintenanceBroadcastPending` is a read-only relay-pool observation.
+`ExecuteProviderMaintenanceTransactions` in `paymasterapplication.cpp` owns the
+typed finite/refill/withdrawal/retirement execution contract, including current
+authority, source locks, fees, checkpoint, commits and accounting.
 
 ### src/wallet/paymasterclientview*, paymasterrecoveryservice*
 
 Typed current session capabilities, status-aware lookups and shared recovery
 orchestration. RPC/GUI callers cannot substitute displayed state for the backend's
 execution-time checks. Structured errors originate in `src/paymaster/error.h`.
+Recovery quote intake uses `Manager::LeaseRecoveryResponses` until durable
+acceptance; local failures retain the reply for retry.
 `LoadClientPaymentReplay` in `paymasterclient.cpp` binds the original order before
 preparation effects; `SelectCreatedClientPaymentInputs` rechecks its original
 inputs for both ordinary payments and sweeps.
@@ -902,6 +911,8 @@ inputs for both ordinary payments and sweeps.
 Derived final/recovery transaction-to-session lookup. Rebuild once, point-read
 matching authoritative records, publish index deltas after successful commits,
 invalidate on abort, and forget on wallet destruction. It grants no authority.
+The same wallet-database cache lifecycle owns the disposable capacity-cleanup
+continuation; `ListPaymasterCapacityResponsesPage` bounds scanned rows and bytes.
 
 ### src/wallet/load.{h,cpp}
 
@@ -918,6 +929,8 @@ and loaded-wallet lifetime handling.
 - Signs only the expected user or provider input role using wallet-owned keys,
   after strict collaborative-template validation.
 - Produces user input-control proofs without exposing private key material.
+- `SignPaymasterBip86Control` shares exact prevout ownership, tweak and digest
+  signing for payment, recovery and provider control proofs.
 
 ### src/wallet/paymasterprovider.{h,cpp}
 - `GetPaymasterProviderPoolReadiness` applies shared domain readiness with ordinary/manual wallet locks excluded; new slot reservation and the provider signing boundary recheck that lock ownership.
