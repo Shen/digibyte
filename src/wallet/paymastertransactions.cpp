@@ -1205,17 +1205,7 @@ bool QueuePersistedPaymasterSubmit(
     // though the exact payment is already mined. Only a fully validated,
     // locally observed final transaction permits retrying its spent Capacity.
     // The unsigned txid or persisted USER PSBT alone never grants this exception.
-    CTransactionRef known_final;
-    {
-        LOCK(wallet.cs_wallet);
-        if (const auto* wallet_tx = wallet.GetWalletTx(attempt.unsigned_txid))
-            known_final = wallet_tx->tx;
-    }
-    if (!known_final) {
-        uint256 block_hash;
-        known_final = node::GetTransaction(nullptr, node->mempool.get(),
-            attempt.unsigned_txid, block_hash, node->chainman->m_blockman);
-    }
+    const CTransactionRef known_final = FindLocalPaymasterFinal(wallet, attempt.unsigned_txid);
     std::optional<ExactFinalTransactionProof> final_proof;
     if (known_final) {
         FinalTransactionPresence presence{FinalTransactionPresence::NONE};
@@ -1518,6 +1508,19 @@ std::vector<unsigned char> SerializeTransaction(const CMutableTransaction& trans
     stream << transaction;
     const auto bytes = MakeUCharSpan(stream);
     return {bytes.begin(), bytes.end()};
+}
+
+CTransactionRef FindLocalPaymasterFinal(CWallet& wallet, const uint256& txid)
+{
+    {
+        LOCK(wallet.cs_wallet);
+        if (const auto* wallet_tx = wallet.GetWalletTx(txid)) return wallet_tx->tx;
+    }
+    auto* node = wallet.chain().context();
+    if (!node || !node->chainman) return {};
+    uint256 block_hash;
+    return node::GetTransaction(nullptr, node->mempool.get(), txid,
+                                block_hash, node->chainman->m_blockman);
 }
 
 bool PreflightFinalPaymasterTransaction(CWallet& wallet,

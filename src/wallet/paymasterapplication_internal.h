@@ -321,6 +321,9 @@ std::vector<unsigned char> SerializePSBT(
     const PartiallySignedTransaction& psbt);
 std::vector<unsigned char> SerializeTransaction(
     const CMutableTransaction& transaction);
+/** Look up local evidence only. Callers must validate the complete transaction
+ * against their accepted template before using it to resume an authorization. */
+CTransactionRef FindLocalPaymasterFinal(CWallet& wallet, const uint256& txid);
 bool PreflightFinalPaymasterTransaction(
     CWallet& wallet,
     const CTransactionRef& transaction,
