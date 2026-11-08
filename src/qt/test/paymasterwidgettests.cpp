@@ -32,6 +32,7 @@
 #include <paymaster/manager.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
+#include <qt/transactiontablemodel.h>
 #include <qt/paymasterwallet.h>
 #include <script/standard.h>
 #include <rpc/server.h>
@@ -466,6 +467,28 @@ UniValue PaymasterSessionView(const std::string& state,
     } else {
         result.pushKV("result_status", UniValue{UniValue::VNULL});
         result.pushKV("result_sequence", UniValue{UniValue::VNULL});
+    }
+    return result;
+}
+
+UniValue PaymasterConfirmationObservation(bool recovery, bool confirmed)
+{
+    auto result = PaymasterSessionView(confirmed ? recovery ? "CANCELED_SAFE" : "CONFIRMED" : "PENDING_PROVIDER",
+        recovery ? "alternative_recovery" : "final_transaction", "MEMPOOL");
+    if (recovery) {
+        auto session = result.find_value("session");
+        session.pushKV("recovery_txid", std::string(64, 'f'));
+        UniValue observation{UniValue::VOBJ}, payment_view{UniValue::VOBJ};
+        observation.pushKV("details_available", true);
+        observation.pushKV("observation_available", true);
+        observation.pushKV("confirmations", confirmed ? 1 : 0);
+        observation.pushKV("txid", std::string(64, 'f'));
+        payment_view.pushKV("recovery", observation);
+        session.pushKV("payment_view", payment_view);
+        result.pushKV("session", session);
+        auto retained = result.find_value("recovery");
+        retained.pushKV("phase", "final_committed");
+        result.pushKV("recovery", retained);
     }
     return result;
 }
@@ -9642,10 +9665,15 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     DigiDollarSendWidget form(gui.platformStyle.get());
     auto* client = form.findChild<PaymasterSendWidget*>();
     int offer_reads{0};
+    int closure_reads{0};
     int unexpected{0};
     client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
         if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
         if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "resolvepaymastersession" && params[1].get_str() == "refresh") {
+            ++closure_reads;
+            return PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
+        }
         if (command == "getpaymasteroffers") {
             ++offer_reads;
             UniValue offers{UniValue::VARR};
@@ -9687,6 +9715,7 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     const UniValue confirmed = PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
     QVERIFY(client->updatePaymasterSessionView(confirmed));
     QCOMPARE(client->m_send.completion(confirmed).kind, PaymasterQt::SendController::CompletionKind::PAYMENT);
+    client->m_send.markNoticeShown();
     if (already_cleared) {
         // Successful send clears the form while the durable session still
         // protects its history. Clearing it again emits no textChanged signal.
@@ -9697,6 +9726,8 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     QVERIFY(primary->isEnabled());
     QCOMPARE(primary->text(), QStringLiteral("Start a new transfer"));
     primary->click();
+    QTRY_COMPARE(closure_reads, 1);
+    QVERIFY(client->m_send.view().requestId.isEmpty());
     QVERIFY(address->text().isEmpty());
     QVERIFY(amount->text().isEmpty());
     QCOMPARE(table->rowCount(), 0);
@@ -9716,6 +9747,262 @@ void PaymasterWidgetTests::paymasterClientNewTransferClearsOffers()
     QCOMPARE(table->rowCount(), 1);
     QVERIFY(table->item(0, 0)->text().contains(QStringLiteral("Fresh provider")));
     QCOMPARE(unexpected, 0); // Starting another entry sends no payment RPC.
+}
+
+void PaymasterWidgetTests::paymasterClientTerminalObservationFollowsWalletSignals_data()
+{
+    QTest::addColumn<bool>("recovery");
+    QTest::newRow("recipient-payment") << false;
+    QTest::newRow("self-recovery") << true;
+}
+
+void PaymasterWidgetTests::paymasterClientTerminalObservationFollowsWalletSignals()
+{
+    QFETCH(bool, recovery);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-terminal-session-observation");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    auto form = std::make_unique<DigiDollarSendWidget>(gui.platformStyle.get());
+    auto* client = form->findChild<PaymasterSendWidget*>();
+    std::vector<WalletModel::RpcCallback> replies;
+    std::vector<uint64_t> read_revisions;
+    int reads{0}, unexpected{0}, notices{0};
+    client->setPaymasterAsyncRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params, WalletModel::RpcCallback callback) {
+            if (command == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+            else if (command == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+            else if (command == "resolvepaymastersession" && params[1].get_str() == "refresh") {
+                ++reads;
+                replies.push_back(std::move(callback));
+                read_revisions.push_back(client->m_sessionObservationRevision);
+            } else {
+                ++unexpected;
+                callback({}, "Unexpected mutation or provider request");
+            }
+        });
+    form->setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&,
+                                       QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        ++notices;
+        return QMessageBox::Cancel;
+    });
+    form->setWalletModel(gui.walletModel.get());
+    DigiDollarTest::SyncDGBBalance(*gui.walletModel);
+    const auto snapshot = [&](bool confirmed) {
+        return PaymasterConfirmationObservation(recovery, confirmed);
+    };
+    const auto confirmed = snapshot(true);
+    const auto establish_completion = [&] {
+        QVERIFY(client->updatePaymasterSessionView(confirmed));
+        QCOMPARE(client->m_send.completion(confirmed).kind, recovery
+            ? PaymasterQt::SendController::CompletionKind::RECOVERY : PaymasterQt::SendController::CompletionKind::PAYMENT);
+        client->m_send.markNoticeShown();
+        client->updatePaymasterFocusMode();
+    };
+    establish_completion();
+    auto* transactions = gui.walletModel->getTransactionTableModel();
+    QSignalSpy changes(transactions, &QAbstractItemModel::dataChanged);
+    int ownership_changes{0};
+    connect(gui.walletModel.get(), &WalletModel::balanceChanged, form.get(), [&] { ++ownership_changes; });
+    // Change the real wallet's processed-tip hash without changing its height
+    // or ownership balance, as happens on a same-height reorg. Exercise the
+    // asynchronous WalletModel -> transaction table -> client signal route.
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetLastBlockProcessed(wallet->GetLastBlockHeight(), uint256::ONE);
+    }
+    client->setPaymasterBusy(true);
+    QTRY_VERIFY([&] {
+        // QTRY evaluates its expression again after success. Do not launch a
+        // second balance worker after the requested tip signal has arrived.
+        if (changes.count() == 2) return true;
+        gui.walletModel->pollBalanceChanged();
+        return false;
+    }());
+    QCOMPARE(ownership_changes, 0);
+    QVERIFY(!client->m_send.view().observationAvailable);
+    QVERIFY(!client->m_send.clearAfterClosure());
+    QCoreApplication::processEvents();
+    QCOMPARE(reads, 0);
+    client->setPaymasterBusy(false);
+    QTRY_COMPARE(reads, 1);
+    // Another tip notification while the read runs invalidates its result.
+    transactions->updateConfirmations();
+    replies[0](confirmed, {});
+    QTRY_COMPARE(reads, 2);
+    QVERIFY(!client->m_send.view().observationAvailable);
+    QCOMPARE(client->m_sessionObservationRevision, read_revisions[1]);
+    replies[1](snapshot(false), {});
+    QVERIFY(client->m_send.view().observationAvailable);
+    QCOMPARE(client->m_send.view().confirmationState, QStringLiteral("unconfirmed"));
+    QVERIFY(!client->m_send.clearAfterClosure());
+    const auto status = form->findChild<QLabel*>("paymasterSessionNextStep")->text();
+    QVERIFY(!status.startsWith("Transfer confirmed") && !status.startsWith("Recovery confirmed"));
+    QCOMPARE(notices, 0);
+    QCOMPARE(unexpected, 0);
+
+    // Read failures retain identity and revoke capabilities instead of keeping
+    // the old confirmation. Old-wallet callbacks/signals cannot restore it.
+    establish_completion();
+    transactions->updateConfirmations();
+    QTRY_COMPARE(reads, 3);
+    replies[2]({}, "PAYMASTER_SESSION_READ_FAILED");
+    QVERIFY(!client->m_send.view().observationAvailable);
+    QVERIFY(!client->m_send.view().requestId.isEmpty());
+    QVERIFY(!client->m_send.clearAfterClosure());
+    transactions->updateConfirmations();
+    QTRY_COMPARE(reads, 4);
+    form->setWalletModel(nullptr);
+    replies[3](confirmed, {});
+    transactions->updateConfirmations();
+    QCoreApplication::processEvents();
+    QCOMPARE(reads, 4);
+    QVERIFY(client->m_send.view().requestId.isEmpty());
+
+    form->setWalletModel(gui.walletModel.get());
+    establish_completion();
+    transactions->updateConfirmations();
+    QTRY_COMPARE(reads, 5);
+    form.reset();
+    replies[4](confirmed, {}); // Destroyed receiver: no notice or stale mutation.
+    QCoreApplication::processEvents();
+    QCOMPARE(notices, 0);
+    QCOMPARE(unexpected, 0);
+}
+
+void PaymasterWidgetTests::paymasterClientNewTransferRechecksClosure_data()
+{
+    QTest::addColumn<QString>("outcome");
+    QTest::newRow("still-confirmed") << QStringLiteral("confirmed");
+    QTest::newRow("reorganized") << QStringLiteral("pending");
+    QTest::newRow("unreadable") << QStringLiteral("error");
+    QTest::newRow("malformed") << QStringLiteral("malformed");
+}
+
+void PaymasterWidgetTests::paymasterClientNewTransferRechecksClosure()
+{
+    QFETCH(QString, outcome);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-new-transfer-closure");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    WalletModel::RpcCallback reply;
+    int reads{0}, unexpected{0};
+    client->setPaymasterAsyncRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params, WalletModel::RpcCallback callback) {
+            if (command == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+            else if (command == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+            else if (command == "resolvepaymastersession" && params[1].get_str() == "refresh") {
+                ++reads;
+                reply = std::move(callback);
+            } else { ++unexpected; callback({}, "Unexpected payment mutation"); }
+        });
+    form.setDialogHandlerForTesting([](QMessageBox::Icon, const QString&, const QString&,
+                                      QMessageBox::StandardButtons, QMessageBox::StandardButton) { return QMessageBox::Cancel; });
+    form.setWalletModel(gui.walletModel.get());
+    const auto confirmed = PaymasterSessionView("CONFIRMED", "final_transaction", "MEMPOOL");
+    QVERIFY(client->updatePaymasterSessionView(confirmed));
+    QCOMPARE(client->m_send.completion(confirmed).kind, PaymasterQt::SendController::CompletionKind::PAYMENT);
+    client->m_send.markNoticeShown();
+    client->onPaymasterPrimaryAction();
+    QVERIFY(!client->m_send.view().requestId.isEmpty());
+    QVERIFY(!client->m_send.clearAfterClosure());
+    QTRY_COMPARE(reads, 1);
+    if (outcome == QLatin1String("error")) reply({}, "PAYMASTER_SESSION_READ_FAILED");
+    else if (outcome == QLatin1String("malformed")) reply(UniValue{UniValue::VOBJ}, {});
+    else reply(outcome == QLatin1String("confirmed") ? confirmed : PaymasterSessionView("MEMPOOL", "final_transaction", "MEMPOOL"), {});
+    QCOMPARE(client->m_send.view().requestId.isEmpty(), outcome == QLatin1String("confirmed"));
+    QCOMPARE(unexpected, 0);
+}
+
+void PaymasterWidgetTests::paymasterClientCompletionNoticeLifetime_data()
+{
+    QTest::addColumn<bool>("recovery");
+    QTest::addColumn<QString>("boundary");
+    for (const bool recovery : {false, true}) {
+        for (const auto* boundary : {"wallet-switch", "destruction", "reorg"}) {
+            const auto name = QByteArray(recovery ? "recovery-" : "payment-") + boundary;
+            QTest::newRow(name.constData()) << recovery << QString::fromLatin1(boundary);
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterClientCompletionNoticeLifetime()
+{
+    QFETCH(bool, recovery);
+    QFETCH(QString, boundary);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-completion-notice-lifetime");
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    auto form = std::make_unique<DigiDollarSendWidget>(gui.platformStyle.get());
+    auto* client = form->findChild<PaymasterSendWidget*>();
+    const QPointer<PaymasterSendWidget> guard{client};
+    std::vector<WalletModel::RpcCallback> replies;
+    int reads{0}, notices{0}, unexpected{0};
+    client->setPaymasterAsyncRpcExecutorForTesting(
+        [&](const std::string& command, const UniValue& params, WalletModel::RpcCallback callback) {
+            if (command == "getpaymasterclientsafetystatus") callback(PaymasterClientSafetyStatus(), {});
+            else if (command == "listdigidollarsendsessions") callback(EmptyPaymasterSessionList(), {});
+            else if (command == "resolvepaymastersession" && params[1].get_str() == "refresh") {
+                ++reads;
+                replies.push_back(std::move(callback));
+            } else { ++unexpected; callback({}, "Unexpected payment mutation"); }
+        });
+    form->setWalletModel(gui.walletModel.get());
+    form->setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&,
+                                       QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        ++notices;
+        if (boundary == QLatin1String("wallet-switch")) {
+            form->setWalletModel(nullptr);
+            form->setWalletModel(gui.walletModel.get());
+        } else if (boundary == QLatin1String("destruction")) {
+            form.reset();
+        } else {
+            gui.walletModel->getTransactionTableModel()->updateConfirmations();
+        }
+        return QMessageBox::Cancel;
+    });
+    const auto confirmed = PaymasterConfirmationObservation(recovery, true);
+    QVERIFY(client->updatePaymasterSessionView(confirmed));
+    QCOMPARE(client->m_send.completion(confirmed).kind, recovery
+        ? PaymasterQt::SendController::CompletionKind::RECOVERY : PaymasterQt::SendController::CompletionKind::PAYMENT);
+    // Leave the completion notice unseen so the fresh closure read presents it.
+    client->onPaymasterPrimaryAction();
+    QTRY_COMPARE(reads, 1);
+    replies[0](confirmed, {});
+    QCOMPARE(notices, 1);
+    if (boundary == QLatin1String("destruction")) {
+        QVERIFY(!guard);
+    } else if (boundary == QLatin1String("wallet-switch")) {
+        QVERIFY(client->m_send.view().requestId.isEmpty());
+        QVERIFY(!client->m_send.view().terminalNoticeShown);
+        QVERIFY(!client->m_sessionObservationPending);
+        QVERIFY(!client->isBusy());
+        QCOMPARE(form->findChild<QLabel*>("paymasterSessionState")->text(), QStringLiteral("No active session"));
+    } else {
+        QVERIFY(!client->m_send.view().requestId.isEmpty());
+        QVERIFY(!client->m_send.view().observationAvailable);
+        QVERIFY(!form->findChild<QLabel*>("paymasterSessionState")->text().contains("confirmed", Qt::CaseInsensitive));
+        QVERIFY(!client->m_send.clearAfterClosure());
+        QTRY_COMPARE(reads, 2);
+        replies[1](PaymasterConfirmationObservation(recovery, false), {});
+        QCOMPARE(client->m_send.view().confirmationState, QStringLiteral("unconfirmed"));
+        QVERIFY(!client->m_send.clearAfterClosure());
+        QCOMPARE(notices, 1);
+    }
+    QCOMPARE(unexpected, 0);
 }
 
 void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance_data()

@@ -143,6 +143,12 @@ private Q_SLOTS:
     void paymasterClientOfferSearchRequiresBalance();
     void paymasterClientNewTransferClearsOffers_data();
     void paymasterClientNewTransferClearsOffers();
+    void paymasterClientTerminalObservationFollowsWalletSignals_data();
+    void paymasterClientTerminalObservationFollowsWalletSignals();
+    void paymasterClientNewTransferRechecksClosure_data();
+    void paymasterClientNewTransferRechecksClosure();
+    void paymasterClientCompletionNoticeLifetime_data();
+    void paymasterClientCompletionNoticeLifetime();
     void paymasterClientFeeCeilingConsistency();
     void paymasterClientOfferFundingConsistency_data();
     void paymasterClientOfferFundingConsistency();

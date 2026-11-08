@@ -16,6 +16,7 @@
 #include <QStringList>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 class DigiDollarSendWidget;
 
@@ -172,8 +173,13 @@ private:
     void stopPaymasterPolling();
     void observePaymasterOutcome();
     void schedulePaymasterPoll(bool state_changed);
+    void queuePaymasterSessionObservation();
+    void schedulePaymasterSessionObservation();
+    void observePaymasterSession(const QString& required_action,
+                                std::function<void(bool)> continuation);
     void refreshPaymasterSessionForAction(
         const QString& required_action, std::function<void()> continuation);
+    void clearCompletedPaymasterSession();
     Q_SLOT void retryPaymasterSession();
     void continuePaymasterRetry();
     Q_SLOT void fallbackPaymasterSession();
@@ -211,6 +217,11 @@ private:
     DigiDollarSendWidget& m_form;
     WalletModel* m_walletModel{nullptr};
     QMetaObject::Connection m_historyConnection;
+    std::vector<QMetaObject::Connection> m_sessionObservationConnections;
+    uint64_t m_sessionObservationRevision{0};
+    bool m_sessionObservationPending{false};
+    bool m_sessionObservationScheduled{false};
+    bool m_closeSessionAfterObservation{false};
     QLabel* m_historyStatus{nullptr};
     QTimer* m_historyStatusTimer{nullptr};
     QElapsedTimer m_historyWaitStarted;
