@@ -27,6 +27,9 @@
   ],
   "shared": [
     "src/net.cpp",
+    "src/netbase.cpp",
+    "src/netbase.h",
+    "src/test/netbase_tests.cpp",
     "src/wallet/wallet.cpp",
     "src/wallet/wallet.h",
     "src/wallet/walletdb.cpp",
