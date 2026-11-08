@@ -361,7 +361,7 @@ FUZZ_TARGET(paymaster_persistence_records,
 {
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     const uint8_t record_kind =
-        provider.ConsumeIntegralInRange<uint8_t>(0, 35);
+        provider.ConsumeIntegralInRange<uint8_t>(0, 36);
     const uint8_t session_mutation =
         provider.ConsumeIntegralInRange<uint8_t>(0, 6);
     const uint8_t template_mutation =
@@ -802,6 +802,34 @@ FUZZ_TARGET(paymaster_persistence_records,
                 return batch.WritePaymasterClientOrder(value);
             });
         break;
+    case 36: {
+        MockableDatabase database;
+        const std::string key{"pmnativeexec"};
+        InstallRawRecord(database, key, raw);
+        const auto before = database.m_records;
+        WalletBatch batch{database};
+        PaymasterMaintenanceExecution execution;
+        const auto status = batch.ReadPaymasterMaintenanceExecutionWithStatus(execution);
+        assert(status != DatabaseReadStatus::NOT_FOUND);
+        assert(database.m_records == before);
+        if (status == DatabaseReadStatus::FOUND) {
+            assert(ValidatePaymasterMaintenanceExecution(execution));
+            const auto canonical = SerializeDatabaseValue(execution);
+            const auto bytes = AsBytes(Span{raw});
+            assert(canonical.size() == bytes.size()); // Trailing data is rejected.
+            assert(std::equal(canonical.begin(), canonical.end(), bytes.begin()));
+            MockableDatabase roundtrip;
+            roundtrip.m_records[SerializeDatabaseKey(key)] = canonical;
+            PaymasterMaintenanceExecution restored;
+            assert(WalletBatch{roundtrip}.ReadPaymasterMaintenanceExecutionWithStatus(restored) == DatabaseReadStatus::FOUND);
+            assert(GetPaymasterMaintenanceExecutionHash(restored) == GetPaymasterMaintenanceExecutionHash(execution));
+            // Decoding signed bytes cannot create provider identity authority.
+            MockableDatabase unauthorized;
+            assert(!WalletBatch{unauthorized}.WritePaymasterMaintenanceExecution(restored));
+            assert(unauthorized.m_records.empty());
+        }
+        break;
+    }
     }
 }
 

@@ -268,6 +268,80 @@ bool WalletBatch::ErasePaymasterIC(const K& key)
 // security transitions belong to PaymasterStore and must use one explicit DB
 // transaction; callers must not compose a signing transition from independent
 // WritePaymaster* calls.
+uint256 GetPaymasterMaintenanceExecutionHash(const PaymasterMaintenanceExecution& execution)
+{
+    return (HashWriter{} << std::string{"DigiByte/PaymasterNativeMaintenance/v1"} << execution).GetHash();
+}
+
+bool ValidatePaymasterMaintenanceExecution(const PaymasterMaintenanceExecution& execution)
+{
+    using namespace DigiDollar::Paymaster;
+    std::string error;
+    if (execution.version != PaymasterMaintenanceExecution::CURRENT_VERSION ||
+        execution.genesis_hash != Params().GenesisBlock().GetHash() || execution.provider_id.IsNull() ||
+        execution.operation_id.IsNull() || execution.created_at <= 0 || execution.legs.empty() || execution.legs.size() > 2 ||
+        !ValidateProviderPoolEntries(execution.before_pool, error) || !ValidateProviderPoolEntries(execution.after_pool, error) ||
+        (!execution.had_pool && !execution.before_pool.empty()) ||
+        (execution.has_ledger && (!ValidateProviderMaintenanceLedger(execution.before_ledger, error) ||
+                                  !ValidateProviderMaintenanceLedger(execution.after_ledger, error)))) return false;
+    std::set<COutPoint> inputs;
+    for (const auto& leg : execution.legs) {
+        if (leg.transaction.empty() || leg.transaction.size() > 4 * 1024 * 1024 ||
+            leg.fee.value <= 0 || !MoneyRange(leg.fee.value) || leg.metadata.size() > 2 ||
+            (leg.digidollar && (leg.history_amount.value <= 0 || leg.history_recipient.empty()))) return false;
+        for (const auto& [key, value] : leg.metadata) {
+            if ((key != "comment" && key != "paymaster_retirement_provider") || value.size() > 4096) return false;
+        }
+        try {
+            CDataStream stream{leg.transaction, SER_NETWORK, ::PROTOCOL_VERSION};
+            CMutableTransaction transaction;
+            stream >> transaction;
+            CDataStream canonical{SER_NETWORK, ::PROTOCOL_VERSION};
+            canonical << transaction;
+            const auto bytes = MakeUCharSpan(canonical);
+            if (!stream.empty() || std::vector<unsigned char>(bytes.begin(), bytes.end()) != leg.transaction ||
+                transaction.vin.empty() || transaction.vout.empty()) return false;
+            for (const auto& input : transaction.vin)
+                if (input.prevout.IsNull() || !inputs.insert(input.prevout).second ||
+                    (input.scriptSig.empty() && input.scriptWitness.IsNull())) return false;
+        } catch (const std::exception&) { return false; }
+    }
+    return true;
+}
+
+bool WalletBatch::WritePaymasterMaintenanceExecution(const PaymasterMaintenanceExecution& execution)
+{
+    PaymasterMaintenanceExecution previous;
+    DigiDollar::Paymaster::ProviderIdentityRecord identity;
+    if (!ValidatePaymasterMaintenanceExecution(execution) ||
+        ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND || identity.provider_id != execution.provider_id ||
+        ReadPaymasterMaintenanceExecutionWithStatus(previous) != DatabaseReadStatus::NOT_FOUND) return false;
+    return WritePaymasterIC(std::string{"pmnativeexec"}, execution, false);
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceExecutionWithStatus(PaymasterMaintenanceExecution& execution)
+{
+    struct StrictExecution : PaymasterMaintenanceExecution {
+        void Unserialize(DataStream& stream)
+        {
+            stream >> static_cast<PaymasterMaintenanceExecution&>(*this);
+            if (!stream.empty()) throw std::ios_base::failure("maintenance execution trailing bytes");
+        }
+    } strict;
+    execution = {};
+    const auto status = m_batch->ReadWithStatus(std::string{"pmnativeexec"}, strict);
+    execution = strict;
+    if ((status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::READ_ERROR) &&
+        execution.version != PaymasterMaintenanceExecution::CURRENT_VERSION) return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return ValidatePaymasterMaintenanceExecution(execution) ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::ErasePaymasterMaintenanceExecution()
+{
+    return ErasePaymasterIC(std::string{"pmnativeexec"});
+}
+
 template <typename K, typename T>
 DatabaseReadStatus WalletBatch::ReadPaymasterVersionedRecord(const K& key,
                                                               T& value)

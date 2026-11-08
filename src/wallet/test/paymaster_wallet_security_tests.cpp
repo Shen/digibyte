@@ -1431,6 +1431,71 @@ BOOST_AUTO_TEST_CASE(checkpoint_pending_native_operation_survives_restart)
     BOOST_CHECK(!WalletBatch{restarted.GetDatabase()}.WritePaymasterSettings(environment.settings));
 }
 
+BOOST_AUTO_TEST_CASE(checkpoint_native_journal_repairs_only_adjacent_exact_commit_gaps)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    PaymasterMaintenanceExecution execution;
+    execution.genesis_hash = Params().GenesisBlock().GetHash();
+    execution.provider_id = environment.identity.provider_id;
+    execution.operation_id = GetRandHash();
+    execution.created_at = 1000;
+    CMutableTransaction transaction;
+    transaction.vin.emplace_back(COutPoint{GetRandHash(), 0}, CScript{} << OP_TRUE);
+    transaction.vout.emplace_back(1, environment.identity.identity_script);
+    PaymasterMaintenanceExecutionLeg leg;
+    leg.transaction = paymaster_store::internal::CanonicalBytes(transaction);
+    leg.fee = DGBSatoshis{1};
+    execution.legs.push_back(leg);
+    std::string error;
+    LOCK(m_wallet.cs_wallet);
+    {
+        PaymasterCheckpointOperation operation{m_wallet};
+        BOOST_REQUIRE_MESSAGE(operation.Begin(execution, error), error);
+        BOOST_REQUIRE(operation.Active());
+    }
+    const auto original = database.m_records;
+    BOOST_CHECK(!CheckPaymasterCheckpoint(database, error));
+    {
+        PaymasterCheckpointOperation operation{m_wallet};
+        BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
+        database.FailCommit();
+        BOOST_CHECK(!WalletBatch{database}.WritePaymasterSettings(environment.settings));
+        database.ClearFailureInjection();
+    }
+    // The external pending checkpoint is one commit ahead. Its immutable
+    // token permits only this journal; a different operation cannot repair it.
+    auto changed = execution;
+    changed.operation_id = GetRandHash();
+    {
+        PaymasterCheckpointOperation operation{m_wallet};
+        const auto before = database.m_records;
+        BOOST_CHECK(!operation.Resume(changed, error));
+        BOOST_CHECK(database.m_records == before);
+        BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
+        database.FailCommit();
+        BOOST_CHECK(!operation.Complete(error));
+        database.ClearFailureInjection();
+    }
+    // Completion advanced the file but failed to erase the journal/marker in
+    // the wallet. Repair that adjacent completion and finish atomically.
+    {
+        PaymasterCheckpointOperation operation{m_wallet};
+        BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
+        BOOST_REQUIRE_MESSAGE(operation.Complete(error), error);
+    }
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(database, error), error);
+    PaymasterMaintenanceExecution saved;
+    BOOST_CHECK(WalletBatch{database}.ReadPaymasterMaintenanceExecutionWithStatus(saved) == DatabaseReadStatus::NOT_FOUND);
+    wallet::CWallet clone{m_node.chain.get(), "old-native-journal", std::make_unique<MockableDatabase>(original)};
+    LOCK(clone.cs_wallet);
+    const auto clone_before = GetMockableDatabase(clone).m_records;
+    PaymasterCheckpointOperation stale{clone};
+    BOOST_CHECK(!stale.Resume(execution, error));
+    BOOST_CHECK(GetMockableDatabase(clone).m_records == clone_before);
+}
+
 BOOST_AUTO_TEST_CASE(checkpoint_recovery_retirement_fences_other_copies)
 {
     const auto environment = MakeProviderEnvironment(200000, 2000);

@@ -17,9 +17,10 @@ class CWallet;
 class DatabaseBatch;
 class WalletBatch;
 class WalletDatabase;
+struct PaymasterMaintenanceExecution;
 
-/** No keys or transaction contents leave the wallet. The random token also
- * distinguishes independently advanced copies at the same generation. */
+/** No keys or transaction contents leave the wallet. Tokens distinguish
+ * independently advanced copies; a pending native token commits its journal. */
 struct PaymasterCheckpoint {
     // Version 2 retains the layout and reads version 1, adding permanent
     // retirement. Older binaries reject the new version rather than resume.
@@ -61,7 +62,7 @@ bool PaymasterCheckpointInTransaction(const WalletBatch* owner);
 
 /** Fence wallet-native broadcasts whose transaction and Paymaster accounting
  * cannot share a database transaction. An unfinished fence survives restart;
- * only this live operation may continue writing through its pending marker. */
+ * only its exact immutable journal can resume through the pending marker. */
 class PaymasterCheckpointOperation {
 public:
     explicit PaymasterCheckpointOperation(CWallet& wallet) : m_wallet(wallet) {}
@@ -70,10 +71,15 @@ public:
     PaymasterCheckpointOperation& operator=(const PaymasterCheckpointOperation&) = delete;
     bool Active() const { return m_active; }
     bool Begin(std::string& error);
+    bool Begin(const PaymasterMaintenanceExecution& execution, std::string& error);
+    /** Resume only this exact immutable journal against its external token.
+     * A one-generation interrupted commit is repaired without rollback. */
+    bool Resume(const PaymasterMaintenanceExecution& execution, std::string& error);
     bool Complete(std::string& error);
 private:
     CWallet& m_wallet;
     bool m_active{false};
+    uint256 m_execution_hash;
 };
 } // namespace wallet
 #endif // DIGIBYTE_WALLET_PAYMASTERCHECKPOINT_H

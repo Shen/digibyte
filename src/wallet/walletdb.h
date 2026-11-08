@@ -18,6 +18,7 @@
 #include <wallet/walletutil.h>
 
 #include <stdint.h>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -39,6 +40,45 @@ struct ProviderFinanceReport;
 } // namespace DigiDollar::Paymaster
 
 namespace wallet {
+/** Immutable, already signed native work. Exact before/after accounting makes
+ * replay idempotent; its hash is the independently retained pending token. */
+struct PaymasterMaintenanceExecutionLeg {
+    std::vector<unsigned char> transaction;
+    DigiDollar::Paymaster::DGBSatoshis fee;
+    std::map<std::string, std::string> metadata;
+    bool digidollar{false};
+    CScript history_recipient;
+    DigiDollar::Paymaster::DDCents history_amount;
+    bool multiple_recipients{false};
+    SERIALIZE_METHODS(PaymasterMaintenanceExecutionLeg, obj)
+    {
+        READWRITE(obj.transaction, obj.fee, obj.metadata, obj.digidollar,
+                  obj.history_recipient, obj.history_amount, obj.multiple_recipients);
+    }
+};
+
+struct PaymasterMaintenanceExecution {
+    static constexpr uint16_t CURRENT_VERSION{1};
+    uint16_t version{CURRENT_VERSION};
+    uint256 genesis_hash;
+    uint256 provider_id;
+    uint256 operation_id;
+    int64_t created_at{0};
+    bool had_pool{false};
+    bool has_ledger{false};
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry> before_pool, after_pool;
+    DigiDollar::Paymaster::ProviderMaintenanceLedger before_ledger, after_ledger;
+    std::vector<PaymasterMaintenanceExecutionLeg> legs;
+    SERIALIZE_METHODS(PaymasterMaintenanceExecution, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.operation_id,
+                  obj.created_at, obj.had_pool, obj.has_ledger, obj.before_pool, obj.after_pool,
+                  obj.before_ledger, obj.after_ledger, obj.legs);
+    }
+};
+bool ValidatePaymasterMaintenanceExecution(const PaymasterMaintenanceExecution& execution);
+uint256 GetPaymasterMaintenanceExecutionHash(const PaymasterMaintenanceExecution& execution);
+
 class CKeyPool;
 class CMasterKey;
 class CWallet;
@@ -312,7 +352,7 @@ public:
     WalletBatch& operator=(const WalletBatch&) = delete;
     ~WalletBatch() { PaymasterWalletTransactionEnd(this); }
 
-    bool SetPaymasterCheckpointPending(bool pending);
+    bool SetPaymasterCheckpointPending(bool pending, const uint256& execution_hash = {});
     bool RetirePaymasterCheckpoint(const uint256& expected_revision);
     /** Only for a reviewed, quiescent restored provider; fences older copies
      * before atomically removing its restoration quarantine. */
@@ -445,6 +485,9 @@ public:
     bool ReadPaymasterSession(const std::string& request_id, DigiDollar::Paymaster::PaymentSession& session);
     bool HasPaymasterSession(const std::string& request_id);
     bool ListPaymasterSessions(std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
+    bool WritePaymasterMaintenanceExecution(const PaymasterMaintenanceExecution& execution);
+    DatabaseReadStatus ReadPaymasterMaintenanceExecutionWithStatus(PaymasterMaintenanceExecution& execution);
+    bool ErasePaymasterMaintenanceExecution();
     /** Ordered raw session page. Bounds rows and bytes scanned before filtering;
      * a page may be empty after filtering and still have a continuation. */
     bool ListPaymasterSessionsPage(const std::string& after, size_t maximum_rows,

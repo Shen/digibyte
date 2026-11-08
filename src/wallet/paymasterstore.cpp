@@ -44,6 +44,31 @@
 namespace wallet {
 using namespace DigiDollar::Paymaster;
 
+namespace {
+DatabaseReadStatus ReadProtectedPaymasterInputs(WalletBatch& batch, std::set<COutPoint>& inputs)
+{
+    inputs.clear();
+    std::vector<ProviderPoolEntry> pool;
+    const auto pool_status = batch.ReadPaymasterProviderPoolWithStatus(pool);
+    if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) return pool_status;
+    for (const auto& entry : pool)
+        if (IsActiveProviderPoolState(entry.state)) inputs.insert(entry.outpoint);
+    PaymasterMaintenanceExecution execution;
+    const auto execution_status = batch.ReadPaymasterMaintenanceExecutionWithStatus(execution);
+    if (execution_status != DatabaseReadStatus::FOUND && execution_status != DatabaseReadStatus::NOT_FOUND) return execution_status;
+    if (execution_status == DatabaseReadStatus::FOUND) {
+        for (const auto& leg : execution.legs) {
+            CMutableTransaction transaction;
+            SpanReader stream{::PROTOCOL_VERSION, leg.transaction};
+            stream >> transaction;
+            for (const auto& input : transaction.vin) inputs.insert(input.prevout);
+        }
+        return DatabaseReadStatus::FOUND;
+    }
+    return pool_status;
+}
+} // namespace
+
 // Wallet coin selection calls these helpers before it knows which Paymaster
 // workflow owns an output. Keep this view deliberately conservative: both an
 // explicit reservation and every live pool state make the outpoint unavailable
@@ -70,13 +95,7 @@ DatabaseReadStatus PaymasterInputReservations::GetReservationStatus(const COutPo
         m_batch->ReadPaymasterReservationWithStatus(outpoint, reservation)};
     if (reservation_status != DatabaseReadStatus::NOT_FOUND) return reservation_status;
     if (!m_pool_loaded) {
-        std::vector<ProviderPoolEntry> pool;
-        m_pool_status = m_batch->ReadPaymasterProviderPoolWithStatus(pool);
-        if (m_pool_status == DatabaseReadStatus::FOUND) {
-            for (const auto& entry : pool) {
-                if (IsActiveProviderPoolState(entry.state)) m_pool_inputs.insert(entry.outpoint);
-            }
-        }
+        m_pool_status = ReadProtectedPaymasterInputs(*m_batch, m_pool_inputs);
         m_pool_loaded = true;
     }
     // AVAILABLE pool entries are dedicated liquidity too. An unreadable pool
@@ -96,16 +115,8 @@ DatabaseReadStatus GetPaymasterProviderPoolInputs(
     const CWallet& wallet, std::set<COutPoint>& inputs)
 {
     LOCK(wallet.cs_wallet);
-    inputs.clear();
-    std::vector<ProviderPoolEntry> pool;
-    const DatabaseReadStatus status{
-        WalletBatch{wallet.GetDatabase()}.ReadPaymasterProviderPoolWithStatus(
-            pool)};
-    if (status != DatabaseReadStatus::FOUND) return status;
-    for (const ProviderPoolEntry& entry : pool) {
-        if (IsActiveProviderPoolState(entry.state)) inputs.insert(entry.outpoint);
-    }
-    return DatabaseReadStatus::FOUND;
+    WalletBatch batch{wallet.GetDatabase()};
+    return ReadProtectedPaymasterInputs(batch, inputs);
 }
 
 namespace paymaster_store::internal {
