@@ -185,6 +185,8 @@ private:
     void clearCompletedPaymasterSession();
     Q_SLOT void retryPaymasterSession();
     void continuePaymasterRetry();
+    /** A modal warning can destroy/rebind this view. Recheck before continuing. */
+    bool showPaymasterWarning(const QString& title, const QString& message);
     Q_SLOT void fallbackPaymasterSession();
     Q_SLOT void recoverPaymasterSessionToSelf();
     Q_SLOT void abandonUnsignedPaymasterSession();

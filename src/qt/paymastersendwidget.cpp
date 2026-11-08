@@ -1440,6 +1440,7 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     if (m_send.view().busy || m_privacy) return;
     const uint64_t wallet_generation = m_send.view().walletGeneration;
     QDialog dialog(this);
+    const QPointer<PaymasterSendWidget> lifetime{this};
     // This is a DigiDollar-owned dialog, so give the shared theme a stable
     // selector instead of inheriting the application's blue default dialog
     // palette. The selector also scopes visible spin-box arrows to this modal.
@@ -1497,7 +1498,7 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
     layout->addWidget(buttons);
     setPaymasterBusy(true);
     const auto answer = dialog.exec();
-    if (wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
+    if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
     setPaymasterBusy(false);
     if (answer != QDialog::Accepted || m_privacy) return;
     if (per_day->value() < per_transfer->value()) {
@@ -1534,8 +1535,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
                 guard->m_clientSafetyConfigured = false;
                 guard->m_clientSafetyError = error;
                 guard->updateClientSafetyDisplay();
-                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster service-fee limits"),
-                                         ClientSafetyPolicyErrorMessage(error));
+                if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Paymaster service-fee limits"),
+                                         ClientSafetyPolicyErrorMessage(error))) return;
                 return;
             }
             qint64 persisted_per_transaction{0};
@@ -1552,8 +1553,8 @@ void PaymasterSendWidget::configureClientSafetyPolicy()
                 guard->m_clientSafetyConfigured = false;
                 guard->m_clientSafetyError = malformed;
                 guard->updateClientSafetyDisplay();
-                guard->m_form.showWarning(
-                    DigiDollarSendWidget::tr("Paymaster service-fee limits"), malformed);
+                if (!guard->showPaymasterWarning(
+                    DigiDollarSendWidget::tr("Paymaster service-fee limits"), malformed)) return;
                 return;
             }
             guard->m_clientSafetyMaximumPerTransaction =
@@ -1814,7 +1815,7 @@ void PaymasterSendWidget::requestPersistedPaymasterSessionPage(bool user_request
                 // Automatic startup checks stay inline. An explicit retry must
                 // report a repeated failure even when the RPC finishes instantly.
                 if (user_requested && !guard->m_privacy) {
-                    guard->m_form.showWarning(DigiDollarSendWidget::tr("Saved transfers unavailable"), message);
+                    if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Saved transfers unavailable"), message)) return;
                 }
             };
             if (!error.isEmpty()) {
@@ -2719,8 +2720,8 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 guard->setOfferCheckStatus(OfferCheckState::FAILED,
                     IsClientSafetyPolicyError(error) ? ClientSafetyPolicyErrorMessage(error) :
                         DigiDollarSendWidget::tr("Public offers could not be checked. Try again."));
-                if (!background) guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster offers unavailable"),
-                                                         ClientSafetyPolicyErrorMessage(error));
+                if (!background) if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Paymaster offers unavailable"),
+                                                         ClientSafetyPolicyErrorMessage(error))) return;
                 guard->setPaymasterBusy(false);
                 return;
             }
@@ -2732,9 +2733,9 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                 guard->m_paymasterPreviewTotalCents = -1;
                 guard->setOfferCheckStatus(OfferCheckState::FAILED, DigiDollarSendWidget::tr(
                     "Offer check failed: the response was malformed. Check node and wallet status before trying again. No fee was authorized."));
-                if (!background) guard->m_form.showWarning(
+                if (!background) if (!guard->showPaymasterWarning(
                     DigiDollarSendWidget::tr("Paymaster offers unavailable"),
-                    DigiDollarSendWidget::tr("Core returned an invalid Paymaster offer preview. Refresh node and wallet status before trying again."));
+                    DigiDollarSendWidget::tr("Core returned an invalid Paymaster offer preview. Refresh node and wallet status before trying again."))) return;
                 guard->setPaymasterBusy(false);
             };
             constexpr size_t MAX_PAYMASTER_OFFER_RESPONSE{
@@ -3186,10 +3187,13 @@ void PaymasterSendWidget::handlePaymasterFailure(const WalletModel::RpcError& fa
         return;
     }
     if (m_send.view().sessionPersisted && error.contains(QStringLiteral("PAYMASTER_NO_ELIGIBLE_OFFER"))) {
-        m_form.showWarning(DigiDollarSendWidget::tr("Offer request ended"),
-            DigiDollarSendWidget::tr("This request has no eligible remaining provider. An expired or rejected attempt cannot be reused. The saved request will now be checked; if it closed without payment authorization, you can start a new transfer.\n\nTechnical details: %1").arg(error));
+        if (!showPaymasterWarning(DigiDollarSendWidget::tr("Offer request ended"),
+            DigiDollarSendWidget::tr("This request has no eligible remaining provider. An expired or rejected attempt cannot be reused. The saved request will now be checked; if it closed without payment authorization, you can start a new transfer.\n\nTechnical details: %1").arg(error))) return;
     } else {
+        const QPointer<PaymasterSendWidget> lifetime{this};
+        const auto token = m_send.replyToken();
         m_form.showBackendError(static_cast<int>(WalletModel::TransactionCreationFailed), error);
+        if (!lifetime || !m_send.accepts(token)) return;
     }
     setPaymasterBusy(false);
     if (m_walletModel && !m_send.view().requestId.isEmpty()) {
@@ -3203,15 +3207,17 @@ void PaymasterSendWidget::handlePaymasterFailure(const WalletModel::RpcError& fa
 bool PaymasterSendWidget::applyPaymasterReplySnapshot(
     const UniValue& result, PaymasterQt::SendController::CompletionKind direct)
 {
+    const QPointer<PaymasterSendWidget> lifetime{this};
+    const auto token = m_send.replyToken();
     const bool direct_success = direct == PaymasterQt::SendController::CompletionKind::PAYMENT;
     if (direct == PaymasterQt::SendController::CompletionKind::PAYMENT_UNVERIFIED) {
         m_send.observationFailed();
         stopPaymasterPolling();
         m_paymasterStateValue->setText(
             DigiDollarSendWidget::tr("Transfer status blocked: malformed direct completion"));
-        m_form.showWarning(
+        if (!showPaymasterWarning(
             DigiDollarSendWidget::tr("DigiDollar transfer status unavailable"),
-            DigiDollarSendWidget::tr("Core returned a direct-transfer status without the exact successful status and a valid nonzero transaction id. The form was not cleared and no Paymaster continuation was started."));
+            DigiDollarSendWidget::tr("Core returned a direct-transfer status without the exact successful status and a valid nonzero transaction id. The form was not cleared and no Paymaster continuation was started."))) return false;
         setPaymasterBusy(false);
         return false;
     }
@@ -3221,14 +3227,16 @@ bool PaymasterSendWidget::applyPaymasterReplySnapshot(
             stopPaymasterPolling();
             m_paymasterStateValue->setText(
                 DigiDollarSendWidget::tr("Paymaster status blocked: malformed Core response"));
-            m_form.showWarning(
+            if (!showPaymasterWarning(
                 DigiDollarSendWidget::tr("Paymaster status unavailable"),
                 DigiDollarSendWidget::tr("Core returned an incomplete or inconsistent Paymaster session (%1). No automatic signing, retry or recovery will continue.")
-                    .arg(decode_error));
+                    .arg(decode_error))) return false;
             setPaymasterBusy(false);
             return false;
         }
-        if (handleAuthoritativePaymasterCompletion(result)) {
+        const bool completed = handleAuthoritativePaymasterCompletion(result);
+        if (!lifetime || !m_send.accepts(token)) return false;
+        if (completed) {
             setPaymasterBusy(false);
             if (m_send.view().sessionState == QStringLiteral("FAILED")) {
                 closeUnusablePaymasterOffer(DigiDollarSendWidget::tr("The provider offer could not be completed."));
@@ -3249,6 +3257,8 @@ bool PaymasterSendWidget::applyPaymasterReplySnapshot(
 
 void PaymasterSendWidget::completeDirectPaymasterReply(const UniValue& result, CAmount amount_cents)
 {
+    const QPointer<PaymasterSendWidget> lifetime{this};
+    const auto token = m_send.replyToken();
     const UniValue& txid = result.find_value("txid");
     const QString txid_text = txid.isStr()
         ? QString::fromStdString(txid.get_str()) : QString{};
@@ -3266,7 +3276,9 @@ void PaymasterSendWidget::completeDirectPaymasterReply(const UniValue& result, C
         ? payment_cents / 100.0
         : amount_cents / 100.0;
     if (m_walletModel) Q_EMIT m_walletModel->digiDollarChanged();
+    if (!lifetime || !m_send.accepts(token)) return;
     m_form.showSuccess(txid_text, recipient_amount);
+    if (!lifetime || !m_send.accepts(token)) return;
     m_form.onClearClicked();
     m_form.updateBalance();
     setPaymasterBusy(false);
@@ -3282,9 +3294,9 @@ void PaymasterSendWidget::applyPreparedPaymasterReply(
     if (next.effect == PreparedEffect::MALFORMED_COMMITMENT) {
         stopPaymasterPolling();
         m_send.clearReview();
-        m_form.showWarning(
+        if (!showPaymasterWarning(
             DigiDollarSendWidget::tr("Paymaster authorization blocked"),
-            DigiDollarSendWidget::tr("Core returned a malformed Paymaster authorization commitment. No signature or automatic retry will continue."));
+            DigiDollarSendWidget::tr("Core returned a malformed Paymaster authorization commitment. No signature or automatic retry will continue."))) return;
         setPaymasterBusy(false);
         return;
     }
@@ -3293,37 +3305,38 @@ void PaymasterSendWidget::applyPreparedPaymasterReply(
         m_send.clearReview();
         m_paymasterStateValue->setText(
             DigiDollarSendWidget::tr("Paymaster authorization blocked: commitment changed or missing"));
-        m_form.showWarning(
+        if (!showPaymasterWarning(
             DigiDollarSendWidget::tr("Paymaster authorization blocked"),
             DigiDollarSendWidget::tr("The wallet did not return the exact authorization commitment that was "
                "approved. No signature or automatic retry will continue. Review the "
-               "current provider offer again."));
+               "current provider offer again."))) return;
         setPaymasterBusy(false);
         return;
     }
     if (next.effect == PreparedEffect::INVALID_AUTHORIZATION_FLAG) {
         stopPaymasterPolling();
-        m_form.showWarning(
+        if (!showPaymasterWarning(
             DigiDollarSendWidget::tr("Paymaster authorization blocked"),
-            DigiDollarSendWidget::tr("Core returned an invalid authorization-required flag. No signature or automatic retry will continue."));
+            DigiDollarSendWidget::tr("Core returned an invalid authorization-required flag. No signature or automatic retry will continue."))) return;
         setPaymasterBusy(false);
         return;
     }
     if (next.effect == PreparedEffect::MISSING_COMMITMENT) {
         m_paymasterStateValue->setText(
             DigiDollarSendWidget::tr("Paymaster authorization blocked: missing exact commitment"));
-        m_form.showWarning(
+        if (!showPaymasterWarning(
             DigiDollarSendWidget::tr("Paymaster authorization blocked"),
             DigiDollarSendWidget::tr("The prepared Paymaster transaction did not include its exact client "
-               "authorization commitment. No Qt authorization will continue."));
+               "authorization commitment. No Qt authorization will continue."))) return;
         setPaymasterBusy(false);
         return;
     }
     if (next.effect == PreparedEffect::REVIEW) {
         stopPaymasterPolling();
+        const QPointer<PaymasterSendWidget> lifetime{this};
         const uint64_t wallet_generation = m_send.view().walletGeneration;
         const OfferReviewResult review = confirmPaymasterSelectionBeforeSigning(result, address);
-        if (wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
+        if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
         if (review != OfferReviewResult::ACCEPTED || m_privacy) {
             setPaymasterBusy(false);
             if (review == OfferReviewResult::EXPIRED) {
@@ -3638,6 +3651,7 @@ PaymasterSendWidget::OfferReviewResult PaymasterSendWidget::confirmPaymasterSele
         .arg(selection.authorization_commitment, changed_fields.join(DigiDollarSendWidget::tr(", ")));
     const uint64_t wallet_generation = m_send.view().walletGeneration;
     QElapsedTimer elapsed;
+    const QPointer<PaymasterSendWidget> lifetime{this};
     elapsed.start();
     const qint64 initial_seconds = selection.expires_at - QDateTime::currentSecsSinceEpoch();
     const auto remaining = [&] {
@@ -3666,7 +3680,7 @@ PaymasterSendWidget::OfferReviewResult PaymasterSendWidget::confirmPaymasterSele
         QTimer timer(&dialog);
         timer.setInterval(200);
         connect(&timer, &QTimer::timeout, &dialog, [&] {
-            if (wallet_generation != m_send.view().walletGeneration || !m_walletModel || m_privacy) {
+            if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel || m_privacy) {
                 dialog.reject();
                 return;
             }
@@ -3679,7 +3693,7 @@ PaymasterSendWidget::OfferReviewResult PaymasterSendWidget::confirmPaymasterSele
         timer.start();
         answer = static_cast<QMessageBox::StandardButton>(dialog.exec());
     }
-    if (wallet_generation != m_send.view().walletGeneration || !m_walletModel || m_privacy) return OfferReviewResult::BLOCKED;
+    if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel || m_privacy) return OfferReviewResult::BLOCKED;
     if (remaining() == 0) return OfferReviewResult::EXPIRED;
     if (answer != QMessageBox::Yes) {
         m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Canceling the unsigned request before returning to payment settings…"));
@@ -3903,7 +3917,7 @@ void PaymasterSendWidget::observePaymasterSession(
                     guard->schedulePaymasterPoll(/*state_changed=*/false);
                     return;
                 }
-                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"), error);
+                if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"), error)) return;
                 if (!guard || !guard->m_send.accepts(token)) return;
                 guard->setPaymasterBusy(false);
                 return;
@@ -3912,10 +3926,10 @@ void PaymasterSendWidget::observePaymasterSession(
             if (!guard->updatePaymasterSessionView(result, &decode_error)) {
                 guard->m_closeSessionAfterObservation = false;
                 guard->stopPaymasterPolling();
-                guard->m_form.showWarning(
+                if (!guard->showPaymasterWarning(
                     DigiDollarSendWidget::tr("Paymaster status unavailable"),
                     DigiDollarSendWidget::tr("Core returned an incomplete or inconsistent Paymaster session (%1). No action was performed.")
-                        .arg(decode_error));
+                        .arg(decode_error))) return;
                 if (!guard || !guard->m_send.accepts(token)) return;
                 guard->setPaymasterBusy(false);
                 return;
@@ -3950,9 +3964,9 @@ void PaymasterSendWidget::refreshPaymasterSessionForAction(
                 return;
             }
             if (!guard->m_send.allows(required_action)) {
-                guard->m_form.showWarning(
+                if (!guard->showPaymasterWarning(
                     DigiDollarSendWidget::tr("Paymaster action no longer available"),
-                    DigiDollarSendWidget::tr("Core no longer allows this action for the refreshed session. No wallet mutation was performed."));
+                    DigiDollarSendWidget::tr("Core no longer allows this action for the refreshed session. No wallet mutation was performed."))) return;
                 return;
             }
             if (continuation) continuation();
@@ -3991,6 +4005,14 @@ void PaymasterSendWidget::retryPaymasterSession()
         });
 }
 
+bool PaymasterSendWidget::showPaymasterWarning(const QString& title, const QString& message)
+{
+    const QPointer<PaymasterSendWidget> guard{this};
+    const auto token = m_send.replyToken();
+    m_form.showWarning(title, message);
+    return guard && guard->m_send.accepts(token);
+}
+
 void PaymasterSendWidget::continuePaymasterRetry()
 {
     if (!m_walletModel || m_send.view().busy || m_privacy ||
@@ -4012,20 +4034,22 @@ void PaymasterSendWidget::continuePaymasterRetry()
             if (!guard) return;
             if (!error.isEmpty()) {
                 guard->stopPaymasterPolling();
-                guard->m_form.showWarning(DigiDollarSendWidget::tr("Exact retry paused"),
-                    DigiDollarSendWidget::tr("The existing transfer could not be reconciled yet. It may already have completed; this message does not mean the payment failed. Check its status before creating another payment.\n\nTechnical details: %1").arg(error));
+                if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Exact retry paused"),
+                    DigiDollarSendWidget::tr("The existing transfer could not be reconciled yet. It may already have completed; this message does not mean the payment failed. Check its status before creating another payment.\n\nTechnical details: %1").arg(error))) return;
                 guard->setPaymasterBusy(false);
                 return;
             }
             QString decode_error;
             if (!guard->updatePaymasterSessionView(result, &decode_error)) {
                 guard->stopPaymasterPolling();
-                guard->m_form.showWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"),
-                    DigiDollarSendWidget::tr("Core returned an invalid retry snapshot (%1).").arg(decode_error));
+                if (!guard->showPaymasterWarning(DigiDollarSendWidget::tr("Paymaster status unavailable"),
+                    DigiDollarSendWidget::tr("Core returned an invalid retry snapshot (%1).").arg(decode_error))) return;
                 guard->setPaymasterBusy(false);
                 return;
             }
+            const auto completion_token = guard->m_send.replyToken();
             const bool completed = guard->handleAuthoritativePaymasterCompletion(result);
+            if (!guard || !guard->m_send.accepts(completion_token)) return;
             if (guard->m_send.view().artifact != QStringLiteral("user_psbt")) {
                 guard->m_send.stopRetry();
             }
@@ -4077,10 +4101,10 @@ void PaymasterSendWidget::fallbackPaymasterSession()
                     if (!guard->updatePaymasterSessionView(
                             result, &decode_error)) {
                         guard->stopPaymasterPolling();
-                        guard->m_form.showWarning(
+                        if (!guard->showPaymasterWarning(
                             DigiDollarSendWidget::tr("Paymaster status unavailable"),
                             DigiDollarSendWidget::tr("Core returned an invalid fallback snapshot (%1).")
-                                .arg(decode_error));
+                                .arg(decode_error))) return;
                         guard->setPaymasterBusy(false);
                         return;
                     }
@@ -4114,9 +4138,9 @@ void PaymasterSendWidget::recoverPaymasterSessionToSelf()
             // poll timer paused across the modal dialog.
             guard->setPaymasterBusy(true);
             if (guard->m_send.view().sessionPrivacy.isEmpty()) {
-                guard->m_form.showWarning(
+                if (!guard->showPaymasterWarning(
                     DigiDollarSendWidget::tr("Paymaster recovery unavailable"),
-                    DigiDollarSendWidget::tr("The authoritative original-session privacy profile is unavailable. Recovery will not continue because Qt must never guess or downgrade it."));
+                    DigiDollarSendWidget::tr("The authoritative original-session privacy profile is unavailable. Recovery will not continue because Qt must never guess or downgrade it."))) return;
                 guard->setPaymasterBusy(false);
                 return;
             }
@@ -4232,8 +4256,8 @@ void PaymasterSendWidget::cancelUnsignedPaymasterSession(bool confirm)
                     if (!error.isEmpty()) {
                         guard->m_paymasterStateValue->setText(
                             DigiDollarSendWidget::tr("Cancellation outcome unavailable. Check current status before starting another transfer."));
-                        guard->m_form.showWarning(
-                            DigiDollarSendWidget::tr("Paymaster cancellation status unavailable"), error);
+                        if (!guard->showPaymasterWarning(
+                            DigiDollarSendWidget::tr("Paymaster cancellation status unavailable"), error)) return;
                         guard->setPaymasterBusy(false);
                         return;
                     }
@@ -4242,10 +4266,10 @@ void PaymasterSendWidget::cancelUnsignedPaymasterSession(bool confirm)
                         !guard->m_send.view().unsignedClosed) {
                         guard->m_paymasterStateValue->setText(
                             DigiDollarSendWidget::tr("Cancellation returned an unexpected wallet state"));
-                        guard->m_form.showWarning(
+                        if (!guard->showPaymasterWarning(
                             DigiDollarSendWidget::tr("Paymaster transfer was not cleared"),
                             DigiDollarSendWidget::tr("Core did not confirm a terminal unsigned FAILED state (%1).")
-                                .arg(decode_error));
+                                .arg(decode_error))) return;
                         guard->setPaymasterBusy(false);
                         return;
                     }
@@ -4310,7 +4334,9 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                 guard->m_send.view().sessionState == QStringLiteral("CANCELED_SAFE")) {
                 guard->m_paymasterClosureReason.clear();
                 guard->setPaymasterNotice(QString{});
+                const auto completion_token = guard->m_send.replyToken();
                 guard->handleAuthoritativePaymasterCompletion(result);
+                if (!guard || !guard->m_send.accepts(completion_token)) return;
                 guard->setPaymasterBusy(false);
                 return;
             }
@@ -4330,7 +4356,9 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                     });
                 return;
             }
+            const auto completion_token = guard->m_send.replyToken();
             guard->handleAuthoritativePaymasterCompletion(result);
+            if (!guard || !guard->m_send.accepts(completion_token)) return;
             guard->setPaymasterNotice(DigiDollarSendWidget::tr(
                 "%1 Core has not confirmed safe unsigned closure. An authorization or transaction may already exist. Keep this transfer and check its status; use only the recovery or cancellation actions shown below.").arg(reason));
             guard->setPaymasterBusy(false);
@@ -4553,11 +4581,15 @@ bool PaymasterSendWidget::confirmPaymasterRecoveryBeforeSigning(
                  .toLocalTime().toString(Qt::ISODate))
         .arg(selection.authorization_commitment)
         .arg(changed_fields.join(DigiDollarSendWidget::tr(", ")));
-    if (m_form.showDialog(
+    const QPointer<PaymasterSendWidget> lifetime{this};
+    const auto token = m_send.replyToken();
+    const auto answer = m_form.showDialog(
             QMessageBox::Question,
             DigiDollarSendWidget::tr("Confirm exact Paymaster recovery authorization"), prompt,
             QMessageBox::Yes | QMessageBox::Cancel,
-            QMessageBox::Cancel) != QMessageBox::Yes) {
+            QMessageBox::Cancel);
+    if (!lifetime || !m_send.accepts(token)) return false;
+    if (answer != QMessageBox::Yes) {
         m_send.stopRecovery();
         m_paymasterStateValue->setText(
             DigiDollarSendWidget::tr("Recovery authorization paused by user"));
@@ -4573,7 +4605,7 @@ void PaymasterSendWidget::blockAlternativePaymasterRecovery(
     stopPaymasterPolling();
     m_send.stopRecovery();
     m_paymasterStateValue->setText(reason);
-    m_form.showWarning(DigiDollarSendWidget::tr("Paymaster recovery blocked"), detail);
+    if (!showPaymasterWarning(DigiDollarSendWidget::tr("Paymaster recovery blocked"), detail)) return;
     setPaymasterBusy(false);
 }
 
@@ -4604,7 +4636,11 @@ void PaymasterSendWidget::handleAlternativePaymasterRecoveryResult(
                 .arg(decode_error));
         return;
     }
-    if (handleAuthoritativePaymasterCompletion(result)) {
+    const QPointer<PaymasterSendWidget> lifetime{this};
+    const auto token = m_send.replyToken();
+    const bool completed = handleAuthoritativePaymasterCompletion(result);
+    if (!lifetime || !m_send.accepts(token)) return;
+    if (completed) {
         setPaymasterBusy(false);
         return;
     }
@@ -4651,7 +4687,7 @@ void PaymasterSendWidget::handleAlternativePaymasterRecoveryResult(
     if (next.effect == RecoveryEffect::REVIEW) {
         const uint64_t wallet_generation = m_send.view().walletGeneration;
         const bool accepted = confirmPaymasterRecoveryBeforeSigning(selection);
-        if (wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
+        if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
         if (!accepted || m_privacy) {
             stopPaymasterPolling();
             setPaymasterBusy(false);
@@ -5386,12 +5422,13 @@ void PaymasterSendWidget::send(const QString& address, CAmount amount_cents)
         // remains mandatory. Automatic with own DGB first reviews a funding
         // check; suitable own DGB then requires explicit Own DGB selection.
         // Privacy mode still requires exposing the payment fields for review.
+        const QPointer<PaymasterSendWidget> lifetime{this};
         const uint64_t wallet_generation = m_send.view().walletGeneration;
         if (new_request && (!preparesPaymasterPayment() || m_privacy) && !showConfirmationDialog(address, amount)) {
             return;
         }
 
-        if (wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
+        if (!lifetime || wallet_generation != m_send.view().walletGeneration || !m_walletModel) return;
         if (new_request && !hasFeeFundingCandidate()) {
             m_form.updateSendButton();
             return;

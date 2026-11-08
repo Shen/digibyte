@@ -9161,6 +9161,20 @@ void PaymasterWidgetTests::paymasterClientReviewCancellation()
         QVERIFY(form.findChild<QLabel*>("paymasterTransferNotice")->isHidden());
         return;
     }
+    if (outcome == "expiry_rpc_error") {
+        // An unstructured failed reply grants no cancellation authority.
+        // Keep the request protected until the user's action obtains a fresh
+        // Core capability; the error string alone cannot release inputs.
+        QVERIFY(address->isReadOnly());
+        QCOMPARE(actions.count("abandon_unsigned"), 0);
+        client->cancelUnsignedPaymasterSession(/*confirm=*/false);
+        QTRY_VERIFY(!address->isReadOnly());
+        QCOMPARE(actions.count("abandon_unsigned"), 1);
+        QCOMPARE(requests.size(), 1);
+        QCOMPARE(address->text(), recipient);
+        QCOMPARE(amount->text(), QStringLiteral("3.25"));
+        return;
+    }
     if (auto_expiry) {
         QCOMPARE(warnings, 0);
         auto* notice = form.findChild<QLabel*>("paymasterTransferNotice");
@@ -9221,7 +9235,7 @@ void PaymasterWidgetTests::paymasterClientReviewCancellation()
             primary->click();
             QCOMPARE(primary->text(), QStringLiteral("Start a new transfer"));
             primary->click();
-            QVERIFY(!address->isReadOnly());
+            QTRY_VERIFY(!address->isReadOnly());
             QCOMPARE(actions.count("abandon_unsigned"), 1);
             QCOMPARE(requests.size(), 1);
         }
@@ -17334,8 +17348,33 @@ void PaymasterWidgetTests::paymasterSendControllerAuthorizationAndLostReply()
     QVERIFY(!controller.beginTransfer(QStringLiteral("00000000-0000-4000-8000-000000000002"), QStringLiteral("high")));
     QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
     QCOMPARE(controller.view().requestId, snapshot.request_id);
+    QVERIFY(!controller.beginRetry());
+    QVERIFY(controller.applySnapshot(snapshot));
     QVERIFY(controller.beginRetry());
     QCOMPARE(controller.advance({true, false}), Controller::Effect::RETRY);
+
+    // A warning can run a nested event loop. Closing the Paymaster widget or
+    // rebinding its wallet during it must stop the caller's continuation.
+    std::unique_ptr<const PlatformStyle> style(PlatformStyle::instantiate("other"));
+    DigiDollarSendWidget form(style.get());
+    QPointer<PaymasterSendWidget> client = form.findChild<PaymasterSendWidget*>();
+    QVERIFY(client);
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&,
+        QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        client->m_send.walletChanged();
+        return QMessageBox::Ok;
+    });
+    QVERIFY(!client->showPaymasterWarning(QStringLiteral("test"), QStringLiteral("wallet changed")));
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString&, const QString&,
+        QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        delete client.data();
+        return QMessageBox::Ok;
+    });
+    // Exercise a production post-warning path, not only the helper.
+    UniValue malformed{UniValue::VOBJ};
+    malformed.pushKV("authorization_commitment", "broken");
+    client->applyPreparedPaymasterReply(malformed, QStringLiteral("recipient"), 100);
+    QVERIFY(client.isNull());
 }
 
 void PaymasterWidgetTests::paymasterSendControllerRecoveryReview()
