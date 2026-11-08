@@ -4147,6 +4147,21 @@ BOOST_AUTO_TEST_CASE(finite_setup_revocation_survives_refill_pruning_and_reopen)
     BOOST_REQUIRE(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::FOUND);
     BOOST_CHECK_EQUAL(authorization.generation, 1U);
     parameters.cancel = true;
+    {
+        ProviderMaintenanceLedger pending;
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(pending));
+        BOOST_REQUIRE(!pending.records.empty() && !pending.records.front().outputs.empty());
+        CMutableTransaction lost_reply;
+        lost_reply.vin.emplace_back(COutPoint{GetRandHash(), 0});
+        lost_reply.vout.emplace_back(1, pending.records.front().outputs.front().script_pub_key);
+        const auto transaction = MakeTransactionRef(lost_reply);
+        BOOST_REQUIRE(provider.AddToWallet(transaction, TxStateInactive{}));
+        const auto before = GetMockableDatabase(provider).m_records;
+        BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
+            [](const auto& e) { return e.code == "PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS"; });
+        BOOST_CHECK(GetMockableDatabase(provider).m_records == before);
+        provider.mapWallet.erase(transaction->GetHash()); // Synthetic partial-output evidence only.
+    }
     BOOST_CHECK(paymaster_app::PreparePaymasterPool(context, provider, parameters).cancelled);
     parameters.cancel = false;
     BOOST_REQUIRE(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::FOUND);

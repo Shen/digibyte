@@ -1002,21 +1002,23 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
         std::string error;
         if (!ReconcileProviderMaintenance(*wallet, recovered, error)) throw ApplicationError(ErrorKind::WALLET, error);
         ledger = ReadPreparationLedger(*wallet);
-        bool found{false}, cancelled{false};
-        for (auto& record : ledger.records) {
+        bool found{false};
+        std::vector<uint256> operation_ids;
+        for (const auto& record : ledger.records) {
             if (!record.IsPreparation() || record.plan_id != supplied_id) continue;
             found = true;
-            // A wallet-saved signature is never cancelled or replaced,
-            // even if its transaction is absent from both pools.
-            if (record.state == ProviderMaintenanceState::PLANNED && record.transaction_id.IsNull()) {
-                record.state = ProviderMaintenanceState::RELEASED;
-                record.updated_at = std::max(record.updated_at, GetTime());
-                record.preparation_error.clear();
-                cancelled = true;
-            }
+            if (record.state == ProviderMaintenanceState::PLANNED && record.transaction_id.IsNull())
+                operation_ids.push_back(record.operation_id);
         }
         if (!found) throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_POOL_PLAN_NOT_FOUND");
-        if (cancelled) WritePreparationLedger(*wallet, ledger);
+        const bool cancelled = !operation_ids.empty();
+        if (cancelled) {
+            ProviderMaintenanceLedger proposed;
+            int64_t released_fee{0};
+            if (!PreparePaymasterMaintenanceCancellation(*wallet, ledger, operation_ids, GetTime(),
+                    proposed, released_fee, error)) throw ApplicationError(ErrorKind::WALLET, error);
+            WritePreparationLedger(*wallet, proposed);
+        }
         result.cancelled = cancelled;
         result.executed = false;
         result.plan_id = supplied_id;

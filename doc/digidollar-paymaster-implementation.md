@@ -319,7 +319,11 @@ after a possible commit retain the conservative fence.
 
 Policy and pool setters initialize records only after a status-bearing read
 proves `NOT_FOUND`. Read errors and unsupported versions preserve budgets, pool
-reservations and checkpoint state.
+reservations and checkpoint state. Finite setup cancellation, selected maintenance
+cancellation and capital release share `PreparePaymasterMaintenanceCancellation`:
+selected records must be planned and unsigned, with no signed sibling or wallet
+output using their scripts, including partial or conflicted output matches. Each
+caller retains its own policy/revocation consequences and atomic write.
 
 Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can

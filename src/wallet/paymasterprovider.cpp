@@ -1807,14 +1807,12 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     if (maintenance_status != DatabaseReadStatus::FOUND && maintenance_status != DatabaseReadStatus::NOT_FOUND)
         return fail("PAYMASTER_CAPITAL_DATABASE_READ");
     std::vector<uint256> uncreated_maintenance;
-    std::set<CScript> uncreated_scripts;
     for (const auto& record : maintenance.records) {
         if (cancel_uncreated && record.state == ProviderMaintenanceState::PLANNED &&
             record.transaction_id.IsNull() && record.actual_fee.value == 0 &&
             record.source_inputs.empty() && !record.outputs.empty() &&
             (record.kind == ProviderMaintenanceKind::REPLENISH_DGB ||
              record.kind == ProviderMaintenanceKind::REPLENISH_CARRIER || record.IsPreparation())) {
-            for (const auto& output : record.outputs) uncreated_scripts.insert(output.script_pub_key);
             uncreated_maintenance.push_back(record.operation_id);
             continue;
         }
@@ -1823,19 +1821,13 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
         if (!record.transaction_id.IsNull() && !confirmed(record.transaction_id))
             return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
     }
-    // A lost reply can leave a signed wallet transaction without a journal
-    // txid. Reject even a partial script match, regardless of confirmation,
-    // abandonment, amount or conflict. Scan once for all candidate tasks.
-    // The caller holds the work guard and we hold cs_wallet, so no funding
-    // signature can race this check and the atomic release.
-    if (!uncreated_scripts.empty()) {
-        for (const auto& [txid, wallet_tx] : wallet.mapWallet) {
-            if (!wallet_tx.tx) return fail("PAYMASTER_CAPITAL_OPEN_MAINTENANCE");
-            for (const auto& output : wallet_tx.tx->vout) {
-                if (uncreated_scripts.count(output.scriptPubKey))
-                    return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
-            }
-        }
+    ProviderMaintenanceLedger cancelled_maintenance;
+    int64_t released_maintenance_fee{0};
+    if (!uncreated_maintenance.empty() &&
+        !PreparePaymasterMaintenanceCancellation(wallet, maintenance, uncreated_maintenance, now,
+            cancelled_maintenance, released_maintenance_fee, error)) {
+        if (error == "PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS") error = "PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE";
+        return false;
     }
     for (const auto& entry : pool) {
         if (entry.state == PoolEntryState::SPENT || entry.state == PoolEntryState::RELEASED) continue;
@@ -1875,12 +1867,7 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
         << recovery << checkpoint_revision << cancel_uncreated).GetHash();
     if (!execute) return true;
     if (expected_plan.IsNull() || expected_plan != result.plan_id) return fail("PAYMASTER_CAPITAL_PLAN_CHANGED");
-    for (const auto& operation_id : uncreated_maintenance) {
-        if (!ReleaseProviderMaintenanceBudget(maintenance, operation_id, now, error)) return false;
-        for (auto& record : maintenance.records) {
-            if (record.operation_id == operation_id) record.preparation_error.clear();
-        }
-    }
+    if (!uncreated_maintenance.empty()) maintenance = std::move(cancelled_maintenance);
     for (auto& entry : pool) {
         if (entry.state != PoolEntryState::AVAILABLE) continue;
         entry.state = PoolEntryState::RELEASED;
