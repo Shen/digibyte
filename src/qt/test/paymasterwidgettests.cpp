@@ -13,6 +13,7 @@
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <node/interface_ui.h>
+#include <paymaster/directory.h>
 #include <paymaster/provider.h>
 #include <paymaster/setup.h>
 #include <primitives/transaction.h>
@@ -15920,6 +15921,26 @@ void PaymasterWidgetTests::paymasterClientOfferCards()
     form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
     form.setDialogHandlerForTesting([](QMessageBox::Icon, const QString&, const QString&, QMessageBox::StandardButtons, QMessageBox::StandardButton) { return QMessageBox::Yes; });
     const auto refresh = [&] { return QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection); };
+    if (theme == "light" && width == 720) {
+        const UniValue normal_offers{offers};
+        constexpr size_t limit = DigiDollar::Paymaster::MAX_DIRECTORY_ENTRIES * DigiDollar::Paymaster::MAX_ANNOUNCEMENT_OFFERS;
+        for (const size_t count : {size_t{100}, size_t{101}, limit, limit + 1}) {
+            offers = UniValue{UniValue::VARR};
+            for (size_t index = 1; index < count; ++index) {
+                auto excluded = PaymasterOffer("Unavailable", std::string(64, 'c'), "user_paid", 20, 325, false, expires);
+                excluded.pushKV("eligible", false);
+                excluded.pushKV("fee_limit_reason", "absolute_or_daily");
+                excluded.pushKV("maximum_service_fee_bps", -1);
+                excluded.pushKV("available_service_fee_cents", 0);
+                offers.push_back(excluded);
+            }
+            offers.push_back(PaymasterOffer("Last eligible sponsor", std::string(64, 'e'), "sponsored", 0, 325, false, expires));
+            QVERIFY(refresh());
+            QCOMPARE(client->m_offerPreview.size(), count <= limit ? size_t{1} : size_t{0});
+            if (count <= limit) QCOMPARE(client->m_offerPreview[0].find_value("provider_id").get_str(), std::string(64, 'e'));
+        }
+        offers = normal_offers;
+    }
     QVERIFY(refresh());
     auto* cards = form.findChild<QFrame*>("paymasterOfferCardsFrame");
     QVERIFY(cards && !cards->isHidden());

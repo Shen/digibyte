@@ -17,6 +17,7 @@
 #include <logging.h>
 #include <pubkey.h>
 #include <uint256.h>
+#include <paymaster/directory.h>
 #include <paymaster/types.h>
 #include <univalue.h>
 #include <util/strencodings.h>
@@ -2706,9 +2707,11 @@ void PaymasterSendWidget::requestPaymasterOffers(bool background)
                     DigiDollarSendWidget::tr("Core returned an invalid Paymaster offer preview. Refresh node and wallet status before trying again."));
                 guard->setPaymasterBusy(false);
             };
-            constexpr size_t MAX_VISIBLE_PAYMASTER_OFFERS{100};
+            constexpr size_t MAX_PAYMASTER_OFFER_RESPONSE{
+                DigiDollar::Paymaster::MAX_DIRECTORY_ENTRIES *
+                DigiDollar::Paymaster::MAX_ANNOUNCEMENT_OFFERS};
             if (!result.isArray() ||
-                result.size() > MAX_VISIBLE_PAYMASTER_OFFERS) {
+                result.size() > MAX_PAYMASTER_OFFER_RESPONSE) {
                 fail_malformed();
                 return;
             }
