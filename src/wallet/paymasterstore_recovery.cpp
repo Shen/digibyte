@@ -965,13 +965,6 @@ bool PaymasterStore::HasProviderDrainWork(
     // already committed exact operational pool resources to one client nonce,
     // so a restart must keep the provider online long enough to accept only
     // that bound quote continuation even when no unreserved pool slot remains.
-    std::vector<std::pair<uint256, std::vector<unsigned char>>> responses;
-    if (!batch.ListPaymasterCapacityResponses(responses)) {
-        error = "PAYMASTER_CAPACITY_DATABASE_READ";
-        return false;
-    }
-    if (responses.empty()) return true;
-
     const int64_t now{GetTime()};
     if (now <= 0) {
         error = "PAYMASTER_INVALID_CAPACITY_EXPIRY_TIME";
@@ -984,13 +977,22 @@ bool PaymasterStore::HasProviderDrainWork(
         return false;
     }
     ProviderBudgetLedger budget_ledger;
-    if (!batch.ReadPaymasterProviderBudgetLedger(budget_ledger) ||
+    const auto budget_status = batch.ReadPaymasterProviderBudgetLedgerWithStatus(budget_ledger);
+    if (budget_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (budget_status != DatabaseReadStatus::FOUND ||
         !ValidateProviderBudgetLedger(budget_ledger, error)) {
         if (error.empty()) {
             error = batch.HasPaymasterProviderBudgetLedger() ? "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER" : "PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND";
         }
         return false;
     }
+    // The bounded authoritative ledger decides which capacity admissions can
+    // still continue. Expired replay caches grant no work; do not rescan their
+    // possibly large historical response bytes on every readiness observation.
+    if (std::none_of(budget_ledger.capacity_admissions.begin(), budget_ledger.capacity_admissions.end(),
+            [now](const auto& admission) {
+                return admission.state == CapacityAdmissionState::RESERVED && admission.expires_at > now;
+            })) return true;
     std::vector<ProviderPoolEntry> pool;
     if (!batch.ReadPaymasterProviderPool(pool) ||
         !ValidateProviderPoolEntries(pool, error)) {
@@ -1002,7 +1004,14 @@ bool PaymasterStore::HasProviderDrainWork(
         pool_by_outpoint.emplace(entry.outpoint, &entry);
     }
 
-    for (const auto& [request_hash, response] : responses) {
+    for (const auto& active_admission : budget_ledger.capacity_admissions) {
+        if (active_admission.state != CapacityAdmissionState::RESERVED || active_admission.expires_at <= now) continue;
+        const auto& request_hash = active_admission.request_hash;
+        std::vector<unsigned char> response;
+        if (batch.ReadPaymasterCapacityResponseWithStatus(request_hash, response) != DatabaseReadStatus::FOUND) {
+            error = "PAYMASTER_CAPACITY_DATABASE_READ";
+            return false;
+        }
         PaymasterCapacityProof proof;
         if (!DecodeCanonicalCapacityProof(response, proof)) {
             error = "PAYMASTER_CAPACITY_RESPONSE_ENCODING";
@@ -1031,6 +1040,7 @@ bool PaymasterStore::HasProviderDrainWork(
         request.expires_at = proof.expires_at;
         std::string validation_error;
         if (GetPersistedCapacityRequestHash(proof) != request_hash ||
+            proof.genesis_hash != Params().GenesisBlock().GetHash() ||
             proof.provider_id != provider_id ||
             !ValidateCapacityProofEnvelope(proof, request, proof.created_at,
                                            validation_error) ||
@@ -1055,25 +1065,8 @@ bool PaymasterStore::HasProviderDrainWork(
 
         const uint256 admission_key = GetProviderRequestSlotKey(
             proof.provider_id, proof.request_id, proof.session_id);
-        const auto admission = std::find_if(
-            budget_ledger.capacity_admissions.begin(),
-            budget_ledger.capacity_admissions.end(),
-            [&](const ProviderCapacityAdmission& candidate) {
-                return candidate.request_key == admission_key;
-            });
-        if (admission == budget_ledger.capacity_admissions.end()) {
-            // The response and its indexes are durable replay barriers, but a
-            // capacity proof without its atomic budget admission grants no
-            // continuation authority. This can remain after upgrading a
-            // wallet written at an older crash boundary. Ignore it when
-            // deciding whether the provider has work to drain so that a
-            // stopped automatic provider may still start solely to restore
-            // liquidity. The proof is deliberately not erased here: normal
-            // expiry/compaction retains the replay barrier for its full
-            // retention window.
-            continue;
-        }
-        if (admission->request_hash != request_hash ||
+        const auto* admission = &active_admission;
+        if (admission->request_key != admission_key || admission->request_hash != request_hash ||
             admission->funding_model != proof.funding_model ||
             admission->requires_carrier != proof.requires_carrier ||
             admission->expires_at != proof.expires_at) {
@@ -1082,9 +1075,9 @@ bool PaymasterStore::HasProviderDrainWork(
         }
 
         ProviderCapacityReleaseRecord release;
-        const bool have_release =
-            batch.ReadPaymasterCapacityRelease(request_hash, release);
-        if (!have_release && batch.HasPaymasterCapacityRelease(request_hash)) {
+        const auto release_status = batch.ReadPaymasterCapacityReleaseWithStatus(request_hash, release);
+        const bool have_release = release_status == DatabaseReadStatus::FOUND;
+        if (release_status != DatabaseReadStatus::FOUND && release_status != DatabaseReadStatus::NOT_FOUND) {
             error = "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
             return false;
         }

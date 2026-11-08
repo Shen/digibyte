@@ -31,6 +31,7 @@ using FinalIds = std::pair<uint256, uint256>;
 struct SessionIndex {
     bool valid{false};
     uint64_t revision{0};
+    uint256 capacity_cleanup_after;
     std::map<uint256, std::set<std::string>> by_transaction;
     std::map<std::string, FinalIds> by_request;
 
@@ -108,12 +109,25 @@ void ForgetPaymasterSessionIndex(WalletDatabase& database)
     session_indexes.erase(&database);
 }
 
+uint256 GetPaymasterCapacityCleanupCursor(WalletDatabase& database)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    return session_indexes[&database].capacity_cleanup_after;
+}
+
+void SetPaymasterCapacityCleanupCursor(WalletDatabase& database, const uint256& after)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes[&database].capacity_cleanup_after = after;
+}
+
 void PrimePaymasterSessionIndex(WalletDatabase& database,
                                 const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
 {
     auto rebuilt = BuildSessionIndex(sessions);
     std::lock_guard<std::mutex> lock{session_index_mutex};
     rebuilt.revision = session_indexes[&database].revision + 1;
+    rebuilt.capacity_cleanup_after = session_indexes[&database].capacity_cleanup_after;
     session_indexes[&database] = std::move(rebuilt);
 }
 
@@ -143,6 +157,7 @@ bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
         // falsely empty lookup. Normal callers are serialized by cs_wallet.
         if (index.revision != revision) return false;
         rebuilt.revision = revision;
+        rebuilt.capacity_cleanup_after = index.capacity_cleanup_after;
         index = std::move(rebuilt);
         const auto found = index.by_transaction.find(txid);
         if (found != index.by_transaction.end()) requests = found->second;
@@ -934,6 +949,59 @@ bool WalletBatch::ListPaymasterCapacityResponses(
                 return false;
             }
             responses.emplace_back(request_hash, std::move(response));
+        } catch (const std::ios_base::failure&) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool WalletBatch::ListPaymasterCapacityResponsesPage(
+    const uint256& after, size_t maximum_responses, size_t maximum_bytes,
+    std::vector<std::pair<uint256, std::vector<unsigned char>>>& responses,
+    uint256& next)
+{
+    using namespace DigiDollar::Paymaster;
+    // Reserve room before each cursor read for a complete permitted row,
+    // including its key and CompactSize prefix. Thus a successful page bounds
+    // bytes actually scanned, not merely the returned payload lengths.
+    constexpr size_t maximum_row_bytes{MAX_DIRECT_MESSAGE_BYTES + 128};
+    responses.clear();
+    next.SetNull();
+    if (maximum_responses == 0 || maximum_responses > 64 ||
+        maximum_bytes < maximum_row_bytes || maximum_bytes > 4 * maximum_row_bytes) return false;
+    DataStream start;
+    start << DBKeys::PAYMASTER_CAPACITY_RESPONSE;
+    SerializeData end{start.begin(), start.end()};
+    if (end.empty() || end.back() == std::byte{0xff}) return false;
+    end.back() = std::byte{static_cast<unsigned char>(std::to_integer<unsigned char>(end.back()) + 1)};
+    if (!after.IsNull()) start << after << uint8_t{0};
+    auto cursor = m_batch->GetNewRangeCursor(start, end);
+    if (!cursor) return false;
+    size_t scanned_bytes{0};
+    while (responses.size() < maximum_responses &&
+           scanned_bytes <= maximum_bytes - maximum_row_bytes) {
+        DataStream key, value;
+        const auto status = cursor->Next(key, value);
+        if (status == DatabaseCursor::Status::DONE) {
+            next.SetNull();
+            return true;
+        }
+        if (status != DatabaseCursor::Status::MORE ||
+            key.size() > maximum_row_bytes || value.size() > maximum_row_bytes - key.size()) return false;
+        scanned_bytes += key.size() + value.size();
+        try {
+            std::string type;
+            uint256 request_hash;
+            std::vector<unsigned char> response;
+            key >> type >> request_hash;
+            value >> response;
+            if (!key.empty() || !value.empty() ||
+                type != DBKeys::PAYMASTER_CAPACITY_RESPONSE || request_hash.IsNull() ||
+                (!after.IsNull() && !(after < request_hash)) || response.empty() ||
+                response.size() > MAX_DIRECT_MESSAGE_BYTES) return false;
+            responses.emplace_back(request_hash, std::move(response));
+            next = request_hash;
         } catch (const std::ios_base::failure&) {
             return false;
         }

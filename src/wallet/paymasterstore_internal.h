@@ -25,6 +25,8 @@ inline constexpr size_t MAX_RECOVERY_ENDPOINT_BYTES{512};
 inline constexpr int64_t CAPACITY_REPLAY_RETENTION_SECONDS{24 * 60 * 60};
 inline constexpr size_t MAX_RETAINED_PROVIDER_SESSIONS{8192};
 inline constexpr size_t MAX_PROVIDER_SESSION_PRUNES_PER_PASS{64};
+inline constexpr size_t MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES{64};
+inline constexpr size_t MAX_PROVIDER_CAPACITY_CLEANUP_BYTES{4 * (MAX_DIRECT_MESSAGE_BYTES + 128)};
 
 /** Normal sessions and active alternative provider recoveries share one
  * history budget. Confirmed recovery evidence is archived by maintenance at

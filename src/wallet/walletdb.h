@@ -531,6 +531,12 @@ public:
         const uint256& request_hash, std::vector<unsigned char>& response);
     bool ListPaymasterCapacityResponses(
         std::vector<std::pair<uint256, std::vector<unsigned char>>>& responses);
+    /** Bounded ordered replay-cache page. A null next cursor restarts the scan.
+     * Caller validates signed sources and all indexes before any mutation. */
+    bool ListPaymasterCapacityResponsesPage(
+        const uint256& after, size_t maximum_responses, size_t maximum_bytes,
+        std::vector<std::pair<uint256, std::vector<unsigned char>>>& responses,
+        uint256& next);
     bool ErasePaymasterCapacityResponse(const uint256& request_hash);
     bool WritePaymasterCapacityNonce(const uint256& client_nonce,
                                      const uint256& request_hash,

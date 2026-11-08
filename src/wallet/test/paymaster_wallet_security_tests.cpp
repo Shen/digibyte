@@ -50,6 +50,7 @@
 #include <wallet/paymasterrecoveryservice.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
@@ -82,8 +83,38 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(WalletContext& context,
 
 using namespace DigiDollar::Paymaster;
 using namespace wallet;
+using wallet::paymaster_store::internal::MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES;
 
 namespace {
+
+// Scope erase-failure injection to capacity-cache atomicity tests. The shared
+// mock's FailWriteAt deliberately counts WriteKey only, not EraseKey.
+class CapacityEraseFailureDatabase : public MockableDatabase
+{
+    class Batch : public MockableBatch {
+        CapacityEraseFailureDatabase& m_database;
+        bool EraseKey(DataStream&& key) override
+        {
+            if (!m_database.m_pass) return false;
+            const size_t index = m_database.erase_count++;
+            if (m_database.fail_erase_at && index == *m_database.fail_erase_at) return false;
+            m_database.m_records.erase(SerializeData{key.begin(), key.end()});
+            return true;
+        }
+    public:
+        explicit Batch(CapacityEraseFailureDatabase& database)
+            : MockableBatch(database.m_records, database.m_pass, &database.m_on_write,
+                  &database.m_refuse_write, database.m_txn_pass, &database.m_fail_write_at,
+                  &database.m_write_count, &database.m_fail_commit), m_database(database) {}
+    };
+public:
+    std::optional<size_t> fail_erase_at;
+    size_t erase_count{0};
+    std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
+    {
+        return std::make_unique<Batch>(*this);
+    }
+};
 
 #ifdef USE_SQLITE
 uint256 SQLiteRecordDigest(WalletDatabase& database)
@@ -2084,6 +2115,181 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_CHECK(still_missing.reservations.empty());
 }
 
+BOOST_AUTO_TEST_CASE(provider_capacity_cache_compaction_outlives_pruned_normal_owner)
+{
+    constexpr int64_t now{1000};
+    constexpr auto request_id = "550e8400-e29b-41d4-a716-446655441191";
+    auto owned_database = std::make_unique<CapacityEraseFailureDatabase>();
+    auto& database = *owned_database;
+    wallet::CWallet wallet{m_node.chain.get(), "capacity-cache-pruned-owner", std::move(owned_database)};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    auto environment = MakeProviderEnvironment(now, /*maximum_reserved=*/2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment, request_id,
+        uint256S("1191"), now, fixture, error, nullptr, {}, DGBSatoshis{500},
+        5500, Params().GenesisBlock().GetHash()), error);
+    BOOST_REQUIRE(PersistProviderQuoteEnvironment(wallet, environment, {fixture.pool_entry}));
+    PaymasterStore store{wallet};
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt,
+        fixture.request.intent.genesis_hash, now, error), error);
+    const auto& cache = environment.capacity_records.front();
+    const int64_t boundary = fixture.capacity_proof.expires_at + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS;
+    size_t expired{0};
+    const auto quoted = database.m_records;
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(boundary, expired, error), error);
+    BOOST_CHECK(database.m_records == quoted);
+
+    // A historical normal owner can already have been pruned at depth 240,
+    // before the retry horizon. Exercise the same storage prune/tombstone path;
+    // this fixture does not claim transaction or chain validation.
+    BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::AUTHORIZED,
+        PendingPhase::NONE, {}, now + 1, error));
+    BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::PENDING_PROVIDER,
+        PendingPhase::USER_SIGNATURE_SENT, {}, now + 2, error));
+    BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::CONFIRMED,
+        PendingPhase::NONE, uint256S("1192"), now + 3, error));
+    BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(request_id, error), error);
+    PaymentSession session;
+    ProviderAttempt attempt;
+    IdempotencyTombstone tombstone;
+    WalletBatch source{database};
+    BOOST_CHECK(source.ReadPaymasterSessionWithStatus(request_id, session) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(source.ReadPaymasterAttemptWithStatus(fixture.attempt.attempt_id, attempt) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(source.ReadPaymasterTombstoneWithStatus(request_id, tombstone) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(tombstone.session_id == fixture.attempt.session_id);
+    const auto pruned = database.m_records;
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(boundary, expired, error), error);
+    BOOST_CHECK(database.m_records == pruned);
+
+    // Cache authenticity and both index bindings remain mandatory, even when
+    // no prunable owner survives. Unknown local formats are also protective.
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        auto raw = database.MakeBatch();
+        if (scenario == 0) {
+            auto corrupt = fixture.capacity_proof;
+            corrupt.identity_signature.back() ^= 1;
+            BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, cache.request_hash),
+                SerializePaymasterSecurityObject(corrupt)));
+        } else if (scenario == 1) {
+            BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_CAPACITY_NONCE, cache.client_nonce), uint256::ONE));
+        } else if (scenario == 2) {
+            BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_CAPACITY_SESSION, cache.session_key), uint256::ONE));
+        } else {
+            BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RELEASE, cache.request_hash), uint16_t{65535}));
+        }
+        const auto corrupt = database.m_records;
+        BOOST_CHECK(!store.ExpireProviderCapacityReservations(boundary + 1, expired, error));
+        BOOST_CHECK(database.m_records == corrupt);
+        BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database).IsNull());
+        database.m_records = pruned;
+    }
+    // Every cache/index/admission mutation and the atomic commit can fail
+    // without modifying the historical fee reservation or input ownership.
+    for (int failure = 0; failure < 7; ++failure) {
+        database.erase_count = 0;
+        if (failure == 0) database.m_txn_pass = false;
+        else if (failure <= 3) database.fail_erase_at = failure - 1;
+        else if (failure <= 5) database.FailWriteAt(failure - 4);
+        else database.FailCommit();
+        BOOST_CHECK(!store.ExpireProviderCapacityReservations(boundary + 1, expired, error));
+        database.m_txn_pass = true;
+        database.fail_erase_at.reset();
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == pruned);
+        BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database).IsNull());
+        AlignSecurityFixtureCheckpoint(database);
+    }
+    ProviderBudgetLedger before_ledger;
+    std::vector<ProviderPoolEntry> before_pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(wallet, before_ledger, before_pool));
+    wallet::CWallet restarted{m_node.chain.get(), "capacity-cache-owner-pruned",
+        DuplicateSecurityFixtureDatabase(database)};
+    PaymasterStore restarted_store{restarted};
+    BOOST_REQUIRE_MESSAGE(restarted_store.ExpireProviderCapacityReservations(boundary + 1, expired, error), error);
+    BOOST_CHECK_EQUAL(expired, 0U); // Replay compaction never reports a financial release.
+    WalletBatch batch{restarted.GetDatabase()};
+    std::vector<unsigned char> bytes;
+    uint256 indexed;
+    BOOST_CHECK(batch.ReadPaymasterCapacityResponseWithStatus(cache.request_hash, bytes) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(batch.ReadPaymasterCapacityNonceWithStatus(cache.client_nonce, indexed) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(batch.ReadPaymasterCapacitySessionWithStatus(cache.session_key, indexed) == DatabaseReadStatus::NOT_FOUND);
+    ProviderBudgetLedger after_ledger;
+    std::vector<ProviderPoolEntry> after_pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, after_ledger, after_pool));
+    before_ledger.capacity_admissions.clear();
+    BOOST_CHECK(SerializePaymasterSecurityObject(before_ledger) == SerializePaymasterSecurityObject(after_ledger));
+    BOOST_CHECK(SerializePaymasterSecurityObject(before_pool) == SerializePaymasterSecurityObject(after_pool));
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(restarted.GetDatabase(), error));
+}
+
+BOOST_AUTO_TEST_CASE(provider_capacity_replay_cleanup_is_bounded_and_restarts_after_failure)
+{
+    constexpr int64_t now{1000};
+    auto environment = MakeProviderEnvironment(now, /*maximum_reserved=*/2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
+        "550e8400-e29b-41d4-a716-446655441192", uint256S("1193"), now,
+        fixture, error, nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash()), error);
+    environment.capacity_records.clear();
+    environment.ledger.capacity_admissions.clear();
+    BOOST_REQUIRE(PersistProviderQuoteEnvironment(m_wallet, environment, {}));
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.TxnBegin());
+    const size_t total = MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES + 3;
+    for (size_t i = 0; i < total; ++i) {
+        auto proof = fixture.capacity_proof;
+        auto request = fixture.capacity_request;
+        request.request_id = proof.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+        request.session_id = proof.session_id = SecurityTestId(uint256S("1194"), i + 1);
+        request.client_nonce = proof.client_nonce = SecurityTestId(uint256S("1195"), i + 1);
+        BOOST_REQUIRE(environment.identity_key.SignSchnorr(GetCapacityProofSignatureHash(proof),
+            proof.identity_signature, nullptr, uint256{}));
+        const auto hash = Hash(SerializePaymasterSecurityObject(request));
+        BOOST_REQUIRE(batch.WritePaymasterCapacityResponse(hash, SerializePaymasterSecurityObject(proof)));
+        BOOST_REQUIRE(batch.WritePaymasterCapacityNonce(proof.client_nonce, hash));
+        BOOST_REQUIRE(batch.WritePaymasterCapacitySession(SecurityCapacitySessionKey(proof), hash));
+    }
+    BOOST_REQUIRE(batch.TxnCommit());
+    PaymasterStore store{m_wallet};
+    const int64_t expiry = fixture.capacity_proof.expires_at + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS + 1;
+    size_t expired{0};
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(expiry, expired, error), error);
+    BOOST_CHECK_EQUAL(expired, 0U);
+    std::vector<std::pair<uint256, std::vector<unsigned char>>> remaining;
+    BOOST_REQUIRE(batch.ListPaymasterCapacityResponses(remaining));
+    BOOST_CHECK_EQUAL(remaining.size(), 3U);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto after = GetPaymasterCapacityCleanupCursor(database);
+    BOOST_REQUIRE(!after.IsNull());
+    const auto partially_compacted = database.m_records;
+    database.FailWriteAt(0);
+    BOOST_CHECK(!store.ExpireProviderCapacityReservations(expiry, expired, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == partially_compacted);
+    BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database).IsNull());
+    SetPaymasterCapacityCleanupCursor(database, after);
+    database.m_pass = false;
+    BOOST_CHECK(!store.ExpireProviderCapacityReservations(expiry, expired, error));
+    database.m_pass = true;
+    BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database).IsNull());
+
+    wallet::CWallet restarted{m_node.chain.get(), "capacity-cleanup-restart",
+        DuplicateSecurityFixtureDatabase(database)};
+    BOOST_CHECK(GetPaymasterCapacityCleanupCursor(restarted.GetDatabase()).IsNull());
+    BOOST_REQUIRE_MESSAGE(PaymasterStore{restarted}.ExpireProviderCapacityReservations(expiry, expired, error), error);
+    WalletBatch restarted_batch{restarted.GetDatabase()};
+    BOOST_REQUIRE(restarted_batch.ListPaymasterCapacityResponses(remaining));
+    BOOST_CHECK(remaining.empty());
+    ProviderBudgetLedger ledger;
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, ledger, pool));
+    BOOST_CHECK(pool.empty());
+    BOOST_CHECK(SerializePaymasterSecurityObject(ledger) == SerializePaymasterSecurityObject(environment.ledger));
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(restarted.GetDatabase(), error));
+}
+
 BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
 {
     constexpr int64_t now{1000};
@@ -3552,6 +3758,27 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_recovery_history_is_compacted_ato
     BOOST_CHECK(restarted_store.GetAlternativeRecoveryByIdWithStatus(recovery.recovery_id, saved) == DatabaseReadStatus::NOT_FOUND);
     BOOST_CHECK(!restarted_store.CommitProviderAlternativeRecoveryQuote(recovery,
         fixture.environment.netgroup_bucket, genesis, boundary + 2, error));
+    // The global replay rows also expire after their authenticated signing
+    // horizon, although the alternative owner was already pruned on restart.
+    ProviderBudgetLedger cache_before;
+    std::vector<ProviderPoolEntry> pool_before;
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, cache_before, pool_before));
+    const auto& cache = fixture.environment.capacity_records.front();
+    const int64_t cache_expiry = recovery.capacity_request.expires_at + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS + 1;
+    BOOST_REQUIRE_MESSAGE(restarted_store.ExpireProviderCapacityReservations(cache_expiry, expired, error), error);
+    BOOST_CHECK_EQUAL(expired, 0U);
+    WalletBatch cache_batch{restarted.GetDatabase()};
+    std::vector<unsigned char> proof;
+    uint256 indexed;
+    BOOST_CHECK(cache_batch.ReadPaymasterCapacityResponseWithStatus(cache.request_hash, proof) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(cache_batch.ReadPaymasterCapacityNonceWithStatus(cache.client_nonce, indexed) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(cache_batch.ReadPaymasterCapacitySessionWithStatus(cache.session_key, indexed) == DatabaseReadStatus::NOT_FOUND);
+    ProviderBudgetLedger cache_after;
+    std::vector<ProviderPoolEntry> pool_after;
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, cache_after, pool_after));
+    cache_before.capacity_admissions.clear();
+    BOOST_CHECK(SerializePaymasterSecurityObject(cache_before) == SerializePaymasterSecurityObject(cache_after));
+    BOOST_CHECK(SerializePaymasterSecurityObject(pool_before) == SerializePaymasterSecurityObject(pool_after));
     BOOST_REQUIRE(CheckPaymasterCheckpoint(restarted.GetDatabase(), error));
 }
 
@@ -3595,6 +3822,22 @@ BOOST_AUTO_TEST_CASE(provider_recovery_pruning_is_bounded_and_preserves_signed_r
     BOOST_REQUIRE_EQUAL(remaining.size(), 1U);
     BOOST_CHECK(remaining.front().recovery_id == signed_recovery.recovery_id);
     BOOST_CHECK(remaining.front().user_signed_psbt == signed_recovery.user_signed_psbt);
+    // A signed owner keeps its own proof and all economic authority. Only its
+    // redundant wire-response replay cache is compacted after the horizon.
+    ProviderBudgetLedger ledger_before;
+    std::vector<ProviderPoolEntry> pool_before;
+    BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger_before, pool_before));
+    const int64_t cache_expiry = signed_recovery.capacity_request.expires_at + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS + 1;
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(cache_expiry, expired, error), error);
+    AlternativeRecoveryRecord signed_after;
+    BOOST_REQUIRE(store.GetAlternativeRecoveryById(signed_recovery.recovery_id, signed_after));
+    BOOST_CHECK(SerializePaymasterSecurityObject(signed_recovery) == SerializePaymasterSecurityObject(signed_after));
+    ProviderBudgetLedger ledger_after;
+    std::vector<ProviderPoolEntry> pool_after;
+    BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger_after, pool_after));
+    ledger_before.capacity_admissions.clear();
+    BOOST_CHECK(SerializePaymasterSecurityObject(ledger_before) == SerializePaymasterSecurityObject(ledger_after));
+    BOOST_CHECK(SerializePaymasterSecurityObject(pool_before) == SerializePaymasterSecurityObject(pool_after));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -6153,6 +6396,59 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_REQUIRE_MESSAGE(history_store.HasProviderDrainWork(identity.provider_id, has_drain_work, error), error);
     BOOST_CHECK(has_drain_work); // The new quote's live capacity continuation.
 
+    {
+        // Recreate a compatible historical replay cache for this genuine signed
+        // and archived recovery. Isolate unrelated live-capacity rows so the
+        // assertion concerns cache compaction rather than nonce expiry.
+        wallet::CWallet cache_wallet{node.chain.get(), "archived-recovery-capacity-cache",
+            DuplicateSecurityFixtureDatabase(history_database)};
+        BOOST_REQUIRE(cache_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        const auto cache_tip = WITH_LOCK(history_wallet.cs_wallet,
+            return std::make_pair(history_wallet.GetLastBlockHeight(), history_wallet.GetLastBlockHash()));
+        {
+            LOCK(cache_wallet.cs_wallet);
+            cache_wallet.SetLastBlockProcessed(cache_tip.first, cache_tip.second);
+        }
+        WalletBatch cache_batch{cache_wallet.GetDatabase()};
+        BOOST_REQUIRE(cache_batch.TxnBegin());
+        for (const auto& cached : environment.capacity_records) {
+            BOOST_REQUIRE(cache_batch.ErasePaymasterCapacityResponse(cached.request_hash));
+            BOOST_REQUIRE(cache_batch.ErasePaymasterCapacityNonce(cached.client_nonce));
+            BOOST_REQUIRE(cache_batch.ErasePaymasterCapacitySession(cached.session_key));
+        }
+        PaymasterCapacityProof proof;
+        CDataStream encoded{recovery.capacity_snapshot.capacity_proof, SER_NETWORK, ::PROTOCOL_VERSION};
+        encoded >> proof;
+        BOOST_REQUIRE(encoded.empty());
+        const auto request_hash = Hash(SerializePaymasterSecurityObject(recovery.capacity_request));
+        BOOST_REQUIRE(cache_batch.WritePaymasterCapacityResponse(request_hash, recovery.capacity_snapshot.capacity_proof));
+        BOOST_REQUIRE(cache_batch.WritePaymasterCapacityNonce(proof.client_nonce, request_hash));
+        BOOST_REQUIRE(cache_batch.WritePaymasterCapacitySession(SecurityCapacitySessionKey(proof), request_hash));
+        BOOST_REQUIRE(cache_batch.TxnCommit());
+        ProviderBudgetLedger ledger_before;
+        std::vector<ProviderPoolEntry> pool_before;
+        BOOST_REQUIRE(ReadProviderSecurityState(cache_wallet, ledger_before, pool_before));
+        PaymasterStore cache_store{cache_wallet};
+        size_t expired{0};
+        const int64_t cache_expiry = proof.expires_at + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS + 1;
+        BOOST_REQUIRE_MESSAGE(cache_store.ExpireProviderCapacityReservations(cache_expiry, expired, error), error);
+        BOOST_CHECK_EQUAL(expired, 0U);
+        ProviderBudgetLedger ledger_after;
+        std::vector<ProviderPoolEntry> pool_after;
+        BOOST_REQUIRE(ReadProviderSecurityState(cache_wallet, ledger_after, pool_after));
+        BOOST_CHECK(SerializePaymasterSecurityObject(ledger_before) == SerializePaymasterSecurityObject(ledger_after));
+        BOOST_CHECK(SerializePaymasterSecurityObject(pool_before) == SerializePaymasterSecurityObject(pool_after));
+        AlternativeRecoveryRecord retained_after;
+        BOOST_REQUIRE(cache_store.GetAlternativeRecoveryById(recovery.recovery_id, retained_after));
+        BOOST_CHECK(SerializePaymasterSecurityObject(retained_after) == SerializePaymasterSecurityObject(recovery));
+        std::vector<unsigned char> absent;
+        BOOST_CHECK(cache_batch.ReadPaymasterCapacityResponseWithStatus(request_hash, absent) == DatabaseReadStatus::NOT_FOUND);
+        const auto compacted = GetMockableDatabase(cache_wallet).m_records;
+        BOOST_REQUIRE_MESSAGE(cache_store.CommitProviderAlternativeRecoveryFinal(
+            recovery, commit, result, result.genesis_hash, error), error);
+        BOOST_CHECK(GetMockableDatabase(cache_wallet).m_records == compacted);
+    }
+    AlignSecurityFixtureCheckpoint(history_database);
     const auto intact = history_database.m_records;
     for (int scenario = 0; scenario < 6; ++scenario) {
         BOOST_TEST_CONTEXT("archived recovery evidence scenario " << scenario) {

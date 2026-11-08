@@ -24,6 +24,7 @@
 #include <version.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterpsbt.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
@@ -1945,7 +1946,14 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<std::pair<uint256, std::vector<unsigned char>>> responses;
-    if (!batch.ListPaymasterCapacityResponses(responses)) {
+    const auto after = GetPaymasterCapacityCleanupCursor(m_wallet.GetDatabase());
+    // Failed observations or commits restart the disposable scan. Publishing
+    // progress only after the complete page succeeds cannot skip failed work.
+    SetPaymasterCapacityCleanupCursor(m_wallet.GetDatabase(), {});
+    uint256 next;
+    if (!batch.ListPaymasterCapacityResponsesPage(after,
+            MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES, MAX_PROVIDER_CAPACITY_CLEANUP_BYTES,
+            responses, next)) {
         error = "PAYMASTER_CAPACITY_DATABASE_READ";
         return false;
     }
@@ -1957,35 +1965,11 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         return false;
     }
     ProviderBudgetLedger budget_ledger;
-    const bool have_budget_ledger =
-        batch.ReadPaymasterProviderBudgetLedger(budget_ledger);
-    if (!have_budget_ledger && batch.HasPaymasterProviderBudgetLedger()) {
+    const auto budget_status = batch.ReadPaymasterProviderBudgetLedgerWithStatus(budget_ledger);
+    const bool have_budget_ledger = budget_status == DatabaseReadStatus::FOUND;
+    if (budget_status != DatabaseReadStatus::FOUND && budget_status != DatabaseReadStatus::NOT_FOUND) {
         error = "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER";
         return false;
-    }
-
-    // A provider-side attempt means the payment flow has bound the capacity
-    // nonce. Conservatively retain such slots at every attempt state: the
-    // pool rebind and attempt transition are atomic in normal operation, but
-    // this also fails closed for imported or partially recovered databases.
-    std::set<uint256> bound_nonces;
-    std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterSessions(sessions)) {
-        error = "PAYMASTER_SESSION_DATABASE_READ";
-        return false;
-    }
-    for (const PaymentSession& session : sessions) {
-        if (!session.provider_side) continue;
-        for (const uint256& attempt_id : session.attempt_ids) {
-            ProviderAttempt attempt;
-            if (!batch.ReadPaymasterAttempt(attempt_id, attempt) ||
-                attempt.session_id != session.session_id ||
-                attempt.provider_id != identity.provider_id) {
-                error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
-                return false;
-            }
-            if (!attempt.client_nonce.IsNull()) bound_nonces.insert(attempt.client_nonce);
-        }
     }
 
     std::vector<ProviderPoolEntry> pool;
@@ -2020,6 +2004,7 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         request.expires_at = proof.expires_at;
         std::string validation_error;
         if (GetPersistedCapacityRequestHash(proof) != request_hash ||
+            proof.genesis_hash != Params().GenesisBlock().GetHash() ||
             !ValidateCapacityProofEnvelope(proof, request, proof.expires_at - 1,
                                            validation_error) ||
             proof.provider_id != identity.provider_id ||
@@ -2041,9 +2026,9 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         }
 
         ProviderCapacityReleaseRecord existing_release;
-        const bool have_release = batch.ReadPaymasterCapacityRelease(
-            request_hash, existing_release);
-        if (!have_release && batch.HasPaymasterCapacityRelease(request_hash)) {
+        const auto release_status = batch.ReadPaymasterCapacityReleaseWithStatus(request_hash, existing_release);
+        const bool have_release = release_status == DatabaseReadStatus::FOUND;
+        if (release_status != DatabaseReadStatus::FOUND && release_status != DatabaseReadStatus::NOT_FOUND) {
             error = "PAYMASTER_CAPACITY_RELEASE_CONFLICT";
             return false;
         }
@@ -2058,6 +2043,33 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
                 [&](const ProviderCapacityAdmission& entry) {
                     return entry.request_key == admission_key;
                 });
+        };
+        const auto admission = find_admission(budget_ledger);
+        if (admission != budget_ledger.capacity_admissions.end() &&
+            (admission->request_hash != request_hash || admission->funding_model != proof.funding_model ||
+             admission->requires_carrier != proof.requires_carrier || admission->expires_at != proof.expires_at)) {
+            error = "PAYMASTER_CAPACITY_ADMISSION_CONFLICT";
+            return false;
+        }
+        const auto compact_replay = [&] {
+            ProviderBudgetLedger compacted{budget_ledger};
+            const auto obsolete = find_admission(compacted);
+            const bool compact_budget = obsolete != compacted.capacity_admissions.end();
+            if (compact_budget) compacted.capacity_admissions.erase(obsolete);
+            if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+            if (!batch.ErasePaymasterCapacityResponse(request_hash) ||
+                !batch.ErasePaymasterCapacityNonce(proof.client_nonce) ||
+                !batch.ErasePaymasterCapacitySession(GetPersistedCapacitySessionKey(proof)) ||
+                (have_release && !batch.ErasePaymasterCapacityRelease(request_hash)) ||
+                (compact_budget && !batch.WritePaymasterProviderBudgetLedger(compacted))) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+            if (!batch.TxnCommit()) {
+                error = "PAYMASTER_DATABASE_COMMIT";
+                return false;
+            }
+            if (compact_budget) budget_ledger = std::move(compacted);
+            return true;
         };
         if (have_release) {
             if (existing_release.client_nonce != proof.client_nonce) {
@@ -2087,80 +2099,69 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
                 return false;
             }
             if (replay_retention_elapsed) {
-                ProviderBudgetLedger compacted_ledger{budget_ledger};
-                bool compact_budget{false};
-                const auto compacted_admission = find_admission(compacted_ledger);
-                if (compacted_admission !=
-                    compacted_ledger.capacity_admissions.end()) {
-                    compacted_ledger.capacity_admissions.erase(
-                        compacted_admission);
-                    compact_budget = true;
-                }
-                if (!batch.TxnBegin()) {
-                    return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-                }
-                if (!batch.ErasePaymasterCapacityResponse(request_hash) ||
-                    !batch.ErasePaymasterCapacityNonce(proof.client_nonce) ||
-                    !batch.ErasePaymasterCapacitySession(
-                        GetPersistedCapacitySessionKey(proof)) ||
-                    !batch.ErasePaymasterCapacityRelease(request_hash) ||
-                    (compact_budget &&
-                     !batch.WritePaymasterProviderBudgetLedger(
-                         compacted_ledger))) {
-                    return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-                }
-                if (!batch.TxnCommit()) {
-                    error = "PAYMASTER_DATABASE_COMMIT";
-                    return false;
-                }
-                if (compact_budget) {
-                    budget_ledger = std::move(compacted_ledger);
-                }
+                if (!compact_replay()) return false;
             }
             continue;
         }
-        if (bound_nonces.count(proof.client_nonce) != 0) {
-            if (proof.expires_at > now || !replay_retention_elapsed) {
-                continue;
-            }
-            ProviderBudgetLedger compacted_ledger{budget_ledger};
-            bool compact_budget{false};
-            if (!have_budget_ledger) {
-                error = "PAYMASTER_CAPACITY_PROMOTION_CONFLICT";
-                return false;
-            }
-            const auto admission = find_admission(compacted_ledger);
-            if (admission != compacted_ledger.capacity_admissions.end()) {
-                if (admission->request_hash != request_hash ||
-                    admission->state != CapacityAdmissionState::PROMOTED) {
-                    error = "PAYMASTER_CAPACITY_PROMOTION_CONFLICT";
-                    return false;
-                }
-                compacted_ledger.capacity_admissions.erase(admission);
-                compact_budget = true;
-            }
-            if (!batch.TxnBegin()) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-            }
-            if (!batch.ErasePaymasterCapacityResponse(request_hash) ||
-                !batch.ErasePaymasterCapacityNonce(proof.client_nonce) ||
-                !batch.ErasePaymasterCapacitySession(
-                    GetPersistedCapacitySessionKey(proof)) ||
-                (compact_budget &&
-                 !batch.WritePaymasterProviderBudgetLedger(
-                     compacted_ledger))) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-            }
-            if (!batch.TxnCommit()) {
-                error = "PAYMASTER_DATABASE_COMMIT";
-                return false;
-            }
-            if (compact_budget) {
-                budget_ledger = std::move(compacted_ledger);
-            }
+        // Promotion must occur before capacity expiry. A normal quote allows
+        // at most 60 seconds of future clock skew and a 24-hour retry window;
+        // recovery requires a current response/capacity for each new signature.
+        // After that authenticated upper bound these rows are replay caches,
+        // independently of whether their normal/recovery owner was pruned or
+        // archived. Deleting them never releases pool inputs, fee reservations,
+        // user signatures, commits or the owner's embedded historical proof.
+        const bool signing_horizon_elapsed = TimeDeltaExceeds(now, proof.expires_at,
+            DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS);
+        const bool nonce_reserved = std::any_of(pool.begin(), pool.end(), [&](const auto& entry) {
+            return entry.reservation_id == proof.client_nonce;
+        });
+        if (signing_horizon_elapsed &&
+            (!nonce_reserved || admission == budget_ledger.capacity_admissions.end() ||
+             admission->state != CapacityAdmissionState::RESERVED)) {
+            if (!compact_replay()) return false;
             continue;
         }
         if (proof.expires_at > now) continue;
+
+        // Releasing an actual nonce reservation is a separate financial
+        // operation. Both owner families veto it, including partially recovered
+        // records whose pool still carries the earlier nonce binding.
+        bool bound{false};
+        PaymentSession session;
+        const auto session_status = batch.ReadPaymasterSessionWithStatus(proof.request_id, session);
+        if (session_status != DatabaseReadStatus::FOUND && session_status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_SESSION_DATABASE_READ";
+            return false;
+        }
+        if (session_status == DatabaseReadStatus::FOUND && session.provider_side && session.session_id == proof.session_id) {
+            for (const auto& attempt_id : session.attempt_ids) {
+                ProviderAttempt attempt;
+                if (!batch.ReadPaymasterAttempt(attempt_id, attempt) || attempt.session_id != session.session_id ||
+                    attempt.provider_id != identity.provider_id) {
+                    error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+                    return false;
+                }
+                bound |= attempt.client_nonce == proof.client_nonce;
+            }
+        }
+        AlternativeRecoveryRecord recovery;
+        const auto recovery_id = GetAlternativeRecoveryId(proof.request_id, proof.session_id, proof.provider_id, proof.client_nonce);
+        const auto recovery_status = batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery);
+        if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_RECOVERY_DATABASE_READ";
+            return false;
+        }
+        if (recovery_status == DatabaseReadStatus::FOUND) {
+            if (!recovery.provider_side || !ValidateAlternativeRecoveryRecordShape(recovery, error)) {
+                if (error.empty()) error = "PAYMASTER_CAPACITY_RECOVERY_BINDING_MISMATCH";
+                return false;
+            }
+            bound = true;
+        }
+        if (bound) {
+            if (signing_horizon_elapsed && !compact_replay()) return false;
+            continue;
+        }
 
         std::set<COutPoint> proof_outpoints;
         std::vector<size_t> releasable_indexes;
@@ -2250,6 +2251,7 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
         pool = std::move(updated_pool);
         ++expired_reservations;
     }
+    SetPaymasterCapacityCleanupCursor(m_wallet.GetDatabase(), next);
     return true;
 }
 

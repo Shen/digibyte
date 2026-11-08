@@ -36,6 +36,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/paymastersessionindex.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -48,6 +49,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <set>
 
 namespace wallet::paymaster_app {
 bool GetOrCreateFinalProviderResult(CWallet& wallet, PaymasterStore& store,
@@ -57,11 +59,29 @@ bool GetOrCreateFinalProviderResult(CWallet& wallet, PaymasterStore& store,
 
 using namespace DigiDollar::Paymaster;
 using namespace wallet;
+using wallet::paymaster_store::internal::MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES;
+using wallet::paymaster_store::internal::MAX_PROVIDER_CAPACITY_CLEANUP_BYTES;
 
 namespace {
 
 class SessionIndexDatabase : public MockableDatabase
 {
+    class CapacityCursor : public DatabaseCursor {
+        std::unique_ptr<DatabaseCursor> m_cursor;
+        SessionIndexDatabase& m_database;
+    public:
+        CapacityCursor(std::unique_ptr<DatabaseCursor> cursor, SessionIndexDatabase& database)
+            : m_cursor(std::move(cursor)), m_database(database) {}
+        Status Next(DataStream& key, DataStream& value) override
+        {
+            const auto status = m_cursor->Next(key, value);
+            if (status == Status::MORE) {
+                ++m_database.capacity_rows;
+                m_database.capacity_bytes += key.size() + value.size();
+            }
+            return status;
+        }
+    };
     class Batch : public MockableBatch {
         SessionIndexDatabase& m_database;
     public:
@@ -78,9 +98,23 @@ class SessionIndexDatabase : public MockableDatabase
             }
             return MockableBatch::GetNewPrefixCursor(prefix);
         }
+        std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override
+        {
+            DataStream prefix;
+            prefix << DBKeys::PAYMASTER_CAPACITY_RESPONSE;
+            auto cursor = MockableBatch::GetNewRangeCursor(begin, end);
+            if (begin.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), begin.begin())) {
+                ++m_database.capacity_ranges;
+                return std::make_unique<CapacityCursor>(std::move(cursor), m_database);
+            }
+            return cursor;
+        }
     };
 public:
     size_t session_scans{0};
+    size_t capacity_ranges{0};
+    size_t capacity_rows{0};
+    size_t capacity_bytes{0};
     std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
     {
         return std::make_unique<Batch>(*this);
@@ -791,6 +825,58 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(provider_capacity_pages_bound_scanned_rows_and_bytes)
+{
+    SessionIndexDatabase database;
+    WalletBatch batch{database};
+    const auto fill = [&](size_t count, size_t bytes) {
+        database.m_records.clear();
+        auto raw = database.MakeBatch();
+        for (size_t i = 0; i < count; ++i) {
+            const auto hash = uint256S(strprintf("%064x", i + 1));
+            BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESPONSE, hash),
+                std::vector<unsigned char>(bytes, 1)));
+        }
+    };
+    const auto check_pages = [&](size_t expected) {
+        uint256 after;
+        size_t total{0};
+        std::set<uint256> visited;
+        do {
+            database.capacity_rows = database.capacity_bytes = 0;
+            std::vector<std::pair<uint256, std::vector<unsigned char>>> rows;
+            uint256 next;
+            BOOST_REQUIRE(batch.ListPaymasterCapacityResponsesPage(after,
+                MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES, MAX_PROVIDER_CAPACITY_CLEANUP_BYTES, rows, next));
+            BOOST_CHECK_LE(database.capacity_rows, MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES);
+            BOOST_CHECK_LE(database.capacity_bytes, MAX_PROVIDER_CAPACITY_CLEANUP_BYTES);
+            BOOST_CHECK_EQUAL(database.capacity_rows, rows.size());
+            for (const auto& row : rows) BOOST_CHECK(visited.insert(row.first).second);
+            total += rows.size();
+            after = next;
+        } while (!after.IsNull());
+        BOOST_CHECK_EQUAL(total, expected);
+    };
+    fill(MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES + 3, 2);
+    check_pages(MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES + 3);
+    fill(7, MAX_DIRECT_MESSAGE_BYTES);
+    check_pages(7);
+    BOOST_CHECK_GE(database.capacity_ranges, 4U);
+
+    // Cache rebuilds preserve progress; wallet unload invalidates all of it.
+    SetPaymasterCapacityCleanupCursor(database, uint256::ONE);
+    PrimePaymasterSessionIndex(database, {});
+    BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database) == uint256::ONE);
+    ForgetPaymasterSessionIndex(database);
+    BOOST_CHECK(GetPaymasterCapacityCleanupCursor(database).IsNull());
+    // An invalid row cannot return an apparently complete successful page.
+    fill(1, MAX_DIRECT_MESSAGE_BYTES + 1);
+    std::vector<std::pair<uint256, std::vector<unsigned char>>> rows;
+    uint256 next;
+    BOOST_CHECK(!batch.ListPaymasterCapacityResponsesPage({}, MAX_PROVIDER_CAPACITY_CLEANUP_RESPONSES,
+        MAX_PROVIDER_CAPACITY_CLEANUP_BYTES, rows, next));
+}
 
 BOOST_AUTO_TEST_CASE(final_session_index_scales_and_tracks_committed_changes)
 {

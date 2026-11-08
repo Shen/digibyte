@@ -13,6 +13,7 @@ namespace wallet {
 class WalletBatch;
 class WalletDatabase;
 
+
 /** Derived lookup only. Caller holds the wallet lock; returned records are
  * freshly read and still require exact-artifact/authorization validation. */
 bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
@@ -21,6 +22,10 @@ bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
 void PrimePaymasterSessionIndex(WalletDatabase& database,
                                 const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
 void ForgetPaymasterSessionIndex(WalletDatabase& database);
+/** Non-authoritative progress through the bounded provider replay-cache scan.
+ * Reset on read/commit failure and wallet unload; never grants a release. */
+uint256 GetPaymasterCapacityCleanupCursor(WalletDatabase& database);
+void SetPaymasterCapacityCleanupCursor(WalletDatabase& database, const uint256& after);
 /** Apply queued index deltas only after the database commit has succeeded.
  * Abort/destruction discards them and invalidates the derived lookup. */
 void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed = false);
