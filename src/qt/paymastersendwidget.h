@@ -16,6 +16,7 @@
 #include <QStringList>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class DigiDollarSendWidget;
@@ -119,6 +120,8 @@ private:
     void reportPaymasterOperationNotStarted(
         const QString& reason);
     void discoverPersistedPaymasterSessions(bool user_requested = false);
+    void requestPersistedPaymasterSessionPage(bool user_requested, std::string cursor,
+        std::shared_ptr<UniValue> collected, uint64_t wallet_generation);
     Q_SLOT void loadSelectedPersistedPaymasterSession();
     void activatePersistedPaymasterSession(
         const QString& request_id);

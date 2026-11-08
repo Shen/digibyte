@@ -5034,6 +5034,14 @@ void PaymasterWidgetTests::paymasterClientMultipleRestartSessionsRequireSelectio
             if (command == "listdigidollarsendsessions") {
                 UniValue listed{UniValue::VOBJ};
                 listed.pushKV("active_only", true);
+                if (params[0].find_value("cursor").isNull()) {
+                    listed.pushKV("count", 0);
+                    listed.pushKV("next_cursor", "00000000-0000-4000-8000-000000000000");
+                    listed.pushKV("sessions", UniValue{UniValue::VARR});
+                    return listed;
+                }
+                if (params[0].find_value("cursor").get_str() != "00000000-0000-4000-8000-000000000000")
+                    throw std::runtime_error("unexpected session page cursor");
                 listed.pushKV("count", 2);
                 listed.pushKV("next_cursor", UniValue{UniValue::VNULL});
                 UniValue sessions{UniValue::VARR};
@@ -5075,8 +5083,8 @@ void PaymasterWidgetTests::paymasterClientMultipleRestartSessionsRequireSelectio
     QVERIFY(chooser && sessions && review);
     QVERIFY(!chooser->isHidden());
     QCOMPARE(sessions->count(), 2);
-    QCOMPARE(commands, QStringList{QStringLiteral(
-                           "listdigidollarsendsessions")});
+    QCOMPARE(commands, QStringList({QStringLiteral("listdigidollarsendsessions"),
+                                   QStringLiteral("listdigidollarsendsessions")}));
     QVERIFY(resolve_actions.isEmpty());
 
     // Selecting a persisted item performs exactly one read-only refresh. It
@@ -5085,6 +5093,7 @@ void PaymasterWidgetTests::paymasterClientMultipleRestartSessionsRequireSelectio
     QCOMPARE(resolve_actions, QStringList{QStringLiteral("refresh")});
     QCOMPARE(commands,
              QStringList({QStringLiteral("listdigidollarsendsessions"),
+                          QStringLiteral("listdigidollarsendsessions"),
                           QStringLiteral("resolvepaymastersession")}));
 }
 

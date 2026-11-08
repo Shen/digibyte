@@ -1773,18 +1773,28 @@ void PaymasterSendWidget::discoverPersistedPaymasterSessions(bool user_requested
     m_loadPersistedPaymasterSessionButton->setEnabled(false);
     m_form.updateSendButton();
 
+    requestPersistedPaymasterSessionPage(user_requested, {},
+        std::make_shared<UniValue>(UniValue::VARR), m_send.view().walletGeneration);
+}
+
+void PaymasterSendWidget::requestPersistedPaymasterSessionPage(bool user_requested, std::string cursor,
+    std::shared_ptr<UniValue> collected, uint64_t wallet_generation)
+{
+    if (!m_walletModel || m_send.view().walletGeneration != wallet_generation) return;
+    m_sessionDiscoveryPending = true;
     UniValue options{UniValue::VOBJ};
     options.pushKV("active_only", true);
-    // The RPC caps one page at 100. Refuse to display a partial active-session
-    // set: a truncated chooser could make an older transfer look absent.
+    // Limits bound scanned rows, including provider/inactive history. Continue
+    // through empty pages without presenting an incomplete active-session set.
     options.pushKV("limit", 100);
+    if (!cursor.empty()) options.pushKV("cursor", cursor);
     UniValue params{UniValue::VARR};
     params.push_back(std::move(options));
     executePaymasterRpcAsync(
         "listdigidollarsendsessions", std::move(params),
-        [guard = QPointer<PaymasterSendWidget>(this), user_requested](
+        [guard = QPointer<PaymasterSendWidget>(this), user_requested, cursor, collected, wallet_generation](
             UniValue result, QString error) {
-            if (!guard) return;
+            if (!guard || guard->m_send.view().walletGeneration != wallet_generation) return;
             guard->m_sessionDiscoveryPending = false;
             guard->m_sessionDiscoveryProgress->hide();
             const auto failed = [&](const QString& detail, bool reservation_conflict = false) {
@@ -1816,20 +1826,28 @@ void PaymasterSendWidget::discoverPersistedPaymasterSessions(bool user_requested
                 failed(QStringLiteral("PAYMASTER_SESSION_LIST_INVALID_RESPONSE"));
                 return;
             }
-            const UniValue& sessions = result.find_value("sessions");
+            const UniValue& page = result.find_value("sessions");
             const UniValue& next_cursor = result.find_value("next_cursor");
             qint64 count{0};
             if (!ReadInt64(result, "count", count) || count < 0 ||
-                count != static_cast<qint64>(sessions.size()) ||
-                sessions.size() > 100 || (!next_cursor.isNull() && !next_cursor.isStr())) {
+                count != static_cast<qint64>(page.size()) || page.size() > 100 ||
+                (!next_cursor.isNull() && !next_cursor.isStr()) ||
+                (next_cursor.isStr() && (!DigiDollar::Paymaster::IsCanonicalRequestId(next_cursor.get_str()) ||
+                                        next_cursor.get_str() <= cursor))) {
                 failed(QStringLiteral("PAYMASTER_SESSION_LIST_INVALID_COUNT_OR_CURSOR"));
                 return;
             }
-
-            if (next_cursor.isStr() && !next_cursor.get_str().empty()) {
+            for (const auto& entry : page.getValues()) collected->push_back(entry);
+            if (collected->size() > 100) {
                 failed(DigiDollarSendWidget::tr("More saved transfers exist than this view can load. Inspect the remaining pages with listdigidollarsendsessions in the RPC console."));
                 return;
             }
+            if (next_cursor.isStr()) {
+                guard->m_sessionDiscoveryProgress->show();
+                guard->requestPersistedPaymasterSessionPage(user_requested, next_cursor.get_str(), collected, wallet_generation);
+                return;
+            }
+            const UniValue& sessions = *collected;
 
             struct ListedSession {
                 QString request_id;
