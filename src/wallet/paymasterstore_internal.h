@@ -71,6 +71,10 @@ bool RequireNoProviderSignatureEvidence(WalletBatch& batch, const uint256& commi
 /** Unsigned cancellation/expiry additionally require absent user authority. */
 bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_key,
                                     std::string& error);
+/** Prove a complete client session unsigned before releasing inputs or fee
+ * authority. A bound negative response alone is not signature evidence. */
+bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
+                                          std::string& error);
 bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,

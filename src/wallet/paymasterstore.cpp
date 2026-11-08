@@ -213,6 +213,81 @@ bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_ke
     return false;
 }
 
+bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
+                                          std::string& error)
+{
+    error.clear();
+    const auto unsafe = [&] {
+        error = "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST";
+        return false;
+    };
+    if (session.provider_side || !session.final_txid.IsNull() ||
+        !session.recovery_txid.IsNull()) return unsafe();
+
+    SelfRecoveryRecord self;
+    const auto self_status = batch.ReadPaymasterRecoveryWithStatus(session.request_id, self);
+    if (self_status != DatabaseReadStatus::NOT_FOUND) {
+        error = self_status == DatabaseReadStatus::FOUND
+            ? "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST" : "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    uint256 recovery_id;
+    const auto index_status = batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(session.request_id, recovery_id);
+    if (index_status != DatabaseReadStatus::NOT_FOUND) {
+        error = index_status == DatabaseReadStatus::FOUND
+            ? "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST" : "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    // A damaged/missing locator cannot hide an authoritative recovery record.
+    // This scan is confined to unsigned release and authorization validation.
+    std::vector<AlternativeRecoveryRecord> recoveries;
+    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
+        error = "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    for (const auto& recovery : recoveries) {
+        if (!recovery.provider_side &&
+            (recovery.request_id == session.request_id || recovery.session_id == session.session_id)) return unsafe();
+    }
+    for (const auto& attempt_id : session.attempt_ids) {
+        ProviderAttempt attempt;
+        if (batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt) != DatabaseReadStatus::FOUND ||
+            attempt.session_id != session.session_id) {
+            error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+            return false;
+        }
+        if ((attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED &&
+             attempt.state != AttemptState::REJECTED && attempt.state != AttemptState::QUOTE_EXPIRED) ||
+            !attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+            !attempt.final_txid.IsNull() || attempt.provider_signed_at != 0 ||
+            !attempt.provider_signed_result.empty()) return unsafe();
+        if (attempt.commit_key.IsNull()) continue;
+        UserAuthorizationRecord authorization;
+        ProviderCommitRecord commit;
+        const auto authorization_status = batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization);
+        const auto commit_status = batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit);
+        if (authorization_status != DatabaseReadStatus::NOT_FOUND || commit_status != DatabaseReadStatus::NOT_FOUND) {
+            error = (authorization_status == DatabaseReadStatus::FOUND || commit_status == DatabaseReadStatus::FOUND)
+                ? "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST" : "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+            return false;
+        }
+        PaymasterResult result;
+        const auto result_status = batch.ReadPaymasterResultWithStatus(attempt.commit_key, result);
+        if (result_status == DatabaseReadStatus::NOT_FOUND) continue;
+        if (result_status != DatabaseReadStatus::FOUND) {
+            error = "PAYMASTER_PERSISTED_RESULT_CORRUPT";
+            return false;
+        }
+        // An authentic negative answer received before any USER signature is
+        // compatible with cancellation. It never substitutes for the other
+        // independently absent authority and unsigned-input checks.
+        if (!ValidatePaymasterResult(result, Params().GenesisBlock().GetHash(),
+                attempt.provider_id, attempt.commit_key, attempt.provider_identity_key, 1, error)) return false;
+        if (!IsNegativeTerminalResultStatus(result.status)) return unsafe();
+    }
+    return true;
+}
+
 std::optional<uint32_t> FindUniqueOutputByScript(const CTransaction& transaction,
                                                  const CScript& script)
 {

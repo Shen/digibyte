@@ -200,6 +200,10 @@ unknown state, an unexpectedly missing known session or a signature from another
 caller keep the transfer protected. Provider reservations may remain until
 expiry after local unsigned closure. Signed/ambiguous work needs the supported
 recovery flow, not UI reset. Cancellation does not interrupt canonical scans.
+Accepted terms without a USER signature can still be closed safely. Independent
+authorization, result and recovery records are checked before every unsigned
+release, including expiry and repeated cancellation; unreadable records keep
+inputs protected.
 
 ## Capability and readiness query
 

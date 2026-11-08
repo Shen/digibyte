@@ -2599,6 +2599,103 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     BOOST_REQUIRE(accepted_fee != accepted_fee_ledger.reservations.end());
     BOOST_CHECK(accepted_fee->state == BudgetReservationState::RESERVED);
 
+    // Independent records outrank unsigned labels, including unsupported and
+    // malformed values. Every denied release must preserve all wallet bytes.
+    for (int evidence = 0; evidence < 12; ++evidence) {
+        wallet::CWallet guarded{m_node.chain.get(), "unsigned-independent-authority",
+                        DuplicateMockDatabase(m_wallet.GetDatabase())};
+        PaymasterStore guarded_store{guarded};
+        {
+            LOCK(guarded.cs_wallet);
+            guarded.LockPaymasterCoin(user_input);
+            auto raw = guarded.GetDatabase().MakeBatch();
+            if (evidence < 3) {
+                UserAuthorizationRecord record{UserAuthorizationRecord::CURRENT_VERSION,
+                    quoted.commit_key, quoted.attempt_id, uint256::ONE, 107, quoted.retry_until};
+                if (evidence == 1) ++record.version;
+                if (evidence == 2) record.canonical_psbt_hash.SetNull();
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, quoted.commit_key), record));
+            } else if (evidence < 6) {
+                ProviderCommitRecord record;
+                record.commit_key = quoted.commit_key;
+                record.provider_id = quoted.provider_id;
+                record.quote_id = quoted.quote_id;
+                record.template_commitment = quoted.template_commitment;
+                record.final_txid = quoted.unsigned_txid;
+                record.final_transaction = quoted.unsigned_transaction;
+                record.raw_transaction_hash = Hash(record.final_transaction);
+                record.provider_inputs = {transaction.vin[1].prevout};
+                record.committed_at = 107;
+                record.retry_until = quoted.retry_until;
+                if (evidence == 4) ++record.version;
+                if (evidence == 5) {
+                    BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, quoted.commit_key), std::vector<unsigned char>{0xff}));
+                } else {
+                    BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, quoted.commit_key), record));
+                }
+            } else if (evidence < 9) {
+                PaymasterResult record;
+                record.genesis_hash = Params().GenesisBlock().GetHash();
+                record.provider_id = quoted.provider_id;
+                record.commit_key = quoted.commit_key;
+                record.result_sequence = 1;
+                record.status = PaymasterResultStatus::USER_PSBT_ACCEPTED;
+                record.updated_at = 107;
+                record.identity_signature.resize(64);
+                BOOST_REQUIRE(provider_identity_key.SignSchnorr(GetPaymasterResultSignatureHash(record),
+                    record.identity_signature, nullptr, uint256{}));
+                if (evidence == 7) ++record.version;
+                if (evidence == 8) record.identity_signature.front() ^= 1;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_RESULT, quoted.commit_key), record));
+            } else if (evidence == 9) {
+                SelfRecoveryRecord record;
+                ++record.version;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_RECOVERY, std::string{request_id}), record));
+            } else if (evidence == 10) {
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY_REQUEST, std::string{request_id}), uint256::ONE));
+            } else {
+                AlternativeRecoveryRecord record;
+                ++record.version;
+                BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, uint256::ONE), record));
+            }
+        }
+        const auto before = GetMockableDatabase(guarded).m_records;
+        size_t expired{0};
+        BOOST_CHECK(!guarded_store.ExpireProviderQuotes(121, expired, error));
+        BOOST_CHECK_EQUAL(expired, 0U);
+        BOOST_CHECK(!guarded_store.AbandonUnsignedClientSession(request_id, 121, error));
+        BOOST_CHECK(!guarded_store.AbandonClientAttemptForFallback(request_id, quoted.attempt_id, 121, error));
+        BOOST_CHECK(GetMockableDatabase(guarded).m_records == before);
+        BOOST_CHECK(IsPaymasterInputReserved(guarded, user_input));
+        LOCK(guarded.cs_wallet);
+        BOOST_CHECK(guarded.IsLockedCoin(user_input));
+    }
+    {
+        wallet::CWallet negative{m_node.chain.get(), "unsigned-authentic-negative-result",
+                         DuplicateMockDatabase(m_wallet.GetDatabase())};
+        PaymasterResult result;
+        result.genesis_hash = Params().GenesisBlock().GetHash();
+        result.provider_id = quoted.provider_id;
+        result.commit_key = quoted.commit_key;
+        result.result_sequence = 1;
+        result.status = PaymasterResultStatus::REJECTED;
+        result.updated_at = 107;
+        result.identity_signature.resize(64);
+        BOOST_REQUIRE(provider_identity_key.SignSchnorr(GetPaymasterResultSignatureHash(result),
+            result.identity_signature, nullptr, uint256{}));
+        BOOST_REQUIRE(negative.GetDatabase().MakeBatch()->Write(
+            std::make_pair(DBKeys::PAYMASTER_RESULT, quoted.commit_key), result));
+        BOOST_REQUIRE_MESSAGE(PaymasterStore{negative}.AbandonUnsignedClientSession(request_id, 107, error), error);
+        BOOST_CHECK(!IsPaymasterInputReserved(negative, user_input));
+        UserAuthorizationRecord unknown;
+        ++unknown.version;
+        BOOST_REQUIRE(negative.GetDatabase().MakeBatch()->Write(
+            std::make_pair(DBKeys::PAYMASTER_USER_AUTH, quoted.commit_key), unknown));
+        const auto closed_before = GetMockableDatabase(negative).m_records;
+        BOOST_CHECK(!PaymasterStore{negative}.AbandonUnsignedClientSession(request_id, 108, error));
+        BOOST_CHECK(GetMockableDatabase(negative).m_records == closed_before);
+    }
+
     // An unsigned accepted quote may be abandoned for another provider. The
     // attempt/session/fee update is atomic and deliberately retains the user
     // input reservation for the next candidate.
@@ -2628,6 +2725,17 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
                                                        fallback_session));
     BOOST_CHECK(fallback_attempt.state == AttemptState::REJECTED);
     BOOST_CHECK(fallback_session.state == SessionState::INPUTS_RESERVED);
+    {
+        wallet::CWallet repeated{m_node.chain.get(), "fallback-repeat-independent-authority",
+                                 DuplicateMockDatabase(fallback_wallet.GetDatabase())};
+        UserAuthorizationRecord unknown;
+        ++unknown.version;
+        BOOST_REQUIRE(repeated.GetDatabase().MakeBatch()->Write(
+            std::make_pair(DBKeys::PAYMASTER_USER_AUTH, quoted.commit_key), unknown));
+        const auto before = GetMockableDatabase(repeated).m_records;
+        BOOST_CHECK(!PaymasterStore{repeated}.AbandonClientAttemptForFallback(request_id, quoted.attempt_id, 108, error));
+        BOOST_CHECK(GetMockableDatabase(repeated).m_records == before);
+    }
     BOOST_CHECK(IsPaymasterInputReserved(fallback_wallet, user_input));
     ClientFeeLedger fallback_fee_ledger;
     {
@@ -8030,6 +8138,38 @@ BOOST_AUTO_TEST_CASE(client_view_recovery_read_failures_block_rpc_actions)
             CheckUnreadableClientArtifact(*this, session, expected_error);
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(client_view_unsigned_authority_failure_returns_no_actions)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    session.state = SessionState::AUTHORIZED;
+    session.pending_phase = PendingPhase::NONE;
+    auto& attempt = artifacts.attempt;
+    attempt.state = AttemptState::QUOTED;
+    attempt.user_signed_psbt.clear();
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
+            artifacts.user_input, session.request_id, session.session_id,
+            ReservationRole::USER_DD, false, 101}));
+    }
+    PaymasterStore store{m_wallet};
+    paymaster_app::ClientSessionView view;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(paymaster_app::LoadClientSessionView(store, session, 110, view, error), error);
+    BOOST_CHECK(std::find(view.allowed_actions.begin(), view.allowed_actions.end(), "abandon_unsigned") != view.allowed_actions.end());
+    UserAuthorizationRecord unknown;
+    ++unknown.version;
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(
+        std::make_pair(DBKeys::PAYMASTER_USER_AUTH, attempt.commit_key), unknown));
+    CheckUnreadableClientArtifact(*this, session, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
 }
 
 BOOST_AUTO_TEST_CASE(client_view_result_read_failures_and_bindings_block_rpc_actions)

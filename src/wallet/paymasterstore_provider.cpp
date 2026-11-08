@@ -1672,6 +1672,7 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
                     continue;
                 }
 
+                if (!RequireNoClientAuthorizationEvidence(batch, session, error)) return false;
                 bool client_fee_changed{false};
                 if (have_client_ledger) {
                     const auto reservation = std::find_if(

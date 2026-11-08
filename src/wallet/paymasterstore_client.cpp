@@ -302,6 +302,20 @@ bool PaymasterStore::ListClientSessions(
     return true;
 }
 
+bool PaymasterStore::ValidateUnsignedClientSession(
+    const PaymentSession& session, std::string& error) const
+{
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession current;
+    if (batch.ReadPaymasterSessionWithStatus(session.request_id, current) != DatabaseReadStatus::FOUND ||
+        CanonicalBytes(current) != CanonicalBytes(session)) {
+        error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+        return false;
+    }
+    return RequireNoClientAuthorizationEvidence(batch, current, error);
+}
+
 bool PaymasterStore::ClientSessionHasLiveReservations(
     const PaymentSession& session,
     bool& has_live_reservations,
@@ -332,27 +346,8 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
         // stale pending-phase bit can survive a restart or a cancelled RPC flow
         // without indicating any active authorization risk; it must not keep an
         // otherwise released reservation pinned forever.
-        SelfRecoveryRecord self_recovery;
-        uint256 alternative_recovery_id;
-        if (batch.ReadPaymasterRecoveryWithStatus(session.request_id, self_recovery) != DatabaseReadStatus::NOT_FOUND ||
-            batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(session.request_id, alternative_recovery_id) != DatabaseReadStatus::NOT_FOUND) return false;
-        for (const uint256& attempt_id : session.attempt_ids) {
-            ProviderAttempt attempt;
-            if (batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt) != DatabaseReadStatus::FOUND ||
-                attempt.attempt_id != attempt_id || attempt.session_id != session.session_id ||
-                (attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED &&
-                 attempt.state != AttemptState::REJECTED && attempt.state != AttemptState::QUOTE_EXPIRED) ||
-                !attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
-                !attempt.final_txid.IsNull() || attempt.provider_signed_at != 0 ||
-                !attempt.provider_signed_result.empty()) return false;
-            if (!attempt.commit_key.IsNull()) {
-                UserAuthorizationRecord authorization;
-                ProviderCommitRecord commit;
-                if (batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization) != DatabaseReadStatus::NOT_FOUND ||
-                    batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit) != DatabaseReadStatus::NOT_FOUND) return false;
-            }
-        }
-        return true;
+        std::string release_error;
+        return RequireNoClientAuthorizationEvidence(batch, session, release_error);
     };
     bool release_checked{false};
     bool released_unsigned{false};
@@ -1622,7 +1617,7 @@ bool PaymasterStore::AbandonClientAttemptForFallback(const std::string& request_
     }
     if (attempt.state == AttemptState::REJECTED &&
         session.state == SessionState::INPUTS_RESERVED) {
-        return true;
+        return RequireNoClientAuthorizationEvidence(batch, session, error);
     }
     if ((attempt.state != AttemptState::CANDIDATE &&
          attempt.state != AttemptState::QUOTED &&
@@ -1636,6 +1631,7 @@ bool PaymasterStore::AbandonClientAttemptForFallback(const std::string& request_
         error = "PAYMASTER_FALLBACK_AUTHORIZATION_MAY_EXIST";
         return false;
     }
+    if (!RequireNoClientAuthorizationEvidence(batch, session, error)) return false;
     for (const COutPoint& outpoint : session.user_inputs) {
         InputReservation reservation;
         if (!batch.ReadPaymasterReservation(outpoint, reservation) ||
@@ -1745,6 +1741,7 @@ bool PaymasterStore::AbandonUnsignedClientSession(const std::string& request_id,
         return false;
     }
     if (session.state == SessionState::FAILED) {
+        if (!RequireNoClientAuthorizationEvidence(batch, session, error)) return false;
         for (const COutPoint& outpoint : session.user_inputs) {
             InputReservation reservation;
             const DatabaseReadStatus status =
@@ -1767,12 +1764,14 @@ bool PaymasterStore::AbandonUnsignedClientSession(const std::string& request_id,
     if ((session.state != SessionState::CREATED &&
          session.state != SessionState::INPUTS_RESERVED &&
          session.state != SessionState::AWAITING_WALLET_UNLOCK &&
-         session.state != SessionState::AWAITING_USER_SIGNATURE) ||
+         session.state != SessionState::AWAITING_USER_SIGNATURE &&
+         session.state != SessionState::AUTHORIZED) ||
         session.pending_phase != PendingPhase::NONE ||
         !session.final_txid.IsNull() || !session.recovery_txid.IsNull()) {
         error = "PAYMASTER_UNSIGNED_ABANDON_AUTHORIZATION_MAY_EXIST";
         return false;
     }
+    if (!RequireNoClientAuthorizationEvidence(batch, session, error)) return false;
 
     std::vector<ProviderAttempt> attempts;
     attempts.reserve(session.attempt_ids.size());

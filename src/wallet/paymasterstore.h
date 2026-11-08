@@ -176,6 +176,11 @@ public:
         bool& has_live_reservations,
         std::string& error) const;
 
+    /** Read-only safety check for unsigned actions; execution repeats it under
+     * the same wallet lock as the release. Unknown authority fails closed. */
+    bool ValidateUnsignedClientSession(
+        const DigiDollar::Paymaster::PaymentSession& session, std::string& error) const;
+
     /** Validate durable artifacts and read the current wallet chain snapshot.
      * Does not reconcile, reserve, sign, broadcast, or contact providers. */
     bool GetSessionObservation(

@@ -102,6 +102,10 @@ replay repair. Existing checkpoint preparation/commit ordering remains intact.
 Unsigned cancellation and recovery expiry/pruning require readable, absent
 independent authority records before releasing financial bindings; unknown
 versions and read failures cannot substitute for absence.
+The same session-wide check covers client quote expiry, unsigned abandonment
+and fallback, including idempotent success paths and every historical attempt.
+It also checks self/alternative recovery authority. Accepted unsigned terms and
+authentic negative terminal results alone do not imply a payment signature.
 
 The persisted quote is authenticated again before acceptance or signing through
 `DecodePaymasterAuthorizationArtifacts`, shared with provider execution and

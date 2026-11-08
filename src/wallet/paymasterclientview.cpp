@@ -395,14 +395,19 @@ bool LoadClientSessionView(PaymasterStore& store,
         view.authorization_may_exist = true;
     }
 
+    const bool early_session =
+        session.state == SessionState::CREATED ||
+        session.state == SessionState::INPUTS_RESERVED ||
+        session.state == SessionState::AWAITING_WALLET_UNLOCK ||
+        session.state == SessionState::AWAITING_USER_SIGNATURE ||
+        session.state == SessionState::AUTHORIZED;
+    // An empty draft can resume preparation without granting payment authority.
+    // Bound unsigned work must pass the same firewall as signing and release.
+    if (view.artifact == "none" && early_session && !view.recovery &&
+        (!session.attempt_ids.empty() || !session.user_inputs.empty()) &&
+        !store.ValidateUnsignedClientSession(session, error)) return false;
     view.allowed_actions.push_back("refresh");
     if (!IsTerminal(session.state) && !view.recovery) {
-        const bool early_session =
-            session.state == SessionState::CREATED ||
-            session.state == SessionState::INPUTS_RESERVED ||
-            session.state == SessionState::AWAITING_WALLET_UNLOCK ||
-            session.state == SessionState::AWAITING_USER_SIGNATURE ||
-            session.state == SessionState::AUTHORIZED;
         if (view.artifact == "none" && early_session) {
             // Resume is deliberately a capability token for the idempotent
             // send RPC, not a new resolvepaymastersession mutation.
@@ -422,7 +427,8 @@ bool LoadClientSessionView(PaymasterStore& store,
             (session.state == SessionState::CREATED ||
              session.state == SessionState::INPUTS_RESERVED ||
              session.state == SessionState::AWAITING_WALLET_UNLOCK ||
-             session.state == SessionState::AWAITING_USER_SIGNATURE) &&
+             session.state == SessionState::AWAITING_USER_SIGNATURE ||
+             session.state == SessionState::AUTHORIZED) &&
             std::all_of(attempts.begin(), attempts.end(), IsUnsignedAttempt)) {
             view.allowed_actions.push_back("abandon_unsigned");
         }
