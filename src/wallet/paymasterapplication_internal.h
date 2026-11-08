@@ -30,12 +30,23 @@ SessionSnapshot CaptureSessionSnapshot(const DigiDollar::Paymaster::PaymentSessi
 std::optional<DigiDollar::Paymaster::ClientPaymentOrder> LoadClientPaymentOrder(
     const PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
     std::string& error);
-/** Recover only unreserved CREATED sweep input constraints. No value means no
- * validated replay metadata; a value reports ordinary wallet selection success. */
-std::optional<bool> SelectCreatedClientSweepInputs(
-    CWallet& wallet, DigiDollarWallet& dd_wallet, const PaymasterStore& store,
+struct ClientPaymentReplay {
+    DigiDollar::Paymaster::PaymentSession session;
+    std::vector<COutPoint> original_inputs;
+};
+/** Read and bind an existing order before any preparation mutation. Explicit
+ * original inputs also support exact legacy replay without optional metadata. */
+std::optional<ClientPaymentReplay> LoadClientPaymentReplay(
+    CWallet& wallet, PaymasterStore& store, const ClientPaymentOptions& input,
+    DigiDollar::Paymaster::DDCents amount,
+    const std::vector<COutPoint>* requested_inputs);
+/** Revalidate an unreserved CREATED order through ordinary wallet selection,
+ * retaining its original ordered inputs for normal payments and sweeps. */
+bool SelectCreatedClientPaymentInputs(
+    CWallet& wallet, DigiDollarWallet& dd_wallet,
     const DigiDollar::Paymaster::PaymentSession& session,
-    DigiDollar::Paymaster::DDCents amount, std::vector<COutPoint>& inputs,
+    const std::vector<COutPoint>& original_inputs,
+    DigiDollar::Paymaster::DDCents target, std::vector<COutPoint>& inputs,
     CAmount& total, std::vector<CAmount>* amounts, std::string& error);
 PaymentResult CaptureSessionPayment(const DigiDollar::Paymaster::PaymentSession& session, const PaymasterStore* store = nullptr);
 /** Validate persisted client display terms without renewing expired authority. */

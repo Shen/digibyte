@@ -114,22 +114,64 @@ std::optional<ClientPaymentOrder> BuildClientPaymentOrder(
     return order;
 }
 
-std::optional<bool> SelectCreatedClientSweepInputs(
-    CWallet& wallet, DigiDollarWallet& dd_wallet, const PaymasterStore& store,
-    const PaymentSession& session, DDCents amount, std::vector<COutPoint>& inputs,
+std::optional<ClientPaymentReplay> LoadClientPaymentReplay(
+    CWallet& wallet, PaymasterStore& store, const ClientPaymentOptions& input,
+    DDCents amount, const std::vector<COutPoint>* requested_inputs)
+{
+    LOCK(wallet.cs_wallet);
+    ClientPaymentReplay replay;
+    if (!FindClientSession(input.request_id, store, replay.session)) return std::nullopt;
+    const PaymentSession& session = replay.session;
+    if (session.provider_side) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_SESSION_REQUIRED");
+    }
+    if (requested_inputs) {
+        replay.original_inputs = *requested_inputs;
+    } else if (!session.user_inputs.empty()) {
+        replay.original_inputs = session.user_inputs;
+    } else {
+        std::string error;
+        const auto order = LoadClientPaymentOrder(store, session, error);
+        if (!order) {
+            throw ApplicationError(ErrorKind::WALLET,
+                IsTerminal(session.state) || error == "PAYMASTER_CLIENT_ORDER_UNAVAILABLE"
+                    ? "PAYMASTER_SESSION_DETAILS_UNAVAILABLE" : error);
+        }
+        replay.original_inputs = order->user_inputs;
+    }
+    if (replay.original_inputs.empty() ||
+        CanonicalClientRequestHash(input, amount, replay.original_inputs) != session.canonical_request_hash ||
+        input.mode != session.fee_mode_requested ||
+        (session.requested_amount.value == 0
+             ? (input.subtract_fee || input.send_all)
+             : (session.requested_amount != amount ||
+                session.subtract_paymaster_fee_from_amount != input.subtract_fee ||
+                session.send_all_spendable_dd != input.send_all))) {
+        // Keep the established error contract for accepted work. This read
+        // selects a diagnostic only; it never reconstructs signing authority.
+        bool accepted{false};
+        if (!IsTerminal(session.state)) {
+            for (const auto& attempt_id : session.attempt_ids) {
+                ProviderAttempt attempt;
+                if (!store.GetAttempt(attempt_id, attempt)) {
+                    throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ");
+                }
+                accepted |= !attempt.accepted_client_manifest_id.IsNull() ||
+                            attempt.client_manifest_accepted_at != 0;
+            }
+        }
+        throw ApplicationError(ErrorKind::WALLET, accepted
+            ? "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT" : "PAYMASTER_REQUEST_ID_CONFLICT");
+    }
+    return replay;
+}
+
+bool SelectCreatedClientPaymentInputs(
+    CWallet& wallet, DigiDollarWallet& dd_wallet, const PaymentSession& session,
+    const std::vector<COutPoint>& original_inputs, DDCents target, std::vector<COutPoint>& inputs,
     CAmount& total, std::vector<CAmount>* amounts, std::string& error)
 {
-    if (session.provider_side || session.state != SessionState::CREATED ||
-        !session.user_inputs.empty() || !session.attempt_ids.empty() ||
-        !session.send_all_spendable_dd) return std::nullopt;
     LOCK(wallet.cs_wallet);
-    auto order = LoadClientPaymentOrder(store, session, error);
-    if (!order) {
-        // Legacy callers can still supply the exact original order. Optional
-        // metadata failure must not replace the existing request hash guard.
-        error.clear();
-        return std::nullopt;
-    }
     const auto fail = [&](const std::string& reason) {
         inputs.clear();
         total = 0;
@@ -137,15 +179,19 @@ std::optional<bool> SelectCreatedClientSweepInputs(
         error = reason;
         return false;
     };
-    if (order->requested_amount != amount) return fail("PAYMASTER_REQUEST_ID_CONFLICT");
-    for (const auto& input : order->user_inputs) {
+    if (session.provider_side || session.state != SessionState::CREATED ||
+        !session.user_inputs.empty() || !session.attempt_ids.empty() || original_inputs.empty()) {
+        return fail("PAYMASTER_CLIENT_ORDER_INPUT_STATE");
+    }
+    for (const auto& input : original_inputs) {
         if (wallet.IsLockedCoin(input)) return fail("PAYMASTER_INPUT_LOCKED");
     }
     // A saved order constrains selection, never reservation authority. Ordinary
     // DD selection rechecks ownership, confirmation, spentness and reservations.
-    if (!dd_wallet.SelectDDCoins(amount.value, order->user_inputs, inputs, total,
+    if (!dd_wallet.SelectDDCoins(target.value, original_inputs, inputs, total,
                                  amounts, &error)) return false;
-    if (total != amount.value) return fail("PAYMASTER_SWEEP_BALANCE_CHANGED");
+    if (session.send_all_spendable_dd && total != session.requested_amount.value)
+        return fail("PAYMASTER_SWEEP_BALANCE_CHANGED");
     return true;
 }
 
@@ -593,9 +639,6 @@ void ValidateClientQuotePreparation(ClientQuoteOperation& operation)
     auto& context = operation.context;
     CWallet* const wallet = &operation.wallet;
     ValidateClientPaymentOptions(input);
-    std::string readiness_error;
-    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
-        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     if (input.payment < 100 || input.payment > MAX_DD_OUTPUT_CENTS ||
         input.requested_amount < 100 || input.requested_amount > MAX_DD_OUTPUT_CENTS) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, "Paymaster amount or fee cap is out of range");
@@ -604,6 +647,10 @@ void ValidateClientQuotePreparation(ClientQuoteOperation& operation)
         (input.subtract_fee && input.requested_amount < input.payment)) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_CLIENT_PAYMENT_ORDER");
     }
+    LoadClientPaymentReplay(*wallet, operation.store, input, DDCents{input.requested_amount}, &input.inputs);
+    std::string readiness_error;
+    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
+        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     if (!CheckPaymasterPrivacyReadiness(input.privacy, context, readiness_error))
         throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     const CDigiDollarAddress address{input.address};
@@ -633,8 +680,9 @@ std::optional<PaymentResult> TryResumeClientQuoteAuthorization(ClientQuoteOperat
     auto& recipient_script = operation.recipient_script;
     auto& durable_session = operation.durable_session;
     auto& have_durable_session = operation.have_durable_session;
-    have_durable_session =
-        FindClientSession(request_id, store, durable_session);
+    const auto replay = LoadClientPaymentReplay(*wallet, store, input, DDCents{requested_amount}, &requested_inputs);
+    have_durable_session = replay.has_value();
+    if (replay) durable_session = replay->session;
     if (have_durable_session && !IsTerminal(durable_session.state)) {
         ProviderAttempt durable_attempt;
         PaymentIntent durable_intent;
@@ -642,9 +690,7 @@ std::optional<PaymentResult> TryResumeClientQuoteAuthorization(ClientQuoteOperat
         if (FindDurableClientAuthorizationAttempt(
                 *wallet, store, durable_session, GetTime(), durable_attempt,
                 durable_intent, durable_quote, error)) {
-            if (CanonicalClientRequestHash(input, DDCents{requested_amount}, requested_inputs) !=
-                    durable_session.canonical_request_hash ||
-                durable_attempt.provider_id != provider_id ||
+            if (durable_attempt.provider_id != provider_id ||
                 durable_intent.request_id != request_id ||
                 durable_intent.session_id != durable_session.session_id ||
                 durable_intent.canonical_request_hash !=
@@ -1429,17 +1475,18 @@ void ValidateAutomaticPaymentPreparation(AutomaticPaymentOperation& operation)
     auto& context = operation.context;
     CWallet* const wallet = &operation.wallet;
     ValidateClientPaymentOptions(input);
-    std::string readiness_error;
-    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
-        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     if (input.amount < 100 || input.amount > MAX_DD_OUTPUT_CENTS)
         throw ApplicationError(ErrorKind::INVALID_INPUT, "Paymaster amount or fee cap is out of range");
     if (input.prepare_only && input.authorization_commitment)
         throw ApplicationError(ErrorKind::INVALID_INPUT, "prepare_only and authorization_commitment are mutually exclusive");
-    if (!CheckPaymasterPrivacyReadiness(input.privacy, context, readiness_error))
-        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     if (input.preferred_provider.has_value() != input.preferred_offer.has_value())
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_PREFERRED_OFFER_PAIR_REQUIRED");
+    LoadClientPaymentReplay(*wallet, operation.store, input, DDCents{input.amount}, operation.preset_inputs);
+    std::string readiness_error;
+    if (!CheckPaymasterClientReadiness(*wallet, context, readiness_error))
+        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
+    if (!CheckPaymasterPrivacyReadiness(input.privacy, context, readiness_error))
+        throw ApplicationError(ErrorKind::GENERAL, readiness_error);
     operation.now = GetTime();
 }
 
@@ -1462,9 +1509,9 @@ std::optional<PaymentResult> TryResumeAutomaticPaymentAuthorization(AutomaticPay
     const auto& amount = operation.input.amount;
     const auto& supplied_authorization_commitment = operation.input.authorization_commitment;
     auto& preset_inputs = operation.preset_inputs;
-    PaymentSession durable_session;
-    if (FindClientSession(request_id, store, durable_session) &&
-        !IsTerminal(durable_session.state)) {
+    const auto replay = LoadClientPaymentReplay(*wallet, store, input, DDCents{amount}, preset_inputs);
+    if (replay && !IsTerminal(replay->session.state)) {
+        PaymentSession durable_session = replay->session;
         ProviderAttempt durable_attempt;
         PaymentIntent durable_intent;
         PaymasterQuote durable_quote;
@@ -1475,10 +1522,7 @@ std::optional<PaymentResult> TryResumeAutomaticPaymentAuthorization(AutomaticPay
             const CDigiDollarAddress dd_address{address};
             const CScript recipient_script = GetScriptForDestination(
                 dd_address.GetDigiDollarDestination());
-            const auto& original_inputs = preset_inputs ? *preset_inputs : durable_session.user_inputs;
-            if (CanonicalClientRequestHash(input, DDCents{amount}, original_inputs) !=
-                    durable_session.canonical_request_hash ||
-                durable_intent.request_id != request_id ||
+            if (durable_intent.request_id != request_id ||
                 durable_intent.session_id != durable_session.session_id ||
                 durable_intent.canonical_request_hash !=
                     durable_session.canonical_request_hash ||
@@ -1720,18 +1764,7 @@ std::optional<PaymentResult> ResumeAutomaticPaymentSelection(AutomaticPaymentOpe
     const int64_t now = operation.now;
     auto& error = operation.error;
     const auto& request_id = operation.input.request_id;
-    const auto& address = operation.input.address;
-    const auto& fee_cap = operation.input.fee_cap;
-    const auto& requested_mode = operation.input.mode;
-    const auto& privacy = operation.input.privacy;
-    const auto& selection = operation.input.selection;
-    const auto& maximum_attempts = operation.input.maximum_attempts;
-    const auto& subtract_fee = operation.input.subtract_fee;
-    const auto& send_all = operation.input.send_all;
     const auto& amount = operation.input.amount;
-    auto& restricted_identity_key = operation.restricted_identity_key;
-    auto& restricted_descriptor = operation.restricted_descriptor;
-    auto& restricted_capability = operation.restricted_capability;
     auto& persisted_selection = operation.persisted_selection;
     auto& persisted_inputs = operation.persisted_inputs;
     auto& attempted_providers = operation.attempted_providers;
@@ -1739,44 +1772,22 @@ std::optional<PaymentResult> ResumeAutomaticPaymentSelection(AutomaticPaymentOpe
     auto& persisted_session = operation.persisted_session;
     auto& have_persisted_session = operation.have_persisted_session;
     auto& preset_inputs = operation.preset_inputs;
-    have_persisted_session =
-        FindClientSession(request_id, store, persisted_session);
+    const auto replay = LoadClientPaymentReplay(operation.wallet, store, operation.input,
+        DDCents{amount}, preset_inputs);
+    have_persisted_session = replay.has_value();
+    if (replay) persisted_session = replay->session;
     if (have_persisted_session) {
         ValidatePreferredClientOffer(input, store, persisted_session);
         if (IsTerminal(persisted_session.state)) {
-            // After pruning, the current format retains the order hash but
-            // not its original inputs. Require the caller's saved input set
-            // to verify a send replay; identity-only status reads still work.
-            const auto& original_inputs = preset_inputs ? *preset_inputs : persisted_session.user_inputs;
-            if (original_inputs.empty()) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DETAILS_UNAVAILABLE");
-            }
-            const CDigiDollarAddress dd_address{address};
-            const uint256 request_hash = CanonicalClientRequestHash(
-                request_id, GetScriptForDestination(dd_address.GetDigiDollarDestination()),
-                DDCents{amount}, DDCents{fee_cap}, original_inputs, requested_mode,
-                privacy, selection, maximum_attempts, subtract_fee, send_all,
-                restricted_identity_key, restricted_descriptor, restricted_capability);
-            if (request_hash != persisted_session.canonical_request_hash ||
-                requested_mode != persisted_session.fee_mode_requested) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REQUEST_ID_CONFLICT");
-            }
-            if (persisted_session.requested_amount.value == 0
-                    ? (subtract_fee || send_all)
-                    : (persisted_session.requested_amount != DDCents{amount} ||
-                       persisted_session.subtract_paymaster_fee_from_amount !=
-                           subtract_fee ||
-                       persisted_session.send_all_spendable_dd != send_all)) {
-                throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_REQUEST_ID_CONFLICT");
-            }
+            // The common replay guard already verified the original order,
+            // including caller-supplied inputs after detail pruning.
             if (!DrainClientSessionEquivocations(
                     *context.paymaster, store, persisted_session, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
             return CaptureSessionPayment(persisted_session, &store);
         }
-        persisted_inputs = persisted_session.user_inputs;
+        persisted_inputs = replay->original_inputs;
         if (!persisted_session.attempt_ids.empty()) {
             for (const uint256& attempt_id : persisted_session.attempt_ids) {
                 ProviderAttempt persisted_attempt;
@@ -1973,7 +1984,21 @@ std::vector<COutPoint> SelectAutomaticPaymentInputs(AutomaticPaymentOperation& o
     std::vector<CAmount> selected_amounts;
     CAmount selected_total{0};
     bool inputs_ok{false};
-    if (persisted_inputs && !persisted_inputs->empty()) {
+    // Re-read after selection: another identical caller may have created or
+    // reserved this order while the directory was inspected. Its original
+    // input binding always wins over another free coin selection.
+    const auto replay = LoadClientPaymentReplay(*wallet, operation.store, operation.input,
+        DDCents{amount}, preset_inputs);
+    if (replay) {
+        operation.persisted_session = replay->session;
+        operation.have_persisted_session = true;
+        persisted_inputs = replay->original_inputs;
+    }
+    if (replay && replay->session.state == SessionState::CREATED) {
+        inputs_ok = SelectCreatedClientPaymentInputs(*wallet, *dd_wallet, replay->session,
+            replay->original_inputs, selected->user_total, selected_inputs,
+            selected_total, &selected_amounts, error);
+    } else if (persisted_inputs && !persisted_inputs->empty()) {
         // This request already owns hard reservations for these exact inputs.
         // Reusing the persisted binding is the only safe automatic resume;
         // ordinary coin selection must continue to hide every reservation.
@@ -1984,16 +2009,7 @@ std::vector<COutPoint> SelectAutomaticPaymentInputs(AutomaticPaymentOperation& o
         selected_inputs = *persisted_inputs;
         inputs_ok = !selected_inputs.empty();
     } else if (send_all) {
-        // The session and original order commit atomically before reservations.
-        // A crash in that gap must not sweep newly received funds on resume.
-        const auto restored = operation.have_persisted_session && !preset_inputs
-            ? SelectCreatedClientSweepInputs(*wallet, *dd_wallet, operation.store,
-                operation.persisted_session, DDCents{amount}, selected_inputs,
-                selected_total, &selected_amounts, error)
-            : std::nullopt;
-        if (restored.has_value()) {
-            inputs_ok = *restored;
-        } else if (dd_wallet->GetSpendableDDBalance() != amount) {
+        if (dd_wallet->GetSpendableDDBalance() != amount) {
             error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
         } else if (preset_inputs) {
             inputs_ok = dd_wallet->SelectDDCoins(
