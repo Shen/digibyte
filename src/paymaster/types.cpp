@@ -110,7 +110,7 @@ std::optional<DDCents> ComputePaymasterPaymentFromGross(
 
 bool IsCanonicalRequestId(std::string_view request_id)
 {
-    if (request_id.size() != 36) return false;
+    if (request_id.size() != MAX_REQUEST_ID_LENGTH) return false;
     for (size_t i = 0; i < request_id.size(); ++i) {
         if (i == 8 || i == 13 || i == 18 || i == 23) {
             if (request_id[i] != '-') return false;

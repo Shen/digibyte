@@ -92,7 +92,7 @@ struct PaymentIntent {
 
     SERIALIZE_METHODS(PaymentIntent, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.client_nonce, obj.user_dd_inputs,
                   obj.recipient_script, obj.recipient_amount,
                   obj.user_dd_change_script, obj.offer_id,

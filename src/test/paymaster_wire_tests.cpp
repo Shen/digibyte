@@ -297,9 +297,99 @@ void CheckTwoSessionRoundRobin(const std::vector<DirectMessage>& selected,
     BOOST_CHECK_EQUAL(selected[1].peer_id + 100, selected[3].peer_id);
 }
 
+template <typename T>
+void CheckRequestIdDecodingBound(T sample = {})
+{
+    const std::string request_id{"550e8400-e29b-41d4-a716-446655440011"};
+    sample.request_id = request_id;
+    CDataStream encoded{SER_NETWORK, 0};
+    encoded << sample;
+    const auto bytes = MakeUCharSpan(encoded);
+    const auto id = std::search(bytes.begin(), bytes.end(), request_id.begin(), request_id.end());
+    BOOST_REQUIRE(id != bytes.end());
+    BOOST_REQUIRE(id != bytes.begin());
+    const size_t prefix_size = static_cast<size_t>(id - bytes.begin()) - 1;
+    BOOST_REQUIRE_EQUAL(bytes[prefix_size], MAX_REQUEST_ID_LENGTH);
+
+    // Preserve the existing wire/disk bytes for valid UUIDs. A malformed
+    // length must fail before growing the destination, even with no payload.
+    T decoded;
+    CDataStream valid{encoded};
+    valid >> decoded;
+    BOOST_CHECK(valid.empty());
+    BOOST_CHECK_EQUAL(decoded.request_id, request_id);
+    CDataStream roundtrip{SER_NETWORK, 0};
+    roundtrip << decoded;
+    BOOST_CHECK(MakeUCharSpan(roundtrip) == bytes);
+    for (const uint64_t length : {uint64_t{MAX_REQUEST_ID_LENGTH + 1}, MAX_SIZE}) {
+        CDataStream truncated{SER_NETWORK, 0};
+        truncated.write(MakeByteSpan(bytes.first(prefix_size)));
+        WriteCompactSize(truncated, length);
+        T rejected;
+        const size_t original_capacity = rejected.request_id.capacity();
+        BOOST_CHECK_THROW(truncated >> rejected, std::ios_base::failure);
+        BOOST_CHECK(rejected.request_id.empty());
+        BOOST_CHECK_EQUAL(rejected.request_id.capacity(), original_capacity);
+    }
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wire_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(request_id_lengths_are_bounded_before_allocation)
+{
+    for (const uint16_t version : {LEGACY_DIRECT_PROTOCOL_VERSION, DigiDollar::Paymaster::PROTOCOL_VERSION}) {
+        PaymasterCapacityRequest capacity;
+        capacity.version = version;
+        CheckRequestIdDecodingBound(capacity);
+        PaymasterCapacityProof proof;
+        proof.version = version;
+        proof.funding_model = FundingModel::USER_PAID;
+        CheckRequestIdDecodingBound(proof);
+        PaymasterQuoteResponse quote;
+        quote.version = version;
+        CheckRequestIdDecodingBound(quote);
+        PaymasterSubmit submit;
+        submit.version = version;
+        CheckRequestIdDecodingBound(submit);
+        PaymasterResultMessage result;
+        result.version = version;
+        CheckRequestIdDecodingBound(result);
+    }
+    CheckRequestIdDecodingBound<PaymentIntent>();
+    CheckRequestIdDecodingBound<AlternativeRecoveryManifest>();
+    CheckRequestIdDecodingBound<RecoveryAuthorizationManifest>();
+    CheckRequestIdDecodingBound<AlternativeRecoveryRequest>();
+    CheckRequestIdDecodingBound<AlternativeRecoveryResponse>();
+    CheckRequestIdDecodingBound<AlternativeRecoverySubmit>();
+    CheckRequestIdDecodingBound<AlternativeRecoveryResultMessage>();
+    CheckRequestIdDecodingBound<AlternativeRecoveryRecord>();
+    CheckRequestIdDecodingBound<ClientPaymentOrder>();
+    CheckRequestIdDecodingBound<PaymentSession>();
+    CheckRequestIdDecodingBound<SelfRecoveryRecord>();
+    CheckRequestIdDecodingBound<InputReservation>();
+    CheckRequestIdDecodingBound<IdempotencyTombstone>();
+    CheckRequestIdDecodingBound<ClientAuthorizationManifest>();
+    CheckRequestIdDecodingBound<ProviderAuthorizationManifest>();
+}
+
+BOOST_AUTO_TEST_CASE(capacity_request_encoding_retains_v5_v6_layout)
+{
+    for (const uint16_t version : {LEGACY_DIRECT_PROTOCOL_VERSION, DigiDollar::Paymaster::PROTOCOL_VERSION}) {
+        PaymasterCapacityRequest request;
+        request.version = version;
+        request.request_id = "550e8400-e29b-41d4-a716-446655440011";
+        CDataStream encoded{SER_NETWORK, 0}, original{SER_NETWORK, 0};
+        encoded << request;
+        original << request.version << request.genesis_hash << request.provider_id
+                 << request.request_id << request.session_id << request.client_nonce
+                 << uint8_t{static_cast<uint8_t>(request.funding_model)}
+                 << request.requires_carrier << request.requested_slots
+                 << request.created_at << request.expires_at;
+        BOOST_CHECK(MakeUCharSpan(encoded) == MakeUCharSpan(original));
+    }
+}
 
 BOOST_AUTO_TEST_CASE(capacity_is_exactly_one_bounded_slot)
 {

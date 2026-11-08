@@ -76,7 +76,7 @@ struct AlternativeRecoveryManifest {
 
     SERIALIZE_METHODS(AlternativeRecoveryManifest, obj)
     {
-        READWRITE(obj.version, obj.manifest_id, obj.request_id, obj.session_id,
+        READWRITE(obj.version, obj.manifest_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   obj.original_provider_id, obj.recovery_provider_id,
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
                   obj.offer_id, obj.policy_hash,
@@ -173,7 +173,7 @@ struct RecoveryAuthorizationManifest {
     SERIALIZE_METHODS(RecoveryAuthorizationManifest, obj)
     {
         READWRITE(obj.version, obj.authorization_commitment,
-                  obj.request_id, obj.session_id, obj.recovery_id,
+                  LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.recovery_id,
                   obj.original_provider_id, obj.recovery_provider_id,
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
                   obj.offer_id, obj.policy_hash, obj.original_commit_key,
@@ -231,7 +231,7 @@ struct AlternativeRecoveryRequest {
 
     SERIALIZE_METHODS(AlternativeRecoveryRequest, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.original_provider_id,
                   obj.recovery_provider_id,
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
@@ -268,7 +268,7 @@ struct AlternativeRecoveryResponse {
 
     SERIALIZE_METHODS(AlternativeRecoveryResponse, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.recovery_id,
                   obj.recovery_provider_id,
                   obj.recovery_request_hash, obj.recovery_commit_key,
@@ -294,7 +294,7 @@ struct AlternativeRecoverySubmit {
 
     SERIALIZE_METHODS(AlternativeRecoverySubmit, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.recovery_id,
                   obj.recovery_provider_id,
                   obj.recovery_request_hash, obj.recovery_commit_key,
@@ -316,7 +316,7 @@ struct AlternativeRecoveryResultMessage {
 
     SERIALIZE_METHODS(AlternativeRecoveryResultMessage, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id,
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   obj.recovery_id,
                   obj.recovery_request_hash, obj.result);
     }
@@ -394,7 +394,7 @@ struct AlternativeRecoveryRecord {
 
     SERIALIZE_METHODS(AlternativeRecoveryRecord, obj)
     {
-        READWRITE(obj.version, obj.provider_side, obj.request_id,
+        READWRITE(obj.version, obj.provider_side, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.recovery_id,
                   obj.recovery_request_hash,
                   obj.original_provider_id, obj.recovery_provider_id,

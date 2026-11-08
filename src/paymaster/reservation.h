@@ -92,7 +92,7 @@ struct ClientPaymentOrder {
 
     SERIALIZE_METHODS(ClientPaymentOrder, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.request_id, obj.session_id,
+        READWRITE(obj.version, obj.genesis_hash, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   obj.canonical_request_hash, obj.recipient_script,
                   obj.requested_amount, obj.maximum_service_fee, obj.user_inputs,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode),
@@ -129,7 +129,7 @@ struct PaymentSession {
 
     SERIALIZE_METHODS(PaymentSession, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id, obj.canonical_request_hash,
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.canonical_request_hash,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_requested),
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_used),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SessionState::CONFLICTED)>>(obj.state),
@@ -156,7 +156,7 @@ struct SelfRecoveryRecord {
 
     SERIALIZE_METHODS(SelfRecoveryRecord, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id, obj.user_inputs,
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.user_inputs,
                   obj.recovery_txid, obj.raw_transaction_hash,
                   obj.final_transaction, obj.created_at);
     }
@@ -175,7 +175,7 @@ struct InputReservation {
 
     SERIALIZE_METHODS(InputReservation, obj)
     {
-        READWRITE(obj.version, obj.outpoint, obj.request_id, obj.session_id,
+        READWRITE(obj.version, obj.outpoint, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   Using<EnumByteFormatter<static_cast<uint8_t>(ReservationRole::PROVIDER_DGB)>>(obj.role),
                   obj.authorization_may_exist, obj.created_at);
     }
@@ -198,7 +198,7 @@ struct IdempotencyTombstone {
 
     SERIALIZE_METHODS(IdempotencyTombstone, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id, obj.canonical_request_hash,
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.canonical_request_hash,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_requested),
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.fee_mode_used),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SessionState::CONFLICTED)>>(obj.final_state),
@@ -344,7 +344,7 @@ struct ClientAuthorizationManifest {
 
     SERIALIZE_METHODS(ClientAuthorizationManifest, obj)
     {
-        READWRITE(obj.version, obj.manifest_id, obj.request_id, obj.session_id,
+        READWRITE(obj.version, obj.manifest_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   obj.provider_id, obj.offer_id, obj.policy_hash,
                   obj.capacity_snapshot_id, obj.capacity_resource_commitment,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
@@ -399,7 +399,7 @@ struct ProviderAuthorizationManifest {
 
     SERIALIZE_METHODS(ProviderAuthorizationManifest, obj)
     {
-        READWRITE(obj.version, obj.manifest_id, obj.request_id, obj.session_id,
+        READWRITE(obj.version, obj.manifest_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id,
                   obj.provider_id, obj.intent_hash,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),

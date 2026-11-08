@@ -116,7 +116,7 @@ struct PaymasterCapacityRequest {
 
     SERIALIZE_METHODS(PaymasterCapacityRequest, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.client_nonce,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   obj.requires_carrier, obj.requested_slots,
@@ -141,7 +141,7 @@ struct PaymasterCapacityProof {
 
     SERIALIZE_METHODS(PaymasterCapacityProof, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.client_nonce,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   obj.requires_carrier, obj.snapshot_id,
@@ -197,7 +197,7 @@ struct PaymasterQuoteResponse {
 
     SERIALIZE_METHODS(PaymasterQuoteResponse, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id, obj.quote);
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.quote);
     }
 };
 
@@ -214,7 +214,7 @@ struct PaymasterSubmit {
 
     SERIALIZE_METHODS(PaymasterSubmit, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, obj.request_id,
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
                   obj.session_id, obj.quote_id, obj.commit_key,
                   obj.template_commitment, obj.user_psbt);
     }
@@ -228,7 +228,7 @@ struct PaymasterResultMessage {
 
     SERIALIZE_METHODS(PaymasterResultMessage, obj)
     {
-        READWRITE(obj.version, obj.request_id, obj.session_id, obj.result);
+        READWRITE(obj.version, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH), obj.session_id, obj.result);
     }
 };
 

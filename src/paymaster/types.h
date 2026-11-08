@@ -10,6 +10,7 @@
 #include <serialize.h>
 #include <uint256.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <ios>
 #include <limits>
@@ -38,6 +39,8 @@ static constexpr uint16_t PROTOCOL_VERSION{6};
  * Discovery announcements and direct-channel negotiation still require V6.
  */
 static constexpr uint16_t LEGACY_DIRECT_PROTOCOL_VERSION{5};
+/** Canonical UUID length; bound decoding before any string allocation. */
+static constexpr size_t MAX_REQUEST_ID_LENGTH{36};
 
 constexpr bool IsSupportedDirectProtocolVersion(uint16_t version)
 {
