@@ -623,6 +623,9 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
         operation.maximum_fee =
             current_policy
                 .maximum_maintenance_fee_per_transaction;
+        if (!CheckPaymasterNewSignatureInputs(*wallet, plan.source_carriers, transfer_error)) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + transfer_error);
+        }
         if (!ReserveProviderMaintenanceBudget(
                 current_ledger, current_policy, operation, now,
                 transfer_error)) {
@@ -683,134 +686,22 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
         pool = std::move(current_pool);
     }
 
-    LOCK(wallet->cs_wallet);
-    CMutableTransaction built;
-    // Revalidate the exact inputs and finish private signing before the
-    // irreversible wallet commit needs its independent checkpoint fence.
-    if (!dd_wallet->BuildDigiDollarTransfer(transfer_plan, built, transfer_error,
-            /*allow_paymaster_pool_inputs=*/true)) {
-        throw ApplicationError(
-            ErrorKind::WALLET,
-            "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " +
-                transfer_error);
-    }
-    const CTransactionRef transaction = MakeTransactionRef(std::move(built));
-    const auto fee = GetProviderFinanceTransactionFee(*wallet, transaction);
-    // Treat the reviewed estimate as a maximum.  Exact signing can
-    // reduce the serialized size and therefore the actual fee; an
-    // increase beyond the preview remains a hard failure.
-    if (!fee || fee->value <= 0 ||
-        fee->value > transfer_plan.estimated_fee ||
-        fee->value >
-            liquidity_policy.maximum_maintenance_fee_per_transaction.value) {
-        throw ApplicationError(
-            ErrorKind::WALLET,
-            "PAYMASTER_MAINTENANCE_FEE_CHANGED");
-    }
-    const CAmount actual_fee = fee->value;
-    PaymasterCheckpointOperation checkpoint{*wallet};
-    if (!checkpoint.Begin(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
-    if (!wallet->CommitTransaction(transaction,
-            {{"comment", "Paymaster carrier excess withdrawal"}}, {}, &transfer_error)) {
-        // The exact sources remain protected after an uncertain commit.
-        throw ApplicationError(ErrorKind::WALLET,
-            "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + transfer_error);
-    }
-    const uint256 txid = transaction->GetHash();
-    if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED");
-    }
-    if (!dd_wallet->RecordPaymasterSendHistory(txid, plan.excess_script_pub_key,
-            transfer_plan.total_amount, transfer_error, "Paymaster carrier excess withdrawal",
-            /*multiple_recipients=*/recipients.size() > 1)) {
-        throw ApplicationError(ErrorKind::WALLET, transfer_error);
-    }
-    {
-        LOCK(wallet->cs_wallet);
-        WalletBatch batch{wallet->GetDatabase()};
-        if (!batch.ReadPaymasterMaintenanceLedger(ledger) ||
-            !batch.ReadPaymasterProviderPool(pool) ||
-            !SpendProviderMaintenanceBudget(
-                ledger, plan.operation_id, txid,
-                DGBSatoshis{actual_fee}, now, transfer_error)) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                transfer_error.empty()
-                    ? "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED"
-                    : transfer_error);
-        }
-        for (const COutPoint& source_outpoint :
-             plan.source_carriers) {
-            const auto source = std::find_if(
-                pool.begin(), pool.end(),
-                [&](const ProviderPoolEntry& entry) {
-                    return entry.outpoint == source_outpoint;
-                });
-            if (source == pool.end() ||
-                source->state != PoolEntryState::RESERVED ||
-                source->reservation_id != plan.operation_id) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    "PAYMASTER_CARRIER_WITHDRAWAL_POOL_CONFLICT");
-            }
-            source->state = PoolEntryState::COMMITTED;
-            source->updated_at = now;
-        }
-        for (const ProviderMaintenanceOutput& replacement :
-             plan.replacement_carriers) {
-            const auto output_index = FindMaintenanceOutputIndex(
-                *transaction, replacement);
-            if (!output_index) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    "PAYMASTER_MAINTENANCE_OUTPUT_MISSING");
-            }
-            ProviderPoolEntry entry;
-            entry.outpoint = COutPoint{txid, *output_index};
-            entry.purpose = replacement.purpose;
-            entry.asset = PoolAsset::DD_CARRIER;
-            entry.state = PoolEntryState::PENDING_SUCCESSOR;
-            entry.script_pub_key = replacement.script_pub_key;
-            entry.carrier_value = replacement.carrier_value;
-            entry.reservation_id = plan.operation_id;
-            entry.origin_commit_key = plan.operation_id;
-            entry.updated_at = now;
-            if (std::none_of(
-                    pool.begin(), pool.end(),
-                    [&](const ProviderPoolEntry& existing) {
-                        return existing.outpoint == entry.outpoint;
-                    })) {
-                pool.push_back(std::move(entry));
-            }
-        }
-        if (!batch.TxnBegin()) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_DATABASE_BEGIN");
-        }
-        if (!batch.WritePaymasterMaintenanceLedger(ledger) ||
-            !batch.WritePaymasterProviderPool(pool)) {
-            batch.TxnAbort();
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_DATABASE_WRITE");
-        }
-        if (!batch.TxnCommit()) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_DATABASE_COMMIT");
-        }
+    std::vector<ProviderMaintenanceTransaction> transactions;
+    const DDMaintenanceTransfer transfer{transfer_plan, plan.excess_script_pub_key,
+        "Paymaster carrier excess withdrawal", recipients.size() > 1};
+    if (!ExecuteProviderMaintenanceTransactions(*wallet,
+            CarrierWithdrawalMaintenanceAuthority{operation, plan, liquidity_policy},
+            {transfer}, transactions, transfer_error)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + transfer_error);
     }
     CarrierWithdrawalResult result;
     result.executed = true;
     result.plan_id = plan.plan_id;
     result.mode = mode;
-    result.txid = txid;
+    result.txid = transactions.front().transaction->GetHash();
     result.withdrawable_excess_cents = plan.excess_amount;
-    result.retained_carrier_cents = DDCents{static_cast<int64_t>(
-            plan.replacement_carriers.size()) * 100};
-    result.estimated_network_fee_satoshis = actual_fee;
-    if (!checkpoint.Complete(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
+    result.retained_carrier_cents = DDCents{static_cast<int64_t>(plan.replacement_carriers.size()) * 100};
+    result.estimated_network_fee_satoshis = transactions.front().fee.value;
     return result;
 }
 
@@ -1530,40 +1421,28 @@ PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wall
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOL_PREPARATION_PENDING");
     }
     if (wallet->IsLocked()) throw ApplicationError(ErrorKind::UNLOCK, "PAYMASTER_WALLET_LOCKED", ErrorDisposition::USER_DECISION);
-    // Validate the DGB transaction before committing a DD retirement.
-    // A fee-cap failure must not release only one half of the pool.
-    CTransactionRef dgb_tx;
-    CAmount dgb_fee{0};
-    if (!retire_dgb.empty()) {
-        auto destination = wallet->GetNewDestination(OutputType::BECH32M, "Retired Paymaster DGB");
-        if (!destination) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
-        CCoinControl coin_control;
-        coin_control.m_allow_other_inputs = false;
-        coin_control.m_allow_paymaster_pool_inputs = true;
-        coin_control.m_min_depth = 1;
-        for (const ProviderPoolEntry* entry : retire_dgb)
-            coin_control.Select(entry->outpoint);
-        std::vector<CRecipient> recipients{{*destination, *retired_dgb_value, /*subtract_fee=*/true}};
-        auto created = CreateTransaction(*wallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
-        if (!created)
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DGB_REBALANCE_FAILED: " + util::ErrorString(created).original);
-        if (bounded && (created->fee <= 0 || created->fee > maximum_fee))
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RETIREMENT_FEE_LIMIT");
-        dgb_tx = created->tx;
-        dgb_fee = created->fee;
+    {
+        std::vector<COutPoint> sources;
+        for (const auto* entry : retire_dgb) sources.push_back(entry->outpoint);
+        for (const auto* entry : retire_dd) sources.push_back(entry->outpoint);
+        std::string error;
+        if (!CheckPaymasterNewSignatureInputs(*wallet, sources, error)) throw ApplicationError(ErrorKind::WALLET, error);
     }
-    LOCK(wallet->cs_wallet);
-    PaymasterCheckpointOperation checkpoint{*wallet};
-    bool executed{false};
-    std::optional<uint256> dd_txid;
-    CTransactionRef dd_tx;
-    CAmount dd_fee{0};
+    PoolRetirementMaintenanceAuthority authority;
+    authority.provider_id = identity.provider_id;
+    authority.reviewed_plan = plan_id;
+    authority.provider_policy_hash = GetProviderPolicyHash(policy);
+    authority.liquidity_revision = expected_revision;
+    authority.maximum_fee = DGBSatoshis{bounded ? maximum_fee : wallet->m_default_max_tx_fee};
+    for (const auto* entry : retire_dgb) authority.sources.push_back(*entry);
+    for (const auto* entry : retire_dd) authority.sources.push_back(*entry);
+    std::vector<ProviderMaintenanceTransfer> transfers;
     if (!retire_dd.empty()) {
         DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
         if (!dd_wallet) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DD_WALLET_UNAVAILABLE");
         std::vector<COutPoint> inputs;
         std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
-        for (const ProviderPoolEntry* entry : retire_dd) {
+        for (const auto* entry : retire_dd) {
             auto destination = wallet->GetNewDestination(OutputType::BECH32M, "Retired Paymaster carrier");
             if (!destination) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
             CDigiDollarAddress address{EncodeDigiDollarAddress(*destination)};
@@ -1571,101 +1450,43 @@ PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wall
             inputs.push_back(entry->outpoint);
             recipients.emplace_back(std::move(address), entry->carrier_value.value);
         }
-        std::string transfer_error;
-        DDTransferPlan transfer_plan;
-        CMutableTransaction transaction;
-        if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, transfer_plan, transfer_error,
-                                               &inputs, /*allow_paymaster_pool_inputs=*/true) ||
-            !dd_wallet->BuildDigiDollarTransfer(transfer_plan, transaction, transfer_error, /*allow_paymaster_pool_inputs=*/true)) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
-        }
-        dd_tx = MakeTransactionRef(std::move(transaction));
-        const auto fee = GetProviderFinanceTransactionFee(*wallet, dd_tx);
-        if (!fee || fee->value <= 0 || fee->value > transfer_plan.estimated_fee)
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RETIREMENT_FEE_ESTIMATE_FAILED");
-        if (fee->value > wallet->m_default_max_tx_fee)
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RETIREMENT_WALLET_FEE_LIMIT");
-        if (bounded && fee->value > maximum_fee) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RETIREMENT_FEE_LIMIT");
-        }
-        // The marker and signed bytes share the existing wallet write.
-        // Rejection must not abandon an already saved transaction.
-        if (!checkpoint.Begin(transfer_error)) throw ApplicationError(ErrorKind::WALLET, transfer_error);
-        if (!wallet->CommitTransaction(dd_tx,
-                {{"comment", "Paymaster carrier retirement"},
-                 {PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
-                {}, &transfer_error)) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + transfer_error);
-        }
-        dd_txid = dd_tx->GetHash();
-        dd_fee = fee->value;
-        if (!dd_wallet->RecordPaymasterSendHistory(dd_tx->GetHash(),
-                GetScriptForDestination(recipients.front().first.GetDigiDollarDestination()),
-                *retired_dd_value, transfer_error)) {
-            throw ApplicationError(ErrorKind::WALLET, transfer_error);
-        }
-        const int64_t now = GetTime();
-        for (const COutPoint& input : inputs) {
-            auto entry = std::find_if(entries.begin(), entries.end(),
-                                      [&](const ProviderPoolEntry& candidate) { return candidate.outpoint == input; });
-            if (entry != entries.end()) {
-                entry->state = PoolEntryState::SPENT;
-                entry->updated_at = now;
-            }
-        }
-        std::string persist_error;
-        if (!SetPaymasterProviderPoolEntries(*wallet, entries, persist_error)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               persist_error + "; retired carrier inputs are recoverable from wallet history");
-        }
-        executed = true;
+        DDTransferPlan plan;
+        std::string error;
+        if (!dd_wallet->PlanFundedDigiDollarTransfer(recipients, plan, error, &inputs, true))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_REBALANCE_FAILED: " + error);
+        transfers.push_back(DDMaintenanceTransfer{plan,
+            GetScriptForDestination(recipients.front().first.GetDigiDollarDestination()),
+            "Paymaster carrier retirement", recipients.size() > 1});
     }
-
     if (!retire_dgb.empty()) {
-        std::string commit_error;
-        if (!checkpoint.Active() && !checkpoint.Begin(commit_error)) throw ApplicationError(ErrorKind::WALLET, commit_error);
-        if (!wallet->CommitTransaction(dgb_tx,
-                {{PAYMASTER_RETIREMENT_PROVIDER_KEY, identity.provider_id.GetHex()}},
-                {}, &commit_error)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_DGB_REBALANCE_REJECTED: " + commit_error);
+        auto destination = wallet->GetNewDestination(OutputType::BECH32M, "Retired Paymaster DGB");
+        if (!destination) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOL_DESTINATION_UNAVAILABLE");
+        DGBMaintenanceTransfer transfer;
+        transfer.coin_control.m_allow_other_inputs = false;
+        transfer.coin_control.m_allow_paymaster_pool_inputs = true;
+        transfer.coin_control.m_min_depth = 1;
+        for (const auto* entry : retire_dgb) transfer.coin_control.Select(entry->outpoint);
+        transfer.recipients.push_back({*destination, *retired_dgb_value, true});
+        transfers.push_back(std::move(transfer));
+    }
+    std::vector<ProviderMaintenanceTransaction> transactions;
+    std::string execution_error;
+    if (!ExecuteProviderMaintenanceTransactions(*wallet, authority, transfers, transactions, execution_error))
+        throw ApplicationError(ErrorKind::WALLET, execution_error);
+    result.executed = true;
+    for (size_t index{0}; index < transactions.size(); ++index) {
+        if (std::holds_alternative<DDMaintenanceTransfer>(transfers[index])) {
+            result.dd_txid = transactions[index].transaction->GetHash();
+            result.dd_network_fee_satoshis = transactions[index].fee.value;
+        } else {
+            result.dgb_txid = transactions[index].transaction->GetHash();
+            result.network_fee_satoshis = transactions[index].fee.value;
         }
-        const int64_t now = GetTime();
-        for (const ProviderPoolEntry* selected : retire_dgb) {
-            auto entry = std::find_if(entries.begin(), entries.end(),
-                                      [&](const ProviderPoolEntry& candidate) { return candidate.outpoint == selected->outpoint; });
-            if (entry != entries.end()) {
-                entry->state = PoolEntryState::SPENT;
-                entry->updated_at = now;
-            }
-        }
-        std::string persist_error;
-        if (!SetPaymasterProviderPoolEntries(*wallet, entries, persist_error)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               persist_error + "; retired DGB inputs are recoverable from wallet history");
-        }
-        executed = true;
     }
-
-    size_t changed_events{0};
-    std::string finance_error;
-    if (!ReconcileProviderFinances(*wallet, changed_events, finance_error)) {
-        throw ApplicationError(ErrorKind::WALLET, finance_error);
-    }
-
-    if (checkpoint.Active() && !checkpoint.Complete(finance_error)) throw ApplicationError(ErrorKind::WALLET, finance_error);
-
-    auto pool = std::move(entries);
-    result.executed = executed;
-    if (dd_txid.has_value()) {
-        result.dd_txid = dd_txid;
-        result.dd_network_fee_satoshis = dd_fee;
-    }
-    if (dgb_tx) {
-        result.dgb_txid = dgb_tx->GetHash();
-        result.network_fee_satoshis = dgb_fee;
-    }
-    result.pool = std::move(pool);
+    std::vector<ProviderPoolEntry> current_pool;
+    if (!GetPaymasterProviderPoolEntries(*wallet, current_pool))
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOLS_NOT_PREPARED");
+    result.pool = std::move(current_pool);
     return result;
 }
 

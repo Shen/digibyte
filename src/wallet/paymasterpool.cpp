@@ -66,34 +66,6 @@
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
 
-uint256 PoolPreparationAuthorization(CWallet& wallet)
-{
-    ProviderIdentityRecord identity;
-    ProviderPolicy policy;
-    if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderPolicy(wallet, policy)) return {};
-    HashWriter hash = TaggedHash("DigiByte Paymaster Pool Authorization v1");
-    hash << Params().GenesisBlock().GetHash() << identity.provider_id << GetProviderPolicyHash(policy);
-    return hash.GetSHA256();
-}
-
-ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet)
-{
-    LOCK(wallet.cs_wallet);
-    WalletBatch batch{wallet.GetDatabase()};
-    ProviderSetupAuthorization authorization;
-    const auto status = batch.ReadPaymasterSetupAuthorizationWithStatus(authorization);
-    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_INVALID_SETUP_AUTHORIZATION");
-    }
-    ProviderIdentityRecord identity;
-    if (status == DatabaseReadStatus::FOUND && authorization.generation != 0 &&
-        (!GetPaymasterIdentity(wallet, identity) || identity.provider_id != authorization.provider_id)) {
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SETUP_IDENTITY_MISMATCH");
-    }
-    authorization.genesis_hash = Params().GenesisBlock().GetHash();
-    return authorization;
-}
-
 ProviderMaintenanceLedger ReadPreparationLedger(CWallet& wallet)
 {
     LOCK(wallet.cs_wallet);
@@ -141,7 +113,7 @@ std::string PreparationFeeLimit(const char* phase, CAmount fee, CAmount limit)
                      phase, FormatMoney(fee), FormatMoney(limit));
 }
 
-std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record, PaymasterCheckpointOperation& checkpoint)
+std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRecord& record)
 {
     LOCK(wallet.cs_wallet);
     ProviderSettings settings;
@@ -171,23 +143,16 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
     std::string restore_error;
     if (!CheckPaymasterProviderRestoreGuard(wallet, restore_error)) return restore_error;
     if (wallet.IsLocked()) return "PAYMASTER_WALLET_LOCKED";
+    ProviderMaintenanceTransfer transfer;
     if (record.kind == ProviderMaintenanceKind::PREPARE_DGB) {
-        std::vector<CRecipient> recipients;
+        DGBMaintenanceTransfer dgb;
+        dgb.coin_control.m_min_depth = 1;
         for (const auto& output : record.outputs) {
             CTxDestination destination;
             if (!ExtractDestination(output.script_pub_key, destination)) return "PAYMASTER_INVALID_MAINTENANCE_OUTPUT";
-            recipients.push_back({destination, output.dgb_value.value, false});
+            dgb.recipients.push_back({destination, output.dgb_value.value, false});
         }
-        // A stempool-only parent is invisible to the normal fee precheck.
-        // Constrain setup funding without changing ordinary wallet selection.
-        CCoinControl control;
-        control.m_min_depth = 1;
-        auto created = CreateTransaction(wallet, recipients, -1, control, true);
-        if (!created) return "PAYMASTER_POOL_WAITING_DGB: " + util::ErrorString(created).original;
-        if (created->fee > record.maximum_fee.value) return PreparationFeeLimit("signed", created->fee, record.maximum_fee.value);
-        std::string error;
-        if (!checkpoint.Begin(error)) return error;
-        if (!wallet.CommitTransaction(created->tx, {}, {}, &error)) return "PAYMASTER_POOL_TRANSACTION_REJECTED: " + error;
+        transfer = std::move(dgb);
     } else {
         auto* dd_wallet = wallet.GetDDWallet();
         if (!dd_wallet) return "PAYMASTER_DD_WALLET_UNAVAILABLE";
@@ -203,31 +168,16 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         if (plan.estimated_fee <= 0) return "PAYMASTER_POOL_FEE_INVALID";
         if (plan.estimated_fee > record.maximum_fee.value) return PreparationFeeLimit("estimated", plan.estimated_fee, record.maximum_fee.value);
         CMutableTransaction inputs;
-        for (const auto& input : plan.dd_utxos)
-            inputs.vin.emplace_back(input);
-        for (const auto& input : plan.fee_utxos)
-            inputs.vin.emplace_back(input);
+        for (const auto& input : plan.dd_utxos) inputs.vin.emplace_back(input);
+        for (const auto& input : plan.fee_utxos) inputs.vin.emplace_back(input);
         if (!PreparationInputsConfirmed(wallet, CTransaction{inputs})) return "PAYMASTER_POOL_WAITING_CONFIRMATION";
-        CMutableTransaction transaction;
-        if (!dd_wallet->BuildDigiDollarTransfer(plan, transaction, error)) {
-            return "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + error;
-        }
-        const CTransactionRef tx = MakeTransactionRef(std::move(transaction));
-        const auto fee = GetProviderFinanceTransactionFee(wallet, tx);
-        if (!fee || fee->value <= 0) return "PAYMASTER_POOL_FEE_INVALID";
-        if (fee->value > record.maximum_fee.value) return PreparationFeeLimit("signed", fee->value, record.maximum_fee.value);
-        if (fee->value > plan.estimated_fee) {
-            return strprintf("PAYMASTER_POOL_FEE_ESTIMATE_EXCEEDED: signed fee %s DGB exceeds planned fee %s DGB; approved setup limit %s DGB",
-                             FormatMoney(fee->value), FormatMoney(plan.estimated_fee), FormatMoney(record.maximum_fee.value));
-        }
-        // Check the exact signed fee before commit. Use the wallet primitive
-        // directly: a rejected pool transaction must remain recoverable, not
-        // enter the ordinary DD send helper's automatic-abandon path.
-        if (!checkpoint.Begin(error)) return error;
-        if (!wallet.CommitTransaction(tx, {{"comment", "Paymaster carrier pool"}}, {}, &error)) {
-            return "PAYMASTER_CARRIER_TRANSACTION_FAILED: " + error;
-        }
+        transfer = DDMaintenanceTransfer{plan, record.outputs.front().script_pub_key,
+            "Paymaster carrier pool", recipients.size() > 1};
     }
+    std::string error;
+    std::vector<ProviderMaintenanceTransaction> transactions;
+    if (!ExecuteProviderMaintenanceTransactions(wallet, FiniteSetupMaintenanceAuthority{record},
+            {transfer}, transactions, error)) return error;
     return {};
 }
 
@@ -247,12 +197,10 @@ void ContinuePoolPreparation(CWallet& wallet)
         const bool conflict = std::any_of(snapshot.records.begin(), snapshot.records.end(), [&](const auto& other) {
             return other.IsPreparation() && other.plan_id == record.plan_id && other.state == ProviderMaintenanceState::FAILED;
         });
-        PaymasterCheckpointOperation checkpoint{wallet};
-        error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record, checkpoint);
+        error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record);
         size_t reconciled{0};
         std::string reconcile_error;
         if (!ReconcileProviderMaintenance(wallet, reconciled, reconcile_error)) throw ApplicationError(ErrorKind::WALLET, reconcile_error);
-        if (checkpoint.Active() && error.empty() && !checkpoint.Complete(reconcile_error)) throw ApplicationError(ErrorKind::WALLET, reconcile_error);
         auto ledger = ReadPreparationLedger(wallet);
         for (auto& current : ledger.records) {
             if (current.operation_id == record.operation_id && current.preparation_error != error.substr(0, 256)) {

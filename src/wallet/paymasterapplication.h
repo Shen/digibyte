@@ -8,10 +8,14 @@
 #include <paymaster/manager.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterfinance.h>
+#include <wallet/coincontrol.h>
+#include <wallet/digidollarwallet.h>
+#include <wallet/spend.h>
 
 #include <optional>
 #include <string>
 #include <vector>
+#include <variant>
 
 namespace wallet {
 class CWallet;
@@ -21,6 +25,62 @@ bool EnsureProviderNotEquivocationBlocked(PaymasterStore& store,
     const DigiDollar::Paymaster::PaymasterId& provider_id, std::string& error);
 struct WalletContext;
 namespace paymaster_app {
+// These authorities intentionally remain distinct. A finite setup plan never
+// grants recurring refill, and a reviewed withdrawal/retirement never consumes
+// or creates customer-payment authority.
+struct FiniteSetupMaintenanceAuthority {
+    DigiDollar::Paymaster::ProviderMaintenanceRecord operation;
+};
+struct RecurringRefillMaintenanceAuthority {
+    DigiDollar::Paymaster::ProviderMaintenanceRecord operation;
+    DigiDollar::Paymaster::ProviderLiquidityPolicy policy;
+};
+struct CarrierWithdrawalMaintenanceAuthority {
+    DigiDollar::Paymaster::ProviderMaintenanceRecord operation;
+    DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan plan;
+    DigiDollar::Paymaster::ProviderLiquidityPolicy policy;
+};
+struct PoolRetirementMaintenanceAuthority {
+    uint256 provider_id;
+    uint256 reviewed_plan;
+    uint256 provider_policy_hash;
+    std::optional<int64_t> liquidity_revision;
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry> sources;
+    DigiDollar::Paymaster::DGBSatoshis maximum_fee;
+};
+using ProviderMaintenanceAuthority = std::variant<FiniteSetupMaintenanceAuthority,
+    RecurringRefillMaintenanceAuthority, CarrierWithdrawalMaintenanceAuthority,
+    PoolRetirementMaintenanceAuthority>;
+
+struct DGBMaintenanceTransfer {
+    std::vector<CRecipient> recipients;
+    CCoinControl coin_control;
+};
+struct DDMaintenanceTransfer {
+    DDTransferPlan plan;
+    CScript history_recipient;
+    std::string comment;
+    bool multiple_recipients{false};
+};
+using ProviderMaintenanceTransfer = std::variant<DGBMaintenanceTransfer, DDMaintenanceTransfer>;
+struct ProviderMaintenanceTransaction {
+    CTransactionRef transaction;
+    DigiDollar::Paymaster::DGBSatoshis fee;
+};
+
+/** Caller owns the provider work guard. Reload authority and check ordinary
+ * input locks under the execution wallet lock, build/sign all legs and bound
+ * their exact fees before opening the checkpoint. Commit, DD tracking/history
+ * and journal/budget/pool accounting share this operation; a possible commit
+ * failure retains its fence and exact wallet bytes. No callback grants spending
+ * authority. Exact previously signed replay remains with reconciliation. */
+bool ExecuteProviderMaintenanceTransactions(
+    CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+    const std::vector<ProviderMaintenanceTransfer>& transfers,
+    std::vector<ProviderMaintenanceTransaction>& transactions, std::string& error);
+uint256 PoolPreparationAuthorization(CWallet& wallet);
+DigiDollar::Paymaster::ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet);
+
 class ProviderWorkGuard final
 {
 public:

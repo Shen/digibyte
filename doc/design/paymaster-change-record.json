@@ -253,6 +253,7 @@
     "source": "Operator follow-up to the 988bb8e621 review, 2026-11-05: implement plan steps 1-6 and phase-based decomposition.",
     "scope": "Targeted recovery classification, node-reader lifecycle, coin-lock ownership, backup test vectors, CSV encoding and setup execution state.",
     "architecture_checks": "Operator instruction on 2026-11-06: remove the Paymaster-specific GitHub protection, separate owner-approval and dedicated agent-identity requirements, including the dedicated hosting workflow and the checker veto on control-file changes. Preserve dependency, cycle, change-scope and shared-Core record checks. Changes to check files follow the normal contribution process.",
-    "cause_a_g": "Operator request on 2026-11-08: fachlich vollstaendige Korrektur der Ursache A-G. Cause E requires forwarding the existing destination-redaction policy into the shared direct TCP logger and testing its failure branches; the three netbase paths are the necessary bounded integration for that explicit correction."
+    "cause_a_g": "Operator request on 2026-11-08: fachlich vollstaendige Korrektur der Ursache A-G. Cause E requires forwarding the existing destination-redaction policy into the shared direct TCP logger and testing its failure branches; the three netbase paths are the necessary bounded integration for that explicit correction.",
+    "review_ap1_6": "Operator follow-up on 2026-11-08: implement review work packages AP1-6, including maintenance-operation consolidation, bounded capacity-cache cleanup, supported Direct endpoints, recovery response leases, shared lifecycle observations and historical finance/control-proof validation. Reuse the agreed integration paths and existing verification policy."
   }
 }

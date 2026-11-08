@@ -41,11 +41,13 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterfinance.h>
 #include <wallet/paymasterstore_internal.h>
 #include <wallet/paymastermaintenancecache.h>
 #include <wallet/spend.h>
 
 #include <util/overflow.h>
+#include <util/moneystr.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
@@ -61,6 +63,7 @@
 #include <optional>
 #include <set>
 #include <string_view>
+#include <type_traits>
 
 namespace wallet::paymaster_app {
 using paymaster_store::internal::PersistedReadError;
@@ -1557,6 +1560,34 @@ static bool ReduceReplenishmentPlan(
     return true;
 }
 
+uint256 PoolPreparationAuthorization(CWallet& wallet)
+{
+    DigiDollar::Paymaster::ProviderIdentityRecord identity;
+    DigiDollar::Paymaster::ProviderPolicy policy;
+    if (!GetPaymasterIdentity(wallet, identity) || !GetPaymasterProviderPolicy(wallet, policy)) return {};
+    HashWriter hash = TaggedHash("DigiByte Paymaster Pool Authorization v1");
+    hash << Params().GenesisBlock().GetHash() << identity.provider_id << DigiDollar::Paymaster::GetProviderPolicyHash(policy);
+    return hash.GetSHA256();
+}
+
+DigiDollar::Paymaster::ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    DigiDollar::Paymaster::ProviderSetupAuthorization authorization;
+    const auto status = batch.ReadPaymasterSetupAuthorizationWithStatus(authorization);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        throw DigiDollar::Paymaster::ApplicationError(DigiDollar::Paymaster::ErrorKind::WALLET, "PAYMASTER_INVALID_SETUP_AUTHORIZATION");
+    }
+    DigiDollar::Paymaster::ProviderIdentityRecord identity;
+    if (status == DatabaseReadStatus::FOUND && authorization.generation != 0 &&
+        (!GetPaymasterIdentity(wallet, identity) || identity.provider_id != authorization.provider_id)) {
+        throw DigiDollar::Paymaster::ApplicationError(DigiDollar::Paymaster::ErrorKind::WALLET, "PAYMASTER_SETUP_IDENTITY_MISMATCH");
+    }
+    authorization.genesis_hash = Params().GenesisBlock().GetHash();
+    return authorization;
+}
+
 bool CheckPaymasterPoolFundingBroadcast(CWallet& wallet, std::string& error)
 {
     LOCK(wallet.cs_wallet);
@@ -1564,6 +1595,395 @@ bool CheckPaymasterPoolFundingBroadcast(CWallet& wallet, std::string& error)
     if (wallet.GetBroadcastTransactions()) return true;
     error = "PAYMASTER_WALLET_BROADCAST_DISABLED";
     return false;
+}
+
+namespace {
+using namespace DigiDollar::Paymaster;
+
+std::string MaintenanceBuildFailure(const ProviderMaintenanceAuthority& authority,
+                                    bool digidollar, const std::string& detail)
+{
+    if (std::holds_alternative<FiniteSetupMaintenanceAuthority>(authority))
+        return std::string{digidollar ? "PAYMASTER_CARRIER_TRANSACTION_FAILED: " : "PAYMASTER_POOL_WAITING_DGB: "} + detail;
+    if (std::holds_alternative<RecurringRefillMaintenanceAuthority>(authority))
+        return digidollar ? "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + detail : "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED";
+    if (std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority))
+        return std::string{digidollar ? "PAYMASTER_CARRIER_REBALANCE_FAILED: " : "PAYMASTER_DGB_REBALANCE_FAILED: "} + detail;
+    return detail;
+}
+
+bool SameMaintenanceOperation(const ProviderMaintenanceRecord& saved,
+                              const ProviderMaintenanceRecord& expected)
+{
+    return saved.operation_id == expected.operation_id && saved.plan_id == expected.plan_id &&
+           saved.kind == expected.kind && saved.outputs == expected.outputs &&
+           saved.source_inputs == expected.source_inputs && saved.maximum_fee == expected.maximum_fee &&
+           saved.preparation_authorization == expected.preparation_authorization &&
+           saved.preparation_request == expected.preparation_request &&
+           saved.withdrawal_excess_script_pub_key == expected.withdrawal_excess_script_pub_key &&
+           saved.withdrawal_excess_amount == expected.withdrawal_excess_amount;
+}
+
+bool ValidateMaintenanceExecutionAuthority(CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+                                          ProviderMaintenanceRecord& operation,
+                                          DGBSatoshis& maximum_fee, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (!CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
+    WalletBatch batch{wallet.GetDatabase()};
+    return std::visit([&](const auto& approval) {
+        using Approval = std::decay_t<decltype(approval)>;
+        if constexpr (std::is_same_v<Approval, PoolRetirementMaintenanceAuthority>) {
+            ProviderIdentityRecord identity;
+            ProviderPolicy policy;
+            std::vector<ProviderPoolEntry> pool;
+            if (approval.reviewed_plan.IsNull() || approval.sources.empty() ||
+                !batch.ReadPaymasterIdentity(identity) || identity.provider_id != approval.provider_id ||
+                !batch.ReadPaymasterProviderPool(pool)) {
+                error = "PAYMASTER_POOL_PLAN_CHANGED";
+                return false;
+            }
+            if (!batch.ReadPaymasterPolicy(policy) || approval.provider_policy_hash.IsNull() ||
+                GetProviderPolicyHash(policy) != approval.provider_policy_hash) {
+                error = "PAYMASTER_PROVIDER_POLICY_CHANGED";
+                return false;
+            }
+            if (approval.liquidity_revision) {
+                ProviderLiquidityPolicy liquidity;
+                if (!batch.ReadPaymasterLiquidityPolicy(liquidity) || liquidity.updated_at != *approval.liquidity_revision) {
+                    error = "PAYMASTER_LIQUIDITY_POLICY_CHANGED";
+                    return false;
+                }
+            }
+            for (const auto& source : approval.sources) {
+                const auto current = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == source.outpoint; });
+                if (current == pool.end() || current->state != PoolEntryState::AVAILABLE ||
+                    !current->reservation_id.IsNull() || current->asset != source.asset ||
+                    current->purpose != source.purpose || current->script_pub_key != source.script_pub_key ||
+                    current->dgb_value != source.dgb_value || current->carrier_value != source.carrier_value ||
+                    current->confirmation_height <= 0 || wallet.IsSpent(source.outpoint)) {
+                    error = "PAYMASTER_POOL_PLAN_CHANGED";
+                    return false;
+                }
+            }
+            maximum_fee = approval.maximum_fee;
+            return true;
+        } else {
+            ProviderMaintenanceLedger ledger;
+            if (batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger) != DatabaseReadStatus::FOUND) {
+                error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
+                return false;
+            }
+            const auto current = std::find_if(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
+                return record.operation_id == approval.operation.operation_id;
+            });
+            if (current == ledger.records.end() || current->state != ProviderMaintenanceState::PLANNED ||
+                !current->transaction_id.IsNull() || !SameMaintenanceOperation(*current, approval.operation)) {
+                error = "PAYMASTER_MAINTENANCE_OPERATION_CONFLICT";
+                return false;
+            }
+            operation = *current;
+            maximum_fee = current->maximum_fee;
+            if constexpr (std::is_same_v<Approval, FiniteSetupMaintenanceAuthority>) {
+                ProviderSettings settings;
+                const auto setup = ReadPoolSetupAuthorization(wallet);
+                // Accepted V1 commands survive their atomic journal migration.
+                // Generation zero is the migration fence; fresh setup approval
+                // always advances it. The exact PLANNED row must still exist.
+                // A V2 journal without an intact fence failed the read above.
+                const bool legacy_accepted = setup.generation == 0 && setup.plan_id.IsNull();
+                if (!operation.IsPreparation() || (!legacy_accepted && setup.plan_id != operation.plan_id) || setup.revoked ||
+                    operation.preparation_authorization != PoolPreparationAuthorization(wallet)) {
+                    error = "PAYMASTER_POOL_POLICY_CHANGED";
+                    return false;
+                }
+                if (!batch.ReadPaymasterSettings(settings) || !settings.enabled) {
+                    error = "PAYMASTER_PROVIDER_DISABLED";
+                    return false;
+                }
+                return CheckPaymasterPoolFundingBroadcast(wallet, error);
+            } else {
+                ProviderLiquidityPolicy policy;
+                if (!batch.ReadPaymasterLiquidityPolicy(policy) ||
+                    (HashWriter{} << policy).GetHash() != (HashWriter{} << approval.policy).GetHash()) {
+                    error = "PAYMASTER_LIQUIDITY_POLICY_CHANGED";
+                    return false;
+                }
+                if constexpr (std::is_same_v<Approval, RecurringRefillMaintenanceAuthority>) {
+                    ProviderSettings settings;
+                    if ((operation.kind != ProviderMaintenanceKind::REPLENISH_DGB &&
+                         operation.kind != ProviderMaintenanceKind::REPLENISH_CARRIER) ||
+                        !policy.automatic_replenishment || !policy.paid_maintenance_approved) {
+                        error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
+                        return false;
+                    }
+                    if (!batch.ReadPaymasterSettings(settings) || !settings.enabled) {
+                        error = "PAYMASTER_PROVIDER_DISABLED";
+                        return false;
+                    }
+                    return CheckPaymasterPoolFundingBroadcast(wallet, error);
+                } else {
+                    ProviderCarrierWithdrawalPlan plan;
+                    if (operation.kind != ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ||
+                        !batch.ReadPaymasterCarrierWithdrawalPlan(plan) ||
+                        plan.plan_id != approval.plan.plan_id || plan.operation_id != operation.operation_id ||
+                        plan.liquidity_policy_updated_at != policy.updated_at || plan.expires_at < GetTime()) {
+                        error = "PAYMASTER_CARRIER_WITHDRAWAL_PLAN_CHANGED";
+                        return false;
+                    }
+                    return true;
+                }
+            }
+        }
+    }, authority);
+}
+
+bool ValidateMaintenanceTransferBinding(const CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+                                       const ProviderMaintenanceRecord& operation,
+                                       const ProviderMaintenanceTransfer& transfer, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const auto fail = [&] { error = "PAYMASTER_MAINTENANCE_TRANSACTION_BINDING_MISMATCH"; return false; };
+    const bool dgb_leg = std::holds_alternative<DGBMaintenanceTransfer>(transfer);
+    std::vector<std::pair<CScript, CAmount>> recipients;
+    std::vector<COutPoint> selected;
+    if (dgb_leg) {
+        const auto& dgb = std::get<DGBMaintenanceTransfer>(transfer);
+        const auto inputs = dgb.coin_control.ListSelected();
+        selected.assign(inputs.begin(), inputs.end());
+        for (const auto& recipient : dgb.recipients) recipients.emplace_back(GetScriptForDestination(recipient.dest), recipient.nAmount);
+    } else {
+        const auto& dd = std::get<DDMaintenanceTransfer>(transfer);
+        selected = dd.plan.dd_utxos;
+        for (const auto& [address, amount] : dd.plan.recipients) {
+            const CDigiDollarAddress destination{address};
+            if (!destination.IsValidForCurrentNetwork()) return fail();
+            recipients.emplace_back(GetScriptForDestination(destination.GetDigiDollarDestination()), amount);
+        }
+    }
+    if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) {
+        std::set<COutPoint> expected;
+        CAmount total{0}, returned{0};
+        for (const auto& source : retirement->sources) {
+            if ((source.asset == PoolAsset::DGB) != dgb_leg) continue;
+            const auto amount = dgb_leg ? source.dgb_value.value : source.carrier_value.value;
+            if (amount <= 0 || amount > std::numeric_limits<CAmount>::max() - total) return fail();
+            total += amount;
+            if (!expected.insert(source.outpoint).second) return fail();
+        }
+        if (selected.size() != expected.size() || std::set<COutPoint>{selected.begin(), selected.end()} != expected) return fail();
+        for (const auto& [script, amount] : recipients) {
+            if (!(wallet.IsMine(script) & ISMINE_SPENDABLE) || amount <= 0 || amount > std::numeric_limits<CAmount>::max() - returned) return fail();
+            returned += amount;
+        }
+        if (returned != total) return fail();
+        if (dgb_leg) {
+            const auto& dgb = std::get<DGBMaintenanceTransfer>(transfer);
+            if (dgb.coin_control.m_allow_other_inputs || !dgb.coin_control.m_allow_paymaster_pool_inputs ||
+                std::any_of(dgb.recipients.begin(), dgb.recipients.end(), [](const auto& recipient) { return !recipient.fSubtractFeeFromAmount; })) return fail();
+        }
+        return true;
+    }
+    std::vector<std::pair<CScript, CAmount>> expected;
+    for (const auto& output : operation.outputs) {
+        if ((output.asset == PoolAsset::DGB) != dgb_leg || !(wallet.IsMine(output.script_pub_key) & ISMINE_SPENDABLE)) return fail();
+        expected.emplace_back(output.script_pub_key, dgb_leg ? output.dgb_value.value : output.carrier_value.value);
+    }
+    if (!operation.withdrawal_excess_script_pub_key.empty()) {
+        if (dgb_leg || !(wallet.IsMine(operation.withdrawal_excess_script_pub_key) & ISMINE_SPENDABLE)) return fail();
+        expected.emplace_back(operation.withdrawal_excess_script_pub_key, operation.withdrawal_excess_amount.value);
+    }
+    if (recipients != expected) return fail();
+    if (dgb_leg) {
+        const auto& dgb = std::get<DGBMaintenanceTransfer>(transfer);
+        if (dgb.coin_control.m_allow_paymaster_pool_inputs ||
+            std::any_of(dgb.recipients.begin(), dgb.recipients.end(), [](const auto& recipient) { return recipient.fSubtractFeeFromAmount; })) return fail();
+    } else if (!operation.source_inputs.empty() && selected != operation.source_inputs) return fail();
+    return true;
+}
+
+bool AccountMaintenanceTransaction(CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+                                  const ProviderMaintenanceRecord& operation,
+                                  const ProviderMaintenanceTransaction& result, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    std::vector<ProviderPoolEntry> pool;
+    if (!ReadOptionalProviderPool(batch, pool, error)) return false;
+    const int64_t now = GetTime();
+    if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) {
+        for (const auto& input : result.transaction->vin) {
+            const auto source = std::find_if(retirement->sources.begin(), retirement->sources.end(), [&](const auto& entry) { return entry.outpoint == input.prevout; });
+            if (source == retirement->sources.end()) continue; // Ordinary DGB fee funding for a DD leg.
+            const auto current = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == input.prevout; });
+            if (current == pool.end() || current->state != PoolEntryState::AVAILABLE || !current->reservation_id.IsNull()) {
+                error = "PAYMASTER_REBALANCE_ACTIVE_RESERVATIONS";
+                return false;
+            }
+            current->state = PoolEntryState::SPENT;
+            current->updated_at = std::max(current->updated_at, now);
+        }
+        if (!batch.WritePaymasterProviderPool(pool)) { error = "PAYMASTER_DATABASE_WRITE"; return false; }
+        return true;
+    }
+    ProviderMaintenanceLedger ledger;
+    if (!batch.ReadPaymasterMaintenanceLedger(ledger)) { error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER"; return false; }
+    const auto saved = std::find_if(ledger.records.begin(), ledger.records.end(), [&](const auto& record) { return record.operation_id == operation.operation_id; });
+    if (saved == ledger.records.end() || saved->state != ProviderMaintenanceState::PLANNED ||
+        !saved->transaction_id.IsNull() || !SameMaintenanceOperation(*saved, operation)) {
+        error = "PAYMASTER_MAINTENANCE_OPERATION_CONFLICT";
+        return false;
+    }
+    if (operation.IsPreparation()) {
+        saved->transaction_id = result.transaction->GetHash();
+        saved->actual_fee = result.fee;
+        saved->state = ProviderMaintenanceState::BROADCAST;
+        ledger.accounting_time_high_water = std::max({ledger.accounting_time_high_water, saved->updated_at, now});
+        saved->updated_at = ledger.accounting_time_high_water;
+    } else if (!SpendProviderMaintenanceBudget(ledger, operation.operation_id, result.transaction->GetHash(), result.fee, now, error)) return false;
+    for (const auto& input : operation.source_inputs) {
+        const auto source = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == input; });
+        if (source == pool.end() || source->state != PoolEntryState::RESERVED || source->reservation_id != operation.operation_id) {
+            error = "PAYMASTER_MAINTENANCE_SOURCE_CONFLICT";
+            return false;
+        }
+        source->state = PoolEntryState::COMMITTED;
+        source->updated_at = std::max(source->updated_at, now);
+    }
+    for (const auto& output : operation.outputs) {
+        const auto index = FindMaintenanceOutputIndex(*result.transaction, output);
+        if (!index) { error = "PAYMASTER_MAINTENANCE_OUTPUT_MISSING"; return false; }
+        const COutPoint outpoint{result.transaction->GetHash(), *index};
+        if (std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == outpoint; })) {
+            error = "PAYMASTER_MAINTENANCE_POOL_CONFLICT";
+            return false;
+        }
+        if (!MakeProviderPoolRoomForMaintenance(pool, 1, error)) return false;
+        ProviderPoolEntry entry;
+        entry.outpoint = outpoint;
+        entry.purpose = output.purpose;
+        entry.asset = output.asset;
+        entry.state = PoolEntryState::PENDING_SUCCESSOR;
+        entry.script_pub_key = output.script_pub_key;
+        entry.dgb_value = output.dgb_value;
+        entry.carrier_value = output.carrier_value;
+        entry.reservation_id = operation.operation_id;
+        entry.origin_commit_key = operation.operation_id;
+        entry.updated_at = now;
+        pool.push_back(std::move(entry));
+    }
+    if (!batch.TxnBegin()) { error = "PAYMASTER_DATABASE_BEGIN"; return false; }
+    if (!batch.WritePaymasterMaintenanceLedger(ledger) || !batch.WritePaymasterProviderPool(pool)) {
+        batch.TxnAbort();
+        error = "PAYMASTER_DATABASE_WRITE";
+        return false;
+    }
+    if (!batch.TxnCommit()) { error = "PAYMASTER_DATABASE_COMMIT"; return false; }
+    return true;
+}
+} // namespace
+
+bool ExecuteProviderMaintenanceTransactions(
+    CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+    const std::vector<ProviderMaintenanceTransfer>& transfers,
+    std::vector<ProviderMaintenanceTransaction>& transactions, std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    transactions.clear();
+    error.clear();
+    if (transfers.empty() || transfers.size() > 2 ||
+        (transfers.size() != 1 && !std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority))) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION";
+        return false;
+    }
+    if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) {
+        for (const bool dgb : {false, true}) {
+            const bool have_sources = std::any_of(retirement->sources.begin(), retirement->sources.end(), [&](const auto& source) {
+                return (source.asset == PoolAsset::DGB) == dgb;
+            });
+            const auto legs = std::count_if(transfers.begin(), transfers.end(), [&](const auto& transfer) {
+                return std::holds_alternative<DGBMaintenanceTransfer>(transfer) == dgb;
+            });
+            if (legs != (have_sources ? 1 : 0)) { error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION"; return false; }
+        }
+    }
+    LOCK(wallet.cs_wallet);
+    if (wallet.IsLocked()) { error = "PAYMASTER_WALLET_LOCKED"; return false; }
+    if (!std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority)) {
+        size_t recovered{0};
+        if (!ReconcileProviderMaintenance(wallet, recovered, error)) return false;
+    }
+    ProviderMaintenanceRecord operation;
+    DGBSatoshis maximum_fee;
+    if (!ValidateMaintenanceExecutionAuthority(wallet, authority, operation, maximum_fee, error)) return false;
+    if (maximum_fee.value <= 0 || !MoneyRange(maximum_fee.value)) { error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED"; return false; }
+    const bool pool_inputs = std::holds_alternative<CarrierWithdrawalMaintenanceAuthority>(authority) ||
+                             std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority);
+    std::vector<ProviderMaintenanceTransaction> built;
+    for (const auto& transfer : transfers) {
+        // Keep authority, input-lock checks and each signer in one wallet-lock
+        // interval. A saved plan never overrides an operator's newer lock.
+        if (!ValidateMaintenanceExecutionAuthority(wallet, authority, operation, maximum_fee, error)) return false;
+        if (!ValidateMaintenanceTransferBinding(wallet, authority, operation, transfer, error)) return false;
+        ProviderMaintenanceTransaction result;
+        if (const auto* dgb = std::get_if<DGBMaintenanceTransfer>(&transfer)) {
+            const auto selected = dgb->coin_control.ListSelected();
+            if (!CheckPaymasterNewSignatureInputs(wallet, {selected.begin(), selected.end()}, error)) return false;
+            if (dgb->coin_control.m_allow_paymaster_pool_inputs && !pool_inputs) { error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION"; return false; }
+            auto created = CreateTransaction(wallet, dgb->recipients, -1, dgb->coin_control, true);
+            if (!created) { error = MaintenanceBuildFailure(authority, false, util::ErrorString(created).original); return false; }
+            result.transaction = created->tx;
+            result.fee = DGBSatoshis{created->fee};
+        } else {
+            const auto& dd = std::get<DDMaintenanceTransfer>(transfer);
+            auto* dd_wallet = wallet.GetDDWallet();
+            if (!dd_wallet) { error = "PAYMASTER_DD_WALLET_UNAVAILABLE"; return false; }
+            auto inputs = dd.plan.dd_utxos;
+            inputs.insert(inputs.end(), dd.plan.fee_utxos.begin(), dd.plan.fee_utxos.end());
+            if (!CheckPaymasterNewSignatureInputs(wallet, inputs, error)) return false;
+            CMutableTransaction transaction;
+            if (!dd_wallet->BuildDigiDollarTransfer(dd.plan, transaction, error, pool_inputs)) {
+                error = MaintenanceBuildFailure(authority, true, error);
+                return false;
+            }
+            result.transaction = MakeTransactionRef(std::move(transaction));
+            const auto fee = GetProviderFinanceTransactionFee(wallet, result.transaction);
+            if (!fee || fee->value <= 0 || fee->value > dd.plan.estimated_fee) { error = "PAYMASTER_MAINTENANCE_FEE_CHANGED"; return false; }
+            result.fee = *fee;
+        }
+        if (result.fee.value <= 0 || result.fee.value > maximum_fee.value || result.fee.value > wallet.m_default_max_tx_fee) {
+            if (std::holds_alternative<FiniteSetupMaintenanceAuthority>(authority))
+                error = strprintf("PAYMASTER_POOL_FEE_LIMIT: signed fee %s DGB exceeds approved setup limit %s DGB",
+                    FormatMoney(result.fee.value), FormatMoney(maximum_fee.value));
+            else if (std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority)) error = "PAYMASTER_RETIREMENT_FEE_LIMIT";
+            else error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
+            return false;
+        }
+        built.push_back(std::move(result));
+    }
+    PaymasterCheckpointOperation checkpoint{wallet};
+    if (!checkpoint.Begin(error)) return false;
+    for (size_t index{0}; index < built.size(); ++index) {
+        const auto& result = built[index];
+        mapValue_t metadata;
+        if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) metadata[PAYMASTER_RETIREMENT_PROVIDER_KEY] = retirement->provider_id.GetHex();
+        if (const auto* dd = std::get_if<DDMaintenanceTransfer>(&transfers[index])) metadata["comment"] = dd->comment;
+        if (!wallet.CommitTransaction(result.transaction, std::move(metadata), {}, &error)) return false;
+        if (const auto* dd = std::get_if<DDMaintenanceTransfer>(&transfers[index])) {
+            auto* dd_wallet = wallet.GetDDWallet();
+            if (!dd_wallet->ProcessIncomingDDTransaction(result.transaction)) { error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED"; return false; }
+            if (!dd_wallet->RecordPaymasterSendHistory(result.transaction->GetHash(), dd->history_recipient,
+                    dd->plan.total_amount, error, dd->comment, dd->multiple_recipients)) return false;
+        }
+        if (!AccountMaintenanceTransaction(wallet, authority, operation, result, error)) return false;
+    }
+    if (std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority)) {
+        size_t changed{0};
+        if (!ReconcileProviderFinances(wallet, changed, error)) return false;
+    }
+    if (!checkpoint.Complete(error)) return false;
+    transactions = std::move(built);
+    return true;
 }
 
 bool ProviderMaintenanceBroadcastPending(
@@ -1791,102 +2211,10 @@ bool RunAutomaticDGBReplenishment(
         return false;
     }
     if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
-    LOCK(wallet.cs_wallet);
-    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
-    // Run the normal signed construction again against current wallet inputs;
-    // all ordinary transaction, fee, signature and size checks remain in force.
-    created = CreateTransaction(wallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
-    if (!created) {
-        error = "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED";
-        return false;
-    }
-    if (created->fee > operation->maximum_fee.value) {
-        error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
-        return false;
-    }
-    PaymasterCheckpointOperation checkpoint{wallet};
-    if (!checkpoint.Begin(error)) return false;
-    std::string commit_error;
-    if (!wallet.CommitTransaction(created->tx, {}, {}, &commit_error)) {
-        error = "PAYMASTER_POOL_TRANSACTION_REJECTED: " + commit_error;
-        return false;
-    }
-
-    {
-        LOCK(wallet.cs_wallet);
-        WalletBatch batch{wallet.GetDatabase()};
-        const DatabaseReadStatus ledger_status{
-            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
-        if (ledger_status != DatabaseReadStatus::FOUND) {
-            error = PersistedReadError(
-                ledger_status, "ProviderMaintenanceLedger", ledger,
-                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
-                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
-            return false;
-        }
-        if (!ReadOptionalProviderPool(batch, pool, error) ||
-            !SpendProviderMaintenanceBudget(
-                ledger, operation->operation_id, created->tx->GetHash(),
-                DGBSatoshis{created->fee}, GetTime(), error)) {
-            if (error.empty()) {
-                error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
-            }
-            return false;
-        }
-        const size_t missing_pool_entries = std::count_if(
-            operation->outputs.begin(), operation->outputs.end(),
-            [&](const ProviderMaintenanceOutput& output) {
-                const auto output_index = FindMaintenanceOutputIndex(
-                    *created->tx, output);
-                return output_index &&
-                       std::none_of(pool.begin(), pool.end(),
-                                    [&](const ProviderPoolEntry& existing) {
-                                        return existing.outpoint ==
-                                               COutPoint{created->tx->GetHash(),
-                                                         *output_index};
-                                    });
-            });
-        if (!MakeProviderPoolRoomForMaintenance(
-                pool, missing_pool_entries, error)) {
-            return false;
-        }
-        for (const ProviderMaintenanceOutput& output : operation->outputs) {
-            const auto output_index = FindMaintenanceOutputIndex(
-                *created->tx, output);
-            if (!output_index) {
-                error = "PAYMASTER_MAINTENANCE_OUTPUT_MISSING";
-                return false;
-            }
-            ProviderPoolEntry entry;
-            entry.outpoint = COutPoint{created->tx->GetHash(), *output_index};
-            entry.purpose = output.purpose;
-            entry.asset = PoolAsset::DGB;
-            entry.state = PoolEntryState::PENDING_SUCCESSOR;
-            entry.script_pub_key = output.script_pub_key;
-            entry.dgb_value = output.dgb_value;
-            entry.reservation_id = operation->operation_id;
-            entry.origin_commit_key = operation->operation_id;
-            entry.updated_at = GetTime();
-            if (std::none_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& existing) {
-                    return existing.outpoint == entry.outpoint;
-                })) pool.push_back(std::move(entry));
-        }
-        if (!batch.TxnBegin()) {
-            error = "PAYMASTER_DATABASE_BEGIN";
-            return false;
-        }
-        if (!batch.WritePaymasterMaintenanceLedger(ledger) ||
-            !batch.WritePaymasterProviderPool(pool)) {
-            batch.TxnAbort();
-            error = "PAYMASTER_DATABASE_WRITE";
-            return false;
-        }
-        if (!batch.TxnCommit()) {
-            error = "PAYMASTER_DATABASE_COMMIT";
-            return false;
-        }
-    }
-    return checkpoint.Complete(error);
+    std::vector<ProviderMaintenanceTransaction> transactions;
+    const DGBMaintenanceTransfer transfer{recipients, coin_control};
+    return ExecuteProviderMaintenanceTransactions(wallet,
+        RecurringRefillMaintenanceAuthority{*operation, policy}, {transfer}, transactions, error);
 }
 
 bool RunAutomaticCarrierReplenishment(
@@ -2087,122 +2415,11 @@ bool RunAutomaticCarrierReplenishment(
 
     if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
 
-    LOCK(wallet.cs_wallet);
-    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
-    std::string transfer_error;
-    CMutableTransaction built;
-    // A stale selection or unavailable key can still fail without publishing
-    // spending authority. Finish exact validation/signing before fencing the
-    // wallet-native commit and its separately persisted maintenance accounting.
-    if (!dd_wallet->BuildDigiDollarTransfer(plan, built, transfer_error)) {
-        error = "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + transfer_error;
-        return false;
-    }
-    const CTransactionRef transaction = MakeTransactionRef(std::move(built));
-    const auto fee = GetProviderFinanceTransactionFee(wallet, transaction);
-    // The DD planner returns a conservative signed-size fee ceiling.  The
-    // finalized transaction may pay less when its exact witness/change shape
-    // is smaller, but it must never exceed the previewed ceiling or the
-    // operator's absolute maintenance limit.
-    if (!fee || fee->value <= 0 || fee->value > plan.estimated_fee ||
-        fee->value > operation->maximum_fee.value) {
-        error = "PAYMASTER_MAINTENANCE_FEE_CHANGED";
-        return false;
-    }
-    const CAmount actual_fee = fee->value;
-    PaymasterCheckpointOperation checkpoint{wallet};
-    if (!checkpoint.Begin(error)) return false;
-    if (!wallet.CommitTransaction(transaction,
-            {{"comment", "Paymaster automatic carrier replenishment"}}, {}, &transfer_error)) {
-        error = "PAYMASTER_CARRIER_REPLENISHMENT_FAILED: " + transfer_error;
-        return false;
-    }
-    const uint256 txid = transaction->GetHash();
-    if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
-        error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED";
-        return false;
-    }
-    if (!dd_wallet->RecordPaymasterSendHistory(txid, operation->outputs.front().script_pub_key,
-            plan.total_amount, error, "Paymaster automatic carrier replenishment",
-            /*multiple_recipients=*/recipients.size() > 1)) return false;
-
-    {
-        LOCK(wallet.cs_wallet);
-        WalletBatch batch{wallet.GetDatabase()};
-        const DatabaseReadStatus ledger_status{
-            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
-        if (ledger_status != DatabaseReadStatus::FOUND) {
-            error = PersistedReadError(
-                ledger_status, "ProviderMaintenanceLedger", ledger,
-                "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
-                "PAYMASTER_INVALID_MAINTENANCE_LEDGER");
-            return false;
-        }
-        if (!ReadOptionalProviderPool(batch, pool, error) ||
-            !SpendProviderMaintenanceBudget(
-                ledger, operation->operation_id, txid,
-                DGBSatoshis{actual_fee}, GetTime(), error)) {
-            if (error.empty()) {
-                error = "PAYMASTER_MAINTENANCE_LEDGER_UPDATE_FAILED";
-            }
-            return false;
-        }
-        const size_t missing_pool_entries = std::count_if(
-            operation->outputs.begin(), operation->outputs.end(),
-            [&](const ProviderMaintenanceOutput& output) {
-                const auto output_index = FindMaintenanceOutputIndex(
-                    *transaction, output);
-                return output_index &&
-                       std::none_of(pool.begin(), pool.end(),
-                                    [&](const ProviderPoolEntry& existing) {
-                                        return existing.outpoint ==
-                                               COutPoint{txid, *output_index};
-                                    });
-            });
-        if (!MakeProviderPoolRoomForMaintenance(
-                pool, missing_pool_entries, error)) {
-            return false;
-        }
-        for (const ProviderMaintenanceOutput& output : operation->outputs) {
-            const auto output_index = FindMaintenanceOutputIndex(
-                *transaction, output);
-            if (!output_index) {
-                error = "PAYMASTER_MAINTENANCE_OUTPUT_MISSING";
-                return false;
-            }
-            ProviderPoolEntry entry;
-            entry.outpoint = COutPoint{txid, *output_index};
-            entry.purpose = output.purpose;
-            entry.asset = PoolAsset::DD_CARRIER;
-            entry.state = PoolEntryState::PENDING_SUCCESSOR;
-            entry.script_pub_key = output.script_pub_key;
-            entry.carrier_value = output.carrier_value;
-            entry.reservation_id = operation->operation_id;
-            entry.origin_commit_key = operation->operation_id;
-            entry.updated_at = GetTime();
-            if (std::none_of(pool.begin(), pool.end(),
-                             [&](const ProviderPoolEntry& existing) {
-                                 return existing.outpoint == entry.outpoint;
-                             })) {
-                pool.push_back(std::move(entry));
-            }
-        }
-        if (!batch.TxnBegin()) {
-            error = "PAYMASTER_DATABASE_BEGIN";
-            return false;
-        }
-        if (!batch.WritePaymasterMaintenanceLedger(ledger) ||
-            !batch.WritePaymasterProviderPool(pool)) {
-            batch.TxnAbort();
-            error = "PAYMASTER_DATABASE_WRITE";
-            return false;
-        }
-        if (!batch.TxnCommit()) {
-            error = "PAYMASTER_DATABASE_COMMIT";
-            return false;
-        }
-    }
-    return checkpoint.Complete(error);
+    std::vector<ProviderMaintenanceTransaction> transactions;
+    const DDMaintenanceTransfer transfer{plan, operation->outputs.front().script_pub_key,
+        "Paymaster automatic carrier replenishment", recipients.size() > 1};
+    return ExecuteProviderMaintenanceTransactions(wallet,
+        RecurringRefillMaintenanceAuthority{*operation, policy}, {transfer}, transactions, error);
 }
 
 void EnsureProviderRestoreSafe(const CWallet& wallet)

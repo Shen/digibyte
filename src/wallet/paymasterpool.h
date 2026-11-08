@@ -9,8 +9,6 @@ class CWallet;
 struct WalletContext;
 void RunPaymasterPoolPreparation(WalletContext& context, CWallet& wallet);
 namespace paymaster_app {
-uint256 PoolPreparationAuthorization(CWallet& wallet);
-DigiDollar::Paymaster::ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet);
 DigiDollar::Paymaster::ProviderMaintenanceLedger ReadPreparationLedger(CWallet& wallet);
 void WritePreparationLedger(CWallet& wallet, const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
 void CommitPoolPreparation(CWallet& wallet,
