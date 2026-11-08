@@ -1508,7 +1508,7 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                                        std::string& error)
 {
     error.clear();
-    if (ledger.version != ProviderMaintenanceLedger::CURRENT_VERSION ||
+    if ((ledger.version != 1 && ledger.version != ProviderMaintenanceLedger::CURRENT_VERSION) ||
         ledger.accounting_time_high_water < 0 || ledger.records.size() > 256) {
         error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
         return false;
@@ -1630,6 +1630,42 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
     return true;
 }
 
+bool ValidateProviderSetupAuthorization(const ProviderSetupAuthorization& authorization,
+                                        std::string& error)
+{
+    if (authorization.version != ProviderSetupAuthorization::CURRENT_VERSION ||
+        authorization.genesis_hash.IsNull() ||
+        (authorization.generation == 0
+             ? !authorization.plan_id.IsNull() || authorization.revoked
+             : authorization.provider_id.IsNull() || authorization.plan_id.IsNull())) {
+        error = "PAYMASTER_INVALID_SETUP_AUTHORIZATION";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool PrepareProviderMaintenanceAdmission(ProviderMaintenanceLedger& ledger,
+                                         size_t additional_records, int64_t now,
+                                         std::string& error)
+{
+    if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
+    if (now <= 0 || additional_records > 256) {
+        error = "PAYMASTER_INVALID_MAINTENANCE_RESERVATION";
+        return false;
+    }
+    ProviderMaintenanceLedger candidate{ledger};
+    candidate.version = ProviderMaintenanceLedger::CURRENT_VERSION;
+    candidate.accounting_time_high_water = EffectiveAccountingTime(now, candidate.accounting_time_high_water);
+    PruneProviderMaintenanceLedger(candidate, candidate.accounting_time_high_water);
+    if (candidate.records.size() > 256 - additional_records) {
+        error = "PAYMASTER_MAINTENANCE_RECORD_LIMIT";
+        return false;
+    }
+    ledger = std::move(candidate);
+    return true;
+}
+
 bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,
                                         int64_t now,
                                         ProviderMaintenanceBudgetUsage& usage,
@@ -1748,8 +1784,7 @@ bool ReserveProviderMaintenanceBudget(ProviderMaintenanceLedger& ledger,
         return false;
     }
     ProviderMaintenanceLedger updated{ledger};
-    updated.accounting_time_high_water = effective_now;
-    PruneProviderMaintenanceLedger(updated, effective_now);
+    if (!PrepareProviderMaintenanceAdmission(updated, 1, effective_now, error)) return false;
     updated.records.push_back(std::move(record));
     if (!ValidateProviderMaintenanceLedger(updated, error)) return false;
     ledger = std::move(updated);

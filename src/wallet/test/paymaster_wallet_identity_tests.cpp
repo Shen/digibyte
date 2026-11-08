@@ -34,6 +34,7 @@
 #include <wallet/paymasterservice.h>
 #include <wallet/paymasterconfiguration.h>
 #include <wallet/paymasterproviderops.h>
+#include <wallet/paymasterpool.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -3936,6 +3937,220 @@ BOOST_AUTO_TEST_CASE(empty_wallet_refill_waits_for_funds_without_duplicate_plans
     readiness.errors = {"PAYMASTER_OPERATIONAL_SLOT_MISSING"};
     BOOST_CHECK(!PublishCurrentProviderAnnouncement(m_wallet, context, readiness, 2000, nullptr, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+}
+
+BOOST_AUTO_TEST_CASE(finite_setup_revocation_survives_refill_pruning_and_reopen)
+{
+    ScopedPaymasterMockTime clock{2000};
+    CWallet provider{m_node.chain.get(), "finite-setup", CreateMockableWalletDatabase()};
+    {
+        LOCK(provider.cs_wallet);
+        provider.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider.SetupDescriptorScriptPubKeyMans();
+        provider.SetBroadcastTransactions(true);
+    }
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(provider, "Finite setup", 1000, identity, error));
+    ProviderPolicy offer;
+    offer.funding_models = FUNDING_MODEL_SPONSORED;
+    offer.min_payment = DDCents{100};
+    offer.max_payment = DDCents{100000};
+    offer.maximum_network_fee = DGBSatoshis{20000000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(provider, offer, 1001, error));
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    paymaster_app::PoolPreparationParameters parameters;
+    parameters.admission = 3;
+    parameters.operational = 1;
+    const auto preview = paymaster_app::PreparePaymasterPool(context, provider, parameters);
+    parameters.plan_id = preview.plan_id;
+    parameters.execute = true;
+    BOOST_CHECK(paymaster_app::PreparePaymasterPool(context, provider, parameters).accepted);
+    // Exact accepted replay retains one command and never advances its epoch.
+    BOOST_CHECK(paymaster_app::PreparePaymasterPool(context, provider, parameters).accepted);
+    WalletBatch batch{provider.GetDatabase()};
+    ProviderSetupAuthorization authorization;
+    BOOST_REQUIRE(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(authorization.generation, 1U);
+    parameters.cancel = true;
+    BOOST_CHECK(paymaster_app::PreparePaymasterPool(context, provider, parameters).cancelled);
+    parameters.cancel = false;
+    BOOST_REQUIRE(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(authorization.revoked);
+    BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
+        [](const ApplicationError& e) { return e.code == "PAYMASTER_POOL_PLAN_CANCELLED"; });
+
+    SetMockTime(100000);
+    ProviderLiquidityPolicy policy;
+    policy.automatic_replenishment = policy.paid_maintenance_approved = true;
+    policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{10000000};
+    policy.maximum_maintenance_fee_per_hour = DGBSatoshis{20000000};
+    policy.maximum_maintenance_fee_per_day = DGBSatoshis{30000000};
+    policy.updated_at = 1000;
+    // Reach real recurring admission/pruning and the failed funding path.
+    BOOST_CHECK(!paymaster_app::RunAutomaticDGBReplenishment(provider, policy, 3, 1, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_WAITING_DGB");
+    ProviderMaintenanceLedger ledger;
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+    BOOST_CHECK(!ledger.records.front().IsPreparation());
+    BOOST_CHECK(provider.mapWallet.empty());
+    SetMockTime(3000); // Neither pruning nor a clock rollback resurrects P.
+    BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
+        [](const ApplicationError& e) { return e.code == "PAYMASTER_POOL_PLAN_CANCELLED"; });
+    CWallet reopened{m_node.chain.get(), "finite-setup-reopen", DuplicateMockDatabase(provider.GetDatabase())};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, reopened, parameters), ApplicationError,
+        [](const ApplicationError& e) { return e.code == "PAYMASTER_POOL_PLAN_CANCELLED"; });
+    parameters.execute = false;
+    parameters.plan_id.reset();
+    const auto fresh = paymaster_app::PreparePaymasterPool(context, reopened, parameters);
+    BOOST_CHECK(fresh.plan_id != preview.plan_id);
+}
+
+BOOST_AUTO_TEST_CASE(finite_setup_admits_after_full_terminal_history_without_recurring_approval)
+{
+    ScopedPaymasterMockTime clock{100000};
+    CWallet provider{m_node.chain.get(), "finite-setup", CreateMockableWalletDatabase()};
+    {
+        LOCK(provider.cs_wallet);
+        provider.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider.SetupDescriptorScriptPubKeyMans();
+    }
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(provider, "Finite history", 1000, identity, error));
+    ProviderPolicy offer;
+    offer.funding_models = FUNDING_MODEL_SPONSORED;
+    offer.min_payment = DDCents{100};
+    offer.max_payment = DDCents{100000};
+    offer.maximum_network_fee = DGBSatoshis{20000000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(provider, offer, 1001, error));
+    ProviderMaintenanceLedger ledger;
+    for (uint32_t index{1}; index <= 256; ++index) {
+        ProviderMaintenanceRecord record;
+        record.operation_id = uint256S(strprintf("%064x", index));
+        record.plan_id = uint256S("f1");
+        record.kind = ProviderMaintenanceKind::PREPARE_DGB;
+        record.state = ProviderMaintenanceState::RELEASED;
+        record.maximum_fee = DGBSatoshis{10000000};
+        record.preparation_authorization = uint256S("f2");
+        record.preparation_request = uint256S("f3");
+        record.created_at = record.updated_at = 1000;
+        ProviderMaintenanceOutput output;
+        output.asset = PoolAsset::DGB;
+        output.script_pub_key = identity.identity_script;
+        output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        record.outputs = {output};
+        ledger.records.push_back(record);
+    }
+    WalletBatch batch{provider.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    paymaster_app::PoolPreparationParameters parameters;
+    parameters.admission = 3;
+    parameters.operational = 1;
+    parameters.plan_id = paymaster_app::PreparePaymasterPool(context, provider, parameters).plan_id;
+    parameters.execute = true;
+    BOOST_CHECK(paymaster_app::PreparePaymasterPool(context, provider, parameters).accepted);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+    BOOST_CHECK(ledger.records.front().plan_id == *parameters.plan_id);
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::PLANNED);
+    BOOST_CHECK(!batch.HasPaymasterLiquidityPolicy());
+}
+
+BOOST_AUTO_TEST_CASE(finite_setup_authority_and_history_commit_atomically)
+{
+    ScopedPaymasterMockTime clock{2000};
+    CWallet provider{m_node.chain.get(), "finite-setup", CreateMockableWalletDatabase()};
+    {
+        LOCK(provider.cs_wallet);
+        provider.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        provider.SetupDescriptorScriptPubKeyMans();
+    }
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(provider, "Atomic finite setup", 1000, identity, error));
+    ProviderPolicy offer;
+    offer.funding_models = FUNDING_MODEL_SPONSORED;
+    offer.min_payment = DDCents{100};
+    offer.max_payment = DDCents{100000};
+    offer.maximum_network_fee = DGBSatoshis{20000000};
+    BOOST_REQUIRE(SetPaymasterProviderPolicy(provider, offer, 1001, error));
+    Manager manager{true};
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    paymaster_app::PoolPreparationParameters parameters;
+    parameters.admission = 3;
+    parameters.operational = 1;
+    parameters.plan_id = paymaster_app::PreparePaymasterPool(context, provider, parameters).plan_id;
+    parameters.execute = true;
+    auto& database = GetMockableDatabase(provider);
+    database.m_fail_commit = true;
+    BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
+        [](const ApplicationError& e) { return e.code == "PAYMASTER_DATABASE_COMMIT"; });
+    database.ClearFailureInjection();
+    WalletBatch batch{database};
+    ProviderSetupAuthorization authorization;
+    ProviderMaintenanceLedger ledger;
+    BOOST_CHECK(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_CHECK(provider.mapWallet.empty());
+    // The checkpoint advances before backend commit and retains its guard.
+    BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(provider, error));
+}
+
+BOOST_AUTO_TEST_CASE(setup_generation_and_journal_versions_fail_closed)
+{
+    WalletBatch batch{m_wallet.GetDatabase()};
+    ProviderMaintenanceLedger ledger;
+    ledger.version = 1; // Authentic old journal remains readable.
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger));
+    ProviderMaintenanceLedger loaded;
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(loaded));
+    BOOST_CHECK_EQUAL(loaded.version, 1);
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(loaded));
+    BOOST_CHECK_EQUAL(loaded.version, ProviderMaintenanceLedger::CURRENT_VERSION);
+    ProviderSetupAuthorization authorization;
+    BOOST_REQUIRE(batch.ReadPaymasterSetupAuthorizationWithStatus(authorization) == DatabaseReadStatus::FOUND);
+    const auto intact = database.m_records;
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        database.m_records = intact;
+        if (scenario == 0) {
+            BOOST_REQUIRE(database.MakeBatch()->Erase(DBKeys::PAYMASTER_SETUP_AUTHORIZATION));
+        } else if (scenario == 1) {
+            auto future = authorization;
+            ++future.version;
+            BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_SETUP_AUTHORIZATION, future));
+        } else if (scenario == 2) {
+            auto future = loaded;
+            future.version = ProviderMaintenanceLedger::CURRENT_VERSION + 1;
+            BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, future));
+        } else {
+            auto invalid = authorization;
+            invalid.generation = 1;
+            invalid.plan_id = uint256::ONE;
+            BOOST_REQUIRE(database.MakeBatch()->Write(DBKeys::PAYMASTER_SETUP_AUTHORIZATION, invalid));
+        }
+        const auto corrupted = database.m_records;
+        BOOST_CHECK(!batch.ReadPaymasterMaintenanceLedger(loaded));
+        BOOST_CHECK(!batch.WritePaymasterMaintenanceLedger(ledger));
+        BOOST_CHECK(database.m_records == corrupted);
+    }
+    database.m_records = intact;
 }
 
 BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery)

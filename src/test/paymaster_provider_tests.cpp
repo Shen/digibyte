@@ -2507,6 +2507,34 @@ BOOST_AUTO_TEST_CASE(maintenance_journal_255_256_257_record_boundary)
     BOOST_CHECK(ledger.records.front().operation_id == uint256::ONE);
 }
 
+BOOST_AUTO_TEST_CASE(maintenance_admission_prunes_terminal_history_but_retains_pending_and_signed)
+{
+    std::string error;
+    ProviderMaintenanceLedger ledger;
+    ledger.version = 1;
+    ledger.accounting_time_high_water = 100000;
+    for (uint32_t index{1}; index <= 256; ++index) {
+        auto record = MaintenanceRecord(uint256S(strprintf("%064x", index)), uint256S("aa"), index, 100);
+        record.created_at = record.updated_at = 1000;
+        record.state = ProviderMaintenanceState::RELEASED;
+        ledger.records.push_back(record);
+    }
+    ledger.records[0].state = ProviderMaintenanceState::PLANNED;
+    ledger.records[1].state = ProviderMaintenanceState::FAILED;
+    ledger.records[1].transaction_id = uint256S("ab");
+    BOOST_REQUIRE(PrepareProviderMaintenanceAdmission(ledger, 2, 2000, error));
+    BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, 100000);
+    BOOST_CHECK_EQUAL(ledger.version, ProviderMaintenanceLedger::CURRENT_VERSION);
+    BOOST_REQUIRE_EQUAL(ledger.records.size(), 2U);
+    BOOST_CHECK(ledger.records[0].state == ProviderMaintenanceState::PLANNED);
+    BOOST_CHECK(ledger.records[1].HasUnresolvedTransaction());
+    const auto before = (HashWriter{} << ledger).GetHash();
+    BOOST_CHECK(!PrepareProviderMaintenanceAdmission(ledger, 255, 100001, error));
+    BOOST_CHECK((HashWriter{} << ledger).GetHash() == before);
+    ++ledger.version;
+    BOOST_CHECK(!PrepareProviderMaintenanceAdmission(ledger, 1, 100001, error));
+}
+
 BOOST_AUTO_TEST_CASE(maintenance_mixed_v3_v4_and_truncated_records)
 {
     // G12: legacy recurring work cannot acquire V4 one-shot setup authority.

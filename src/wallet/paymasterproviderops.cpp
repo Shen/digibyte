@@ -937,6 +937,7 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     const bool txindex_ready = !execute || ProviderTxIndexIsReady(*wallet, /*wait_for_sync=*/true);
     LOCK(wallet->cs_wallet);
     auto ledger = ReadPreparationLedger(*wallet);
+    auto setup_authorization = ReadPoolSetupAuthorization(*wallet);
     const uint256 authorization = PoolPreparationAuthorization(*wallet);
     if (authorization.IsNull() && !proposed_policy) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_IDENTITY_NOT_FOUND");
     const bool pending = std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
@@ -954,10 +955,18 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     }
     const uint256 request_hash = request_hasher.GetSHA256();
     const uint256 requested_plan = parameters.plan_id.value_or(uint256{});
+    if (execute && !parameters.cancel && setup_authorization.plan_id == requested_plan &&
+        setup_authorization.revoked) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_POOL_PLAN_CANCELLED");
+    }
     const bool replay = execute && std::any_of(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
         return record.IsPreparation() && record.plan_id == requested_plan && record.preparation_request == request_hash &&
                record.preparation_authorization == authorization;
     });
+    if (execute && !parameters.cancel && !replay && !requested_plan.IsNull() &&
+        setup_authorization.plan_id == requested_plan) {
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_POOL_PLAN_NOT_RETAINED");
+    }
     CTransactionRef recovery_tx;
     std::vector<ProviderMaintenanceOutput> recovery_outputs;
     const auto& recovery_id = parameters.recovery_transaction;
@@ -1017,9 +1026,10 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     const int64_t total_carriers = carrier_value *
                                    (missing_admission_carriers + missing_operational_carriers);
     HashWriter plan_hasher = TaggedHash(
-        "DigiByte Paymaster Pool Preparation Plan v1");
+        "DigiByte Paymaster Pool Preparation Plan v2");
     plan_hasher << Params().GenesisBlock().GetHash()
                 << GetProviderPolicyHash(policy)
+                << setup_authorization.generation
                 << admission << operational
                 << admission_carriers << operational_carriers
                 << missing_admission << missing_operational
@@ -1035,9 +1045,8 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
                     << static_cast<uint8_t>(entry.purpose) << static_cast<uint8_t>(entry.asset)
                     << entry.dgb_value.value << entry.carrier_value.value;
     }
-    for (const auto& record : ledger.records) {
-        if (record.IsPreparation()) plan_hasher << record.operation_id << static_cast<uint8_t>(record.state);
-    }
+    // The permanent generation, rather than removable history, prevents a
+    // cancelled/completed plan from becoming a new approval after pruning.
     plan_hasher << fee_limit << authorization << recovery_outputs;
     if (recovery_tx) plan_hasher << recovery_tx->GetWitnessHash();
     if (proposed_policy) plan_hasher << std::string{"setup preview only"};
@@ -1142,7 +1151,18 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     if (!already_authorized) {
         const size_t new_steps = (missing_admission + missing_operational > 0) +
                                  (missing_admission_carriers + missing_operational_carriers > 0);
-        if (ledger.records.size() + new_steps > 256) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_MAINTENANCE_RECORD_LIMIT");
+        std::string admission_error;
+        if (!PrepareProviderMaintenanceAdmission(ledger, new_steps, GetTime(), admission_error)) {
+            throw ApplicationError(ErrorKind::WALLET, admission_error);
+        }
+        if (setup_authorization.generation == std::numeric_limits<uint64_t>::max()) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SETUP_GENERATION_EXHAUSTED");
+        }
+        if (!GetPaymasterIdentity(*wallet, identity)) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_IDENTITY_NOT_FOUND");
+        ++setup_authorization.generation;
+        setup_authorization.provider_id = identity.provider_id;
+        setup_authorization.plan_id = supplied_id;
+        setup_authorization.revoked = false;
         if (wallet->IsLocked()) throw ApplicationError(ErrorKind::UNLOCK, "PAYMASTER_WALLET_LOCKED", ErrorDisposition::USER_DECISION);
         const auto append = [&](PoolAsset asset, int admission_count, int operational_count) {
             if (admission_count + operational_count == 0) return;
@@ -1181,7 +1201,7 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
         // committed. Only the existing wallet stores signed bytes.
         append(PoolAsset::DD_CARRIER, missing_admission_carriers, missing_operational_carriers);
         append(PoolAsset::DGB, missing_admission, missing_operational);
-        WritePreparationLedger(*wallet, ledger);
+        CommitPoolPreparation(*wallet, setup_authorization, ledger);
     }
     std::set<uint256> prior_transactions;
     for (const auto& record : ledger.records) {

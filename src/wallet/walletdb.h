@@ -151,6 +151,7 @@ extern const std::string PAYMASTER_SPONSOR_AUTH;         // "pmsponsor" - hashed
 extern const std::string PAYMASTER_PROVIDER_POOL;        // "pmpool" - validated admission and operational pool entries
 extern const std::string PAYMASTER_LIQUIDITY_POLICY;     // "pmliquidity" - automatic pool targets and fee ceilings
 extern const std::string PAYMASTER_MAINTENANCE_LEDGER;   // "pmmaintenance" - restartable maintenance operations
+extern const std::string PAYMASTER_SETUP_AUTHORIZATION; // "pmsetupauth" - permanent finite setup generation/revocation
 extern const std::string PAYMASTER_FINANCE_LEDGER;       // "pmfinance" - durable provider finance history
 extern const std::string PAYMASTER_BACKUP_STATUS;        // "pmbackup" - full-wallet backup acknowledgement
 extern const std::string PAYMASTER_RESTORE_GUARD;        // "pmrestoreguard" - restored provider quarantine
@@ -677,6 +678,9 @@ public:
     DatabaseReadStatus ReadPaymasterMaintenanceLedgerWithStatus(
         DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
     bool HasPaymasterMaintenanceLedger();
+    bool WritePaymasterSetupAuthorization(const DigiDollar::Paymaster::ProviderSetupAuthorization& authorization);
+    DatabaseReadStatus ReadPaymasterSetupAuthorizationWithStatus(
+        DigiDollar::Paymaster::ProviderSetupAuthorization& authorization);
     bool WritePaymasterFinanceLedger(
         const DigiDollar::Paymaster::ProviderFinanceLedger& ledger,
         bool overwrite = true);

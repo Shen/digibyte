@@ -642,7 +642,9 @@ struct ProviderMaintenanceRecord {
 };
 
 struct ProviderMaintenanceLedger {
-    static constexpr uint16_t CURRENT_VERSION{1};
+    // V2 requires the independent setup authorization record. Older software
+    // must not discard its generation/revocation fence while pruning history.
+    static constexpr uint16_t CURRENT_VERSION{2};
 
     uint16_t version{CURRENT_VERSION};
     int64_t accounting_time_high_water{0};
@@ -651,6 +653,27 @@ struct ProviderMaintenanceLedger {
     SERIALIZE_METHODS(ProviderMaintenanceLedger, obj)
     {
         READWRITE(obj.version, obj.accounting_time_high_water, obj.records);
+    }
+};
+
+/** Permanent wallet-local setup identity, independent of the bounded journal.
+ * Each newly accepted finite plan advances generation. An older plan can only
+ * replay retained exact work; it can never become a fresh authorization after
+ * history is pruned or the same pool inventory appears again. */
+struct ProviderSetupAuthorization {
+    static constexpr uint16_t CURRENT_VERSION{1};
+
+    uint16_t version{CURRENT_VERSION};
+    uint256 genesis_hash;
+    PaymasterId provider_id;
+    uint64_t generation{0};
+    uint256 plan_id;
+    bool revoked{false};
+
+    SERIALIZE_METHODS(ProviderSetupAuthorization, obj)
+    {
+        READWRITE(obj.version, obj.genesis_hash, obj.provider_id,
+                  obj.generation, obj.plan_id, obj.revoked);
     }
 };
 
@@ -948,6 +971,13 @@ bool ProviderLiquidityTargetsSatisfyPolicy(
     const ProviderPolicy& provider_policy);
 bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                                        std::string& error);
+bool ValidateProviderSetupAuthorization(const ProviderSetupAuthorization& authorization,
+                                        std::string& error);
+/** Prune only old terminal history and check bounded room on a copy. Does not
+ * revoke or replace setup authority, release unresolved work or reset time. */
+bool PrepareProviderMaintenanceAdmission(ProviderMaintenanceLedger& ledger,
+                                         size_t additional_records, int64_t now,
+                                         std::string& error);
 /** Use the durable accounting time floor; unsigned/live exposure never ages out.
  * Leaves usage empty on invalid records or overflow and never mutates the ledger. */
 bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,

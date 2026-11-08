@@ -76,6 +76,24 @@ uint256 PoolPreparationAuthorization(CWallet& wallet)
     return hash.GetSHA256();
 }
 
+ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderSetupAuthorization authorization;
+    const auto status = batch.ReadPaymasterSetupAuthorizationWithStatus(authorization);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_INVALID_SETUP_AUTHORIZATION");
+    }
+    ProviderIdentityRecord identity;
+    if (status == DatabaseReadStatus::FOUND && authorization.generation != 0 &&
+        (!GetPaymasterIdentity(wallet, identity) || identity.provider_id != authorization.provider_id)) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SETUP_IDENTITY_MISMATCH");
+    }
+    authorization.genesis_hash = Params().GenesisBlock().GetHash();
+    return authorization;
+}
+
 ProviderMaintenanceLedger ReadPreparationLedger(CWallet& wallet)
 {
     LOCK(wallet.cs_wallet);
@@ -93,6 +111,19 @@ void WritePreparationLedger(CWallet& wallet, const ProviderMaintenanceLedger& le
     if (!WalletBatch{wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(ledger)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DATABASE_WRITE");
     }
+}
+
+void CommitPoolPreparation(CWallet& wallet, const ProviderSetupAuthorization& authorization,
+                           const ProviderMaintenanceLedger& ledger)
+{
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    if (!batch.TxnBegin()) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DATABASE_BEGIN");
+    if (!batch.WritePaymasterSetupAuthorization(authorization) || !batch.WritePaymasterMaintenanceLedger(ledger)) {
+        batch.TxnAbort();
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DATABASE_WRITE");
+    }
+    if (!batch.TxnCommit()) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DATABASE_COMMIT");
 }
 
 bool PreparationInputsConfirmed(CWallet& wallet, const CTransaction& tx)
@@ -135,6 +166,8 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
         }
         return "PAYMASTER_POOL_WAITING_CONFIRMATION";
     }
+    const auto authorization = ReadPoolSetupAuthorization(wallet);
+    if (authorization.plan_id == record.plan_id && authorization.revoked) return "PAYMASTER_POOL_PLAN_CANCELLED";
     std::string restore_error;
     if (!CheckPaymasterProviderRestoreGuard(wallet, restore_error)) return restore_error;
     if (wallet.IsLocked()) return "PAYMASTER_WALLET_LOCKED";

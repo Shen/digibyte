@@ -8,6 +8,7 @@
 #include <wallet/paymasterfinancecache.h>
 #include <paymaster/finance.h>
 
+#include <chainparams.h>
 #include <crypto/common.h>
 #include <hash.h>
 #include <util/strencodings.h>
@@ -193,6 +194,7 @@ const std::string PAYMASTER_SPONSOR_AUTH{"pmsponsor"};
 const std::string PAYMASTER_PROVIDER_POOL{"pmpool"};
 const std::string PAYMASTER_LIQUIDITY_POLICY{"pmliquidity"};
 const std::string PAYMASTER_MAINTENANCE_LEDGER{"pmmaintenance"};
+const std::string PAYMASTER_SETUP_AUTHORIZATION{"pmsetupauth"};
 const std::string PAYMASTER_CARRIER_WITHDRAWAL{"pmcarrierwithdraw"};
 const std::string PAYMASTER_FINANCE_LEDGER{"pmfinance"};
 const std::string PAYMASTER_BACKUP_STATUS{"pmbackup"};
@@ -1717,24 +1719,105 @@ bool WalletBatch::WritePaymasterMaintenanceLedger(
     const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger,
     bool overwrite)
 {
+    using namespace DigiDollar::Paymaster;
     std::string error;
-    if (!DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger, error)) {
+    if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const auto fail = [&] {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
         return false;
+    };
+    ProviderSetupAuthorization authorization;
+    const auto setup_status = ReadPaymasterSetupAuthorizationWithStatus(authorization);
+    if (setup_status != DatabaseReadStatus::FOUND && setup_status != DatabaseReadStatus::NOT_FOUND) return fail();
+    const bool previously_revoked = authorization.revoked;
+    ProviderMaintenanceLedger previous;
+    const auto previous_status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, previous);
+    if ((previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND) ||
+        (previous_status == DatabaseReadStatus::FOUND && !ValidateProviderMaintenanceLedger(previous, error))) return fail();
+    if (setup_status == DatabaseReadStatus::NOT_FOUND) {
+        if (previous_status == DatabaseReadStatus::FOUND && previous.version != 1) return fail();
+        // The permanent fence and V2 journal always commit together. Missing
+        // V2 authority must never be mistaken for an unused generation.
+        authorization.genesis_hash = Params().GenesisBlock().GetHash();
     }
-    return WritePaymasterIC(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger, overwrite);
+    if (std::any_of(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
+            return record.IsPreparation() && record.plan_id == authorization.plan_id &&
+                   record.state == ProviderMaintenanceState::RELEASED;
+        })) {
+        authorization.revoked = true;
+    }
+    ProviderMaintenanceLedger current{ledger};
+    current.version = ProviderMaintenanceLedger::CURRENT_VERSION;
+    const bool write_authorization = setup_status == DatabaseReadStatus::NOT_FOUND || authorization.revoked != previously_revoked;
+    if ((write_authorization && !WritePaymasterSetupAuthorization(authorization)) ||
+        !WritePaymasterIC(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, current, overwrite)) return fail();
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceLedgerWithStatus(
     DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger)
 {
+    using namespace DigiDollar::Paymaster;
     std::string error;
-    const DatabaseReadStatus status = ReadPaymasterVersionedRecord(
-        DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger);
+    ledger = {};
+    const auto status = m_batch->ReadWithStatus(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger);
+    if ((status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::READ_ERROR) &&
+        ledger.version != 1 && ledger.version != ProviderMaintenanceLedger::CURRENT_VERSION) {
+        return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    }
     if (status != DatabaseReadStatus::FOUND) return status;
-    return DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger,
-                                                                    error)
-               ? DatabaseReadStatus::FOUND
-               : DatabaseReadStatus::READ_ERROR;
+    ProviderSetupAuthorization authorization;
+    const auto setup_status = ReadPaymasterSetupAuthorizationWithStatus(authorization);
+    if (setup_status != DatabaseReadStatus::FOUND &&
+        (setup_status != DatabaseReadStatus::NOT_FOUND || ledger.version != 1)) {
+        return setup_status == DatabaseReadStatus::NOT_FOUND ? DatabaseReadStatus::READ_ERROR : setup_status;
+    }
+    return ValidateProviderMaintenanceLedger(ledger, error) ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::WritePaymasterSetupAuthorization(
+    const DigiDollar::Paymaster::ProviderSetupAuthorization& authorization)
+{
+    using namespace DigiDollar::Paymaster;
+    std::string error;
+    if (!ValidateProviderSetupAuthorization(authorization, error) ||
+        authorization.genesis_hash != Params().GenesisBlock().GetHash()) return false;
+    ProviderIdentityRecord identity;
+    if (authorization.generation != 0 &&
+        (ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+         identity.provider_id != authorization.provider_id)) return false;
+    ProviderSetupAuthorization previous;
+    const auto status = ReadPaymasterSetupAuthorizationWithStatus(previous);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return false;
+    if (status == DatabaseReadStatus::NOT_FOUND && authorization.generation > 1) return false;
+    if (status == DatabaseReadStatus::FOUND &&
+        (authorization.generation < previous.generation ||
+         authorization.generation - previous.generation > 1 ||
+         (previous.generation != 0 && authorization.provider_id != previous.provider_id) ||
+         (authorization.generation == previous.generation &&
+          (authorization.provider_id != previous.provider_id || authorization.plan_id != previous.plan_id ||
+           (previous.revoked && !authorization.revoked))))) return false;
+    return WritePaymasterIC(DBKeys::PAYMASTER_SETUP_AUTHORIZATION, authorization);
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterSetupAuthorizationWithStatus(
+    DigiDollar::Paymaster::ProviderSetupAuthorization& authorization)
+{
+    std::string error;
+    const auto status = ReadPaymasterVersionedRecord(DBKeys::PAYMASTER_SETUP_AUTHORIZATION, authorization);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    if (!DigiDollar::Paymaster::ValidateProviderSetupAuthorization(authorization, error) ||
+        authorization.genesis_hash != Params().GenesisBlock().GetHash()) return DatabaseReadStatus::READ_ERROR;
+    DigiDollar::Paymaster::ProviderIdentityRecord identity;
+    if (authorization.generation != 0 &&
+        (ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+         identity.provider_id != authorization.provider_id)) return DatabaseReadStatus::READ_ERROR;
+    return DatabaseReadStatus::FOUND;
 }
 
 bool WalletBatch::ReadPaymasterMaintenanceLedger(
